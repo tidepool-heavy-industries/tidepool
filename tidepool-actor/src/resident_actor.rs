@@ -560,22 +560,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         roster.sort();
         let runtime = self.runtime_observation.snapshot();
         let usage = runtime.latest_provider_usage();
-        let unavailable_responses = if view != StatusView::Concise {
-            format!("{:?}", requests.unavailable_responses)
-        } else {
-            format!(
-                "{} terminal (use :status!)",
-                requests.unavailable_responses.len()
-            )
-        };
-        let unavailable_watches = if view != StatusView::Concise {
-            format!("{:?}", requests.unavailable_watches)
-        } else {
-            format!(
-                "{} terminal (use :status!)",
-                requests.unavailable_watches.len()
-            )
-        };
+        let unavailable_responses = format!("{:?}", requests.unavailable_responses);
+        let unavailable_watches = format!("{:?}", requests.unavailable_watches);
         let roster_summary = if view != StatusView::Concise || terminal_actors == 0 {
             String::new()
         } else {
@@ -622,7 +608,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .as_deref()
                 .unwrap_or(self.descriptor.effective_role().prompt_profile()),
             prompt_identity,
-            if self.policy_installed { "attached" } else { "detached" },
+            if self.policy_installed {
+                "attached"
+            } else {
+                "detached"
+            },
             runtime.workbench_posture,
             self.launch_worktrees.first(),
             requests.pending_responses,
@@ -748,7 +738,11 @@ where
         let deployments = self.environment.deployments.clone();
         tokio::spawn(async move {
             tokio::time::sleep_until(deadline.due_monotonic()).await;
-            if let Some(notification) = requests.deadline_request(owner, request) {
+            let (cancellation, notifications) = requests.deadline_request(owner, request);
+            for notification in notifications {
+                let _ = deployments.send(LocalResidentDeployment::WatchChanged { notification });
+            }
+            if let Some(notification) = cancellation {
                 let _ =
                     deployments.send(LocalResidentDeployment::RequestCancellation { notification });
             }

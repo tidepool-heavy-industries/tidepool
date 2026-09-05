@@ -308,10 +308,10 @@ pub(crate) struct RequestRegistry {
 pub(crate) struct ActorRequestStatus {
     pub pending_responses: Vec<(RequestId, String)>,
     pub ready_responses: Vec<(RequestId, String)>,
-    pub unavailable_responses: Vec<(RequestId, String)>,
+    pub unavailable_responses: Vec<(RequestId, String, ResponseFailure)>,
     pub pending_watches: Vec<(WatchId, String)>,
     pub ready_watches: Vec<(WatchId, String)>,
-    pub unavailable_watches: Vec<(WatchId, String)>,
+    pub unavailable_watches: Vec<(WatchId, String, ResponseFailure)>,
     pub deadlines: Vec<(RequestId, String)>,
 }
 
@@ -471,9 +471,16 @@ impl RequestRegistry {
                 OwnerState::Ready => status
                     .ready_responses
                     .push((*request, record.label.clone())),
-                OwnerState::Unavailable(_) | OwnerState::Abandoned => status
-                    .unavailable_responses
-                    .push((*request, record.label.clone())),
+                OwnerState::Unavailable(ref failure) => status.unavailable_responses.push((
+                    *request,
+                    record.label.clone(),
+                    failure.clone(),
+                )),
+                OwnerState::Abandoned => status.unavailable_responses.push((
+                    *request,
+                    record.label.clone(),
+                    ResponseFailure::Abandoned,
+                )),
                 OwnerState::Observing => status
                     .pending_responses
                     .push((*request, record.label.clone())),
@@ -493,17 +500,23 @@ impl RequestRegistry {
             match record.state {
                 WatchState::Pending => status.pending_watches.push((*watch, record.label.clone())),
                 WatchState::Ready => status.ready_watches.push((*watch, record.label.clone())),
-                WatchState::Unavailable { .. } => status
-                    .unavailable_watches
-                    .push((*watch, record.label.clone())),
+                WatchState::Unavailable { ref failure, .. } => {
+                    status
+                        .unavailable_watches
+                        .push((*watch, record.label.clone(), failure.clone()))
+                }
             }
         }
         status.pending_responses.sort_unstable();
         status.ready_responses.sort_unstable();
-        status.unavailable_responses.sort_unstable();
+        status
+            .unavailable_responses
+            .sort_unstable_by_key(|entry| entry.0);
         status.pending_watches.sort_unstable();
         status.ready_watches.sort_unstable();
-        status.unavailable_watches.sort_unstable();
+        status
+            .unavailable_watches
+            .sort_unstable_by_key(|entry| entry.0);
         status.deadlines.sort_unstable();
         status
     }
@@ -769,10 +782,55 @@ impl RequestRegistry {
         &self,
         owner: ActorRef,
         request: RequestId,
-    ) -> Option<RequestCancellationNotification> {
-        self.cancel_request(owner, request, CancellationReason::DeadlineExpired)
-            .ok()
-            .and_then(|(_, notification)| notification)
+    ) -> (
+        Option<RequestCancellationNotification>,
+        Vec<WatchNotification>,
+    ) {
+        let mut state = self.state.lock();
+        let Some(record) = state.requests.get_mut(&request) else {
+            return (None, Vec::new());
+        };
+        // Reply acceptance and deadline expiry share this lock. An accepted
+        // terminal transfer wins even while its result is still settling.
+        if authorize_owner(record, owner).is_err()
+            || is_owner_terminal(&record.owner_state)
+            || matches!(
+                record.target_state,
+                TargetState::Settling | TargetState::Closed
+            )
+        {
+            return (None, Vec::new());
+        }
+        record.owner_state = OwnerState::Unavailable(ResponseFailure::DeadlineExceeded);
+        let notification = match record.target_state {
+            TargetState::CancellationRequested { .. }
+            | TargetState::AcknowledgingCancellation(_) => None,
+            _ => {
+                let presented = record.target_state == TargetState::Presented;
+                record.target_state = TargetState::CancellationRequested {
+                    presented,
+                    reason: CancellationReason::DeadlineExpired,
+                };
+                presented.then_some(RequestCancellationNotification {
+                    target: record.target,
+                    request,
+                    label: record.label.clone(),
+                    reason: CancellationReason::DeadlineExpired,
+                    occurred_at_unix_ms: unix_time_ms(),
+                    sequence: ActorEventSequence(0),
+                    watermark: ActorEventSequence(0),
+                })
+            }
+        };
+        let notification = notification.map(|mut notification| {
+            let sequence = next_event_sequence(&mut state, notification.target);
+            notification.sequence = sequence;
+            notification.watermark = sequence;
+            notification
+        });
+        // Target custody stays live until cancellation or exit closes it;
+        // releasing the owner's wait must not require target cooperation.
+        (notification, reevaluate_watches(&mut state))
     }
 
     pub(crate) fn observe_reply(
@@ -1533,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn response_deadline_uses_the_same_acknowledged_transition() {
+    fn response_deadline_wakes_owner_before_target_acknowledgement() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -1541,11 +1599,23 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
 
-        assert_eq!(registry.deadline_request(owner, request), None);
+        let (cancellation, notifications) = registry.deadline_request(owner, request);
+        assert_eq!(cancellation, None);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        let status = registry.status_for(owner);
+        assert_eq!(
+            status.unavailable_responses[0].2,
+            ResponseFailure::DeadlineExceeded
+        );
+        assert_eq!(
+            status.unavailable_watches[0].2,
+            ResponseFailure::DeadlineExceeded
+        );
         assert_eq!(
             registry.observe_response(owner, request),
-            Ok(ResponseObservation::CancellationPending(
-                CancellationReason::DeadlineExpired
+            Ok(ResponseObservation::Unavailable(
+                ResponseFailure::DeadlineExceeded
             ))
         );
         registry.present(target, request).unwrap();
@@ -1553,18 +1623,118 @@ mod tests {
             .begin_cancellation_acknowledgement(target, request)
             .unwrap();
         let notifications = registry.finish_cancellation_acknowledgement(request);
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].watch, watch);
+        assert!(notifications.is_empty());
         assert_eq!(
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Unavailable(
                 ResponseFailure::DeadlineExceeded
             ))
         );
-        assert_eq!(registry.deadline_request(owner, request), None);
+        assert_eq!(
+            registry.deadline_request(owner, request),
+            (None, Vec::new())
+        );
         assert_eq!(
             registry.cancel_request(owner, request, CancellationReason::RequesterCancelled),
             Ok((CancelRequestOutcome::AlreadyTerminal, None))
+        );
+    }
+
+    #[test]
+    fn deadline_rejects_late_reply_and_notifies_a_later_watch() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (cancellation, notifications) = registry.deadline_request(owner, request);
+        assert_eq!(cancellation.unwrap().target, target);
+        assert!(notifications.is_empty());
+        assert_eq!(
+            registry.begin_reply(target, request),
+            Err(ReplyError::CancellationRequested)
+        );
+        let (watch, notifications) = registry.register_watch(owner, vec![request]).unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        assert_eq!(
+            registry.deadline_request(owner, request),
+            (None, Vec::new())
+        );
+        assert_eq!(registry.active_for_target(target).len(), 1);
+        assert_eq!(
+            registry.observe_reply(target, request),
+            Ok(ReplyObservation::CancellationRequested(
+                CancellationReason::DeadlineExpired
+            ))
+        );
+    }
+
+    #[test]
+    fn accepted_reply_wins_deadline_even_when_settlement_fails() {
+        for settlement_fails in [false, true] {
+            let registry = RequestRegistry::default();
+            let owner = actor(1);
+            let target = actor(2);
+            let request = registry.reserve(owner, target);
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+            let (_, initial) = registry.register_watch(owner, vec![request]).unwrap();
+            assert!(initial.is_empty());
+            registry.begin_reply(target, request).unwrap();
+            assert_eq!(
+                registry.deadline_request(owner, request),
+                (None, Vec::new())
+            );
+            let notifications = if settlement_fails {
+                registry.fail_reply_settlement(request, "lost result")
+            } else {
+                registry.finish_reply(request)
+            };
+            assert_eq!(notifications.len(), 1);
+            let expected = if settlement_fails {
+                ResponseObservation::Unavailable(ResponseFailure::SettlementFailed(
+                    "lost result".into(),
+                ))
+            } else {
+                ResponseObservation::Ready
+            };
+            assert_eq!(registry.observe_response(owner, request), Ok(expected));
+            assert_eq!(
+                registry.deadline_request(owner, request),
+                (None, Vec::new())
+            );
+        }
+    }
+
+    #[test]
+    fn deadline_bounds_wait_during_requested_cancellation() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        registry
+            .cancel_request(owner, request, CancellationReason::RequesterCancelled)
+            .unwrap();
+        registry
+            .begin_cancellation_acknowledgement(target, request)
+            .unwrap();
+        let (_, initial) = registry.register_watch(owner, vec![request]).unwrap();
+        assert!(initial.is_empty());
+        let (cancellation, notifications) = registry.deadline_request(owner, request);
+        assert!(cancellation.is_none());
+        assert_eq!(notifications.len(), 1);
+        assert!(registry
+            .finish_cancellation_acknowledgement(request)
+            .is_empty());
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(
+                ResponseFailure::DeadlineExceeded
+            ))
         );
     }
 
