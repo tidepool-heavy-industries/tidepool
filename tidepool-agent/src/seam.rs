@@ -100,18 +100,7 @@ pub enum ReasoningEffort {
     High,
 }
 
-/// Tokens one turn actually consumed, as the backend reported them.
-///
-/// `Option`-free on purpose once present: a backend that reports usage reports
-/// all of it. Whether it reported any is [`CycleOutcome::usage`]'s `Option`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input_tokens: i64,
-    pub cached_input_tokens: i64,
-    pub output_tokens: i64,
-    pub reasoning_output_tokens: i64,
-    pub total_tokens: i64,
-}
+pub use tidepool_model::TokenUsage;
 
 /// Receipt-bearing observations. Model prose is never the source of any
 /// field here.

@@ -197,8 +197,28 @@ pub extern "C" fn write_barrier(vmctx: *mut VMContext, slot: *mut *mut u8) {
         if !ms.write_barrier_armed() {
             return;
         }
+        // Nursery fields move with their owners and are traced by Cheney's
+        // object walk. Remembering their addresses would retain stale slots
+        // after collection. External array payloads and old-space fields are
+        // stable and do need the barrier.
+        if ms.gc_active_range().is_some_and(|(start, size)| {
+            let address = slot as usize;
+            address >= start as usize && address - (start as usize) < size
+        }) {
+            return;
+        }
         ms.register_remembered_slot(slot);
     }
+}
+
+/// Mutate an existing heap pointer field and record its generational edge.
+///
+/// # Safety
+/// `slot` must be a valid writable pointer field. If it is outside the nursery,
+/// its address must remain valid until the owning allocation is retired.
+pub(super) unsafe fn store_heap_pointer(vmctx: *mut VMContext, slot: *mut *mut u8, value: *mut u8) {
+    unsafe { *slot = value };
+    write_barrier(vmctx, slot);
 }
 
 /// Per-machine state for the copying garbage collector.
@@ -1238,6 +1258,25 @@ pub(crate) unsafe fn host_alloc_gc(vmctx: *mut VMContext, size: usize) -> *mut u
 mod tests {
     use super::*;
     use crate::layout;
+
+    #[test]
+    fn barrier_remembers_stable_fields_but_never_nursery_addresses() {
+        let mut nursery = [0u64; 8];
+        let start = nursery.as_mut_ptr() as *mut u8;
+        let ms = crate::machine_state::MachineState::new();
+        ms.set_gc_state(start, std::mem::size_of_val(&nursery));
+        ms.arm_write_barrier();
+        let mut vmctx = unsafe { VMContext::new(start, start.add(64), gc_trigger) };
+        vmctx.machine_state = &ms as *const _ as *mut _;
+        let mut external = std::ptr::null_mut();
+        unsafe {
+            store_heap_pointer(&mut vmctx, start as *mut *mut u8, start.add(32));
+            store_heap_pointer(&mut vmctx, &mut external, start.add(32));
+        }
+        let remembered = ms.remembered_slots_snapshot();
+        assert_eq!(remembered, vec![&mut external as *mut *mut u8]);
+        assert_eq!(external, unsafe { start.add(32) });
+    }
 
     /// The verifier must FIRE on a corrupted heap (a size-wrap Con) and stay
     /// SILENT on a healthy one.

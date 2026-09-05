@@ -15,12 +15,11 @@ pub fn agent_inspection_decl() -> crate::EffectDecl {
             "AgentForgetWith :: (Int, Int) -> AgentInspection AgentForgetOutcome",
         ],
         type_defs: &[
-            "data ProviderUsageScope = UsageLastProviderResponse deriving (Show, Eq)",
             "data CacheBoundaryReason = CacheFresh | CacheForkedPrefix | CacheReattachedThread | CacheProviderUnknown deriving (Show, Eq)",
             "data AgentRosterState = RosterRunning | RosterStopped | RosterFailed Text | RosterCancelled Text deriving (Show, Eq)",
             "data AgentWorkbenchTransfer = WorkbenchReplyTransfer | WorkbenchCancellationTransfer deriving (Show, Eq)",
             "data AgentWorkbenchPosture = WorkbenchIdle | WorkbenchRunningUnit Int Int | WorkbenchAwaitingEffect Int Int Text | WorkbenchTerminalTransfer AgentWorkbenchTransfer | WorkbenchFailed deriving (Show, Eq)",
-            "data AgentRosterEntry = AgentRosterEntry { rosterActorId :: Int, rosterActorIncarnation :: Int, rosterLabel :: Text, rosterSupervisorId :: Maybe Int, rosterSupervisorIncarnation :: Maybe Int, rosterContextParentId :: Maybe Int, rosterContextParentIncarnation :: Maybe Int, rosterState :: AgentRosterState, rosterRole :: ActorContextRole, rosterBoundWorktree :: Maybe Text, rosterForkGroup :: Maybe Int, rosterHaskellScope :: Int, rosterProviderThread :: Maybe Text, rosterProviderParentThread :: Maybe Text, rosterCachedInputTokens :: Maybe Int, rosterUncachedInputTokens :: Maybe Int, rosterUsageActivation :: Maybe Int, rosterUsageObservedAt :: Maybe Int, rosterUsageScope :: Maybe ProviderUsageScope, rosterCacheBoundary :: Maybe CacheBoundaryReason, rosterEventWatermark :: Int, rosterWorkbenchPosture :: AgentWorkbenchPosture } deriving (Show, Eq)",
+            "data AgentRosterEntry = AgentRosterEntry { rosterActorId :: Int, rosterActorIncarnation :: Int, rosterLabel :: Text, rosterSupervisorId :: Maybe Int, rosterSupervisorIncarnation :: Maybe Int, rosterContextParentId :: Maybe Int, rosterContextParentIncarnation :: Maybe Int, rosterState :: AgentRosterState, rosterRole :: ActorContextRole, rosterBoundWorktree :: Maybe Text, rosterForkGroup :: Maybe Int, rosterHaskellScope :: Int, rosterProviderThread :: Maybe Text, rosterProviderParentThread :: Maybe Text, rosterFirstUsage :: Maybe ProviderUsageObservation, rosterLatestUsage :: Maybe ProviderUsageObservation, rosterCacheBoundary :: Maybe CacheBoundaryReason, rosterEventWatermark :: Int, rosterWorkbenchPosture :: AgentWorkbenchPosture } deriving (Show, Eq)",
             "data AgentForgetOutcome = AgentForgotten | AgentForgetRunning | AgentForgetRetained [Int] [Int] | AgentForgetUnavailable deriving (Show, Eq)",
         ],
         extra_imports: &[],

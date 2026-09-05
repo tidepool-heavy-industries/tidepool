@@ -574,7 +574,9 @@ pub async fn run(
     std::fs::create_dir_all(&run_root)?;
     let host_incarnation = HostIncarnationLease::claim(&run_root)?;
 
-    let (worktrees, bindings) = actor_worktree_resources(&config.workspace)?;
+    let workspace = config.workspace.clone();
+    let (worktrees, bindings) =
+        tokio::task::spawn_blocking(move || actor_worktree_resources(&workspace)).await??;
     let bindings = Arc::new(Mutex::new(bindings));
     let worktree_authority =
         ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
@@ -842,7 +844,7 @@ fn actor_worktree_resources_at(
     })?;
     Ok((
         WorktreeManager::new(GitCli::new(), registry, worktree_root, workspace),
-        BindingTable::open(root.join("bindings"))?,
+        BindingTable::open_with_timeout(root.join("bindings"), Duration::from_secs(10))?,
     ))
 }
 
@@ -2154,10 +2156,7 @@ async fn run_delivery_pump(
             }
             _ = usage_poll.tick() => {
                 match backend.usage(&thread).await {
-                    Ok(Some(usage)) => runtime_observation.publish_cache_usage(
-                        usage.cached_input_tokens,
-                        usage.input_tokens.saturating_sub(usage.cached_input_tokens),
-                    ),
+                    Ok(Some(usage)) => runtime_observation.publish_cache_usage(usage),
                     Ok(None) => {}
                     Err(error) => tracing::debug!(actor = ?actor, %error, "provider usage observation unavailable"),
                 }
@@ -2170,6 +2169,13 @@ fn prepare_owner_notification(
     notice: &tidepool_actor::ChildExitNotice,
     deployments: &[InteractiveDeployment],
 ) -> Option<OwnerNotification> {
+    if notice
+        .child
+        .terminal()
+        .retirement_acknowledged_by(notice.owner)
+    {
+        return None;
+    }
     let owner_application = deployments.iter().find(|app| app.actor == notice.owner)?;
     Some(OwnerNotification {
         owner: notice.owner,

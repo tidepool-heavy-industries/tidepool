@@ -5,6 +5,52 @@ use tidepool_protocol::effects::{
 use tidepool_protocol::hs::HsType;
 
 #[test]
+fn usage_observation_has_one_shared_record_and_distinct_history_endpoints() {
+    use tidepool_protocol::schema::TypeShape;
+    let context = tidepool_protocol::effects::actor_context::actor_context();
+    let observation = context
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ProviderUsageObservation")
+        .unwrap();
+    let TypeShape::Record { fields } = &observation.shape else {
+        panic!("usage record")
+    };
+    assert_eq!(
+        fields.iter().map(|field| field.hs_name).collect::<Vec<_>>(),
+        [
+            "usageObservationId",
+            "usageTimestamp",
+            "usageCachedInputTokens",
+            "usageUncachedInputTokens"
+        ]
+    );
+    for (effect, name, expected) in [
+        (
+            context,
+            "ActorContextInfo",
+            ["contextFirstUsage", "contextLatestUsage"],
+        ),
+        (
+            agent_inspection(),
+            "AgentRosterEntry",
+            ["rosterFirstUsage", "rosterLatestUsage"],
+        ),
+    ] {
+        let record = effect.type_defs.iter().find(|ty| ty.name == name).unwrap();
+        let TypeShape::Record { fields } = &record.shape else {
+            panic!("inspection record")
+        };
+        let usage_fields = fields
+            .iter()
+            .filter(|field| field.ty == HsType::maybe(HsType::Named("ProviderUsageObservation")))
+            .map(|field| field.hs_name)
+            .collect::<Vec<_>>();
+        assert_eq!(usage_fields, expected);
+    }
+}
+
+#[test]
 fn fork_effort_is_optional_at_the_existing_launch_boundary() {
     let forks = tidepool_protocol::effects::forks::forks();
     let launch = forks

@@ -45,10 +45,10 @@ impl ResponseExpectation {
         );
         preamble = insert_preamble_imports(&preamble, "qualified Data.Void as TidepoolVoid");
         preamble.push_str(&format!(
-            "\nsessionReply :: TidepoolReplies.Reply ({0})\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {1})\nrespond :: ({0}) -> Eff {2} TidepoolVoid.Void\nrespond = TidepoolReplies.reply sessionReply\n",
+            "\nsessionReply :: TidepoolReplies.Reply ({0})\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {1})\n{2}\nrespond = TidepoolReplies.reply sessionReply\n",
             self.expected_type(),
             request.0,
-            effects_alias,
+            self.respond_signature(effects_alias),
         ));
         preamble
     }
@@ -309,6 +309,27 @@ pub(crate) struct CleanupReceiptProjection {
     pub complete: bool,
 }
 
+fn usage_observation_value(
+    table: &DataConTable,
+    sample: Option<&crate::ProviderUsageSample>,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    let value = sample
+        .map(|sample| {
+            actor_context_constructor(
+                table,
+                "ProviderUsageObservation",
+                vec![
+                    sample.observation_id.to_value(table)?,
+                    sample.source_timestamp.to_value(table)?,
+                    sample.cached_input_tokens.to_value(table)?,
+                    sample.uncached_input_tokens.to_value(table)?,
+                ],
+            )
+        })
+        .transpose()?;
+    Ok(value.to_value(table)?)
+}
+
 fn agent_roster_value(
     table: &DataConTable,
     entry: AgentRosterProjection,
@@ -316,13 +337,6 @@ fn agent_roster_value(
     let usage = entry.runtime.latest_provider_usage();
     let supervisor = entry.descriptor.supervisor_parent();
     let context_parent = entry.descriptor.context_parent();
-    let usage_scope = usage
-        .map(|sample| match sample.scope {
-            crate::ProviderUsageScope::LastProviderResponse => {
-                actor_context_constructor(table, "UsageLastProviderResponse", Vec::new())
-            }
-        })
-        .transpose()?;
     let cache_boundary = usage
         .map(|sample| {
             actor_context_constructor(
@@ -443,22 +457,8 @@ fn agent_roster_value(
             actor_int(entry.descriptor.placement().lexical_scope.0)?.to_value(table)?,
             entry.runtime.provider_thread.to_value(table)?,
             entry.runtime.provider_parent_thread.to_value(table)?,
-            usage
-                .map(|sample| sample.cached_input_tokens)
-                .to_value(table)?,
-            usage
-                .map(|sample| sample.uncached_input_tokens)
-                .to_value(table)?,
-            usage
-                .and_then(|sample| sample.activation_sequence)
-                .map(actor_int)
-                .transpose()?
-                .to_value(table)?,
-            usage
-                .map(|sample| actor_int(sample.observed_at_unix_ms))
-                .transpose()?
-                .to_value(table)?,
-            usage_scope.to_value(table)?,
+            usage_observation_value(table, entry.runtime.first_provider_usage.as_ref())?,
+            usage_observation_value(table, usage)?,
             cache_boundary.to_value(table)?,
             actor_int(entry.runtime.event_watermark)?.to_value(table)?,
             workbench_posture,
@@ -1550,7 +1550,7 @@ fn haskell_display(result: &tidepool_runtime::EvalResult) -> Option<String> {
     };
     tidepool_runtime::value_to_json(rendered, result.table(), 0)
         .as_str()
-        .map(str::to_owned)
+        .map(crate::workbench_display::layout)
 }
 
 impl<H, O> ResidentActorRunner<H, O>
@@ -2481,12 +2481,8 @@ where
                     actor_int(runtime.event_watermark)?.to_value(table)?,
                     runtime.provider_thread.to_value(table)?,
                     runtime.provider_parent_thread.to_value(table)?,
-                    usage
-                        .map(|sample| sample.cached_input_tokens)
-                        .to_value(table)?,
-                    usage
-                        .map(|sample| sample.uncached_input_tokens)
-                        .to_value(table)?,
+                    usage_observation_value(table, runtime.first_provider_usage.as_ref())?,
+                    usage_observation_value(table, usage)?,
                     i64::from(descendants.maximum_depth).to_value(table)?,
                     i64::from(descendants.maximum_active_children).to_value(table)?,
                     descriptor

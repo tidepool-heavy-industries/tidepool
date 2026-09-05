@@ -25,11 +25,40 @@ async fn committed(
 
 #[tokio::test]
 async fn published_unfold_watch_and_request_examples_execute() {
+    execute_examples(false).await;
+}
+
+#[tokio::test]
+async fn rich_response_survives_resident_computation() {
+    struct VerifyHeap;
+    impl Drop for VerifyHeap {
+        fn drop(&mut self) {
+            tidepool_codegen::host_fns::clear_heap_verify_override();
+        }
+    }
+    let before = tidepool_codegen::host_fns::heap_verify_run_count();
+    tidepool_codegen::host_fns::set_heap_verify(true);
+    let _verification = VerifyHeap;
+    execute_examples(true).await;
+    assert!(tidepool_codegen::host_fns::heap_verify_run_count() > before);
+}
+
+async fn execute_examples(rich_response: bool) {
     let mut campaign = TestCampaign::start().await;
     let root = Arc::clone(&campaign.root_installation.policy);
+    for block in include_str!("../../../prompts/shoal/docs/workbench.md")
+        .split("```haskell\n")
+        .skip(1)
+    {
+        committed(root.as_ref(), block.split_once("```").unwrap().0).await;
+    }
     committed(
         root.as_ref(),
-        include_str!("../actor_host_fixtures/generic_actor/documentation_setup.hs"),
+        if rich_response {
+            include_str!("../actor_host_fixtures/generic_actor/rich_response_setup.hs")
+        } else {
+            include_str!("../actor_host_fixtures/generic_actor/documentation_setup.hs")
+        },
     )
     .await;
     committed(root.as_ref(), ":type (undefined :: Review)").await;
@@ -114,8 +143,15 @@ async fn published_unfold_watch_and_request_examples_execute() {
         example(include_str!("../../../prompts/shoal/docs/watch.md")),
     )
     .await;
+    committed(
+        root.as_ref(),
+        include_str!("../actor_host_fixtures/generic_actor/response_computation.hs"),
+    )
+    .await;
     for child in &children {
-        let source = if child.label.ends_with("/domain") {
+        let source = if rich_response {
+            include_str!("../actor_host_fixtures/generic_actor/rich_response_reply.hs")
+        } else if child.label.ends_with("/domain") {
             "respond (Report sessionInput)"
         } else {
             "respond sessionInput"
@@ -133,6 +169,11 @@ async fn published_unfold_watch_and_request_examples_execute() {
         .contains("ReplyAvailable"));
     committed(
         root.as_ref(),
+        "context <- actorContext\ncontextFirstUsage context\ncontextLatestUsage context",
+    )
+    .await;
+    committed(
+        root.as_ref(),
         "let worker = forkedActor (fst workers)\nlet task = 9 :: Int",
     )
     .await;
@@ -144,6 +185,9 @@ async fn published_unfold_watch_and_request_examples_execute() {
         include_str!("../../../prompts/shoal/docs/request.md"),
         include_str!("../../../prompts/shoal/docs/deadline.md"),
     ] {
+        if rich_response {
+            break;
+        }
         committed(root.as_ref(), example(document)).await;
         committed(
             root.as_ref(),

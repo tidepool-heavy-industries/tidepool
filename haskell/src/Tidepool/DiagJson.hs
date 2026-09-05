@@ -6,13 +6,14 @@ module Tidepool.DiagJson
   ( ReportOutcome(..)
   , DiagSeverity(..)
   , Diag(..)
+  , SourceRejection(..)
   , diagsFromSourceError
   , diagFromException
   , renderDiagsJson
   , renderDiag
   ) where
 
-import Control.Exception (SomeException)
+import Control.Exception (Exception, SomeException)
 import Data.Foldable (toList)
 import Data.List (intercalate)
 
@@ -32,6 +33,11 @@ data ReportOutcome
   = ReportSuccess
   | ReportSourceFailure
   | ReportWorkerFailure
+
+-- | A source contract rejected during extraction, after GHC typechecking.
+-- Distinct from unexpected worker exceptions; the report keeps that distinction.
+newtype SourceRejection = SourceRejection String deriving Show
+instance Exception SourceRejection
 
 -- | Severity carried by one structured diagnostic.
 data DiagSeverity = DiagError | DiagWarning

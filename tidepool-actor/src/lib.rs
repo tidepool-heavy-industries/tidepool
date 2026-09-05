@@ -45,6 +45,7 @@ mod start;
 mod termination;
 mod typed_request;
 mod wait;
+mod workbench_display;
 
 pub use descriptor::ActorDescriptor;
 pub use external_application::{
@@ -103,7 +104,6 @@ pub use role::{
 pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
     ActorWorkbenchPosture, ActorWorkbenchTransfer, CacheBoundaryReason, ProviderUsageSample,
-    ProviderUsageScope,
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError,

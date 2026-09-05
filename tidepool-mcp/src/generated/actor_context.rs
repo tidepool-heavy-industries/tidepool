@@ -11,11 +11,12 @@ pub fn actor_context_decl() -> crate::EffectDecl {
             "ActorContextWith :: ActorContext ActorContextInfo",
         ],
         type_defs: &[
+            "data ProviderUsageObservation = ProviderUsageObservation { usageObservationId :: Text, usageTimestamp :: Maybe Text, usageCachedInputTokens :: Int, usageUncachedInputTokens :: Int } deriving (Show, Eq)",
             "data ActorContextRole = ContextRoot | ContextResearch | ContextCoding | ContextScaffolding | ContextIntegration | ContextInherited deriving (Show, Eq)",
             "data ActorNativeTools = NativeInspectionOnly | NativeCoding | NativeIntegration | NativeInherited deriving (Show, Eq)",
             "data ActorWorkspaceAccess = WorkspaceNone | WorkspaceInspectOnly | WorkspaceWritableBound deriving (Show, Eq)",
             "data ActivationKind = ActivationRootStarted | ActivationRequest Int Int | ActivationEvents [Int] deriving (Show, Eq)",
-            "data ActorContextInfo = ActorContextInfo { contextActorId :: Int, contextActorIncarnation :: Int, contextParentId :: Maybe Int, contextParentIncarnation :: Maybe Int, contextActorPath :: Text, contextRole :: ActorContextRole, contextEffectRow :: Text, contextNativeTools :: ActorNativeTools, contextWorkspaceAccess :: ActorWorkspaceAccess, contextBoundWorktree :: Maybe Text, contextForkGroup :: Maybe Int, contextHaskellScope :: Int, contextActivationKind :: ActivationKind, contextEventWatermark :: Int, contextProviderThread :: Maybe Text, contextProviderParentThread :: Maybe Text, contextCachedInputTokens :: Maybe Int, contextUncachedInputTokens :: Maybe Int, contextMaximumDepth :: Int, contextMaximumActiveChildren :: Int, contextPromptProfile :: Text } deriving (Show, Eq)",
+            "data ActorContextInfo = ActorContextInfo { contextActorId :: Int, contextActorIncarnation :: Int, contextParentId :: Maybe Int, contextParentIncarnation :: Maybe Int, contextActorPath :: Text, contextRole :: ActorContextRole, contextEffectRow :: Text, contextNativeTools :: ActorNativeTools, contextWorkspaceAccess :: ActorWorkspaceAccess, contextBoundWorktree :: Maybe Text, contextForkGroup :: Maybe Int, contextHaskellScope :: Int, contextActivationKind :: ActivationKind, contextEventWatermark :: Int, contextProviderThread :: Maybe Text, contextProviderParentThread :: Maybe Text, contextFirstUsage :: Maybe ProviderUsageObservation, contextLatestUsage :: Maybe ProviderUsageObservation, contextMaximumDepth :: Int, contextMaximumActiveChildren :: Int, contextPromptProfile :: Text } deriving (Show, Eq)",
         ],
         extra_imports: &[],
         helpers: &[

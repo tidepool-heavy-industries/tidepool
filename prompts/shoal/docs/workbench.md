@@ -19,6 +19,20 @@ type or apply a pure projection. `:info fmt` and `:type [fmt|hello|]` use the
 same quasiquoter imports as execution. Use `:bindings` to inspect current
 names and `:browse` for library declarations.
 
+When retained evidence becomes noisy, keep the original and define a local view:
+
+```haskell
+let scores = map candidateScore
+let candidates = [Candidate 7, Candidate 3]
+scores candidates
+scores (filter judge candidates)
+```
+
+The view is ordinary Haskell, so you can change it as the question changes.
+Long single-line values receive generic indentation; custom rendering and all
+underlying evidence remain available. Project before printing when you need
+fewer facts, rather than repeatedly dumping the complete value.
+
 Declarations and bindings persist between calls. Earlier closures keep the
 definitions they captured; later definitions do not rewrite old values or
 children. A retained recipient needs the new decision delta when you change

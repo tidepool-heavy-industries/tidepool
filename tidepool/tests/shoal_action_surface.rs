@@ -121,3 +121,26 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
         tidepool_runtime::FailureClass::UserHaskell
     );
 }
+
+#[test]
+fn unresolved_request_result_is_a_source_diagnostic_with_annotation_guidance() {
+    eval_harness::require_extract();
+    let include = shoal_include_paths();
+    let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let source = include_str!("shoal_action_surface/request_type_diagnostic.hs");
+    let error = compile_haskell(source, "unresolved", &include_refs).unwrap_err();
+    let tidepool_runtime::CompileError::Diagnostics(diagnostics) = error else {
+        panic!("unresolved authored result must be a source rejection: {error:?}");
+    };
+    assert!(
+        diagnostics.iter().any(|diag| {
+            diag.message.contains("result type is unresolved")
+                && diag.message.contains("requestWith @Finding")
+        }),
+        "{diagnostics:?}"
+    );
+    for target in ["annotated", "functionResult"] {
+        compile_haskell(source, target, &include_refs)
+            .unwrap_or_else(|error| panic!("concrete {target} should compile: {error}"));
+    }
+}

@@ -78,9 +78,9 @@ inspectForkGroup = observeForkGroup . forkGroupHandle
 
 cacheFacts
   :: AgentRosterEntry
-  -> (Maybe ProviderUsageScope, Maybe CacheBoundaryReason, Int)
+  -> (Maybe ProviderUsageObservation, Maybe CacheBoundaryReason, Int)
 cacheFacts entry =
-  (rosterUsageScope entry, rosterCacheBoundary entry, rosterEventWatermark entry)
+  (rosterFirstUsage entry, rosterCacheBoundary entry, rosterEventWatermark entry)
 
 workbenchPosture :: AgentRosterEntry -> AgentWorkbenchPosture
 workbenchPosture = rosterWorkbenchPosture

@@ -22,6 +22,8 @@ module Tidepool.Translate
   ) where
 
 import GHC
+import Control.Exception (throw)
+import Tidepool.DiagJson (SourceRejection(..))
 import GHC.Core
 import qualified GHC.Core.Utils as Core
 import GHC.Types.Id
@@ -2825,14 +2827,14 @@ resolveSitedIds binds = Map.fromList
 
 checkSiteType :: VerbSpec -> Type -> TransM Type
 checkSiteType spec ty = do
-  checkMonomorphicSite (vsName spec) ty
+  checkMonomorphicSite (vsName spec) SiteResult ty
   pure (stabilizeEffectRows ty)
 
 checkSiteInputType :: VerbSpec -> [Type] -> Int -> TransM Type
 checkSiteInputType spec tys index =
   case drop index tys of
     ty : _ -> do
-      checkMonomorphicSite (vsName spec ++ " input") ty
+      checkMonomorphicSite (vsName spec) SiteInput ty
       pure (stabilizeEffectRows ty)
     [] -> error $ "sited verb " ++ vsName spec
       ++ " declares missing input type argument " ++ show index
@@ -2845,13 +2847,20 @@ siteTypeOf ty = SiteType
 
 -- | Suspension sites carry concrete type metadata, so their answer type must
 -- be monomorphic at extraction time.
-checkMonomorphicSite :: String -> Type -> TransM ()
-checkMonomorphicSite what ty = do
+data SiteTypePosition = SiteInput | SiteResult
+
+checkMonomorphicSite :: String -> SiteTypePosition -> Type -> TransM ()
+checkMonomorphicSite verb position ty = do
   binder <- gets tsCurrentBinder
   let siteDesc = maybe "<top level>" T.unpack binder
       typeStr = Tidepool.GhcPipeline.renderType ty
+      (what, advice) = case position of
+        SiteInput -> (verb ++ " input", "The input type is unresolved. Add a concrete type annotation to the input.")
+        SiteResult -> (verb, "The result type is unresolved. Add a concrete result type annotation or visible type application, for example `"
+          ++ verb ++ " @Finding ...` when Finding is your intended result type.")
   when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
-    error $ "polymorphic " ++ what ++ " site in " ++ siteDesc ++ ": " ++ typeStr
+    throw $ SourceRejection $ "polymorphic " ++ what ++ " site in " ++ siteDesc ++ ": " ++ typeStr
+      ++ "\n" ++ advice
 
 -- | Recognize GHC's unpackAppendCString# builtin.
 -- unpackAppendCString# :: Addr# -> [Char] -> [Char]

@@ -353,6 +353,14 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let executable = current_executable()?;
     let compiler_socket = run_root.join("compiler.sock");
     let compiler_bin = tidepool_extract_cmd::resolve_bin()?.path;
+    println!(
+        "launch: agent={} version={} model={} effort={} extractor={}",
+        interactive_agent.executable().display(),
+        interactive_agent.version(),
+        agent.model,
+        agent.effort,
+        compiler_bin.display()
+    );
     let compiler_program = compiler_bin
         .to_str()
         .ok_or_else(|| runtime_error("compiler executable path is not UTF-8"))?
@@ -839,7 +847,11 @@ async fn preflight(
 ) -> Result<InteractiveAgentInstallation, Box<dyn std::error::Error>> {
     crate::haskell_sources::ensure_stdlib()?;
     crate::haskell_sources::ensure_shoal_haskell()?;
-    tidepool_runtime::toolchain::bind_extract_endpoint()?;
+    tidepool_runtime::toolchain::bind_extract_endpoint().map_err(|error| {
+        runtime_error(format!(
+            "{error}. Launch through `just shoal-console` or `just shoal-init` for the matched local toolchain."
+        ))
+    })?;
 
     // Codex keys its interactive trust decision by the path visible inside
     // its process. Every actor gets an isolated repository mounted at this one
@@ -865,7 +877,7 @@ async fn preflight(
         .stderr(Stdio::piped());
     let mut boundary = boundary.spawn().map_err(|source| {
         runtime_error(format!(
-            "Bubblewrap is required for Shoal actor worktrees: {source}"
+            "Bubblewrap is required for Shoal actor worktrees: {source}. Launch through `just shoal-console` or `just shoal-init` to enter the supported environment."
         ))
     })?;
     let stderr = boundary.stderr.take().ok_or_else(|| {

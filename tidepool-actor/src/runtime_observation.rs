@@ -1,8 +1,7 @@
 //! Shared, typed observation of the external application bound to an actor.
 //!
-//! Provider usage is sampled, not accumulated here. The backend reports the
-//! latest provider response and may return the same sample on several polls;
-//! this owner deduplicates those polls while retaining activation correlation.
+//! The backend recovers first and latest durable provider observations. Polls
+//! deduplicate by source identity; polling time never supplies causal attribution.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,11 +21,6 @@ pub enum ActorActivationKind {
     EventsActivated {
         inbox_sequences: Vec<u64>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderUsageScope {
-    LastProviderResponse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -70,13 +64,10 @@ pub enum ActorWorkbenchTransfer {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUsageSample {
-    pub activation_sequence: Option<u64>,
+    pub observation_id: String,
+    pub source_timestamp: Option<String>,
     pub observed_at_unix_ms: u64,
-    pub scope: ProviderUsageScope,
     pub cache_boundary: CacheBoundaryReason,
-    pub prompt_profile: Option<String>,
-    pub prompt_catalog_version: Option<u32>,
-    pub prompt_fingerprint: Option<String>,
     pub cached_input_tokens: i64,
     pub uncached_input_tokens: i64,
 }
@@ -93,6 +84,7 @@ pub struct ActorRuntimeObservation {
     pub prompt_catalog_version: Option<u32>,
     pub prompt_fingerprint: Option<String>,
     pub provider_usage: Vec<ProviderUsageSample>,
+    pub first_provider_usage: Option<ProviderUsageSample>,
     pub workbench_posture: ActorWorkbenchPosture,
 }
 
@@ -162,33 +154,29 @@ impl ActorRuntimeObservationHandle {
         observation.prompt_fingerprint = Some(fingerprint.into());
     }
 
-    pub fn publish_cache_usage(&self, cached_input_tokens: i64, uncached_input_tokens: i64) {
+    pub fn publish_cache_usage(&self, usage: tidepool_model::ProviderUsageSnapshot) {
         let mut observation = self.inner.write();
-        let activation_sequence = observation.current_activation_sequence;
-        let cache_boundary = observation.cache_boundary;
-        let prompt_profile = observation.prompt_profile.clone();
-        let prompt_catalog_version = observation.prompt_catalog_version;
-        let prompt_fingerprint = observation.prompt_fingerprint.clone();
-        if observation.provider_usage.last().is_some_and(|sample| {
-            sample.activation_sequence == activation_sequence
-                && sample.cached_input_tokens == cached_input_tokens
-                && sample.uncached_input_tokens == uncached_input_tokens
-                && sample.cache_boundary == cache_boundary
-                && sample.prompt_fingerprint == prompt_fingerprint
-        }) {
+        let make_sample = |source: tidepool_model::ProviderUsageObservation| ProviderUsageSample {
+            observation_id: source.id,
+            source_timestamp: source.timestamp,
+            observed_at_unix_ms: unix_time_ms(),
+            cache_boundary: observation.cache_boundary,
+            cached_input_tokens: source.usage.cached_input_tokens,
+            uncached_input_tokens: source.usage.input_tokens - source.usage.cached_input_tokens,
+        };
+        let first = make_sample(usage.first);
+        let latest = make_sample(usage.latest);
+        if observation.first_provider_usage.is_none() {
+            observation.first_provider_usage = Some(first);
+        }
+        if observation
+            .provider_usage
+            .last()
+            .is_some_and(|sample| sample.observation_id == latest.observation_id)
+        {
             return;
         }
-        observation.provider_usage.push(ProviderUsageSample {
-            activation_sequence,
-            observed_at_unix_ms: unix_time_ms(),
-            scope: ProviderUsageScope::LastProviderResponse,
-            cache_boundary,
-            prompt_profile,
-            prompt_catalog_version,
-            prompt_fingerprint,
-            cached_input_tokens,
-            uncached_input_tokens,
-        });
+        observation.provider_usage.push(latest);
         if observation.provider_usage.len() > MAX_PROVIDER_SAMPLES {
             let remove = observation.provider_usage.len() - MAX_PROVIDER_SAMPLES;
             observation.provider_usage.drain(..remove);
@@ -209,10 +197,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_observation_survives_history_eviction_and_equal_counts_are_distinct() {
+        let observation = ActorRuntimeObservationHandle::default();
+        let first = usage("first", 10, 20).first;
+        for index in 0..40 {
+            let mut snapshot = usage(&format!("response-{index}"), 10, 20);
+            snapshot.first = first.clone();
+            observation.publish_cache_usage(snapshot);
+        }
+        let snapshot = observation.snapshot();
+        assert_eq!(
+            snapshot
+                .first_provider_usage
+                .as_ref()
+                .unwrap()
+                .observation_id,
+            "first"
+        );
+        assert_eq!(snapshot.provider_usage.len(), MAX_PROVIDER_SAMPLES);
+        assert_eq!(
+            snapshot.latest_provider_usage().unwrap().observation_id,
+            "response-39"
+        );
+    }
+
+    fn usage(id: &str, cached: i64, uncached: i64) -> tidepool_model::ProviderUsageSnapshot {
+        let observation = tidepool_model::ProviderUsageObservation {
+            id: id.into(),
+            timestamp: Some("2026-09-05T00:00:00Z".into()),
+            usage: tidepool_model::TokenUsage {
+                input_tokens: cached + uncached,
+                cached_input_tokens: cached,
+                output_tokens: 0,
+                reasoning_output_tokens: 0,
+                total_tokens: cached + uncached,
+            },
+        };
+        tidepool_model::ProviderUsageSnapshot {
+            first: observation.clone(),
+            latest: observation,
+        }
+    }
+
+    #[test]
     fn absent_provider_metrics_remain_distinct_from_measured_zero() {
         let observation = ActorRuntimeObservationHandle::default();
         assert_eq!(observation.snapshot().latest_provider_usage(), None);
-        observation.publish_cache_usage(0, 12);
+        observation.publish_cache_usage(usage("first", 0, 12));
         assert_eq!(
             observation
                 .snapshot()
@@ -223,23 +254,17 @@ mod tests {
     }
 
     #[test]
-    fn repeated_polls_deduplicate_but_new_activations_remain_visible() {
+    fn repeated_polls_do_not_attribute_old_usage_to_new_activations() {
         let observation = ActorRuntimeObservationHandle::default();
         observation.begin_activation(4);
         observation.publish_cache_boundary(CacheBoundaryReason::ForkedPrefix);
-        observation.publish_cache_usage(80, 20);
-        observation.publish_cache_usage(80, 20);
+        observation.publish_cache_usage(usage("first", 80, 20));
+        observation.publish_cache_usage(usage("first", 80, 20));
         observation.begin_activation(5);
-        observation.publish_cache_usage(80, 20);
+        observation.publish_cache_usage(usage("first", 80, 20));
 
         let snapshot = observation.snapshot();
-        assert_eq!(snapshot.provider_usage.len(), 2);
-        assert_eq!(snapshot.provider_usage[0].activation_sequence, Some(4));
-        assert_eq!(snapshot.provider_usage[1].activation_sequence, Some(5));
-        assert_eq!(
-            snapshot.provider_usage[1].scope,
-            ProviderUsageScope::LastProviderResponse
-        );
+        assert_eq!(snapshot.provider_usage.len(), 1);
     }
 
     #[test]
@@ -266,18 +291,6 @@ mod tests {
                 inbox_sequences: vec![11, 12]
             }
         );
-    }
-
-    #[test]
-    fn usage_sample_carries_the_prompt_identity_active_for_that_response() {
-        let observation = ActorRuntimeObservationHandle::default();
-        observation.publish_prompt_profile("coding-v1", 3, "abc123");
-        observation.publish_cache_usage(90, 10);
-        let snapshot = observation.snapshot();
-        let sample = snapshot.latest_provider_usage().unwrap();
-        assert_eq!(sample.prompt_profile.as_deref(), Some("coding-v1"));
-        assert_eq!(sample.prompt_catalog_version, Some(3));
-        assert_eq!(sample.prompt_fingerprint.as_deref(), Some("abc123"));
     }
 
     #[test]

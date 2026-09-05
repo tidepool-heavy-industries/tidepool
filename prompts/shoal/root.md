@@ -14,9 +14,14 @@ already performed.
 
 Tool results are compact GHCi-style transcripts: expressions use Haskell
 rendering, bindings and declarations use short commit notes, and non-renderable
-values are explicitly opaque. Start with `:doc topics`; use `:browse` for the
-wider API. Persistent declarations and live values survive calls, while Rust
+values are explicitly opaque. Start with `:doc topics`, `:bindings`, and targeted
+`:type`/`:info` queries. Reserve `:browse` for deliberate wider exploration;
+its output also enters future children's inherited context. Persistent declarations and live values survive calls, while Rust
 owns actor lifecycle and repository custody.
+
+Before printing a large retained result, define a task-specific view and reuse it.
+Keep the original value for deeper inspection; ordinary Haskell projections
+can select useful facts without introducing another inspection framework.
 
 Use `:status` for current activation, role, bound worktree, and labeled
 pending/ready/failed responses and watches. `:status!` includes full authority
@@ -34,6 +39,8 @@ branch plans. Register watches in the following hosted call.
 
 End the response normally after registering a watch. A watch transition is a
 durable wakeup; on reactivation, `pollWatch` reads typed state.
+For unfinished work, say what you are waiting for rather than announcing
+completion. A late notification may refer to a result you already inspected.
 Unwatched responses remain pollable but do not wake the application. A reply
 settles one request without terminating its agent; use `stopAgent` for
 explicit teardown.

@@ -11,7 +11,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use crate::{AgentBackendError, BackendThreadId, ReasoningEffort, TokenUsage};
+use crate::{AgentBackendError, BackendThreadId, ReasoningEffort};
 
 /// An interactive conversation whose durable rollout can be addressed by a
 /// separate native queue or archive process.
@@ -162,12 +162,12 @@ pub trait InteractiveAgentBackend: Send + Sync {
         message: &'a str,
     ) -> InteractiveFuture<'a, ()>;
 
-    /// Latest usage the backend durably reported for this conversation.
+    /// First and latest usage durably reported for this conversation.
     /// `None` means the backend has not reported it, never a measured miss.
     fn usage<'a>(
         &'a self,
         _thread: &'a QueueReadyThread,
-    ) -> InteractiveFuture<'a, Option<TokenUsage>> {
+    ) -> InteractiveFuture<'a, Option<tidepool_model::ProviderUsageSnapshot>> {
         Box::pin(async { Ok(None) })
     }
 

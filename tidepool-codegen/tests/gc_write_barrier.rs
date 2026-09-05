@@ -201,8 +201,7 @@ fn build_read_back() -> CoreExpr {
 /// a Lam body until the closure is actually CALLED). The fragment's root is
 /// `f` itself: `run_pure_and_bind`'s `deep_force` forces it to WHNF (identity
 /// for a `Closure` — Tier1, not descended), so `x`'s thunk survives tenuring
-/// unevaluated, exactly the shape `OldSpace::tenure`'s thunk-indirection loop
-/// exists for.
+/// unevaluated, exercising memoization after the thunk has moved to old-space.
 fn build_mk_thunk_holder(boxed_val: i64) -> CoreExpr {
     reset_ctr();
     let mut b = TreeBuilder::new();
@@ -467,17 +466,8 @@ fn tenured_array_write_survives_gc_g1() {
         .unwrap();
 }
 
-/// UNIFICATION — the pre-existing thunk-indirection tenure path (a Tier1
-/// closure tenured unforced, later forced, mutating its indirection cell to
-/// point at a nursery result) is now routed through the SAME `write_barrier`
-/// API as array writes — not a parallel mechanism. Checks this two ways:
-/// (1) `remembered_slots_count()` increases at tenure time, proving the
-/// thunk-indirection cell registered through the barrier's own tracking; (2)
-/// forcing the thunk, then forcing real GC, then re-forcing (following the
-/// now-`THUNK_EVALUATED` indirection) still returns the correct value — the
-/// pre-existing "forced tenured thunk's result survives GC" behavior must not
-/// regress now that it is barrier-routed instead of a special-case
-/// `register_persistent_root` call.
+/// A thunk retained before evaluation must remember its nursery result when
+/// memoized, and return that same value after a real collection.
 #[test]
 #[serial]
 fn tenured_thunk_indirection_uses_write_barrier_and_survives_gc() {
@@ -505,13 +495,6 @@ fn tenured_thunk_indirection_uses_write_barrier_and_survives_gc() {
             let slot = machine
                 .run_pure_and_bind(mk_thunk)
                 .expect("run_pure_and_bind mk_thunk_holder");
-            let after_tenure = machine.remembered_slots_count();
-            assert!(
-                after_tenure > before,
-                "tenure's thunk-indirection loop must register through the SAME \
-                 write_barrier API remembered_slots_count tracks (before={before}, \
-                 after={after_tenure})"
-            );
 
             let mut env = ExternalEnv::new();
             env.insert(THUNK_EXT, slot.addr());
@@ -521,6 +504,7 @@ fn tenured_thunk_indirection_uses_write_barrier_and_survives_gc() {
             let forced = machine
                 .run_fragment_pure(force_fn)
                 .expect("run_fragment_pure force_thunk");
+            assert!(machine.remembered_slots_count() > before);
             assert_eq!(
                 expect_int(&forced),
                 555,

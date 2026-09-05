@@ -31,6 +31,7 @@ pub struct ActorExitAlreadyPublished {
 
 struct ExitState {
     terminal: Mutex<Option<ActorTerminal>>,
+    acknowledged_retirement: Mutex<Option<crate::ActorRef>>,
     changed: watch::Sender<u64>,
 }
 
@@ -60,12 +61,22 @@ impl Default for RetainedActorExit {
 }
 
 impl RetainedActorExit {
+    pub(crate) fn acknowledge_retirement(&self, supervisor: crate::ActorRef) {
+        *self.state.acknowledged_retirement.lock() = Some(supervisor);
+    }
+
+    /// Whether this supervisor already received the explicit retirement result.
+    pub fn retirement_acknowledged_by(&self, supervisor: crate::ActorRef) -> bool {
+        *self.state.acknowledged_retirement.lock() == Some(supervisor)
+    }
+
     #[must_use]
     pub fn new() -> Self {
         let (changed, _) = watch::channel(0);
         Self {
             state: Arc::new(ExitState {
                 terminal: Mutex::new(None),
+                acknowledged_retirement: Mutex::new(None),
                 changed,
             }),
         }

@@ -20,7 +20,7 @@ use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode,
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    QueueReadyThread, ReasoningEffort, TokenUsage,
+    ProviderUsageObservation, ProviderUsageSnapshot, QueueReadyThread, ReasoningEffort, TokenUsage,
 };
 
 const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
@@ -270,7 +270,7 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     fn usage<'a>(
         &'a self,
         thread: &'a QueueReadyThread,
-    ) -> InteractiveFuture<'a, Option<TokenUsage>> {
+    ) -> InteractiveFuture<'a, Option<ProviderUsageSnapshot>> {
         let sessions = super::isolation::codex_home().join("sessions");
         let thread = thread.id().0.clone();
         Box::pin(async move {
@@ -294,27 +294,50 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
 fn read_rollout_usage(
     sessions: &Path,
     thread: &str,
-) -> Result<Option<TokenUsage>, AgentBackendError> {
+) -> Result<Option<ProviderUsageSnapshot>, AgentBackendError> {
     let Some(path) = find_rollout(sessions, thread, 4)? else {
         return Ok(None);
     };
     let file = std::fs::File::open(&path)
         .map_err(|error| unavailable("open Codex rollout for usage", error))?;
+    let mut first = None;
     let mut latest = None;
-    for line in BufReader::new(file).lines() {
+    let mut own_thread = false;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|error| unavailable("read Codex rollout usage", error))?;
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        if value.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
+            own_thread = value.pointer("/payload/id").and_then(|v| v.as_str()) == Some(thread);
+            continue;
+        }
+        if !own_thread
+            || value.get("type").and_then(|v| v.as_str()) != Some("event_msg")
+            || value.pointer("/payload/type").and_then(|v| v.as_str()) != Some("token_count")
+        {
+            continue;
+        }
         let Some(usage) = value
             .pointer("/payload/info/last_token_usage")
             .and_then(parse_rollout_usage)
         else {
             continue;
         };
-        latest = Some(usage);
+        let observation = ProviderUsageObservation {
+            id: format!("{thread}:{index}"),
+            timestamp: value
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            usage,
+        };
+        first.get_or_insert_with(|| observation.clone());
+        latest = Some(observation);
     }
-    Ok(latest)
+    Ok(first
+        .zip(latest)
+        .map(|(first, latest)| ProviderUsageSnapshot { first, latest }))
 }
 
 fn find_rollout(
@@ -981,8 +1004,9 @@ mod tests {
         std::fs::write(
             rollout,
             concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"019fe92a-1a66-7820-9481-c0a2d108aba1\"}}\n",
                 "{\"payload\":{\"type\":\"other\"}}\n",
-                "{\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{",
                 "\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7,",
                 "\"reasoning_output_tokens\":3,\"total_tokens\":107}}}}\n"
             ),
@@ -990,9 +1014,9 @@ mod tests {
         .unwrap();
 
         let usage = read_rollout_usage(root.path(), thread).unwrap().unwrap();
-        assert_eq!(usage.input_tokens, 100);
-        assert_eq!(usage.cached_input_tokens, 80);
-        assert_eq!(usage.total_tokens, 107);
+        assert_eq!(usage.first.usage.input_tokens, 100);
+        assert_eq!(usage.first.usage.cached_input_tokens, 80);
+        assert_eq!(usage.latest.usage.total_tokens, 107);
 
         let invalid = serde_json::json!({
             "input_tokens": 10,
@@ -1002,5 +1026,43 @@ mod tests {
             "total_tokens": 10
         });
         assert_eq!(parse_rollout_usage(&invalid), None);
+    }
+
+    #[test]
+    fn rollout_usage_selects_own_first_and_latest_after_delayed_poll() {
+        let root = tempfile::tempdir().unwrap();
+        let thread = "child";
+        let path = root.path().join("rollout-child.jsonl");
+        let usage = serde_json::json!({"input_tokens": 100, "cached_input_tokens": 80,
+            "output_tokens": 7, "reasoning_output_tokens": 3, "total_tokens": 107});
+        let event = serde_json::json!({"type": "event_msg", "timestamp": "2026-09-05T00:00:00Z",
+            "payload": {"type": "token_count", "info": {"last_token_usage": usage}}});
+        let lines = [
+            serde_json::json!({"type": "session_meta", "payload": {"id": "parent"}}),
+            event.clone(),
+            serde_json::json!({"type": "session_meta", "payload": {"id": thread}}),
+            event.clone(),
+            event,
+        ];
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{{\"type\":",
+                lines
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        )
+        .unwrap();
+        let snapshot = read_rollout_usage(root.path(), thread).unwrap().unwrap();
+        assert_eq!(snapshot.first.id, "child:3");
+        assert_eq!(snapshot.latest.id, "child:4");
+        assert_eq!(snapshot.first.usage, snapshot.latest.usage);
+        assert_eq!(
+            read_rollout_usage(root.path(), thread).unwrap(),
+            Some(snapshot)
+        );
     }
 }

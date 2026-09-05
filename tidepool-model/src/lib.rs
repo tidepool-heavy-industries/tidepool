@@ -168,6 +168,34 @@ impl Conversation {
     }
 }
 
+/// Tokens one turn actually consumed, as the backend reported them.
+///
+/// `Option`-free on purpose once present: a backend that reports usage reports
+/// all of it. Callers represent unavailable measurements with `Option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// One durable provider observation; equal counts need not mean the same response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderUsageObservation {
+    pub id: String,
+    pub timestamp: Option<String>,
+    pub usage: TokenUsage,
+}
+
+/// Endpoints of the provider thread's completed-response history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderUsageSnapshot {
+    pub first: ProviderUsageObservation,
+    pub latest: ProviderUsageObservation,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

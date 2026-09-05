@@ -9,6 +9,13 @@ pub struct ResponseExpectation {
 }
 
 impl ResponseExpectation {
+    pub(crate) fn respond_signature(&self, effects: &str) -> String {
+        format!(
+            "respond :: ({}) -> Eff {effects} TidepoolVoid.Void",
+            self.expected_type
+        )
+    }
+
     #[must_use]
     pub(crate) fn new(expected_type: impl Into<String>) -> Self {
         Self {

@@ -88,3 +88,5 @@ pub async fn copy_interactive_binding(
 ) -> Result<(), AgentBackendError> {
     backend::codex::node::copy_binding(path, thread).await
 }
+
+pub use tidepool_model::{ProviderUsageObservation, ProviderUsageSnapshot};

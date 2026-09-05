@@ -229,6 +229,14 @@ impl BindingTable {
     /// enforced from in-memory state, so one owning table per root is a
     /// correctness precondition, not a deployment nicety.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorktreeError> {
+        Self::open_with_timeout(root, std::time::Duration::ZERO)
+    }
+
+    /// Wait for the existing owner to release its lock, without replacing it.
+    pub fn open_with_timeout(
+        root: impl AsRef<Path>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, WorktreeError> {
         let root = root.as_ref().to_path_buf();
         let dir = DurableJsonDir::open(&root)?;
 
@@ -239,13 +247,22 @@ impl BindingTable {
             .write(true)
             .open(&lock_path)
             .map_err(|e| storage_failure(&lock_path, e))?;
-        if owner_lock.try_lock().is_err() {
-            return Err(storage_failure(
-                &lock_path,
-                "another process (or another BindingTable in this one) already \
-                 owns this binding root — one worktree, one agent is enforced \
-                 from in-memory state, so exactly one owner may hold it",
-            ));
+        let started = std::time::Instant::now();
+        loop {
+            match owner_lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    std::thread::sleep(std::time::Duration::from_millis(50).min(remaining));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(storage_failure(&lock_path,
+                        "another process already owns this binding root; stop its Shoal session and wait for shutdown before launching again (ownership was not changed)"));
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(storage_failure(&lock_path, error));
+                }
+            }
         }
 
         let mut bindings = Vec::new();

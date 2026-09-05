@@ -1148,7 +1148,15 @@ mod tests {
             kind: ActorExitKind::Cancelled,
             summary: "cancel parked actor".into(),
         };
-        actor.shutdown(terminal).await.expect("shutdown");
+        let supervisor = ActorRef::first(crate::ActorId(99));
+        actor
+            .retire_by(supervisor, terminal)
+            .await
+            .expect("shutdown");
+        assert!(actor.terminal().retirement_acknowledged_by(supervisor));
+        assert!(!actor
+            .terminal()
+            .retirement_acknowledged_by(ActorRef::first(crate::ActorId(100))));
         task.await.expect("actor task");
         assert!(call_rx.await.is_err(), "deferred caller must be released");
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
@@ -1172,6 +1180,19 @@ mod tests {
         let terminal = actor.terminal().wait().await;
         task.await.expect("actor task");
         assert_eq!(terminal.kind, ActorExitKind::Failed);
+        let supervisor = ActorRef::first(crate::ActorId(99));
+        let observed = actor
+            .retire_by(
+                supervisor,
+                ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "late retirement".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(observed.kind, ActorExitKind::Failed);
+        assert!(!actor.terminal().retirement_acknowledged_by(supervisor));
         assert!(terminal.summary.contains("cast probe"));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }

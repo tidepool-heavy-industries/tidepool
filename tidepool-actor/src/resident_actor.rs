@@ -555,20 +555,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 }
                 if view == StatusView::Lineage {
                     return Some(format!(
-                        "  - {:?} ({}@{}) supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} cache_scope={:?} activation={:?} bound_worktree={:?}",
+                        "  - {:?} ({}@{}) supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
                         record.descriptor.fork_group(), record.descriptor.placement().lexical_scope.0,
                         runtime.provider_thread, runtime.provider_parent_thread,
+                        runtime.first_provider_usage.as_ref().map(|sample| (&sample.observation_id, sample.cached_input_tokens, sample.uncached_input_tokens)),
                         usage.map(|sample| sample.cache_boundary),
                         usage.map(|sample| sample.cached_input_tokens),
                         usage.map(|sample| sample.uncached_input_tokens),
-                        usage.map(|sample| sample.scope),
-                        usage.and_then(|sample| sample.activation_sequence), record.bound_worktree,
+                        record.bound_worktree,
                     ));
                 }
                 Some(format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} activation={:?} workbench={:?} state={}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
@@ -581,8 +581,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     runtime.provider_parent_thread,
                     usage.map(|sample| sample.cached_input_tokens),
                     usage.map(|sample| sample.uncached_input_tokens),
-                    usage.map(|sample| sample.scope),
-                    usage.and_then(|sample| sample.activation_sequence),
                     runtime.workbench_posture,
                     state,
                 ))
@@ -599,7 +597,21 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         } else {
             format!("\n  completed/stopped actors hidden={hidden_terminal_actors} (use :status!)")
         };
-        let sample_history = if view == StatusView::Trace {
+        let sample_history = if view == StatusView::Lineage {
+            format!(
+                "\n  first_usage={:?}\n  latest_usage={:?}",
+                runtime.first_provider_usage.as_ref().map(|sample| (
+                    &sample.observation_id,
+                    sample.cached_input_tokens,
+                    sample.uncached_input_tokens
+                )),
+                usage.map(|sample| (
+                    &sample.observation_id,
+                    sample.cached_input_tokens,
+                    sample.uncached_input_tokens
+                ))
+            )
+        } else if view == StatusView::Trace {
             format!("\n  provider_usage_history={:?}", runtime.provider_usage)
         } else {
             String::new()
@@ -624,7 +636,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         } else {
             format!(
-            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
+            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
@@ -636,9 +648,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             runtime.provider_parent_thread,
             usage.map(|sample| sample.cached_input_tokens),
             usage.map(|sample| sample.uncached_input_tokens),
-            usage.map(|sample| sample.scope),
             usage.map(|sample| sample.cache_boundary),
-            usage.and_then(|sample| sample.activation_sequence),
             runtime.activation_kind,
             runtime.event_watermark,
             self.descriptor.effective_role().role(),
@@ -1315,13 +1325,16 @@ where
                     crate::resident_workbench::AgentStopProjection::AlreadyStopped
                 } else if let Some(target) = kernel.resolve(stop.target) {
                     match target
-                        .shutdown(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: format!(
-                                "supervisor {}@{} requested retirement",
-                                context.actor.id.0, context.actor.incarnation.0
-                            ),
-                        })
+                        .retire_by(
+                            context.actor,
+                            ActorTerminal {
+                                kind: ActorExitKind::Cancelled,
+                                summary: format!(
+                                    "supervisor {}@{} requested retirement",
+                                    context.actor.id.0, context.actor.incarnation.0
+                                ),
+                            },
+                        )
                         .await
                     {
                         Ok(terminal) => {
@@ -1476,13 +1489,16 @@ where
                         AgentStopProjection::AlreadyStopped
                     } else if let Some(target) = kernel.resolve(actor) {
                         match target
-                            .shutdown(ActorTerminal {
-                                kind: ActorExitKind::Cancelled,
-                                summary: format!(
-                                    "campaign {} cleanup requested by {}@{}",
-                                    group.0, context.actor.id.0, context.actor.incarnation.0
-                                ),
-                            })
+                            .retire_by(
+                                context.actor,
+                                ActorTerminal {
+                                    kind: ActorExitKind::Cancelled,
+                                    summary: format!(
+                                        "campaign {} cleanup requested by {}@{}",
+                                        group.0, context.actor.id.0, context.actor.incarnation.0
+                                    ),
+                                },
+                            )
                             .await
                         {
                             Ok(terminal) => {
@@ -2117,7 +2133,12 @@ where
             drop(input);
             return Ok(InteractivePark::Cancelled(request.request));
         }
-        let request_message = request.initial_user_message.clone();
+        let contract = crate::interactive_session::ActivationContract {
+            input_type: request.input_type.clone(),
+            response: request.response.clone(),
+            effects: context.haskell_effects_alias.clone(),
+        };
+        let request_message = contract.message(request.initial_user_message.as_deref());
         let already_installed = self.policy_installed;
         let workbench = self.environment.runner.workbench(
             request.response.clone(),
@@ -2132,7 +2153,7 @@ where
                 input,
             )
             .await?;
-        self.install_interactive_policy(kernel, context, request.initial_user_message.clone())?;
+        self.install_interactive_policy(kernel, context, Some(request_message.clone()))?;
         self.standing =
             ResidentStanding::Interactive(crate::interactive_session::ResidentInteractiveAwait {
                 request,
@@ -2158,11 +2179,13 @@ where
                     ResidentStanding::Interactive(awaiting) => awaiting.request.request,
                     _ => unreachable!(),
                 },
+                contract,
                 match &self.standing {
-                    ResidentStanding::Interactive(awaiting) => awaiting.request.input_type.clone(),
+                    ResidentStanding::Interactive(awaiting) => {
+                        awaiting.request.initial_user_message.as_deref()
+                    }
                     _ => unreachable!(),
                 },
-                request_message.as_deref(),
             );
             self.next_activation_sequence += 1;
             let _ = self

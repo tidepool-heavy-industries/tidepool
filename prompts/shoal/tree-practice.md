@@ -27,7 +27,8 @@ ends the turn; a pending request can span watch wakeups. An accepted reply
 settles that request exactly once without terminating the actor.
 
 Use `:doc topics` for focused examples, `:type`, `:info`, and `:bindings` to
-explore your current Haskell, and `:browse` for the wider API. Opaque functions
+explore your current Haskell. Reserve `:browse` for deliberate wider discovery;
+unnecessary output becomes inherited context at the next fork. Opaque functions
 and handles are ordinary values: inspect their types and write useful pure
-projections. The task's types, helpers, evidence, and acceptance criteria are
+projections before printing large retained results. The task's types, helpers, evidence, and acceptance criteria are
 yours to invent; no campaign schema is required.

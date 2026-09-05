@@ -740,3 +740,22 @@ fn binding_table_refuses_a_second_live_owner_over_one_root() {
     drop(first);
     BindingTable::open(&root).expect("the root is free once the owner drops");
 }
+
+#[test]
+fn binding_table_waits_for_release_without_stealing_live_ownership() {
+    use std::time::Duration;
+    use tidepool_worktree::BindingTable;
+    let base = tempfile::TempDir::new().unwrap();
+    let root = base.path().join("bindings");
+    let first = BindingTable::open(&root).unwrap();
+    assert!(BindingTable::open_with_timeout(&root, Duration::from_millis(20)).is_err());
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        drop(first);
+    });
+    let second = BindingTable::open_with_timeout(&root, Duration::from_secs(2)).unwrap();
+    release.join().unwrap();
+    assert!(BindingTable::open(&root).is_err());
+    drop(second);
+    BindingTable::open(&root).unwrap();
+}

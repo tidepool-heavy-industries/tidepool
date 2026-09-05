@@ -13,6 +13,10 @@ belong above it.
   old-space reclamation.
 - Every allocation/forcing path installs the complete root registry set used by
   collection. Partial registry installation is corruption, not an optimization.
+- Heap mutations record generational edges at the store. Ordinary Rust field
+  replacements use `store_heap_pointer`; emitted, atomic, and bulk writes use
+  `write_barrier`. Never remember movable nursery slot addresses or predict
+  future writes at tenure.
 - `ValueHandle` carries opaque live values between continuations without
   serialization. Unknown handles and continuations are typed errors.
 - Unexpected runtime shapes produce a poisoned result with a useful breadcrumb;

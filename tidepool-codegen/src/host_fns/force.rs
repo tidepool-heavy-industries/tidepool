@@ -20,6 +20,19 @@ use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
 /// exceeding it can only mean a memoized indirection cycle.
 const INDIRECTION_FOLLOW_LIMIT: u64 = 64 * 1024 * 1024;
 
+/// Publish a thunk result through the same barrier as other heap mutations.
+/// The thunk may have been tenured before its body was evaluated.
+unsafe fn memoize_thunk(vmctx: *mut VMContext, thunk: *mut u8, result: *mut u8) {
+    unsafe {
+        super::gc::store_heap_pointer(
+            vmctx,
+            thunk.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8,
+            result,
+        );
+        *thunk.add(layout::THUNK_STATE_OFFSET as usize) = layout::THUNK_EVALUATED;
+    }
+}
+
 /// Force a thunk to WHNF. Loops to handle chains (thunk returning thunk).
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
@@ -82,10 +95,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         // null) instead.
                         if result.is_null() {
                             overwrite_runtime_error(RuntimeError::BadPointer);
-                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
-                                as *mut *mut u8) = error_poison_ptr();
-                            *current.add(layout::THUNK_STATE_OFFSET as usize) =
-                                layout::THUNK_EVALUATED;
+                            memoize_thunk(vmctx, current, error_poison_ptr());
                             return error_poison_ptr();
                         }
 
@@ -96,10 +106,7 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         // until SIGSEGV). Then return poison immediately —
                         // don't loop into further forces.
                         if has_runtime_error() {
-                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
-                                as *mut *mut u8) = result;
-                            *current.add(layout::THUNK_STATE_OFFSET as usize) =
-                                layout::THUNK_EVALUATED;
+                            memoize_thunk(vmctx, current, result);
                             return error_poison_ptr();
                         }
 
@@ -116,19 +123,11 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
                         // Memoize the poison instead so re-forces fail fast.
                         if result == current {
                             let poison = runtime_blackhole_trap(vmctx);
-                            *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize)
-                                as *mut *mut u8) = poison;
-                            *current.add(layout::THUNK_STATE_OFFSET as usize) =
-                                layout::THUNK_EVALUATED;
+                            memoize_thunk(vmctx, current, poison);
                             return poison;
                         }
 
-                        // 4. Write indirection (offset 16, overwriting code_ptr)
-                        *(current.add(layout::THUNK_INDIRECTION_OFFSET as usize) as *mut *mut u8) =
-                            result;
-
-                        // 5. Set state = Evaluated
-                        *current.add(layout::THUNK_STATE_OFFSET as usize) = layout::THUNK_EVALUATED;
+                        memoize_thunk(vmctx, current, result);
 
                         // Result may be another thunk — loop to force it
                         current = result;
@@ -286,9 +285,11 @@ pub extern "C" fn deep_force(vmctx: *mut VMContext, root: *mut u8) -> *mut u8 {
                 visited.clear();
             }
 
-            // `parent` may have moved during the force; re-read through the
-            // still-registered root before writing back.
-            *(parent_root.get().add(field_off) as *mut *mut u8) = forced_child;
+            // The parent may be tenured, while forcing its child can allocate
+            // a nursery value. Root relocation and the old-to-young write
+            // barrier are both required when replacing the field.
+            let slot = parent_root.get().add(field_off) as *mut *mut u8;
+            super::gc::store_heap_pointer(vmctx, slot, forced_child);
 
             // Done with this item: drop its root registration (truncates
             // exactly this one entry — see the LIFO-nesting doc above) BEFORE

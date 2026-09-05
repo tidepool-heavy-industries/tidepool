@@ -60,6 +60,17 @@ pub fn actor_context() -> Effect {
 
 fn type_defs() -> Vec<TypeDef> {
     vec![
+        TypeDef {
+            name: "ProviderUsageObservation", wire_rust: None,
+            shape: TypeShape::Record { fields: vec![
+                field("usageObservationId", HsType::Text),
+                field("usageTimestamp", HsType::maybe(HsType::Text)),
+                field("usageCachedInputTokens", HsType::Int),
+                field("usageUncachedInputTokens", HsType::Int),
+            ] },
+            json: JsonInstance::None, derives: NO_WIRE, domain: None,
+            doc: &["One completed provider response, identified by its durable source; no activation attribution is inferred."],
+        },
         closed_sum(
             "ActorContextRole",
             &[
@@ -141,8 +152,8 @@ fn type_defs() -> Vec<TypeDef> {
                     field("contextEventWatermark", HsType::Int),
                     field("contextProviderThread", HsType::maybe(HsType::Text)),
                     field("contextProviderParentThread", HsType::maybe(HsType::Text)),
-                    field("contextCachedInputTokens", HsType::maybe(HsType::Int)),
-                    field("contextUncachedInputTokens", HsType::maybe(HsType::Int)),
+                    field("contextFirstUsage", HsType::maybe(HsType::Named("ProviderUsageObservation"))),
+                    field("contextLatestUsage", HsType::maybe(HsType::Named("ProviderUsageObservation"))),
                     field("contextMaximumDepth", HsType::Int),
                     field("contextMaximumActiveChildren", HsType::Int),
                     field("contextPromptProfile", HsType::Text),

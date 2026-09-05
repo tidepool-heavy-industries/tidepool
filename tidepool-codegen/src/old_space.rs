@@ -13,10 +13,11 @@
 //!
 //! Every store of a nursery pointer into already-tenured or external-to-
 //! nursery memory routes through ONE function, [`crate::host_fns::write_barrier`]:
-//! [`OldSpace::tenure`]'s thunk-indirection cells (a Tier1 closure tenures
-//! UNFORCED, and forcing it later mutates its indirection cell to point at a
-//! nursery result), `WriteSmallArray`/`WriteArray`, `casSmallArray#`, and the
-//! boxed-array copy family's destination range. `write_barrier` records the
+//! thunk memoization (a Tier1 closure tenures UNFORCED, and forcing it later
+//! mutates its indirection cell to point at a nursery result),
+//! `WriteSmallArray`/`WriteArray`, `casSmallArray#`, and the
+//! boxed-array copy family's destination range, and `deep_force`'s constructor
+//! field rewrites. `write_barrier` records the
 //! store's destination slot in the machine's remembered set; `perform_gc`
 //! traces and rewrites every remembered slot on every collection (including
 //! the doubling re-evacuate, which reuses the same root-slot list), exactly
@@ -176,12 +177,9 @@ impl OldSpace {
     /// Evacuates `ptr`'s *entire* transitive closure at tenure time, returns a
     /// [`RootSlot`] holding the tenured root pointer, and registers that slot
     /// as a persistent GC root ([`crate::host_fns::register_persistent_root`])
-    /// so minor GCs keep it live and never strand it. Any thunk in the copied
-    /// closure that is still unevaluated or mid-force has its indirection cell
-    /// routed through the write barrier ([`crate::host_fns::write_barrier`],
-    /// see the module doc) instead — a later force of that thunk mutates the
-    /// cell to point at a nursery result, and the barrier is what keeps that
-    /// store visible to GC. Also arms the write barrier (idempotent) and
+    /// so minor GCs keep it live and never strand it. Later mutations, including
+    /// thunk memoization, record their edges through the write barrier at the
+    /// store itself. Also arms the write barrier (idempotent) and
     /// registers every arena this call grows into with `MachineState`, for a
     /// diagnostic pass that needs old-space bounds reachable from vmctx alone.
     ///
@@ -268,32 +266,6 @@ impl OldSpace {
                 "tenure: measure_closure_bytes({needed}) ≠ cheney_copy bytes_copied({})",
                 res.bytes_copied
             );
-
-            // The write barrier (see the module doc): any live thunk in the
-            // graph just copied gets its indirection cell routed through
-            // `write_barrier`, here — the only point where every such cell in
-            // this tenure is enumerable at once. A later force of the thunk
-            // mutates the cell to point at a nursery result; the barrier is
-            // what keeps that store visible to GC.
-            let base = to_slice.as_mut_ptr();
-            let mut off = 0usize;
-            while off < res.bytes_copied {
-                let obj = base.add(off);
-                let sz = read_size(obj) as usize;
-                if read_tag(obj) == tidepool_heap::layout::TAG_THUNK {
-                    let state = *obj.add(tidepool_heap::layout::THUNK_STATE_OFFSET);
-                    if state == tidepool_heap::layout::THUNK_UNEVALUATED
-                        || state == tidepool_heap::layout::THUNK_BLACKHOLE
-                    {
-                        crate::host_fns::write_barrier(
-                            vmctx,
-                            obj.add(tidepool_heap::layout::THUNK_INDIRECTION_OFFSET)
-                                as *mut *mut u8,
-                        );
-                    }
-                }
-                off += (sz + 7) & !7;
-            }
 
             self.cursor += res.bytes_copied;
             self.used += res.bytes_copied;

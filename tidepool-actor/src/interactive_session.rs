@@ -40,21 +40,30 @@ impl ResidentActivation {
         actor: crate::ActorRef,
         sequence: u64,
         request: crate::RequestId,
-        input_type: String,
+        contract: ActivationContract,
         request_message: Option<&str>,
     ) -> Self {
-        let message = request_message.map_or_else(
-            || format!("A new typed request is ready as `sessionInput :: {input_type}`."),
-            |message| {
-                format!("{message}\n\nThe authoritative request input is mounted as `sessionInput :: {input_type}`.")
-            },
-        );
+        let message = contract.message(request_message);
         Self {
             id: ActivationId { actor, sequence },
             request,
-            input_type,
+            input_type: contract.input_type,
             message,
         }
+    }
+}
+
+pub(crate) struct ActivationContract {
+    pub input_type: String,
+    pub response: ResponseExpectation,
+    pub effects: String,
+}
+
+impl ActivationContract {
+    pub(crate) fn message(&self, guidance: Option<&str>) -> String {
+        format!("{}\n\nMounted request contract:\n```haskell\nsessionInput :: {}\n{}\n```\nUse `:info` on the input or reply type to inspect its constructors.",
+            guidance.unwrap_or("A new typed request is ready."), self.input_type,
+            self.response.respond_signature(&self.effects))
     }
 }
 
@@ -173,12 +182,16 @@ mod tests {
             actor(),
             3,
             crate::RequestId(11),
-            "Candidate".into(),
+            ActivationContract {
+                input_type: "Candidate".into(),
+                response: ResponseExpectation::new("Review"),
+                effects: "ActorEffects".into(),
+            },
             Some("Review this candidate."),
         );
         assert_eq!(
             activation.message,
-            "Review this candidate.\n\nThe authoritative request input is mounted as `sessionInput :: Candidate`."
+            "Review this candidate.\n\nMounted request contract:\n```haskell\nsessionInput :: Candidate\nrespond :: (Review) -> Eff ActorEffects TidepoolVoid.Void\n```\nUse `:info` on the input or reply type to inspect its constructors."
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }

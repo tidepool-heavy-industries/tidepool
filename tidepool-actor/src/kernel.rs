@@ -305,6 +305,13 @@ impl LocalActorRef {
         if let Some(existing) = self.terminal.get() {
             return Ok(existing);
         }
+        self.send_shutdown(terminal).await
+    }
+
+    async fn send_shutdown(
+        &self,
+        terminal: ActorTerminal,
+    ) -> Result<ActorTerminal, KernelInvocationFailure> {
         let (reply, receive) = tokio::sync::oneshot::channel();
         self.address
             .send_message(KernelMessage::Shutdown {
@@ -315,6 +322,22 @@ impl LocalActorRef {
         receive
             .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+    }
+
+    /// Request retirement and retain which supervisor received its acknowledgement.
+    pub async fn retire_by(
+        &self,
+        supervisor: ActorRef,
+        terminal: ActorTerminal,
+    ) -> Result<ActorTerminal, KernelInvocationFailure> {
+        if let Some(existing) = self.terminal.get() {
+            return Ok(existing);
+        }
+        let result = self.send_shutdown(terminal).await?;
+        if result.kind == crate::ActorExitKind::Cancelled {
+            self.terminal.acknowledge_retirement(supervisor);
+        }
+        Ok(result)
     }
 }
 

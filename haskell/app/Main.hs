@@ -35,7 +35,8 @@ import Tidepool.GhcPipeline
   , withResidentPipeline )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
-  ( ReportOutcome(..), Diag(..), diagsFromSourceError, diagFromException, renderDiagsJson )
+  ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
+  , diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
@@ -186,7 +187,10 @@ reportDiags :: Either SomeException () -> IO ExitCode
 reportDiags (Left e) = do
   let (outcome, diags) = case fromException e of
         Just (se :: SourceError) -> (ReportSourceFailure, diagsFromSourceError se)
-        Nothing                  -> (ReportWorkerFailure, [diagFromException e])
+        Nothing -> case fromException e of
+          Just (SourceRejection message) ->
+            (ReportSourceFailure, [Diag Nothing DiagError message])
+          Nothing -> (ReportWorkerFailure, [diagFromException e])
   putStrLn (renderDiagsJson outcome diags)
   -- Debug copy for humans only; stdout (above) is the authoritative machine
   -- contract.

@@ -25,17 +25,6 @@ pub fn agent_inspection() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
-                name: "ProviderUsageScope",
-                wire_rust: None,
-                shape: TypeShape::Sum {
-                    variants: vec![variant("UsageLastProviderResponse", vec![])],
-                },
-                json: JsonInstance::None,
-                derives: NO_WIRE,
-                domain: None,
-                doc: &["The interval represented by one provider usage observation."],
-            },
-            TypeDef {
                 name: "CacheBoundaryReason",
                 wire_rust: None,
                 shape: TypeShape::Sum {
@@ -125,13 +114,13 @@ pub fn agent_inspection() -> Effect {
                         field("rosterHaskellScope", HsType::Int),
                         field("rosterProviderThread", HsType::maybe(HsType::Text)),
                         field("rosterProviderParentThread", HsType::maybe(HsType::Text)),
-                        field("rosterCachedInputTokens", HsType::maybe(HsType::Int)),
-                        field("rosterUncachedInputTokens", HsType::maybe(HsType::Int)),
-                        field("rosterUsageActivation", HsType::maybe(HsType::Int)),
-                        field("rosterUsageObservedAt", HsType::maybe(HsType::Int)),
                         field(
-                            "rosterUsageScope",
-                            HsType::maybe(HsType::Named("ProviderUsageScope")),
+                            "rosterFirstUsage",
+                            HsType::maybe(HsType::Named("ProviderUsageObservation")),
+                        ),
+                        field(
+                            "rosterLatestUsage",
+                            HsType::maybe(HsType::Named("ProviderUsageObservation")),
                         ),
                         field(
                             "rosterCacheBoundary",
@@ -172,7 +161,13 @@ pub fn agent_inspection() -> Effect {
                 doc: &["Explicit, refusal-bearing release of terminal actor observations."],
             },
         ],
-        foreign_types: &[("ActorContextRole", "crate::ActorContextRoleWire")],
+        foreign_types: &[
+            ("ActorContextRole", "crate::ActorContextRoleWire"),
+            (
+                "ProviderUsageObservation",
+                "crate::ProviderUsageObservationWire",
+            ),
+        ],
         errors: None,
         verbs: vec![
             Verb {
