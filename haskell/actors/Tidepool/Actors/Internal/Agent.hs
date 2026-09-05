@@ -34,6 +34,8 @@ module Tidepool.Actors.Internal.Agent
   , withRequestDeadline
   , requestWith
   , requestWithSited
+  , requestWithProgress
+  , requestWithProgressSited
   , AgentState (..)
   , AgentObservation (..)
   , agentIdentity
@@ -56,6 +58,8 @@ import qualified Tidepool.Actor.Internal as ActorInternal
 import Tidepool.Actors.Role (AgentControl, AgentInspection, AgentLaunch, Forks)
 import Tidepool.Agent.Reply.Internal
   ( Reply
+  , Progress (..)
+  , responseRequestId
   , Replies
   , RequestLabel (..)
   , RequestId (..)
@@ -300,6 +304,27 @@ requestWith
   -> RequestOptions input
   -> Eff effs (Response result)
 requestWith = requestWithSited @result @input 0
+
+{-# OPAQUE requestWithProgress #-}
+requestWithProgress
+  :: forall progress result input effs
+   . Member Replies effs
+  => AgentRef
+  -> RequestOptions input
+  -> Eff effs (Response result, Progress progress)
+requestWithProgress = requestWithProgressSited @progress @result @input 0
+
+{-# OPAQUE requestWithProgressSited #-}
+requestWithProgressSited
+  :: forall progress result input effs
+   . Member Replies effs
+  => Int
+  -> AgentRef
+  -> RequestOptions input
+  -> Eff effs (Response result, Progress progress)
+requestWithProgressSited site actor options = do
+  response <- requestWithSited @result @input site actor options
+  pure (response, Progress (responseRequestId response))
 
 {-# OPAQUE requestWithSited #-}
 requestWithSited

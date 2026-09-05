@@ -90,4 +90,7 @@ pub async fn copy_interactive_binding(
     backend::codex::node::copy_binding(path, thread).await
 }
 
-pub use tidepool_model::{ProviderUsageObservation, ProviderUsageSnapshot};
+pub use tidepool_model::{
+    ProviderFailure, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
+    ProviderUsageObservation, ProviderUsageSnapshot,
+};

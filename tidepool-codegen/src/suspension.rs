@@ -179,6 +179,12 @@ pub enum ResumeInput {
     Answer(Value),
     /// A value already rooted in this machine's retained heap.
     Handle(ValueHandle),
+    /// A constructor whose final field borrows an existing live value.
+    FramedHandle {
+        handle: ValueHandle,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<Value>,
+    },
     /// Consume the continuation without running it.
     Abort(String),
 }

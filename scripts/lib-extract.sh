@@ -301,7 +301,7 @@ start_battery_daemon() {
 
   echo "==> starting per-run resident compile daemon: socket=$sock log=$log" >&2
   # Rotation and RSS flags are omitted so the frontend owns their defaults.
-  "$TIDEPOOL_EXTRACT" --daemon --socket "$sock" "${watch_args[@]}" >"$log" 2>&1 &
+  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" "${watch_args[@]}" >"$log" 2>&1 &
   BATTERY_DAEMON_PID=$!
   BATTERY_DAEMON_OWNED=1
   # Recorded before the boot-wait below so a signal arriving mid-wait still

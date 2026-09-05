@@ -6,6 +6,7 @@ use std::io::{self, BufRead};
 
 use serde_json::Value;
 use tidepool_model::{
+    ProviderFailure, ProviderObservation, ProviderTurnObservation, ProviderTurnState,
     ProviderUsageCompleteness, ProviderUsageObservation, ProviderUsageScope, ProviderUsageSnapshot,
     ProviderUsageSummary, TokenUsage,
 };
@@ -19,10 +20,18 @@ struct Turn {
     incomplete: bool,
 }
 
+#[cfg(test)]
 pub(super) fn read(
     reader: impl BufRead,
     thread: &str,
 ) -> io::Result<Option<ProviderUsageSnapshot>> {
+    observe(reader, thread).map(|snapshot| snapshot.usage)
+}
+
+pub(super) fn observe(reader: impl BufRead, thread: &str) -> io::Result<ProviderObservation> {
+    let mut observation = ProviderObservation::default();
+    let mut started_turns = BTreeSet::new();
+    let mut failed_turns = BTreeSet::new();
     let mut own_thread = false;
     let mut legacy_first = None;
     let mut legacy_latest = None;
@@ -78,8 +87,69 @@ pub(super) fn read(
             current_turn.get_or_insert_with(|| turn.into());
             continue;
         }
+        if own_thread && kind == Some("turn_context") {
+            observation.confirmed_model = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            observation.confirmed_effort = payload
+                .get("effort")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
         if !own_thread || kind != Some("event_msg") {
             continue;
+        }
+        if let Some(turn) = payload.get("turn_id").and_then(Value::as_str) {
+            let event = payload.get("type").and_then(Value::as_str);
+            let state = match event {
+                Some("task_started" | "turn_started") => Some(ProviderTurnState::Active),
+                Some("task_complete" | "turn_complete") => Some(
+                    if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
+                        // Only structured protocol codes classify failures.
+                        let code = error.get("codex_error_info").and_then(Value::as_str);
+                        ProviderTurnState::Failed(match code {
+                            Some("bad_request") => ProviderFailure::RequestRejected,
+                            Some("response_stream_connection_failed") => {
+                                ProviderFailure::TransportFailed
+                            }
+                            _ => ProviderFailure::Other(error.to_string()),
+                        })
+                    } else {
+                        ProviderTurnState::Succeeded
+                    },
+                ),
+                Some("turn_aborted") => Some(ProviderTurnState::Interrupted),
+                _ => None,
+            };
+            if let Some(state) = state {
+                if matches!(state, ProviderTurnState::Failed(_))
+                    && failed_turns.insert(turn.to_owned())
+                {
+                    observation.failures.push(ProviderTurnObservation {
+                        thread: thread.into(),
+                        turn: turn.into(),
+                        revision: index,
+                        state: state.clone(),
+                    });
+                }
+                let starts = matches!(state, ProviderTurnState::Active);
+                let new_start = starts && started_turns.insert(turn.to_owned());
+                if new_start
+                    || (!starts
+                        && observation.turn.as_ref().is_none_or(|current| {
+                            current.turn == turn
+                                && matches!(current.state, ProviderTurnState::Active)
+                        }))
+                {
+                    observation.turn = Some(ProviderTurnObservation {
+                        thread: thread.into(),
+                        turn: turn.into(),
+                        revision: index,
+                        state,
+                    });
+                }
+            }
         }
         match payload.get("type").and_then(Value::as_str) {
             Some("task_started" | "turn_started") => {
@@ -136,14 +206,16 @@ pub(super) fn read(
         }
     }
     if ordered.is_empty() {
-        return Ok(legacy_first
-            .zip(legacy_latest)
-            .map(|(first, latest)| ProviderUsageSnapshot {
-                first,
-                latest,
-                thread_summary: None,
-                latest_turn_summary: None,
-            }));
+        observation.usage =
+            legacy_first
+                .zip(legacy_latest)
+                .map(|(first, latest)| ProviderUsageSnapshot {
+                    first,
+                    latest,
+                    thread_summary: None,
+                    latest_turn_summary: None,
+                });
+        return Ok(observation);
     }
     let turn_complete = |turn_id: &str, turn: &Turn| {
         !incomplete
@@ -171,12 +243,13 @@ pub(super) fn read(
         &ordered,
         turns.iter().all(|(id, turn)| turn_complete(id, turn)),
     );
-    Ok(Some(ProviderUsageSnapshot {
+    observation.usage = Some(ProviderUsageSnapshot {
         first: ordered[0].clone(),
         latest: ordered[ordered.len() - 1].clone(),
         thread_summary,
         latest_turn_summary,
-    }))
+    });
+    Ok(observation)
 }
 
 fn summarize(
@@ -249,6 +322,79 @@ mod tests {
     fn usage() -> Value {
         json!({"input_tokens":100,"cached_input_tokens":80,"output_tokens":7,
             "reasoning_output_tokens":3,"total_tokens":107})
+    }
+
+    #[test]
+    fn health_survives_missing_usage_and_ignores_older_completion() {
+        let failure = json!({"type":"event_msg","payload":{
+            "type":"task_complete","turn_id":"first",
+            "error":{"codex_error_info":"other","message":"bad_request"}}});
+        let mut values = vec![
+            json!({"type":"session_meta","payload":{"id":"child"}}),
+            event("task_started", "first"),
+            failure.clone(),
+        ];
+        let project = |values: &[Value]| {
+            observe(
+                values
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .as_bytes(),
+                "child",
+            )
+            .unwrap()
+        };
+        let failed = project(&values);
+        assert!(failed.usage.is_none());
+        let first_revision = failed.turn.as_ref().unwrap().revision;
+        values.push(failure.clone());
+        values.push(event("task_started", "first"));
+        assert_eq!(project(&values).turn.unwrap().revision, first_revision);
+        assert!(matches!(
+            failed.turn.unwrap().state,
+            ProviderTurnState::Failed(ProviderFailure::Other(_))
+        ));
+        values.push(event("task_started", "second"));
+        values.push(failure);
+        let active = project(&values).turn.unwrap();
+        assert_eq!(active.turn, "second");
+        assert_eq!(active.state, ProviderTurnState::Active);
+        values.push(event("task_complete", "second"));
+        let recovered = project(&values);
+        assert_eq!(recovered.failures.len(), 1);
+        assert_eq!(recovered.failures[0].turn, "first");
+        assert_eq!(recovered.failures[0].revision, first_revision);
+        assert_eq!(
+            project(&values).turn.unwrap().state,
+            ProviderTurnState::Succeeded
+        );
+    }
+
+    #[test]
+    fn confirmed_settings_require_own_durable_context() {
+        let values = [
+            json!({"type":"session_meta","payload":{"id":"parent"}}),
+            json!({"type":"turn_context","payload":{"model":"parent-model","effort":"high"}}),
+            json!({"type":"session_meta","payload":{"id":"child"}}),
+        ];
+        let source = values
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let snapshot = observe(source.as_bytes(), "child").unwrap();
+        assert_eq!(snapshot.confirmed_model, None);
+        assert_eq!(snapshot.confirmed_effort, None);
+        let source = format!(
+            "{source}\n{}",
+            json!({"type":"turn_context","payload":{
+            "model":"gpt-5.6-sol","effort":"low"}})
+        );
+        let snapshot = observe(source.as_bytes(), "child").unwrap();
+        assert_eq!(snapshot.confirmed_model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(snapshot.confirmed_effort.as_deref(), Some("low"));
     }
 
     fn record(thread: &str, turn: &str, response: &str) -> Value {

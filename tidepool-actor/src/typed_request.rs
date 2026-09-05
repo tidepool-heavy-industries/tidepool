@@ -6,6 +6,7 @@ use tidepool_runtime::YieldSite;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseExpectation {
     expected_type: String,
+    pub(crate) progress_type: Option<String>,
 }
 
 impl ResponseExpectation {
@@ -20,6 +21,7 @@ impl ResponseExpectation {
     pub(crate) fn new(expected_type: impl Into<String>) -> Self {
         Self {
             expected_type: expected_type.into(),
+            progress_type: None,
         }
     }
 
@@ -43,7 +45,7 @@ pub enum RequestSignatureError {
     InvalidSite(i64),
     #[error("request site {0} is absent from its GHC metadata")]
     MissingSite(u64),
-    #[error("request site {site} describes {actual} live input types, expected one")]
+    #[error("request site {site} describes {actual} live input types, expected an input and optional progress type")]
     InputArity { site: u64, actual: usize },
 }
 
@@ -56,16 +58,26 @@ pub(crate) fn decode_typed_request_site(
         .iter()
         .find(|metadata| metadata.site == site)
         .ok_or(RequestSignatureError::MissingSite(site))?;
-    let [input] = metadata.inputs.as_slice() else {
+    let Some(input) = metadata
+        .inputs
+        .first()
+        .filter(|_| metadata.inputs.len() <= 2)
+    else {
         return Err(RequestSignatureError::InputArity {
             site,
             actual: metadata.inputs.len(),
         });
     };
+    let mut response = ResponseExpectation::new(metadata.ty.clone());
+    let mut output_modules = metadata.modules.clone();
+    if let Some(progress) = metadata.inputs.get(1) {
+        response.progress_type = Some(progress.ty.clone());
+        output_modules.extend(progress.modules.iter().cloned());
+    }
     Ok(TypedRequestSignature {
         input_type: input.ty.clone(),
         input_modules: input.modules.clone(),
-        response: ResponseExpectation::new(metadata.ty.clone()),
-        output_modules: metadata.modules.clone(),
+        response,
+        output_modules,
     })
 }

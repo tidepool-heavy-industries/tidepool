@@ -4,7 +4,7 @@
 //! [`tidepool_atomic_write`], and this module owns the sequencing contract that
 //! composes them: append first, deliver, then monotonically acknowledge.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -16,6 +16,20 @@ use tidepool_repr::jsonl::{self, SyncPolicy, TailPolicy};
 pub struct DurableEnvelope<T> {
     pub sequence: u64,
     pub payload: T,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublicationStamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicationStamp {
+    pub stream: String,
+    pub revision: u64,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct InboxCheckpoint {
+    sequence: u64,
+    watermarks: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +47,7 @@ pub enum InboxError {
 const COMPACT_ACKNOWLEDGED_ROWS: u64 = 64;
 
 struct InboxState<T> {
+    watermarks: BTreeMap<String, u64>,
     next_sequence: u64,
     cursor: u64,
     compacted_through: u64,
@@ -58,7 +73,17 @@ where
         create_parent(&rows_path)?;
         create_parent(&cursor_path)?;
         let rows = read_rows::<T>(&rows_path)?;
-        let cursor = read_cursor(&cursor_path)?;
+        let checkpoint = read_cursor(&cursor_path)?;
+        let cursor = checkpoint.sequence;
+        let mut watermarks = checkpoint.watermarks;
+        for row in &rows {
+            if let Some(stamp) = &row.publication {
+                watermarks
+                    .entry(stamp.stream.clone())
+                    .and_modify(|revision| *revision = (*revision).max(stamp.revision))
+                    .or_insert(stamp.revision);
+            }
+        }
         let first = rows.first().map(|row| row.sequence);
         let last = rows.last().map(|row| row.sequence).unwrap_or(cursor);
         for pair in rows.windows(2) {
@@ -85,6 +110,7 @@ where
             rows_path,
             cursor_path,
             state: Mutex::new(InboxState {
+                watermarks,
                 next_sequence: last + 1,
                 cursor,
                 compacted_through: first.map_or(cursor, |sequence| sequence.saturating_sub(1)),
@@ -97,17 +123,51 @@ where
     }
 
     pub fn publish(&self, payload: T) -> Result<DurableEnvelope<T>, InboxError> {
+        self.publish_inner(payload, None)
+            .map(|envelope| envelope.expect("unkeyed publications are never deduplicated"))
+    }
+
+    /// Publish only when this stream advances. The stamp commits with the row;
+    /// acknowledgement checkpoints it before compaction can remove that row.
+    pub fn publish_latest(
+        &self,
+        stream: String,
+        revision: u64,
+        payload: T,
+    ) -> Result<Option<DurableEnvelope<T>>, InboxError> {
+        self.publish_inner(payload, Some(PublicationStamp { stream, revision }))
+    }
+
+    fn publish_inner(
+        &self,
+        payload: T,
+        publication: Option<PublicationStamp>,
+    ) -> Result<Option<DurableEnvelope<T>>, InboxError> {
         let mut state = lock(&self.state);
+        if publication.as_ref().is_some_and(|stamp| {
+            state
+                .watermarks
+                .get(&stamp.stream)
+                .is_some_and(|revision| *revision >= stamp.revision)
+        }) {
+            return Ok(None);
+        }
         let envelope = DurableEnvelope {
             sequence: state.next_sequence,
             payload,
+            publication,
         };
         let line = serde_json::to_string(&envelope)
             .map_err(|error| InboxError::Corrupt(error.to_string()))?;
         jsonl::append_new_line(&self.rows_path, &line, SyncPolicy::All)?;
         state.next_sequence += 1;
+        if let Some(stamp) = &envelope.publication {
+            state
+                .watermarks
+                .insert(stamp.stream.clone(), stamp.revision);
+        }
         state.pending.push_back(envelope.clone());
-        Ok(envelope)
+        Ok(Some(envelope))
     }
 
     pub fn pending(&self) -> Result<Vec<DurableEnvelope<T>>, InboxError> {
@@ -147,7 +207,12 @@ where
         if sequence == state.cursor {
             return Ok(());
         }
-        tidepool_atomic_write::write_durable(&self.cursor_path, sequence.to_string().as_bytes())
+        let checkpoint = serde_json::to_vec(&InboxCheckpoint {
+            sequence,
+            watermarks: state.watermarks.clone(),
+        })
+        .map_err(|error| InboxError::Corrupt(error.to_string()))?;
+        tidepool_atomic_write::write_durable(&self.cursor_path, &checkpoint)
             .map_err(|error| InboxError::Corrupt(error.to_string()))?;
         state.cursor = sequence;
         while state
@@ -187,13 +252,26 @@ fn create_parent(path: &std::path::Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn read_cursor(path: &std::path::Path) -> Result<u64, InboxError> {
+fn read_cursor(path: &std::path::Path) -> Result<InboxCheckpoint, InboxError> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredCursor {
+        Legacy(u64),
+        Checkpoint(InboxCheckpoint),
+    }
     match std::fs::read_to_string(path) {
-        Ok(value) => value
-            .trim()
-            .parse()
+        Ok(value) => serde_json::from_str::<StoredCursor>(&value)
+            .map(|stored| match stored {
+                StoredCursor::Legacy(sequence) => InboxCheckpoint {
+                    sequence,
+                    ..Default::default()
+                },
+                StoredCursor::Checkpoint(checkpoint) => checkpoint,
+            })
             .map_err(|error| InboxError::Corrupt(format!("invalid cursor: {error}"))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(InboxCheckpoint::default())
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -242,7 +320,8 @@ mod tests {
             reopened.pending().unwrap(),
             vec![DurableEnvelope {
                 sequence: 2,
-                payload: "two".to_string()
+                payload: "two".to_string(),
+                publication: None,
             }]
         );
         assert_eq!(reopened.publish("three".into()).unwrap().sequence, 3);
@@ -292,5 +371,64 @@ mod tests {
             reopened.publish("next".into()).unwrap().sequence,
             COMPACT_ACKNOWLEDGED_ROWS + 1
         );
+    }
+
+    #[test]
+    fn legacy_numeric_cursor_migrates_on_acknowledgement() {
+        let (_dir, rows, cursor, inbox) = inbox();
+        let first = inbox.publish("first".into()).unwrap();
+        let second = inbox.publish("second".into()).unwrap();
+        drop(inbox);
+        std::fs::write(&cursor, first.sequence.to_string()).unwrap();
+        let reopened = DurableInbox::<String>::open(rows.clone(), cursor.clone()).unwrap();
+        assert_eq!(reopened.pending().unwrap().len(), 1);
+        reopened.acknowledge(second.sequence).unwrap();
+        assert!(std::fs::read_to_string(&cursor).unwrap().starts_with('{'));
+        drop(reopened);
+        assert!(DurableInbox::<String>::open(rows, cursor)
+            .unwrap()
+            .pending()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn publication_watermark_survives_reopen_ack_and_compaction() {
+        let (_dir, rows, cursor, inbox) = inbox();
+        let first = inbox
+            .publish_latest("actor-thread".into(), 10, "failed".into())
+            .unwrap()
+            .unwrap();
+        drop(inbox);
+        let reopened = DurableInbox::<String>::open(rows.clone(), cursor.clone()).unwrap();
+        assert!(reopened
+            .publish_latest("actor-thread".into(), 10, "replay".into())
+            .unwrap()
+            .is_none());
+        assert_eq!(reopened.pending().unwrap().len(), 1);
+        reopened.acknowledge(first.sequence).unwrap();
+        for _ in 1..COMPACT_ACKNOWLEDGED_ROWS {
+            let row = reopened.publish("ordinary".into()).unwrap();
+            reopened.acknowledge(row.sequence).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&rows).unwrap(), "");
+        drop(reopened);
+        let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
+        assert!(reopened
+            .publish_latest("actor-thread".into(), 9, "delayed".into())
+            .unwrap()
+            .is_none());
+        assert!(reopened
+            .publish_latest("actor-thread".into(), 10, "replay".into())
+            .unwrap()
+            .is_none());
+        assert!(reopened
+            .publish_latest("actor-thread".into(), 11, "new failure".into())
+            .unwrap()
+            .is_some());
+        assert!(reopened
+            .publish_latest("another-incarnation".into(), 10, "independent".into())
+            .unwrap()
+            .is_some());
     }
 }

@@ -54,6 +54,8 @@ pub(crate) enum RepliesReq {
     ObserveReplyWith(i64),
     AttemptAcknowledgeCancellationWith(i64),
     AcknowledgeCancellationWith(i64),
+    PublishProgressWith(i64, Value),
+    ObserveProgressWith(i64),
 }
 
 #[derive(tidepool_bridge_derive::FromCore)]
@@ -63,10 +65,37 @@ pub(crate) enum RepliesReq {
 )]
 pub(crate) enum WatchesReq {
     #[core(module = "Tidepool.Agent.Watch.Internal")]
-    RegisterWatchWith(String, Vec<(i64, bool)>),
+    RegisterWatchWith(String, Vec<AwaitDependency>),
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     ObserveWatchWith(i64),
     ForgetWatchWith(i64),
+    ObserveWatchProgressWith(i64, i64, i64),
+}
+
+#[derive(tidepool_bridge_derive::FromCore)]
+pub(crate) enum AwaitDependency {
+    #[core(module = "Tidepool.Agent.Watch.Internal")]
+    AwaitDependency(i64, bool),
+    AwaitProgress(i64, i64),
+}
+
+impl AwaitDependency {
+    pub(crate) fn checked(
+        self,
+    ) -> Result<(RequestId, crate::request::WatchRequirement), BridgeError> {
+        Ok(match self {
+            Self::AwaitDependency(request, allow_failure) => (
+                request_id(request)?,
+                crate::request::WatchRequirement::Response { allow_failure },
+            ),
+            Self::AwaitProgress(request, cursor) => (
+                request_id(request)?,
+                crate::request::WatchRequirement::ProgressAfter(u64::try_from(cursor).map_err(
+                    |_| BridgeError::UnsupportedType("negative progress cursor".into()),
+                )?),
+            ),
+        })
+    }
 }
 
 pub(crate) struct RequestReservation {
@@ -123,7 +152,7 @@ pub(crate) struct CancellationAcknowledgement {
 
 pub(crate) struct WatchRegistration {
     pub continuation: ResidentHole,
-    pub dependencies: Vec<(RequestId, bool)>,
+    pub dependencies: Vec<(RequestId, crate::request::WatchRequirement)>,
     pub label: String,
 }
 
@@ -393,7 +422,7 @@ fn response_failure_value(
     constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
 }
 
-fn constructor(
+pub(crate) fn constructor(
     table: &DataConTable,
     module: &str,
     name: &str,

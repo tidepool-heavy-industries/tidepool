@@ -157,6 +157,10 @@ fn build_suspending_parent(captured_n: i64, req: i64) -> CoreExpr {
 /// the same shape `assert_pair_result` deep-verifies — proving the closure
 /// crossed AND ran inside the resumed continuation's own compiled code.
 fn build_applying_parent(captured_n: i64, req: i64, arg_n: i64) -> CoreExpr {
+    build_applying_parent_shape(captured_n, req, arg_n, false)
+}
+
+fn build_applying_parent_shape(captured_n: i64, req: i64, arg_n: i64, framed: bool) -> CoreExpr {
     let mut b = TreeBuilder::new();
     let cap_lit = b.push(CoreFrame::Lit(Literal::LitInt(captured_n)));
     let captured = b.push(CoreFrame::Con {
@@ -168,7 +172,7 @@ fn build_applying_parent(captured_n: i64, req: i64, arg_n: i64) -> CoreExpr {
         tag: C1,
         fields: vec![arg_lit],
     });
-    let var_f = b.push(CoreFrame::Var(VarId(0)));
+    let var_f = b.push(CoreFrame::Var(VarId(if framed { 4 } else { 0 })));
     let applied = b.push(CoreFrame::App {
         fun: var_f,
         arg: arg_con,
@@ -182,9 +186,23 @@ fn build_applying_parent(captured_n: i64, req: i64, arg_n: i64) -> CoreExpr {
         tag: VAL_ID,
         fields: vec![pair],
     });
+    let body = if framed {
+        let scrutinee = b.push(CoreFrame::Var(VarId(0)));
+        b.push(CoreFrame::Case {
+            scrutinee,
+            binder: VarId(2),
+            alts: vec![Alt {
+                con: AltCon::DataAlt(PAIR_ID),
+                binders: vec![VarId(3), VarId(4)],
+                body: val,
+            }],
+        })
+    } else {
+        val
+    };
     let lam = b.push(CoreFrame::Lam {
         binder: VarId(0),
-        body: val,
+        body,
     });
     let leaf = b.push(CoreFrame::Con {
         tag: LEAF_ID,
@@ -347,6 +365,58 @@ fn in_test_thread(f: impl FnOnce() + Send + 'static) {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+#[serial]
+fn framed_handle_keeps_closure_live_during_constructor_allocation_gc() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = table();
+        let mut machine = JitEffectMachine::compile_session(
+            &build_applying_parent_shape(77, 55, 99, true),
+            &table,
+            2048,
+        )
+        .unwrap();
+        let parent = match machine
+            .run_suspendable_parked(&table, &mut NoDispatch, &(), RealmId(1))
+            .unwrap()
+        {
+            ParkedOutcome::Suspended { id, .. } => id,
+            other => panic!("expected suspension: {other:?}"),
+        };
+        let producer =
+            park_finalize_fragment(&mut machine, &table, RealmId(2), "framed_producer", 30, 300);
+        let handle = machine.handle_from_live_payload(producer).unwrap();
+        force_gc_on(&mut machine, &table, "before_framed_delivery", 200);
+        let mut prefix = Value::Lit(Literal::LitInt(42));
+        for _ in 0..40 {
+            prefix = Value::Con(C1, vec![prefix]);
+        }
+        let before = tidepool_codegen::host_fns::gc_trigger_call_count();
+        match machine
+            .resume_continuation(
+                parent,
+                &mut NoDispatch,
+                &(),
+                ResumeInput::FramedHandle {
+                    handle,
+                    constructor: PAIR_ID,
+                    prefix: vec![prefix],
+                },
+            )
+            .unwrap()
+        {
+            ParkedOutcome::CompletedValue(value) => assert_pair_result(&value, 77, 99),
+            other => panic!("expected applied closure: {other:?}"),
+        }
+        assert!(tidepool_codegen::host_fns::gc_trigger_call_count() > before);
+        assert_receipts(&machine, 1, 1);
+        machine.close_realm(RealmId(2));
+        assert_receipts(&machine, 0, 0);
+        disarm_gc_hazards();
+    });
 }
 
 /// Park the answerer-shaped finalize program as a fragment under `realm`,

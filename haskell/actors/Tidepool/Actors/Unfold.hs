@@ -50,6 +50,8 @@ module Tidepool.Actors.Unfold
   , Unfold
   , child
   , childSited
+  , childWithProgress
+  , childWithProgressSited
   , Forked
   , forkedActor
   , forkedResponse
@@ -85,7 +87,7 @@ import Prelude
 
 import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply (Replies, Response, ResponseResult)
-import Tidepool.Agent.Reply.Internal (RequestLabel (..))
+import Tidepool.Agent.Reply.Internal (RequestLabel (..), Progress (..), responseRequestId)
 import Tidepool.Agent.Watch (Await, Settlement, awaitResponse, awaitSettled)
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
@@ -445,6 +447,25 @@ childSited
   -> Branch child input result
   -> Unfold parent (Forked result)
 childSited = BranchU
+
+{-# OPAQUE childWithProgress #-}
+childWithProgress
+  :: forall progress result child input parent
+   . (KnownEffects child, Subset child parent)
+  => Branch child input result
+  -> Unfold parent (Forked result, Progress progress)
+childWithProgress = childWithProgressSited @progress @result @child @input @parent 0
+
+{-# OPAQUE childWithProgressSited #-}
+childWithProgressSited
+  :: forall progress result child input parent
+   . (KnownEffects child, Subset child parent)
+  => Int
+  -> Branch child input result
+  -> Unfold parent (Forked result, Progress progress)
+childWithProgressSited site branch =
+  (\worker -> (worker, Progress (responseRequestId (forkedResponse worker))))
+    <$> childSited @result @child @input @parent site branch
 
 data UnfoldError
   = UnfoldBeginRejected Text

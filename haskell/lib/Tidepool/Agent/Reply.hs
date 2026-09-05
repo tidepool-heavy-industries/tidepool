@@ -9,6 +9,10 @@ module Tidepool.Agent.Reply
   , Response
   , Reply
   , Replies
+  , Progress
+  , ProgressCursor (..)
+  , ProgressState (..)
+  , pollProgress
   , ReplyError (..)
   , ResponseFailure (..)
   , ResponseResult (..)
@@ -34,6 +38,10 @@ module Tidepool.Agent.Reply
 
 import Tidepool.Agent.Reply.Internal
   ( Reply
+  , Progress
+  , ProgressCursor (..)
+  , ProgressState (..)
+  , pollProgress
   , Replies
   , ReplyError (..)
   , RequestId

@@ -144,6 +144,9 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     (
         "AgentInspection",
         &[
+            "ProviderFailureKind",
+            "ProviderHealth",
+            "AgentDisposition",
             "CacheBoundaryReason",
             "AgentRosterState",
             "AgentWorkbenchTransfer",

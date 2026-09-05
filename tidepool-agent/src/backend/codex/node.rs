@@ -20,8 +20,9 @@ use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode,
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    ProviderUsageSnapshot, QueueReadyThread, ReasoningEffort,
+    QueueReadyThread, ReasoningEffort,
 };
+use tidepool_model::ProviderObservation;
 
 #[path = "rollout_usage.rs"]
 mod rollout_usage;
@@ -270,10 +271,10 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         ))
     }
 
-    fn usage<'a>(
+    fn observe<'a>(
         &'a self,
         thread: &'a QueueReadyThread,
-    ) -> InteractiveFuture<'a, Option<ProviderUsageSnapshot>> {
+    ) -> InteractiveFuture<'a, Option<ProviderObservation>> {
         let sessions = super::isolation::codex_home().join("sessions");
         let thread = thread.id().0.clone();
         Box::pin(async move {
@@ -297,13 +298,14 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
 fn read_rollout_usage(
     sessions: &Path,
     thread: &str,
-) -> Result<Option<ProviderUsageSnapshot>, AgentBackendError> {
+) -> Result<Option<ProviderObservation>, AgentBackendError> {
     let Some(path) = find_rollout(sessions, thread, 4)? else {
         return Ok(None);
     };
     let file = std::fs::File::open(&path)
         .map_err(|error| unavailable("open Codex rollout for usage", error))?;
-    rollout_usage::read(BufReader::new(file), thread)
+    rollout_usage::observe(BufReader::new(file), thread)
+        .map(Some)
         .map_err(|error| unavailable("read Codex rollout usage", error))
 }
 
@@ -1032,6 +1034,7 @@ mod tests {
         .unwrap();
 
         let usage = read_rollout_usage(root.path(), thread).unwrap().unwrap();
+        let usage = usage.usage.unwrap();
         assert_eq!(usage.first.usage.input_tokens, 100);
         assert_eq!(usage.first.usage.cached_input_tokens, 80);
         assert_eq!(usage.latest.usage.total_tokens, 107);
@@ -1075,9 +1078,10 @@ mod tests {
         )
         .unwrap();
         let snapshot = read_rollout_usage(root.path(), thread).unwrap().unwrap();
-        assert_eq!(snapshot.first.id, "child:3");
-        assert_eq!(snapshot.latest.id, "child:4");
-        assert_eq!(snapshot.first.usage, snapshot.latest.usage);
+        let usage = snapshot.usage.as_ref().unwrap();
+        assert_eq!(usage.first.id, "child:3");
+        assert_eq!(usage.latest.id, "child:4");
+        assert_eq!(usage.first.usage, usage.latest.usage);
         assert_eq!(
             read_rollout_usage(root.path(), thread).unwrap(),
             Some(snapshot)

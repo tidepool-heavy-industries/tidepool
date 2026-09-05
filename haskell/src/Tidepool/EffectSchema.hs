@@ -81,6 +81,9 @@ sitedVerbs =
       "requestSited" "Tidepool.Actors.Internal.Agent" 2 3 False True [1]
   , verb "requestWith" "Tidepool.Actors.Internal.Agent"
       "requestWithSited" "Tidepool.Actors.Internal.Agent" 2 2 False True [1]
+  , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
+      "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" 3 2 False True [2, 0])
+      { vsAnswerSource = TypeArgument 1 }
   , VerbSpec
       { vsName = "child"
       , vsModule = "Tidepool.Actors.Unfold"
@@ -93,6 +96,9 @@ sitedVerbs =
       , vsInputTypeArgs = [2]
       , vsAnswerSource = TypeArgument 0
       }
+  , (verb "childWithProgress" "Tidepool.Actors.Unfold"
+      "childWithProgressSited" "Tidepool.Actors.Unfold" 5 1 False True [3, 0])
+      { vsAnswerSource = TypeArgument 1 }
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" 1 1 False True []
   , verb "serve" "Tidepool.Actor"

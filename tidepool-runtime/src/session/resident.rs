@@ -1273,6 +1273,37 @@ where
         )
     }
 
+    /// Borrow a retained value as the final field of a typed constructor.
+    /// The caller keeps custody alive through resumption; the resulting heap
+    /// value has ordinary Haskell reachability independent of that root.
+    pub fn resume_framed_custody(
+        &mut self,
+        hole: ResidentHole,
+        custody: &RootCustody,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<Value>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let Some(handle) = custody.handle else {
+            unreachable!("live custody always contains its handle");
+        };
+        let seed = hole.seed();
+        let cont_id = match hole {
+            ResidentHole::Plain(hole) => hole.id,
+            ResidentHole::Binding(hole) => hole.id,
+            ResidentHole::ProjectedBinding(hole) => hole.id,
+        };
+        self.reenter(
+            &cont_id,
+            ResumeInput::FramedHandle {
+                handle,
+                constructor,
+                prefix,
+            },
+            seed,
+            Some(&custody.provenance),
+        )
+    }
+
     /// Whether the resident machine has been bootstrapped yet. `false` from
     /// [`Self::unbootstrapped`] until the session's first real turn brings the
     /// machine up (`run`/`run_bind`/`run_child`/`run_child_pure`); always

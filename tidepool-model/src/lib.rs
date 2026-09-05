@@ -214,6 +214,41 @@ pub struct ProviderUsageSummary {
 }
 
 /// Endpoints and authoritative aggregates of the provider's response history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderTurnState {
+    Active,
+    Succeeded,
+    Failed(ProviderFailure),
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderFailure {
+    RequestRejected,
+    TransportFailed,
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderTurnObservation {
+    pub thread: String,
+    pub turn: String,
+    pub revision: usize,
+    pub state: ProviderTurnState,
+}
+
+/// A single durable read; absent fields are unknown, not measured zero or idle.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderObservation {
+    pub usage: Option<ProviderUsageSnapshot>,
+    /// Failed turns in durable source order, including failures before the latest turn.
+    pub failures: Vec<ProviderTurnObservation>,
+    pub turn: Option<ProviderTurnObservation>,
+    pub confirmed_model: Option<String>,
+    pub confirmed_effort: Option<String>,
+}
+
+/// Endpoints and authoritative aggregates of the provider's response history.
 /// Older providers may expose observations without sufficiently identified
 /// records to support totals. Missing aggregates remain `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]

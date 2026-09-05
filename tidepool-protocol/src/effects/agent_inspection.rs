@@ -25,6 +25,28 @@ pub fn agent_inspection() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
+                name: "ProviderFailureKind", wire_rust: None,
+                shape: TypeShape::Sum { variants: vec![variant("RequestRejected", vec![]),
+                    variant("TransportFailed", vec![]), variant("OtherProviderFailure", vec![HsType::Text])] },
+                json: JsonInstance::None, derives: NO_WIRE, domain: None, doc: &[],
+            },
+            TypeDef {
+                name: "ProviderHealth", wire_rust: None,
+                shape: TypeShape::Sum { variants: vec![
+                    variant("ProviderUnknown", vec![]), variant("ProviderActive", vec![]),
+                    variant("ProviderSucceeded", vec![]), variant("ProviderInterrupted", vec![]),
+                    variant("ProviderFailed", vec![HsType::Named("ProviderFailureKind")]),
+                ] }, json: JsonInstance::None, derives: NO_WIRE, domain: None, doc: &[],
+            },
+            TypeDef {
+                name: "AgentDisposition", wire_rust: None,
+                shape: TypeShape::Sum { variants: vec![
+                    variant("Working", vec![]), variant("NeedsAttention", vec![]),
+                    variant("SettledAwaitingProvider", vec![]), variant("IdleRetained", vec![]),
+                ] }, json: JsonInstance::None, derives: NO_WIRE, domain: None,
+                doc: &["Derived request/provider posture; only IdleRetained is a retirement candidate."],
+            },
+            TypeDef {
                 name: "CacheBoundaryReason",
                 wire_rust: None,
                 shape: TypeShape::Sum {
@@ -108,6 +130,12 @@ pub fn agent_inspection() -> Effect {
                         field("rosterContextParentId", HsType::maybe(HsType::Int)),
                         field("rosterContextParentIncarnation", HsType::maybe(HsType::Int)),
                         field("rosterState", HsType::Named("AgentRosterState")),
+                        field("rosterProviderHealth", HsType::Named("ProviderHealth")),
+                        field("rosterProviderTurn", HsType::maybe(HsType::Text)),
+                        field("rosterProviderObservationStale", HsType::Bool),
+                        field("rosterDisposition", HsType::maybe(HsType::Named("AgentDisposition"))),
+                        field("rosterCurrentRequests", HsType::list(HsType::Int)),
+                        field("rosterQueuedRequests", HsType::list(HsType::Int)),
                         field("rosterRole", HsType::Named("ActorContextRole")),
                         field("rosterBoundWorktree", HsType::maybe(HsType::Text)),
                         field("rosterForkGroup", HsType::maybe(HsType::Int)),

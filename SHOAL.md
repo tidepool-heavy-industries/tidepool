@@ -31,6 +31,29 @@ verified with Git.
 
 ## Workbench basics
 
+Progress-capable requests use `requestWithProgress @Progress @Result`;
+progressive unfold branches use `childWithProgress @Progress @Result`.
+The target's mounted `reportProgress` publishes an arbitrary typed value.
+Observers use independent revision cursors with `pollProgress` or
+`awaitProgressAfter`; updates coalesce and ready watches retain stable
+snapshots. See `:doc watch` for the channel contract.
+
+Provider failures leave requests pending and notify the exact supervisor.
+Inspect typed roster health and disposition before recovery or cleanup.
+`IdleRetained` is the retirement candidate; cleanup revalidates it.
+`:status!` separates requested and provider-confirmed model settings and shows
+the verified backend installation. Hosted shells expose that executable in
+`TIDEPOOL_INTERACTIVE_CODEX_BIN`. Use Shoal communication rather than native
+collaboration, and explicitly stop workers whose rejected history cannot be
+recovered. See `:doc recovery` and `:doc cleanup`.
+
+Durable inbox readers accept legacy numeric acknowledgement cursors and rows
+without publication stamps. New acknowledgements store a JSON checkpoint with
+per-stream publication watermarks before compacting acknowledged rows. This
+is a forward migration: older binaries cannot read the new checkpoint format.
+Rebuilding the host is required to use these additions; a running host retains
+its loaded prompt and API catalog.
+
 Start by inspecting the actual environment:
 
 ```haskell
@@ -444,8 +467,8 @@ represented as `Nothing`, never a fabricated zero. Tidepool deliberately
 keeps an idle actor's backend attached today: reply settlement is not proof of
 provider turn-idleness, and eager teardown would weaken inexpensive follow-up
 and multi-wave orchestration. Process hibernation is an optional future
-backend optimization once a durable provider idle/usage event can make it
-race-free; it is not part of actor semantics.
+backend optimization requiring atomic admission against the observed provider
+state; it is not part of actor semantics.
 
 `contextUsageSummary` and `rosterUsageSummary` expose totals over uniquely
 identified durable provider response records, with scope, completeness, response
@@ -517,8 +540,8 @@ settlement, host lifecycle evidence, and independently verified Git/test facts.
 - Correlate actor incarnation, request/activation identity, hosted-tool
   invocation, compile attempt, and settlement in the existing structured
   tracing path.
-- Feed durable provider turn-idle and token-usage events into the existing
-  context observation seam before considering process hibernation.
+- Use the existing durable provider health and usage observations if process
+  hibernation becomes necessary; preserve explicit retirement policy.
 - Keep common fan-out, review, and fold patterns as ordinary Haskell rather
   than adding a worker registry, merge queue, or second scheduler.
 

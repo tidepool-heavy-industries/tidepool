@@ -218,6 +218,15 @@ struct RequestRecord {
     target_state: TargetState,
     owner_state: OwnerState,
     deadline: Option<ActiveRequestDeadline>,
+    progress: Option<ProgressSnapshot>,
+}
+
+/// Snapshots share custody, not a consumption cursor. Replacing the latest
+/// publication drops only the registry's reference; an observer can retain it.
+#[derive(Clone)]
+pub(crate) struct ProgressSnapshot {
+    pub revision: u64,
+    pub value: std::sync::Arc<tidepool_runtime::session::RootCustody>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,12 +289,25 @@ struct WatchRecord {
     label: String,
     dependencies: Vec<WatchDependency>,
     state: WatchState,
+    progress: HashMap<(RequestId, u64), ProgressCapture>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ProgressCapture {
+    Update(ProgressSnapshot),
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatchRequirement {
+    Response { allow_failure: bool },
+    ProgressAfter(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WatchDependency {
     request: RequestId,
-    allow_failure: bool,
+    requirement: WatchRequirement,
 }
 
 #[derive(Default)]
@@ -386,6 +408,46 @@ impl Drop for RequestCleanupGuard {
 }
 
 impl RequestRegistry {
+    pub(crate) fn publish_progress(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+        value: tidepool_runtime::session::RootCustody,
+    ) -> Result<(u64, Vec<WatchNotification>), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_progress_publication(record, target)?;
+        let revision = record
+            .progress
+            .as_ref()
+            .map_or(Some(1), |previous| previous.revision.checked_add(1))
+            .filter(|revision| *revision <= i64::MAX as u64)
+            .ok_or(ReplyError::Stale)?;
+        record.progress = Some(ProgressSnapshot {
+            revision,
+            value: std::sync::Arc::new(value),
+        });
+        Ok((revision, reevaluate_watches(&mut state)))
+    }
+
+    pub(crate) fn observe_progress(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+    ) -> Result<(Option<ProgressSnapshot>, bool), ReplyError> {
+        let state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        let closed = record.owner_state != OwnerState::Observing
+            || matches!(
+                record.target_state,
+                TargetState::Closed
+                    | TargetState::AcknowledgingCancellation(_)
+                    | TargetState::Settling
+            );
+        Ok((record.progress.clone(), closed))
+    }
+
     pub(crate) fn campaign_cleanup_blockers(
         &self,
         owners: &std::collections::HashSet<ActorRef>,
@@ -525,6 +587,29 @@ impl RequestRegistry {
         active
     }
 
+    pub(crate) fn work_for_target(&self, target: ActorRef) -> (Vec<RequestId>, Vec<RequestId>) {
+        let state = self.state.lock();
+        let mut current = Vec::new();
+        let mut queued = Vec::new();
+        for (id, record) in &state.requests {
+            if record.target != target {
+                continue;
+            }
+            match record.target_state {
+                TargetState::Closed => {}
+                TargetState::Reserved
+                | TargetState::Queued
+                | TargetState::CancellationRequested {
+                    presented: false, ..
+                } => queued.push(*id),
+                _ => current.push(*id),
+            }
+        }
+        current.sort_unstable();
+        queued.sort_unstable();
+        (current, queued)
+    }
+
     pub(crate) fn status_for(&self, owner: ActorRef) -> ActorRequestStatus {
         let state = self.state.lock();
         let mut status = ActorRequestStatus {
@@ -617,6 +702,7 @@ impl RequestRegistry {
                 target_state: TargetState::Reserved,
                 owner_state: OwnerState::Observing,
                 deadline: None,
+                progress: None,
             },
         );
         id
@@ -742,6 +828,7 @@ impl RequestRegistry {
         match record.target_state {
             TargetState::Presented => {
                 record.target_state = TargetState::Settling;
+                record.progress = None;
                 Ok(())
             }
             TargetState::CancellationRequested { .. }
@@ -945,6 +1032,7 @@ impl RequestRegistry {
             _ => return Err(ReplyError::Stale),
         };
         record.target_state = TargetState::AcknowledgingCancellation(reason);
+        record.progress = None;
         Ok(reason)
     }
 
@@ -1052,11 +1140,30 @@ impl RequestRegistry {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn register_watch_labeled(
         &self,
         owner: ActorRef,
         label: String,
         dependencies: Vec<(RequestId, bool)>,
+    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        self.register_watch_requirements(
+            owner,
+            label,
+            dependencies
+                .into_iter()
+                .map(|(request, allow_failure)| {
+                    (request, WatchRequirement::Response { allow_failure })
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn register_watch_requirements(
+        &self,
+        owner: ActorRef,
+        label: String,
+        dependencies: Vec<(RequestId, WatchRequirement)>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
         if state.cleaning.contains(&owner) {
@@ -1083,16 +1190,42 @@ impl RequestRegistry {
                 label,
                 dependencies: dependencies
                     .into_iter()
-                    .map(|(request, allow_failure)| WatchDependency {
+                    .map(|(request, requirement)| WatchDependency {
                         request,
-                        allow_failure,
+                        requirement,
                     })
                     .collect(),
                 state: WatchState::Pending,
+                progress: HashMap::new(),
             },
         );
         let notifications = reevaluate_watches(&mut state);
         Ok((id, notifications))
+    }
+
+    pub(crate) fn observe_watch_progress(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+        request: RequestId,
+        after: u64,
+    ) -> Result<(Option<ProgressSnapshot>, bool), ReplyError> {
+        let state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        if record.state != WatchState::Ready {
+            return Err(ReplyError::Stale);
+        }
+        match record
+            .progress
+            .get(&(request, after))
+            .ok_or(ReplyError::Unauthorized)?
+        {
+            ProgressCapture::Update(snapshot) => Ok((Some(snapshot.clone()), false)),
+            ProgressCapture::Closed => Ok((None, true)),
+        }
     }
 
     pub(crate) fn observe_watch(
@@ -1263,6 +1396,26 @@ fn authorize_target(record: &RequestRecord, actor: ActorRef) -> Result<(), Reply
     }
 }
 
+fn authorize_progress_publication(
+    record: &RequestRecord,
+    target: ActorRef,
+) -> Result<(), ReplyError> {
+    authorize_target(record, target)?;
+    if record.owner_state != OwnerState::Observing {
+        return Err(ReplyError::AlreadySettled);
+    }
+    match record.target_state {
+        TargetState::Presented
+        | TargetState::CancellationRequested {
+            presented: true, ..
+        } => Ok(()),
+        TargetState::Closed | TargetState::AcknowledgingCancellation(_) => {
+            Err(ReplyError::AlreadySettled)
+        }
+        _ => Err(ReplyError::Stale),
+    }
+}
+
 fn identity_error(expected: ActorRef, actual: ActorRef) -> ReplyError {
     if expected.id == actual.id {
         ReplyError::WrongIncarnation
@@ -1272,21 +1425,62 @@ fn identity_error(expected: ActorRef, actual: ActorRef) -> ReplyError {
 }
 
 fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
+    for record in state.requests.values_mut() {
+        if record.owner_state != OwnerState::Observing || record.target_state == TargetState::Closed
+        {
+            record.progress = None;
+        }
+    }
     let mut notifications = Vec::new();
     for (watch_id, watch) in &mut state.watches {
         if watch.state != WatchState::Pending {
             continue;
         }
+        for dependency in &watch.dependencies {
+            let WatchRequirement::ProgressAfter(after) = dependency.requirement else {
+                continue;
+            };
+            let key = (dependency.request, after);
+            if watch.progress.contains_key(&key) {
+                continue;
+            }
+            let Some(record) = state.requests.get(&dependency.request) else {
+                continue;
+            };
+            if let Some(snapshot) = record
+                .progress
+                .as_ref()
+                .filter(|snapshot| snapshot.revision > after)
+            {
+                watch
+                    .progress
+                    .insert(key, ProgressCapture::Update(snapshot.clone()));
+            } else if record.owner_state != OwnerState::Observing
+                || record.target_state == TargetState::Closed
+            {
+                watch.progress.insert(key, ProgressCapture::Closed);
+            }
+        }
         let transition = watch.dependencies.iter().find_map(|dependency| {
             let record = state.requests.get(&dependency.request)?;
             match &record.owner_state {
-                OwnerState::Unavailable(failure) if !dependency.allow_failure => {
+                OwnerState::Unavailable(failure)
+                    if dependency.requirement
+                        == (WatchRequirement::Response {
+                            allow_failure: false,
+                        }) =>
+                {
                     Some(WatchTransition::Unavailable {
                         request: dependency.request,
                         failure: failure.clone(),
                     })
                 }
-                OwnerState::Abandoned if !dependency.allow_failure => {
+                OwnerState::Abandoned
+                    if dependency.requirement
+                        == (WatchRequirement::Response {
+                            allow_failure: false,
+                        }) =>
+                {
                     Some(WatchTransition::Unavailable {
                         request: dependency.request,
                         failure: ResponseFailure::Abandoned,
@@ -1300,13 +1494,19 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                 .dependencies
                 .iter()
                 .all(|dependency| {
+                    if let WatchRequirement::ProgressAfter(after) = dependency.requirement {
+                        return watch.progress.contains_key(&(dependency.request, after));
+                    }
                     state
                         .requests
                         .get(&dependency.request)
                         .is_some_and(|record| match record.owner_state {
                             OwnerState::Ready => true,
                             OwnerState::Unavailable(_) | OwnerState::Abandoned => {
-                                dependency.allow_failure
+                                dependency.requirement
+                                    == (WatchRequirement::Response {
+                                        allow_failure: true,
+                                    })
                             }
                             _ => false,
                         })
@@ -1318,10 +1518,13 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
         };
         watch.state = match &transition {
             WatchTransition::Ready => WatchState::Ready,
-            WatchTransition::Unavailable { request, failure } => WatchState::Unavailable {
-                request: *request,
-                failure: failure.clone(),
-            },
+            WatchTransition::Unavailable { request, failure } => {
+                watch.progress.clear();
+                WatchState::Unavailable {
+                    request: *request,
+                    failure: failure.clone(),
+                }
+            }
         };
         let current = match &transition {
             WatchTransition::Ready => WatchStateProjection::Ready,
@@ -1363,6 +1566,179 @@ mod tests {
 
     fn actor(id: u64) -> ActorRef {
         ActorRef::first(ActorId(id))
+    }
+
+    #[test]
+    fn progress_publication_requires_exact_presented_target() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        let authorize = |publisher| {
+            let state = registry.state.lock();
+            authorize_progress_publication(&state.requests[&request], publisher)
+        };
+        assert_eq!(authorize(target), Err(ReplyError::Stale));
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        assert_eq!(authorize(target), Ok(()));
+        assert_eq!(authorize(owner), Err(ReplyError::Unauthorized));
+        assert_eq!(
+            authorize(ActorRef {
+                id: target.id,
+                incarnation: Incarnation(2)
+            }),
+            Err(ReplyError::WrongIncarnation)
+        );
+        registry.abandon_response(owner, request).unwrap();
+        assert_eq!(authorize(target), Err(ReplyError::AlreadySettled));
+    }
+
+    #[test]
+    fn progress_registration_racing_settlement_cannot_miss_closure() {
+        for _ in 0..32 {
+            let registry = std::sync::Arc::new(RequestRegistry::default());
+            let owner = actor(1);
+            let target = actor(2);
+            let request = registry.reserve(owner, target);
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let registrar = {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    registry
+                        .register_watch_requirements(
+                            owner,
+                            "racing".into(),
+                            vec![(request, WatchRequirement::ProgressAfter(0))],
+                        )
+                        .unwrap()
+                })
+            };
+            barrier.wait();
+            registry.begin_reply(target, request).unwrap();
+            let notifications = registry.finish_reply(request);
+            let (watch, initial) = registrar.join().unwrap();
+            assert_eq!(notifications.len() + initial.len(), 1);
+            assert!(matches!(
+                registry.observe_watch_progress(owner, watch, request, 0),
+                Ok((None, true))
+            ));
+        }
+    }
+
+    #[test]
+    fn progress_watches_close_on_abandonment_cancellation_and_retirement() {
+        for terminal_path in 0..3 {
+            let registry = RequestRegistry::default();
+            let owner = actor(1);
+            let target = actor(2);
+            let request = registry.reserve(owner, target);
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+            let (watch, _) = registry
+                .register_watch_requirements(
+                    owner,
+                    "progress".into(),
+                    vec![(request, WatchRequirement::ProgressAfter(0))],
+                )
+                .unwrap();
+            match terminal_path {
+                0 => {
+                    registry.abandon_response(owner, request).unwrap();
+                }
+                1 => {
+                    registry
+                        .cancel_request(owner, request, CancellationReason::RequesterCancelled)
+                        .unwrap();
+                    assert!(matches!(
+                        registry.observe_watch(owner, watch),
+                        Ok(WatchObservation::Pending)
+                    ));
+                    registry
+                        .begin_cancellation_acknowledgement(target, request)
+                        .unwrap();
+                    registry.finish_cancellation_acknowledgement(request);
+                }
+                _ => {
+                    registry.actor_stopped(
+                        target,
+                        &ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "retired".into(),
+                        },
+                    );
+                }
+            }
+            assert!(matches!(
+                registry.observe_progress(owner, request),
+                Ok((None, true))
+            ));
+            assert!(matches!(
+                registry.observe_watch_progress(owner, watch, request, 0),
+                Ok((None, true))
+            ));
+        }
+    }
+
+    #[test]
+    fn progress_watch_closure_is_stable_and_authorized() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, initial) = registry
+            .register_watch_requirements(
+                owner,
+                "progress".into(),
+                vec![(request, WatchRequirement::ProgressAfter(0))],
+            )
+            .unwrap();
+        assert!(initial.is_empty());
+        assert!(matches!(
+            registry.observe_watch(owner, watch),
+            Ok(WatchObservation::Pending)
+        ));
+        assert!(matches!(
+            registry.register_watch_requirements(
+                target,
+                "wrong-owner".into(),
+                vec![(request, WatchRequirement::ProgressAfter(0))]
+            ),
+            Err(ReplyError::Unauthorized)
+        ));
+        registry.begin_reply(target, request).unwrap();
+        let notifications = registry.finish_reply(request);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        for _ in 0..2 {
+            assert!(matches!(
+                registry.observe_watch_progress(owner, watch, request, 0),
+                Ok((None, true))
+            ));
+        }
+        assert!(matches!(
+            registry.observe_watch_progress(target, watch, request, 0),
+            Err(ReplyError::Unauthorized)
+        ));
+        assert!(registry.finish_reply(request).is_empty());
+        let (late, notifications) = registry
+            .register_watch_requirements(
+                owner,
+                "late".into(),
+                vec![(request, WatchRequirement::ProgressAfter(10))],
+            )
+            .unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert!(matches!(
+            registry.observe_watch_progress(owner, late, request, 10),
+            Ok((None, true))
+        ));
     }
 
     #[test]

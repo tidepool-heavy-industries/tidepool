@@ -27,6 +27,15 @@ the receipt records the successful prefix and what remains. Retrying the
 inspected plan cannot expand its scope; survivors accepting new work require
 a fresh plan. Keep valuable specialists rather than cleaning up automatically.
 
+The typed roster separates current and queued requests from provider health.
+`IdleRetained` requires a successful, non-stale provider completion and no
+request work. `SettledAwaitingProvider` means the actor's request is settled
+but the provider is still active; `NeedsAttention` includes failed,
+interrupted, unknown, or stale provider observations. Cleanup rechecks this
+evidence immediately before retiring each live actor. For deliberate recovery
+of a failed or stuck worker, use explicit `stopAgent`; it is a control action,
+not a claim that the provider was idle.
+
 Cleanup never deletes worktrees, branches, commits, build evidence, or user
 files. Dirty worktrees remain available after actor retirement. Use ordinary
 Git and explicit repository operations for any later repository cleanup.

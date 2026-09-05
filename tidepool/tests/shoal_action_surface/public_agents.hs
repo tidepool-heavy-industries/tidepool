@@ -22,6 +22,12 @@ submit
   -> Eff ActorEffects (Response result)
 submit = request
 
+submitProgress
+  :: AgentRef
+  -> RequestOptions input
+  -> Eff ActorEffects (Response result, Progress progress)
+submitProgress = requestWithProgress
+
 submitWithOnlyReplies
   :: AgentRef
   -> RequestLabel
@@ -158,6 +164,14 @@ heterogeneousUnfold group textLeaf intLeaf =
     (,)
       <$> child (withEffort High (researching @Text textLeaf projectHead ()))
       <*> child (withEffort Low (coding @Int intLeaf projectHead ()))
+
+progressiveUnfold
+  :: ForkGroupPath
+  -> BranchLabel
+  -> Eff ActorEffects (Forked Text, Progress Int)
+progressiveUnfold group leaf =
+  unfold group $
+    childWithProgress @Int (researching @Text leaf projectHead ())
 
 homogeneousUnfold
   :: ForkGroupPath

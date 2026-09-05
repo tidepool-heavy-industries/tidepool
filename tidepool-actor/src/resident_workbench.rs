@@ -44,12 +44,18 @@ impl ResponseExpectation {
             "qualified Tidepool.Agent.Reply.Internal as TidepoolReplies",
         );
         preamble = insert_preamble_imports(&preamble, "qualified Data.Void as TidepoolVoid");
+        preamble = insert_preamble_imports(&preamble, "qualified Prelude as TidepoolPrelude");
         preamble.push_str(&format!(
             "\nsessionReply :: TidepoolReplies.Reply ({0})\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {1})\n{2}\nrespond = TidepoolReplies.reply sessionReply\n",
             self.expected_type(),
             request.0,
             self.respond_signature(effects_alias),
         ));
+        if let Some(progress_type) = &self.progress_type {
+            preamble.push_str(&format!(
+                "\nreportProgress :: ({progress_type}) -> Eff {effects_alias} ()\nreportProgress value = do\n  outcome <- TidepoolReplies.reportRequestProgress (TidepoolReplies.ProgressSink (TidepoolReplies.RequestId {})) value\n  case outcome of\n    Left failure -> TidepoolPrelude.error (TidepoolPrelude.show failure)\n    Right () -> pure ()\n", request.0,
+            ));
+        }
         preamble
     }
 }
@@ -240,6 +246,7 @@ pub(crate) struct ResidentAgentAttachment {
 }
 
 pub(crate) struct AgentRosterProjection {
+    pub(crate) requests: (Vec<crate::RequestId>, Vec<crate::RequestId>),
     pub(crate) actor: crate::ActorRef,
     pub(crate) descriptor: crate::ActorDescriptor,
     pub(crate) bound_worktree: Option<String>,
@@ -375,6 +382,39 @@ fn agent_roster_value(
     table: &DataConTable,
     entry: AgentRosterProjection,
 ) -> Result<Value, ResidentActorWorkbenchError> {
+    let (health_name, health_fields) =
+        match entry.runtime.provider_turn.as_ref().map(|turn| &turn.state) {
+            None => ("ProviderUnknown", vec![]),
+            Some(tidepool_model::ProviderTurnState::Active) => ("ProviderActive", vec![]),
+            Some(tidepool_model::ProviderTurnState::Succeeded) => ("ProviderSucceeded", vec![]),
+            Some(tidepool_model::ProviderTurnState::Interrupted) => ("ProviderInterrupted", vec![]),
+            Some(tidepool_model::ProviderTurnState::Failed(failure)) => {
+                let (name, fields) = match failure {
+                    tidepool_model::ProviderFailure::RequestRejected => ("RequestRejected", vec![]),
+                    tidepool_model::ProviderFailure::TransportFailed => ("TransportFailed", vec![]),
+                    tidepool_model::ProviderFailure::Other(detail) => {
+                        ("OtherProviderFailure", vec![detail.to_value(table)?])
+                    }
+                };
+                (
+                    "ProviderFailed",
+                    vec![actor_context_constructor(table, name, fields)?],
+                )
+            }
+        };
+    let health = actor_context_constructor(table, health_name, health_fields)?;
+    let disposition = if entry.terminal.is_none() {
+        Some(actor_context_constructor(
+            table,
+            entry
+                .runtime
+                .disposition(!entry.requests.0.is_empty() || !entry.requests.1.is_empty())
+                .constructor_name(),
+            vec![],
+        )?)
+    } else {
+        None
+    };
     let usage = entry.runtime.latest_provider_usage();
     let supervisor = entry.descriptor.supervisor_parent();
     let context_parent = entry.descriptor.context_parent();
@@ -487,6 +527,29 @@ fn agent_roster_value(
                 .transpose()?
                 .to_value(table)?,
             state,
+            health,
+            entry
+                .runtime
+                .provider_turn
+                .as_ref()
+                .map(|turn| turn.turn.clone())
+                .to_value(table)?,
+            entry.runtime.provider_observation_stale.to_value(table)?,
+            disposition.to_value(table)?,
+            entry
+                .requests
+                .0
+                .iter()
+                .map(|id| actor_int(id.0))
+                .collect::<Result<Vec<_>, _>>()?
+                .to_value(table)?,
+            entry
+                .requests
+                .1
+                .iter()
+                .map(|id| actor_int(id.0))
+                .collect::<Result<Vec<_>, _>>()?
+                .to_value(table)?,
             actor_context_constructor(table, role, Vec::new())?,
             entry.bound_worktree.to_value(table)?,
             entry
@@ -681,6 +744,18 @@ pub(crate) enum ResidentActorBoundary {
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
+    ProgressPublication {
+        continuation: ResidentHole,
+        request: crate::RequestId,
+        value: RootCustody,
+    },
+    ProgressPoll(ResponsePoll),
+    WatchProgressPoll {
+        continuation: ResidentHole,
+        watch: crate::WatchId,
+        request: crate::RequestId,
+        after: u64,
+    },
     RequestCancellation(RequestCancellation),
     ResponseAbandonment(ResponseAbandonment),
     ResponseForget(ResponseForget),
@@ -762,6 +837,9 @@ impl ResidentActorBoundary {
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
             Self::ResponsePoll(_) => "pollResponse",
+            Self::ProgressPublication { .. } => "reportProgress",
+            Self::ProgressPoll(_) => "pollProgress",
+            Self::WatchProgressPoll { .. } => "pollWatch progress",
             Self::RequestCancellation(_) => "cancelRequest",
             Self::ResponseAbandonment(_) => "abandonResponse",
             Self::ResponseForget(_) => "forgetResponse",
@@ -941,6 +1019,8 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::ReserveRequestWith(..)) => "request reservation",
             Self::Replies(RepliesReq::SubmitRequestWith(..)) => "request submission",
             Self::Replies(RepliesReq::AttemptReplyWith(..)) => "attemptReply",
+            Self::Replies(RepliesReq::PublishProgressWith(..)) => "reportProgress",
+            Self::Replies(RepliesReq::ObserveProgressWith(..)) => "pollProgress",
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
             Self::Replies(RepliesReq::CancelRequestWith(..)) => "cancelRequest",
@@ -953,6 +1033,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
+            Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
         }
     }
@@ -2032,6 +2113,21 @@ where
                             request: crate::request_effect::request_id(request_id)?,
                         }))
                     }
+                    ResidentRequest::Replies(RepliesReq::PublishProgressWith(request_id, _)) => {
+                        // Request/watch custody can outlive the publishing actor.
+                        // Arc<RootCustody> releases this shared-machine root when
+                        // the last registry or watch snapshot stops retaining it.
+                        let value = session.live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)
+                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("progress publication has no live payload".into()))?;
+                        Ok(ResidentActorBoundary::ProgressPublication {
+                            continuation: hole, request: crate::request_effect::request_id(request_id)?, value,
+                        })
+                    }
+                    ResidentRequest::Replies(RepliesReq::ObserveProgressWith(request_id)) => {
+                        Ok(ResidentActorBoundary::ProgressPoll(ResponsePoll {
+                            continuation: hole, request: crate::request_effect::request_id(request_id)?,
+                        }))
+                    }
                     ResidentRequest::Replies(RepliesReq::CancelRequestWith(request_id)) => Ok(
                         ResidentActorBoundary::RequestCancellation(RequestCancellation {
                             continuation: hole,
@@ -2080,10 +2176,7 @@ where
                     )) => {
                         let dependencies = dependencies
                             .into_iter()
-                            .map(|(request, allow_failure)| {
-                                crate::request_effect::request_id(request)
-                                    .map(|request| (request, allow_failure))
-                            })
+                            .map(crate::request_effect::AwaitDependency::checked)
                             .collect::<Result<Vec<_>, _>>()?;
                         Ok(ResidentActorBoundary::WatchRegistration(
                             WatchRegistration {
@@ -2098,6 +2191,14 @@ where
                             continuation: hole,
                             watch: crate::request_effect::watch_id(watch_id)?,
                         }))
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(watch, request, after)) => {
+                        Ok(ResidentActorBoundary::WatchProgressPoll {
+                            continuation: hole,
+                            watch: crate::request_effect::watch_id(watch)?,
+                            request: crate::request_effect::request_id(request)?,
+                            after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
+                        })
                     }
                     ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchForget(WatchForget {
@@ -2779,6 +2880,82 @@ where
                     observation,
                     session.data_con_table(),
                 )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_progress_publication(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<u64, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let answer = match outcome {
+                    Ok(_) => {
+                        let right =
+                            tidepool_bridge::get_resilient(table, "Right", 1).ok_or_else(|| {
+                                tidepool_bridge::BridgeError::UnknownDataConName("Right".into())
+                            })?;
+                        Value::Con(right, vec![().to_value(table)?])
+                    }
+                    Err(error) => crate::request_effect::rejected_reply_value(error, table)?,
+                };
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_progress_observation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Result<(Option<crate::request::ProgressSnapshot>, bool), crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let module = "Tidepool.Agent.Reply.Internal";
+                let answer = match observation {
+                    Ok((Some(snapshot), _)) => {
+                        let name = format!("{module}.ProgressUpdate");
+                        let constructor = table
+                            .get_by_qualified_name(&name)
+                            .ok_or(tidepool_bridge::BridgeError::UnknownDataConName(name))?;
+                        let revision = i64::try_from(snapshot.revision).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "progress revision exceeds Haskell Int".into(),
+                            )
+                        })?;
+                        let prefix = vec![revision.to_value(table)?];
+                        return session
+                            .resume_framed_custody(hole, &snapshot.value, constructor, prefix)
+                            .map_err(ResidentActorWorkbenchError::Resident);
+                    }
+                    Ok((None, closed)) => crate::request_effect::constructor(
+                        table,
+                        module,
+                        if closed {
+                            "ProgressClosed"
+                        } else {
+                            "ProgressPending"
+                        },
+                        vec![],
+                    )?,
+                    Err(error) => crate::request_effect::constructor(
+                        table,
+                        module,
+                        "ProgressRejected",
+                        vec![crate::request_effect::reply_error_value(error, table)?],
+                    )?,
+                };
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

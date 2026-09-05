@@ -64,6 +64,14 @@ survive a failure. Polling does not consume results. Ending a model response
 ends the turn; a pending request can span watch wakeups. An accepted reply
 settles that request exactly once without terminating the actor.
 
+Use `requestWithProgress` or `childWithProgress` when intermediate typed evidence
+matters. A request has one authorized progress producer and multiple observers
+with independent cursors; the latest value replaces older unobserved updates.
+Only explicit watches wake an idle coordinator. Inspect provider health when a
+worker needs attention, and use `IdleRetained` to identify retirement candidates.
+Keep communication on the Shoal surface; native collaboration is disabled for
+hosted agents. More steering cannot repair provider-rejected retained history.
+
 Use `:doc topics` for focused examples, `:type`, `:info`, and `:bindings` to
 explore your current Haskell. Reserve `:browse` for deliberate wider discovery;
 unnecessary output becomes inherited context at the next fork. Opaque functions

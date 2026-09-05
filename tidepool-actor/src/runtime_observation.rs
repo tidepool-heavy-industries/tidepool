@@ -75,6 +75,15 @@ pub struct ProviderUsageSample {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActorRuntimeObservation {
+    pub backend_executable: Option<String>,
+    pub backend_version: Option<String>,
+    pub requested_model: Option<String>,
+    pub requested_effort: Option<String>,
+    pub confirmed_model: Option<String>,
+    pub confirmed_effort: Option<String>,
+    pub provider_observation_stale: bool,
+    pub provider_turn: Option<tidepool_model::ProviderTurnObservation>,
+    pub provider_failures: Vec<tidepool_model::ProviderTurnObservation>,
     pub provider_thread: Option<String>,
     pub provider_parent_thread: Option<String>,
     pub current_activation_sequence: Option<u64>,
@@ -91,7 +100,40 @@ pub struct ActorRuntimeObservation {
     pub workbench_posture: ActorWorkbenchPosture,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentDisposition {
+    Working,
+    NeedsAttention,
+    SettledAwaitingProvider,
+    IdleRetained,
+}
+
+impl AgentDisposition {
+    pub(crate) fn constructor_name(self) -> &'static str {
+        match self {
+            Self::Working => "Working",
+            Self::NeedsAttention => "NeedsAttention",
+            Self::SettledAwaitingProvider => "SettledAwaitingProvider",
+            Self::IdleRetained => "IdleRetained",
+        }
+    }
+}
+
 impl ActorRuntimeObservation {
+    pub(crate) fn disposition(&self, has_requests: bool) -> AgentDisposition {
+        use tidepool_model::ProviderTurnState;
+        use AgentDisposition::*;
+        if self.provider_observation_stale || self.provider_turn.is_none() {
+            return NeedsAttention;
+        }
+        match self.provider_turn.as_ref().map(|turn| &turn.state) {
+            Some(ProviderTurnState::Failed(_) | ProviderTurnState::Interrupted) => NeedsAttention,
+            _ if has_requests => Working,
+            Some(ProviderTurnState::Succeeded) => IdleRetained,
+            Some(ProviderTurnState::Active) => SettledAwaitingProvider,
+            _ => NeedsAttention,
+        }
+    }
     #[must_use]
     pub fn latest_provider_usage(&self) -> Option<&ProviderUsageSample> {
         self.provider_usage.last()
@@ -117,6 +159,57 @@ pub struct ActorRuntimeObservationHandle {
 }
 
 impl ActorRuntimeObservationHandle {
+    pub fn publish_provider_observation(&self, observation: tidepool_model::ProviderObservation) {
+        {
+            let mut state = self.inner.write();
+            if observation
+                .turn
+                .as_ref()
+                .zip(state.provider_turn.as_ref())
+                .is_some_and(|(next, previous)| {
+                    next.thread == previous.thread && next.revision < previous.revision
+                })
+            {
+                state.provider_observation_stale = true;
+                return;
+            }
+            state.provider_observation_stale = false;
+            state.provider_failures = observation.failures;
+            state.confirmed_model = observation.confirmed_model;
+            state.confirmed_effort = observation.confirmed_effort;
+            if let Some(turn) = observation.turn {
+                if state.provider_turn.as_ref().is_none_or(|previous| {
+                    previous.thread != turn.thread || previous.revision <= turn.revision
+                }) {
+                    state.provider_turn = Some(turn);
+                }
+            } else {
+                state.provider_observation_stale = true;
+            }
+        }
+        if let Some(usage) = observation.usage {
+            self.publish_cache_usage(usage);
+        }
+    }
+
+    pub fn mark_provider_observation_stale(&self) {
+        self.inner.write().provider_observation_stale = true;
+    }
+
+    pub fn publish_backend_provenance(
+        &self,
+        executable: String,
+        version: String,
+        model: Option<String>,
+        effort: Option<String>,
+    ) {
+        let mut state = self.inner.write();
+        state.backend_executable = Some(executable);
+        state.backend_version = Some(version);
+        state.requested_model = model;
+        state.requested_effort = effort;
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> ActorRuntimeObservation {
         self.inner.read().clone()
@@ -201,6 +294,67 @@ impl ActorRuntimeObservationHandle {
             let remove = observation.provider_usage.len() - MAX_PROVIDER_SAMPLES;
             observation.provider_usage.drain(..remove);
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_health_tests {
+    use super::*;
+    use tidepool_model::{ProviderObservation, ProviderTurnObservation, ProviderTurnState};
+
+    #[test]
+    fn retirement_candidate_requires_positive_idle_and_no_request() {
+        let mut runtime = ActorRuntimeObservation::default();
+        assert_eq!(runtime.disposition(false), AgentDisposition::NeedsAttention);
+        runtime.provider_turn = Some(ProviderTurnObservation {
+            thread: "thread".into(),
+            turn: "turn".into(),
+            revision: 1,
+            state: ProviderTurnState::Active,
+        });
+        assert_eq!(
+            runtime.disposition(false),
+            AgentDisposition::SettledAwaitingProvider
+        );
+        assert_eq!(runtime.disposition(true), AgentDisposition::Working);
+        runtime.provider_turn.as_mut().unwrap().state = ProviderTurnState::Succeeded;
+        assert_eq!(runtime.disposition(false), AgentDisposition::IdleRetained);
+        assert_eq!(runtime.disposition(true), AgentDisposition::Working);
+        runtime.provider_observation_stale = true;
+        assert_eq!(runtime.disposition(false), AgentDisposition::NeedsAttention);
+        runtime.provider_observation_stale = false;
+        runtime.provider_turn.as_mut().unwrap().state =
+            ProviderTurnState::Failed(tidepool_model::ProviderFailure::RequestRejected);
+        assert_eq!(runtime.disposition(true), AgentDisposition::NeedsAttention);
+    }
+
+    #[test]
+    fn provider_health_preserves_newer_evidence_and_marks_read_failure_stale() {
+        let handle = ActorRuntimeObservationHandle::default();
+        let observation = |revision, state| ProviderObservation {
+            usage: None,
+            turn: Some(ProviderTurnObservation {
+                thread: "thread".into(),
+                turn: "turn".into(),
+                revision,
+                state,
+            }),
+            ..Default::default()
+        };
+        handle.publish_provider_observation(observation(10, ProviderTurnState::Succeeded));
+        handle.publish_provider_observation(observation(2, ProviderTurnState::Active));
+        assert_eq!(
+            handle.snapshot().provider_turn.unwrap().state,
+            ProviderTurnState::Succeeded
+        );
+        handle.mark_provider_observation_stale();
+        let stale = handle.snapshot();
+        assert!(stale.provider_observation_stale);
+        assert_eq!(stale.provider_turn.unwrap().revision, 10);
+        handle.publish_provider_observation(ProviderObservation::default());
+        assert!(handle.snapshot().provider_observation_stale);
+        handle.publish_provider_observation(observation(11, ProviderTurnState::Active));
+        assert!(!handle.snapshot().provider_observation_stale);
     }
 }
 

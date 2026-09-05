@@ -544,6 +544,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     None => "running".into(),
                 };
                 let runtime = record.runtime_observation.snapshot();
+                let requests = self.environment.requests.work_for_target(*identity);
+                let state = if terminal.is_none() {
+                    format!("{state} disposition={:?} current={:?} queued={:?}",
+                        runtime.disposition(!requests.0.is_empty() || !requests.1.is_empty()), requests.0, requests.1)
+                } else { state };
+                let state = match &runtime.provider_turn {
+                    Some(turn) => format!("{state} provider={:?} turn={:?}", turn.state, turn.turn),
+                    None => format!("{state} provider=unknown"),
+                };
                 let usage = runtime.latest_provider_usage();
                 if view == StatusView::Concise {
                     return Some(format!(
@@ -626,8 +635,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let prompt_identity = if view == StatusView::Trace {
             format!(
-                " prompt_catalog={:?} prompt_fingerprint={:?}",
-                runtime.prompt_catalog_version, runtime.prompt_fingerprint
+                " prompt_catalog={:?} prompt_fingerprint={:?}\n  backend: executable={:?} version={:?} requested_model={:?} requested_effort={:?}\n  provider: turn={:?} stale={} confirmed_model={:?} confirmed_effort={:?}",
+                runtime.prompt_catalog_version, runtime.prompt_fingerprint,
+                runtime.backend_executable, runtime.backend_version,
+                runtime.requested_model, runtime.requested_effort,
+                runtime.provider_turn, runtime.provider_observation_stale,
+                runtime.confirmed_model, runtime.confirmed_effort,
             )
         } else {
             String::new()
@@ -711,6 +724,21 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
+    fn idle_for_cleanup(&self, actor: ActorRef) -> bool {
+        let requests = self.environment.requests.work_for_target(actor);
+        self.environment
+            .actors
+            .lock()
+            .get(&actor)
+            .is_some_and(|record| {
+                record
+                    .runtime_observation
+                    .snapshot()
+                    .disposition(!requests.0.is_empty() || !requests.1.is_empty())
+                    == crate::runtime_observation::AgentDisposition::IdleRetained
+            })
+    }
+
     fn cleanup_plan(
         &self,
         kernel: &KernelContext,
@@ -760,12 +788,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .environment
             .requests
             .campaign_cleanup_blockers(&owners, &targets);
+        let refusal = actors.iter().find(|entry| !entry.terminal && !self.idle_for_cleanup(entry.actor))
+            .map(|entry| format!("actor {}@{} has no confirmed idle provider turn; inspect its health before cleanup", entry.actor.id.0, entry.actor.incarnation.0));
         crate::resident_workbench::CleanupPlanProjection {
             group,
             actors,
             pending_responses,
             pending_watches,
-            refusal: None,
+            refusal,
         }
     }
 }
@@ -1180,6 +1210,7 @@ where
                 let observation = records.get(&inspection.target).and_then(|record| {
                     actor_is_self_or_descendant(context.actor, inspection.target, &records).then(
                         || crate::resident_workbench::AgentRosterProjection {
+                            requests: self.environment.requests.work_for_target(inspection.target),
                             actor: inspection.target,
                             descriptor: record.descriptor.clone(),
                             bound_worktree: record.bound_worktree.clone(),
@@ -1206,6 +1237,7 @@ where
                     })
                     .map(
                         |(actor, record)| crate::resident_workbench::AgentRosterProjection {
+                            requests: self.environment.requests.work_for_target(*actor),
                             actor: *actor,
                             descriptor: record.descriptor.clone(),
                             bound_worktree: record.bound_worktree.clone(),
@@ -1243,6 +1275,7 @@ where
                         .map(|actor| {
                             let record = records.get(&actor)?;
                             Some(crate::resident_workbench::AgentRosterProjection {
+                                requests: self.environment.requests.work_for_target(actor),
                                 actor,
                                 descriptor: record.descriptor.clone(),
                                 bound_worktree: record.bound_worktree.clone(),
@@ -1440,6 +1473,22 @@ where
                 };
                 let mut steps = Vec::new();
 
+                if let Some(refusal) = &plan.refusal {
+                    return self
+                        .environment
+                        .runner
+                        .resume_cleanup_receipt(
+                            context.clone(),
+                            continuation,
+                            CleanupReceiptProjection {
+                                steps: vec![CleanupStepProjection::Blocked(refusal.clone())],
+                                plan,
+                                complete: false,
+                            },
+                        )
+                        .await;
+                }
+
                 let group_order = match self
                     .environment
                     .fork_groups
@@ -1495,6 +1544,9 @@ where
                     let actor = actor_plan.actor;
                     let outcome = if actor_plan.terminal {
                         AgentStopProjection::AlreadyStopped
+                    } else if !self.idle_for_cleanup(actor) {
+                        stop_failed = true;
+                        AgentStopProjection::Failed("provider is not confirmed idle; cleanup observation is stale or needs attention".into())
                     } else if let Some(target) = kernel.resolve(actor) {
                         match target
                             .retire_by(
@@ -1914,6 +1966,34 @@ where
                     .resume_response_observation(context.clone(), poll.continuation, observation)
                     .await
             }
+            ResidentActorBoundary::ProgressPublication {
+                continuation,
+                request,
+                value,
+            } => {
+                let outcome = self
+                    .environment
+                    .requests
+                    .publish_progress(context.actor, request, value)
+                    .map(|(revision, notifications)| {
+                        self.publish_watch_notifications(notifications);
+                        revision
+                    });
+                self.environment
+                    .runner
+                    .resume_progress_publication(context.clone(), continuation, outcome)
+                    .await
+            }
+            ResidentActorBoundary::ProgressPoll(poll) => {
+                let observation = self
+                    .environment
+                    .requests
+                    .observe_progress(context.actor, poll.request);
+                self.environment
+                    .runner
+                    .resume_progress_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }
             ResidentActorBoundary::RequestCancellation(cancellation) => {
                 let projected = self
                     .environment
@@ -1975,7 +2055,7 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_labeled(
+                    .register_watch_requirements(
                         context.actor,
                         registration.label,
                         registration.dependencies,
@@ -1999,6 +2079,23 @@ where
                 self.environment
                     .runner
                     .resume_watch_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }
+            ResidentActorBoundary::WatchProgressPoll {
+                continuation,
+                watch,
+                request,
+                after,
+            } => {
+                let observation = self.environment.requests.observe_watch_progress(
+                    context.actor,
+                    watch,
+                    request,
+                    after,
+                );
+                self.environment
+                    .runner
+                    .resume_progress_observation(context.clone(), continuation, observation)
                     .await
             }
             ResidentActorBoundary::WatchForget(forget) => {

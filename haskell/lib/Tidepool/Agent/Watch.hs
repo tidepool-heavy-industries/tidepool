@@ -15,6 +15,7 @@ module Tidepool.Agent.Watch
   , awaitResponse
   , awaitValue
   , awaitSettled
+  , awaitProgressAfter
   , watch
   , pollWatch
   , ForgetWatchOutcome (..)
@@ -34,6 +35,7 @@ import Tidepool.Agent.Watch.Internal
   , awaitResponse
   , awaitValue
   , awaitSettled
+  , awaitProgressAfter
   , pollWatch
   , ForgetWatchOutcome (..)
   , forgetWatch

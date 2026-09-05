@@ -11,3 +11,9 @@ do not. Ending the model response ends the turn—there is no completion, yield,
 or park effect. A labeled `watch` requests durable reactivation. Typed handles,
 polling, and structured receipts are authoritative; `:status` reports posture
 and queues.
+
+Progress-capable requests also mount `reportProgress`. Use `pollProgress` or
+`awaitProgressAfter` with an independent revision cursor; ready watches retain
+snapshots while newer updates may coalesce. `:status!` shows provider health
+and the verified backend separately from actor lifecycle. Failed provider turns
+leave requests pending; inspect before further steering or explicit retirement.

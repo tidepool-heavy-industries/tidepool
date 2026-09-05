@@ -61,9 +61,16 @@ pub(crate) struct ActivationContract {
 
 impl ActivationContract {
     pub(crate) fn message(&self, guidance: Option<&str>) -> String {
+        let progress = self
+            .response
+            .progress_type
+            .as_ref()
+            .map_or(String::new(), |ty| {
+                format!("\nreportProgress :: ({ty}) -> Eff {} ()", self.effects)
+            });
         format!("{}\n\nMounted request contract:\n```haskell\nsessionInput :: {}\n{}\n```\nUse `:info` on the input or reply type to inspect its constructors.",
             guidance.unwrap_or("A new typed request is ready."), self.input_type,
-            self.response.respond_signature(&self.effects))
+            format!("{}{progress}", self.response.respond_signature(&self.effects)))
     }
 }
 

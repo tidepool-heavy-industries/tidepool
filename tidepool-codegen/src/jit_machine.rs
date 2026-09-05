@@ -1449,6 +1449,21 @@ impl JitEffectMachine {
                     return Err(JitError::UnknownValueHandle(h));
                 }
             },
+            ResumeInput::FramedHandle {
+                handle,
+                constructor,
+                prefix,
+            } => {
+                let entry = self
+                    .resources
+                    .handle(handle)
+                    .ok_or(JitError::UnknownValueHandle(handle))?;
+                ResumePayload::FramedHeapPtr {
+                    pointer: unsafe { entry.slot.current() },
+                    constructor,
+                    prefix,
+                }
+            }
             ResumeInput::Abort(reason) => {
                 // A stowed machine has no thread. We do NOT run the
                 // continuation — the ask itself fails, returning
@@ -2371,7 +2386,17 @@ impl JitEffectMachine {
                 None => return Err(JitError::UnknownContinuation(id)),
             };
         // Validate before consuming the frame or running the continuation.
-        if let ResumeInput::Answer(val) = &input {
+        if let ResumeInput::FramedHandle { handle, .. } = &input {
+            if self.resources.handle(*handle).is_none() {
+                return Err(JitError::UnknownValueHandle(*handle));
+            }
+        }
+        let validation_values: &[Value] = match &input {
+            ResumeInput::Answer(value) => std::slice::from_ref(value),
+            ResumeInput::FramedHandle { prefix, .. } => prefix,
+            _ => &[],
+        };
+        for val in validation_values {
             if let Err(reason) = answer_force_nf(val) {
                 // Reject without consuming. The frame stays parked and rooted,
                 // so the rooting receipt must still hold.
@@ -3066,6 +3091,11 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
 enum ResumePayload {
     Response(tidepool_effect::Response),
     HeapPtr(*mut u8),
+    FramedHeapPtr {
+        pointer: *mut u8,
+        constructor: tidepool_repr::DataConId,
+        prefix: Vec<Value>,
+    },
 }
 
 /// Materialize a resume payload into a heap pointer and resume the machine's
@@ -3115,6 +3145,47 @@ fn materialize_response_and_resume(
         // crosses into the continuation verbatim, where the eager bridge
         // would have substituted CLOSURE_SENTINEL.
         ResumePayload::HeapPtr(p) => ResponsePlan::Ready(p),
+        ResumePayload::FramedHeapPtr {
+            mut pointer,
+            constructor,
+            mut prefix,
+        } => {
+            let _field_root = unsafe { heap_bridge::RootScope::new(vmctx_ptr) };
+            // The borrowed field must track GC while its surrounding constructor
+            // is allocated. Only the prefix crosses the ordinary value bridge.
+            unsafe {
+                crate::host_fns::register_rust_root(vmctx_ptr, &mut pointer);
+            }
+            let index = prefix.len();
+            prefix.push(Value::Lit(tidepool_repr::Literal::LitInt(0)));
+            let frame = Value::Con(constructor, prefix);
+            let nodes = frame.node_count();
+            if nodes > MAX_EFFECT_RESPONSE_NODES {
+                return Err(JitError::EffectResponseTooLarge {
+                    nodes,
+                    limit: MAX_EFFECT_RESPONSE_NODES,
+                });
+            }
+            let framed = unsafe {
+                crate::signal_safety::with_signal_protection(|| {
+                    heap_bridge::gc_retry(
+                        vmctx_ptr,
+                        |result: &Result<*mut u8, heap_bridge::BridgeError>| {
+                            matches!(result, Err(heap_bridge::BridgeError::NurseryExhausted))
+                        },
+                        || heap_bridge::value_to_heap(&frame, &mut *vmctx_ptr),
+                    )
+                })
+            }
+            .map_err(JitError::Signal)??;
+            unsafe {
+                let slot = framed.add(crate::layout::CON_FIELDS_OFFSET as usize + 8 * index)
+                    as *mut *mut u8;
+                *slot = pointer;
+                crate::host_fns::write_barrier(vmctx_ptr, slot);
+            }
+            ResponsePlan::Ready(framed)
+        }
         ResumePayload::Response(tidepool_effect::Response::List {
             items,
             cons_id,

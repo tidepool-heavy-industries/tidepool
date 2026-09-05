@@ -172,12 +172,12 @@ pub trait InteractiveAgentBackend: Send + Sync {
         message: &'a str,
     ) -> InteractiveFuture<'a, ()>;
 
-    /// First and latest usage durably reported for this conversation.
-    /// `None` means the backend has not reported it, never a measured miss.
-    fn usage<'a>(
+    /// Usage and provider turn health from one durable observation.
+    /// `None` means unavailable, never measured zero or an idle process.
+    fn observe<'a>(
         &'a self,
         _thread: &'a QueueReadyThread,
-    ) -> InteractiveFuture<'a, Option<tidepool_model::ProviderUsageSnapshot>> {
+    ) -> InteractiveFuture<'a, Option<tidepool_model::ProviderObservation>> {
         Box::pin(async { Ok(None) })
     }
 

@@ -185,6 +185,8 @@ pub enum ActorHostReadiness {
 }
 
 struct InteractiveDeployment {
+    supervisor: Option<ActorRef>,
+    notified_provider_failures: std::collections::BTreeSet<(String, String)>,
     actor: ActorRef,
     local_actor: LocalActorRef,
     pane: TmuxPaneId,
@@ -285,6 +287,14 @@ enum DurableActorEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum TypedActorEvent {
+    ProviderTurnFailed {
+        #[serde(default)]
+        revision: u64,
+        actor: ActorRef,
+        thread: String,
+        turn: String,
+        failure: tidepool_agent::ProviderFailure,
+    },
     SessionReady {
         sequence: u64,
         request: tidepool_actor::RequestId,
@@ -322,6 +332,10 @@ impl DurableActorEvent {
             format!("inbox event {inbox_sequence}/{inbox_watermark}; ")
         };
         match self {
+            Self::Typed(TypedActorEvent::ProviderTurnFailed { actor, thread, turn, failure, .. }) => format!(
+                "{delivery}actor {}@{} provider turn {turn:?} in thread {thread:?} failed: {failure:?}. The actor request remains pending. Inspect status before deciding whether to retire or recover it; further steering does not repair rejected history.",
+                actor.id.0, actor.incarnation.0,
+            ),
             Self::Typed(TypedActorEvent::SessionReady { message, .. }) | Self::Legacy(message) => {
                 message.clone()
             }
@@ -1060,6 +1074,35 @@ async fn run_interactive_applications(
             biased;
             _ = wait_for_shutdown(shutdown.clone()) => break None,
             _ = health.tick() => {
+                for index in 0..deployments.len() {
+                    let deployment = &deployments[index];
+                    let snapshot = deployment.runtime_observation.snapshot();
+                    if snapshot.provider_observation_stale { continue; }
+                    for turn in snapshot.provider_failures {
+                    let deployment = &deployments[index];
+                    let tidepool_agent::ProviderTurnState::Failed(failure) = turn.state else { continue; };
+                    let key = (turn.thread.clone(), turn.turn.clone());
+                    if deployment.notified_provider_failures.contains(&key) { continue; }
+                    let actor = deployment.actor;
+                    if let Some(supervisor) = deployment.supervisor {
+                        let Some(owner) = deployments.iter().find(|app| app.actor == supervisor) else { continue; };
+                        let event = DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
+                            revision: turn.revision as u64,
+                            actor, thread: turn.thread, turn: turn.turn, failure,
+                        });
+                        if let Err(error) = publish_inbox_event(Arc::clone(&owner.inbox), event).await {
+                            tracing::warn!(?actor, %error, "provider failure notice pending publication");
+                            // Preserve source order: a later watermark must not suppress
+                            // this failed publication on retry.
+                            break;
+                        }
+                    } else {
+                        // Root failures are operator-visible, never self-injected retries.
+                        tracing::error!(?actor, ?failure, turn = %turn.turn, "root provider turn needs attention");
+                    }
+                    deployments[index].notified_provider_failures.insert(key);
+                    }
+                }
                 if let Some(index) = deployments.iter().position(|deployment| {
                     !deployment.failure_reported
                         && (deployment.service.is_finished()
@@ -1857,6 +1900,16 @@ async fn launch_prepared_interactive_application(
     let command = backend.render(&spec).map_err(|error| {
         application_error(actor_identity, InteractiveOperation::BuildCommand, error)
     })?;
+    runtime_observation.publish_backend_provenance(
+        config
+            .interactive_agent
+            .executable()
+            .to_string_lossy()
+            .into_owned(),
+        config.interactive_agent.version().into(),
+        spec.model.clone(),
+        spec.effort.map(|effort| format!("{effort:?}")),
+    );
     let command = process_boundary.wrap(
         BUBBLEWRAP_PROGRAM,
         ProcessInvocation {
@@ -1881,10 +1934,20 @@ async fn launch_prepared_interactive_application(
         let _ = std::fs::remove_dir_all(&socket_root);
         return Ok(None);
     }
-    let launch_environment = actor_launch_environment(
+    let mut launch_environment = actor_launch_environment(
         config.pane_environment.clone(),
         actor_identity == root,
         build_output.as_deref(),
+    );
+    // Shell commands must resolve the same verified installation as delivery.
+    // An inherited PATH or override can name a different rollout protocol.
+    launch_environment.set.insert(
+        "TIDEPOOL_INTERACTIVE_CODEX_BIN".into(),
+        config
+            .interactive_agent
+            .executable()
+            .to_string_lossy()
+            .into_owned(),
     );
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
@@ -1959,6 +2022,8 @@ async fn launch_prepared_interactive_application(
     );
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
+            supervisor: installation.supervisor_parent,
+            notified_provider_failures: Default::default(),
             actor: actor_identity,
             local_actor: actor,
             pane,
@@ -2160,10 +2225,13 @@ async fn run_delivery_pump(
                 }
             }
             _ = usage_poll.tick() => {
-                match backend.usage(&thread).await {
-                    Ok(Some(usage)) => runtime_observation.publish_cache_usage(usage),
-                    Ok(None) => {}
-                    Err(error) => tracing::debug!(actor = ?actor, %error, "provider usage observation unavailable"),
+                match backend.observe(&thread).await {
+                    Ok(Some(observation)) => runtime_observation.publish_provider_observation(observation),
+                    Ok(None) => runtime_observation.mark_provider_observation_stale(),
+                    Err(error) => {
+                        runtime_observation.mark_provider_observation_stale();
+                        tracing::debug!(actor = ?actor, %error, "provider observation unavailable");
+                    }
                 }
             }
         }
@@ -2207,10 +2275,31 @@ async fn publish_inbox_event(
     inbox: Arc<DurableInbox<DurableActorEvent>>,
     event: DurableActorEvent,
 ) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || inbox.publish(event))
-        .await
-        .map_err(|error| format!("actor inbox publisher task: {error}"))?
-        .map_err(|error| error.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        if let DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
+            actor,
+            thread,
+            revision,
+            ..
+        }) = &event
+        {
+            inbox
+                .publish_latest(
+                    format!(
+                        "provider-failure:{}@{}:{thread}",
+                        actor.id.0, actor.incarnation.0
+                    ),
+                    *revision,
+                    event,
+                )
+                .map(|_| ())
+        } else {
+            inbox.publish(event).map(|_| ())
+        }
+    })
+    .await
+    .map_err(|error| format!("actor inbox publisher task: {error}"))?
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2589,6 +2678,134 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn progress_retains_closures_and_watch_snapshots_across_calls() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup =
+            dispatch_haskell_script(root.as_ref(), include_str!("actor_host/progress_setup.hs"))
+                .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let child = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut child = None;
+            loop {
+                match campaign.deployments.recv().await {
+                    Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                        child = Some(installation)
+                    }
+                    Some(LocalResidentDeployment::SessionReady { .. }) => {
+                        return child.expect("child policy installed before request")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed"),
+                }
+            }
+        })
+        .await
+        .expect("progress request activation");
+        let first = dispatch_haskell_script(
+            child.policy.as_ref(),
+            "reportProgress (ProgressNote 1 (+ sessionInput))",
+        )
+        .await;
+        assert_eq!(first["status"], "committed", "{first:?}");
+        campaign.await_watch_ready().await;
+        let second = dispatch_haskell_script(
+            child.policy.as_ref(),
+            "reportProgress (ProgressNote 2 (* sessionInput))",
+        )
+        .await;
+        assert_eq!(second["status"], "committed", "{second:?}");
+        let captured = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/progress_observe.hs"),
+        )
+        .await;
+        assert_eq!(captured["status"], "committed", "{captured:?}");
+        assert!(captured.to_string().contains("(13,30)"), "{captured:?}");
+        assert_eq!(captured["items"][7]["output"], "40", "{captured:?}");
+        let reply = dispatch_haskell_script(child.policy.as_ref(), "respond (42 :: Int)").await;
+        assert_eq!(reply["status"], "replied", "{reply:?}");
+        let stopped = dispatch_haskell_script(root.as_ref(), "stopAgent worker").await;
+        assert_eq!(stopped["status"], "committed", "{stopped:?}");
+        let retained = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/progress_retained.hs"),
+        )
+        .await;
+        assert_eq!(retained["status"], "committed", "{retained:?}");
+        assert_eq!(retained["items"][1]["output"], "True", "{retained:?}");
+        assert_eq!(retained["items"][2]["output"], "15", "{retained:?}");
+        assert_eq!(retained["items"][4]["output"], "50", "{retained:?}");
+        assert_eq!(retained["items"][6]["output"], "16", "{retained:?}");
+        campaign
+            .actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "progress test complete".into(),
+            })
+            .await
+            .unwrap();
+        campaign.hosted.await.unwrap();
+    }
+
+    #[test]
+    fn provider_failure_notice_preserves_identity_and_old_inbox_payloads() {
+        let notice = super::DurableActorEvent::Typed(super::TypedActorEvent::ProviderTurnFailed {
+            revision: 10,
+            actor: tidepool_actor::ActorRef {
+                id: tidepool_actor::ActorId(7),
+                incarnation: tidepool_actor::Incarnation(3),
+            },
+            thread: "provider-thread".into(),
+            turn: "provider-turn".into(),
+            failure: tidepool_agent::ProviderFailure::Other("unknown provider code".into()),
+        });
+        let encoded = serde_json::to_string(&notice).unwrap();
+        assert_eq!(
+            serde_json::from_str::<super::DurableActorEvent>(&encoded).unwrap(),
+            notice
+        );
+        assert!(notice.render(1, 1).contains("7@3"));
+        let legacy = serde_json::from_str::<super::DurableActorEvent>("\"old event\"").unwrap();
+        assert_eq!(legacy.render(1, 1), "old event");
+    }
+
+    #[tokio::test]
+    async fn provider_failure_publication_deduplicates_across_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let rows = directory.path().join("rows");
+        let cursor = directory.path().join("cursor");
+        let inbox = Arc::new(DurableInbox::open(rows.clone(), cursor.clone()).unwrap());
+        let notice = |turn: &str, revision| {
+            DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
+                actor: tidepool_actor::ActorRef::first(tidepool_actor::ActorId(7)),
+                thread: "thread".into(),
+                turn: turn.into(),
+                revision,
+                failure: tidepool_agent::ProviderFailure::RequestRejected,
+            })
+        };
+        publish_inbox_event(inbox.clone(), notice("first", 10))
+            .await
+            .unwrap();
+        publish_inbox_event(inbox.clone(), notice("first", 10))
+            .await
+            .unwrap();
+        assert_eq!(inbox.pending().unwrap().len(), 1);
+        inbox.acknowledge(1).unwrap();
+        drop(inbox);
+        let inbox = Arc::new(DurableInbox::open(rows, cursor).unwrap());
+        publish_inbox_event(inbox.clone(), notice("first", 10))
+            .await
+            .unwrap();
+        assert!(inbox.pending().unwrap().is_empty());
+        publish_inbox_event(inbox.clone(), notice("second", 20))
+            .await
+            .unwrap();
+        assert_eq!(inbox.pending().unwrap().len(), 1);
+    }
+
     #[test]
     fn fork_effort_is_optional_and_never_replaced_by_the_root_default() {
         use tidepool_actor::ForkEffort;
@@ -4018,6 +4235,22 @@ mod tests {
                 output.contains("ReplyAvailable") && output.contains("ScaffoldReport \"folded\"")
             }));
 
+        for installation in child_installations
+            .iter()
+            .chain(nested_installations.iter())
+        {
+            installation
+                .runtime_observation
+                .publish_provider_observation(tidepool_agent::ProviderObservation {
+                    turn: Some(tidepool_agent::ProviderTurnObservation {
+                        thread: format!("test-{}", installation.actor.identity().id.0),
+                        turn: "completed".into(),
+                        revision: 1,
+                        state: tidepool_agent::ProviderTurnState::Succeeded,
+                    }),
+                    ..Default::default()
+                });
+        }
         let cleanup_doc = include_str!("../../prompts/shoal/docs/cleanup.md");
         let cleanup_examples = cleanup_doc
             .split("```haskell\n")
@@ -4036,6 +4269,23 @@ mod tests {
                 .is_some_and(|output| output.contains("cleanupPlanRefusal = Nothing")),
             "{cleanup_plan:?}"
         );
+
+        let stale_runtime = &child_installations[0].runtime_observation;
+        let confirmed_turn = stale_runtime.snapshot().provider_turn;
+        stale_runtime.mark_provider_observation_stale();
+        let blocked = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "executeCleanup cleanupPlan",
+        )
+        .await;
+        assert_eq!(blocked["status"], "committed", "{blocked:?}");
+        let blocked_output = blocked["items"][0]["output"].as_str().unwrap();
+        assert!(blocked_output.contains("CleanupBlocked"), "{blocked:?}");
+        assert!(!blocked_output.contains("CleanupForgot"), "{blocked:?}");
+        stale_runtime.publish_provider_observation(tidepool_agent::ProviderObservation {
+            turn: confirmed_turn,
+            ..Default::default()
+        });
 
         let cleanup = dispatch_haskell_script(
             root_installation.policy.as_ref(),

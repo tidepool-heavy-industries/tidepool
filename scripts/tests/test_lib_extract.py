@@ -23,6 +23,7 @@ if sys.argv[1] == "--compiler-endpoint-v1":
     sys.exit(2)  # EOF is deliberately not a complete compiler request.
 assert sys.argv[1] == "--daemon"
 Path(os.environ["DAEMON_PID_FILE"]).write_text(str(os.getpid()))
+Path(os.environ["DAEMON_PID_FILE"] + ".argv").write_text("\n".join(sys.argv[1:]))
 mode = os.environ.get("DAEMON_MODE", "ready")
 if mode == "exit":
     print("daemon startup failure", file=sys.stderr)
@@ -56,6 +57,11 @@ print(json.dumps({"reason": "compiler-artifact", "target": {"name": "tidepool-ex
 
 
 class ExtractHelpers(unittest.TestCase):
+    def test_owned_daemon_keeps_endpoint_through_worker_rotation(self):
+        self.run_shell('trap teardown_battery_daemon EXIT\nstart_battery_daemon',
+                       TIDEPOOL_EXTRACT=str(self.frontend))
+        self.assertIn("--persistent", (self.root / "daemon.pid.argv").read_text().splitlines())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="extract helpers ")
         self.addCleanup(self.temp.cleanup)

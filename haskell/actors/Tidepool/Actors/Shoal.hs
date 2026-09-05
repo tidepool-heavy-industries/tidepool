@@ -77,6 +77,7 @@ module Tidepool.Actors.Shoal
   , integrating
   , Unfold
   , child
+  , childWithProgress
   , Forked
   , forkedActor
   , forkedResponse
@@ -110,6 +111,9 @@ module Tidepool.Actors.Shoal
   , observeAgent
   , AgentRosterEntry (..)
   , AgentRosterState (..)
+  , AgentDisposition (..)
+  , ProviderHealth (..)
+  , ProviderFailureKind (..)
   , AgentWorkbenchPosture (..)
   , AgentWorkbenchTransfer (..)
   , ProviderUsageObservation (..)
@@ -137,6 +141,11 @@ module Tidepool.Actors.Shoal
   , withRequestGuidance
   , withRequestDeadline
   , requestWith
+  , requestWithProgress
+  , Progress
+  , ProgressCursor (..)
+  , ProgressState (..)
+  , pollProgress
   , StopOutcome (..)
   , stopAgent
   , RequestId
@@ -178,6 +187,7 @@ module Tidepool.Actors.Shoal
   , awaitResponse
   , awaitValue
   , awaitSettled
+  , awaitProgressAfter
   , watch
   , pollWatch
   , ForgetWatchOutcome (..)
@@ -260,6 +270,7 @@ import Tidepool.Actors.Internal.Agent
   , after
   , requestOptions
   , requestWith
+  , requestWithProgress
   , StopOutcome (..)
   , startAgent
   , stopAgent
@@ -278,6 +289,9 @@ import Tidepool.Effects.Core
   , ActorWorkspaceAccess (..)
   , AgentRosterEntry (..)
   , AgentRosterState (..)
+  , AgentDisposition (..)
+  , ProviderHealth (..)
+  , ProviderFailureKind (..)
   , AgentWorkbenchPosture (..)
   , AgentWorkbenchTransfer (..)
   , ProviderUsageObservation (..)

@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Engine-private typed readiness subscriptions.
@@ -18,6 +19,7 @@ module Tidepool.Agent.Watch.Internal
   , awaitResponse
   , awaitValue
   , awaitSettled
+  , awaitProgressAfter
   , watch
   , pollWatch
   , ForgetWatchOutcome (..)
@@ -32,6 +34,9 @@ import Prelude
 
 import Tidepool.Agent.Reply.Internal
   ( ReplyError
+  , Progress (..)
+  , ProgressCursor (..)
+  , ProgressState
   , RequestId (..)
   , Response
   , ResponseFailure
@@ -40,20 +45,25 @@ import Tidepool.Agent.Reply.Internal
   , responseRequestId
   )
 
-data AwaitDependency = AwaitDependency RequestId Bool
+data AwaitDependency = AwaitDependency RequestId Bool | AwaitProgress RequestId ProgressCursor
+  deriving (Eq)
 
-data Await result = Await [AwaitDependency] ([(RequestId, ResponseFailure)] -> Maybe result)
+data Await result = Await [AwaitDependency]
+  (forall effs. Member Watches effs => Int -> [(RequestId, ResponseFailure)] -> Eff effs (Maybe result))
 
 instance Functor Await where
   fmap f (Await dependencies observe) =
-    Await dependencies (fmap f . observe)
+    Await dependencies (\watchId failures -> fmap (fmap f) (observe watchId failures))
 
 instance Applicative Await where
-  pure value = Await [] (const (Just value))
+  pure value = Await [] (\_ _ -> pure (Just value))
   Await leftDependencies observeFunction <*> Await rightDependencies observeArgument =
     Await
       (deduplicate (leftDependencies <> rightDependencies))
-      (\failures -> observeFunction failures <*> observeArgument failures)
+      (\watchId failures -> do
+        function <- observeFunction watchId failures
+        argument <- observeArgument watchId failures
+        pure (function <*> argument))
 
 newtype WatchId = WatchId Int
   deriving (Show, Eq, Ord)
@@ -101,7 +111,8 @@ data RawWatchObservation
   | RawWatchRejected ReplyError
 
 data Watches a where
-  RegisterWatchWith :: Text -> [(Int, Bool)] -> Watches Int
+  RegisterWatchWith :: Text -> [AwaitDependency] -> Watches Int
+  ObserveWatchProgressWith :: Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
   ForgetWatchWith :: Int -> Watches ForgetWatchOutcome
 
@@ -118,23 +129,28 @@ data Settlement result
 
 awaitResponse :: Response result -> Await (ResponseResult result)
 awaitResponse response =
-  Await [AwaitDependency (responseRequestId response) False] (const (readResponse response))
+  Await [AwaitDependency (responseRequestId response) False] (\_ _ -> pure (readResponse response))
 
 awaitValue :: Response result -> Await result
 awaitValue = fmap responseValue . awaitResponse
 
 awaitSettled :: Response result -> Await (Settlement result)
 awaitSettled response =
-  Await [AwaitDependency request True] $ \failures ->
-    case readResponse response of
+  Await [AwaitDependency request True] $ \_ failures ->
+    pure $ case readResponse response of
       Just result -> Just (ReplyAvailable result)
       Nothing -> ReplyUnavailable <$> lookup request failures
   where
     request = responseRequestId response
 
+awaitProgressAfter :: Progress progress -> ProgressCursor -> Await (ProgressState progress)
+awaitProgressAfter (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
+  Await [AwaitProgress request cursor] $ \watchId _ ->
+    Just <$> send (ObserveWatchProgressWith watchId requestId revision)
+
 watch :: Member Watches effs => WatchLabel -> Await result -> Eff effs (Watch result)
 watch (WatchLabel label) awaiting@(Await dependencies _) = do
-  watchId <- send (RegisterWatchWith label (map rawDependency dependencies))
+  watchId <- send (RegisterWatchWith label dependencies)
   pure (Watch (WatchId watchId) awaiting)
 
 pollWatch
@@ -143,26 +159,23 @@ pollWatch
   -> Eff effs (WatchState result)
 pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
   observation <- send (ObserveWatchWith watchId)
-  pure $ case observation of
-    RawWatchPending -> WatchPending
-    RawWatchReady rawFailures ->
-      case observe (map (\(request, failure) -> (RequestId request, failure)) rawFailures) of
+  case observation of
+    RawWatchPending -> pure WatchPending
+    RawWatchReady rawFailures -> do
+      captured <- observe watchId (map (\(request, failure) -> (RequestId request, failure)) rawFailures)
+      pure $ case captured of
         Just result -> WatchReady result
         Nothing -> error "Tidepool watch became ready before every response cell was filled"
     RawWatchUnavailable request failure ->
-      WatchUnavailable (WatchDependencyUnavailable request failure)
-    RawWatchRejected failure -> WatchUnavailable (WatchRejected failure)
+      pure (WatchUnavailable (WatchDependencyUnavailable request failure))
+    RawWatchRejected failure -> pure (WatchUnavailable (WatchRejected failure))
 
 forgetWatch :: Member Watches effs => Watch result -> Eff effs ForgetWatchOutcome
 forgetWatch (Watch (WatchId watchId) _) = send (ForgetWatchWith watchId)
 
-rawDependency :: AwaitDependency -> (Int, Bool)
-rawDependency (AwaitDependency (RequestId request) allowFailure) = (request, allowFailure)
-
 deduplicate :: [AwaitDependency] -> [AwaitDependency]
 deduplicate = foldr add []
   where
-    add dependency [] = [dependency]
-    add (AwaitDependency request allowFailure) (AwaitDependency other otherAllows : rest)
-      | request == other = AwaitDependency request (allowFailure && otherAllows) : rest
-      | otherwise = AwaitDependency other otherAllows : add (AwaitDependency request allowFailure) rest
+    add dependency rest
+      | dependency `elem` rest = rest
+      | otherwise = dependency : rest
