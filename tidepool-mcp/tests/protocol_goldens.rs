@@ -1,23 +1,12 @@
-//! Class A golden baseline: pins, byte-for-byte, the
-//! effect-contract artifacts that cross the Rust/Haskell boundary. These
-//! goldens are the non-regression evidence that an effect-at-a-time schema
-//! migration is safe — when lane N later flips effect N, re-asserting these
-//! goldens proves every OTHER effect's artifacts did not move. Captured NOW,
-//! from unmodified trunk, before anything is flipped.
+//! Focused compatibility pins for the generated effect protocol.
 //!
-//! The bar is exact byte equality, not `contains`: the generated
-//! `Tidepool.Effects` module source is content-addressed as a compile-cache
-//! key (`ensure_effects_module` in `tidepool-mcp/src/lib.rs`) — a single
-//! changed byte invalidates every cached compile for every user.
-//!
-//! Three layers, mirroring `tidepool-handlers/tests/bridged_records.rs` (the
-//! pattern this file copies):
-//!   1. whole-file byte compare against a committed golden (the three
-//!      `*_golden_matches_committed_file` tests below),
-//!   2. an INDEPENDENT hardcoded pin on a handful of items
-//!      (`hardcoded_pins_survive_a_blind_regen`), so a blindly-run regen
-//!      cannot launder a change into the goldens,
-//!   3. the `TIDEPOOL_REGEN_PROTOCOL_GOLDENS` env-var regen escape hatch.
+//! Generated-file currency and real Haskell compilation own full-surface
+//! fidelity. This suite pins only the details whose accidental movement has
+//! independent meaning: effect order, selected hand-authored contracts,
+//! import gating, the standard row, and the concise tool index. It deliberately
+//! does not snapshot the entire generated Core module or every schema field;
+//! those migration-era mirrors made ordinary API evolution require rewriting
+//! thousands of lines without adding a distinct invariant.
 
 use tidepool_mcp::EffectDecl;
 
@@ -60,85 +49,21 @@ fn all_declaration_names_and_order_are_explicit() {
             "Finalize",
             "Green",
             "Actor",
+            "ActorContext",
             "ActorKernel",
             "ActorLocal",
+            "AgentControl",
+            "AgentInspection",
+            "AgentLaunch",
+            "Forks",
             "AgentTools",
             "AgentSession",
+            "BoundWorktree",
+            "WorktreeRegistry",
+            "WorktreeAllocation",
+            "WorktreeIntegration",
         ]
     );
-}
-
-// ---------------------------------------------------------------------------
-// The dumper — lossless, unambiguous text rendering of one EffectDecl
-// ---------------------------------------------------------------------------
-//
-// Every field is framed as a header line naming its exact byte length,
-// followed by exactly that many bytes of raw content, followed by a footer
-// line. This is netstring-style length-prefixed framing: decoding a field
-// never depends on scanning its content for a delimiter (which a multi-line
-// `type_defs`/`helpers` entry — itself containing blank lines, "--"
-// sequences, anything — could otherwise spoof), only on the declared byte
-// count recorded right before it. Fields are emitted in a FIXED order under
-// FIXED labels, so the whole rendering is an injective function of the
-// tuple of field values: two EffectDecls differing in any single field
-// (including WHICH multi-line entry differs inside `type_defs`/`helpers`,
-// or how many blank lines one contains) can never render to the same text.
-
-fn write_blob(out: &mut String, label: &str, value: &str) {
-    out.push_str(&format!("-- {label} ({} bytes) --\n", value.len()));
-    out.push_str(value);
-    if !value.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&format!("-- end {label} --\n\n"));
-}
-
-fn write_list(out: &mut String, label: &str, items: &[&str]) {
-    out.push_str(&format!("-- {label} ({} items) --\n", items.len()));
-    for (i, item) in items.iter().enumerate() {
-        write_blob(out, &format!("{label}[{i}]"), item);
-    }
-    out.push_str(&format!("-- end {label} --\n\n"));
-}
-
-/// Dump every field of one `EffectDecl` to text, one labelled section per
-/// field, in declaration order.
-fn render_effect_decl(decl: &EffectDecl) -> String {
-    let mut out = String::new();
-    write_blob(&mut out, "type_name", decl.type_name);
-    write_blob(&mut out, "description", decl.description);
-    match decl.prompt_card {
-        Some(pc) => {
-            out.push_str("-- prompt_card: Some --\n");
-            write_blob(&mut out, "prompt_card.0", pc);
-        }
-        None => out.push_str("-- prompt_card: None --\n\n"),
-    }
-    write_list(&mut out, "constructors", decl.constructors);
-    write_list(&mut out, "type_defs", decl.type_defs);
-    write_list(&mut out, "extra_imports", decl.extra_imports);
-    write_list(&mut out, "helpers", decl.helpers);
-    write_list(&mut out, "type_params", decl.type_params);
-    write_list(&mut out, "default_row_args", decl.default_row_args);
-    out.push_str(&format!(
-        "-- helpers_row_polymorphic --\n{}\n-- end helpers_row_polymorphic --\n\n",
-        decl.helpers_row_polymorphic
-    ));
-    out
-}
-
-/// Render every pinned decl, concatenated in list order with a clear
-/// per-effect header.
-fn render_pinned_decls(decls: &[EffectDecl]) -> String {
-    let mut out = String::new();
-    for decl in decls {
-        out.push_str(&format!(
-            "=============================== EFFECT: {} ===============================\n\n",
-            decl.type_name
-        ));
-        out.push_str(&render_effect_decl(decl));
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -174,32 +99,15 @@ fn assert_matches_golden(name: &str, generated: &str) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Golden 1 — every pinned EffectDecl, dumped field-by-field
-// ---------------------------------------------------------------------------
-
-#[test]
-fn effect_decls_golden_matches_committed_file() {
-    let generated = render_pinned_decls(&pinned_decls());
-    assert_matches_golden("effect_decls.txt", &generated);
-}
-
-// ---------------------------------------------------------------------------
-// Golden 2 — the generated Tidepool.Effects.Core + Tidepool.Effects (shim)
-// modules for the standard row. These are the compile-cache-key artifacts:
-// captured verbatim, no normalization, no trailing-whitespace trimming.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn effects_core_module_universal_golden_matches_committed_file() {
-    let generated = tidepool_mcp::effects_core_module_source();
-    assert_matches_golden("effects_core_module.standard.hs", &generated);
-}
-
-#[test]
-fn effects_authored_module_universal_golden_matches_committed_file() {
-    let generated = tidepool_mcp::effects_authored_module_source();
-    assert_matches_golden("effects_authored_module.standard.hs", &generated);
+/// Length-prefix a generated artifact so adjacent sections remain
+/// unambiguous even when their contents contain arbitrary newlines.
+fn write_blob(out: &mut String, label: &str, value: &str) {
+    out.push_str(&format!("-- {label} ({} bytes) --\n", value.len()));
+    out.push_str(value);
+    if !value.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("-- end {label} --\n\n"));
 }
 
 #[test]
@@ -212,7 +120,7 @@ fn effects_shim_module_standard_golden_matches_committed_file() {
 }
 
 // ---------------------------------------------------------------------------
-// Golden 3 — the derived tool-description effects index over the standard row.
+// The derived tool-description effects index over the standard row.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -225,13 +133,10 @@ fn tool_description_effects_index_golden_matches_committed_file() {
 // Layer 2 — an INDEPENDENT hardcoded pin, modelled on
 // `tidepool-mcp/src/preamble.rs`'s `import_gating_pin` module doc: these are
 // literal strings transcribed BY HAND from the hand-written definitions, NOT
-// read from any golden file and NOT produced by `render_effect_decl` above.
+// read from any golden file and NOT produced by a schema renderer.
 // Their whole job is to stay true even when someone regenerates
-// `effect_decls.txt` blindly (`TIDEPOOL_REGEN_PROTOCOL_GOLDENS=1` over a
-// change that also altered the underlying definition): a dumper bug or a
-// silent definition drift can launder itself into a regenerated golden, but it
-// cannot launder itself into a string written independently, by hand, from the
-// source of truth.
+// a generated artifact blindly: a generator bug or silent definition drift
+// cannot launder itself into a string written independently from the source.
 //
 // The Exec pins have since outgrown that job. They were transcribed from
 // `effect_defs.rs`'s `exec_effect_def!` while it still existed; that macro is
@@ -281,7 +186,7 @@ fn hardcoded_pins_survive_a_blind_regen() {
 }
 
 // ---------------------------------------------------------------------------
-// Golden 4 — import-gating pin: the generated eval-module text (both the
+// Import-gating pin: the generated eval-module text (both the
 // stmt/eval plane's `build_preamble` and the decl plane's
 // `session_decl_module_env`) is a content-addressed compile-cache key
 // (`ensure_effects_module_at`) — a single changed byte invalidates every
@@ -308,8 +213,8 @@ fn env_text(env: &tidepool_runtime::session::ModuleEnv) -> String {
 }
 
 /// Renders `build_preamble` and `session_decl_module_env`'s output for one
-/// effect row into a single labelled blob (netstring-style framing, same
-/// idiom as [`render_effect_decl`] above) and diffs it against one golden.
+/// effect row into a single length-prefixed blob and diffs it against one
+/// golden.
 fn check_import_gating(golden_name: &str, effects: &[EffectDecl]) {
     let mut out = String::new();
     write_blob(

@@ -422,9 +422,9 @@ impl Effect {
     /// order, then the derived error ADT.
     ///
     /// That order is not a preference — it is the order the hand-written
-    /// projection already emits, and the Class A `effect_decls.txt` golden is
-    /// what proves it. An effect with empty `type_defs` (Exec, Journal) renders
-    /// exactly as before: the error ADT alone, or nothing.
+    /// projection already emits, and the focused protocol compatibility tests
+    /// are what prove it. An effect with empty `type_defs` (Exec, Journal)
+    /// renders exactly as before: the error ADT alone, or nothing.
     #[must_use]
     pub fn type_def_texts(&self) -> Vec<String> {
         let mut out: Vec<String> = self.type_defs.iter().map(TypeDef::render_decl).collect();
