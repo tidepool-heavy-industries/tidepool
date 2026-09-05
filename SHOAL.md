@@ -5,11 +5,36 @@ It keeps the runnable surface visibly distinct from active replacement
 designs. Runtime semantics remain owned by the relevant crate documentation;
 active designs remain in `plans/`.
 
-The active post-dogfood implementation handoff is
-[live context-unfold dogfood follow-ups](plans/actor-model/live-context-unfold-dogfood-followups.md).
-It is the root plan for the next resident-agent UX, correctness,
-observability, resource, and recovery wave; this guide continues to describe
-only the currently landed surface.
+## Current handoff (2026-09-05)
+
+The reliability and typed-progress implementation landed in `398d38ae`.
+It includes provider health and provenance, durable failure notifications,
+cleanup revalidation, and typed progress with one producer and independent
+observer cursors. Progress is a coalescing latest-value channel; each watch
+retains its first qualifying snapshot, including while other dependencies
+remain pending. See [progress design and checks](plans/actor-model/shoal-progress-channel.md).
+
+Focused provider, inbox, request-registry, hosted progress/cleanup, and GC
+checks passed, along with all 217 extractor fixtures, 12 script tests,
+formatting, and the Shoal build. Work was completed locally without agents.
+The live canary remains deferred at the user's request. The running host was
+not restarted; start a new host to load the new executable, prompt, and API.
+Do not treat the older follow-up plans as evidence of outstanding work without
+checking their items against the implementation.
+
+The Sol configuration-update fix is in the separate Codex repository at
+`/home/inanna/dev/codex`, commit `702639b55a`. It applies to roots and children:
+only `gpt-6-astra` with Responses Lite can record durable reasoning controls.
+For Sol, request construction also filters inherited `configuration_update`
+items out of outgoing input while preserving durable history. Sol still uses
+ordinary request-level reasoning effort. This does not depend on spawning.
+
+That Codex candidate was built at
+`/home/inanna/dev/codex/codex-rs/target/dev-small/codex`. Launch the next host
+with `TIDEPOOL_INTERACTIVE_CODEX_BIN` pointing to that executable; rebuilding
+Shoal alone does not replace Codex. Confirm the resolved installation through
+`:status!`. The source fix and deterministic checks are complete; deployment
+to a new live session and the deferred live canary are not yet verified.
 
 ## Working model
 
