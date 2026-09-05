@@ -51,6 +51,55 @@ fn usage_observation_has_one_shared_record_and_distinct_history_endpoints() {
 }
 
 #[test]
+fn usage_summaries_have_provider_scope_completeness_and_shared_inspection_fields() {
+    use tidepool_protocol::schema::TypeShape;
+    let context = tidepool_protocol::effects::actor_context::actor_context();
+    let summary = context
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ProviderUsageSummary")
+        .unwrap();
+    let TypeShape::Record { fields } = &summary.shape else {
+        panic!("summary record")
+    };
+    assert_eq!(
+        fields.iter().map(|field| field.hs_name).collect::<Vec<_>>(),
+        [
+            "usageSummaryScope",
+            "usageSummaryCompleteness",
+            "usageSummaryObservations",
+            "usageSummaryCachedInputTokens",
+            "usageSummaryUncachedInputTokens",
+        ]
+    );
+    for (effect, name, expected) in [
+        (
+            context,
+            "ActorContextInfo",
+            ["contextUsageSummary", "contextLatestTurnUsage"],
+        ),
+        (
+            agent_inspection(),
+            "AgentRosterEntry",
+            ["rosterUsageSummary", "rosterLatestTurnUsage"],
+        ),
+    ] {
+        let record = effect.type_defs.iter().find(|ty| ty.name == name).unwrap();
+        let TypeShape::Record { fields } = &record.shape else {
+            panic!("inspection record")
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|field| field.ty == HsType::maybe(HsType::Named("ProviderUsageSummary")))
+                .map(|field| field.hs_name)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn fork_effort_is_optional_at_the_existing_launch_boundary() {
     let forks = tidepool_protocol::effects::forks::forks();
     let launch = forks

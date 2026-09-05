@@ -189,11 +189,39 @@ pub struct ProviderUsageObservation {
     pub usage: TokenUsage,
 }
 
-/// Endpoints of the provider thread's completed-response history.
+/// Provider-owned scope; a provider turn is not an actor request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderUsageScope {
+    Thread(String),
+    Turn { thread: String, turn: String },
+}
+
+/// `Complete` covers the observed scope through a durable turn-completion
+/// boundary, not future work on a persistent provider thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderUsageCompleteness {
+    Partial,
+    Complete,
+}
+
+/// Totals from uniquely identified durable response records, never poll samples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderUsageSummary {
+    pub scope: ProviderUsageScope,
+    pub completeness: ProviderUsageCompleteness,
+    pub observations: i64,
+    pub usage: TokenUsage,
+}
+
+/// Endpoints and authoritative aggregates of the provider's response history.
+/// Older providers may expose observations without sufficiently identified
+/// records to support totals. Missing aggregates remain `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUsageSnapshot {
     pub first: ProviderUsageObservation,
     pub latest: ProviderUsageObservation,
+    pub thread_summary: Option<ProviderUsageSummary>,
+    pub latest_turn_summary: Option<ProviderUsageSummary>,
 }
 
 #[cfg(test)]

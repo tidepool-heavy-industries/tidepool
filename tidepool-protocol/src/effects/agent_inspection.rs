@@ -123,6 +123,14 @@ pub fn agent_inspection() -> Effect {
                             HsType::maybe(HsType::Named("ProviderUsageObservation")),
                         ),
                         field(
+                            "rosterUsageSummary",
+                            HsType::maybe(HsType::Named("ProviderUsageSummary")),
+                        ),
+                        field(
+                            "rosterLatestTurnUsage",
+                            HsType::maybe(HsType::Named("ProviderUsageSummary")),
+                        ),
+                        field(
                             "rosterCacheBoundary",
                             HsType::maybe(HsType::Named("CacheBoundaryReason")),
                         ),
@@ -167,6 +175,7 @@ pub fn agent_inspection() -> Effect {
                 "ProviderUsageObservation",
                 "crate::ProviderUsageObservationWire",
             ),
+            ("ProviderUsageSummary", "crate::ProviderUsageSummaryWire"),
         ],
         errors: None,
         verbs: vec![

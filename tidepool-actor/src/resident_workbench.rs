@@ -330,6 +330,47 @@ fn usage_observation_value(
     Ok(value.to_value(table)?)
 }
 
+fn usage_summary_value(
+    table: &DataConTable,
+    summary: Option<&tidepool_model::ProviderUsageSummary>,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    use tidepool_model::{ProviderUsageCompleteness, ProviderUsageScope};
+    let value = summary
+        .map(|summary| {
+            let scope = match &summary.scope {
+                ProviderUsageScope::Thread(thread) => {
+                    actor_context_constructor(table, "UsageThread", vec![thread.to_value(table)?])?
+                }
+                ProviderUsageScope::Turn { thread, turn } => actor_context_constructor(
+                    table,
+                    "UsageTurn",
+                    vec![thread.to_value(table)?, turn.to_value(table)?],
+                )?,
+            };
+            actor_context_constructor(
+                table,
+                "ProviderUsageSummary",
+                vec![
+                    scope,
+                    actor_context_constructor(
+                        table,
+                        match summary.completeness {
+                            ProviderUsageCompleteness::Partial => "UsagePartial",
+                            ProviderUsageCompleteness::Complete => "UsageComplete",
+                        },
+                        Vec::new(),
+                    )?,
+                    summary.observations.to_value(table)?,
+                    summary.usage.cached_input_tokens.to_value(table)?,
+                    (summary.usage.input_tokens - summary.usage.cached_input_tokens)
+                        .to_value(table)?,
+                ],
+            )
+        })
+        .transpose()?;
+    Ok(value.to_value(table)?)
+}
+
 fn agent_roster_value(
     table: &DataConTable,
     entry: AgentRosterProjection,
@@ -459,6 +500,8 @@ fn agent_roster_value(
             entry.runtime.provider_parent_thread.to_value(table)?,
             usage_observation_value(table, entry.runtime.first_provider_usage.as_ref())?,
             usage_observation_value(table, usage)?,
+            usage_summary_value(table, entry.runtime.provider_usage_summary.as_ref())?,
+            usage_summary_value(table, entry.runtime.latest_turn_usage_summary.as_ref())?,
             cache_boundary.to_value(table)?,
             actor_int(entry.runtime.event_watermark)?.to_value(table)?,
             workbench_posture,
@@ -2500,6 +2543,8 @@ where
                     runtime.provider_parent_thread.to_value(table)?,
                     usage_observation_value(table, runtime.first_provider_usage.as_ref())?,
                     usage_observation_value(table, usage)?,
+                    usage_summary_value(table, runtime.provider_usage_summary.as_ref())?,
+                    usage_summary_value(table, runtime.latest_turn_usage_summary.as_ref())?,
                     i64::from(descendants.maximum_depth).to_value(table)?,
                     i64::from(descendants.maximum_active_children).to_value(table)?,
                     descriptor

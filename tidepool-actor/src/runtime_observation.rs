@@ -1,7 +1,8 @@
 //! Shared, typed observation of the external application bound to an actor.
 //!
-//! The backend recovers first and latest durable provider observations. Polls
-//! deduplicate by source identity; polling time never supplies causal attribution.
+//! The backend recovers durable provider observations and response aggregates.
+//! Polls replace totals and deduplicate display samples by source identity;
+//! polling time never supplies causal attribution.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -85,6 +86,8 @@ pub struct ActorRuntimeObservation {
     pub prompt_fingerprint: Option<String>,
     pub provider_usage: Vec<ProviderUsageSample>,
     pub first_provider_usage: Option<ProviderUsageSample>,
+    pub provider_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
+    pub latest_turn_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
     pub workbench_posture: ActorWorkbenchPosture,
 }
 
@@ -92,6 +95,19 @@ impl ActorRuntimeObservation {
     #[must_use]
     pub fn latest_provider_usage(&self) -> Option<&ProviderUsageSample> {
         self.provider_usage.last()
+    }
+
+    pub(crate) fn usage_summary_display(&self) -> String {
+        match &self.provider_usage_summary {
+            Some(summary) => format!(
+                "usage={:?} responses={} cached={} uncached={}",
+                summary.completeness,
+                summary.observations,
+                summary.usage.cached_input_tokens,
+                summary.usage.input_tokens - summary.usage.cached_input_tokens,
+            ),
+            None => "usage=unavailable".into(),
+        }
     }
 }
 
@@ -156,6 +172,10 @@ impl ActorRuntimeObservationHandle {
 
     pub fn publish_cache_usage(&self, usage: tidepool_model::ProviderUsageSnapshot) {
         let mut observation = self.inner.write();
+        // Replace authoritative aggregates even when the latest response is
+        // unchanged: a later durable completion event can settle its scope.
+        observation.provider_usage_summary = usage.thread_summary;
+        observation.latest_turn_usage_summary = usage.latest_turn_summary;
         let make_sample = |source: tidepool_model::ProviderUsageObservation| ProviderUsageSample {
             observation_id: source.id,
             source_timestamp: source.timestamp,
@@ -236,6 +256,8 @@ mod tests {
         tidepool_model::ProviderUsageSnapshot {
             first: observation.clone(),
             latest: observation,
+            thread_summary: None,
+            latest_turn_summary: None,
         }
     }
 
@@ -265,6 +287,38 @@ mod tests {
 
         let snapshot = observation.snapshot();
         assert_eq!(snapshot.provider_usage.len(), 1);
+    }
+
+    #[test]
+    fn aggregate_usage_replacement_survives_eviction_and_completion_without_new_response() {
+        use tidepool_model::{ProviderUsageCompleteness, ProviderUsageScope, ProviderUsageSummary};
+        let observation = ActorRuntimeObservationHandle::default();
+        let mut last = usage("last", 80, 20);
+        for i in 0..40 {
+            observation.publish_cache_usage(usage(&format!("{i}"), 80, 20));
+        }
+        last.thread_summary = Some(ProviderUsageSummary {
+            scope: ProviderUsageScope::Thread("thread".into()),
+            completeness: ProviderUsageCompleteness::Partial,
+            observations: 100,
+            usage: tidepool_model::TokenUsage {
+                input_tokens: 10000,
+                cached_input_tokens: 8000,
+                ..Default::default()
+            },
+        });
+        observation.publish_cache_usage(last.clone());
+        last.thread_summary.as_mut().unwrap().completeness = ProviderUsageCompleteness::Complete;
+        observation.publish_request_activation(crate::RequestId(8), 5);
+        observation.publish_cache_usage(last.clone());
+        let snapshot = observation.snapshot();
+        assert_eq!(snapshot.provider_usage.len(), MAX_PROVIDER_SAMPLES);
+        assert_eq!(snapshot.provider_usage_summary, last.thread_summary);
+        assert_eq!(snapshot.latest_turn_usage_summary, None);
+        assert_eq!(
+            snapshot.usage_summary_display(),
+            "usage=Complete responses=100 cached=8000 uncached=2000"
+        );
     }
 
     #[test]

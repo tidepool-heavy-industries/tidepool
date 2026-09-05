@@ -547,15 +547,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 let usage = runtime.latest_provider_usage();
                 if view == StatusView::Concise {
                     return Some(format!(
-                        "  - {:?} ({}@{}) role={:?} bound_worktree={:?} state={state}",
+                        "  - {:?} ({}@{}) role={:?} bound_worktree={:?} state={state} {}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.effective_role().role(),
                         record.bound_worktree,
+                        runtime.usage_summary_display(),
                     ));
                 }
                 if view == StatusView::Lineage {
                     return Some(format!(
-                        "  - {:?} ({}@{}) supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?}",
+                        "  - {:?} ({}@{}) supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
                         record.descriptor.fork_group(), record.descriptor.placement().lexical_scope.0,
@@ -565,10 +566,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         usage.map(|sample| sample.cached_input_tokens),
                         usage.map(|sample| sample.uncached_input_tokens),
                         record.bound_worktree,
+                        runtime.usage_summary_display(),
                     ));
                 }
                 Some(format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
@@ -583,6 +585,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     usage.map(|sample| sample.uncached_input_tokens),
                     runtime.workbench_posture,
                     state,
+                    runtime.usage_summary_display(),
                 ))
             })
             .collect::<Vec<_>>();
@@ -612,7 +615,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 ))
             )
         } else if view == StatusView::Trace {
-            format!("\n  provider_usage_history={:?}", runtime.provider_usage)
+            format!(
+                "\n  provider_usage_history={:?}\n  usage_summary={:?}\n  latest_turn_usage={:?}",
+                runtime.provider_usage,
+                runtime.provider_usage_summary,
+                runtime.latest_turn_usage_summary
+            )
         } else {
             String::new()
         };

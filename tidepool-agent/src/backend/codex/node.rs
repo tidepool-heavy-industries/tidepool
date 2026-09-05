@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -20,8 +20,11 @@ use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode,
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    ProviderUsageObservation, ProviderUsageSnapshot, QueueReadyThread, ReasoningEffort, TokenUsage,
+    ProviderUsageSnapshot, QueueReadyThread, ReasoningEffort,
 };
+
+#[path = "rollout_usage.rs"]
+mod rollout_usage;
 
 const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
@@ -300,44 +303,8 @@ fn read_rollout_usage(
     };
     let file = std::fs::File::open(&path)
         .map_err(|error| unavailable("open Codex rollout for usage", error))?;
-    let mut first = None;
-    let mut latest = None;
-    let mut own_thread = false;
-    for (index, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|error| unavailable("read Codex rollout usage", error))?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if value.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
-            own_thread = value.pointer("/payload/id").and_then(|v| v.as_str()) == Some(thread);
-            continue;
-        }
-        if !own_thread
-            || value.get("type").and_then(|v| v.as_str()) != Some("event_msg")
-            || value.pointer("/payload/type").and_then(|v| v.as_str()) != Some("token_count")
-        {
-            continue;
-        }
-        let Some(usage) = value
-            .pointer("/payload/info/last_token_usage")
-            .and_then(parse_rollout_usage)
-        else {
-            continue;
-        };
-        let observation = ProviderUsageObservation {
-            id: format!("{thread}:{index}"),
-            timestamp: value
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned),
-            usage,
-        };
-        first.get_or_insert_with(|| observation.clone());
-        latest = Some(observation);
-    }
-    Ok(first
-        .zip(latest)
-        .map(|(first, latest)| ProviderUsageSnapshot { first, latest }))
+    rollout_usage::read(BufReader::new(file), thread)
+        .map_err(|error| unavailable("read Codex rollout usage", error))
 }
 
 fn find_rollout(
@@ -366,23 +333,6 @@ fn find_rollout(
         }
     }
     Ok(None)
-}
-
-fn parse_rollout_usage(value: &serde_json::Value) -> Option<TokenUsage> {
-    let usage = TokenUsage {
-        input_tokens: value.get("input_tokens")?.as_i64()?,
-        cached_input_tokens: value.get("cached_input_tokens")?.as_i64()?,
-        output_tokens: value.get("output_tokens")?.as_i64()?,
-        reasoning_output_tokens: value.get("reasoning_output_tokens")?.as_i64()?,
-        total_tokens: value.get("total_tokens")?.as_i64()?,
-    };
-    (usage.input_tokens >= 0
-        && usage.cached_input_tokens >= 0
-        && usage.cached_input_tokens <= usage.input_tokens
-        && usage.output_tokens >= 0
-        && usage.reasoning_output_tokens >= 0
-        && usage.total_tokens >= 0)
-        .then_some(usage)
 }
 
 fn prepare_native_tool_policy(
@@ -1093,7 +1043,7 @@ mod tests {
             "reasoning_output_tokens": 0,
             "total_tokens": 10
         });
-        assert_eq!(parse_rollout_usage(&invalid), None);
+        assert_eq!(rollout_usage::parse_usage(&invalid), None);
     }
 
     #[test]
