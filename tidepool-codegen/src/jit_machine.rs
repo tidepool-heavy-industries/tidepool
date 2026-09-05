@@ -3280,8 +3280,8 @@ fn probe_list_spine(val: &tidepool_eval::value::Value) -> Option<(u64, u64, usiz
 /// and each cell freed iteratively, one at a time. This is the load-bearing
 /// detail — letting a deep spine hit `Value`'s recursive destructor costs ~3
 /// stack frames per cons cell, which overflows the eval thread's stack on
-/// responses past a few thousand elements (SIGSEGV outside signal protection
-/// → silent thread exit → caller hang).
+/// responses past a few thousand elements (a fatal stack overflow outside
+/// signal protection).
 fn dismantle_list_spine(
     val: tidepool_eval::value::Value,
     len: usize,

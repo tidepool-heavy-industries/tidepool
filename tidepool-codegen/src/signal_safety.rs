@@ -338,19 +338,29 @@ mod inner {
                 siglongjmp(buf, sig);
             }
         }
-        // SAFETY: Not in JIT context — writing crash dump with async-signal-safe calls,
-        // then terminating this thread only (not the process) to avoid killing the MCP server.
-        // The stderr breadcrumb is load-bearing: without it a silent thread exit
-        // presents to the embedder as a HANG, since the eval caller never returns.
-        // write(2) is async-signal-safe.
+        // An unprotected fault can leave arbitrary Rust state corrupted or
+        // locked. Thread-only exit also bypasses Rust's completion bookkeeping,
+        // permanently wedging scoped joins. Terminate the process with the
+        // original signal so its supervisor can observe the failure.
+        // SAFETY: diagnostics and fatal termination use async-signal-safe calls.
         unsafe {
             write_crash_dump(sig, _info);
-            let msg = b"[tidepool] fatal signal outside JIT protection; eval thread terminated; see .tidepool/crash.log\n";
+            let msg = b"[tidepool] fatal signal outside JIT protection; terminating process; see .tidepool/crash.log\n";
             libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
-            #[cfg(target_os = "linux")]
-            libc::syscall(libc::SYS_exit, 0);
-            #[cfg(not(target_os = "linux"))]
-            libc::pthread_exit(std::ptr::null_mut());
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(sig, &action, ptr::null_mut());
+            // The delivered signal is blocked while its handler runs. Unblock
+            // it before raising it on this thread with the default disposition.
+            let mut signals: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut signals);
+            libc::sigaddset(&mut signals, sig);
+            libc::sigprocmask(libc::SIG_UNBLOCK, &signals, ptr::null_mut());
+            libc::raise(sig);
+            // If restoring/delivering the signal fails, never return into the
+            // faulting instruction or report a successful exit.
+            libc::_exit(128 + sig);
         }
     }
 

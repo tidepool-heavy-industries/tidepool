@@ -16,11 +16,10 @@
 //! ## Crash isolation
 //!
 //! A JIT (or eval) fault that escapes `with_signal_protection` lands in the
-//! process-wide SIGSEGV/SIGILL handler, which exits the *thread* — to the
-//! embedder that reads as a silent hang, not a failure. So every case runs in
-//! a forked child that streams a verdict back over a pipe; the parent attributes
-//! faults by *verdict-byte presence*, not by `WIFSIGNALED` (the handler would
-//! mask the signal as a clean thread exit). The child runs the JIT phase first
+//! process-wide SIGSEGV/SIGILL handler, which terminates the process. Every case
+//! runs in a forked child that streams a verdict back over a pipe; the parent
+//! attributes faults by verdict-byte presence, including failures that exit
+//! without a signal. The child runs the JIT phase first
 //! and writes a survival marker before touching the eval oracle, so a missing
 //! marker is unambiguously a JIT fault (B3), while a marker with no final record
 //! is an eval-side fault (a known-divergence skip, not a bug).
