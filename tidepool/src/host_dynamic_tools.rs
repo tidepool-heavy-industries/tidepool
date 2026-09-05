@@ -96,6 +96,7 @@ impl HostDynamicToolService {
         let registration = Registration {
             protocol_version: PROTOCOL_VERSION,
             dynamic_tools: vec![DynamicTool::Namespace {
+                model_only: true,
                 name: NAMESPACE.into(),
                 description,
                 tools: wire_tools,
@@ -152,6 +153,8 @@ enum RegistrationScope {
 #[serde(tag = "type", rename_all = "camelCase")]
 enum DynamicTool {
     Namespace {
+        #[serde(rename = "modelOnly")]
+        model_only: bool,
         name: String,
         description: String,
         tools: Vec<NamespaceTool>,
@@ -243,6 +246,7 @@ fn parse_thread(raw: String) -> Result<BackendThreadId, uuid::Error> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CallRequest {
+    context_call_id: Option<String>,
     protocol_version: u32,
     thread_id: String,
     turn_id: String,
@@ -430,6 +434,7 @@ async fn call(
     };
     let invocation = ToolInvocation {
         context: Some(ToolInvocationContext {
+            context_call_id: request.context_call_id.clone(),
             thread_id: request.thread_id.clone(),
             turn_id: request.turn_id.clone(),
             call_id: request.call_id.clone(),
@@ -510,6 +515,7 @@ mod tests {
                         "threadId": context.as_ref().map(|value| &value.thread_id),
                         "turnId": context.as_ref().map(|value| &value.turn_id),
                         "callId": context.as_ref().map(|value| &value.call_id),
+                        "contextCallId": context.as_ref().and_then(|value| value.context_call_id.as_ref()),
                         "namespace": context.as_ref().and_then(|value| value.namespace.as_ref()),
                     })),
                     ToolArguments::Structured(_) => Err(ResidentToolError::InvalidInvocation(
@@ -602,6 +608,7 @@ mod tests {
 
     fn call_request(arguments: serde_json::Value) -> CallRequest {
         CallRequest {
+            context_call_id: None,
             protocol_version: PROTOCOL_VERSION,
             thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
             turn_id: "turn".into(),
@@ -620,6 +627,7 @@ mod tests {
         assert_eq!(value["scope"], "primaryThread");
         assert_eq!(value["dynamicTools"][0]["type"], "namespace");
         assert_eq!(value["dynamicTools"][0]["name"], NAMESPACE);
+        assert_eq!(value["dynamicTools"][0]["modelOnly"], true);
         assert_eq!(value["dynamicTools"][0]["tools"][0]["type"], "custom");
         assert_eq!(value["dynamicTools"][0]["tools"][0]["name"], "haskell");
     }
@@ -704,6 +712,7 @@ mod tests {
         let response = call(
             State(state),
             Json(CallRequest {
+                context_call_id: None,
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: thread.into(),
                 turn_id: "turn".into(),
@@ -869,6 +878,7 @@ mod tests {
             "threadId": thread,
             "turnId": "turn-1",
             "callId": "call-1",
+            "contextCallId": "outer-exec",
             "namespace": NAMESPACE,
             "tool": "haskell",
             "arguments": source,
@@ -930,6 +940,7 @@ mod tests {
         assert_eq!(receipt["threadId"], thread);
         assert_eq!(receipt["turnId"], "turn-1");
         assert_eq!(receipt["callId"], "call-1");
+        assert_eq!(receipt["contextCallId"], "outer-exec");
         assert_eq!(receipt["namespace"], NAMESPACE);
 
         let conflict = client

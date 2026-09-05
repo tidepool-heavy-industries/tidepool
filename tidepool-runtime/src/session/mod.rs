@@ -73,9 +73,9 @@ pub use workbench::{
     workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome, CommittedBlock,
     GhciInputError, GhciInputKind, GhciInputUnit, MetaCommandLine, ParsedBlock, WorkSequence,
     WorkbenchBinding, WorkbenchBindingKind, WorkbenchDiscovery, WorkbenchExecutionId,
-    WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
-    WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{

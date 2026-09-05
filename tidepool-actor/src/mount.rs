@@ -83,6 +83,11 @@ impl ActorCompileView {
         self.session.turn_imports(&self.external)
     }
 
+    #[must_use]
+    pub(crate) fn shadow_preamble(&self, preamble: &str) -> String {
+        self.session.shadow_preamble(preamble)
+    }
+
     /// Exact non-session imports needed when persisting a declaration. This
     /// includes configured vocabulary and compiler-derived type dependencies,
     /// but excludes generated declaration/value modules used to carry state.

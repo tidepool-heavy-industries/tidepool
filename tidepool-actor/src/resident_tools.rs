@@ -151,6 +151,13 @@ impl ResidentToolClient {
     ) -> Result<serde_json::Value, ResidentToolError> {
         let _turn = self.dispatch_gate.lock().await;
         if let Some(invocation) = invocation {
+            if let Some(context_call_id) = &invocation.context_call_id {
+                request =
+                    request.with_fork_boundary(tidepool_runtime::session::WorkbenchForkBoundary {
+                        thread_id: invocation.thread_id.clone(),
+                        call_id: context_call_id.clone(),
+                    });
+            }
             let operation = WorkbenchCallKey::from(invocation);
             request = request.with_execution_id(execution_id(self.actor.identity(), &operation));
         }
@@ -241,6 +248,7 @@ mod tests {
 
     fn call_key(call_id: &str) -> WorkbenchCallKey {
         ToolInvocationContext {
+            context_call_id: Some("outer-call".into()),
             thread_id: "thread".into(),
             turn_id: "turn".into(),
             call_id: call_id.into(),

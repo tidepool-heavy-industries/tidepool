@@ -277,11 +277,17 @@ pub fn workbench_json_to_haskell(value: &serde_json::Value) -> String {
     }
 }
 
+/// Exact hosted invocation coordinates supplied by the trusted transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkbenchForkBoundary {
+    pub thread_id: String,
+    pub call_id: String,
+}
+
 /// One ordered request against a persistent Haskell workbench.
 ///
-/// This is transport-neutral despite the JSON-shaped optional input: MCP,
-/// provider-native fenced execution, tests, and future frontends must agree on
-/// item sequencing and input mounting without copying the request contract.
+/// MCP, provider-native fenced execution, tests, and other frontends share
+/// item sequencing and input mounting through this transport-neutral value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkbenchRequest {
     /// GHCi-capable items run in source order. Execution stops at the first
@@ -306,6 +312,10 @@ pub struct WorkbenchRequest {
     #[serde(skip)]
     #[schemars(skip)]
     execution_id: Option<WorkbenchExecutionId>,
+    /// Trusted transport coordinates; never accepted from authored JSON.
+    #[serde(skip)]
+    #[schemars(skip)]
+    fork_boundary: Option<WorkbenchForkBoundary>,
 }
 
 impl WorkbenchRequest {
@@ -317,6 +327,7 @@ impl WorkbenchRequest {
             verbose: None,
             input_kinds: units.iter().map(GhciInputUnit::kind).collect(),
             execution_id: None,
+            fork_boundary: None,
         })
     }
 
@@ -329,6 +340,17 @@ impl WorkbenchRequest {
     #[must_use]
     pub fn execution_id(&self) -> Option<&WorkbenchExecutionId> {
         self.execution_id.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_fork_boundary(mut self, boundary: WorkbenchForkBoundary) -> Self {
+        self.fork_boundary = Some(boundary);
+        self
+    }
+
+    #[must_use]
+    pub fn fork_boundary(&self) -> Option<&WorkbenchForkBoundary> {
+        self.fork_boundary.as_ref()
     }
 
     #[must_use]
@@ -969,6 +991,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_coordinates_cannot_be_supplied_by_authored_json() {
+        let authored: WorkbenchRequest = serde_json::from_value(serde_json::json!({
+            "items": ["pure ()"],
+            "execution_id": "forged-execution",
+            "fork_boundary": {"thread_id": "another-parent", "call_id": "another-call"}
+        }))
+        .unwrap();
+        assert!(authored.execution_id().is_none());
+        assert!(authored.fork_boundary().is_none());
+
+        let trusted = authored.with_fork_boundary(WorkbenchForkBoundary {
+            thread_id: "parent-thread".into(),
+            call_id: "hosted-call".into(),
+        });
+        assert_eq!(trusted.fork_boundary().unwrap().call_id, "hosted-call");
+        let serialized = serde_json::to_value(trusted).unwrap();
+        assert!(serialized.get("fork_boundary").is_none());
+        assert!(serialized.get("execution_id").is_none());
+        let schema = serde_json::to_value(schemars::schema_for!(WorkbenchRequest)).unwrap();
+        assert!(schema["properties"].get("fork_boundary").is_none());
+        assert!(schema["properties"].get("execution_id").is_none());
+    }
 
     #[test]
     fn classifies_only_stable_lexical_shapes() {

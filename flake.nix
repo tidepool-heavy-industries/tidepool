@@ -18,7 +18,7 @@
     # Codex owns its own locked compiler/package graph. Do not force it onto
     # Tidepool's Rust overlay: the two workspaces intentionally have distinct
     # MSRV/toolchain timelines.
-    codex.url = "github:inanna-malick/codex/1f89980a03d8afdcb484469fb667446158aaff9f";
+    codex.url = "github:inanna-malick/codex/118e1cfcd1d7dd120460ff0685e976f0d17327dc";
   };
 
   outputs =

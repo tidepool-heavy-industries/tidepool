@@ -65,7 +65,26 @@ pub struct ActorWorkbenchSource {
     workbench_imports: SourceImports,
 }
 
+/// One prepared import environment for evaluation and inspection. Name
+/// resolution comes from the exact lexical view before either path builds
+/// a compiler request.
+struct WorkbenchCompilation {
+    preamble: String,
+    imports: String,
+    include: Vec<PathBuf>,
+    injected: Vec<String>,
+}
+
 impl ActorWorkbenchSource {
+    fn prepare(&self, scope: &crate::ActorCompileView) -> WorkbenchCompilation {
+        WorkbenchCompilation {
+            preamble: scope.shadow_preamble(&self.preamble),
+            imports: scope.turn_imports(),
+            include: scope.include_paths(&self.base_include),
+            injected: scope.injected_module_names(),
+        }
+    }
+
     #[must_use]
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
         Self {
@@ -3285,11 +3304,10 @@ where
     O: OutputSink + Sync,
 {
     let compile_view = actor_compile_view(session, context, source, type_modules)?;
+    let prepared = source.prepare(&compile_view);
     let templates =
-        resident_workbench_templates(&source.preamble, effect_stack, &compile_view.turn_imports());
-    let include = compile_view.include_paths(&source.base_include);
-    let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
-    let injected = compile_view.injected_module_names();
+        resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
+    let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let verdict = match classify_workbench_item(&block.source) {
         Ok(WorkbenchItem::Declaration(_)) => Some(TurnClassification {
             kind: TurnKind::Decl,
@@ -3305,7 +3323,7 @@ where
         lexical_scope = ?context.placement.lexical_scope,
         generation = compile_view.next_value_generation().0,
         imports = %compile_view.turn_imports(),
-        injected = ?injected,
+        injected = ?prepared.injected,
         source = %block.source,
         "compiling resident actor workbench item"
     );
@@ -3314,7 +3332,7 @@ where
         templates: &templates,
         include: &include_refs,
         session_root: compile_view.session_root(),
-        inject_modules: &injected,
+        inject_modules: &prepared.injected,
         gen: compile_view.next_value_generation().0,
         verdict,
         target: None,
@@ -3545,16 +3563,18 @@ fn inspect_compile_view(
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
 ) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError> {
-    let includes = compile_view.include_paths(&source.base_include);
-    let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let injected = compile_view.injected_module_names();
-    let imports = compile_view.turn_imports();
+    let prepared = source.prepare(compile_view);
+    let include_refs = prepared
+        .include
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
     match run_inspections(InspectionRequest {
-        preamble: &source.preamble,
-        imports: &imports,
+        preamble: &prepared.preamble,
+        imports: &prepared.imports,
         include: &include_refs,
         session_root: compile_view.session_root(),
-        inject_modules: &injected,
+        inject_modules: &prepared.injected,
         queries,
     }) {
         Ok(results) if results.len() == queries.len() => Ok(results

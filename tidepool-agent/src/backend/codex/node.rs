@@ -78,6 +78,13 @@ pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, Agen
     .await?;
     require_probe(
         &executable,
+        &["fork", "--help"],
+        "destination-owned invocation forks",
+        &["--destination-local", "--through-call"],
+    )
+    .await?;
+    require_probe(
+        &executable,
         &["queue", "--help"],
         "queue delivery",
         &["--thread", "--message"],
@@ -432,9 +439,17 @@ fn command_for(
             validate_thread(thread)?;
             command.arg("resume").arg(&thread.0);
         }
-        InteractiveLaunchMode::Fork(thread) => {
-            validate_thread(thread)?;
-            command.arg("fork").arg(&thread.0);
+        InteractiveLaunchMode::Fork {
+            parent,
+            through_call,
+        } => {
+            validate_thread(parent)?;
+            command
+                .arg("fork")
+                .arg(&parent.0)
+                .arg("--destination-local")
+                .arg("--through-call")
+                .arg(through_call);
         }
     }
     command
@@ -863,6 +878,39 @@ mod tests {
                 "/tmp/tidepool/host-tools.sock",
             ]
         }));
+    }
+
+    #[test]
+    fn fork_selects_destination_runtime_and_exact_call_without_effort_dependency() {
+        for effort in [
+            None,
+            Some(ReasoningEffort::Low),
+            Some(ReasoningEffort::High),
+        ] {
+            let mut requested = spec(InteractiveLaunchMode::Fork {
+                parent: BackendThreadId(THREAD.into()),
+                through_call: "hosted-call-17".into(),
+            });
+            requested.effort = effort;
+            let command = command_for(&installation(), &requested).unwrap();
+            assert_eq!(
+                &command.args[..5],
+                &[
+                    "fork",
+                    THREAD,
+                    "--destination-local",
+                    "--through-call",
+                    "hosted-call-17"
+                ]
+            );
+            assert_eq!(
+                command
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("model_reasoning_effort")),
+                effort.is_some()
+            );
+        }
     }
 
     #[test]

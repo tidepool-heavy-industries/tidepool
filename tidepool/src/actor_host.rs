@@ -4,8 +4,12 @@
 //! stock interactive agent is attached to each installed Haskell tool policy;
 //! tmux is process ownership and observability, never message transport.
 
+#[cfg(test)]
+mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
+#[cfg(test)]
+mod test_campaign;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -156,7 +160,7 @@ fn launch_effort(
     default: ReasoningEffort,
     requested: Option<tidepool_actor::ForkEffort>,
 ) -> Option<ReasoningEffort> {
-    if matches!(mode, InteractiveLaunchMode::Fork(_)) {
+    if matches!(mode, InteractiveLaunchMode::Fork { .. }) {
         requested.map(|effort| match effort {
             tidepool_actor::ForkEffort::Low => ReasoningEffort::Low,
             tidepool_actor::ForkEffort::Medium => ReasoningEffort::Medium,
@@ -1793,7 +1797,21 @@ async fn launch_prepared_interactive_application(
         })?,
     );
     let launch_mode = if let Some(parent) = fork_parent_thread.clone() {
-        InteractiveLaunchMode::Fork(parent)
+        let boundary = installation
+            .fork_boundary
+            .as_ref()
+            .filter(|boundary| boundary.thread_id == parent.0 && !boundary.call_id.is_empty())
+            .ok_or_else(|| {
+                application_error(
+                    actor_identity,
+                    InteractiveOperation::BuildCommand,
+                    "context fork has no matching parent hosted-call boundary",
+                )
+            })?;
+        InteractiveLaunchMode::Fork {
+            parent,
+            through_call: boundary.call_id.clone(),
+        }
     } else if actor_identity == root {
         config.root_launch_mode.clone()
     } else {
@@ -1801,11 +1819,11 @@ async fn launch_prepared_interactive_application(
     };
     let expected_resume = match &launch_mode {
         InteractiveLaunchMode::Resume(thread) => Some(thread.clone()),
-        InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
+        InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork { .. } => None,
     };
     runtime_observation.publish_cache_boundary(match &launch_mode {
         InteractiveLaunchMode::Fresh => tidepool_actor::CacheBoundaryReason::Fresh,
-        InteractiveLaunchMode::Fork(_) => tidepool_actor::CacheBoundaryReason::ForkedPrefix,
+        InteractiveLaunchMode::Fork { .. } => tidepool_actor::CacheBoundaryReason::ForkedPrefix,
         InteractiveLaunchMode::Resume(_) => tidepool_actor::CacheBoundaryReason::ReattachedThread,
     });
     let developer_instructions = developer_instructions(&installation.effective_role, &launch_mode);
@@ -1818,9 +1836,11 @@ async fn launch_prepared_interactive_application(
         ),
     );
     let effort = launch_effort(&launch_mode, config.effort, installation.fork_effort);
+    let model =
+        (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. })).then(|| config.model.clone());
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
-        model: Some(config.model.clone()),
+        model,
         effort,
         developer_instructions,
         initial_prompt: installation.initial_user_message.clone(),
@@ -2562,7 +2582,10 @@ mod tests {
     fn fork_effort_is_optional_and_never_replaced_by_the_root_default() {
         use tidepool_actor::ForkEffort;
         use tidepool_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
-        let fork = InteractiveLaunchMode::Fork(BackendThreadId("parent".into()));
+        let fork = InteractiveLaunchMode::Fork {
+            parent: BackendThreadId("parent".into()),
+            through_call: "call".into(),
+        };
         for default in [
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
@@ -2590,7 +2613,6 @@ mod tests {
     use tidepool_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     };
-    use tidepool_testing::eval_harness;
     use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use tidepool_worktree::WorktreeSpec;
 
@@ -2619,6 +2641,7 @@ mod tests {
             let result = endpoint
                 .dispatch_boxed(ToolInvocation {
                     context: Some(ToolInvocationContext {
+                        context_call_id: Some(call_id.clone()),
                         thread_id: "actor-host-vertical".into(),
                         turn_id: call_id.clone(),
                         call_id,
@@ -2640,7 +2663,7 @@ mod tests {
         last.expect("non-empty Haskell fixture")
     }
 
-    async fn dispatch_haskell_script(
+    pub(super) async fn dispatch_haskell_script(
         endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
         script: &str,
     ) -> serde_json::Value {
@@ -2648,6 +2671,7 @@ mod tests {
         endpoint
             .dispatch_boxed(ToolInvocation {
                 context: Some(ToolInvocationContext {
+                    context_call_id: Some(call_id.clone()),
                     thread_id: "actor-host-vertical".into(),
                     turn_id: call_id.clone(),
                     call_id,
@@ -2834,7 +2858,10 @@ mod tests {
                 maximum_depth: 2,
                 maximum_active_children: 3,
             }),
-            &InteractiveLaunchMode::Fork(BackendThreadId("parent".into())),
+            &InteractiveLaunchMode::Fork {
+                parent: BackendThreadId("parent".into()),
+                through_call: "call".into(),
+            },
         );
         assert!(scaffold.starts_with(PromptId::ScaffoldingAgent.body()));
         assert!(scaffold.contains("descendant_depth=2; active_children=3"));
@@ -3273,64 +3300,18 @@ mod tests {
                 .collect()
         }
 
-        eval_harness::require_extract();
-        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
-        repository
-            .writer()
-            .commit_file("README.md", "source\n", "seed")
-            .unwrap();
-        let runtime = tempfile::tempdir().unwrap();
-        let config = ActorHostConfig {
-            haskell_root: crate::haskell_sources::ensure_shoal_haskell().unwrap(),
-            workspace: repository.path().to_path_buf(),
-            run_root: runtime.path().join("run"),
-            root_binding_path: runtime.path().join("root-binding.json"),
-            interactive_agent: tidepool_agent::native_interactive_agent_from_parts(
-                std::env::current_exe().unwrap(),
-                "test installation".into(),
-            )
-            .unwrap(),
-            tmux_session: "unused-in-reply-watch-test".into(),
-            model: "test-model".into(),
-            effort: ReasoningEffort::Low,
-            root_launch_mode: InteractiveLaunchMode::Fresh,
-            pane_environment: std::collections::BTreeMap::new(),
-        };
-        let session_root = tempfile::tempdir().expect("session root");
-        let (worktrees, bindings) =
-            actor_worktree_resources_at(&runtime.path().join("worktrees"), repository.path())
-                .expect("worktree resources");
-        let bindings = Arc::new(Mutex::new(bindings));
-        let authority = ActorWorktreeAuthority::new(
-            runtime_namespace(session_root.path()),
-            Arc::clone(&bindings),
-        );
-        let (source, root) = compile_root(
-            &config,
-            session_root.path(),
-            worktrees.clone(),
-            authority.clone(),
-        )
-        .expect("compile permanent root");
-        let (actor, hosted, mut deployments) =
-            tidepool_actor::spawn_resident_root_with_fork_admission(
-                source,
-                root,
-                Some(fork_workspace_admission(
-                    worktrees.clone(),
-                    authority.clone(),
-                )),
-            )
-            .await
-            .expect("spawn permanent root");
-        authority.install_root(actor.identity().into());
-        let LocalResidentDeployment::PolicyInstalled(root_installation) = deployments
-            .recv()
-            .await
-            .expect("root application installation")
-        else {
-            panic!("root retired before installing its application")
-        };
+        let test_campaign::TestCampaign {
+            _repository,
+            _runtime,
+            session_root,
+            worktrees,
+            bindings,
+            authority,
+            actor,
+            hosted,
+            mut deployments,
+            root_installation,
+        } = test_campaign::TestCampaign::start().await;
 
         let ergonomics = dispatch_haskell_script(
             root_installation.policy.as_ref(),

@@ -227,16 +227,18 @@ mod tests {
     #[test]
     fn materialized_facade_reexports_only_selected_exact_items() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let view = SessionCompileView::new(
-            SessionId(8),
-            ScopeId::ROOT,
-            dir.path().to_path_buf(),
-            SourceImports::new(),
-            Some(SessionModule::lib(Generation(4))),
-            Vec::new(),
-            Vec::new(),
-            Generation(1),
-        );
+        let view = SessionCompileView {
+            session: SessionId(8),
+            lexical_scope: ScopeId::ROOT,
+            root: dir.path().to_path_buf(),
+            persistent_imports: SourceImports::new(),
+            library: Some(SessionModule::lib(Generation(4))),
+            visible_values: Vec::new(),
+            injected_values: Vec::new(),
+            next_value_generation: Generation(1),
+            shadowing: Vec::new(),
+        }
+        .canonicalize();
         let surface = ExactExportSurface::new(
             SessionId(8),
             Some(SessionModule::lib(Generation(4))),

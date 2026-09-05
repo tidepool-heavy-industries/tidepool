@@ -73,6 +73,8 @@ pub enum ToolArguments {
 /// Transport correlation carried unchanged when the host protocol supplies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolInvocationContext {
+    /// Recorded model invocation owning this execution, when supplied by the host.
+    pub context_call_id: Option<String>,
     pub thread_id: String,
     pub turn_id: String,
     pub call_id: String,

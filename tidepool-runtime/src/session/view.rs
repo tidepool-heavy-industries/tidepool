@@ -124,43 +124,45 @@ impl SourceImports {
 /// module sets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionCompileView {
-    session: SessionId,
-    lexical_scope: ScopeId,
-    root: PathBuf,
-    persistent_imports: SourceImports,
-    library: Option<SessionModule>,
-    visible_values: Vec<SessionModule>,
-    injected_values: Vec<SessionModule>,
-    next_value_generation: Generation,
+    pub(super) session: SessionId,
+    pub(super) lexical_scope: ScopeId,
+    pub(super) root: PathBuf,
+    pub(super) persistent_imports: SourceImports,
+    pub(super) library: Option<SessionModule>,
+    pub(super) visible_values: Vec<SessionModule>,
+    pub(super) injected_values: Vec<SessionModule>,
+    pub(super) next_value_generation: Generation,
+    pub(super) shadowing: Vec<super::ExportItem>,
 }
 
 impl SessionCompileView {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the compile view is one immutable snapshot of these independently owned fields"
-    )]
-    pub(crate) fn new(
-        session: SessionId,
-        lexical_scope: ScopeId,
-        root: PathBuf,
-        persistent_imports: SourceImports,
-        library: Option<SessionModule>,
-        mut visible_values: Vec<SessionModule>,
-        mut injected_values: Vec<SessionModule>,
-        next_value_generation: Generation,
-    ) -> Self {
-        sort_modules(&mut visible_values);
-        sort_modules(&mut injected_values);
-        Self {
-            session,
-            lexical_scope,
-            root,
-            persistent_imports,
-            library,
-            visible_values,
-            injected_values,
-            next_value_generation,
-        }
+    pub(super) fn canonicalize(mut self) -> Self {
+        sort_modules(&mut self.visible_values);
+        sort_modules(&mut self.injected_values);
+        self
+    }
+
+    /// Current scope bindings take precedence over implicit vocabulary imports,
+    /// just as they do in persisted declaration modules.
+    #[must_use]
+    pub fn shadow_preamble(&self, preamble: &str) -> String {
+        let heads = self.shadowing.iter().collect::<Vec<_>>();
+        preamble
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.trim_start().starts_with("import ") {
+                    let rewritten =
+                        super::render::hide_session_heads(line.trim_end_matches('\n'), &heads);
+                    if line.ends_with('\n') {
+                        format!("{rewritten}\n")
+                    } else {
+                        rewritten
+                    }
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect()
     }
 
     #[must_use]
@@ -257,19 +259,21 @@ mod tests {
 
     #[test]
     fn compile_view_keeps_visible_and_injected_value_sets_distinct() {
-        let view = SessionCompileView::new(
-            SessionId(4),
-            ScopeId::ROOT,
-            PathBuf::from("/session"),
-            SourceImports::from_specs(["Data.Set qualified as Set"]),
-            Some(SessionModule::lib(Generation(3))),
-            vec![SessionModule::val(Generation(5))],
-            vec![
+        let view = SessionCompileView {
+            session: SessionId(4),
+            lexical_scope: ScopeId::ROOT,
+            root: PathBuf::from("/session"),
+            persistent_imports: SourceImports::from_specs(["Data.Set qualified as Set"]),
+            library: Some(SessionModule::lib(Generation(3))),
+            visible_values: vec![SessionModule::val(Generation(5))],
+            injected_values: vec![
                 SessionModule::val(Generation(2)),
                 SessionModule::val(Generation(5)),
             ],
-            Generation(6),
-        );
+            next_value_generation: Generation(6),
+            shadowing: Vec::new(),
+        }
+        .canonicalize();
         let external = SourceImports::from_specs(["HarnessTypes (Decision (..))"]);
 
         assert_eq!(

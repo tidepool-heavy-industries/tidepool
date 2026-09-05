@@ -458,7 +458,7 @@ fn extract_user_imports(src: &str) -> (String, Vec<String>) {
 ///   A `import qualified …` line is returned unchanged — qualified names can
 ///   never collide with an unqualified session decl. Empty `all_session_heads`
 ///   also returns the line unchanged (no session decls yet to guard against).
-fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -> String {
+pub(super) fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -> String {
     if all_session_heads.is_empty() || imp.trim_start().starts_with("import qualified") {
         return imp.to_string();
     }

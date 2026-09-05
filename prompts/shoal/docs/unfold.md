@@ -9,7 +9,7 @@ let Right domainLabel = branchLabel "domain"
 let Right reviewLabel = branchLabel "review"
 :{
 workers <- unfold (batch campaign wave) $
-  (,) <$> child (coding @Report domainLabel projectHead domainPlan)
+  (,) <$> child (withEffort Low (coding @Report domainLabel projectHead domainPlan))
       <*> child (researching @Review reviewLabel projectHead reviewPlan)
 :}
 ```
@@ -17,6 +17,11 @@ workers <- unfold (batch campaign wave) $
 Each `Forked a` contains its retained `AgentRef`, `Response a`, and immutable
 launch/worktree receipt. Context is copied exactly; the branch role narrows
 effects and native authority independently.
+
+`withEffort Low`, `Medium`, or `High` requests the child's initial reasoning
+effort. Omission inherits the parent setting. The request alone is not evidence
+of provider application or cache reuse; inspect provider observations before
+claiming either. Changing effort on an already running actor is not supported.
 
 Define your `Report`/`Review` types and `domainPlan`/`reviewPlan` values first.
 `projectHead` requires a clean source; choose `snapshotDirty projectHead`

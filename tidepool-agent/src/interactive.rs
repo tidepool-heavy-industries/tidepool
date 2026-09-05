@@ -72,7 +72,10 @@ pub type InteractiveFuture<'a, T> =
 pub enum InteractiveLaunchMode {
     Fresh,
     Resume(BackendThreadId),
-    Fork(BackendThreadId),
+    Fork {
+        parent: BackendThreadId,
+        through_call: String,
+    },
 }
 
 /// Which layer owns native filesystem containment for an interactive agent.

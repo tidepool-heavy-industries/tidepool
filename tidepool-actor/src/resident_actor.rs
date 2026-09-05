@@ -67,6 +67,7 @@ pub struct LocalResidentInstallation {
     pub launch_worktrees: Vec<String>,
     pub effective_role: crate::EffectiveRole,
     pub fork_effort: Option<crate::ForkEffort>,
+    pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
     pub fork_group: Option<crate::ForkGroupId>,
@@ -331,6 +332,7 @@ pub struct ResidentKernelBehavior<H, O> {
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
     completed_workbenches: CompletedWorkbenchExecutions,
+    active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 }
 
 #[derive(Clone)]
@@ -400,6 +402,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
             completed_workbenches: CompletedWorkbenchExecutions::default(),
+            active_fork_boundary: None,
         }
     }
 
@@ -426,6 +429,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
             completed_workbenches: CompletedWorkbenchExecutions::default(),
+            active_fork_boundary: None,
         }
     }
 
@@ -921,6 +925,18 @@ where
             fork_workspace,
         } = child;
         let fork_group = descriptor.fork_group();
+        if descriptor.context_parent().is_some() {
+            if self.policy_installed
+                && self.active_fork_boundary.as_ref().is_none_or(|boundary| {
+                    boundary.thread_id.is_empty() || boundary.call_id.is_empty()
+                })
+            {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
+                ));
+            }
+            descriptor = descriptor.with_fork_boundary(self.active_fork_boundary.clone());
+        }
         if !self
             .descriptor
             .profile()
@@ -2031,6 +2047,7 @@ where
                             launch_worktrees: self.launch_worktrees.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
                             fork_effort: self.descriptor.fork_effort(),
+                            fork_boundary: self.descriptor.fork_boundary().cloned(),
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
                             fork_group: self.descriptor.fork_group(),
@@ -2186,6 +2203,7 @@ where
             launch_worktrees: self.launch_worktrees.clone(),
             effective_role: self.descriptor.effective_role().clone(),
             fork_effort: self.descriptor.fork_effort(),
+            fork_boundary: self.descriptor.fork_boundary().cloned(),
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
             fork_group: self.descriptor.fork_group(),
@@ -3602,7 +3620,9 @@ where
                 }
             }
             let retained_request = execution.as_ref().map(|_| request.clone());
+            self.active_fork_boundary = request.fork_boundary().cloned();
             let result = self.execute_workbench(kernel, &context, request).await;
+            self.active_fork_boundary = None;
             match &result {
                 Ok(KernelStep::Continue(_)) => self
                     .runtime_observation

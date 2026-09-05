@@ -1023,16 +1023,33 @@ impl PersistentSession {
             .map(|(_, entry)| entry.module)
             .collect();
         let injected_values = self.bindings.live_modules().collect();
-        Some(SessionCompileView::new(
-            lib.session_id(),
-            scope,
-            PathBuf::from(lib.include_dir()),
-            self.workbench_imports_in(scope),
-            lib.current_module_in(scope),
-            visible_values,
-            injected_values,
-            self.val_gen.next(),
-        ))
+        let mut shadowing = lib
+            .current_declarations_in(scope)
+            .into_iter()
+            .map(|(item, _)| item)
+            .collect::<Vec<_>>();
+        shadowing.extend(
+            self.bindings
+                .iter_current_in(&self.scopes, scope)
+                .into_iter()
+                .map(|(name, _)| super::ExportItem::Value {
+                    name: name.0.clone(),
+                }),
+        );
+        Some(
+            SessionCompileView {
+                session: lib.session_id(),
+                lexical_scope: scope,
+                root: PathBuf::from(lib.include_dir()),
+                persistent_imports: self.workbench_imports_in(scope),
+                library: lib.current_module_in(scope),
+                visible_values,
+                injected_values,
+                next_value_generation: self.val_gen.next(),
+                shadowing,
+            }
+            .canonicalize(),
+        )
     }
 
     /// Capture selected declaration heads from `scope` as an exact export

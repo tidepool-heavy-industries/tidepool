@@ -20,6 +20,7 @@ pub struct ActorDescriptor {
     actor_path: Option<tidepool_repr::ActorPath>,
     fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
+    fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 }
 
 impl ActorDescriptor {
@@ -38,6 +39,7 @@ impl ActorDescriptor {
             actor_path: None,
             fork_group: None,
             fork_effort: None,
+            fork_boundary: None,
         }
     }
 
@@ -49,6 +51,20 @@ impl ActorDescriptor {
     #[must_use]
     pub fn fork_effort(&self) -> Option<crate::ForkEffort> {
         self.fork_effort
+    }
+
+    #[must_use]
+    pub fn fork_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
+        self.fork_boundary.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) fn with_fork_boundary(
+        mut self,
+        boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    ) -> Self {
+        self.fork_boundary = boundary;
+        self
     }
 
     #[must_use]

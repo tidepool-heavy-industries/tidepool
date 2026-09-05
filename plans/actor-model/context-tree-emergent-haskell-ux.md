@@ -28,6 +28,33 @@ user's TUI repository, not an automated provider campaign.
 
 ### Current implementation evidence
 
+- Disk/build cleanup committed as `c88f863b`: removed the old Rust debug
+  artifacts, disabled dev/test debug information, and consolidated 221
+  integration targets in codegen/runtime/harness/repl into 34 Cargo suites.
+  Test bodies remain in separate modules; Cargo owns the suite list (the
+  duplicate JSON manifest was deleted). All 34 targets compiled and list
+  1,447 tests. Four targeted runtime checks passed, strict lint passed, and
+  ELF inspection found no debug sections in the linked suites. The rebuilt
+  debug tree measured 2.8 GiB before subsequent Shoal integration builds.
+- Codex source pin committed as `6591ec5d` at
+  `1f89980a03d8afdcb484469fb667446158aaff9f`. The flake contract evaluates;
+  final Nix binary build, namespace smoke against that binary, and real-provider
+  cache reuse are still separate pending evidence.
+- Hosted invocation coordinates now travel as trusted, non-serialized
+  workbench metadata into immutable child descriptors and destination-local
+  CLI launches. Siblings retain the same parent-thread/call pair. Forks omit
+  the model override as well as omitted effort, preserving parent selection.
+- Exact lexical compile views retain current shadowing names. Evaluation and
+  inspection share one prepared source environment and declaration rendering's
+  import-hiding rule. The executable help scenario covers a `Review` alias
+  colliding with the prelude, including inspection and inherited child use.
+- The focused published-help scenario executes unfold, heterogeneous watch,
+  retained request, deadline options, repeated settled polls and failed-child
+  status. It waits for typed readiness rather than assuming accepted replies
+  have already finished settlement. Together with trusted-coordinate and
+  launch/effort checks: four passed, nextest
+  `2c9679b9-3868-4500-8fd4-104e1db277b8` (39.172 seconds).
+
 - Baseline committed as `b248fe5f` at the user's request; prior canary/test
   results are recorded in the hardening ledger, not rerun for that checkpoint.
 - Shared tree practice is composed for every role and included in prompt
@@ -1479,3 +1506,80 @@ The desired outcome is a root that grows useful Haskell and a tree of
 understanding together: investing effort in shared reasoning, distributing
 well-understood work, integrating exact evidence, and discovering better ways
 to work as the campaign proceeds.
+
+
+### Context-fork regression investigation (2026-09-04)
+
+The successful Sol canary root `01a06f18-f4dc-7662-b610-e3baa077c54c`
+recorded 20 provider `exec` calls and no direct Haskell calls. The failed Astra
+root `01a06fb9-8e38-7af2-8a29-c5f407a86ff4` likewise recorded `exec` calls.
+September 3 Shoal rollouts also contain wrapped Haskell calls. These observations
+do not establish when direct access first disappeared, but rule out today's
+Astra switch as the introduction of wrapping in the successful canary workflow.
+Both Sol and Astra currently advertise `code_mode_only` in local model metadata.
+
+The prior Codex pin was `f7adc3ad3783eff5c0594463ff4e2a00b841a3f0`. Its tool
+exposure policy matches the current pin for this case. Today's destination-local
+fork integration introduced an exact `--through-call` boundary and incorrectly
+used the nested hosted execution ID as a recorded conversation call ID. The
+existing code-mode cell broker must retain both identities; workbench receipt
+identity must continue using the individual nested execution ID.
+
+Explicit `contextCallId` transport provenance, separate from `callId`, is
+implemented in both working trees. Direct Haskell exposure and wrapped-call
+behavior have independent acceptance tests and live evidence below.
+
+
+Direct-access fix verification: run `f9544853-78d3-41d2-aab9-0386a2a0258c`
+(`shoal-direct-haskell-canary`) used root thread
+`01a06fe5-3f10-78d3-a7ff-7cb2adb5f60e` and child
+`01a06fe6-8267-7170-ab9d-643aa52c8b4b`. Both provider rollouts contain native
+`tidepool_actor.haskell` custom calls. The child inherited the report type and
+closure, returned `shoal-iris-739::child`, changed only its sentinel, and settled
+a typed watch observed twice. Cleanup completed and retained the branch, seed
+commit `b2aba7f79fc10eac4906c8b9326b65f04e04e73e`, and dirty worktree
+`wt-01f6503a-5948-465a-a288-1d3aaf076f1e`. Root remained ROOT.
+
+Surface ownership is now declaration-level: Shoal advertises its namespace with
+`modelOnly: true`; Codex retains native exposure across model tool-mode changes
+without replacing any configured namespace exceptions.
+
+First-child cache measurement is **7,808 / 24,745 input tokens (~32%)**. Later
+24,832 / 25,144 (~99%) is within-child reuse, not evidence of parent-prefix reuse.
+A strengthened namespace smoke proves the sampled parent input prefix is
+identical but shows distinct `prompt_cache_key` values for every CLI fork.
+Cache affinity is now separate from session ownership in Codex's existing
+client and durable metadata. Its final record contains both a routing UUID and
+a separate prompt cache key. Direct and wrapped namespace smokes verify one
+inherited cache key across siblings and grandchildren, with isolated execution.
+Legacy and paginated fork/resume tests also cover cache affinity, including
+children resumed before their first inference.
+
+This did **not** resolve the real-provider miss: run
+`28c31e3a-0041-4caa-86a6-91d3344d8259`, root
+`01a06ffa-4cc7-7de1-a1b7-8a0a4ac632e2`, child
+`01a06ffb-74f5-75a2-a489-41536e08eee1`, recorded first-child reuse of
+7,808 / 24,751 despite identical cache keys. Its typed inheritance, watch,
+isolation, and worktree-preserving cleanup passed.
+
+Request-traced run `acdb3452-9826-43f4-adf6-c7e62a6c62b6` confirms exact
+initial parent input objects, including tool declarations and base instructions,
+in child `01a06ffe-bc34-70a3-9e09-8ddbd8189aac`. First-child reuse was again
+7,808 / 18,104. The parent uses incremental WebSocket continuation while the
+child sends a fresh full request. Same-effort controls also missed. Subsequent
+controlled probes identified a routing mismatch: the inherited routing UUID must
+be applied consistently to both the transport session header and top-level
+request metadata. Changing only either location was insufficient.
+
+The final implementation passes a fresh Astra medium/low canary without debug
+switches: run `21ea80d8-1b00-49fc-b76e-012ec457e506`, first-child cache reuse
+16,512 / 18,135 (91.0%). Typed inheritance, repeated watch polling, native
+isolation, and deliberate cleanup retaining the dirty worktree/history passed.
+See [the cache investigation](cache-reuse-investigation.md) for controls,
+identifiers, logging, migration decisions, and provider limits.
+
+Focused evidence before the cache-affinity change: Codex exposure tests (2),
+protocol/hosted-HTTP tests (300), app-server dynamic-tool unit tests (16), direct
+and wrapped namespace smokes all passed. Tidepool registration/HTTP tests and
+published unfold/watch/request execution passed; the latter took 459.843s on
+this rebuild. No full workspace battery was run.
