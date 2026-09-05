@@ -486,6 +486,11 @@ fn command_for(
     command
         .arg("--host-dynamic-tools-socket")
         .arg(&spec.host_tools_socket);
+    // The host owns the actor tree and reply routing. Native collaboration
+    // would create a second, unrelated tree inside this actor's provider thread.
+    for feature in ["multi_agent", "multi_agent_v2"] {
+        command.arg("--disable").arg(feature);
+    }
     if let Some(model) = &spec.model {
         command.arg("--model").arg(model);
     }
@@ -944,6 +949,37 @@ mod tests {
             command_for(&installation(), &spec),
             Err(AgentBackendError::ProtocolRejected { .. })
         ));
+    }
+
+    #[test]
+    fn hosted_launches_disable_native_collaboration_for_every_launch_mode() {
+        for mode in [
+            InteractiveLaunchMode::Fresh,
+            InteractiveLaunchMode::Resume(BackendThreadId(THREAD.into())),
+            InteractiveLaunchMode::Fork {
+                parent: BackendThreadId(THREAD.into()),
+                through_call: "hosted-call-17".into(),
+            },
+        ] {
+            let mut requested = spec(mode);
+            requested.model = Some("gpt-5.6-sol".into());
+            requested.effort = Some(ReasoningEffort::Low);
+            let command = command_for(&installation(), &requested).unwrap();
+            for feature in ["multi_agent", "multi_agent_v2"] {
+                assert!(command
+                    .args
+                    .windows(2)
+                    .any(|args| args == ["--disable", feature]));
+            }
+            assert!(command
+                .args
+                .windows(2)
+                .any(|args| args == ["--model", "gpt-5.6-sol"]));
+            assert!(command
+                .args
+                .iter()
+                .any(|arg| arg == "model_reasoning_effort=\"low\""));
+        }
     }
 
     #[test]

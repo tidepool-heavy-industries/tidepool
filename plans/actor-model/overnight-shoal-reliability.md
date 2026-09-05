@@ -46,3 +46,11 @@ use focused checks and one integrated disposable Sol/low live canary.
   specifies live acceptance and report requirements. Host launch awaits the
   integrated implementation and Sol configuration verification.
 - Full acceptance remains pending.
+- Sol worker's provider turn failed after invoking native
+  `collaboration.send_message` to `/root`; durable rollout contains a native
+  self-addressed `agent_message` followed by HTTP 400 rejecting
+  `configuration_update` with multi-agent execution. No native subagent spawn
+  was recorded. Shoal stop returned `StoppedNow`; root owns its unfinished work.
+- Root launch fix disables native `multi_agent` and `multi_agent_v2` for hosted
+  agents, keeping actor routing in Shoal. Focused fresh/resume/fork Sol/low
+  argument regression passed; integrated live verification remains pending.
