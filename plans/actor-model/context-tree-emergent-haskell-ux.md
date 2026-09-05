@@ -315,7 +315,8 @@ label or identical visible filesystem paths.
 
 All children see the complete fork call, including sibling plans, and receive
 a small branch selector plus authoritative role/resource differences. The
-parent-only tool result is outside the inherited prefix. Exact context means
+actual tool result is included in the inherited prefix, along with the final
+committed Haskell scope of the enclosing block. Exact context means
 the supported accumulated conversation; do not claim transfer of provider
 internals that the backend does not expose.
 
@@ -1249,7 +1250,7 @@ In the actual target Codex fork:
 1. Develop a substantial parent context and some useful declarations.
 2. Fork multiple children from the same complete call and deliberate Git seed.
 3. Prove inherited declaration behavior, provider/context lineage, and the
-   exclusion of the parent-only tool result.
+   inclusion of the actual completed tool result and exclusion of later parent progress.
 4. Run lower-effort implementation in a child and a higher-effort decision in
    a parent or investigator.
 5. Change effort on a retained context through the supported configuration

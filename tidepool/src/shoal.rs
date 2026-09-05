@@ -1119,6 +1119,7 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
         "TIDEPOOL_TOOLCHAIN_STAMP",
         "TIDEPOOL_TOOLCHAIN_HANDSHAKE",
         "CODEX_HOME",
+        "CODEX_ROLLOUT_TRACE_ROOT",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",

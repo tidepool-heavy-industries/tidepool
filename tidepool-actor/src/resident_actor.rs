@@ -373,6 +373,10 @@ impl CompletedWorkbenchExecutions {
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
+    fn pending_in_tool_block(&self, target: ActorRef) -> bool {
+        self.active_fork_boundary.is_some() && self.environment.fork_groups.is_pending_child(target)
+    }
+
     fn record_child_observation(&mut self, child: ActorRef) {
         if self.child_exit_observations.observe(child) {
             self.deferred_child_failures
@@ -842,6 +846,12 @@ where
         target: ActorRef,
         request: MailboxValue,
     ) -> Result<MailboxValue, ResidentCallError> {
+        if self.pending_in_tool_block(target) {
+            return Err(ResidentCallError::Call(KernelCallFailure::Handler {
+                actor: target,
+                detail: "child starts after this tool block completes; register a watch or call it in a later tool invocation".into(),
+            }));
+        }
         ancestry.enter(target).map_err(ResidentCallError::Call)?;
         let target_ref = kernel
             .resolve(target)
@@ -1826,6 +1836,11 @@ where
                     .await
             }
             ResidentActorBoundary::Wait(wait) => {
+                if self.pending_in_tool_block(wait.target) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "child starts after this tool block completes; register a watch or wait in a later tool invocation".into(),
+                    ));
+                }
                 let target = kernel.resolve(wait.target).ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         KernelCallFailure::TargetUnavailable(wait.target).to_string(),
@@ -2730,33 +2745,8 @@ where
                             effect: effect.clone(),
                         },
                     );
-                    let commits_with_unit = boundary.commits_with_workbench_unit();
                     let ordinal = effect_ordinal;
                     effect_ordinal += 1;
-                    if self.environment.fork_groups.has_ready(context.actor) {
-                        settle_prepared_operations(
-                            unit.operations,
-                            WorkbenchOperationDisposition::Rejected,
-                        );
-                        record_workbench_operation(
-                            unit.operations,
-                            unit.execution,
-                            unit.input_unit_index,
-                            ordinal,
-                            &effect,
-                            WorkbenchOperationDisposition::Rejected,
-                        );
-                        self.abort_unpublished_groups(
-                            kernel,
-                            context.actor,
-                            "effectful work followed a committed unfold",
-                        )
-                        .await;
-                        return Ok(ResidentWorkbenchStep::Rejected(
-                            "unfold must commit the final effect boundary; no effect may follow its admission commit"
-                                .into(),
-                        ));
-                    }
                     match boundary {
                         ResidentActorBoundary::ReplyAttempt(attempt) => match self
                             .environment
@@ -2888,11 +2878,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
-                                        if commits_with_unit {
-                                            WorkbenchOperationDisposition::Prepared
-                                        } else {
-                                            WorkbenchOperationDisposition::Committed
-                                        },
+                                        WorkbenchOperationDisposition::Committed,
                                     );
                                     outcome
                                 }
@@ -3057,7 +3043,7 @@ where
             {
                 Ok(step) => step,
                 Err(source) => {
-                    self.abort_unpublished_groups(
+                    self.abort_incomplete_groups(
                         kernel,
                         context.actor,
                         "Haskell workbench failed during unfold admission",
@@ -3090,7 +3076,7 @@ where
                 {
                     Ok(step) => step,
                     Err(source) => {
-                        self.abort_unpublished_groups(
+                        self.abort_incomplete_groups(
                             kernel,
                             context.actor,
                             "Haskell workbench failed during unfold admission",
@@ -3113,36 +3099,12 @@ where
                     installed_bindings,
                 } => {
                     if self.environment.fork_groups.has_ready(context.actor) {
-                        if index + 1 != request.items.len() {
-                            self.abort_unpublished_groups(
-                                kernel,
-                                context.actor,
-                                "unfold was not the final Haskell input unit",
-                            )
-                            .await;
-                            settle_prepared_operations(
-                                &mut unit_operations,
-                                WorkbenchOperationDisposition::Rejected,
-                            );
-                            receipts.push(WorkbenchItemReceipt {
-                                index,
-                                status: WorkbenchItemStatus::Rejected,
-                                output: "unfold must be the final executable input unit in its hosted Haskell call".into(),
-                                warnings: Vec::new(),
-                                installed_bindings: Vec::new(),
-                                operations: unit_operations,
-                                terminal_transfer: None,
-                            });
-                            return Ok(KernelStep::Continue(workbench_response(
-                                WorkbenchRunStatus::Rejected,
-                                receipts,
-                                index,
-                                request.items.len(),
-                            )));
-                        }
-                        if let Err(source) =
+                        let publication = if self.active_fork_boundary.is_none() {
                             self.environment.fork_groups.publish_ready(context.actor)
-                        {
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        if let Err(source) = publication {
                             settle_prepared_operations(
                                 &mut unit_operations,
                                 WorkbenchOperationDisposition::Unknown,
@@ -3159,8 +3121,8 @@ where
                             &mut unit_operations,
                             WorkbenchOperationDisposition::Committed,
                         );
-                    } else if self.environment.fork_groups.has_unpublished(context.actor) {
-                        self.abort_unpublished_groups(
+                    } else if self.environment.fork_groups.has_incomplete(context.actor) {
+                        self.abort_incomplete_groups(
                             kernel,
                             context.actor,
                             "Haskell input ended before unfold admission committed",
@@ -3215,7 +3177,7 @@ where
                         index += 1;
                         continue;
                     }
-                    self.abort_unpublished_groups(
+                    self.abort_incomplete_groups(
                         kernel,
                         context.actor,
                         "Haskell input rejected during unfold admission",
@@ -3241,8 +3203,8 @@ where
                     request: request_id,
                     result,
                 } => {
-                    if self.environment.fork_groups.has_unpublished(context.actor) {
-                        self.abort_unpublished_groups(
+                    if self.environment.fork_groups.has_incomplete(context.actor) {
+                        self.abort_incomplete_groups(
                             kernel,
                             context.actor,
                             "request reply interrupted unfold admission",
@@ -3360,8 +3322,8 @@ where
                 ResidentWorkbenchStep::CancellationAcknowledged {
                     request: request_id,
                 } => {
-                    if self.environment.fork_groups.has_unpublished(context.actor) {
-                        self.abort_unpublished_groups(
+                    if self.environment.fork_groups.has_incomplete(context.actor) {
+                        self.abort_incomplete_groups(
                             kernel,
                             context.actor,
                             "request cancellation interrupted unfold admission",
@@ -3529,6 +3491,23 @@ where
             }
         }
     }
+    async fn abort_incomplete_groups(
+        &self,
+        kernel: &KernelContext,
+        owner: ActorRef,
+        summary: &str,
+    ) {
+        for child in self.environment.fork_groups.abort_incomplete(owner) {
+            if let Some(child) = kernel.resolve(child) {
+                let _ = child
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: summary.into(),
+                    })
+                    .await;
+            }
+        }
+    }
 }
 
 impl<H, O> KernelBehavior for ResidentKernelBehavior<H, O>
@@ -3556,9 +3535,149 @@ where
                     runtime_observation: self.runtime_observation.clone(),
                 },
             );
+            if self.descriptor.fork_boundary().is_some() {
+                let group = self
+                    .descriptor
+                    .fork_group()
+                    .ok_or_else(|| KernelBehaviorError {
+                        detail: "deferred fork has no group".into(),
+                    })?;
+                self.environment
+                    .fork_groups
+                    .gate(group, context.actor)
+                    .and_then(|gate| gate.mark_ready())
+                    .map_err(|error| KernelBehaviorError {
+                        detail: error.to_string(),
+                    })?;
+                return Ok(KernelStep::Continue(()));
+            }
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
                 detail: "resident actor boot was consumed twice".into(),
             })?;
+            self.initialize(kernel, &context, boot)
+                .await
+                .map_err(Self::failure)
+        })
+    }
+
+    fn abort_pending_forks<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async move {
+            self.abort_unpublished_groups(
+                kernel,
+                kernel.identity(),
+                "host reattached without acknowledging tool completion; queued fork cancelled",
+            )
+            .await;
+            Ok(())
+        })
+    }
+
+    fn tool_completed<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async move {
+            let context = self.context(kernel.identity());
+            self.abort_incomplete_groups(
+                kernel,
+                context.actor,
+                "fork admission stopped before tool completion",
+            )
+            .await;
+            let groups = self.environment.fork_groups.ready_groups(context.actor);
+            let groups: Vec<_> = groups
+                .into_iter()
+                .filter(|(_, children)| {
+                    let actors = self.environment.actors.lock();
+                    children.iter().all(|child| {
+                        actors.get(child).is_some_and(|record| {
+                            record.descriptor.fork_boundary() == Some(&boundary)
+                        })
+                    })
+                })
+                .collect();
+            if groups.is_empty() {
+                return Ok(());
+            }
+            let children: Vec<_> = {
+                let actors = self.environment.actors.lock();
+                groups
+                    .iter()
+                    .flat_map(|(_, children)| children.iter().copied())
+                    .filter(|child| {
+                        actors
+                            .get(child)
+                            .is_some_and(|record| record.terminal.is_none())
+                            && kernel
+                                .resolve(*child)
+                                .is_some_and(|child| child.terminal().get().is_none())
+                    })
+                    .collect()
+            };
+            let previous = {
+                let actors = self.environment.actors.lock();
+                children
+                    .iter()
+                    .map(|child| actors[child].descriptor.placement().lexical_scope)
+                    .collect()
+            };
+            let scopes = self
+                .environment
+                .runner
+                .finalize_fork_scopes(context.clone(), previous)
+                .await
+                .map_err(Self::failure)?;
+            for (group, _) in groups {
+                self.environment
+                    .fork_groups
+                    .publish_group(group, context.actor)
+                    .map_err(|error| KernelBehaviorError {
+                        detail: error.to_string(),
+                    })?;
+            }
+            let mut unused_scopes = Vec::new();
+            for (child, scope) in children.into_iter().zip(scopes) {
+                let sent = kernel.resolve(child).is_some_and(|child| {
+                    child.terminal().get().is_none()
+                        && child
+                            .address()
+                            .send_message(crate::KernelMessage::ReleaseFork { scope })
+                            .is_ok()
+                });
+                if !sent {
+                    unused_scopes.push(scope);
+                }
+            }
+            if !unused_scopes.is_empty() {
+                self.environment
+                    .runner
+                    .retire_fork_scopes(context, unused_scopes)
+                    .await
+                    .map_err(Self::failure)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn release_fork<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        scope: tidepool_codegen::scope::ScopeId,
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async move {
+            let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
+                detail: "deferred fork was already released".into(),
+            })?;
+            self.descriptor.set_lexical_scope(scope);
+            let context = self.context(kernel.identity());
+            kernel.install_session_context(context.clone())?;
+            if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
+                record.descriptor = self.descriptor.clone();
+            }
             self.initialize(kernel, &context, boot)
                 .await
                 .map_err(Self::failure)
@@ -3911,6 +4030,12 @@ where
                 .requests
                 .actor_stopped(context.actor, terminal);
             self.publish_watch_notifications(notifications);
+            self.abort_unpublished_groups(
+                kernel,
+                context.actor,
+                "fork owner stopped before tool completion",
+            )
+            .await;
             if let Some(hook) = self.shutdown_hook.take() {
                 self.environment
                     .runner

@@ -152,6 +152,10 @@ impl ActorDescriptor {
         self.live_payload
     }
 
+    pub(crate) fn set_lexical_scope(&mut self, scope: tidepool_codegen::scope::ScopeId) {
+        self.placement.lexical_scope = scope;
+    }
+
     #[must_use]
     pub fn placement(&self) -> ActorPlacement {
         self.placement

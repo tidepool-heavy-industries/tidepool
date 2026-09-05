@@ -1,3 +1,31 @@
+const HOSTED_DESCRIPTION_LIMIT: usize = 1024;
+const HASKELL_TOOL_DESCRIPTION: &str =
+    include_str!("../../prompts/shoal/haskell-tool-description.md");
+const HASKELL_TOOL_INSTRUCTIONS: &str =
+    include_str!("../../prompts/shoal/haskell-tool-instructions.md");
+
+const fn utf8_char_count(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let mut count = 0;
+    while index < bytes.len() {
+        if bytes[index] & 0b1100_0000 != 0b1000_0000 {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+const _: () = assert!(
+    utf8_char_count(HASKELL_TOOL_DESCRIPTION) <= HOSTED_DESCRIPTION_LIMIT,
+    "hosted Haskell tool description exceeds the provider limit"
+);
+const _: () = assert!(
+    utf8_char_count(HASKELL_TOOL_INSTRUCTIONS) <= HOSTED_DESCRIPTION_LIMIT,
+    "hosted Haskell tool instructions exceed the provider limit"
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptId {
     HaskellToolDescription,
@@ -13,12 +41,12 @@ impl PromptId {
             Self::HaskellToolDescription => PromptArtifact {
                 id: self,
                 role: PromptRole::HostedToolDescription,
-                body: include_str!("../../prompts/shoal/haskell-tool-description.md"),
+                body: HASKELL_TOOL_DESCRIPTION,
             },
             Self::HaskellToolInstructions => PromptArtifact {
                 id: self,
                 role: PromptRole::HostedToolInstructions,
-                body: include_str!("../../prompts/shoal/haskell-tool-instructions.md"),
+                body: HASKELL_TOOL_INSTRUCTIONS,
             },
         }
     }
@@ -106,7 +134,7 @@ mod tests {
         assert!(description.contains("Ending the model response ends the turn"));
         assert!(artifacts
             .iter()
-            .all(|artifact| artifact.body.chars().count() <= 1024));
+            .all(|artifact| artifact.body.chars().count() <= HOSTED_DESCRIPTION_LIMIT));
         assert!(workbench_doc("unfold").unwrap().contains("Forked a"));
         assert!(workbench_doc("cleanup").unwrap().contains("executeCleanup"));
         assert!(workbench_doc("refinement")

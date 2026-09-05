@@ -1,5 +1,10 @@
 # Cache-preserving context unfold and typed result fold
 
+The current tool-completion boundary is specified in [SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold).
+It supersedes this record's final-input-unit restriction: admitted children now
+start after the real enclosing tool result and inherit its final committed scope.
+
+
 Status: implemented and verified; retained as the decision record and gate
 evidence. The stable user contract now lives in the root `SHOAL.md`, the
 public Haskell modules, and the owning Rust crate docs. This plan records the

@@ -16,11 +16,10 @@ remain pending. See [progress design and checks](plans/actor-model/shoal-progres
 
 Focused provider, inbox, request-registry, hosted progress/cleanup, and GC
 checks passed, along with all 217 extractor fixtures, 12 script tests,
-formatting, and the Shoal build. Work was completed locally without agents.
-The live canary remains deferred at the user's request. The running host was
-not restarted; start a new host to load the new executable, prompt, and API.
-Do not treat the older follow-up plans as evidence of outstanding work without
-checking their items against the implementation.
+formatting, and the Shoal build. The later live smoke below checks fork
+completion and typed replies; it is not a full progress/cleanup campaign.
+Check older follow-up plan items against the implementation before treating
+them as outstanding work.
 
 The Sol configuration-update fix is in the separate Codex repository at
 `/home/inanna/dev/codex`, commit `702639b55a`. It applies to roots and children:
@@ -29,12 +28,12 @@ For Sol, request construction also filters inherited `configuration_update`
 items out of outgoing input while preserving durable history. Sol still uses
 ordinary request-level reasoning effort. This does not depend on spawning.
 
-That Codex candidate was built at
-`/home/inanna/dev/codex/codex-rs/target/dev-small/codex`. Launch the next host
-with `TIDEPOOL_INTERACTIVE_CODEX_BIN` pointing to that executable; rebuilding
-Shoal alone does not replace Codex. Confirm the resolved installation through
-`:status!`. The source fix and deterministic checks are complete; deployment
-to a new live session and the deferred live canary are not yet verified.
+The Shoal flake now pins Codex `c8460ff`, which includes that fix and hosted
+protocol v3 completion acknowledgements. The packaged contract check and a
+live two-child smoke passed: both children inherited the real tool result and
+final block bindings, excluding a later parent rebinding. Use `just shoal-console`
+to build and launch the matching host and Codex. See the
+[fork/cache investigation](docs/SHOAL_FORK_CACHE_RCA.md) for evidence and limits.
 
 ## Working model
 
@@ -232,11 +231,12 @@ the applicative `Tidepool.Actors.Unfold` API exported by the default facade.
 ## Cache-preserving context unfold
 
 Use `unfold` when several independent branches materially benefit from the
-caller's accumulated model context. It forks the active provider thread and
-the immutable Haskell binding tip, creates one persistent actor and named
-worktree per branch, and returns typed handles in the applicative plan's
-original shape. Each child receives the whole unfold call plus only its own
-selected `sessionInput`; the parent keeps the original reply authority.
+caller's accumulated model context. It admits one persistent actor and named
+worktree per branch and returns typed handles in the applicative plan's original
+shape. Children start after the enclosing tool block finishes. Each child inherits
+the conversation through its real result and the block's final committed Haskell
+bindings, plus its selected `sessionInput`; the parent keeps the original reply
+authority.
 
 ```haskell
 let Right campaign = campaignLabel "normalization"
@@ -250,12 +250,18 @@ forks <- unfold (batch campaign wave) $
 ```
 
 `Unfold` is deliberately applicative, not monadic: the runtime can see and
-reserve the complete sibling shape before it publishes any assignment. A
-successful admission must be the final effect boundary in the final Haskell
-input unit. Pure projection or reshaping of its returned handles in that same
-unit is allowed; no later effect is. Pre-publication failure rolls the whole
-group back. After publication, each persistent child has its own lifecycle and
-may receive typed follow-up requests.
+reserve the complete sibling shape before it publishes any assignment. Statements
+and effects after `unfold` run normally. All admitted groups share the final
+committed scope of the enclosing tool block, including subsequent bindings.
+Assignment values, closures, and explicit worktree seeds retain ordinary value
+semantics. Failed admission rolls back its own group; a later statement failure
+preserves earlier admissions and becomes part of the real inherited tool result.
+
+You may enqueue, poll, and register watches before the block completes. Blocking
+on a queued child is rejected because that child cannot start until completion.
+After launch, each child has its own lifecycle and may receive typed follow-up
+requests. Reattachment cancels forks whose completion was never acknowledged;
+already released children remain independently addressable.
 
 The standard role rows are `ResearchEffects`, `CodingEffects`,
 `ScaffoldEffects`, and `IntegrationEffects`. `narrowed` may select any
@@ -308,7 +314,7 @@ changeView state = case state of
 For example, assign two independent review tasks against a clean source head.
 Each child receives its task as `sessionInput` and replies with `ChangeReport`;
 for a review without changes, `changeCommit` identifies the reviewed head.
-Put this complete unfold in the final input unit of its call:
+Admit the review branches:
 
 ```haskell
 let Right reviewCampaign = campaignLabel "review"
@@ -324,7 +330,7 @@ forks <- unfold (batch reviewCampaign reviewWave) $
 :}
 ```
 
-In the next call, register the independent watches:
+Register the independent watches in the same block or a later call:
 
 ```haskell
 let Right domainReadyLabel = watchLabel "domain-ready"

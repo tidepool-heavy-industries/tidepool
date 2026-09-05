@@ -2,7 +2,7 @@
 //!
 //! The socket directory is the authority membrane: it is owner-only, created
 //! for one actor incarnation, and mounted into only that actor's interactive
-//! process. Registration is immutable, and the v2 `/session` callback certifies
+//! process. Registration is immutable, and the v3 `/session` callback certifies
 //! that exactly one Codex thread is durably queue-ready before any invocation
 //! can be dispatched.
 
@@ -120,6 +120,7 @@ impl HostDynamicToolService {
             .route("/v1/dynamic-tools/registration", get(registration))
             .route("/v1/dynamic-tools/session", post(attach_session))
             .route("/v1/dynamic-tools/call", post(call))
+            .route("/v1/dynamic-tools/completed", post(completed))
             .layer(DefaultBodyLimit::max(REQUEST_LIMIT))
             .with_state(self.state);
         axum::serve(listener, app).await
@@ -179,6 +180,44 @@ enum NamespaceTool {
     },
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompletionRequest {
+    protocol_version: u32,
+    thread_id: String,
+    context_call_id: String,
+}
+
+async fn completed(
+    State(state): State<HostState>,
+    Json(request): Json<CompletionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if request.protocol_version != PROTOCOL_VERSION
+        || request.context_call_id.is_empty()
+        || request.context_call_id.len() > 256
+        || state
+            .bound_thread
+            .lock()
+            .await
+            .as_ref()
+            .is_none_or(|thread| thread.0 != request.thread_id)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid tool completion identity".into(),
+        ));
+    }
+    state
+        .endpoint
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: request.thread_id,
+            call_id: request.context_call_id,
+        })
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
 async fn registration(State(state): State<HostState>) -> Json<Registration> {
     Json((*state.registration).clone())
 }
@@ -210,7 +249,7 @@ async fn attach_session(
     let mut bound = state.bound_thread.lock().await;
     match bound.as_ref() {
         // Repeated callbacks still enter the acceptance owner below so an
-        // unsupported protocol version cannot inherit an earlier v2 success.
+        // unsupported protocol version cannot inherit an earlier acceptance.
         Some(existing) if existing == &thread => {}
         Some(_) => return Err((StatusCode::CONFLICT, "actor is already bound")),
         None => {}
@@ -234,6 +273,15 @@ async fn attach_session(
             )
         }
     })?;
+    if bound.is_some() {
+        state.endpoint.reattach_boxed().await.map_err(|error| {
+            tracing::error!(%error, "could not settle queued forks on reattachment");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not settle queued forks",
+            )
+        })?;
+    }
     *bound = Some(thread);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -798,7 +846,7 @@ mod tests {
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
-            "unsupported dynamic-tool protocol version 9; expected 2"
+            "unsupported dynamic-tool protocol version 9; expected 3"
         );
 
         let mut request = call_request(serde_json::Value::String("pure ()".into()));

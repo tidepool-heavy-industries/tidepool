@@ -64,7 +64,7 @@ prefix_rule(
     justification = "Inspection-only actors may inspect Git but must delegate repository mutation to a coding actor.",
 )
 "#;
-pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 2;
+pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 3;
 
 /// Resolve and behaviorally verify the interactive Codex executable.
 ///
@@ -84,7 +84,7 @@ pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, Agen
         &executable,
         &["fork", "--help"],
         "destination-owned invocation forks",
-        &["--destination-local", "--through-call"],
+        &["--destination-local", "--after-call"],
     )
     .await?;
     require_probe(
@@ -414,17 +414,14 @@ fn command_for(
             validate_thread(thread)?;
             command.arg("resume").arg(&thread.0);
         }
-        InteractiveLaunchMode::Fork {
-            parent,
-            through_call,
-        } => {
+        InteractiveLaunchMode::Fork { parent, after_call } => {
             validate_thread(parent)?;
             command
                 .arg("fork")
                 .arg(&parent.0)
                 .arg("--destination-local")
-                .arg("--through-call")
-                .arg(through_call);
+                .arg("--after-call")
+                .arg(after_call);
         }
     }
     command
@@ -820,7 +817,7 @@ mod tests {
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("unsupported host dynamic-tools protocol version 1; expected 2"));
+            .contains("unsupported host dynamic-tools protocol version 1; expected 3"));
         assert!(!path.exists());
     }
 
@@ -873,7 +870,7 @@ mod tests {
         ] {
             let mut requested = spec(InteractiveLaunchMode::Fork {
                 parent: BackendThreadId(THREAD.into()),
-                through_call: "hosted-call-17".into(),
+                after_call: "hosted-call-17".into(),
             });
             requested.effort = effort;
             let command = command_for(&installation(), &requested).unwrap();
@@ -883,7 +880,7 @@ mod tests {
                     "fork",
                     THREAD,
                     "--destination-local",
-                    "--through-call",
+                    "--after-call",
                     "hosted-call-17"
                 ]
             );
@@ -914,7 +911,7 @@ mod tests {
             InteractiveLaunchMode::Resume(BackendThreadId(THREAD.into())),
             InteractiveLaunchMode::Fork {
                 parent: BackendThreadId(THREAD.into()),
-                through_call: "hosted-call-17".into(),
+                after_call: "hosted-call-17".into(),
             },
         ] {
             let mut requested = spec(mode);
@@ -945,7 +942,7 @@ mod tests {
             InteractiveLaunchMode::Resume(BackendThreadId(THREAD.into())),
             InteractiveLaunchMode::Fork {
                 parent: BackendThreadId(THREAD.into()),
-                through_call: "hosted-call-17".into(),
+                after_call: "hosted-call-17".into(),
             },
         ] {
             for policy in [

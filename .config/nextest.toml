@@ -38,7 +38,7 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # not a bypass of it. The actor-host reply/watch campaign is a lib test but
 # repeatedly compiles Haskell; keep it in the daemon-backed heavy lane rather
 # than making every `just quick` invocation pay several cold compiler boots.
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (binary(crash_recovery) | test(typed_reply_settles_response_and_wakes_registered_watch))))'
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (binary(crash_recovery) | (test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests)))))'
 
 # GHC-heavy tests run below full core count so concurrent extractor requests do
 # not oversubscribe CPU and memory. This is a per-run limit; callers running
@@ -51,5 +51,5 @@ max-threads = 4
 # its tests do no `extract` work (no tidepool-extract spawn, no
 # EvalHarness/Harness turn, no haskell_eval!/haskell_inline! expansion).
 [[profile.default.overrides]]
-filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery) & !test(typed_reply_settles_response_and_wakes_registered_watch)) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior)) | (package(tidepool-actor) & !kind(test))))'
+filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery) & !(test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests))) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior)) | (package(tidepool-actor) & !kind(test))))'
 test-group = 'ghc-heavy'

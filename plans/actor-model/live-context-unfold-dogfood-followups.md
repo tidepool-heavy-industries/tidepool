@@ -1,5 +1,10 @@
 # Live context-unfold dogfood follow-ups
 
+The current tool-completion boundary is specified in [SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold).
+It supersedes this record's final-input-unit restriction: admitted children now
+start after the real enclosing tool result and inherit its final committed scope.
+
+
 Status: implemented through the reviewed live-process hardening wave; a fresh
 provider canary is the final acceptance gate. Host-restart reconstruction is a
 separately gated successor phase, not a partially landed durability claim.

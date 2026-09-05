@@ -18,7 +18,7 @@
     # Codex owns its own locked compiler/package graph. Do not force it onto
     # Tidepool's Rust overlay: the two workspaces intentionally have distinct
     # MSRV/toolchain timelines.
-    codex.url = "github:inanna-malick/codex/118e1cfcd1d7dd120460ff0685e976f0d17327dc";
+    codex.url = "github:inanna-malick/codex/c8460ffd7c859da2a1467f4384020cf9a19bcc69";
   };
 
   outputs =
@@ -385,7 +385,7 @@
             ${interactiveCodex}/bin/codex-code-mode-host --help
             ${interactiveCodex}/bin/codex --help | grep --fixed-strings -- '--host-dynamic-tools-socket'
             ${interactiveCodex}/bin/codex fork --help | grep --fixed-strings -- '--destination-local'
-            ${interactiveCodex}/bin/codex fork --help | grep --fixed-strings -- '--through-call'
+            ${interactiveCodex}/bin/codex fork --help | grep --fixed-strings -- '--after-call'
             ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--thread'
             ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--message'
             ${interactiveCodex}/bin/codex archive --help

@@ -53,6 +53,19 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         Some(haskell_tool_instructions())
     }
 
+    fn reattach_boxed(&self) -> ResidentToolFuture {
+        let client = self.client.clone();
+        Box::pin(async move { client.reattach().await })
+    }
+
+    fn complete_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        let client = self.client.clone();
+        Box::pin(async move { client.complete(boundary).await })
+    }
+
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
         let client = self.client.clone();
         Box::pin(async move {

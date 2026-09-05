@@ -74,7 +74,7 @@ pub enum InteractiveLaunchMode {
     Resume(BackendThreadId),
     Fork {
         parent: BackendThreadId,
-        through_call: String,
+        after_call: String,
     },
 }
 

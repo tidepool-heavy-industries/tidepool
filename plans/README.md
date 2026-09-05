@@ -25,6 +25,10 @@ charter / glossary and the plan file is deleted (git is the archive).
   [context trees and an emergent resident Haskell surface](actor-model/context-tree-emergent-haskell-ux.md):
   a shared scaffold/unfold/fold/refine practice with task-specific Haskell
   discovered during use, retained specialists, and effort-aware context reuse.
+  Its next proposed concrete exercise is the
+  [recursive scaffold campaign](actor-model/recursive-scaffold-campaign.md):
+  disjoint obligations, intentional partial commits, typed integration, and
+  recursive repair in a lightweight standalone project.
 - [DevSwarm Haskell DSL](devswarm-haskell-dsl.md): clean-slate successor to
   `harness-dogfooding/dev-tree`; dynamic recursive owner sessions plus a typed
   candidate/review/revision interpreter. The current runnable slice uses a

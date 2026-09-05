@@ -242,6 +242,35 @@ pub trait KernelBehavior: Send + 'static {
     /// Continue work deliberately yielded after its initiating caller was
     /// settled. Behaviors which never return 'ContinueLater' own no pending
     /// continuation and keep this rejecting default.
+    /// Release effects waiting for a durably recorded enclosing tool result.
+    fn abort_pending_forks<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn tool_completed<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Start an admitted child with its final inherited scope.
+    fn release_fork<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _scope: tidepool_codegen::scope::ScopeId,
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor has no deferred fork".into(),
+            })
+        })
+    }
+
     fn resume<'a>(
         &'a mut self,
         _context: &'a KernelContext,
@@ -431,6 +460,43 @@ where
                     }
                     Err(error) => {
                         let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            KernelMessage::AbortPendingForks { reply } => {
+                let result = state
+                    .behavior
+                    .abort_pending_forks(&state.context)
+                    .await
+                    .map(|()| serde_json::Value::Null)
+                    .map_err(|error| KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: error.to_string(),
+                    });
+                let _ = reply.send(result);
+            }
+            KernelMessage::ToolCompleted { boundary, reply } => {
+                let result = state
+                    .behavior
+                    .tool_completed(&state.context, boundary)
+                    .await
+                    .map(|()| serde_json::Value::Null)
+                    .map_err(|error| KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: error.to_string(),
+                    });
+                let _ = reply.send(result);
+            }
+            KernelMessage::ReleaseFork { scope } => {
+                match state.behavior.release_fork(&state.context, scope).await {
+                    Ok(step) => finish_after_step(&myself, state, step).await,
+                    Err(error) => {
+                        fail_actor(
+                            &myself,
+                            state,
+                            format!("deferred fork startup failed: {error}"),
+                        )
+                        .await
                     }
                 }
             }

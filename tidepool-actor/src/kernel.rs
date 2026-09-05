@@ -163,6 +163,16 @@ pub enum KernelMessage {
         request: WorkbenchRequest,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    ToolCompleted {
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        reply: RpcReplyPort<KernelInvocationReply>,
+    },
+    AbortPendingForks {
+        reply: RpcReplyPort<KernelInvocationReply>,
+    },
+    ReleaseFork {
+        scope: tidepool_codegen::scope::ScopeId,
+    },
     /// Drain one mailbox request retained while the resident behavior was
     /// parked on an external interaction rather than on `receive`.
     DrainMailbox,
@@ -205,6 +215,14 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("Workbench")
                 .field("request", request)
                 .finish_non_exhaustive(),
+            Self::ToolCompleted { boundary, .. } => formatter
+                .debug_tuple("ToolCompleted")
+                .field(boundary)
+                .finish(),
+            Self::AbortPendingForks { .. } => formatter.write_str("AbortPendingForks"),
+            Self::ReleaseFork { scope } => {
+                formatter.debug_tuple("ReleaseFork").field(scope).finish()
+            }
             Self::DrainMailbox => formatter.write_str("DrainMailbox"),
             Self::Resume => formatter.write_str("Resume"),
             Self::ExternalApplicationFailed { failure, .. } => formatter

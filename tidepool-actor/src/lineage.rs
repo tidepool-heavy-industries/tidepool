@@ -176,6 +176,8 @@ pub enum ForkGroupError {
     AlreadyCommitted(u64),
     #[error("fork group {0} is not committed")]
     NotCommitted(u64),
+    #[error("fork group {0} is not ready for publication")]
+    NotReady(u64),
     #[error("fork group {0} has members outside the inspected cleanup scope")]
     CleanupScopeChanged(u64),
     #[error("actor {0:?} is being cleaned up")]
@@ -509,7 +511,9 @@ impl ForkGroupRegistry {
         if !group.children.contains(&child) {
             return Err(ForkGroupError::Unknown(id.0));
         }
-        group.phase.send_replace(ForkGroupPhase::Aborted);
+        if *group.phase.borrow() != ForkGroupPhase::Committed {
+            group.phase.send_replace(ForkGroupPhase::Aborted);
+        }
         Ok(())
     }
 
@@ -593,6 +597,50 @@ impl ForkGroupRegistry {
         Ok(group.children)
     }
 
+    pub(crate) fn is_pending_child(&self, actor: ActorRef) -> bool {
+        self.state.lock().groups.values().any(|group| {
+            matches!(
+                *group.phase.borrow(),
+                ForkGroupPhase::Staging | ForkGroupPhase::Ready
+            ) && group.children.contains(&actor)
+        })
+    }
+
+    pub(crate) fn ready_groups(&self, owner: ActorRef) -> Vec<(ForkGroupId, Vec<ActorRef>)> {
+        let mut groups: Vec<_> = self
+            .state
+            .lock()
+            .groups
+            .iter()
+            .filter_map(|(id, group)| {
+                (group.owner == owner && *group.phase.borrow() == ForkGroupPhase::Ready)
+                    .then(|| (*id, group.children.clone()))
+            })
+            .collect();
+        groups.sort_by_key(|(id, _)| id.0);
+        groups
+    }
+
+    pub(crate) fn publish_group(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+    ) -> Result<(), ForkGroupError> {
+        let state = self.state.lock();
+        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        if *group.phase.borrow() != ForkGroupPhase::Ready {
+            return Err(ForkGroupError::NotReady(id.0));
+        }
+        group.phase.send_replace(ForkGroupPhase::Committed);
+        Ok(())
+    }
+
     pub fn publish_ready(&self, owner: ActorRef) -> Result<Vec<ForkGroupId>, ForkGroupError> {
         let mut state = self.state.lock();
         let mut published = Vec::new();
@@ -625,12 +673,32 @@ impl ForkGroupRegistry {
     }
 
     pub fn abort_unpublished(&self, owner: ActorRef) -> Vec<ActorRef> {
+        self.abort_pending(owner, true)
+    }
+
+    pub(crate) fn abort_incomplete(&self, owner: ActorRef) -> Vec<ActorRef> {
+        self.abort_pending(owner, false)
+    }
+
+    pub(crate) fn has_incomplete(&self, owner: ActorRef) -> bool {
+        self.state.lock().groups.values().any(|group| {
+            group.owner == owner
+                && matches!(
+                    *group.phase.borrow(),
+                    ForkGroupPhase::Staging | ForkGroupPhase::Aborted
+                )
+        })
+    }
+
+    fn abort_pending(&self, owner: ActorRef, include_ready: bool) -> Vec<ActorRef> {
         let mut state = self.state.lock();
         let ids: Vec<_> = state
             .groups
             .iter()
             .filter_map(|(id, group)| {
-                (group.owner == owner && *group.phase.borrow() != ForkGroupPhase::Committed)
+                (group.owner == owner
+                    && *group.phase.borrow() != ForkGroupPhase::Committed
+                    && (include_ready || *group.phase.borrow() != ForkGroupPhase::Ready))
                     .then_some(*id)
             })
             .collect();
@@ -852,7 +920,10 @@ fn reserved_descendants(state: &ForkGroupsState, root: ActorRef) -> usize {
 }
 
 fn publish_if_ready(group: &mut ForkGroup) {
-    if group.commit_requested && group.ready.len() == group.reservations.len() {
+    if group.commit_requested
+        && group.ready.len() == group.reservations.len()
+        && *group.phase.borrow() == ForkGroupPhase::Staging
+    {
         group.phase.send_replace(ForkGroupPhase::Ready);
     }
 }
@@ -950,6 +1021,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(paths[0].allocated.to_string(), "compiler/runtime/tests-1");
+    }
+
+    #[test]
+    fn published_group_is_not_reopened_by_late_startup_observations() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(ActorId(1));
+        let child = ActorRef::first(ActorId(2));
+        let (group, reservations) = groups
+            .begin(
+                owner,
+                ActorPath::parse("root/wave").unwrap(),
+                vec![segment("child")],
+                4,
+            )
+            .unwrap();
+        groups
+            .claim(group, owner, &reservations[0].allocated)
+            .unwrap();
+        groups.attach_child(group, owner, child).unwrap();
+        let phase = groups.request_commit(group, owner).unwrap();
+        groups.mark_ready(group, child).unwrap();
+        groups.publish_group(group, owner).unwrap();
+        groups.mark_ready(group, child).unwrap();
+        groups.mark_failed(group, child).unwrap();
+        assert_eq!(*phase.borrow(), ForkGroupPhase::Committed);
+        assert!(groups.abort_unpublished(owner).is_empty());
     }
 
     #[test]

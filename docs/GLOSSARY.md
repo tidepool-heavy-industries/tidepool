@@ -67,7 +67,8 @@ machine session: state genuinely stays in memory across calls);
 to an exact retained transcript prefix).
 
 **context unfold** is the applicative construction of persistent child actor
-applications from one active provider call and immutable Haskell binding tip.
+applications admitted during a provider tool block and launched after its real
+result is recorded, with that block's final committed Haskell binding tip.
 It shares context, narrows authority explicitly, and returns typed handles;
 results return later through replies and watches. **fold** is ordinary Haskell
 composition of those typed results and worktree evidence, not an automatic

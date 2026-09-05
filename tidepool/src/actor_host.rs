@@ -1855,7 +1855,7 @@ async fn launch_prepared_interactive_application(
             })?;
         InteractiveLaunchMode::Fork {
             parent,
-            through_call: boundary.call_id.clone(),
+            after_call: boundary.call_id.clone(),
         }
     } else if actor_identity == root {
         config.root_launch_mode.clone()
@@ -2812,7 +2812,7 @@ mod tests {
         use tidepool_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
         let fork = InteractiveLaunchMode::Fork {
             parent: BackendThreadId("parent".into()),
-            through_call: "call".into(),
+            after_call: "call".into(),
         };
         for default in [
             ReasoningEffort::Low,
@@ -2865,23 +2865,7 @@ mod tests {
     ) -> serde_json::Value {
         let mut last = None;
         for item in items {
-            let call_id = uuid::Uuid::new_v4().simple().to_string();
-            let result = endpoint
-                .dispatch_boxed(ToolInvocation {
-                    context: Some(ToolInvocationContext {
-                        context_call_id: Some(call_id.clone()),
-                        thread_id: "actor-host-vertical".into(),
-                        turn_id: call_id.clone(),
-                        call_id,
-                        namespace: Some("haskell".into()),
-                    }),
-                    name: tidepool_actor::HASKELL_TOOL.into(),
-                    arguments: ToolArguments::Raw(item.into()),
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("Haskell item failed:\n{item}\n\n{error}\n\nprevious receipt: {last:?}")
-                });
+            let result = dispatch_haskell_script(endpoint, item).await;
             assert_ne!(
                 result["status"], "rejected",
                 "Haskell item rejected:\n{item}\n\n{result:?}\n\nprevious receipt: {last:?}"
@@ -2896,20 +2880,28 @@ mod tests {
         script: &str,
     ) -> serde_json::Value {
         let call_id = uuid::Uuid::new_v4().simple().to_string();
-        endpoint
+        let result = endpoint
             .dispatch_boxed(ToolInvocation {
                 context: Some(ToolInvocationContext {
                     context_call_id: Some(call_id.clone()),
                     thread_id: "actor-host-vertical".into(),
                     turn_id: call_id.clone(),
-                    call_id,
+                    call_id: call_id.clone(),
                     namespace: Some("haskell".into()),
                 }),
                 name: tidepool_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(script.into()),
             })
             .await
-            .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"))
+            .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"));
+        endpoint
+            .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: "actor-host-vertical".into(),
+                call_id,
+            })
+            .await
+            .expect("recorded tool completion");
+        result
     }
 
     #[tokio::test]
@@ -3088,7 +3080,7 @@ mod tests {
             }),
             &InteractiveLaunchMode::Fork {
                 parent: BackendThreadId("parent".into()),
-                through_call: "call".into(),
+                after_call: "call".into(),
             },
         );
         assert!(scaffold.starts_with(PromptId::ScaffoldingAgent.body()));

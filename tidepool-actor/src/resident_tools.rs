@@ -59,6 +59,17 @@ pub trait ResidentToolEndpoint: Send + Sync {
     fn tools(&self) -> &[HostedTool];
     fn instructions(&self) -> Option<&str>;
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture;
+    /// Settle unacknowledged forks when a hosted connection reattaches.
+    fn reattach_boxed(&self) -> ResidentToolFuture {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
+    /// Acknowledge the real, durable result of an enclosing model-visible call.
+    fn complete_boxed(
+        &self,
+        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        Box::pin(async { Ok(serde_json::Value::Null) })
+    }
 }
 
 #[derive(Clone)]
@@ -142,6 +153,43 @@ impl ResidentToolClient {
                 )
             })?
             .map_err(ResidentToolError::Invocation)
+    }
+
+    pub(crate) async fn reattach(&self) -> Result<serde_json::Value, ResidentToolError> {
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .address()
+            .send_message(crate::KernelMessage::AbortPendingForks {
+                reply: reply.into(),
+            })
+            .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
+        receive
+            .await
+            .map_err(|_| {
+                ResidentToolError::Unavailable("actor stopped during reattachment".into())
+            })?
+            .map_err(ResidentToolError::Invocation)
+    }
+
+    pub(crate) async fn complete(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<serde_json::Value, ResidentToolError> {
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .address()
+            .send_message(crate::KernelMessage::ToolCompleted {
+                boundary: boundary.clone(),
+                reply: reply.into(),
+            })
+            .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
+        let result = receive
+            .await
+            .map_err(|_| {
+                ResidentToolError::Unavailable("actor stopped before tool completion".into())
+            })?
+            .map_err(ResidentToolError::Invocation)?;
+        Ok(result)
     }
 
     pub(crate) async fn dispatch_workbench(

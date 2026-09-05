@@ -34,8 +34,10 @@ only its supervisor terminates the actor. There is no completion, yield, or
 park operation.
 
 Use `:doc unfold` for a complete applicative frontier and `:doc watch` for a
-typed fold. The final executable input unit of an unfold call contains all
-branch plans. Register watches in the following hosted call.
+typed fold. `unfold` returns admitted handles immediately; children start after
+the whole tool block returns and inherit its final committed bindings and real
+tool result. Subsequent statements may register watches. Do not synchronously
+wait for a queued child inside the same block.
 
 End the response normally after registering a watch. A watch transition is a
 durable wakeup; on reactivation, `pollWatch` reads typed state.

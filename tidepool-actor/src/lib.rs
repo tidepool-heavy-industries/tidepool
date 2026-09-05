@@ -14,9 +14,11 @@
 //! are shared as information, while [`EffectiveRole`], exact
 //! [`ActorEffectKey`] membership, opaque grants, workspace placement, and
 //! descendant limits independently define each child's authority. Children
-//! are not published until every provider binding is queue-ready and the final
-//! hosted effect boundary commits. Pre-publication failure aborts the group;
-//! published children remain independently addressable for typed follow-up.
+//! are admitted dormant and released after the enclosing hosted tool block's
+//! real result is durable. They inherit its final committed Haskell scope.
+//! Admission failure aborts its own group; subsequent statement failure preserves
+//! earlier admissions. Unacknowledged groups are cancelled on host reattachment
+//! or owner shutdown. Published children remain independently addressable.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
