@@ -17,6 +17,26 @@ use tidepool_runtime::session::{
 
 use crate::generated::actor::ActorReq;
 use crate::ActorDescriptor;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+pub enum ForkEffort {
+    Low,
+    Medium,
+    High,
+}
+
+pub(crate) struct ActorStartRequest {
+    pub label: String,
+    pub role: ActorLaunchRoleWire,
+    pub profile: ActorEffectProfileWire,
+    pub launch_worktrees: Vec<String>,
+    pub fork_group: Option<crate::ForkGroupId>,
+    pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
+    pub effect_keys: Option<Vec<ActorEffectKeyWire>>,
+    pub fork_effort: Option<ForkEffort>,
+    pub session_id: tidepool_repr::SessionId,
+    pub parent_actor: crate::ActorRef,
+}
+
 #[derive(tidepool_bridge_derive::FromCore)]
 pub enum ActorEffectProfileWire {
     ActorReadWriteProfile,
@@ -69,12 +89,15 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
 /// One parked parent continuation paired with exclusive custody of its child
 /// entry. Compiler provenance travels with the rooted entry itself.
 pub struct ResidentActorStart {
-    descriptor: ActorDescriptor,
-    parent_hole: ResidentHole,
-    entry: RootCustody,
-    launch_worktrees: Vec<String>,
-    fork_group: Option<crate::ForkGroupId>,
-    fork_workspace: Option<crate::ForkWorkspaceSeed>,
+    pub(crate) parent_hole: ResidentHole,
+    pub(crate) child: CapturedChildLaunch,
+}
+
+pub(crate) struct CapturedChildLaunch {
+    pub descriptor: ActorDescriptor,
+    pub entry: RootCustody,
+    pub launch_worktrees: Vec<String>,
+    pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,36 +168,42 @@ impl ResidentActorStart {
         Self::capture_decoded(
             session,
             parent_hole,
-            label,
-            role,
-            profile,
-            launch_worktrees,
-            fork_group,
-            None,
-            None,
-            session_id,
-            parent_actor,
+            ActorStartRequest {
+                label,
+                role,
+                profile,
+                launch_worktrees,
+                fork_group,
+                fork_workspace: None,
+                effect_keys: None,
+                fork_effort: None,
+                session_id,
+                parent_actor,
+            },
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture_decoded<H, O>(
         session: &mut ResidentSession<H, O>,
         parent_hole: ResidentHole,
-        label: String,
-        role: ActorLaunchRoleWire,
-        profile: ActorEffectProfileWire,
-        launch_worktrees: Vec<String>,
-        fork_group: Option<crate::ForkGroupId>,
-        fork_workspace: Option<crate::ForkWorkspaceSeed>,
-        effect_keys: Option<Vec<ActorEffectKeyWire>>,
-        session_id: tidepool_repr::SessionId,
-        parent_actor: crate::ActorRef,
+        request: ActorStartRequest,
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
+        let ActorStartRequest {
+            label,
+            role,
+            profile,
+            launch_worktrees,
+            fork_group,
+            fork_workspace,
+            effect_keys,
+            fork_effort,
+            session_id,
+            parent_actor,
+        } = request;
         let context_fork = fork_group.is_some();
         let child_realm = RealmId::fresh();
         let entry = session
@@ -227,6 +256,7 @@ impl ResidentActorStart {
         )
         .with_profile(profile)
         .with_effective_role(effective_role)
+        .with_fork_effort(fork_effort)
         .with_supervisor_parent(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
         if context_fork {
@@ -236,34 +266,14 @@ impl ResidentActorStart {
             descriptor = descriptor.with_fork_group(group);
         }
         Ok(Self {
-            descriptor,
             parent_hole,
-            entry,
-            launch_worktrees,
-            fork_group,
-            fork_workspace,
+            child: CapturedChildLaunch {
+                descriptor,
+                entry,
+                launch_worktrees,
+                fork_workspace,
+            },
         })
-    }
-
-    /// Consume the capture into the exact parent obligation and child entry.
-    pub fn into_parts(
-        self,
-    ) -> (
-        ActorDescriptor,
-        ResidentHole,
-        RootCustody,
-        Vec<String>,
-        Option<crate::ForkGroupId>,
-        Option<crate::ForkWorkspaceSeed>,
-    ) {
-        (
-            self.descriptor,
-            self.parent_hole,
-            self.entry,
-            self.launch_worktrees,
-            self.fork_group,
-            self.fork_workspace,
-        )
     }
 }
 

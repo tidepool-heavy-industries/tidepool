@@ -33,6 +33,8 @@ module Tidepool.Actors.Unfold
   , Branch
   , withBranchGuidance
   , withBranchDeadline
+  , ForkEffort (..)
+  , withEffort
   , RolePolicy
   , inspectionPolicy
   , codingPolicy
@@ -121,6 +123,7 @@ import Tidepool.Effects.Core
   , WorktreeReceipt
   , WorktreeSource (..)
   , Forks (..)
+  , ForkEffort (..)
   , AgentInspection (..)
   , WorktreeSpec (..)
   )
@@ -222,10 +225,15 @@ data Branch (childEffects :: [Type -> Type]) input result where
 data BranchOptions = BranchOptions
   { branchGuidance :: Maybe Text
   , branchDeadline :: Maybe RequestDeadline
+  , branchEffort :: Maybe ForkEffort
   }
 
 defaultBranchOptions :: BranchOptions
-defaultBranchOptions = BranchOptions Nothing Nothing
+defaultBranchOptions = BranchOptions Nothing Nothing Nothing
+
+withEffort :: ForkEffort -> Branch child input result -> Branch child input result
+withEffort effort (Branch label role seed effects options input) =
+  Branch label role seed effects (options { branchEffort = Just effort }) input
 
 withBranchGuidance
   :: Text
@@ -534,7 +542,7 @@ startBranch
   -> Text
   -> Branch child input result
   -> Eff effects (Either UnfoldError (AgentRef, Text, WorktreeHandle))
-startBranch groupId allocated (Branch _ role seed effects _ _) = do
+startBranch groupId allocated (Branch _ role seed effects options _) = do
   let (worktreeSpec, dirtyPolicy) = seedRequest allocated seed
   launched <- startForkedAgent
     (launchRoleFor role)
@@ -543,6 +551,7 @@ startBranch groupId allocated (Branch _ role seed effects _ _) = do
     worktreeSpec
     dirtyPolicy
     (effectKeys effects)
+    (branchEffort options)
   pure $ case launched of
     Left failure -> Left (UnfoldBranchRejected allocated failure)
     Right branch -> Right branch

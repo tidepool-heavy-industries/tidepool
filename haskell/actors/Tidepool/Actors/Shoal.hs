@@ -61,6 +61,8 @@ module Tidepool.Actors.Shoal
   , Branch
   , withBranchGuidance
   , withBranchDeadline
+  , ForkEffort (..)
+  , withEffort
   , RolePolicy
   , inspectionPolicy
   , codingPolicy

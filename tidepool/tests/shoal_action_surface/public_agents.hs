@@ -156,8 +156,8 @@ heterogeneousUnfold
 heterogeneousUnfold group textLeaf intLeaf =
   unfold group $
     (,)
-      <$> child (researching @Text textLeaf projectHead ())
-      <*> child (coding @Int intLeaf projectHead ())
+      <$> child (withEffort High (researching @Text textLeaf projectHead ()))
+      <*> child (withEffort Low (coding @Int intLeaf projectHead ()))
 
 homogeneousUnfold
   :: ForkGroupPath
@@ -182,7 +182,7 @@ configuredBranch
   -> BranchLabel
   -> Branch ResearchActorEffects () Text
 configuredBranch deadline leaf =
-  withBranchDeadline deadline $
+  withEffort Medium $ withBranchDeadline deadline $
     withBranchGuidance "inspect only" $
       researching @Text leaf projectHead ()
 

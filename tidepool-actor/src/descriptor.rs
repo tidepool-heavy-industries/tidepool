@@ -19,6 +19,7 @@ pub struct ActorDescriptor {
     context_parent: Option<ActorRef>,
     actor_path: Option<tidepool_repr::ActorPath>,
     fork_group: Option<crate::ForkGroupId>,
+    fork_effort: Option<crate::ForkEffort>,
 }
 
 impl ActorDescriptor {
@@ -36,12 +37,24 @@ impl ActorDescriptor {
             context_parent: None,
             actor_path: None,
             fork_group: None,
+            fork_effort: None,
         }
     }
 
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    #[must_use]
+    pub fn fork_effort(&self) -> Option<crate::ForkEffort> {
+        self.fork_effort
+    }
+
+    #[must_use]
+    pub fn with_fork_effort(mut self, effort: Option<crate::ForkEffort>) -> Self {
+        self.fork_effort = effort;
+        self
     }
 
     #[must_use]

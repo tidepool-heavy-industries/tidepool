@@ -151,6 +151,22 @@ pub struct ActorHostConfig {
     pub pane_environment: std::collections::BTreeMap<String, String>,
 }
 
+fn launch_effort(
+    mode: &InteractiveLaunchMode,
+    default: ReasoningEffort,
+    requested: Option<tidepool_actor::ForkEffort>,
+) -> Option<ReasoningEffort> {
+    if matches!(mode, InteractiveLaunchMode::Fork(_)) {
+        requested.map(|effort| match effort {
+            tidepool_actor::ForkEffort::Low => ReasoningEffort::Low,
+            tidepool_actor::ForkEffort::Medium => ReasoningEffort::Medium,
+            tidepool_actor::ForkEffort::High => ReasoningEffort::High,
+        })
+    } else {
+        Some(default)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ActorHostReadiness {
     /// The root pane is selected, but its queue-ready session binding has not
@@ -1801,10 +1817,11 @@ async fn launch_prepared_interactive_application(
             &tidepool_actor::shoal_hosted_prompt_fingerprint(),
         ),
     );
+    let effort = launch_effort(&launch_mode, config.effort, installation.fork_effort);
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         model: Some(config.model.clone()),
-        effort: Some(config.effort),
+        effort,
         developer_instructions,
         initial_prompt: installation.initial_user_message.clone(),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
@@ -2541,6 +2558,34 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fork_effort_is_optional_and_never_replaced_by_the_root_default() {
+        use tidepool_actor::ForkEffort;
+        use tidepool_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
+        let fork = InteractiveLaunchMode::Fork(BackendThreadId("parent".into()));
+        for default in [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ] {
+            assert_eq!(super::launch_effort(&fork, default, None), None);
+            for (requested, selected) in [
+                (ForkEffort::Low, ReasoningEffort::Low),
+                (ForkEffort::Medium, ReasoningEffort::Medium),
+                (ForkEffort::High, ReasoningEffort::High),
+            ] {
+                assert_eq!(
+                    super::launch_effort(&fork, default, Some(requested)),
+                    Some(selected)
+                );
+            }
+            assert_eq!(
+                super::launch_effort(&InteractiveLaunchMode::Fresh, default, None),
+                Some(default)
+            );
+        }
+    }
+
     use super::*;
     use tidepool_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,

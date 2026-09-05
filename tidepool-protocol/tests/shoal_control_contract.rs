@@ -1,8 +1,27 @@
-//! Independent ABI pins for inspected cleanup and exact group inspection.
+//! Independent ABI pins for Shoal control and fork configuration.
 use tidepool_protocol::effects::{
     agent_control::agent_control, agent_inspection::agent_inspection,
 };
 use tidepool_protocol::hs::HsType;
+
+#[test]
+fn fork_effort_is_optional_at_the_existing_launch_boundary() {
+    let forks = tidepool_protocol::effects::forks::forks();
+    let launch = forks
+        .verbs
+        .iter()
+        .find(|verb| verb.ctor == "ForksStartWith")
+        .unwrap();
+    assert_eq!(launch.args.len(), 10);
+    assert_eq!(launch.args[9].name, "effort");
+    assert_eq!(
+        launch.args[9].ty,
+        HsType::maybe(HsType::Named("ForkEffort"))
+    );
+    // Preserve the entry closure's position: the actor capture owner claims
+    // its live custody by this field, independently of configuration decoding.
+    assert_eq!(launch.args[1].name, "entry");
+}
 
 #[test]
 fn cleanup_execution_carries_exact_incarnations_and_activity_revisions() {

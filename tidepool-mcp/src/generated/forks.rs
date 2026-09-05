@@ -9,12 +9,13 @@ pub fn forks_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "ForksBeginWith :: Bool -> Text -> [Text] -> Forks (Either Text (Int, Text, [Text]))",
-            "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
+            "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Maybe ForkEffort -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
             "ForksCommitWith :: Int -> Forks (Either Text ())",
             "ForksAbortWith :: Int -> Forks (Either Text ())",
             "ForksCleanupWith :: Int -> Forks ForkGroupCleanupOutcome",
         ],
         type_defs: &[
+            "data ForkEffort = Low | Medium | High deriving (Show, Eq)",
             "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration deriving (Show, Eq)",
             "data ForkGroupCleanupOutcome = ForkGroupCleaned | ForkGroupStillActive [(Int, Int)] | ForkGroupCleanupRejected Text deriving (Show, Eq)",
         ],

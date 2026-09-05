@@ -25,6 +25,24 @@ pub fn forks() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
+                name: "ForkEffort",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: ["Low", "Medium", "High"]
+                        .into_iter()
+                        .map(|ctor| SumVariant {
+                            ctor,
+                            fields: VariantFields::Positional(Vec::new()),
+                            doc: &[],
+                        })
+                        .collect(),
+                },
+                json: JsonInstance::None,
+                derives: WireDerives(&[]),
+                domain: None,
+                doc: &["Reasoning effort selected before a context child's first inference."],
+            },
+            TypeDef {
                 name: "ActorEffectKey",
                 wire_rust: None,
                 shape: TypeShape::Sum {
@@ -141,6 +159,11 @@ pub fn forks() -> Effect {
                     name: "effectKeys",
                     ty: HsType::list(HsType::Named("ActorEffectKey")),
                     rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>"),
+                });
+                args.push(Arg {
+                    name: "effort",
+                    ty: HsType::maybe(HsType::Named("ForkEffort")),
+                    rust: RustBinding::Path("Option<crate::ForkEffort>"),
                 });
                 Verb {
                     ctor: "ForksStartWith",

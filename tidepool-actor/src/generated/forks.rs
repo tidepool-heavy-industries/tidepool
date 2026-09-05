@@ -24,6 +24,7 @@ pub enum ForksReq {
         Option<tidepool_bridge_effects::WtWorktreeSpec>,
         tidepool_bridge_effects::WtDirtyPolicy,
         Vec<crate::ActorEffectKeyWire>,
+        Option<crate::ForkEffort>,
     ),
     ForksCommitWith(i64),
     ForksAbortWith(i64),

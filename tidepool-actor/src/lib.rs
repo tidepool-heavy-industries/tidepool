@@ -107,7 +107,7 @@ pub use runtime_observation::{
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError,
-    ResidentActorStart,
+    ForkEffort, ResidentActorStart,
 };
 pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};

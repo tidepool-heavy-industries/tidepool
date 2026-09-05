@@ -73,6 +73,23 @@ user's TUI repository, not an automated provider campaign.
   unfinished. Prefer minimal deterministic scenarios for subsequent targeted
   changes and a minimal live canary for the provider boundary; do not introduce
   additional test checkpoint/receipt infrastructure in this wave.
+- Fork-effort plumbing now accepts `withEffort Low/Medium/High` on a branch,
+  carries the optional value through the existing launch boundary, and leaves
+  omitted fork effort unset instead of replacing it with the root's project
+  default. This is requested configuration, not proof of first inference or
+  cache reuse. Provider observation, policy completion, revision pinning, and
+  destination-owned unresolved-call verification remain pending.
+- Launch capture uses `ActorStartRequest` and `CapturedChildLaunch` named
+  fields instead of long positional arguments and a six-element return tuple.
+  The descriptor is the single owner of the captured fork-group identity.
+- Effort slice checks: public Haskell surface 2 passed (nextest
+  `48425f20-8b71-483f-9af5-af0e1d586bda`); host inheritance/override selection
+  1 passed (`3a7770eb-c3b6-4105-a149-eecc5d830976`); protocol ABI/freshness
+  11 passed. Strict actor/host lint passed for all targets. The smaller resident
+  actor launch/policy/terminal-reply scenario passed in 13.897 seconds
+  (`b3aa20d7-bb2b-4103-bd5a-018fd42d5c1d`).
+  Fixture compatibility also passed: 217 tests, nextest
+  `37a3d506-73dc-41b7-ae7f-f5a57f880e1e`.
 
 After the implementation wave, deliver a short report on other useful Tidepool
 applications, including resident Haskell editing helpers that emerge during a

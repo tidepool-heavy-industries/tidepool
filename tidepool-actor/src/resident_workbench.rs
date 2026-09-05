@@ -1570,15 +1570,12 @@ where
                     ) => crate::ResidentActorStart::capture_decoded(
                         session,
                         hole,
-                        label,
-                        role,
-                        profile,
-                        worktrees,
-                        None,
-                        None,
-                        None,
-                        context.placement.session,
-                        context.actor,
+                        crate::start::ActorStartRequest {
+                            label, role, profile, launch_worktrees: worktrees,
+                            fork_group: None, fork_workspace: None, effect_keys: None,
+                            fork_effort: None,
+                            session_id: context.placement.session, parent_actor: context.actor,
+                        },
                     )
                     .map(ResidentActorBoundary::Start)
                     .map_err(ResidentActorWorkbenchError::StartCapture),
@@ -1592,6 +1589,7 @@ where
                         worktree_spec,
                         bound_dirty_policy,
                         effect_keys,
+                        effort,
                     )) => {
                         let group = u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -1601,18 +1599,16 @@ where
                         crate::ResidentActorStart::capture_decoded(
                             session,
                             hole,
-                            label,
-                            role,
-                            profile,
-                            worktrees,
-                            Some(crate::ForkGroupId(group)),
-                            Some(match worktree_spec {
-                                Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
-                                None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
-                            }),
-                            Some(effect_keys),
-                            context.placement.session,
-                            context.actor,
+                            crate::start::ActorStartRequest {
+                                label, role, profile, launch_worktrees: worktrees,
+                                fork_group: Some(crate::ForkGroupId(group)),
+                                fork_workspace: Some(match worktree_spec {
+                                    Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
+                                    None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
+                                }),
+                                effect_keys: Some(effect_keys), fork_effort: effort,
+                                session_id: context.placement.session, parent_actor: context.actor,
+                            },
                         )
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)

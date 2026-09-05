@@ -66,6 +66,7 @@ pub struct LocalResidentInstallation {
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
     pub effective_role: crate::EffectiveRole,
+    pub fork_effort: Option<crate::ForkEffort>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
     pub fork_group: Option<crate::ForkGroupId>,
@@ -845,19 +846,9 @@ where
         context: &ActorSessionContext,
         start: crate::ResidentActorStart,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let (descriptor, parent_hole, entry, launch_worktrees, fork_group, fork_workspace) =
-            start.into_parts();
-        let started = self
-            .try_start_child(
-                kernel,
-                context,
-                descriptor,
-                entry,
-                launch_worktrees,
-                fork_group,
-                fork_workspace,
-            )
-            .await;
+        let crate::ResidentActorStart { parent_hole, child } = start;
+        let fork_group = child.descriptor.fork_group();
+        let started = self.try_start_child(kernel, context, child).await;
         let (child, allocated_label, admitted_worktree) = match started {
             Ok(started) => started,
             Err(error) if fork_group.is_some() => {
@@ -910,16 +901,11 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn try_start_child(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
-        mut descriptor: ActorDescriptor,
-        entry: RootCustody,
-        mut launch_worktrees: Vec<String>,
-        fork_group: Option<crate::ForkGroupId>,
-        fork_workspace: Option<crate::ForkWorkspaceSeed>,
+        child: crate::start::CapturedChildLaunch,
     ) -> Result<
         (
             LocalActorRef,
@@ -928,6 +914,13 @@ where
         ),
         ResidentActorWorkbenchError,
     > {
+        let crate::start::CapturedChildLaunch {
+            mut descriptor,
+            entry,
+            mut launch_worktrees,
+            fork_workspace,
+        } = child;
+        let fork_group = descriptor.fork_group();
         if !self
             .descriptor
             .profile()
@@ -2037,6 +2030,7 @@ where
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
+                            fork_effort: self.descriptor.fork_effort(),
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
                             fork_group: self.descriptor.fork_group(),
@@ -2191,6 +2185,7 @@ where
             initial_user_message,
             launch_worktrees: self.launch_worktrees.clone(),
             effective_role: self.descriptor.effective_role().clone(),
+            fork_effort: self.descriptor.fork_effort(),
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
             fork_group: self.descriptor.fork_group(),
