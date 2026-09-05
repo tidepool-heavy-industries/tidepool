@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Shared TIDEPOOL_EXTRACT resolution + validation, sourced by battery.sh,
-# battery-shard.sh, and bench-turn.sh. One copy so the three callers can't
-# drift out of sync with each other.
+# Shared extractor resolution, validation, and test-daemon lifecycle.
 #
 # Usage: source this file, then call `resolve_tidepool_extract`. Callers must
-# already be cd'd to the repo root (all three do this before sourcing) since
+# already be cd'd to the repo root since
 # the build step below runs `cd haskell`.
 #
 # Also owns the resident-compile-daemon lifecycle helpers
@@ -44,13 +42,20 @@ resolve_tidepool_extract() {
       echo "error: the active GHC does not expose lens; run through 'just' or enter 'nix develop'" >&2
       exit 1
     fi
-    ( cd haskell && cabal build tidepool-extract-bin )
-    cargo build -p tidepool-extract-cmd --bin tidepool-extract
+    ( cd haskell && cabal build tidepool-extract-bin ) || return 1
+    # Cargo owns target-directory, profile, and target-triple resolution.
+    # Read its artifact path, including on a fresh=true cache hit.
+    TIDEPOOL_EXTRACT="$(
+      set -o pipefail
+      cargo build -p tidepool-extract-cmd --bin tidepool-extract --message-format=json-render-diagnostics |
+        jq -ser '[.[] | select(.reason == "compiler-artifact" and
+          .target.name == "tidepool-extract" and .executable != null) |
+          .executable] | unique | if length == 1 then .[0] else error("expected one extractor executable") end'
+    )" || return 1
     # Split assignment from export: `export VAR="$(cmd)"` masks the command's
     # exit status (SC2155), so a failed list-bin would proceed with an empty
     # var.
-    TIDEPOOL_EXTRACT_WORKER="$(cd haskell && cabal list-bin tidepool-extract-bin)"
-    TIDEPOOL_EXTRACT="$PWD/target/debug/tidepool-extract"
+    TIDEPOOL_EXTRACT_WORKER="$(cd haskell && cabal list-bin tidepool-extract-bin)" || return 1
     export TIDEPOOL_EXTRACT TIDEPOOL_EXTRACT_WORKER
   fi
 
@@ -112,6 +117,25 @@ resolve_tidepool_extract() {
   echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 }
 
+# The frontend resolves its compiler worker before publishing this identity. EOF
+# after the identity is an incomplete request, so the exit status is not a
+# successful-request signal. Share this preflight with Shoal bootstrap.
+validate_tidepool_extract_endpoint() (
+  local probe_dir endpoint_magic probe_status=0
+  probe_dir="$(mktemp -d -t tidepool-endpoint-probe.XXXXXX)" || return 1
+  trap 'rm -rf "$probe_dir"' EXIT
+  unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
+  timeout --kill-after=5 30 "$TIDEPOOL_EXTRACT" --compiler-endpoint-v1 \
+    </dev/null >"$probe_dir/identity" 2>"$probe_dir/stderr" || probe_status=$?
+  endpoint_magic="$(od -An -tx1 -N8 "$probe_dir/identity" | tr -d '[:space:]')"
+  if [[ "$probe_status" = 124 || "$probe_status" = 137 || "$endpoint_magic" != "5450434944303031" ]] \
+    || [[ "$(wc -c <"$probe_dir/identity")" -lt 40 ]]; then
+    cat "$probe_dir/stderr" >&2
+    echo "error: extractor could not bind a direct compiler endpoint; check TIDEPOOL_EXTRACT and TIDEPOOL_EXTRACT_WORKER" >&2
+    return 1
+  fi
+)
+
 # --- Resident compile daemon ---
 #
 # Globals set by start_battery_daemon and read by teardown_battery_daemon:
@@ -123,12 +147,13 @@ resolve_tidepool_extract() {
 BATTERY_DAEMON_PID=""
 BATTERY_DAEMON_SOCKET_DIR=""
 BATTERY_DAEMON_OWNED=0
+BATTERY_DAEMON_START_FAILED=0
 BATTERY_ARTIFACT_DIR=""
 BATTERY_NEXTEST_LOG=""
 
 # Failure artifacts for battery entry points. Successful runs leave nothing;
-# failed runs retain the exact command, nextest output, toolchain report, and
-# compile-daemon log under target/tidepool-test-runs/.
+# test or daemon-startup failures retain the exact command, nextest output,
+# toolchain report, and compile-daemon log under target/tidepool-test-runs/.
 prepare_battery_artifacts() {
   local label="$1"
   shift
@@ -151,7 +176,7 @@ prepare_battery_artifacts() {
 finalize_battery_artifacts() {
   local status="$1"
   [[ -n "$BATTERY_ARTIFACT_DIR" ]] || return 0
-  if [[ "$status" -eq 0 ]]; then
+  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
     rm -rf "$BATTERY_ARTIFACT_DIR"
     return 0
   fi
@@ -161,7 +186,7 @@ finalize_battery_artifacts() {
     cp "$daemon_log" "$BATTERY_ARTIFACT_DIR/daemon.log"
   fi
   scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
-  echo "==> test failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
+  echo "==> test/daemon failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
   echo "==> reproduce: $BATTERY_ARTIFACT_DIR/reproduce.sh" >&2
 }
 
@@ -234,9 +259,7 @@ _battery_daemon_stamp_path() {
 # and looks alive, reuse it and leave BATTERY_DAEMON_OWNED=0 — a chain
 # invocation (e.g. battery-shard.sh runs launched back-to-back by another
 # script that already started a daemon) must not start, or later tear down,
-# a second one. Checked before the opt-in gate below: reusing an inherited,
-# already-running daemon is always correct regardless of whether this
-# particular invocation's own env re-states the opt-in.
+# a second one. The explicit disable switch still takes precedence.
 #
 # An unreachable daemon needs no handling here: ExtractCmd::run() (the ONE
 # tidepool-extract invocation builder, tidepool-extract-cmd/CLAUDE.md) falls
@@ -247,9 +270,12 @@ start_battery_daemon() {
   BATTERY_DAEMON_PID=""
   BATTERY_DAEMON_SOCKET_DIR=""
   BATTERY_DAEMON_OWNED=0
+  BATTERY_DAEMON_START_FAILED=0
 
   if [ "${TIDEPOOL_EXTRACT_NO_DAEMON:-0}" = "1" ]; then
-    echo "==> TIDEPOOL_EXTRACT_NO_DAEMON=1 — skipping the resident compile daemon (direct spawn per request)" >&2
+    unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
+    validate_tidepool_extract_endpoint || return 1
+    echo "==> compile daemon disabled; direct compiler endpoint validated" >&2
     return 0
   fi
 
@@ -257,6 +283,7 @@ start_battery_daemon() {
     echo "==> reusing already-running compile daemon at $TIDEPOOL_EXTRACT_DAEMON_SOCKET (outer wrapper owns its lifecycle)" >&2
     return 0
   fi
+  unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
 
   BATTERY_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
   local sock="$BATTERY_DAEMON_SOCKET_DIR/extract.sock"
@@ -276,30 +303,41 @@ start_battery_daemon() {
   # Rotation and RSS flags are omitted so the frontend owns their defaults.
   "$TIDEPOOL_EXTRACT" --daemon --socket "$sock" "${watch_args[@]}" >"$log" 2>&1 &
   BATTERY_DAEMON_PID=$!
+  BATTERY_DAEMON_OWNED=1
   # Recorded before the boot-wait below so a signal arriving mid-wait still
   # tears this down correctly (the caller installs its cleanup trap before
   # calling this function).
 
-  local waited=0
-  while [ ! -S "$sock" ]; do
+  local started_at=$SECONDS
+  while ! _battery_daemon_socket_alive "$sock"; do
     if ! kill -0 "$BATTERY_DAEMON_PID" 2>/dev/null; then
-      echo "==> compile daemon exited before it came up (see $log) — continuing without it" >&2
+      echo "==> compile daemon exited before readiness (see $log)" >&2
+      wait "$BATTERY_DAEMON_PID" 2>/dev/null || true
       BATTERY_DAEMON_PID=""
-      return 0
+      _battery_direct_fallback
+      return $?
     fi
-    if [ "$waited" -ge 30 ]; then
-      echo "==> compile daemon did not create its socket within 30s (see $log) — continuing without it" >&2
-      kill -TERM "$BATTERY_DAEMON_PID" 2>/dev/null || true
+    if [ $((SECONDS - started_at)) -ge 30 ]; then
+      echo "==> compile daemon was not ready within 30s (see $log)" >&2
+      _terminate_and_wait "$BATTERY_DAEMON_PID" "compile daemon startup"
       BATTERY_DAEMON_PID=""
-      return 0
+      _battery_direct_fallback
+      return $?
     fi
     sleep 0.5
-    waited=$((waited + 1))
   done
 
   export TIDEPOOL_EXTRACT_DAEMON_SOCKET="$sock"
   BATTERY_DAEMON_OWNED=1
   echo "==> compile daemon up: pid=$BATTERY_DAEMON_PID socket=$sock" >&2
+}
+
+_battery_direct_fallback() {
+  BATTERY_DAEMON_START_FAILED=1
+  BATTERY_DAEMON_OWNED=0
+  unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
+  validate_tidepool_extract_endpoint || return 1
+  echo "==> compile daemon unavailable; direct compiler endpoint validated, using direct spawn per request" >&2
 }
 
 # Sends TERM to pid $1, waits up to a 10s grace period (polling `kill -0`),
@@ -320,7 +358,10 @@ start_battery_daemon() {
 # sequence has exactly one implementation.
 _terminate_and_wait() {
   local pid="$1" label="$2"
-  kill -0 "$pid" 2>/dev/null || return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    return 0
+  fi
   kill -TERM "$pid" 2>/dev/null || true
   local term_sent_at=$SECONDS
   while kill -0 "$pid" 2>/dev/null; do
@@ -346,7 +387,14 @@ teardown_battery_daemon() {
   fi
   BATTERY_DAEMON_PID=""
   if [ -n "$BATTERY_DAEMON_SOCKET_DIR" ] && [ -d "$BATTERY_DAEMON_SOCKET_DIR" ]; then
-    rm -rf "$BATTERY_DAEMON_SOCKET_DIR"
+    if [ "$BATTERY_DAEMON_START_FAILED" = 1 ] && [ -z "$BATTERY_ARTIFACT_DIR" ]; then
+      echo "==> retained compile daemon startup log: $BATTERY_DAEMON_SOCKET_DIR/daemon.log" >&2
+    else
+      rm -rf "$BATTERY_DAEMON_SOCKET_DIR"
+    fi
+  fi
+  if [ "$BATTERY_DAEMON_OWNED" = 1 ]; then
+    unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
   fi
   BATTERY_DAEMON_SOCKET_DIR=""
   BATTERY_DAEMON_OWNED=0

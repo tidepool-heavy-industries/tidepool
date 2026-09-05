@@ -25,21 +25,7 @@ source scripts/lib-extract.sh
 resolve_tidepool_extract
 
 echo "==> validating the local extractor/compiler endpoint"
-probe_dir="$(mktemp -d -t shoal-endpoint-probe.XXXXXX)"
-trap 'rm -rf "$probe_dir"' EXIT
-# A bound endpoint writes its identity before reading the framed request. EOF
-# after that identity is intentionally an incomplete request, so validate the
-# fixed magic rather than treating the later EOF status as the probe result.
-"$TIDEPOOL_EXTRACT" --compiler-endpoint-v1 \
-  </dev/null >"$probe_dir/identity" 2>"$probe_dir/stderr" || true
-endpoint_magic="$(od -An -tx1 -N8 "$probe_dir/identity" | tr -d '[:space:]')"
-if [[ "$endpoint_magic" != "5450434944303031" ]]; then
-  cat "$probe_dir/stderr" >&2
-  echo "error: local tidepool-extract did not publish the TPCID001 compiler endpoint identity" >&2
-  exit 1
-fi
-rm -rf "$probe_dir"
-trap - EXIT
+validate_tidepool_extract_endpoint
 
 echo "==> building Shoal"
 cargo build -p tidepool --bin shoal

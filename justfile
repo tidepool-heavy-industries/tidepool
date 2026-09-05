@@ -40,6 +40,10 @@ test-lib crate filter="":
     if [[ -n "$2" ]]; then args+=(-E "$2"); fi
     {{ nix }} scripts/battery.sh "${args[@]}"
 
+# Test shared extractor resolution and daemon lifecycle without compiler builds.
+test-toolchain-scripts:
+    {{ nix }} python3 scripts/tests/test_lib_extract.py -v
+
 # Run a crate's Cargo integration suites sequentially.
 [positional-arguments]
 suite crate:
