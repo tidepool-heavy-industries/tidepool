@@ -1,5 +1,13 @@
 # External Codex handoff — exclusive controller, harmless observers
 
+## Human-facing handoff
+
+The requirements-first peer assignment is `~/dev/codex/TASK.md`, written directly
+in the Codex repository at the human's request. Use that for the external session.
+This file retains Shoal-side investigation and acceptance notes, not implementation
+directions binding the Codex peer. That peer owns design/API choices and may correct
+our assumptions with evidence.
+
 ## Execution boundary
 
 **This is not a Shoal fork assignment.** User requires any Codex edits to happen
@@ -45,7 +53,7 @@ satisfy the agreed observer acceptance gate. A filtering TUI proxy or custom UI 
 avoid native edits only by adding a new policy/presentation layer; that is not the
 recommended ownership boundary and is not an approved silent substitution.
 
-**Human-managed handoff:** give this file to the Codex-repository LLM outside Shoal
+**Human-managed handoff:** point the Codex-repository LLM at its local `TASK.md`
 before the next service integration wave. Ask it to return the reviewed commit,
 protocol/CLI contract, binary/build instructions, tests and limitations. The human
 brings those artifacts back to Shoal. No cross-repo actor handle is presumed. While

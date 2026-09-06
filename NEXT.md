@@ -61,8 +61,8 @@ ownership.** Ordinary attached clients can currently race to answer tool request
 Moving the process without moving hosted-tool forwarding out of the TUI is not a fix.
 Pre-wave reinspection confirms a native dependency for the agreed directly attached
 observer TUI: responses lose connection identity before pending-callback completion,
-and readiness has no caller role check. **Prepare the human-managed Codex handoff
-now, not mid-wave.** The [external handoff and evidence](plans/next/service/native-control.md)
+and readiness has no caller role check. **The human-managed requirements handoff is written at
+`~/dev/codex/TASK.md`; the Codex-side LLM owns implementation as a peer.** The [external handoff and evidence](plans/next/service/native-control.md)
 separate required ownership/TUI changes from existing capabilities. A headless-only
 service could use existing Codex but would not close the agreed observer gate.
 These findings constrain the architecture below.
