@@ -116,8 +116,46 @@ RunRequest's worktreeHead follows initial policy installation. Therefore these
 Service requested a bounded repair: require both exact SessionReady events and
 exercise a nested boundHead unfold/leaf response, with independent review. This
 uses private TestCampaign hosted Haskell, not native inference or observer TUI.
-The current validation obligation remains pending on that strengthened evidence.
+The strengthened evidence below closes this in-process coverage gap.
 
 Post-submission custody deliberately remains retained: the tmux boundary cannot
 prove exact process reaping. This is a product gate, not a passing cleanup path.
 Do not deploy this staged candidate as complete service/custody support.
+
+
+## Final strengthened regression result
+
+Reviewed candidate 1da69df3 (test code 6028ed0a) was integrated at
+**e4a5e2e8556b6346695261b83ebaabd184471c70**. Service directly ran:
+
+```
+NEXTEST_TEST_THREADS=1 just test-lib tidepool 'test(custody_precedes_first_bootstrap_worktree_use_for_two_siblings)'
+```
+
+One test executed and passed, 106 excluded, 29.931 seconds; nextest run
+034f3af8-5469-4fa1-b797-3259254f5f49. Changed test target compiled. Both exact
+sibling SessionReady requests now prove the initial production worktreeHead
+finished. A real child policy performs nested boundHead unfold from a distinct
+parent commit, exact leaf activation, respond/sessionInput, watch and typed reply.
+Unexpected events fail; all exact root/sibling/leaf retirements, retained terminal
+values, three released bindings and preserved worktree source are checked.
+
+Direct logs: `target/service-custody-validation/exact-bootstrap.log`,
+`exact-revision.txt`, `exact-binaries.sha256`. Test SHA-256
+9766a6e18bcea68cd300b50440cdbcab9c285998749a85406bef11817d1ce1a5;
+extractor 463d2664aea5b9e776efacd1ed7d1659735998caf340c17c676cb375401e2c93;
+local worker 20ba5fbf59b459c93a78bcc31d321af104ecfd2c5af6455699ec0bee885fe323.
+Formatting and diff checks passed. Compile daemon teardown was observed.
+Production actor/handler/host source is unchanged from 467a5467, where the prior
+negative/cancellation checks and Shoal build ran; only tests/fixtures/docs changed.
+Do not describe those older runs as reruns of the strengthened test revision.
+
+This establishes the repair's in-process recursive bootstrap behavior. It does
+not establish the exact cause/timing of the two historical denials, native
+full-prefix forks, native controller/observer behavior or exact OS process reap.
+No running host, native pin, or live failed actor was replaced/retried. A private
+hosted-Haskell canary does not need a live-root restart; exercising the fix in the
+actual live Shoal process requires a rebuilt matched host/extractor/worker and a
+user-owned restart. The staged irreversible post-submission custody fence still
+blocks declaring this candidate deployable until service process-reap/release
+integration is complete. Retained custody implementer/reviewer remain available.
