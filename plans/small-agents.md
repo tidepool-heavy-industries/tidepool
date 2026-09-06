@@ -1,5 +1,9 @@
 # Small agents as typed, programmable components
 
+Implementation entry: [next-wave root](../NEXT.md) and the gated
+[read-only small-worker tranche](next/small-workers.md). The service/control
+acceptance gate comes first; this document retains the broader design intent.
+
 ## Intent
 
 Extend Shoal with lightweight agents whose context, tools and result contract are
