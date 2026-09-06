@@ -2213,3 +2213,40 @@ provides `NEXTEST_SUCCESS_OUTPUT=immediate` and battery.sh preserves that settin
 this usage is now in scripts/codex-worktree-guidance.md. No new launcher needed.
 The survey names no cache/cost measurements and does not claim active-update
 transport experience from its own subtree. Keep that attribution boundary.
+
+### Ingress survey fold and source checks
+
+Typed survey request 39 sampled retained idle implementer (40) and reviewer
+(42); root retains `ingressSurveySettlement`. Their direct and attributed
+findings corroborate exact-seed/file ownership, useful public-consumer review,
+and distinct accepted/incorporated/tested baselines. The reviewer added public
+Lit/LitAlt malformed-input coverage beyond the private-helper regression.
+
+Both found unrelated root process inventory and large tool output low-value for
+this narrow lane. Root did emit a large process listing during initial launch
+verification; this was avoidable context noise, not necessary shared context.
+Use bounded projections for lifecycle questions. No measured selected-prefix
+benefit or cache claim follows from this qualitative feedback.
+
+Build overhead now has a source-backed dependency lead: repr's dev dependency on
+`tidepool-testing` is consumed only by `tests/proptest_cbor.rs` and
+`tests/proptest_varid_defense.rs` via `gen::arb_core_expr`; tidepool-testing has
+unconditional dependencies on runtime/codegen/toolchain/MCP and related layers.
+Thus a narrow repr test selection still compiles those dependencies. The shared
+battery also initializes extractor infrastructure. A future bounded improvement
+should separate pure-IR generators from runtime harness dependencies at their
+owner, rather than duplicate generators or create a parallel test launcher.
+No controlled before/after measurement or refactor has been performed.
+
+Formatter finding needs a correction before acting: ingress reports using
+`rustfmt --edition 2024`, while root Cargo.toml sets workspace edition **2021**.
+That mismatch is directly verified; it does not establish missing formatter
+configuration. Prefer owning `cargo fmt -p ...` and inspect all changed output;
+final campaign formatting must use the workspace edition.
+
+Root has now defined task-local `RevisionCheck` with separate `ExecutionOutcome`
+and `CheckExpectation`, tested revision and retained evidence. Its first actual
+use records the combined native suite at 5ac5be7d as ExecutedFailed/RequirePassing
+(1 passed, 2 failed), without calling the failures blocked or passed. Existing
+in-flight NumericDelivery contracts keep their captured types; no attempt was
+made to redefine them under active actors.
