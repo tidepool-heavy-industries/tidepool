@@ -62,22 +62,43 @@ impl Fixture {
         .unwrap()
     }
 
-    fn spawn_for(
+    fn register(&self, owners: &InteractiveOwners) {
+        owners.lock().insert(
+            self.custody.actor,
+            InteractiveApplicationOwner {
+                cancel: None,
+                fork_gate: None,
+                custody: Some(self.custody.clone()),
+                scoped_retention: None,
+                launch: HostLaunchState::Pending,
+                terminal: None,
+                retirement: Arc::new(Mutex::new(None)),
+            },
+        );
+    }
+
+    fn claim(
         &self,
+        owners: &InteractiveOwners,
         actor: ActorRef,
-        executable: &str,
-    ) -> Result<ScopedCustodyOwner, ScopedSpawnError> {
-        ScopedCustodyOwner::spawn(
-            self.custody.clone(),
-            actor,
-            self.prepared(executable),
+    ) -> Result<Arc<Mutex<ScopedProcessSlot>>, ScopedClaimError> {
+        owners
+            .lock()
+            .get_mut(&self.custody.actor)
+            .unwrap()
+            .reserve_scope(self.custody.clone(), actor)
+    }
+
+    fn spawn(&self, owners: &InteractiveOwners) -> Arc<Mutex<ScopedProcessSlot>> {
+        let slot = self.claim(owners, self.custody.actor).unwrap();
+        spawn_into(
+            slot.clone(),
+            self.prepared(bwrap()),
             ServiceEnvironment::default(),
             File::create(self.tree.cwd().join("scope.log")).unwrap(),
         )
-    }
-
-    fn spawn(&self) -> ScopedCustodyOwner {
-        self.spawn_for(self.custody.actor, bwrap()).unwrap()
+        .unwrap();
+        slot
     }
 
     fn retained(&self) {
@@ -107,31 +128,48 @@ fn cancelled() -> ActorTerminal {
     }
 }
 
+fn owners() -> InteractiveOwners {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 #[test]
 fn scoped_custody_exact_claim_and_pre_spawn_failure() {
     let mut fixture = Fixture::new(1);
+    let map = owners();
+    fixture.register(&map);
     assert!(matches!(
-        fixture.spawn_for(ActorRef::first(tidepool_actor::ActorId(2)), bwrap()),
-        Err(ScopedSpawnError::WrongActor)
+        fixture.claim(&map, ActorRef::first(tidepool_actor::ActorId(2))),
+        Err(ScopedClaimError::WrongActor)
     ));
-    let mut other_incarnation = fixture.custody.actor;
-    other_incarnation.incarnation = tidepool_actor::Incarnation(2);
+    let mut next = fixture.custody.actor;
+    next.incarnation = tidepool_actor::Incarnation(2);
     assert!(matches!(
-        fixture.spawn_for(other_incarnation, bwrap()),
-        Err(ScopedSpawnError::WrongActor)
+        fixture.claim(&map, next),
+        Err(ScopedClaimError::WrongActor)
     ));
+    let slot = fixture.claim(&map, fixture.custody.actor).unwrap();
+    spawn_into(
+        slot.clone(),
+        fixture.prepared("/does/not/exist"),
+        ServiceEnvironment::default(),
+        File::create(fixture.tree.cwd().join("scope.log")).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(*slot.lock(), ScopedProcessSlot::NotSpawned(_)));
     assert!(matches!(
-        fixture.spawn_for(fixture.custody.actor, "/does/not/exist"),
-        Err(ScopedSpawnError::PreSpawn(_))
+        fixture.claim(&map, fixture.custody.actor),
+        Err(ScopedClaimError::AlreadyClaimed)
     ));
-    assert!(matches!(
-        fixture.spawn_for(fixture.custody.actor, bwrap()),
-        Err(ScopedSpawnError::AlreadyClaimed)
-    ));
-    fixture.retained();
-
-    // No copied generation is an admission token: removing the exact old lease
-    // and rebinding cannot turn the old custody object into a claim for the new row.
+    assert!(map
+        .lock()
+        .get_mut(&fixture.custody.actor)
+        .unwrap()
+        .scoped_retention
+        .as_mut()
+        .unwrap()
+        .observe_not_spawned());
+    map.lock().remove(&fixture.custody.actor); // Definitive pre-spawn rollback only.
+    drop(slot);
     let lease = Arc::get_mut(&mut fixture.custody)
         .unwrap()
         .binding
@@ -148,128 +186,208 @@ fn scoped_custody_exact_claim_and_pre_spawn_failure() {
             1,
         )
         .unwrap();
+    fixture.register(&map);
     assert!(matches!(
-        fixture.spawn_for(fixture.custody.actor, bwrap()),
-        Err(ScopedSpawnError::MissingLease)
+        fixture.claim(&map, fixture.custody.actor),
+        Err(ScopedClaimError::MissingLease)
     ));
     new_lease
         .release(&mut fixture.custody.bindings.lock())
         .unwrap();
+}
 
-    let fixture = Fixture::new(3);
-    assert!(matches!(
-        fixture.spawn_for(fixture.custody.actor, "/does/not/exist"),
-        Err(ScopedSpawnError::PreSpawn(_))
-    ));
-    let table = fixture.custody.bindings.clone();
-    let id = fixture.tree.id().clone();
-    drop(fixture.custody);
+#[tokio::test]
+async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
+    let fixture = Fixture::new(1);
+    let map = owners();
+    fixture.register(&map);
+    let slot = fixture.claim(&map, fixture.custody.actor).unwrap();
+    let prepared = fixture.prepared(bwrap());
+    let output = File::create(fixture.tree.cwd().join("scope.log")).unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel::<()>();
+    drop(receive); // BEFORE spawn, and therefore before any pin.
+    let worker = tokio::task::spawn_blocking(move || {
+        spawn_into(slot, prepared, ServiceEnvironment::default(), output).unwrap();
+        assert!(send.send(()).is_err()); // Stored in row before lost notification.
+    });
+    worker.await.unwrap();
+    fixture.retained();
+    let slot = {
+        let mut rows = map.lock();
+        let row = rows.get_mut(&fixture.custody.actor).unwrap();
+        let retained = row.scoped_retention.as_mut().unwrap();
+        retained.pin(deadline()).unwrap();
+        retained.slot.clone()
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    drop(receive);
+    tokio::task::spawn_blocking(move || {
+        let status = stop_slot(&slot, deadline()).unwrap();
+        assert!(send.send(status).is_err());
+    })
+    .await
+    .unwrap();
+    {
+        let mut rows = map.lock();
+        let row = rows.get_mut(&fixture.custody.actor).unwrap();
+        assert!(matches!(
+            row.scoped_retention
+                .as_mut()
+                .unwrap()
+                .stop(deadline())
+                .unwrap(),
+            ScopedCleanupObservation::ProcessStoppedActorActive(_)
+        ));
+        row.retired(cancelled());
+        row.retired(ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "duplicate".into(),
+        });
+        assert_eq!(row.terminal, Some(cancelled()));
+        match row
+            .scoped_retention
+            .as_mut()
+            .unwrap()
+            .stop(deadline())
+            .unwrap()
+        {
+            ScopedCleanupObservation::ProcessStoppedHostWorkPending { terminal, .. } => {
+                assert_eq!(terminal, cancelled())
+            }
+            _ => panic!("terminal observed"),
+        }
+    }
+    let (resume, blocked) = tokio::sync::oneshot::channel();
+    let mut task = tokio::spawn(async move {
+        blocked.await.unwrap();
+        Ok(())
+    });
+    assert!(await_applications(&mut task, Duration::ZERO).await.is_err());
     assert!(
-        table.lock().current(&id).is_none(),
-        "true pre-spawn failure must not create process custody"
+        !task.is_finished(),
+        "timeout must not abort the fleet owner"
     );
-    let stopped = Fixture::new(4);
-    stopped.custody.actor_stopped(&cancelled());
+    let mut teardown = RetainedInteractiveFleet {
+        owners: map,
+        unfinished: Some(task),
+        failure: "host work pending".into(),
+    };
+    resume.send(()).unwrap();
+    teardown.unfinished.take().unwrap().await.unwrap().unwrap();
+    fixture.retained();
     assert!(matches!(
-        stopped.spawn_for(stopped.custody.actor, bwrap()),
-        Err(ScopedSpawnError::ActorStopped)
+        *teardown
+            .owners
+            .lock()
+            .get(&fixture.custody.actor)
+            .unwrap()
+            .scoped_retention
+            .as_ref()
+            .unwrap()
+            .slot
+            .lock(),
+        ScopedProcessSlot::Owned(_)
     ));
+    drop(teardown); // Fixture namespace was explicitly stopped through exact slot.
+    assert_eq!(
+        Arc::strong_count(&fixture.custody),
+        1,
+        "no backref, cycle or leak"
+    );
+    fixture.retained(); // No successful binding settlement is claimed.
 }
 
 #[test]
-fn scoped_custody_own_scope_actor_and_host_retention() {
+fn scoped_custody_concurrent_claim_sibling_timeout_and_legacy_fence() {
     let first = Fixture::new(1);
     let second = Fixture::new(2);
+    let map = owners();
+    first.register(&map);
+    second.register(&map);
     let barrier = std::sync::Barrier::new(2);
     let claim = || {
         barrier.wait();
-        first.spawn_for(first.custody.actor, bwrap())
+        first.claim(&map, first.custody.actor)
     };
-    let mut owner = std::thread::scope(|threads| {
-        let a = threads.spawn(&claim);
-        let b = threads.spawn(&claim);
+    let slot = std::thread::scope(|scope| {
+        let a = scope.spawn(&claim);
+        let b = scope.spawn(&claim);
         match (a.join().unwrap(), b.join().unwrap()) {
-            (Ok(owner), Err(ScopedSpawnError::AlreadyClaimed))
-            | (Err(ScopedSpawnError::AlreadyClaimed), Ok(owner)) => owner,
-            _ => panic!("exactly one concurrent claim must own its spawn"),
+            (Ok(slot), Err(ScopedClaimError::AlreadyClaimed))
+            | (Err(ScopedClaimError::AlreadyClaimed), Ok(slot)) => slot,
+            _ => panic!("one exact claim"),
         }
     });
-    let mut sibling = second.spawn();
     assert!(matches!(
-        first.spawn_for(first.custody.actor, bwrap()),
-        Err(ScopedSpawnError::AlreadyClaimed)
+        map.lock()
+            .get_mut(&second.custody.actor)
+            .unwrap()
+            .reserve_scope(first.custody.clone(), second.custody.actor),
+        Err(ScopedClaimError::WrongActor)
     ));
-    owner.pin(deadline()).unwrap();
-    sibling.pin(deadline()).unwrap();
-    let status = match sibling.stop(deadline()).unwrap() {
-        ScopedCleanupObservation::ProcessStoppedActorActive(status) => status,
-        _ => panic!("actor is still active"),
-    };
-    // Copyable status has no path into another owner's cleanup/settlement API.
-    let copied = status;
-    assert_eq!(copied.monitor_status(), status.monitor_status());
-    first.retained();
-    second.retained();
-    let first_status = owner.stop(deadline()).unwrap();
-    assert!(matches!(
-        first_status,
-        ScopedCleanupObservation::ProcessStoppedActorActive(_)
-    ));
-    first.custody.actor_stopped(&cancelled());
-    first.custody.actor_stopped(&ActorTerminal {
-        kind: ActorExitKind::Completed,
-        summary: "duplicate".into(),
-    });
-    match owner.stop(deadline()).unwrap() {
-        ScopedCleanupObservation::ProcessStoppedHostWorkPending { terminal, status } => {
-            assert_eq!(terminal, cancelled());
-            assert!(!status.monitor_status().success());
-        }
-        _ => panic!("observed actor terminal is not actor-active"),
+    spawn_into(
+        slot.clone(),
+        first.prepared(bwrap()),
+        ServiceEnvironment::default(),
+        File::create(first.tree.cwd().join("scope.log")).unwrap(),
+    )
+    .unwrap();
+    assert!(spawn_into(
+        slot.clone(),
+        first.prepared(bwrap()),
+        ServiceEnvironment::default(),
+        File::create(first.tree.cwd().join("duplicate.log")).unwrap()
+    )
+    .is_err());
+    let sibling = second.spawn(&map);
+    {
+        let mut rows = map.lock();
+        let owner = rows
+            .get_mut(&first.custody.actor)
+            .unwrap()
+            .scoped_retention
+            .as_mut()
+            .unwrap();
+        assert!(owner.stop(Instant::now()).is_err());
+        owner.pin(deadline()).unwrap();
+        assert!(owner
+            .stop(Instant::now() - std::time::Duration::from_secs(1))
+            .is_err());
+        first.retained();
+        owner.stop(deadline()).unwrap();
+        let owner = rows
+            .get_mut(&second.custody.actor)
+            .unwrap()
+            .scoped_retention
+            .as_mut()
+            .unwrap();
+        owner.pin(deadline()).unwrap();
+        let copied = match owner.stop(deadline()).unwrap() {
+            ScopedCleanupObservation::ProcessStoppedActorActive(status) => status,
+            _ => panic!("active"),
+        };
+        let status = copied;
+        assert_eq!(status.monitor_status(), copied.monitor_status());
     }
-    drop(owner);
-    drop(sibling);
     first.retained();
     second.retained();
-    assert!(
-        Arc::strong_count(&first.custody) > 1,
-        "host-pending guard must retain its custody owner"
-    );
-}
+    drop(slot);
+    drop(sibling);
+    drop(map);
+    assert_eq!(Arc::strong_count(&first.custody), 1);
 
-#[test]
-fn scoped_custody_pin_timeout_lost_result_and_legacy_fence() {
-    let fixture = Fixture::new(1);
-    let mut owner = fixture.spawn();
-    // Expired deadline guarantees no wait-based positive cleanup evidence.
-    assert!(
-        owner.stop(Instant::now()).is_err(),
-        "unvalidated init is not cleanup proof"
-    );
-    fixture.retained();
-    owner.pin(deadline()).unwrap();
-    assert!(owner
-        .stop(Instant::now() - std::time::Duration::from_secs(1))
-        .is_err());
-    fixture.retained();
-    // Explicit test teardown through the same owner, not a foreign receipt.
-    owner.stop(deadline()).unwrap();
-    let (send, receive) = tokio::sync::oneshot::channel();
-    send.send(owner)
-        .unwrap_or_else(|_| panic!("receiver exists"));
-    drop(receive); // Lose the asynchronous owned result; Drop must retain resources.
-    fixture.retained();
-    assert!(Arc::strong_count(&fixture.custody) > 1);
-
-    let legacy = Fixture::new(2);
+    let legacy = Fixture::new(3);
     legacy.custody.process_may_exist();
+    let map = owners();
+    legacy.register(&map);
     assert!(matches!(
-        legacy.spawn_for(legacy.custody.actor, bwrap()),
-        Err(ScopedSpawnError::AlreadyClaimed)
+        legacy.claim(&map, legacy.custody.actor),
+        Err(ScopedClaimError::AlreadyClaimed)
     ));
     legacy.custody.actor_stopped(&cancelled());
     let table = legacy.custody.bindings.clone();
     let id = legacy.tree.id().clone();
+    drop(map);
     drop(legacy.custody);
     assert!(table.lock().current(&id).is_some());
 }
@@ -277,15 +395,30 @@ fn scoped_custody_pin_timeout_lost_result_and_legacy_fence() {
 #[test]
 fn scoped_custody_pin_error_retains_owner() {
     let fixture = Fixture::new(1);
-    // Deterministic protocol-failure injection: a real exited wrapper emits no
-    // init record. Successful pin/timeout tests above use actual bwrap.
-    let mut owner = fixture
-        .spawn_for(fixture.custody.actor, "/run/current-system/sw/bin/false")
-        .unwrap();
-    assert!(owner.pin(deadline()).is_err());
-    assert!(owner.stop(deadline()).is_err());
+    let map = owners();
+    fixture.register(&map);
+    let slot = fixture.claim(&map, fixture.custody.actor).unwrap();
+    spawn_into(
+        slot.clone(),
+        fixture.prepared("/run/current-system/sw/bin/false"),
+        ServiceEnvironment::default(),
+        File::create(fixture.tree.cwd().join("scope.log")).unwrap(),
+    )
+    .unwrap();
+    {
+        let mut rows = map.lock();
+        let retained = rows
+            .get_mut(&fixture.custody.actor)
+            .unwrap()
+            .scoped_retention
+            .as_mut()
+            .unwrap();
+        assert!(retained.pin(deadline()).is_err());
+        assert!(retained.stop(deadline()).is_err());
+        assert!(matches!(*retained.slot.lock(), ScopedProcessSlot::Owned(_)));
+    }
     fixture.retained();
-    drop(owner);
-    fixture.retained();
-    assert!(Arc::strong_count(&fixture.custody) > 1);
+    drop(slot);
+    drop(map);
+    assert_eq!(Arc::strong_count(&fixture.custody), 1);
 }

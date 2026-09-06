@@ -26,7 +26,7 @@ pub(super) struct CustodyState {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ScopedSpawnError {
+pub(super) enum ScopedClaimError {
     #[error("scope claim does not name this exact installed actor")]
     WrongActor,
     #[error("scope claim requires its installed lease")]
@@ -35,91 +35,100 @@ enum ScopedSpawnError {
     AlreadyClaimed,
     #[error("scope claim requires a live actor")]
     ActorStopped,
-    #[error("scope was not spawned: {0}")]
-    PreSpawn(ServiceScopeError),
 }
 
 /// Addressable slot reserved by the existing host launch row before spawn.
 /// Neither slot nor spawn closure owns a back-reference to the retention owner.
-enum ScopedProcessSlot {
+pub(super) enum ScopedProcessSlot {
     Reserved,
     Spawning,
     NotSpawned(ServiceScopeError),
     Owned(ServiceScope),
 }
 
-/// The host lifecycle row is the anchor; asynchronous completion is only notice.
-struct ScopedHostRetention {
+/// Only the existing host lifecycle map owns this noncloneable anchor. The
+/// process slot has no custody back-reference and no task handle/cycle.
+pub(super) struct ScopedHostRetention {
     custody: Arc<ActorWorkspaceCustody>,
+    pub(super) slot: Arc<parking_lot::Mutex<ScopedProcessSlot>>,
+}
+
+pub(super) fn reserve(
+    custody: Arc<ActorWorkspaceCustody>,
+    actor: ActorRef,
+) -> Result<ScopedHostRetention, ScopedClaimError> {
+    {
+        let mut state = custody.state.lock();
+        if custody.actor != actor {
+            return Err(ScopedClaimError::WrongActor);
+        }
+        if custody.binding.is_none() {
+            return Err(ScopedClaimError::MissingLease);
+        }
+        if !matches!(state.launch, LaunchCustody::Unclaimed) {
+            return Err(ScopedClaimError::AlreadyClaimed);
+        }
+        if state.terminal.is_some() {
+            return Err(ScopedClaimError::ActorStopped);
+        }
+        state.launch = LaunchCustody::ScopedClaimed;
+    }
+    Ok(ScopedHostRetention {
+        custody,
+        slot: Arc::new(parking_lot::Mutex::new(ScopedProcessSlot::Reserved)),
+    })
+}
+
+/// Store the exact synchronous result BEFORE completing any async notice.
+/// Duplicate submissions cannot replace an owned scope. No closure owns custody.
+pub(super) fn spawn_into(
     slot: Arc<parking_lot::Mutex<ScopedProcessSlot>>,
-}
-
-struct ScopedResources {
-    custody: Arc<ActorWorkspaceCustody>,
-    scope: ServiceScope,
-}
-
-/// Noncloneable and without a constructor accepting ServiceScope or a cleanup
-/// receipt. The private spawn operation pairs the claim with its own result.
-struct ScopedCustodyOwner {
-    resources: Option<ScopedResources>,
-}
-
-impl ScopedCustodyOwner {
-    fn spawn(
-        custody: Arc<ActorWorkspaceCustody>,
-        actor: ActorRef,
-        prepared: PreparedServiceScope,
-        environment: ServiceEnvironment,
-        output: File,
-    ) -> Result<Self, ScopedSpawnError> {
-        {
-            let mut state = custody.state.lock();
-            if custody.actor != actor {
-                return Err(ScopedSpawnError::WrongActor);
-            }
-            if custody.binding.is_none() {
-                return Err(ScopedSpawnError::MissingLease);
-            }
-            if !matches!(state.launch, LaunchCustody::Unclaimed) {
-                return Err(ScopedSpawnError::AlreadyClaimed);
-            }
-            if state.terminal.is_some() {
-                return Err(ScopedSpawnError::ActorStopped);
-            }
-            // The immutable, noncloneable ActiveBinding is the generation
-            // authority. No copied identity or table read creates another lease.
-            state.launch = LaunchCustody::ScopedClaimed;
+    prepared: PreparedServiceScope,
+    environment: ServiceEnvironment,
+    output: File,
+) -> Result<(), ServiceScopeError> {
+    {
+        let mut state = slot.lock();
+        if !matches!(*state, ScopedProcessSlot::Reserved) {
+            return Err(ServiceScopeError::WrongPhase);
         }
-        match prepared.spawn(environment, output) {
-            Ok(scope) => Ok(Self {
-                resources: Some(ScopedResources { custody, scope }),
-            }),
-            Err(error) => {
-                // The synchronous API guarantees Err is before successful spawn.
-                // Never erase a concurrent legacy fence, and never allow retry.
-                let mut state = custody.state.lock();
-                if matches!(state.launch, LaunchCustody::ScopedClaimed) {
-                    state.launch = LaunchCustody::ScopedNotSpawned;
-                }
-                Err(ScopedSpawnError::PreSpawn(error))
-            }
+        *state = ScopedProcessSlot::Spawning;
+    }
+    let result = prepared.spawn(environment, output);
+    *slot.lock() = match result {
+        Ok(scope) => ScopedProcessSlot::Owned(scope),
+        Err(error) => ScopedProcessSlot::NotSpawned(error),
+    };
+    Ok(())
+}
+
+impl ScopedHostRetention {
+    pub(super) fn pin(&mut self, deadline: Instant) -> Result<(), ServiceScopeError> {
+        match &mut *self.slot.lock() {
+            ScopedProcessSlot::Owned(scope) => scope.pin_init(deadline),
+            _ => Err(ServiceScopeError::WrongPhase),
         }
     }
 
-    fn pin(&mut self, deadline: Instant) -> Result<(), ServiceScopeError> {
-        self.resources
-            .as_mut()
-            .expect("owned resources")
-            .scope
-            .pin_init(deadline)
+    /// The slot itself, not a completion-channel result, proves pre-spawn Err.
+    /// This only removes the process fence; it does not assert settlement.
+    pub(super) fn observe_not_spawned(&mut self) -> bool {
+        if !matches!(*self.slot.lock(), ScopedProcessSlot::NotSpawned(_)) {
+            return false;
+        }
+        let mut state = self.custody.state.lock();
+        if matches!(state.launch, LaunchCustody::ScopedClaimed) {
+            state.launch = LaunchCustody::ScopedNotSpawned;
+        }
+        true
     }
 
-    fn stop(&mut self, deadline: Instant) -> Result<ScopedCleanupObservation, ServiceScopeError> {
-        let resources = self.resources.as_mut().expect("owned resources");
-        let status = resources.scope.terminate_and_wait(deadline)?;
-        let state = resources.custody.state.lock();
-        Ok(match &state.terminal {
+    pub(super) fn stop(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<ScopedCleanupObservation, ServiceScopeError> {
+        let status = stop_slot(&self.slot, deadline)?;
+        Ok(match &self.custody.state.lock().terminal {
             None => ScopedCleanupObservation::ProcessStoppedActorActive(status),
             Some(terminal) => ScopedCleanupObservation::ProcessStoppedHostWorkPending {
                 status,
@@ -129,21 +138,21 @@ impl ScopedCustodyOwner {
     }
 }
 
-impl Drop for ScopedCustodyOwner {
-    fn drop(&mut self) {
-        // Even a successfully stopped namespace does not discharge host work.
-        // This also covers a spawn_blocking result whose receiver disappeared.
-        // Retain the entire owner, not just a row with lost process handles.
-        if let Some(resources) = self.resources.take() {
-            tracing::error!(actor = ?resources.custody.actor, "retaining scoped custody: host quiescence unsupported");
-            std::mem::forget(resources);
-        }
+/// Retirement workers may borrow only the slot. Losing their result cannot
+/// remove it from the exact host map row, and the result remains status only.
+pub(super) fn stop_slot(
+    slot: &parking_lot::Mutex<ScopedProcessSlot>,
+    deadline: Instant,
+) -> Result<ServiceScopeCleanup, ServiceScopeError> {
+    match &mut *slot.lock() {
+        ScopedProcessSlot::Owned(scope) => scope.terminate_and_wait(deadline),
+        _ => Err(ServiceScopeError::WrongPhase),
     }
 }
 
 /// Reporting only. Copying the contained ServiceScopeCleanup cannot authorize
 /// settlement; there is deliberately no function accepting it as authority.
-enum ScopedCleanupObservation {
+pub(super) enum ScopedCleanupObservation {
     ProcessStoppedActorActive(ServiceScopeCleanup),
     ProcessStoppedHostWorkPending {
         status: ServiceScopeCleanup,
