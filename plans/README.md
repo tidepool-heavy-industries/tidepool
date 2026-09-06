@@ -8,6 +8,7 @@ archive).
 
 ## Active work
 
+- [Shoal iteration after numeric dogfood](shoal-numeric-dogfood-iteration.md): completed-run evaluation and proposed steering/launch reliability, pure-IR test cost, and evidence/context improvements.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers
