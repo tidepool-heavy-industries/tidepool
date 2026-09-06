@@ -1871,7 +1871,22 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Fork { .. } => tidepool_actor::CacheBoundaryReason::ForkedPrefix,
         InteractiveLaunchMode::Resume(_) => tidepool_actor::CacheBoundaryReason::ReattachedThread,
     });
-    let developer_instructions = developer_instructions(&installation.effective_role, &launch_mode);
+    let workspace_observation = tidepool_actor::ActorWorkspaceObservation {
+        workspace_path: agent_workspace.clone(),
+        host_storage_path: workspace.clone(),
+        worktree_id: installation.launch_worktrees.first().cloned(),
+        expected_branch: worktree
+            .as_ref()
+            .map(|tree| tree.branch().as_str().to_owned()),
+    };
+    runtime_observation.publish_workspace(workspace_observation.clone());
+    let mut developer_instructions =
+        developer_instructions(&installation.effective_role, &launch_mode);
+    developer_instructions.push_str("\nWorkspace binding: ");
+    developer_instructions.push_str(&workspace_observation.orientation());
+    developer_instructions.push_str(
+        "\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n",
+    );
     runtime_observation.publish_prompt_profile(
         installation.effective_role.prompt_profile(),
         PromptId::CATALOG_VERSION,

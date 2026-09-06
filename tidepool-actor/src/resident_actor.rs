@@ -703,8 +703,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             sample_history,
         )
         };
+        let workspace = runtime.workspace.as_ref().map_or_else(
+            || "workspace mapping: unavailable (no hosted launch observation)".to_owned(),
+            crate::ActorWorkspaceObservation::orientation,
+        );
         let status = format!(
-            "{current}\n  deadlines: [{}]\nactors:\n{}",
+            "{current}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
             requests
                 .deadlines
                 .iter()

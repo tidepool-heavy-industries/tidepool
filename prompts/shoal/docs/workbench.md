@@ -47,3 +47,12 @@ projected bindings are not installed. Inspect its receipt before retrying:
 exact transport retries retain the original result, while submitting the
 same source in a new call is new intent. `:recovery` describes the supported
 source-replay boundary; it does not restore arbitrary lost live values.
+
+For native commands, use the `workspace_path` shown in `:status`. Hosted actors
+see their assigned checkout at one stable path; different actors can therefore
+report the same `pwd`. `host_storage_path` (and worktree receipt `cwd`) names
+the backing checkout on the host, not the preferred native-tool working directory.
+Status also shows the assigned worktree and expected branch when available.
+Check `git branch --show-current` and Git worktree identity against that assignment
+before diagnosing a routing problem. The expected branch is launch evidence;
+an intentional checkout change can make current Git state differ.

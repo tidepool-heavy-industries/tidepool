@@ -105,7 +105,8 @@ pub use role::{
 };
 pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
-    ActorWorkbenchPosture, ActorWorkbenchTransfer, CacheBoundaryReason, ProviderUsageSample,
+    ActorWorkbenchPosture, ActorWorkbenchTransfer, ActorWorkspaceObservation, CacheBoundaryReason,
+    ProviderUsageSample,
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError,

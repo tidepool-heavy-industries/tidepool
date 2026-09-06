@@ -11,6 +11,26 @@ use parking_lot::RwLock;
 
 const MAX_PROVIDER_SAMPLES: usize = 32;
 
+/// Launch-time checkout mapping supplied by the process-boundary owner.
+/// Paths are presentation evidence, not worktree authority or live Git status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorWorkspaceObservation {
+    pub workspace_path: std::path::PathBuf,
+    pub host_storage_path: std::path::PathBuf,
+    pub worktree_id: Option<String>,
+    pub expected_branch: Option<String>,
+}
+
+impl ActorWorkspaceObservation {
+    #[must_use]
+    pub fn orientation(&self) -> String {
+        format!(
+            "workspace_path={:?} (native tools); host_storage_path={:?}; assigned_worktree={:?}; expected_branch={:?}\n  The workspace path can be identical across actors; each actor sees its assigned checkout. Worktree receipt `cwd` is the host storage path. Verify assignment with Git identity, not a unique-looking `pwd`.",
+            self.workspace_path, self.host_storage_path, self.worktree_id, self.expected_branch,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActorActivationKind {
     #[default]
@@ -98,6 +118,7 @@ pub struct ActorRuntimeObservation {
     pub provider_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
     pub latest_turn_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
     pub workbench_posture: ActorWorkbenchPosture,
+    pub workspace: Option<ActorWorkspaceObservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +180,10 @@ pub struct ActorRuntimeObservationHandle {
 }
 
 impl ActorRuntimeObservationHandle {
+    pub fn publish_workspace(&self, workspace: ActorWorkspaceObservation) {
+        self.inner.write().workspace = Some(workspace);
+    }
+
     pub fn publish_provider_observation(&self, observation: tidepool_model::ProviderObservation) {
         {
             let mut state = self.inner.write();
@@ -528,6 +553,36 @@ mod tests {
                 total: 5,
                 effect: "watch replies".into(),
             }
+        );
+    }
+
+    #[test]
+    fn workspace_orientation_distinguishes_storage_from_shared_visible_path() {
+        let first = ActorWorkspaceObservation {
+            workspace_path: "/tmp/shared-visible-workspace".into(),
+            host_storage_path: "/host/worktrees/first".into(),
+            worktree_id: Some("first".into()),
+            expected_branch: Some("research/first".into()),
+        };
+        let mut second = first.clone();
+        second.host_storage_path = "/host/worktrees/second".into();
+        second.worktree_id = Some("second".into());
+        second.expected_branch = Some("research/second".into());
+        let observation = ActorRuntimeObservationHandle::default();
+        assert!(observation.snapshot().workspace.is_none());
+        observation.publish_workspace(first.clone());
+        let rendered = observation.snapshot().workspace.unwrap().orientation();
+        assert!(
+            rendered.contains("workspace_path=\"/tmp/shared-visible-workspace\" (native tools)")
+        );
+        assert!(rendered.contains("host_storage_path=\"/host/worktrees/first\""));
+        assert!(rendered.contains("expected_branch=Some(\"research/first\")"));
+        assert!(rendered.contains("each actor sees its assigned checkout"));
+        observation.publish_workspace(second.clone());
+        assert_eq!(observation.snapshot().workspace, Some(second));
+        assert_ne!(
+            rendered,
+            observation.snapshot().workspace.unwrap().orientation()
         );
     }
 }
