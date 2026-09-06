@@ -635,7 +635,14 @@ fn decode_literal(val: &Value) -> Result<Literal, ReadError> {
                 "LitByteArray expects bytes".to_string(),
             )),
         },
-        "LitFloat" => Ok(Literal::LitFloat(as_u64(&arr[1])?)),
+        "LitFloat" => {
+            let bits = as_u64(&arr[1])?;
+            // Float payloads are zero-extended IEEE binary32 encodings. Do not
+            // accept distinct IR values that execution would silently truncate.
+            u32::try_from(bits)
+                .map_err(|_| ReadError::InvalidLiteral(format!("Float bits exceed u32: {bits}")))?;
+            Ok(Literal::LitFloat(bits))
+        }
         "LitDouble" => Ok(Literal::LitDouble(as_u64(&arr[1])?)),
         _ => Err(ReadError::InvalidLiteral(tag.to_string())),
     }
@@ -752,7 +759,10 @@ mod tests {
             Value::Text("LitFloat".into()),
             Value::Integer(((1u64 << 32) | u64::from(1.0f32.to_bits())).into()),
         ]);
-        assert!(matches!(decode_literal(&literal), Err(ReadError::InvalidLiteral(_))));
+        assert!(matches!(
+            decode_literal(&literal),
+            Err(ReadError::InvalidLiteral(_))
+        ));
     }
 
     #[test]
