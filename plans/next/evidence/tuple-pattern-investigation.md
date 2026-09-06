@@ -87,3 +87,12 @@ Qualitative cost: three small live calls plus targeted owner/fixture inspection
 resolved the general syntax question. The missing original receipt prevents
 specific diagnosis and creates avoidable speculative investigation. No quantified
 context, token or cache saving is claimed.
+
+Root review: inspected the evidence-only diff and independently executed
+`(rootTupleProbeLeft, rootTupleProbeRight) <- pure (1 :: Int, 2 :: Int)` followed
+by inspection; both bindings committed and output was `(1,2)`. This confirms the
+supported general form on root's live host, not the historical service failure.
+Service follow-up: retain/publish the exact rejected source, error and input-unit
+boundaries before diagnosing that narrower case. No unsupported tuple restriction
+will be added to the shared guide. Root accepted this as a bounded investigation,
+not a completed bug fix.
