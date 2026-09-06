@@ -31,6 +31,7 @@ pub struct ActorExitAlreadyPublished {
 
 struct ExitState {
     terminal: Mutex<Option<ActorTerminal>>,
+    requested_shutdown: Mutex<Option<ActorTerminal>>,
     acknowledged_retirement: Mutex<Option<crate::ActorRef>>,
     changed: watch::Sender<u64>,
 }
@@ -61,6 +62,20 @@ impl Default for RetainedActorExit {
 }
 
 impl RetainedActorExit {
+    /// Record intent without publishing an exit. Bootstrap checks this at safe
+    /// boundaries; only ordinary lifecycle cleanup may publish the terminal.
+    pub(crate) fn request_shutdown(&self, terminal: ActorTerminal) -> ActorTerminal {
+        self.state
+            .requested_shutdown
+            .lock()
+            .get_or_insert(terminal)
+            .clone()
+    }
+
+    pub(crate) fn requested_shutdown(&self) -> Option<ActorTerminal> {
+        self.state.requested_shutdown.lock().clone()
+    }
+
     pub(crate) fn acknowledge_retirement(&self, supervisor: crate::ActorRef) {
         *self.state.acknowledged_retirement.lock() = Some(supervisor);
     }
@@ -76,6 +91,7 @@ impl RetainedActorExit {
         Self {
             state: Arc::new(ExitState {
                 terminal: Mutex::new(None),
+                requested_shutdown: Mutex::new(None),
                 acknowledged_retirement: Mutex::new(None),
                 changed,
             }),
@@ -136,6 +152,24 @@ mod tests {
             kind: ActorExitKind::Completed,
             summary: summary.into(),
         }
+    }
+
+    #[test]
+    fn shutdown_intent_does_not_publish_terminal_or_replace_first_request() {
+        let retained = RetainedActorExit::new();
+        let requested = ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "cancel bootstrap".into(),
+        };
+        assert_eq!(retained.request_shutdown(requested.clone()), requested);
+        assert_eq!(
+            retained.request_shutdown(completed("later request")),
+            requested
+        );
+        assert_eq!(retained.requested_shutdown(), Some(requested.clone()));
+        assert_eq!(retained.get(), None);
+        retained.publish(requested.clone()).unwrap();
+        assert_eq!(retained.get(), Some(requested));
     }
 
     #[tokio::test]

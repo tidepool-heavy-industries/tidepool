@@ -108,6 +108,13 @@ impl LocalActorDirectory {
 }
 
 impl KernelContext {
+    pub(crate) fn requested_shutdown(&self) -> Option<ActorTerminal> {
+        self.directory
+            .resolve(self.identity)?
+            .terminal()
+            .requested_shutdown()
+    }
+
     #[must_use]
     pub fn identity(&self) -> ActorRef {
         self.identity
@@ -760,17 +767,8 @@ async fn shutdown_children(context: &KernelContext, timeout: Duration) {
                 kind: ActorExitKind::Cancelled,
                 summary: "owner actor stopped".into(),
             };
-            let result = child
-                .address()
-                .call(
-                    |reply| KernelMessage::Shutdown {
-                        terminal: requested.clone(),
-                        reply,
-                    },
-                    Some(timeout),
-                )
-                .await;
-            if !matches!(result, Ok(ractor::rpc::CallResult::Success(_))) {
+            let result = tokio::time::timeout(timeout, child.shutdown(requested.clone())).await;
+            if !matches!(result, Ok(Ok(_))) {
                 if child.terminal().get().is_none() {
                     publish_terminal(child.terminal(), &requested);
                 }

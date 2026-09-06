@@ -52,6 +52,14 @@ impl TestCampaign {
         research_policy: tidepool_actor::ResearchPolicy,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
     ) -> Self {
+        Self::start_with_config(research_policy, transform, |_| {}).await
+    }
+
+    pub async fn start_with_config(
+        research_policy: tidepool_actor::ResearchPolicy,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+    ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
         repository
@@ -59,7 +67,7 @@ impl TestCampaign {
             .commit_file("README.md", "source\n", "seed")
             .unwrap();
         let runtime = tempfile::tempdir().unwrap();
-        let config = ActorHostConfig {
+        let mut config = ActorHostConfig {
             haskell_root: crate::haskell_sources::ensure_shoal_haskell().unwrap(),
             workspace: repository.path().to_path_buf(),
             run_root: runtime.path().join("run"),
@@ -76,6 +84,7 @@ impl TestCampaign {
             root_launch_mode: InteractiveLaunchMode::Fresh,
             pane_environment: BTreeMap::new(),
         };
+        configure(&mut config);
         let session_root = tempfile::tempdir().expect("session root");
         let (worktrees, bindings) =
             actor_worktree_resources_at(&runtime.path().join("worktrees"), repository.path())

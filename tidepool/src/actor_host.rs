@@ -131,34 +131,6 @@ impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
         self.process_may_exist
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
-    fn process_reaped(&self) {
-        self.process_may_exist
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-    fn release_after_process(
-        self: Arc<Self>,
-    ) -> Result<tidepool_actor::CustodyRelease, ForkWorkspaceAdmissionError> {
-        self.process_reaped();
-        match Arc::try_unwrap(self) {
-            Ok(mut custody) => {
-                if let Some(binding) = custody.binding.take() {
-                    let result = if custody
-                        .actor_completed
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                    {
-                        binding.complete(&mut custody.bindings.lock())
-                    } else {
-                        binding.release(&mut custody.bindings.lock())
-                    };
-                    result.map_err(|error| ForkWorkspaceAdmissionError {
-                        detail: error.to_string(),
-                    })?;
-                }
-                Ok(tidepool_actor::CustodyRelease::Released)
-            }
-            Err(_) => Ok(tidepool_actor::CustodyRelease::RetainedByActor),
-        }
-    }
 }
 
 impl Drop for ActorWorkspaceCustody {
@@ -511,7 +483,6 @@ enum CleanupComponent {
 enum CleanupComponentOutcome {
     Completed,
     Forced,
-    CustodyRetainedByActor,
     Failed { detail: String },
 }
 
@@ -529,13 +500,9 @@ struct InteractiveCleanupReceipt {
 
 impl InteractiveCleanupReceipt {
     fn degraded(&self) -> bool {
-        self.components.iter().any(|component| {
-            matches!(
-                component.outcome,
-                CleanupComponentOutcome::Failed { .. }
-                    | CleanupComponentOutcome::CustodyRetainedByActor
-            )
-        })
+        self.components
+            .iter()
+            .any(|component| matches!(component.outcome, CleanupComponentOutcome::Failed { .. }))
     }
 
     fn render(&self) -> String {
@@ -546,9 +513,6 @@ impl InteractiveCleanupReceipt {
                 CleanupComponentOutcome::Failed { detail } => {
                     Some(format!("{:?}: {detail}", component.component))
                 }
-                CleanupComponentOutcome::CustodyRetainedByActor => Some(
-                    "worktree custody retained by actor; final release is not yet observed".into(),
-                ),
                 CleanupComponentOutcome::Completed | CleanupComponentOutcome::Forced => None,
             })
             .collect::<Vec<_>>();
@@ -2133,11 +2097,7 @@ async fn launch_prepared_interactive_application(
     };
 
     if let Err(error) = tmux.retain_pane_on_exit(&pane).await {
-        if abandon_interactive_application(&tmux, &pane, service, &socket_root).await {
-            if let Some(custody) = &installation.worktree_custody {
-                custody.process_reaped();
-            }
-        }
+        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
         return Err(application_error(
             actor_identity,
             InteractiveOperation::LaunchProcess,
@@ -2147,11 +2107,7 @@ async fn launch_prepared_interactive_application(
 
     if actor_identity == root {
         if let Err(error) = tmux.select_window_for_pane(&pane).await {
-            if abandon_interactive_application(&tmux, &pane, service, &socket_root).await {
-                if let Some(custody) = &installation.worktree_custody {
-                    custody.process_reaped();
-                }
-            }
+            abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
             return Err(application_error(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
@@ -2160,11 +2116,7 @@ async fn launch_prepared_interactive_application(
         }
     }
     if cancelled.try_recv().is_ok() {
-        if abandon_interactive_application(&tmux, &pane, service, &socket_root).await {
-            if let Some(custody) = &installation.worktree_custody {
-                custody.process_reaped();
-            }
-        }
+        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
         return Ok(None);
     }
     tracing::info!(
@@ -2515,7 +2467,10 @@ async fn retire_interactive_application(
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Process,
         outcome: match tmux.kill_pane(&deployment.pane).await {
-            Ok(()) => CleanupComponentOutcome::Completed,
+            Ok(()) => CleanupComponentOutcome::Failed {
+                detail: "pane cleanup requested; exact process termination remains unconfirmed"
+                    .into(),
+            },
             Err(error) => CleanupComponentOutcome::Failed {
                 detail: error.to_string(),
             },
@@ -2568,24 +2523,10 @@ async fn retire_interactive_application(
         component: CleanupComponent::BuildResource,
         outcome: build_outcome,
     });
-    let binding_outcome = if let Some(custody) = deployment.worktree_custody.take() {
-        if components.iter().any(|component| {
-            matches!(component.component, CleanupComponent::Process)
-                && matches!(component.outcome, CleanupComponentOutcome::Completed)
-        }) {
-            match custody.release_after_process() {
-                Ok(tidepool_actor::CustodyRelease::Released) => CleanupComponentOutcome::Completed,
-                Ok(tidepool_actor::CustodyRelease::RetainedByActor) => {
-                    CleanupComponentOutcome::CustodyRetainedByActor
-                }
-                Err(error) => CleanupComponentOutcome::Failed {
-                    detail: error.to_string(),
-                },
-            }
-        } else {
-            CleanupComponentOutcome::Failed {
-                detail: "custody retained: process cleanup is unconfirmed".into(),
-            }
+    let binding_outcome = if deployment.worktree_custody.take().is_some() {
+        // Pane removal (including an absent/non-owned pane) is not a process reap.
+        CleanupComponentOutcome::Failed {
+            detail: "custody retained: tmux cannot prove exact process termination".into(),
         }
     } else {
         CleanupComponentOutcome::Completed
@@ -2645,12 +2586,11 @@ async fn abandon_interactive_application(
     pane: &TmuxPaneId,
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: &Path,
-) -> bool {
-    let reaped = tmux.kill_pane(pane).await.is_ok();
+) {
+    let _ = tmux.kill_pane(pane).await;
     service.abort();
     let _ = service.await;
     let _ = std::fs::remove_dir_all(socket_root);
-    reaped
 }
 
 async fn discover_interactive_binding(

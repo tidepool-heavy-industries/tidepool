@@ -54,8 +54,7 @@ pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
 pub use fork_workspace::{
-    CustodyRelease, ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceCustody,
-    ForkWorkspaceSeed,
+    ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceCustody, ForkWorkspaceSeed,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{

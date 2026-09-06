@@ -2471,6 +2471,12 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
         if self.worktree_custody.is_none() {
             match self.launch_worktrees.as_slice() {
                 [] => {}
@@ -2501,6 +2507,12 @@ where
                 }
             }
         }
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
         let outcome = match boot {
             ResidentBoot::Workbench => {
                 self.standing = ResidentStanding::Workbench;
@@ -2515,7 +2527,7 @@ where
                     .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
                     .await?;
                 loop {
-                    match self
+                    let startup_step = self
                         .environment
                         .runner
                         .capture_startup_step(
@@ -2523,8 +2535,14 @@ where
                             outcome,
                             context.placement.resource_scope,
                         )
-                        .await?
-                    {
+                        .await?;
+                    if let Some(terminal) = kernel.requested_shutdown() {
+                        return Ok(KernelStep::Stop {
+                            output: (),
+                            terminal,
+                        });
+                    }
+                    match startup_step {
                         ResidentActorStartupStep::InstallShutdown(shutdown) => {
                             if self.shutdown_hook.is_some() {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
