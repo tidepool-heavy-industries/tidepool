@@ -105,6 +105,19 @@ impl HttpFixture {
             client,
         }
     }
+    // Fixture-only disposal after negative assertions. This does not manufacture
+    // resident evidence or turn the production retained state into success.
+    async fn dispose_http(&self) {
+        let mut owner = self.owner.lock().await;
+        owner.control.drain();
+        let service = owner.service.take().unwrap();
+        drop(owner);
+        tokio::time::timeout(limit(), service)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
     async fn finish(&self) -> HostedObservation {
         assert_eq!(self.owners.lock().len(), 1);
         observe(&self.owner, CompletionBoundary::AbortForShutdown, limit()).await
@@ -400,13 +413,20 @@ async fn hosted_unsupported_seal_retains_live_actor_and_http() {
         completed(&fixture.client, "unsupported").await.status(),
         reqwest::StatusCode::OK
     );
-    // Fixture cleanup uses genuine retained terminal evidence, not a fake seal.
     campaign
         .actor
         .shutdown_with_cleanup(cancelled())
         .await
         .unwrap();
-    confirmed_http(fixture.finish().await, campaign.actor.identity());
+    assert!(matches!(
+        fixture.finish().await,
+        HostedObservation::Observed {
+            seal: SealObservation::Failed(_),
+            http: HttpObservation::Pending,
+            ..
+        }
+    ));
+    fixture.dispose_http().await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -441,6 +461,30 @@ async fn hosted_foreign_real_seal_is_rejected_without_shutdown_or_http_drain() {
         completed(&fixture.client, "sibling").await.status(),
         reqwest::StatusCode::OK
     );
+    // A terminal for the expected actor cannot repair a rejected foreign seal.
+    campaign
+        .actor
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap();
+    let after_expected_terminal = fixture.finish().await;
+    assert!(
+        matches!(
+            after_expected_terminal,
+            HostedObservation::Observed {
+                seal: SealObservation::Failed(_),
+                resident: ResidentObservation::Pending,
+                http: HttpObservation::Pending,
+            }
+        ),
+        "{after_expected_terminal:?}"
+    );
+    assert!(sibling.terminal().get().is_none());
+    assert!(!service_finished(&fixture.owner));
+    assert_eq!(
+        completed(&fixture.client, "sibling").await.status(),
+        reqwest::StatusCode::OK
+    );
     let sibling_cleanup = sibling
         .shutdown_with_cleanup(cancelled())
         .await
@@ -450,14 +494,16 @@ async fn hosted_foreign_real_seal_is_rejected_without_shutdown_or_http_drain() {
         matches!(account(campaign.actor.identity(), Some(sibling_cleanup)),
         ResidentObservation::Foreign(actor) if actor == sibling.identity())
     );
-    // Both real actors are cleaned before fixture HTTP teardown. This is not
-    // acceptance of the rejected foreign seal as authority over the expected actor.
-    campaign
-        .actor
-        .shutdown_with_cleanup(cancelled())
-        .await
-        .unwrap();
-    confirmed_http(fixture.finish().await, campaign.actor.identity());
+    // Both actors are now cleaned, but the original failed barrier is retained.
+    assert!(matches!(
+        fixture.finish().await,
+        HostedObservation::Observed {
+            seal: SealObservation::Failed(_),
+            http: HttpObservation::Pending,
+            ..
+        }
+    ));
+    fixture.dispose_http().await;
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
     sibling_campaign.forest.shutdown().await;
@@ -601,15 +647,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
     assert!(!service_finished(&fixture.owner));
     // Fixture teardown, deliberately not claimed as consumer cleanup evidence.
     // The consumer correctly leaves HTTP pending on the failed child domain.
-    let mut owner = fixture.owner.lock().await;
-    owner.control.drain();
-    let service = owner.service.take().unwrap();
-    drop(owner);
-    tokio::time::timeout(limit(), service)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    fixture.dispose_http().await;
     forest.shutdown().await;
     task.await.unwrap();
 }
