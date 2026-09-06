@@ -150,3 +150,24 @@ A useful type-level impossibility (uninhabited quiescence proof) must not make a
 unaddressable leak look like completed retention. Fresh review exposed the limit;
 coordinator product judgment prevented premature integration. This demonstrates
 value in the tree, but also rework/critical-path cost to reduce, not a latency win.
+
+## Retention capacity reached during lifecycle validation
+
+Service progress49 reports the ancestor active/reserved descendant ceiling32
+rejected an authored-test child before creation. The implementer continued locally
+without retrying admission or widening policy; service requested retirement of
+completed descendants through their owning leads. This is real coordination
+capacity pressure, not a failed implementation or measured token-cost result.
+Root additionally retired completed usageLead and durabilityLead with
+`traverse (stopAgent . forkedActor) [usageLead, durabilityLead]`, observing two
+StoppedNow outcomes. Their delivered evidence and root integration records remain
+retained. These two actors had no outstanding assignments; no active service or
+run-map obligation was stopped. Released capacity does not prove a later child
+was admitted, and the existing limit remains unchanged.
+
+Next-wave retention policy: keep specialists for concrete likely repairs, but
+retire completed branches at accepted integration boundaries instead of retaining
+every lead indefinitely. Measure retained-idle occupancy separately from executing
+workers before considering whether future runtime limits should distinguish them.
+The current source policy is authoritative; do not infer a scheduler defect merely
+from reaching its configured ceiling or weaken authority to relieve pressure.
