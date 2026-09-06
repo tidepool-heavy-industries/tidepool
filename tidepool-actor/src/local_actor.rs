@@ -391,6 +391,7 @@ enum HostedAdmission {
     #[default]
     Open,
     Sealed,
+    Closing,
 }
 
 pub struct LocalActorState<B> {
@@ -489,6 +490,10 @@ where
         };
         match message {
             KernelMessage::SealHostedWork { reply } => {
+                if matches!(state.hosted_admission, HostedAdmission::Closing) {
+                    drop(reply);
+                    return Ok(());
+                }
                 state.hosted_admission = HostedAdmission::Sealed;
                 let _ = reply.send(crate::HostedWorkSeal {
                     actor: state.context.identity,
@@ -533,7 +538,7 @@ where
                 },
             },
             KernelMessage::Tool { invocation, reply } => {
-                if matches!(state.hosted_admission, HostedAdmission::Sealed) {
+                if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     let _ = reply.send(Err(KernelInvocationFailure::Rejected {
                         actor: state.context.identity,
                         detail: "hosted work admission is sealed".into(),
@@ -554,7 +559,7 @@ where
                 }
             }
             KernelMessage::AbortPendingForks { reply } => {
-                if matches!(state.hosted_admission, HostedAdmission::Sealed) {
+                if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     let _ = reply.send(Err(KernelInvocationFailure::Rejected {
                         actor: state.context.identity,
                         detail: "hosted work admission is sealed".into(),
@@ -574,6 +579,13 @@ where
                 let _ = reply.send(result);
             }
             KernelMessage::ToolCompleted { boundary, reply } => {
+                if matches!(state.hosted_admission, HostedAdmission::Closing) {
+                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted completion boundary is closed".into(),
+                    }));
+                    return Ok(());
+                }
                 let result = state
                     .behavior
                     .tool_completed(&state.context, boundary)
@@ -586,6 +598,9 @@ where
                 let _ = reply.send(result);
             }
             KernelMessage::ReleaseFork { scope } => {
+                if matches!(state.hosted_admission, HostedAdmission::Closing) {
+                    return Ok(());
+                }
                 match state.behavior.release_fork(&state.context, scope).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
                     Err(error) => {
@@ -599,7 +614,7 @@ where
                 }
             }
             KernelMessage::Workbench { request, reply } => {
-                if matches!(state.hosted_admission, HostedAdmission::Sealed) {
+                if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     let _ = reply.send(Err(KernelInvocationFailure::Rejected {
                         actor: state.context.identity,
                         detail: "hosted work admission is sealed".into(),
@@ -835,7 +850,7 @@ where
     }
     // Serialized mailbox execution closes completion admission here: queued
     // completion cannot run across this snapshot or after stopping the actor.
-    state.hosted_admission = HostedAdmission::Sealed;
+    state.hosted_admission = HostedAdmission::Closing;
     let children_before = shutdown_children(&state.context, Duration::from_secs(15)).await;
     let (hook, realm) = state
         .behavior
