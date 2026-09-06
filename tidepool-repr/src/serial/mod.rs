@@ -8,7 +8,7 @@ pub mod read;
 pub mod write;
 
 pub use read::read_cbor;
-pub use read::{read_metadata, MetaWarnings};
+pub use read::{MetaWarnings, read_metadata};
 pub use write::write_cbor;
 pub use write::write_metadata;
 
@@ -657,5 +657,64 @@ mod tests {
             read_metadata(&bytes),
             Err(ReadError::InvalidStructure(_))
         ));
+    }
+    #[test]
+    fn float_bits_roundtrip_special_encodings() {
+        // Serialization preserves payload bits, not IEEE numeric equality.
+        // Include both zeros, subnormals, finite extrema, infinities, and
+        // positive/negative quiet and signaling NaNs with distinct payloads.
+        for bits in [
+            0u32,
+            0x8000_0000,
+            1,
+            0x8000_0001,
+            0x007f_ffff,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0xff7f_ffff,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc0_0001,
+            0xffc0_1234,
+            0x7f80_0001,
+        ] {
+            roundtrip(RecursiveTree {
+                nodes: vec![CoreFrame::Lit(Literal::LitFloat(u64::from(bits)))],
+            });
+        }
+        for bits in [
+            0u64,
+            0x8000_0000_0000_0000,
+            1,
+            0x8000_0000_0000_0001,
+            0x000f_ffff_ffff_ffff,
+            0x0010_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+            0xffef_ffff_ffff_ffff,
+            0x7ff0_0000_0000_0000,
+            0xfff0_0000_0000_0000,
+            0x7ff8_0000_0000_0001,
+            0xfff8_0000_0000_1234,
+            0x7ff0_0000_0000_0001,
+        ] {
+            roundtrip(RecursiveTree {
+                nodes: vec![CoreFrame::Lit(Literal::LitDouble(bits))],
+            });
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn float_bits_roundtrip_arbitrary_encodings(
+            float_bits in proptest::prelude::any::<u32>(),
+            double_bits in proptest::prelude::any::<u64>(),
+        ) {
+            roundtrip(RecursiveTree {
+                nodes: vec![CoreFrame::Lit(Literal::LitFloat(u64::from(float_bits)))],
+            });
+            roundtrip(RecursiveTree {
+                nodes: vec![CoreFrame::Lit(Literal::LitDouble(double_bits))],
+            });
+        }
     }
 }
