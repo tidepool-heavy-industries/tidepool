@@ -71,3 +71,15 @@ This does not replace the service-owned separate rows/checkpoint-parent fault,
 poison/reopen and process/HTTP/effect-drain gates. Root publication is not evidence
 that the busy service lead has received or incorporated it. Known-broken active
 amendment transport was not retried or disguised as a queued fallback.
+
+Consumer lead incorporation/cleanup receipt: fast-forwarded to exact root merge
+9d64a066 with clean checkout, then used traverse (stopAgent . forkedActor) over
+journalOwner, bindingOwner and consumerReviewer. Observed three StoppedNow
+outcomes; post-retirement native checks found retained fault logs, independent
+review.md and local hash evidence. Lead remains available. Its report repeated
+the assignment-time fact that root checks were running; the completed root checks
+above supersede that statement, not vice versa. No child rerun was claimed.
+
+This is a concrete compositional-Haskell cleanup example: one traversal, retained
+typed outcomes, no API discovery (lead report). It establishes successful use,
+not a quantified cost or latency comparison with another orchestration system.
