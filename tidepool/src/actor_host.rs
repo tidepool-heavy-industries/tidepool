@@ -10,6 +10,8 @@ mod custody_tests;
 mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
+#[allow(dead_code)] // Staged owner; no launch switch before native/quiescence integration.
+mod scoped_custody;
 #[cfg(test)]
 mod research_policy_tests;
 #[cfg(test)]
