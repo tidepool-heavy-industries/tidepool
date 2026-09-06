@@ -2275,7 +2275,8 @@ where
             response: request.response.clone(),
             effects: context.haskell_effects_alias.clone(),
         };
-        let request_message = contract.message(request.initial_user_message.as_deref());
+        let request_message =
+            contract.message(request.request, request.initial_user_message.as_deref());
         let already_installed = self.policy_installed;
         let workbench = self.environment.runner.workbench(
             request.response.clone(),

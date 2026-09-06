@@ -23,11 +23,16 @@ pub struct ActorWorkspaceObservation {
 
 impl ActorWorkspaceObservation {
     #[must_use]
-    pub fn orientation(&self) -> String {
+    pub fn summary(&self) -> String {
         format!(
-            "workspace_path={:?} (native tools); host_storage_path={:?}; assigned_worktree={:?}; expected_branch={:?}\n  The workspace path can be identical across actors; each actor sees its assigned checkout. Worktree receipt `cwd` is the host storage path. Verify assignment with Git identity, not a unique-looking `pwd`.",
+            "workspace_path={:?} (native tools); host_storage_path={:?}; assigned_worktree={:?}; expected_branch={:?}",
             self.workspace_path, self.host_storage_path, self.worktree_id, self.expected_branch,
         )
+    }
+
+    #[must_use]
+    pub fn orientation(&self) -> String {
+        format!("{}\n  The workspace path can be identical across actors; each actor sees its assigned checkout. Worktree receipt `cwd` is the host storage path. Verify assignment with Git identity, not a unique-looking `pwd`.", self.summary())
     }
 }
 
@@ -123,6 +128,7 @@ pub struct ActorRuntimeObservation {
     pub latest_turn_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
     pub workbench_posture: ActorWorkbenchPosture,
     pub workspace: Option<ActorWorkspaceObservation>,
+    pub launch_role: Option<crate::EffectiveRole>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +151,23 @@ impl AgentDisposition {
 }
 
 impl ActorRuntimeObservation {
+    /// Current launch authority and checkout evidence, without inferred bindings.
+    #[must_use]
+    pub fn activation_orientation(&self) -> Option<String> {
+        let role = self.launch_role.as_ref()?;
+        let budget = role.descendants();
+        let mut text = format!(
+            "Actor authority: role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; max_active_children={}.",
+            role.role(), role.haskell_effects_type(), role.native_tools(), role.workspace(),
+            budget.maximum_depth, budget.maximum_active_children,
+        );
+        if let Some(workspace) = &self.workspace {
+            text.push_str("\nWorkspace binding: ");
+            text.push_str(&workspace.summary());
+        }
+        Some(text)
+    }
+
     pub(crate) fn disposition(&self, has_requests: bool) -> AgentDisposition {
         use tidepool_model::ProviderTurnState;
         use AgentDisposition::*;
@@ -233,6 +256,10 @@ pub struct ActorRuntimeObservationHandle {
 }
 
 impl ActorRuntimeObservationHandle {
+    pub fn publish_launch_role(&self, role: crate::EffectiveRole) {
+        self.inner.write().launch_role = Some(role);
+    }
+
     pub fn publish_workspace(&self, workspace: ActorWorkspaceObservation) {
         self.inner.write().workspace = Some(workspace);
     }

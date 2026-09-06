@@ -336,9 +336,9 @@ impl DurableActorEvent {
                 "{delivery}actor {}@{} provider turn {turn:?} in thread {thread:?} failed: {failure:?}. The actor request remains pending. Inspect status before deciding whether to retire or recover it; further steering does not repair rejected history.",
                 actor.id.0, actor.incarnation.0,
             ),
-            Self::Typed(TypedActorEvent::SessionReady { message, .. }) | Self::Legacy(message) => {
-                message.clone()
-            }
+            Self::Typed(TypedActorEvent::SessionReady { sequence, request, message, .. }) =>
+                format!("{delivery}request activation {sequence} (request {}).\n\n{message}", request.0),
+            Self::Legacy(message) => message.clone(),
             Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
                 "{delivery}typed watch {} {:?} changed from {:?} to {:?} at {} (actor event {}/{}). Inspect it with `pollWatch`; the handle is authoritative.",
                 notification.watch.0,
@@ -1879,11 +1879,10 @@ async fn launch_prepared_interactive_application(
             .as_ref()
             .map(|tree| tree.branch().as_str().to_owned()),
     };
-    runtime_observation.publish_workspace(workspace_observation.clone());
+    runtime_observation.publish_workspace(workspace_observation);
+    runtime_observation.publish_launch_role(installation.effective_role.clone());
     let mut developer_instructions =
         developer_instructions(&installation.effective_role, &launch_mode);
-    developer_instructions.push_str("\nWorkspace binding: ");
-    developer_instructions.push_str(&workspace_observation.orientation());
     developer_instructions.push_str(
         "\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n",
     );
@@ -1908,7 +1907,10 @@ async fn launch_prepared_interactive_application(
         model,
         effort,
         developer_instructions,
-        initial_prompt: installation.initial_user_message.clone(),
+        initial_prompt: installation
+            .initial_user_message
+            .as_ref()
+            .map(|message| orient_activation(message, &runtime_observation.snapshot())),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
         host_tools_socket: endpoint,
     };
@@ -2134,6 +2136,16 @@ fn actor_launch_environment(
     }
 }
 
+fn orient_activation(
+    message: &str,
+    observation: &tidepool_actor::ActorRuntimeObservation,
+) -> String {
+    match observation.activation_orientation() {
+        Some(orientation) => format!("{message}\n\n{orientation}"),
+        None => message.to_owned(),
+    }
+}
+
 async fn deliver_pending(
     actor: ActorRef,
     inbox: &Arc<DurableInbox<DurableActorEvent>>,
@@ -2177,6 +2189,7 @@ async fn deliver_pending(
         .map(|message| message.payload.render(message.sequence, inbox_watermark))
         .collect::<Vec<_>>()
         .join("\n\n");
+    let rendered = orient_activation(&rendered, &runtime_observation.snapshot());
     backend
         .push(&cwd, thread, &rendered)
         .await
@@ -3286,6 +3299,10 @@ mod tests {
         let encoded = serde_json::to_value(&request).expect("serialize typed request event");
         assert_eq!(encoded["type"], "sessionReady");
         assert_eq!(encoded["request"], 7);
+        assert_eq!(
+            request.render(2, 5),
+            "delayed inbox event 2/5; request activation 4 (request 7).\n\nReview it."
+        );
 
         let watch = DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
             notification: tidepool_actor::WatchNotification {
@@ -3385,6 +3402,22 @@ mod tests {
             .unwrap();
         let actor = ActorRef::first(tidepool_actor::ActorId(7));
         let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        assert_eq!(orient_activation("event", &observation.snapshot()), "event");
+        observation.publish_launch_role(tidepool_actor::EffectiveRole::research());
+        observation.publish_workspace(tidepool_actor::ActorWorkspaceObservation {
+            workspace_path: "/tmp/visible".into(),
+            host_storage_path: "/host/research".into(),
+            worktree_id: Some("research-tree".into()),
+            expected_branch: Some("research".into()),
+        });
+        let orientation = observation.snapshot().activation_orientation().unwrap();
+        assert!(orientation.contains("role=Research"));
+        assert!(orientation.contains("native_tools=InspectionOnly"));
+        assert!(orientation.contains("workspace=InspectOnly"));
+        assert!(orientation.contains("descendant_depth=0"));
+        assert!(orientation.contains("workspace_path=\"/tmp/visible\" (native tools)"));
+        assert!(orientation.contains("expected_branch=Some(\"research\")"));
+        assert!(!orientation.contains("sessionReply"));
 
         assert!(
             deliver_pending(actor, &inbox, &thread, &backend, root.path(), &observation,)
@@ -3409,7 +3442,10 @@ mod tests {
         assert!(inbox.pending().expect("acked inbox").is_empty());
         assert_eq!(
             *backend.messages.lock().unwrap(),
-            ["child completed", "child completed\n\nsecond event"]
+            [
+                format!("child completed\n\n{orientation}"),
+                format!("child completed\n\nsecond event\n\n{orientation}"),
+            ]
         );
         assert_eq!(
             observation.snapshot().activation_kind,

@@ -43,7 +43,7 @@ impl ResidentActivation {
         contract: ActivationContract,
         request_message: Option<&str>,
     ) -> Self {
-        let message = contract.message(request_message);
+        let message = contract.message(request, request_message);
         Self {
             id: ActivationId { actor, sequence },
             request,
@@ -60,7 +60,7 @@ pub(crate) struct ActivationContract {
 }
 
 impl ActivationContract {
-    pub(crate) fn message(&self, guidance: Option<&str>) -> String {
+    pub(crate) fn message(&self, request: crate::RequestId, guidance: Option<&str>) -> String {
         let progress = self
             .response
             .progress_type
@@ -68,8 +68,8 @@ impl ActivationContract {
             .map_or(String::new(), |ty| {
                 format!("\nreportProgress :: ({ty}) -> Eff {} ()", self.effects)
             });
-        format!("{}\n\nMounted request contract:\n```haskell\nsessionInput :: {}\n{}\n```\nUse `:info` on the input or reply type to inspect its constructors.",
-            guidance.unwrap_or("A new typed request is ready."), self.input_type,
+        format!("{}\n\nTyped request {} mounted:\n```haskell\nsessionInput :: {}\nsessionReply :: Reply ({})\n{}\n```\nUse `:info` on the input or reply type to inspect its constructors.",
+            guidance.unwrap_or("A new typed request is ready."), request.0, self.input_type, self.response.expected_type(),
             format!("{}{progress}", self.response.respond_signature(&self.effects)))
     }
 }
@@ -198,7 +198,7 @@ mod tests {
         );
         assert_eq!(
             activation.message,
-            "Review this candidate.\n\nMounted request contract:\n```haskell\nsessionInput :: Candidate\nrespond :: (Review) -> Eff ActorEffects TidepoolVoid.Void\n```\nUse `:info` on the input or reply type to inspect its constructors."
+            "Review this candidate.\n\nTyped request 11 mounted:\n```haskell\nsessionInput :: Candidate\nsessionReply :: Reply (Review)\nrespond :: (Review) -> Eff ActorEffects TidepoolVoid.Void\n```\nUse `:info` on the input or reply type to inspect its constructors."
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }
