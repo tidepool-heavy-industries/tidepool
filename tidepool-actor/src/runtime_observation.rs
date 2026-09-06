@@ -152,9 +152,9 @@ impl AgentDisposition {
 }
 
 impl ActorRuntimeObservation {
-    /// Current launch authority and checkout evidence, without inferred bindings.
+    /// Fixed per-incarnation launch orientation; detailed observations remain in status.
     #[must_use]
-    pub fn activation_orientation(&self) -> Option<String> {
+    pub fn launch_orientation(&self) -> Option<String> {
         let role = self.launch_role.as_ref()?;
         let budget = role.descendants();
         let mut text = format!(
@@ -167,7 +167,7 @@ impl ActorRuntimeObservation {
             text.push_str(&format!(
                 "workspace_path={:?} (native tools); expected_branch={:?}; seed={}",
                 workspace.workspace_path,
-                workspace.expected_branch,
+                workspace.expected_branch.as_deref().unwrap_or("unassigned"),
                 if workspace.worktree_id.is_some() {
                     "boundHead"
                 } else {

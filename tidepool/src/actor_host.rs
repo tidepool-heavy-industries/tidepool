@@ -328,12 +328,7 @@ impl DurableActorEvent {
         })
     }
 
-    fn render(
-        &self,
-        inbox_sequence: u64,
-        inbox_watermark: u64,
-        launched_at: Option<i64>,
-    ) -> String {
+    fn render(&self, launched_at: Option<i64>) -> String {
         let elapsed = |occurred: u64| match launched_at
             .and_then(|start| i64::try_from(occurred).ok()?.checked_sub(start))
             .filter(|elapsed| *elapsed >= 0)
@@ -345,21 +340,15 @@ impl DurableActorEvent {
             ),
             None => "elapsed time unavailable".to_owned(),
         };
-        let delivery = if inbox_sequence < inbox_watermark {
-            format!("delayed inbox event {inbox_sequence}/{inbox_watermark}; ")
-        } else {
-            format!("inbox event {inbox_sequence}/{inbox_watermark}; ")
-        };
         match self {
             Self::Typed(TypedActorEvent::ProviderTurnFailed { actor, thread, turn, failure, .. }) => format!(
-                "{delivery}actor {}@{} provider turn {turn:?} in thread {thread:?} failed: {failure:?}. The actor request remains pending. Inspect status before deciding whether to retire or recover it; further steering does not repair rejected history.",
+                "actor {}@{} provider turn {turn:?} in thread {thread:?} failed: {failure:?}. The actor request remains pending. Inspect status before deciding whether to retire or recover it; further steering does not repair rejected history.",
                 actor.id.0, actor.incarnation.0,
             ),
-            Self::Typed(TypedActorEvent::SessionReady { sequence, request, message, .. }) =>
-                format!("{delivery}request activation {sequence} (request {}).\n\n{message}", request.0),
+            Self::Typed(TypedActorEvent::SessionReady { message, .. }) => message.clone(),
             Self::Legacy(message) => message.clone(),
             Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
-                "{delivery}watch {} {:?}: {:?} → {:?} ({}). Poll its retained handle with `pollWatch`.",
+                "watch {} {:?}: {:?} → {:?} ({}). Poll its retained handle with `pollWatch`.",
                 notification.watch.0,
                 notification.label,
                 notification.previous,
@@ -367,7 +356,7 @@ impl DurableActorEvent {
                 elapsed(notification.occurred_at_unix_ms),
             ),
             Self::Typed(TypedActorEvent::RequestCancellation { notification }) => format!(
-                "{delivery}request {} {:?} has cancellation pending ({:?}; {}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
+                "request {} {:?} has cancellation pending ({:?}; {}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
                 notification.request.0,
                 notification.label,
                 notification.reason,
@@ -1903,6 +1892,8 @@ async fn launch_prepared_interactive_application(
     developer_instructions.push_str(
         "\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n",
     );
+    let developer_instructions =
+        orient_launch_instructions(&developer_instructions, &runtime_observation.snapshot());
     runtime_observation.publish_prompt_profile(
         installation.effective_role.prompt_profile(),
         PromptId::CATALOG_VERSION,
@@ -1924,10 +1915,7 @@ async fn launch_prepared_interactive_application(
         model,
         effort,
         developer_instructions,
-        initial_prompt: installation
-            .initial_user_message
-            .as_ref()
-            .map(|message| orient_activation(message, &runtime_observation.snapshot())),
+        initial_prompt: installation.initial_user_message.clone(),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
         host_tools_socket: endpoint,
     };
@@ -2159,11 +2147,11 @@ fn actor_launch_environment(
     }
 }
 
-fn orient_activation(
+fn orient_launch_instructions(
     message: &str,
     observation: &tidepool_actor::ActorRuntimeObservation,
 ) -> String {
-    match observation.activation_orientation() {
+    match observation.launch_orientation() {
         Some(orientation) => format!("{message}\n\n{orientation}"),
         None => message.to_owned(),
     }
@@ -2210,19 +2198,12 @@ async fn deliver_pending(
     let rendered = pending
         .iter()
         .map(|message| {
-            message.payload.render(
-                message.sequence,
-                inbox_watermark,
-                runtime_observation.snapshot().launched_at_unix_ms,
-            )
+            message
+                .payload
+                .render(runtime_observation.snapshot().launched_at_unix_ms)
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let rendered = if activation.is_some() {
-        orient_activation(&rendered, &runtime_observation.snapshot())
-    } else {
-        rendered
-    };
     backend
         .push(&cwd, thread, &rendered)
         .await
@@ -2829,9 +2810,9 @@ mod tests {
             serde_json::from_str::<super::DurableActorEvent>(&encoded).unwrap(),
             notice
         );
-        assert!(notice.render(1, 1, None).contains("7@3"));
+        assert!(notice.render(None).contains("7@3"));
         let legacy = serde_json::from_str::<super::DurableActorEvent>("\"old event\"").unwrap();
-        assert_eq!(legacy.render(1, 1, None), "old event");
+        assert_eq!(legacy.render(None), "old event");
     }
 
     #[tokio::test]
@@ -3332,10 +3313,7 @@ mod tests {
         let encoded = serde_json::to_value(&request).expect("serialize typed request event");
         assert_eq!(encoded["type"], "sessionReady");
         assert_eq!(encoded["request"], 7);
-        assert_eq!(
-            request.render(2, 5, None),
-            "delayed inbox event 2/5; request activation 4 (request 7).\n\nReview it."
-        );
+        assert_eq!(request.render(None), "Review it.");
 
         let watch = DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
             notification: tidepool_actor::WatchNotification {
@@ -3353,14 +3331,10 @@ mod tests {
                 watermark: tidepool_actor::ActorEventSequence(3),
             },
         });
+        assert!(watch.render(Some(0)).contains("+12m34s since actor launch"));
+        assert!(watch.render(None).contains("elapsed time unavailable"));
         assert!(watch
-            .render(2, 2, Some(0))
-            .contains("+12m34s since actor launch"));
-        assert!(watch
-            .render(2, 2, None)
-            .contains("elapsed time unavailable"));
-        assert!(watch
-            .render(2, 2, Some(800_000))
+            .render(Some(800_000))
             .contains("elapsed time unavailable"));
         let encoded = serde_json::to_value(&watch).expect("serialize typed watch event");
         assert_eq!(encoded["type"], "watchChanged");
@@ -3444,7 +3418,10 @@ mod tests {
             .unwrap();
         let actor = ActorRef::first(tidepool_actor::ActorId(7));
         let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
-        assert_eq!(orient_activation("event", &observation.snapshot()), "event");
+        assert_eq!(
+            orient_launch_instructions("event", &observation.snapshot()),
+            "event"
+        );
         observation.publish_launch_role(tidepool_actor::EffectiveRole::research(), 0);
         observation.publish_workspace(tidepool_actor::ActorWorkspaceObservation {
             workspace_path: "/tmp/visible".into(),
@@ -3452,14 +3429,18 @@ mod tests {
             worktree_id: Some("research-tree".into()),
             expected_branch: Some("research".into()),
         });
-        let orientation = observation.snapshot().activation_orientation().unwrap();
+        let orientation = observation.snapshot().launch_orientation().unwrap();
         assert!(orientation.contains("role=Research"));
         assert!(orientation.contains("native_tools=InspectionOnly"));
         assert!(orientation.contains("workspace=InspectOnly"));
         assert!(orientation.contains("descendant_depth=0"));
         assert!(orientation.contains("workspace_path=\"/tmp/visible\" (native tools)"));
-        assert!(orientation.contains("expected_branch=Some(\"research\")"));
+        assert!(orientation.contains("expected_branch=\"research\""));
         assert!(!orientation.contains("sessionReply"));
+        assert_eq!(
+            orient_launch_instructions("launch instructions", &observation.snapshot()),
+            format!("launch instructions\n\n{orientation}")
+        );
 
         assert!(
             deliver_pending(actor, &inbox, &thread, &backend, root.path(), &observation,)
@@ -3495,6 +3476,36 @@ mod tests {
                 inbox_sequences: vec![1, 2]
             }
         );
+
+        // First and retained requests use the same unwrapped message boundary.
+        for sequence in [1, 2] {
+            let message = format!("Request {sequence}: review\n\nReturn with `respond`.");
+            inbox
+                .publish(DurableActorEvent::Typed(TypedActorEvent::SessionReady {
+                    sequence,
+                    request: tidepool_actor::RequestId(sequence),
+                    input_type: "Text".into(),
+                    message: message.clone(),
+                }))
+                .unwrap();
+            backend
+                .fail
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                deliver_pending(actor, &inbox, &thread, &backend, root.path(), &observation)
+                    .await
+                    .is_err()
+            );
+            backend
+                .fail
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            deliver_pending(actor, &inbox, &thread, &backend, root.path(), &observation)
+                .await
+                .unwrap();
+            let messages = backend.messages.lock().unwrap();
+            assert_eq!(&messages[messages.len() - 2..], &[message.clone(), message]);
+            assert!(inbox.pending().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

@@ -14,8 +14,8 @@ width permit it; `researchingLeaf` deliberately omits delegation. A larger
 subtree can be requested with `withForkBudget`; `previewBranch` shows the
 effective policy before admission, without creating a child. Research
 descendants remain inspection-only. Exhausted budgets make a worker a leaf,
-even when its effect row includes `Forks`. Use the activation’s authority and
-reply declaration; inspect only missing information. Return the requested value
+even when its effect row includes `Forks`. Use the launch instructions for authority and
+the activation’s reply declaration; inspect only missing information. Return the requested value
 with evidence, unresolved questions, and validation limits. Distinguish an
 observed restriction from a hypothesis about its impact. Send findings to the
 coordinator for inclusion in shared notes; this checkout is inspection-only.

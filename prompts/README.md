@@ -26,7 +26,8 @@ Files under `shoal/` retain their existing Codex surfaces and roles:
 - **Authored task data:** `initial_user_message`, completion tasks, harness prompts, fork briefs, startup values, and operator messages remain User content supplied by Haskell or the operator.
 
 Activation messages are rendered by Rust and carry request previews, reply
-declarations when available, and current authority/workspace facts. Stable
+declarations when available. Authority and assigned workspace appear once in
+per-incarnation launch instructions; detailed state remains in `:status`. Stable
 prompts teach composition and conditional discovery; they do not duplicate
 those runtime facts. Hosted requests settle through `respond`; roots outside
 a request have no reply binding. Files in `shoal/docs/` supply on-demand `:doc`
