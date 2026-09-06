@@ -654,7 +654,14 @@ mod actual_seal {
         assert_eq!(proof.actor(), actor.identity());
         assert_eq!(endpoint.seals.load(Ordering::SeqCst), 1);
         endpoint.release_dispatch.add_permits(1);
-        assert_eq!(late.await.unwrap()["success"], false);
+        let denied_late = late.await.unwrap();
+        assert_eq!(denied_late["success"], false);
+        assert!(
+            denied_late
+                .to_string()
+                .contains("hosted work admission is sealed"),
+            "{denied_late}"
+        );
         let completion = serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"context"});
         let mut wrong = completion.clone();
         wrong["threadId"] = serde_json::json!("foreign");
