@@ -162,9 +162,8 @@ impl KernelContext {
     /// Release routing and terminal metadata for an exact, already-terminal
     /// actor. Live Haskell handles become explicitly unavailable afterward.
     pub fn forget_terminal_actor(&self, actor: ActorRef) -> bool {
-        let child = self
-            .children
-            .lock()
+        let mut children = self.children.lock();
+        let child = children
             .values()
             .find(|child| child.identity() == actor)
             .cloned();
@@ -185,9 +184,7 @@ impl KernelContext {
                     );
                 }
             }
-            self.children
-                .lock()
-                .retain(|_, child| child.identity() != actor);
+            children.retain(|_, child| child.identity() != actor);
         }
         forgotten
     }
@@ -209,6 +206,10 @@ impl KernelContext {
                 std::io::Error::other("actor child admission is closed").into(),
             ));
         }
+        let mut custody = StartupCustody {
+            retained: self.forgotten_children.clone(),
+            accounted: false,
+        };
         let terminal = RetainedActorExit::new();
         let spawned = self
             .myself
@@ -233,6 +234,7 @@ impl KernelContext {
                         "child startup failed without retained cleanup: {error}"
                     )),
                 );
+                custody.accounted = true;
                 return Err(error);
             }
         };
@@ -241,6 +243,7 @@ impl KernelContext {
         self.children
             .lock()
             .insert(child.address().get_id(), child.clone());
+        custody.accounted = true;
         Ok(child)
     }
 }
@@ -918,11 +921,37 @@ fn combine_cleanup(
     }
 }
 
+// Declared after the admission lease: cancellation records uncertainty before
+// releasing that lease, so retirement cannot overtake the evidence write.
+struct StartupCustody {
+    retained: std::sync::Arc<parking_lot::Mutex<crate::CleanupComponentOutcome>>,
+    accounted: bool,
+}
+impl Drop for StartupCustody {
+    fn drop(&mut self) {
+        if !self.accounted {
+            let mut retained = self.retained.lock();
+            *retained = combine_cleanup(
+                retained.clone(),
+                crate::CleanupComponentOutcome::Unconfirmed(
+                    "child startup waiter lost before registration; cleanup unavailable".into(),
+                ),
+            );
+        }
+    }
+}
+
 async fn shutdown_children(
     context: &KernelContext,
     timeout: Duration,
 ) -> crate::CleanupComponentOutcome {
-    let children: Vec<_> = context.children.lock().values().cloned().collect();
+    let (children, mut outcome) = {
+        let children = context.children.lock();
+        (
+            children.values().cloned().collect::<Vec<_>>(),
+            context.forgotten_children.lock().clone(),
+        )
+    };
     let mut shutdowns = FuturesUnordered::new();
     for child in children {
         shutdowns.push(async move {
@@ -956,7 +985,6 @@ async fn shutdown_children(
             }
         });
     }
-    let mut outcome = context.forgotten_children.lock().clone();
     while let Some(child) = shutdowns.next().await {
         outcome = combine_cleanup(outcome, child);
     }
@@ -985,6 +1013,7 @@ mod tests {
     }
 
     struct ProbeBehavior {
+        startup_gate: Option<(Arc<Notify>, Arc<Notify>)>,
         calls: Arc<Mutex<Vec<&'static str>>>,
         release_first: Arc<Notify>,
         fail_cast: bool,
@@ -1002,7 +1031,14 @@ mod tests {
             &mut self,
             _context: &KernelContext,
         ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
-            Box::pin(async { Ok(KernelStep::Continue(())) })
+            let gate = self.startup_gate.clone();
+            Box::pin(async move {
+                if let Some((entered, release)) = gate {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                Ok(KernelStep::Continue(()))
+            })
         }
 
         fn cast(
@@ -1240,6 +1276,7 @@ mod tests {
         let child_exits = Arc::new(Mutex::new(Vec::new()));
         ProbeFixture {
             behavior: ProbeBehavior {
+                startup_gate: None,
                 calls: Arc::clone(&calls),
                 release_first: Arc::clone(&release),
                 fail_cast,
@@ -1742,5 +1779,65 @@ mod tests {
             ),
             "forgetting routing must not erase cleanup uncertainty"
         );
+    }
+    #[tokio::test]
+    async fn startup_admission_cancellation_is_retained_before_barrier() {
+        for cancel in [false, true] {
+            let (owner, task) = spawn_local_actor(None, behavior(false).behavior)
+                .await
+                .unwrap();
+            let context = KernelContext {
+                identity: owner.identity(),
+                myself: owner.address().clone(),
+                children: Arc::new(Mutex::new(HashMap::new())),
+                directory: LocalActorDirectory::default(),
+                child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
+                forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
+            };
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let mut child = behavior(false).behavior;
+            child.startup_gate = Some((entered.clone(), release.clone()));
+            let spawning_context = context.clone();
+            let spawning =
+                tokio::spawn(async move { spawning_context.spawn_child(None, child).await });
+            entered.notified().await;
+            assert!(context.child_admission_closed.try_write().is_err());
+            assert!(context.children.lock().is_empty());
+            if cancel {
+                spawning.abort();
+                assert!(spawning.await.unwrap_err().is_cancelled());
+            } else {
+                release.notify_one();
+                let child = spawning.await.unwrap().unwrap();
+                assert!(context.owns_child(child.identity()));
+            }
+            *context.child_admission_closed.write().await = true;
+            if cancel {
+                assert!(context.children.lock().is_empty());
+                assert!(matches!(
+                    *context.forgotten_children.lock(),
+                    crate::CleanupComponentOutcome::Unconfirmed(_)
+                ));
+            }
+            let outcome = shutdown_children(&context, Duration::from_secs(1)).await;
+            // Probe behavior cannot prove realm cleanup even on successful startup.
+            assert!(!matches!(
+                outcome,
+                crate::CleanupComponentOutcome::Confirmed
+            ));
+            assert!(context
+                .spawn_child(None, behavior(false).behavior)
+                .await
+                .is_err());
+            owner
+                .shutdown_with_cleanup(ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "test done".into(),
+                })
+                .await
+                .unwrap();
+            task.await.unwrap();
+        }
     }
 }
