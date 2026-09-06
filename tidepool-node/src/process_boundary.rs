@@ -11,6 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "process_scope.rs"]
+pub mod service_scope;
+
 pub const BUBBLEWRAP_PROGRAM: &str = "bwrap";
 
 /// An exact executable plus argv, ready for a process launcher.
@@ -32,6 +35,15 @@ pub struct ProcessMountBoundary {
 }
 
 impl ProcessMountBoundary {
+    /// Prepare an opt-in service scope without spawning or changing legacy wrap().
+    pub fn prepare_service_scope(
+        &self,
+        bubblewrap: PathBuf,
+        command: ProcessInvocation,
+    ) -> Result<service_scope::PreparedServiceScope, service_scope::ServiceScopeError> {
+        service_scope::PreparedServiceScope::new(self.clone(), bubblewrap, command)
+    }
+
     pub fn new(
         cwd: impl AsRef<Path>,
         read_only_roots: impl IntoIterator<Item = PathBuf>,
