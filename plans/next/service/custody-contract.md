@@ -1,25 +1,31 @@
-# Pre-bootstrap custody implementation contract
+# Pre-bootstrap custody integration contract
 
 The existing injected ForkWorkspaceAdmission owns installation in addition to
 allocation. `install_custody(actor, worktree)` returns an opaque shared lease;
 no new registry or identity issuer. Concrete host implementation holds the
-existing BindingTable ActiveBinding receipt and releases that exact generation.
-The default is explicitly unsupported, not success.
+existing BindingTable ActiveBinding receipt. Installation is required, with no
+default successful or unsupported implementation remaining.
 
-Before `ResidentBoot::Entry` can run any Haskell under the child principal,
-install the exact allocated worktree binding. The kernel retains the lease for
-its lifetime and clones it into LocalResidentInstallation, so host launch and
-cleanup retain custody even if the actor exits first. No bootstrap or provider
-start on installation failure. No lease is necessary without a worktree.
+Before child entry evaluates any Haskell under its principal, the kernel
+installs exact allocated worktree custody. Kernel and LocalResidentInstallation
+share the lease. Host validates the preexisting binding instead of binding late.
+No bootstrap or provider publication follows a failed installation or observed
+shutdown intent. Shutdown intent is retained separately from published terminal
+in the existing exit owner and checked at bootstrap safe boundaries.
 
-The host must consume/validate this already installed binding rather than bind
-a second time. Preserve a clearly owned path for existing non-fork/root launch
-consumers if source inspection shows they need it. Bind errors never broaden
-access or trigger retry. Exact last-owner release must preserve checkout files
-and surface release failure as bounded structured evidence. Ensure shutdown,
-bootstrap failure and provider launch cancellation drop their owners.
+Before process submission, last-owner Drop releases only the owned generation,
+retaining checkout files. After submission may have occurred, the current tmux
+boundary cannot prove exact process reaping: its missing/foreign-pane success
+and ordinary pane deletion are insufficient evidence. The fence is therefore
+irreversible in this staged slice and cleanup explicitly reports unconfirmed
+binding release. There is no new serialized cleanup outcome variant.
 
-Scaffold hole: trait signature only; the production implementation, entry gate,
-lease propagation/validation, structured denial evidence and deterministic
-regression tests are the implementation worker's obligation. Review should
-challenge lifetime assumptions against actual shutdown ordering.
+PRODUCT GATE: do not deploy this slice as complete custody support. Ordinary
+tmux-launched actors retain bindings after cleanup. The replacing service
+supervisor must supply authoritative exact-process termination proof and a
+reviewed release transition before release/reuse can be accepted. Actor terminal
+publication alone is not that proof. Do not weaken the fence to pane absence.
+
+Independent review and evidence: custody-review.md. This corrects the initial
+scaffold's unconditional last-owner release assumption. The custody implementer
+and reviewer are retained for service integration repairs.
