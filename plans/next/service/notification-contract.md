@@ -37,11 +37,21 @@ rows. Notification rows use existing text payload encoding plus typed envelope
 receipt provenance, not a new payload variant that old tail repair cannot decode.
 New-format inboxes still must not be reopened by old binaries.
 
-Durability acceptance is OPEN: independent review demonstrated ignored parent
-open/fsync errors in atomic-write::write_durable using deterministic EIO injection.
-First-file JSONL admission and new directory ancestry also need owning primitive
-repair. Process reopen tests prove process-level persistence only, not power-crash
-safety. Native send remains unavailable independently of this durability gate.
+Node-local strict durability is accepted under the single-open-owner and
+controlled-hierarchy contract. Accepted atomic-write/JSONL owners propagate
+parent open/fsync failures; inbox prepares BOTH parent hierarchies with the shared
+durable directory helper and stabilizes surviving rows/cursor after tail repair
+before exposing receipt/send capability. Symlink entries, targets and target
+ancestry must already be durable; concurrent hierarchy replacement is excluded.
+At integrated source c5b74bf8, 22 inbox tests (including 20 hit-checked syscall-fault
+subprocess cases) and 3 notification host regressions passed. These prove failure
+propagation, poison/no retry and process reconciliation, not physical power-loss
+safety. Native send remains unavailable. Exclusive socket-directory custody now
+cleans pre-submission preparation failures, including failed inbox open, without
+deleting preexisting collisions. Once hosted or native work may exist, paths are
+retained and cleanup is reported failed until exact process and accepted hosted
+work completion are proven. Shutdown preserves launch failures and completed
+deployment custody across its deadline; abort is not successful cleanup.
 Submitted transport acceptance maps to Unconfirmed, never Presented; only explicit
 correlated presentation evidence may establish Presented.
 

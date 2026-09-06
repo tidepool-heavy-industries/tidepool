@@ -1,5 +1,5 @@
 //! Shared timestamp, error-mapping, and atomic JSON-directory primitives for
-//! worktree storage. Callers own serialization, locking, and domain rollback.
+//! worktree storage. Callers own serialization, locking, and uncertainty handling.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,7 +48,8 @@ impl DurableJsonDir {
     /// Open (creating if absent) a JSON-file directory rooted at `dir`.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, WorktreeError> {
         let dir = dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir).map_err(|e| storage_failure(&dir, e))?;
+        tidepool_atomic_write::create_dir_all_durable(&dir)
+            .map_err(|e| storage_failure(&e.path, e.source))?;
         Ok(Self { dir })
     }
 

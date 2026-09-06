@@ -16,8 +16,8 @@
 //! ## Format
 //!
 //! One [`ObservationBatch`] per line (JSONL). A batch owns one `event_id` and
-//! every co-emitted view, so a crash can retain all of a reconciliation or
-//! none of it, never a misleading prefix.
+//! every co-emitted view. A partial final JSON row is repaired on exclusive
+//! reopen; a failed append may already be visible and poisons its writer.
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -43,19 +43,17 @@ pub struct ObservationBatch {
     pub recorded_at_ms: i64,
 }
 
-/// Append-only, crash-safe, restart-durable.
+/// Append-only, with acknowledged rows synced before success.
 ///
-/// Filesystem errors on open/append (missing directory permissions, a full
-/// disk) surface as [`WorktreeError::StorageFailure`] naming the journal
-/// path, so a resident driving many worktrees can fail the one cycle that hit
-/// the fault rather than aborting and taking every other worktree's in-flight
-/// work with it. The one recoverable-by-design failure — a torn final row —
-/// is handled explicitly below and never reaches an error the caller has to
-/// act on.
+/// A failed append leaves this handle uncertain: further writes are refused
+/// until it is dropped and exclusively reopened. Diagnostic reads retain the
+/// last acknowledged snapshot, not a claim about possibly visible failed writes.
+/// Reopen reconciles retained rows and the explicitly repairable torn final row.
 #[derive(Debug)]
 pub struct EventJournal {
     path: PathBuf,
     entries: Vec<ObservationBatch>,
+    write_uncertain: bool,
     /// Exclusive for this handle's lifetime. Cursor and EventId allocation
     /// are derived from the in-memory rows, so a second writer would be stale.
     _owner_lock: fs::File,
@@ -97,7 +95,8 @@ impl EventJournal {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|e| storage_failure(parent, e))?;
+                tidepool_atomic_write::create_dir_all_durable(parent)
+                    .map_err(|e| storage_failure(&e.path, e.source))?;
             }
         }
         let lock_path = path.with_extension("owner.lock");
@@ -138,7 +137,7 @@ impl EventJournal {
 
         // Open only after initialization has durably published a complete
         // header. Existing nonempty files are never replaced here.
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .append(true)
             .open(&path)
             .map_err(|e| storage_failure(&path, e))?;
@@ -229,9 +228,16 @@ impl EventJournal {
             entries.push(entry);
         }
 
+        // A prior writer may have failed after making bytes visible. Confirm
+        // the reconciled contents and pathname before admitting another writer.
+        file.sync_all().map_err(|e| storage_failure(&path, e))?;
+        tidepool_atomic_write::sync_parent_directory(&path)
+            .map_err(|e| storage_failure(&e.path, e.source))?;
+
         Ok(Self {
             path,
             entries,
+            write_uncertain: false,
             _owner_lock: owner_lock,
         })
     }
@@ -248,7 +254,11 @@ impl EventJournal {
         events: &[RepositoryEvent],
         event_id: EventId,
     ) -> Result<u64, WorktreeError> {
-        let cursor = self.entries.last().map_or(1, |e| e.cursor + 1);
+        self.ensure_writable()?;
+        let cursor = self
+            .end_cursor()
+            .checked_add(1)
+            .ok_or_else(|| storage_failure(&self.path, "journal cursor exhausted"))?;
         let entry = ObservationBatch {
             cursor,
             event_id,
@@ -258,17 +268,28 @@ impl EventJournal {
         #[allow(clippy::expect_used, reason = "serialize event journal entry")]
         let line = serde_json::to_string(&entry).expect("serialize event journal entry");
 
-        // The shared JSONL primitive performs one write for the complete row
-        // plus newline, followed by fsync. The lifetime lock excludes every
-        // competing appender, so no stale cursor allocator exists.
-        jsonl::append_new_line(&self.path, &line, SyncPolicy::All)
-            .map_err(|e| storage_failure(&self.path, e))?;
+        // The lifetime lock excludes competing appenders, but an I/O error
+        // may follow a partial or complete visible row. Never reuse its cursor.
+        if let Err(error) = jsonl::append_new_line(&self.path, &line, SyncPolicy::All) {
+            self.write_uncertain = true;
+            return Err(storage_failure(&self.path, error));
+        }
 
         self.entries.push(entry);
         Ok(cursor)
     }
 
-    /// The current end. A fresh subscription starts here — see the module docs.
+    /// Refuse mutations based on a snapshot whose last publication is uncertain.
+    pub(crate) fn ensure_writable(&self) -> Result<(), WorktreeError> {
+        if self.write_uncertain {
+            return Err(storage_failure(&self.path,
+                "journal append outcome is uncertain; drop and exclusively reopen before further mutation"));
+        }
+        Ok(())
+    }
+
+    /// The last acknowledged end, not possibly visible failed appends.
+    /// A fresh subscription starts here — see the module docs.
     pub fn end_cursor(&self) -> u64 {
         self.entries.last().map_or(0, |e| e.cursor)
     }

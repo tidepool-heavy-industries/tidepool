@@ -184,6 +184,7 @@ impl WorktreeMonitor {
     /// git read (true first sight: nothing to report yet, so nothing is
     /// journalled here). See the module docs for why no event is emitted.
     pub fn register(&mut self, worktree: WorktreeId, path: PathBuf) -> Result<(), WorktreeError> {
+        self.journal.ensure_writable()?;
         let (mut head, mut branch) = self.last_observed(&worktree);
         if head.is_none() {
             if !crate::registry::worktree_present(&path) {
@@ -242,6 +243,7 @@ impl WorktreeMonitor {
         &mut self,
         worktree: &WorktreeId,
     ) -> Result<Vec<Observed<RepositoryEvent>>, WorktreeError> {
+        self.journal.ensure_writable()?;
         let baseline = self
             .baselines
             .get(worktree)
