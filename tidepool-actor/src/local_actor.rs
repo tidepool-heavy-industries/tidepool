@@ -63,6 +63,7 @@ pub struct KernelContext {
     myself: RactorRef<KernelMessage>,
     children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
     directory: LocalActorDirectory,
+    forgotten_children: std::sync::Arc<parking_lot::Mutex<crate::CleanupComponentOutcome>>,
 }
 
 /// Process-local exact-incarnation routing and terminal-observation index.
@@ -160,8 +161,29 @@ impl KernelContext {
     /// Release routing and terminal metadata for an exact, already-terminal
     /// actor. Live Haskell handles become explicitly unavailable afterward.
     pub fn forget_terminal_actor(&self, actor: ActorRef) -> bool {
+        let child = self
+            .children
+            .lock()
+            .values()
+            .find(|child| child.identity() == actor)
+            .cloned();
         let forgotten = self.directory.forget_terminal(actor);
         if forgotten {
+            if let Some(child) = child {
+                if !child
+                    .terminal()
+                    .cleanup()
+                    .is_some_and(|outcome| outcome.actor() == actor && outcome.is_confirmed())
+                {
+                    let mut retained = self.forgotten_children.lock();
+                    *retained = combine_cleanup(
+                        retained.clone(),
+                        crate::CleanupComponentOutcome::Unconfirmed(format!(
+                            "forgotten child {actor:?} lacked confirmed cleanup"
+                        )),
+                    );
+                }
+            }
             self.children
                 .lock()
                 .retain(|_, child| child.identity() != actor);
@@ -179,7 +201,7 @@ impl KernelContext {
         C: KernelBehavior,
     {
         let terminal = RetainedActorExit::new();
-        let (address, task) = self
+        let spawned = self
             .myself
             .spawn_linked(
                 name,
@@ -191,7 +213,20 @@ impl KernelContext {
                     incarnation: self.identity.incarnation,
                 },
             )
-            .await?;
+            .await;
+        let (address, task) = match spawned {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                let mut retained = self.forgotten_children.lock();
+                *retained = combine_cleanup(
+                    retained.clone(),
+                    crate::CleanupComponentOutcome::Unconfirmed(format!(
+                        "child startup failed without retained cleanup: {error}"
+                    )),
+                );
+                return Err(error);
+            }
+        };
         drop(task);
         let child = LocalActorRef::new_in_incarnation(address, terminal, self.identity.incarnation);
         self.children
@@ -389,6 +424,9 @@ where
             myself,
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
             directory: arguments.directory,
+            forgotten_children: std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::CleanupComponentOutcome::Confirmed,
+            )),
         };
         let mut state = LocalActorState {
             context,
@@ -893,7 +931,7 @@ async fn shutdown_children(
             }
         });
     }
-    let mut outcome = crate::CleanupComponentOutcome::Confirmed;
+    let mut outcome = context.forgotten_children.lock().clone();
     while let Some(child) = shutdowns.next().await {
         outcome = combine_cleanup(outcome, child);
     }
@@ -1646,6 +1684,7 @@ mod tests {
                 actor.clone(),
             )]))),
             directory: LocalActorDirectory::default(),
+            forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
         };
         let result = shutdown_children(&context, Duration::from_millis(1)).await;
         assert!(matches!(
