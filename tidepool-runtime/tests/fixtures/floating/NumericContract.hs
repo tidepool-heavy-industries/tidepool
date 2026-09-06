@@ -68,21 +68,39 @@ arithmetic :: (RealFloat a) => a -> [Bool]
 arithmetic witness =
   [ x + y == 5, x - y == -1, x * y == 6, x / y == 2 / 3
   , x < y, not (x > y), x == x, x /= y
-  , fromIntegral (14592 :: Int) == (14592 `asTypeOf` witness)
-  , truncate (2.75 `asTypeOf` witness) == (2 :: Integer)
-  , floor (-2.75 `asTypeOf` witness) == (-3 :: Integer)
-  , ceiling (-2.75 `asTypeOf` witness) == (-2 :: Integer)
-  , round (2.5 `asTypeOf` witness) == (2 :: Integer)
-  , round (3.5 `asTypeOf` witness) == (4 :: Integer)
+  , truncate (witness + 1.75) == (2 :: Integer)
+  , floor (witness - 3.75) == (-3 :: Integer)
+  , ceiling (witness - 3.75) == (-2 :: Integer)
+  , round (witness + 1.5) == (2 :: Integer)
+  , round (witness + 2.5) == (4 :: Integer)
   , let (m,e) = decodeFloat x in encodeFloat m e == x
   ]
   where
     x = witness + 1
     y = witness + 2
 
+-- Keep conversion inputs opaque to simplification at the call site. Unlike
+-- asTypeOf, each helper consumes the actual operand.
+{-# NOINLINE intToDouble #-}
+intToDouble :: Int -> Double
+intToDouble = fromIntegral
+
+{-# NOINLINE intToFloat #-}
+intToFloat :: Int -> Float
+intToFloat = fromIntegral
+
+{-# NOINLINE widen #-}
+widen :: Float -> Double
+widen = realToFrac
+
+{-# NOINLINE narrow #-}
+narrow :: Double -> Float
+narrow = realToFrac
+
 arithmeticResult :: String
 arithmeticResult = show
   ( arithmetic (1 :: Double), arithmetic (1 :: Float)
-  , (realToFrac (1.25 :: Float) :: Double) == 1.25
-  , (realToFrac (1.25 :: Double) :: Float) == 1.25
+  , widen 1.25 == 1.25
+  , narrow 1.25 == 1.25
+  , intToDouble 14592 == 14592, intToFloat 14592 == 14592
   )
