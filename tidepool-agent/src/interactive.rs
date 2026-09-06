@@ -65,12 +65,13 @@ impl InteractiveAgentInstallation {
 
 /// Delivery certainty is control flow: a failure before submission allows the
 /// assignment to continue; uncertainty after submission must keep its fence.
+/// Details describe this delivery operation, not the original agent run.
 #[derive(Debug, thiserror::Error)]
 pub enum UpdatePresentationError {
     #[error("update was not submitted: {0}")]
-    NotSubmitted(AgentBackendError),
+    NotSubmitted(String),
     #[error("update presentation is unconfirmed: {0}")]
-    Unconfirmed(AgentBackendError),
+    Unconfirmed(String),
 }
 
 pub type UpdatePresentationFuture<'a> =
@@ -200,9 +201,7 @@ pub trait InteractiveAgentBackend: Send + Sync {
     ) -> UpdatePresentationFuture<'a> {
         Box::pin(async {
             Err(UpdatePresentationError::NotSubmitted(
-                AgentBackendError::BackendUnavailable {
-                    detail: "this backend does not support confirmed active updates".into(),
-                },
+                "this backend does not support confirmed active updates".into(),
             ))
         })
     }

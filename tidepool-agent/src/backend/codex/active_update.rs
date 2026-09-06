@@ -7,14 +7,10 @@ use tokio::io::{AsyncBufReadExt, AsyncSeekExt};
 
 use super::super::process::Session;
 use super::super::transport::Transport;
-use crate::{
-    AgentBackendError, InteractiveAgentInstallation, QueueReadyThread, UpdatePresentationError,
-};
+use crate::{InteractiveAgentInstallation, QueueReadyThread, UpdatePresentationError};
 
-fn failure(error: impl std::fmt::Display) -> AgentBackendError {
-    AgentBackendError::RunFailed {
-        detail: format!("active update: {error}"),
-    }
+fn failure(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
 #[derive(Deserialize)]
@@ -45,7 +41,7 @@ async fn submit<T: Transport>(
     thread: &str,
     key: &str,
     message: &str,
-) -> Result<(), AgentBackendError> {
+) -> Result<(), String> {
     // The fork's turn/start is atomic start_or_steer_turn: it steers the active
     // turn, or wakes the same conversation if idle. It never enters the queue
     // for a second assignment, and leaves thread configuration unchanged.
@@ -68,7 +64,7 @@ async fn submit<T: Transport>(
 async fn await_confirmation<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     key: &str,
-) -> Result<(), AgentBackendError> {
+) -> Result<(), String> {
     let mut line = String::new();
     loop {
         let count = reader.read_line(&mut line).await.map_err(failure)?;
@@ -84,6 +80,7 @@ async fn await_confirmation<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+#[tracing::instrument(skip_all, fields(thread = %thread.id().0, update_key = key), err(level = "warn"))]
 pub(super) async fn present(
     installation: &InteractiveAgentInstallation,
     cwd: &Path,
@@ -98,7 +95,8 @@ pub(super) async fn present(
         let path =
             tokio::task::spawn_blocking(move || super::find_rollout(&sessions, &thread_id, 4))
                 .await
-                .map_err(failure)??
+                .map_err(failure)?
+                .map_err(failure)?
                 .ok_or_else(|| failure("bound conversation rollout is unavailable"))?;
         let mut file = tokio::fs::File::open(path).await.map_err(failure)?;
         file.seek(std::io::SeekFrom::End(0))
@@ -111,8 +109,8 @@ pub(super) async fn present(
         )
         .await
         .map_err(|_| failure("timed out connecting to the interactive daemon"))?
-        .map_err(failure)?;
-        Ok::<_, AgentBackendError>((reader, session))
+        .map_err(|error| format!("connecting update proxy: {error}"))?;
+        Ok::<_, String>((reader, session))
     }
     .await
     .map_err(NotSubmitted)?;

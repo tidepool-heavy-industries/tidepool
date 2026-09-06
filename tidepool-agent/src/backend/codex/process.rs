@@ -358,11 +358,7 @@ impl Session<RawAsyncClient> {
             .await
             .map_err(SessionError::Spawn)?;
 
-        let mut command = build_child_command()?;
-        let child = command
-            .spawn()
-            .map_err(|e| SessionError::Spawn(codex_codes::Error::Io(e)))?;
-        let raw = RawAsyncClient::new(child).map_err(SessionError::Spawn)?;
+        let raw = spawn_transport(build_child_command()?)?;
         let mut session = Self::over(raw);
 
         session.initialize(capabilities).await?;
@@ -372,18 +368,13 @@ impl Session<RawAsyncClient> {
     /// Connect to the existing interactive daemon through its native proxy.
     /// Closing this child closes only the connection, never the daemon/thread.
     pub(super) async fn connect_proxy(executable: &Path, cwd: &Path) -> Result<Self, SessionError> {
-        let child = tokio::process::Command::new(executable)
+        let mut command = tokio::process::Command::new(executable);
+        command
             .args(["app-server", "proxy"])
             .current_dir(cwd)
             .env_clear()
-            .envs(child_env_vars())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| SessionError::Spawn(codex_codes::Error::Io(error)))?;
-        let raw = RawAsyncClient::new(child).map_err(SessionError::Spawn)?;
+            .envs(child_env_vars());
+        let raw = spawn_transport(command)?;
         let mut session = Self::over(raw);
         session
             .initialize(InitializeCapabilities {
@@ -393,6 +384,20 @@ impl Session<RawAsyncClient> {
             .await?;
         Ok(session)
     }
+}
+
+/// The transport owner establishes its pipe and cleanup invariants immediately
+/// before spawning. Callers choose arguments/environment, never stream ownership.
+/// RawAsyncClient owns all three pipes and continuously drains stderr through log.
+fn spawn_transport(mut command: tokio::process::Command) -> Result<RawAsyncClient, SessionError> {
+    let child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| SessionError::Spawn(codex_codes::Error::Io(error)))?;
+    RawAsyncClient::new(child).map_err(SessionError::Spawn)
 }
 
 impl<T: Transport> Session<T> {
@@ -920,6 +925,114 @@ mod tests {
 
     fn turn_from_json(value: serde_json::Value) -> codex_codes::Turn {
         serde_json::from_value(value).expect("Turn fixture must match the real wire shape")
+    }
+
+    fn stdio_peer() -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("peer");
+        std::fs::write(&executable, include_str!("../../../fixtures/stdio-peer.sh")).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Replay the recorded initialize response; the peer invents no provider semantics.
+        let recording = include_str!("../../../fixtures/app-server-0.146.0/phase4-live-turn.jsonl");
+        let response: RecordedFrame =
+            serde_json::from_str(recording.lines().nth(1).unwrap()).unwrap();
+        std::fs::write(
+            directory.path().join("initialize.json"),
+            format!("{}\n", response.frame),
+        )
+        .unwrap();
+        (directory, executable)
+    }
+
+    async fn assert_peer_reaped(directory: &Path) {
+        let pid: u32 = std::fs::read_to_string(directory.join("peer.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while process_exists(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("transport must reap its own peer");
+    }
+
+    #[tokio::test]
+    async fn proxy_transport_drains_stderr_and_reaps_on_shutdown_and_drop() {
+        for shutdown in [true, false] {
+            let (directory, executable) = stdio_peer();
+            let session = tokio::time::timeout(
+                Duration::from_secs(10),
+                Session::connect_proxy(&executable, directory.path()),
+            )
+            .await
+            .expect("stderr must not block handshake")
+            .expect("proxy connects");
+            assert_eq!(session.frames()[0].frame["method"], "initialize");
+            assert_eq!(
+                session.frames()[0].frame["params"]["capabilities"]["experimentalApi"],
+                true
+            );
+            assert_eq!(session.frames()[2].frame["method"], "initialized");
+            if shutdown {
+                session.shutdown().await.unwrap();
+            } else {
+                drop(session);
+            }
+            assert_peer_reaped(directory.path()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_transport_reaps_on_handshake_failure_and_cancellation() {
+        let (directory, executable) = stdio_peer();
+        std::fs::write(directory.path().join("close"), "").unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            Session::connect_proxy(&executable, directory.path()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(SessionError::Closed { method }) if method == "initialize"));
+        assert_peer_reaped(directory.path()).await;
+
+        let (directory, executable) = stdio_peer();
+        std::fs::write(directory.path().join("hang"), "").unwrap();
+        let cwd = directory.path().to_owned();
+        let connection =
+            tokio::spawn(async move { Session::connect_proxy(&executable, &cwd).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.path().join("input.jsonl").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        connection.abort();
+        assert!(connection.await.err().unwrap().is_cancelled());
+        assert_peer_reaped(directory.path()).await;
+    }
+
+    #[tokio::test]
+    async fn transport_owner_overrides_incompatible_caller_stdio() {
+        let mut command = tokio::process::Command::new("cat");
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut transport = spawn_transport(command).unwrap();
+        let frame = serde_json::json!({"retained": "λ"});
+        transport.send(&frame).await.unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(5), transport.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), frame);
+        transport.shutdown().await.unwrap();
     }
 
     // --- child env allowlist -------------------------------------------------

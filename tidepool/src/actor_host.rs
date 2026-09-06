@@ -2958,6 +2958,66 @@ mod tests {
         })
         .await
         .unwrap();
+        let failed = dispatch_haskell_script(
+            root.as_ref(),
+            "Right failedClarification <- updateRequest answer \"Private baseline clarification\"",
+        )
+        .await;
+        assert_eq!(failed["status"], "committed", "{failed:?}");
+        let failed_delivery = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match campaign.deployments.recv().await {
+                    Some(LocalResidentDeployment::RequestUpdate { delivery }) => return delivery,
+                    Some(LocalResidentDeployment::SessionReady { .. }) => {
+                        panic!("update queued another assignment")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let presentation = failed_delivery.begin().unwrap();
+        let key = presentation.key().to_owned();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(log.reopen().unwrap()))
+            .finish();
+        let error = tidepool_agent::UpdatePresentationError::NotSubmitted(
+            "connecting update proxy: controlled transport failure".into(),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            presentation.not_presented(error.to_string())
+        });
+        let logged = std::fs::read_to_string(log.path()).unwrap();
+        for expected in [
+            "request update not presented",
+            "actor=ActorRef",
+            "request=RequestId",
+            "update=1",
+            &key,
+            "connecting update proxy",
+        ] {
+            assert!(logged.contains(expected), "missing {expected}: {logged}");
+        }
+        assert!(!logged.contains("Private baseline clarification"));
+        let failed_state =
+            dispatch_haskell_script(root.as_ref(), "pollRequestUpdate failedClarification").await;
+        assert!(
+            failed_state.to_string().contains("UpdateNotPresented"),
+            "{failed_state:?}"
+        );
+        assert!(
+            !failed_state.to_string().contains("agent run failed"),
+            "{failed_state:?}"
+        );
+        let pending = dispatch_haskell_script(root.as_ref(), "pollResponse answer").await;
+        assert!(
+            pending.to_string().contains("ResponsePending"),
+            "{pending:?}"
+        );
         let sent = dispatch_haskell_script(
             root.as_ref(),
             "Right clarification <- updateRequest answer \"Tabs must be clickable\"",

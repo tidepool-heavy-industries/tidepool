@@ -119,6 +119,29 @@ impl RequestUpdatePresentation {
     }
 
     fn finish(&mut self, outcome: PresentationOutcome) {
+        // Emit at the custody owner so missing applications, backend errors and
+        // dropped presentation tasks all retain the same exact correlation.
+        let actor = self.delivery.target;
+        let request = self.delivery.id.request;
+        let update = self.delivery.id.sequence;
+        let update_key = self.key();
+        match &outcome {
+            PresentationOutcome::Presented => tracing::info!(
+                ?actor,
+                ?request,
+                update,
+                update_key,
+                "request update presented; incorporation is not confirmed"
+            ),
+            PresentationOutcome::NotPresented(reason) => tracing::warn!(
+                ?actor, ?request, update, update_key, %reason,
+                "request update not presented; failure applies to clarification delivery"
+            ),
+            PresentationOutcome::Unconfirmed(reason) => tracing::warn!(
+                ?actor, ?request, update, update_key, %reason,
+                "request update presentation unconfirmed; uncertainty fences settlement"
+            ),
+        }
         let mut state = self.delivery.registry.state.lock();
         if let Some(request) = state.requests.get_mut(&self.delivery.id.request) {
             if let Some(update) = request

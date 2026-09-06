@@ -259,7 +259,9 @@ codex app-server generate-json-schema --out tidepool-agent/fixtures/app-server-0
 `InteractiveAgentBackend::present_update` is distinct from queued assignment
 `push`. `UpdatePresentationError` distinguishes failure before submission from
 uncertainty after submission; the actor owner uses that distinction to retain
-or release its presentation fence.
+or release its presentation fence. Its detail describes update delivery, never
+failure of the original agent run. Presentation custody logs every outcome with
+actor, request, update sequence, and correlation key, including dropped attempts.
 
 The Codex adapter connects through the selected installation's `app-server
 proxy`, using the existing `Session` transport/process owner. Native `turn/start`
@@ -275,6 +277,12 @@ unrelated events, and partial JSONL records cannot confirm presentation.
 Connection has a 30-second deadline; submission plus confirmation has a
 five-minute deadline. Unknown outcomes are never retried. Closing the proxy
 reaps only that connection's child process, not the interactive daemon.
+
+Both direct app-server and proxy connections use `process::spawn_transport`.
+It sets all three streams to pipes immediately before spawn and enables
+kill-on-drop, including during failed or cancelled initialization. The raw client
+owns and drains stderr through the logging bridge; callers configure arguments
+and environment but cannot select incompatible stream ownership.
 
 The provider contract is source-verified in `turn_processor::turn_start_inner`,
 `session::turn::run_hooks_and_record_inputs`, and
