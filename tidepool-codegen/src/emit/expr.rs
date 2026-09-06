@@ -3027,61 +3027,6 @@ pub(crate) fn demand_whnf_ssaval(
     Ok(SsaVal::HeapPtr(forced))
 }
 
-/// Force a thunked SsaVal to WHNF. If the value is a HeapPtr pointing to a
-/// TAG_THUNK object, emit code to call `heap_force` and return the result.
-/// Raw values and non-thunk HeapPtrs pass through unchanged.
-pub(crate) fn force_thunk_ssaval(
-    pipeline: &mut CodegenPipeline,
-    builder: &mut FunctionBuilder,
-    vmctx: Value,
-    val: SsaVal,
-) -> Result<SsaVal, EmitError> {
-    match val {
-        SsaVal::Raw(_, _) => Ok(val),
-        SsaVal::HeapPtr(ptr) => {
-            let tag = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
-            let is_thunk = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, tag, layout::TAG_THUNK as i64);
-
-            let force_block = builder.create_block();
-            let ready_block = builder.create_block();
-            builder.append_block_param(ready_block, types::I64);
-
-            builder.ins().brif(
-                is_thunk,
-                force_block,
-                &[],
-                ready_block,
-                &[BlockArg::Value(ptr)],
-            );
-
-            builder.switch_to_block(force_block);
-            builder.seal_block(force_block);
-
-            let force_fn = pipeline
-                .module
-                .declare_function(
-                    "heap_force",
-                    Linkage::Import,
-                    &crate::emit::heap_force_sig(pipeline.isa.default_call_conv()),
-                )
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
-            let call = builder.ins().call(force_ref, &[vmctx, ptr]);
-            let forced = builder.inst_results(call)[0];
-            builder.declare_value_needs_stack_map(forced);
-            builder.ins().jump(ready_block, &[BlockArg::Value(forced)]);
-
-            builder.switch_to_block(ready_block);
-            builder.seal_block(ready_block);
-            let result = builder.block_params(ready_block)[0];
-            builder.declare_value_needs_stack_map(result);
-            Ok(SsaVal::HeapPtr(result))
-        }
-    }
-}
-
 /// Materialize a lifted value without demanding it. Constructor fields and
 /// lazy primitive operands share thunk capture and heap-boxing semantics.
 fn emit_lazy_heap_value(args: EmitArgs, idx: usize) -> Result<Value, EmitError> {
