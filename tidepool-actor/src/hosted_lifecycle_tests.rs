@@ -1,3 +1,4 @@
+use crate as tidepool_actor;
 use std::{sync::Arc, time::Duration};
 use tidepool_actor::{
     ActorExitKind, ActorTerminal, ActorWorkbenchSource, EffectiveRole, Incarnation,
@@ -93,22 +94,14 @@ async fn authored_seal_survives_lost_waiter_and_rejects_late_work() {
         .new_workbench("sealed-workbench".into(), EffectiveRole::coding())
         .await
         .unwrap();
-    let policy = loop {
-        if let LocalResidentDeployment::PolicyInstalled(installation) = events.recv().await.unwrap()
-        {
-            break installation.policy;
-        }
-    };
+    let policy: Arc<dyn ResidentToolEndpoint> =
+        Arc::new(super::ResidentInteractivePolicy::local(actor.clone()));
     let sibling = forest
         .new_workbench("sibling".into(), EffectiveRole::coding())
         .await
         .unwrap();
-    let sibling_policy = loop {
-        if let LocalResidentDeployment::PolicyInstalled(installation) = events.recv().await.unwrap()
-        {
-            break installation.policy;
-        }
-    };
+    let sibling_policy: Arc<dyn ResidentToolEndpoint> =
+        Arc::new(super::ResidentInteractivePolicy::local(sibling.clone()));
     let address = actor.identity();
     let source = format!(
         "send (NotifyWith ({}, {}) \"hold\")",

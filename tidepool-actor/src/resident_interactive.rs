@@ -134,3 +134,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "hosted_lifecycle_tests.rs"]
+mod lifecycle_tests;
