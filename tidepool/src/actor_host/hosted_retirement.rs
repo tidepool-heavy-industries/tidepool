@@ -167,16 +167,21 @@ impl HostedRetirement {
                 })));
             }
         }
-        if let Some(seal) = &mut self.seal {
+        if self.actor.terminal().get().is_some() {
+            self.terminal_path = true;
+            self.control.quiesce();
+        } else if let Some(seal) = &mut self.seal {
             seal.finish().await;
         }
         if self.boundary != CompletionBoundary::AbortForShutdown {
             return;
         }
-        if self.actor.terminal().get().is_some() {
+        if self.shutdown.is_none() && self.actor.terminal().get().is_some() {
             self.resident = account(exact, self.actor.terminal().cleanup());
         } else {
-            if !matches!(&self.seal, Some(Operation::Finished(Ok(seal))) if seal.actor() == exact) {
+            if self.shutdown.is_none()
+                && !matches!(&self.seal, Some(Operation::Finished(Ok(seal))) if seal.actor() == exact)
+            {
                 return;
             }
             if self.shutdown.is_none() {

@@ -70,6 +70,7 @@ impl Fixture {
                 fork_gate: None,
                 custody: Some(self.custody.clone()),
                 scoped_retention: None,
+                hosted: Arc::new(Mutex::new(None)),
                 launch: HostLaunchState::Pending,
                 terminal: None,
                 retirement: Arc::new(Mutex::new(None)),
