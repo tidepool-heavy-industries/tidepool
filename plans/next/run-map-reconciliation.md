@@ -30,11 +30,15 @@ not prompt bodies. This is lead-executed evidence, not fresh independent review.
 environment) is the representative read-only consumer. It reports actor
 incarnation directories, bounded inbox event metadata and per-actor bindings,
 with JSON stdout and concise stderr. It does not expose assignment messages.
-Missing binding remains Unknown. Actor0's separate root binding is not yet
-linked by this reader; the above reconciliation handles it explicitly.
+Missing binding remains Unknown. Root linkage uses recorded status identity,
+not an actor0 convention. The historical run's status is now Exited and no
+longer retains root identity; its separate root thread is observed, but the
+actor association remains Unknown. The ad-hoc reconciliation above used its
+explicit historical actor selection and is not a reader inference.
 
-This is intentionally partial: optional time windows, root binding linkage,
-provider usage via the existing usage owner, parent/admission/source edges,
+The later increment adds UTC Unix-millisecond windows and root binding linkage
+when typed status retains exact root identity. Still partial: provider usage via
+the existing usage owner, parent/admission/source edges,
 structured review/integration/tested revision links and existing Shoal CLI
 integration remain outstanding. Reader reports usage/acceptance Unknown rather
 than fabricating support. Independent review has now successfully launched and requested local reader
@@ -75,3 +79,22 @@ whole-file rows, has no per-record bound, and treats middle corruption as an
 error. This partial inventory needs bounded records and diagnostics while
 retaining readable evidence; no new generic JSONL helper or durable log was
 introduced in these repairs. Existing JSONL ownership is unchanged.
+
+## Root-claim reconciliation and binding authority
+
+A typed internal RootThreadConstraint retains agreement/absence/conflict before
+rendering public Unknown evidence. Known status/root-binding contradiction
+makes the exact root node Unknown regardless of whether its per-actor binding
+matches status, root-binding, or neither. A missing root binding does not erase
+a per-actor claim agreeing with status; a per-actor/status contradiction remains
+Unknown. No reason-string branching drives this behavior.
+
+Inspected `tidepool_agent::read_interactive_binding` and its node.rs owner:
+it validates the version ladder and thread syntax to construct the opaque
+QueueReadyThread readiness proof. The run-map's bounded binding projection
+intentionally observes only the recorded nonempty thread text and its path,
+including potentially legacy artifacts; it neither constructs QueueReadyThread
+nor certifies readiness, lifecycle success or current execution authority.
+The map must not be used to launch/control an actor. No binding-version policy
+is duplicated here. Root actor identity still uses the existing versioned
+RunStatus decoder, with no raw serde fallback.

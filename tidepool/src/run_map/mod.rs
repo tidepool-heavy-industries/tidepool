@@ -1,5 +1,8 @@
 //! Read-only, bounded derivation of Shoal run artifacts.
 //! Missing evidence is not a negative observation or an acceptance verdict.
+mod metadata;
+use metadata::{binding_thread, read_root, recorded_link};
+pub use metadata::{RecordedLink, RootBinding, TimeWindow, WatchState};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,11 +41,16 @@ pub struct ActorNode {
     pub incarnation: u64,
     pub provider_thread: Evidence<String>,
     pub events: Vec<RecordedEvent>,
+    pub parent: Evidence<tidepool_actor::ActorRef>,
+    pub source_seed: Evidence<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct RecordedEvent {
     pub sequence: Option<u64>,
     pub kind: EventKind,
+    pub timestamp_unix_ms: Evidence<u64>,
+    pub window_membership: Evidence<bool>,
+    pub link: Evidence<RecordedLink>,
     pub source: String,
 }
 /// Inbox event labels classify records, never actor lifecycle success.
@@ -67,6 +75,8 @@ impl From<&str> for EventKind {
 #[derive(Debug, Serialize)]
 pub struct RunMap {
     pub source: String,
+    pub root: RootBinding,
+    pub window: TimeWindow,
     pub actors: Vec<ActorNode>,
     pub diagnostics: Vec<String>,
     pub usage: Evidence<u64>,
@@ -76,6 +86,13 @@ pub struct RunMap {
 /// Partial artifact inventory. It deliberately does not parse assignment prose
 /// or infer parentage, acceptance, failures or token usage from event labels.
 pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
+    read_windowed_run(run, limits, TimeWindow::default())
+}
+
+/// Timestamped events outside the window are omitted. Untimed events remain
+/// explicitly unclassified; static actor directories are not dated by inference.
+pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::Result<RunMap> {
+    window.validate()?;
     let read_bound = u64::try_from(limits.bytes_per_record)
         .ok()
         .and_then(|bytes| bytes.checked_add(1))
@@ -87,6 +104,8 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
         })?;
     let mut report = RunMap {
         source: run.display().to_string(),
+        root: read_root(run, read_bound),
+        window,
         actors: Vec::new(),
         diagnostics: Vec::new(),
         usage: Evidence::Unknown {
@@ -129,37 +148,26 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
     }
     for (actor, incarnation, directory) in directories {
         let binding = directory.join("binding.json");
-        let thread = (|| -> Option<String> {
-            let mut bytes = Vec::new();
-            File::open(&binding)
-                .ok()?
-                .take(read_bound)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            if bytes.len() > limits.bytes_per_record {
-                return None;
+        let mut provider_thread = binding_thread(&binding, read_bound);
+        if let Evidence::Observed {
+            value: root_actor, ..
+        } = &report.root.actor
+        {
+            if root_actor.id.0 == actor && root_actor.incarnation.0 == incarnation {
+                provider_thread = report.root.actor_thread(provider_thread);
             }
-            serde_json::from_slice::<Value>(&bytes).ok()?["thread"]
-                .as_str()
-                .map(str::to_owned)
-        })();
-        let provider_thread = match thread {
-            Some(value) => Evidence::Observed {
-                value,
-                source: binding.display().to_string(),
-            },
-            None => Evidence::Unknown {
-                reason: format!(
-                    "{} missing, unreadable, oversized or invalid",
-                    binding.display()
-                ),
-            },
-        };
+        }
         let mut node = ActorNode {
             actor,
             incarnation,
             provider_thread,
             events: Vec::new(),
+            parent: Evidence::Unknown {
+                reason: "No structured admission parent artifact consumed".into(),
+            },
+            source_seed: Evidence::Unknown {
+                reason: "No structured source seed artifact consumed".into(),
+            },
         };
         let inbox = directory.join("inbox.jsonl");
         match File::open(&inbox) {
@@ -216,7 +224,38 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
                     match serde_json::from_slice::<Value>(&bytes) {
                         Ok(value) => {
                             if let Some(kind) = value["payload"]["type"].as_str() {
+                                let timestamp = value["payload"]["occurred_at_unix_ms"].as_u64();
+                                if timestamp.is_some_and(|time| !window.contains(time)) {
+                                    continue;
+                                }
+                                let timestamp_unix_ms = match timestamp {
+                                    Some(value) => Evidence::Observed {
+                                        value,
+                                        source: source.clone(),
+                                    },
+                                    None => Evidence::Unknown {
+                                        reason: "Event has no recorded Unix-millisecond timestamp"
+                                            .into(),
+                                    },
+                                };
+                                let window_membership = if timestamp.is_some()
+                                    || !window.is_bounded()
+                                {
+                                    Evidence::Observed {
+                                        value: true,
+                                        source: source.clone(),
+                                    }
+                                } else {
+                                    Evidence::Unknown {
+                                        reason: "Untimed event retained outside window accounting"
+                                            .into(),
+                                    }
+                                };
+                                let link = recorded_link(&value["payload"], &source);
                                 node.events.push(RecordedEvent {
+                                    timestamp_unix_ms,
+                                    window_membership,
+                                    link,
                                     sequence: value["sequence"].as_u64(),
                                     kind: kind.into(),
                                     source,
@@ -236,11 +275,44 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
         }
         report.actors.push(node);
     }
+    if window.is_bounded() {
+        let untimed = report
+            .actors
+            .iter()
+            .flat_map(|actor| &actor.events)
+            .filter(|event| matches!(event.window_membership, Evidence::Unknown { .. }))
+            .count();
+        if untimed > 0 {
+            report.diagnostics.push(format!(
+                "{untimed} untimed events retained with unknown window membership"
+            ));
+        }
+    }
     Ok(report)
 }
 impl RunMap {
     pub fn concise(&self) -> String {
-        format!("{}: {} observed actor directories, {} recorded events, {} diagnostics; usage and acceptance unknown (not peak concurrency)", self.source, self.actors.len(), self.actors.iter().map(|actor| actor.events.len()).sum::<usize>(), self.diagnostics.len())
+        let mut output = format!("{}: {} observed actor directories, {} recorded events, {} diagnostics; usage and acceptance unknown (not peak concurrency)", self.source, self.actors.len(), self.actors.iter().map(|actor| actor.events.len()).sum::<usize>(), self.diagnostics.len());
+        for actor in &self.actors {
+            let thread = match &actor.provider_thread {
+                Evidence::Observed { value, .. } => value.as_str(),
+                _ => "unknown",
+            };
+            output.push_str(&format!(
+                "\n  {}@{} thread={} events={} parent=unknown source=unknown",
+                actor.actor,
+                actor.incarnation,
+                thread,
+                actor.events.len()
+            ));
+        }
+        if self.window.is_bounded() {
+            output.push_str(&format!(
+                "\n  UTC window {:?}..{:?} ms; untimed events remain unclassified",
+                self.window.from_unix_ms, self.window.until_unix_ms
+            ));
+        }
+        output
     }
 }
 

@@ -65,3 +65,47 @@ while selected test execution took 0.008s. This directly illustrates setup overh
 not proof of a particular optimization's savings. Narrow build/setup reuse merits
 measurement without weakening checkout isolation or matched-toolchain policy.
 The direct retained request/watch repair loop worked without API rediscovery.
+
+## Window/metadata follow-up review
+
+New candidate 78f7b365a76bf0186cee97886b83f0d601ca4fcf incorporated by fast-forward
+on reviewer branch. Reviewed owning status decoder and real TypedActorEvent /
+WatchNotification producers: UTC timestamp is only claimed where recorded;
+request/watch projections omit assignment prose. Status decoder version gate is
+reused, with unsupported-version regression. Declared graph/usage holes remain.
+
+Requested repair: status/root binding conflict became Unknown at report.root but
+could leave the known root actor node with an Observed per-actor thread. Require
+conflict propagation to that node with typed internal evidence, not reason-string
+matching. Distinguish absence from contradiction. Waiting on retained
+windowRepair/windowRepairReady; no acceptance yet. Final focused verification will
+run against the repaired exact revision.
+
+## Window/metadata repair accepted
+
+Accept increment 0c5623f1c6c3a523598f3f9f337b14558c97ea74 within declared partial
+scope. Reviewer integrated it at 63eab9622c753124d52ccd366a2656c1b83ea204 and
+independently inspected typed RootThreadConstraint propagation: contradiction
+cannot be overridden by per-actor evidence; absence is distinct. Raw bounded
+binding thread projection is artifact evidence only, not QueueReadyThread proof.
+The owning RunStatus decoder remains the sole status-version gate.
+
+Independent checks at that exact reviewer merge:
+- `just test-lib tidepool 'test(partial_map_) | test(run_map_)'`: 9 executed/passed,
+  99 skipped, compile daemon torn down; /tmp/run-map-review/window-tests.log.
+- `nix develop --command cargo build -p tidepool --example run_map`: compiled;
+  /tmp/run-map-review/window-example-build.log.
+- Built example exercised with temporary sanitized fixtures: unbounded, from-only,
+  until-only, inclusive/exclusive, empty windows; reversed window, missing argument,
+  malformed integer rejected. Five success and three failure-path assertions passed;
+  assignment marker absent from stdout/stderr. Output /tmp/run-map-review/window-cli-checks.log;
+  inline harness retained in reviewer native-tool receipt.
+- cargo fmt -p tidepool --check and git diff --check passed.
+Example SHA256 9f767742790b18b4c9851628976f266f8242c277f2cca3eeeb0fece3d50351c9.
+
+Usage, unrecorded graph edges and root-owned Shoal CLI integration remain outside
+this increment. No service/custody acceptance claimed. This warm reviewer rebuild
+reported 12.44s Cargo test build and 0.007s selected test execution, versus the
+previous cold checkout 4m29s build: different source/cache conditions, not a
+controlled causal speedup claim. The retained reviewer/implementer repair loop
+again worked without rediscovering Haskell orchestration APIs.
