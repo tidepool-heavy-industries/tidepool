@@ -311,7 +311,14 @@ struct InteractiveDeployment {
 #[derive(Debug)]
 struct BuildResourceLease {
     path: PathBuf,
-    released: bool,
+    state: BuildResourceState,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BuildResourceState {
+    Unsubmitted,
+    RetainedUnconfirmed,
+    Released,
 }
 
 impl BuildResourceLease {
@@ -324,7 +331,7 @@ impl BuildResourceLease {
         std::fs::create_dir_all(&path)?;
         Ok(Self {
             path,
-            released: false,
+            state: BuildResourceState::Unsubmitted,
         })
     }
 
@@ -332,14 +339,25 @@ impl BuildResourceLease {
         &self.path
     }
 
+    fn process_may_exist(&mut self) {
+        self.state = BuildResourceState::RetainedUnconfirmed;
+    }
+
     fn release(mut self) -> Result<(), std::io::Error> {
+        if self.state == BuildResourceState::RetainedUnconfirmed {
+            return Err(std::io::Error::other(
+                "build resource retained: exact process and hosted work cleanup is unconfirmed",
+            ));
+        }
+        // Deletion failure may be partial; Drop must not silently retry it.
+        self.state = BuildResourceState::RetainedUnconfirmed;
         match std::fs::remove_dir_all(&self.path) {
             Ok(()) => {
-                self.released = true;
+                self.state = BuildResourceState::Released;
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.released = true;
+                self.state = BuildResourceState::Released;
                 Ok(())
             }
             Err(error) => Err(error),
@@ -349,7 +367,7 @@ impl BuildResourceLease {
 
 impl Drop for BuildResourceLease {
     fn drop(&mut self) {
-        if !self.released {
+        if self.state == BuildResourceState::Unsubmitted {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -1881,7 +1899,7 @@ async fn launch_prepared_interactive_application(
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
-    let build_resource = if native_tool_policy == InteractiveNativeToolPolicy::InspectionOnly {
+    let mut build_resource = if native_tool_policy == InteractiveNativeToolPolicy::InspectionOnly {
         None
     } else {
         let run_id = run_root
@@ -2073,6 +2091,9 @@ async fn launch_prepared_interactive_application(
             .to_string_lossy()
             .into_owned(),
     );
+    if let Some(resource) = &mut build_resource {
+        resource.process_may_exist();
+    }
     if let Some(custody) = &installation.worktree_custody {
         custody.process_may_exist();
     }
@@ -5309,5 +5330,42 @@ mod tests {
             .await
             .expect("shutdown root");
         hosted.await.expect("root actor task");
+    }
+    #[test]
+    fn build_resource_retains_after_launch_uncertainty_and_failed_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("build");
+        std::fs::create_dir(&path).unwrap();
+        let mut lease = BuildResourceLease {
+            path: path.clone(),
+            state: BuildResourceState::Unsubmitted,
+        };
+        lease.process_may_exist();
+        assert!(lease.release().is_err());
+        assert!(
+            path.is_dir(),
+            "failed release and Drop must retain resource"
+        );
+        let lease = BuildResourceLease {
+            path: path.clone(),
+            state: BuildResourceState::RetainedUnconfirmed,
+        };
+        drop(lease);
+        assert!(
+            path.is_dir(),
+            "unconfirmed launch Drop must retain resource"
+        );
+    }
+
+    #[test]
+    fn build_resource_prelaunch_drop_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("build");
+        std::fs::create_dir(&path).unwrap();
+        drop(BuildResourceLease {
+            path: path.clone(),
+            state: BuildResourceState::Unsubmitted,
+        });
+        assert!(!path.exists());
     }
 }
