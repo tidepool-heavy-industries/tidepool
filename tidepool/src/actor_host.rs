@@ -328,7 +328,20 @@ impl BuildResourceLease {
             actor.id.0,
             actor.incarnation.0,
         );
-        std::fs::create_dir_all(&path)?;
+        Self::allocate_path(path)
+    }
+
+    fn allocate_path(path: PathBuf) -> Result<Self, std::io::Error> {
+        // A retained directory may still be used by an uncertain prior launch.
+        // Only an exclusively created leaf grants prelaunch deletion ownership.
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "build resource has no parent",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir(&path)?;
         Ok(Self {
             path,
             state: BuildResourceState::Unsubmitted,
@@ -5355,6 +5368,35 @@ mod tests {
             path.is_dir(),
             "unconfirmed launch Drop must retain resource"
         );
+    }
+
+    #[test]
+    fn build_resource_reallocation_cannot_adopt_retained_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("run").join("build");
+        let mut lease = BuildResourceLease::allocate_path(path.clone()).unwrap();
+        std::fs::write(path.join("live-output"), b"retained").unwrap();
+        lease.process_may_exist();
+        drop(lease);
+        let error = BuildResourceLease::allocate_path(path.clone()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(path.join("live-output")).unwrap(),
+            b"retained"
+        );
+    }
+
+    #[test]
+    fn build_resource_fresh_allocation_can_release_and_reallocate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("run").join("build");
+        BuildResourceLease::allocate_path(path.clone())
+            .unwrap()
+            .release()
+            .unwrap();
+        assert!(!path.exists());
+        drop(BuildResourceLease::allocate_path(path.clone()).unwrap());
+        assert!(!path.exists());
     }
 
     #[test]
