@@ -86,6 +86,13 @@ Inside declaration groups use ordinary definitions rather than GHCi `let`.
 Use `Member Effect effects` constraints for reusable effectful helpers. The
 compiler checks types; Rust interpreters enforce runtime authority.
 
+Start from the shared core API guide below and the supplied assignment, not an
+inventory of the session. Do not run `:bindings` as a first-turn ritual: inherited
+names and automatic observations can be irrelevant, and visibility is not
+authority. Use it only when you need to locate a specific missing live value.
+Do not re-query signatures already supplied by the guide unless actual use
+reveals a mismatch or you need a detail it omits.
+
 Discover only what is missing: `:bindings` locates values, `:type` checks their
 use, `:info` explains a declaration, and `:doc topics` locates focused examples.
 Use `:show imports` for scope and `:browse` when broader discovery is useful.

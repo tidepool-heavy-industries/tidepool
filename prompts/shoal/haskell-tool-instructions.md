@@ -5,7 +5,9 @@ A new call is new intent; exact transport retries return the retained receipt.
 
 Read the assignment in its activation. For omitted prose, use
 inspectFull sessionInput directly. Opaque inputs need selection or application.
-Discover missing context with :doc topics, :type, :info, or :bindings.
+Use the shared core API guide first. Discover only missing information with
+:type, :info, or focused :doc help; use :bindings to locate a needed live value,
+not as a startup inventory.
 Use :status! for lifecycle uncertainty and :recovery after recreation.
 
 unfold starts children after the tool block returns. request queues new work;

@@ -7,6 +7,7 @@ Files under `shoal/` define the hosted base and focused instruction layers:
 | Artifact | Owner | Consuming role |
 |---|---|---|
 | `base.md` | `tidepool::actor_host` | Shared Shoal base instructions, replacing the backend default |
+| `api-guide.md` | `tidepool::actor_host` | One shared core API guide, appended to the base for every role |
 | `scaffolding-agent.md` | `tidepool::actor_host` | Scaffold-focused coding actor instructions |
 | `integration-agent.md` | `tidepool::actor_host` | Integration actor instructions |
 | `root.md` | `tidepool::actor_host` | Developer instructions for the root actor |
@@ -35,7 +36,10 @@ examples, including executable examples covered by the actor-host tests.
 
 ## Shoal base selection
 
-The host compiles `shoal/base.md` into its prompt catalog. At startup it
+The host compiles `shoal/base.md` followed by `shoal/api-guide.md` into one
+base artifact in its prompt catalog. The API guide is the same superset for
+every role: it contains no per-actor inventory or role-dependent substitutions.
+Runtime authority still governs which operations an actor may use. At startup it
 materializes the exact bytes once beneath the run's `prompts/` directory, using
 the content hash as the filename and rejecting mismatched existing artifacts.
 Every fresh, resumed, or forked launch receives the same absolute file path with

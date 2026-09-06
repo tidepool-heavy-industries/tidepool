@@ -10,7 +10,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 12;
+    pub(super) const CATALOG_VERSION: u32 = 13;
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
@@ -25,7 +25,11 @@ impl PromptId {
 
     pub(super) fn artifact(self) -> PromptArtifact {
         let body = match self {
-            Self::ShoalBase => include_str!("../../../prompts/shoal/base.md"),
+            Self::ShoalBase => concat!(
+                include_str!("../../../prompts/shoal/base.md"),
+                "\n\n",
+                include_str!("../../../prompts/shoal/api-guide.md")
+            ),
             Self::ShoalRoot => include_str!("../../../prompts/shoal/root.md"),
             Self::RecreatedRoot => include_str!("../../../prompts/shoal/recreated-root.md"),
             Self::WorktreeAgent => include_str!("../../../prompts/shoal/worktree-agent.md"),
