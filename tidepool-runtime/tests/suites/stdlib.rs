@@ -11,3 +11,5 @@ mod text_filter_gc;
 mod validator_reject;
 #[path = "../vendor_text_functions.rs"]
 mod vendor_text_functions;
+#[path = "../numeric_oracle.rs"]
+mod numeric_oracle;
