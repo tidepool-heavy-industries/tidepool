@@ -659,6 +659,43 @@ mod tests {
         ));
     }
     #[test]
+    fn float_ingress_rejects_high_bits_in_nodes_and_alternatives() {
+        for bits in [
+            1u64 << 32,
+            (1u64 << 32) | u64::from(1.0f32.to_bits()),
+            u64::MAX,
+        ] {
+            let literal = Literal::LitFloat(bits);
+            let node = RecursiveTree {
+                nodes: vec![CoreFrame::Lit(literal.clone())],
+            };
+            let alternative = RecursiveTree {
+                nodes: vec![
+                    CoreFrame::Lit(Literal::LitFloat(0)),
+                    CoreFrame::Case {
+                        scrutinee: 0,
+                        binder: VarId(1),
+                        alts: vec![Alt {
+                            con: AltCon::LitAlt(literal),
+                            binders: vec![],
+                            body: 0,
+                        }],
+                    },
+                ],
+            };
+            // The writer exposes the in-memory representation; the public
+            // reader must reject malformed values wherever literals appear.
+            for expr in [node, alternative] {
+                let bytes = write_cbor(&expr).expect("encode test input");
+                assert!(matches!(
+                    read_cbor(&bytes),
+                    Err(ReadError::InvalidLiteral(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn float_bits_roundtrip_special_encodings() {
         // Serialization preserves payload bits, not IEEE numeric equality.
         // Include both zeros, subnormals, finite extrema, infinities, and
