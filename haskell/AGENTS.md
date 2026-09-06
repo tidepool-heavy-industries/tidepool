@@ -20,3 +20,18 @@ discovery, cache policy, and artifact decoding.
   never hand-edit or selectively omit generated CBOR artifacts.
 - Do not share `dist-newstyle` between worktrees. Use Nix plus a worktree-local
   Cabal build for focused extractor tests.
+
+## Resident API contracts
+
+- Effect membership expresses callable intent, not resource authority. Opaque
+  handles and Rust interpreters enforce ownership; inherited bindings do not
+  transfer their author's permissions.
+- Keep pure observations distinct from effects: `inspectFull` constructs a
+  presentation value. Bind an effect result before inspecting it, or use
+  `inspectFull <$> action`; do not disguise inspection as an effect.
+- Actor orchestration surface is also generated/composed by `tidepool-actor`.
+  Search its production consumers before adding a public Haskell helper.
+- Preserve the distinction between actor `Watch result` and event `EventWatch`.
+  Do not resolve public-name collisions with import hiding or duplicate aliases.
+- Verify changed Haskell consumers in the repository Nix/toolchain environment.
+  Use `just fixtures-check` after extractor translation or serialization changes.
