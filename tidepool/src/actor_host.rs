@@ -9,6 +9,8 @@ mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
 mod host_incarnation;
+#[allow(dead_code)] // Lifecycle consumer scaffold; implementation follows.
+mod hosted_retirement;
 mod prompt_catalog;
 #[cfg(test)]
 mod research_policy_tests;
