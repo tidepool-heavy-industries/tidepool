@@ -244,7 +244,7 @@ impl CodexAgentBackend {
                 .block_on(Session::connect(capabilities))
                 .map_err(map_session_error)?;
             // Acquire the pidfd BEFORE handing the session back: from here on
-            // a canceller taken at any time can reap this process. Opening it
+            // a canceller taken at any time can signal this exact process. Opening it
             // NOW, bound to this exact process instance, is what closes the
             // check-then-kill gap a numeric pid has — see [`PidFdSlot`].
             let identity = match session.pid() {
@@ -344,7 +344,7 @@ impl AgentBackend for CodexAgentBackend {
 
     /// A handle that SIGKILLs the app-server child from another thread.
     ///
-    /// Real reaping, not a flag: a cycle thread blocked in
+    /// Identity-safe signaling, not a flag: a cycle thread blocked in
     /// [`start_turn`](AgentBackend::start_turn) is blocked on a read from the
     /// child's stdout, so killing the child closes the pipe and the blocked
     /// read returns — the seam call comes back
@@ -384,9 +384,8 @@ impl AgentBackend for CodexAgentBackend {
     }
 }
 
-/// How long [`CodexCanceller::cancel`] waits for the killed child to actually
-/// leave the process table before giving up. SIGKILL is unblockable, so this is
-/// a bound on the kernel reaping it, not on the process deciding to comply.
+/// Maximum best-effort wait for the signaled process to exit. Pidfd readiness
+/// is not reaping; the owning child handle must still collect its exit status.
 const CANCEL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One process this backend's canceller may signal, or why it cannot — the
@@ -439,20 +438,19 @@ fn pidfd_slot_for(pid: u32) -> PidFdSlot {
     }
 }
 
-/// Reaps one [`CodexAgentBackend`]'s app-server child from another thread.
+/// Requests termination of one exact app-server process from another thread.
 ///
-/// Sends `SIGKILL` through the recorded pidfd (see [`PidFdSlot`] for why a
-/// pidfd and not a bare pid) and CONFIRMS the process is gone before
-/// returning, the same "never trust that the signal was sent" rule
-/// [`Session::shutdown`] follows. It cannot go through `Session::shutdown`
-/// instead: that consumes `self` and needs the runtime, both held `&mut` by
-/// the blocked cycle thread this exists to interrupt. Killing the child
-/// unblocks that thread's read on the child's stdout as soon as the pipe
-/// closes. [`PidFdSlot::Empty`]/[`PidFdSlot::IdentityUnprovable`] both leave
-/// `cancel` a genuine, signal-nothing no-op — never a numeric-pid fallback.
-/// The killed child is left for its owning `tokio::process::Child` to reap;
-/// `cancel` waits on the PIDFD instead, which reports the reap without
-/// needing that ownership.
+/// Signals the retained pidfd and waits a bounded time for exit. The void
+/// cancellation interface supplies no cleanup receipt: signal/poll failures
+/// and timeout cannot be distinguished by its caller. Pidfd POLLIN reports
+/// exit (including an unreaped zombie), not Child::wait completion or executor
+/// subtree quiescence. See <https://man7.org/linux/man-pages/man2/pidfd_open.2.html>.
+/// The owning session remains responsible for direct-child shutdown/reaping.
+///
+/// This cannot call Session::shutdown because that consumes the session held
+/// by the blocked cycle thread. Signaling the child can unblock its stdout
+/// reader; an inherited descendant pipe can still delay that reader's EOF.
+/// Empty/unprovable identity signals nothing, with no numeric-PID fallback.
 ///
 /// `cancel_requested` covers the connect phase: a cancel that arrives before
 /// a pidfd is acquired has nothing to SIGKILL, so it sets this flag instead,
@@ -486,7 +484,8 @@ impl BackendCanceller for CodexCanceller {
         // the pidfd and this call is the outcome cancellation wanted, so it
         // is ignored.
         let _ = rustix::process::pidfd_send_signal(fd, rustix::process::Signal::KILL);
-        // A pidfd becomes readable (POLLIN) once its process is reaped.
+        // POLLIN indicates exit, not reaping; this void best-effort path
+        // does not provide a confirmed cleanup receipt.
         let mut pfd = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
         let timeout = rustix::event::Timespec {
             tv_sec: CANCEL_CONFIRM_TIMEOUT.as_secs() as _,
