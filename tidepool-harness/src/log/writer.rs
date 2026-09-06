@@ -1,6 +1,7 @@
 //! Append-only jsonl writer: header first line, one [`Event`] per line
 //! after, fsync'd on every append so a crash never loses an acknowledged
-//! event.
+//! event on filesystems supporting strict directory sync. Errors may follow visible
+//! writes; uncertain writers refuse further appends rather than reuse a sequence.
 
 use std::fs::{File, OpenOptions};
 use std::path::Path;
@@ -30,6 +31,8 @@ pub enum WriteError {
     Io(#[from] std::io::Error),
     #[error("failed to serialize event log line: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("event log publication is uncertain; retain the log for reconciliation and do not reuse this writer")]
+    Uncertain,
 }
 
 /// Owns one run's log file. `next_seq` is the writer-assigned, monotonic,
@@ -43,8 +46,18 @@ pub struct LogWriter {
 impl LogWriter {
     /// Creates a new run file at `path` (error if one already exists —
     /// a run's log is never silently overwritten) and writes the header
-    /// as the first line.
+    /// as the first line. Durably creates the parent hierarchy and publishes the
+    /// new filename before returning. Failure retains any visible file; retry
+    /// never overwrites it. The caller owns the hierarchy against rename/removal
+    /// and must already have durably established any external symlink targets.
     pub fn create(path: impl AsRef<Path>, header: &LogHeader) -> Result<Self, WriteError> {
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        tidepool_atomic_write::create_dir_all_durable(parent)
+            .map_err(|e| std::io::Error::new(e.source.kind(), e))?;
         let file = OpenOptions::new().create_new(true).write(true).open(path)?;
         let mut writer = LogWriter {
             file,
@@ -55,12 +68,17 @@ impl LogWriter {
             version: LOG_VERSION_CURRENT,
             header,
         })?;
+        tidepool_atomic_write::sync_parent_directory(path)
+            .map_err(|e| std::io::Error::new(e.source.kind(), e))?;
         Ok(writer)
     }
 
     /// Appends `event`, assigning it the next per-file `seq`, and fsyncs
     /// before returning. Returns the assigned `seq`.
     pub fn append(&mut self, event: Event) -> Result<u64, WriteError> {
+        if self.write_uncertain {
+            return Err(WriteError::Uncertain);
+        }
         let seq = self.next_seq;
         let record = EventRecord { seq, event };
         self.write_line(&record)?;
@@ -70,7 +88,14 @@ impl LogWriter {
 
     fn write_line<T: serde::Serialize>(&mut self, value: &T) -> Result<(), WriteError> {
         let line = serde_json::to_string(value)?;
-        jsonl::write_line(&mut self.file, &line, SyncPolicy::All)?;
+        if let Err(error) = jsonl::write_line(&mut self.file, &line, SyncPolicy::All) {
+            self.write_uncertain = true;
+            return Err(error.into());
+        }
         Ok(())
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "writer_fault_tests.rs"]
+mod fault_tests;
