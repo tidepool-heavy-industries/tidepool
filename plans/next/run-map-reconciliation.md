@@ -79,3 +79,22 @@ whole-file rows, has no per-record bound, and treats middle corruption as an
 error. This partial inventory needs bounded records and diagnostics while
 retaining readable evidence; no new generic JSONL helper or durable log was
 introduced in these repairs. Existing JSONL ownership is unchanged.
+
+## Root-claim reconciliation and binding authority
+
+A typed internal RootThreadConstraint retains agreement/absence/conflict before
+rendering public Unknown evidence. Known status/root-binding contradiction
+makes the exact root node Unknown regardless of whether its per-actor binding
+matches status, root-binding, or neither. A missing root binding does not erase
+a per-actor claim agreeing with status; a per-actor/status contradiction remains
+Unknown. No reason-string branching drives this behavior.
+
+Inspected `tidepool_agent::read_interactive_binding` and its node.rs owner:
+it validates the version ladder and thread syntax to construct the opaque
+QueueReadyThread readiness proof. The run-map's bounded binding projection
+intentionally observes only the recorded nonempty thread text and its path,
+including potentially legacy artifacts; it neither constructs QueueReadyThread
+nor certifies readiness, lifecycle success or current execution authority.
+The map must not be used to launch/control an actor. No binding-version policy
+is duplicated here. Root actor identity still uses the existing versioned
+RunStatus decoder, with no raw serde fallback.
