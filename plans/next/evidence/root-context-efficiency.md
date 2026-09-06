@@ -70,3 +70,28 @@ Proposed owning fix: show a complete `requestWithProgress` example using
 watched progress as an explicit lead-assignment option when nonterminal findings
 matter. Do not expose the private constructor merely to match misleading discovery.
 Review alongside usage lead guidance changes to avoid overlapping edits.
+
+## Run-map follow-up findings and evaluation lens
+
+Attributed lead observations at fd6f1358d7f5b488d70f1cca6ef7caea661e6984:
+- Shared unfold/watch guide was sufficient; retained named handles avoided
+  assignment rediscovery on wake.
+- Inherited root-looking context required one :status! to resolve child identity.
+  Investigate activation placement/clarity rather than adding routine inventories.
+- Permission failure receipts did not identify the denied operation/bootstrap
+  stage, forcing source investigation. Existing custody owner should add bounded
+  structured denial evidence, not another diagnostic registry.
+- Nix shell setup stdout contaminated machine-readable report capture; direct
+  execution of the built example produced clean JSON. Assess the shell-output
+  owner before blaming the report parser or creating an alternative launcher.
+
+Fresh reviewer is assigned the concrete partial-reader candidate, its retained
+implementer and focused failure/evidence checks. It is not a retry of the two
+failed implementation launches, and full run-map acceptance remains outstanding.
+
+User's evaluation lens includes architectural potential: compare observed current
+performance, capabilities of the intended low-friction system, and concrete distance
+between them. Shared-prefix forks, parallel execution and retained specialist repair
+are hypotheses for lower context cost and critical-path latency. Distinguish fixable
+UX/mechanism defects from architectural limits; anticipated gains remain hypotheses
+until matched revision/provider usage and accepted-outcome measurements support them.
