@@ -64,6 +64,8 @@ pub(crate) type HostToolSealFuture = std::pin::Pin<
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HostToolSealError {
+    #[error("HTTP tool service is already draining")]
+    AlreadyDraining,
     #[error(transparent)]
     Endpoint(#[from] ResidentToolError),
     #[error("resident seal belongs to {actual:?}, expected {expected:?}")]
@@ -77,13 +79,25 @@ impl HostToolControl {
     /// Immediately quiesce HTTP admission, then return the exact endpoint barrier
     /// future. The host must retain this future (or its owned task/result) across
     /// bounded waits; dropping it is uncertainty, not cancellation or permission
-    /// to retry. Completion callbacks remain available. A seal is not cleanup.
+    /// to retry. Already-Draining admission is rejected without invoking the
+    /// endpoint. The host must separately serialize raw drain against pending
+    /// seals/completions; this operation does not reserve completion access.
+    /// A seal is not cleanup.
     #[allow(dead_code)] // Parent pending/lifecycle consumer is staged separately.
     pub(crate) fn quiesce_and_seal(
         &self,
         expected: tidepool_actor::ActorRef,
     ) -> HostToolSealFuture {
-        self.quiesce();
+        let mut already_draining = false;
+        self.phase.send_modify(|phase| match phase {
+            HostToolPhase::Draining => already_draining = true,
+            HostToolPhase::Serving | HostToolPhase::Quiescing => {
+                *phase = HostToolPhase::Quiescing;
+            }
+        });
+        if already_draining {
+            return Box::pin(async { Err(HostToolSealError::AlreadyDraining) });
+        }
         let endpoint = Arc::clone(&self.endpoint);
         Box::pin(async move {
             let seal = endpoint.seal_hosted_work_boxed().await?;
