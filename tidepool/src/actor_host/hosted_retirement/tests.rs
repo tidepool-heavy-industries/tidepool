@@ -1,1 +1,615 @@
+use super::*;
+use crate::host_dynamic_tools::HostDynamicToolService;
+use tidepool_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
+use tidepool_runtime::session::ModuleEnv;
+use tidepool_tool::{HostedTool, ToolInvocation};
+use tokio::sync::Semaphore;
 
+const URL: &str = "http://localhost/v1/dynamic-tools";
+const THREAD: &str = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
+fn protocol() -> u32 {
+    tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION
+}
+fn client(socket: &Path) -> reqwest::Client {
+    reqwest::Client::builder()
+        .unix_socket(socket.to_path_buf())
+        .no_proxy()
+        .http1_only()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap()
+}
+async fn attach(client: &reqwest::Client) {
+    let response = client
+        .post(format!("{URL}/session"))
+        .json(&serde_json::json!({"protocolVersion":protocol(),"threadId":THREAD}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+}
+async fn call(client: &reqwest::Client, source: &str, id: &str) -> serde_json::Value {
+    client
+        .post(format!("{URL}/call"))
+        .json(&serde_json::json!({
+            "protocolVersion":protocol(), "threadId":THREAD, "turnId":id,
+            "callId":id, "contextCallId":id, "namespace":"tidepool_actor",
+            "tool":"haskell", "arguments":source,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+async fn completed(client: &reqwest::Client, id: &str) -> reqwest::Response {
+    client
+        .post(format!("{URL}/completed"))
+        .json(&serde_json::json!({
+            "protocolVersion":protocol(),"threadId":THREAD,"contextCallId":id,
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+fn cancelled() -> ActorTerminal {
+    ActorTerminal {
+        kind: ActorExitKind::Cancelled,
+        summary: "fixture shutdown".into(),
+    }
+}
+fn limit() -> Duration {
+    Duration::from_secs(120)
+}
+
+struct HttpFixture {
+    _directory: tempfile::TempDir,
+    owners: InteractiveOwners,
+    slot: HostedSlot,
+    owner: HostedOwner,
+    client: reqwest::Client,
+}
+impl HttpFixture {
+    async fn start(actor: LocalActorRef, endpoint: Arc<dyn ResidentToolEndpoint>) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("http.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let service =
+            HostDynamicToolService::new(endpoint, directory.path().join("binding"), None).unwrap();
+        let owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
+        let exact = actor.identity();
+        owners.lock().insert(
+            exact,
+            InteractiveApplicationOwner {
+                cancel: None,
+                fork_gate: None,
+                custody: None,
+                scoped_retention: None,
+                hosted: Arc::new(Mutex::new(None)),
+                launch: HostLaunchState::Pending,
+                terminal: None,
+                retirement: Arc::new(Mutex::new(None)),
+            },
+        );
+        let slot = owners.lock().get(&exact).unwrap().hosted.clone();
+        let owner = start(&slot, actor, service, listener).unwrap();
+        assert!(Arc::ptr_eq(slot.lock().as_ref().unwrap(), &owner));
+        let client = client(&socket);
+        attach(&client).await;
+        Self {
+            _directory: directory,
+            owners,
+            slot,
+            owner,
+            client,
+        }
+    }
+    async fn finish(&self) -> HostedObservation {
+        assert_eq!(self.owners.lock().len(), 1);
+        observe(&self.owner, CompletionBoundary::AbortForShutdown, limit()).await
+    }
+}
+fn confirmed_http(observation: HostedObservation, actor: ActorRef) {
+    let HostedObservation::Observed { resident, http, .. } = observation else {
+        panic!("cleanup still pending");
+    };
+    let ResidentObservation::Accounted(cleanup) = resident else {
+        panic!("resident evidence missing: {resident:?}")
+    };
+    assert_eq!(cleanup.actor(), actor);
+    assert!(cleanup.is_confirmed(), "{cleanup:?}");
+    assert!(matches!(http, HttpObservation::Drained), "{http:?}");
+}
+
+/// Scheduling decorator only: all accepted tool work, completion callbacks and
+/// successful seals execute on the real resident endpoint. No evidence is made here.
+struct HeldEndpoint {
+    inner: Arc<dyn ResidentToolEndpoint>,
+    seal_entered: Semaphore,
+    seal_release: Arc<Semaphore>,
+    completion_entered: Arc<Semaphore>,
+    completion_release: Arc<Semaphore>,
+    hold_seal: bool,
+    hold_completion: bool,
+    seals: std::sync::atomic::AtomicUsize,
+}
+impl ResidentToolEndpoint for HeldEndpoint {
+    fn tools(&self) -> &[HostedTool] {
+        self.inner.tools()
+    }
+    fn instructions(&self) -> Option<&str> {
+        self.inner.instructions()
+    }
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        self.inner.dispatch_boxed(invocation)
+    }
+    fn complete_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        let inner = self.inner.clone();
+        let entered = self.completion_entered.clone();
+        let release = self.completion_release.clone();
+        let hold = self.hold_completion;
+        Box::pin(async move {
+            let result = inner.complete_boxed(boundary).await;
+            if hold {
+                entered.add_permits(1);
+                release.acquire().await.unwrap().forget();
+            }
+            result
+        })
+    }
+    fn seal_hosted_work_boxed(
+        &self,
+    ) -> BoxFuture<'static, Result<HostedWorkSeal, ResidentToolError>> {
+        self.seals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.seal_entered.add_permits(1);
+        let inner = self.inner.clone();
+        let release = self.seal_release.clone();
+        let hold = self.hold_seal;
+        Box::pin(async move {
+            if hold {
+                release.acquire().await.unwrap().forget();
+            }
+            inner.seal_hosted_work_boxed().await
+        })
+    }
+}
+fn held(inner: Arc<dyn ResidentToolEndpoint>, seal: bool, completion: bool) -> Arc<HeldEndpoint> {
+    Arc::new(HeldEndpoint {
+        inner,
+        seal_entered: Semaphore::new(0),
+        seal_release: Arc::new(Semaphore::new(0)),
+        completion_entered: Arc::new(Semaphore::new(0)),
+        completion_release: Arc::new(Semaphore::new(0)),
+        hold_seal: seal,
+        hold_completion: completion,
+        seals: std::sync::atomic::AtomicUsize::new(0),
+    })
+}
+async fn entered(semaphore: &Semaphore) {
+    tokio::time::timeout(limit(), semaphore.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+}
+
+#[tokio::test]
+async fn hosted_live_seal_keeps_completion_until_abort_and_drains_exact_actor() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let actor = campaign.actor.identity();
+    let fixture = HttpFixture::start(
+        campaign.actor.clone(),
+        campaign.root_installation.policy.clone(),
+    )
+    .await;
+    let result = call(&fixture.client, "let hostedAnswer = 42 :: Int", "initial").await;
+    assert_eq!(result["success"], true, "{result:?}");
+    let observation = observe(
+        &fixture.owner,
+        CompletionBoundary::AwaitingNativeDecision,
+        limit(),
+    )
+    .await;
+    assert!(
+        matches!(observation, HostedObservation::Observed { seal: SealObservation::Confirmed(ref seal), http: HttpObservation::Pending, .. } if seal.actor() == actor),
+        "{observation:?}"
+    );
+    assert_eq!(
+        completed(&fixture.client, "initial").await.status(),
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        call(&fixture.client, "hostedAnswer", "late").await["success"],
+        false
+    );
+    assert!(!service_finished(&fixture.owner));
+    confirmed_http(fixture.finish().await, actor);
+    confirmed_http(fixture.finish().await, actor);
+    assert_eq!(campaign.actor.terminal().cleanup().unwrap().actor(), actor);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    let weak = Arc::downgrade(&fixture.owner);
+    drop(fixture);
+    assert!(
+        weak.upgrade().is_none(),
+        "completed service retains no owner cycle"
+    );
+}
+
+#[tokio::test]
+async fn hosted_terminal_path_uses_retained_cleanup_without_seal() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let endpoint = held(campaign.root_installation.policy.clone(), true, false);
+    let fixture = HttpFixture::start(campaign.actor.clone(), endpoint.clone()).await;
+    let cleanup = campaign
+        .actor
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap()
+        .cleanup;
+    assert!(cleanup.is_confirmed(), "{cleanup:?}");
+    let observation = fixture.finish().await;
+    assert!(matches!(
+        observation,
+        HostedObservation::Observed {
+            seal: SealObservation::TerminalPath,
+            ..
+        }
+    ));
+    confirmed_http(observation, campaign.actor.identity());
+    assert_eq!(endpoint.seals.load(std::sync::atomic::Ordering::SeqCst), 0);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_lost_seal_and_http_waiters_reuse_stored_operations() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let endpoint = held(campaign.root_installation.policy.clone(), true, true);
+    let fixture = HttpFixture::start(campaign.actor.clone(), endpoint.clone()).await;
+    assert_eq!(
+        call(&fixture.client, "let retainedAnswer = 7 :: Int", "held").await["success"],
+        true
+    );
+    let owner = fixture.owner.clone();
+    let waiting = tokio::spawn(async move {
+        observe(&owner, CompletionBoundary::AwaitingNativeDecision, limit()).await
+    });
+    entered(&endpoint.seal_entered).await;
+    waiting.abort();
+    let _ = waiting.await;
+    assert!(matches!(
+        observe(
+            &fixture.owner,
+            CompletionBoundary::AwaitingNativeDecision,
+            Duration::ZERO
+        )
+        .await,
+        HostedObservation::Pending
+    ));
+    assert_eq!(endpoint.seals.load(std::sync::atomic::Ordering::SeqCst), 1);
+    endpoint.seal_release.add_permits(1);
+    assert!(matches!(
+        observe(
+            &fixture.owner,
+            CompletionBoundary::AwaitingNativeDecision,
+            limit()
+        )
+        .await,
+        HostedObservation::Observed {
+            seal: SealObservation::Confirmed(_),
+            ..
+        }
+    ));
+    let client = fixture.client.clone();
+    let completion = tokio::spawn(async move { completed(&client, "held").await });
+    entered(&endpoint.completion_entered).await;
+    let task_id = fixture.owner.lock().await.service.as_ref().unwrap().id();
+    let owner = fixture.owner.clone();
+    let waiting = tokio::spawn(async move {
+        observe(&owner, CompletionBoundary::AbortForShutdown, limit()).await
+    });
+    // Exact terminal is the actor-owned barrier; the held HTTP callback still
+    // prevents the original service task from joining after graceful drain.
+    tokio::time::timeout(limit(), campaign.actor.terminal().wait())
+        .await
+        .unwrap();
+    waiting.abort();
+    let _ = waiting.await;
+    assert!(matches!(
+        observe(
+            &fixture.owner,
+            CompletionBoundary::AbortForShutdown,
+            Duration::ZERO
+        )
+        .await,
+        HostedObservation::Pending
+    ));
+    assert_eq!(
+        fixture.owner.lock().await.service.as_ref().unwrap().id(),
+        task_id
+    );
+    endpoint.completion_release.add_permits(1);
+    assert_eq!(completion.await.unwrap().status(), reqwest::StatusCode::OK);
+    confirmed_http(fixture.finish().await, campaign.actor.identity());
+    assert_eq!(endpoint.seals.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        fixture.slot.lock().is_some(),
+        "owner remains anchored after join"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+struct UnsupportedSeal(Arc<dyn ResidentToolEndpoint>);
+impl ResidentToolEndpoint for UnsupportedSeal {
+    fn tools(&self) -> &[HostedTool] {
+        self.0.tools()
+    }
+    fn instructions(&self) -> Option<&str> {
+        self.0.instructions()
+    }
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        self.0.dispatch_boxed(invocation)
+    }
+    fn complete_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        self.0.complete_boxed(boundary)
+    }
+    // Exercise the owning trait's genuine unsupported seal default.
+}
+
+#[tokio::test]
+async fn hosted_unsupported_seal_retains_live_actor_and_http() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let fixture = HttpFixture::start(
+        campaign.actor.clone(),
+        Arc::new(UnsupportedSeal(campaign.root_installation.policy.clone())),
+    )
+    .await;
+    assert_eq!(
+        call(
+            &fixture.client,
+            "let unsupportedAnswer = 5 :: Int",
+            "unsupported"
+        )
+        .await["success"],
+        true
+    );
+    let observation = fixture.finish().await;
+    assert!(
+        matches!(
+            observation,
+            HostedObservation::Observed {
+                seal: SealObservation::Failed(_),
+                resident: ResidentObservation::Pending,
+                http: HttpObservation::Pending,
+            }
+        ),
+        "{observation:?}"
+    );
+    assert!(campaign.actor.terminal().get().is_none());
+    assert!(!service_finished(&fixture.owner));
+    assert_eq!(
+        completed(&fixture.client, "unsupported").await.status(),
+        reqwest::StatusCode::OK
+    );
+    // Fixture cleanup uses genuine retained terminal evidence, not a fake seal.
+    campaign
+        .actor
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap();
+    confirmed_http(fixture.finish().await, campaign.actor.identity());
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_foreign_real_seal_is_rejected_without_shutdown_or_http_drain() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let sibling_campaign = test_campaign::TestCampaign::start().await;
+    let sibling = sibling_campaign.actor.clone();
+    let sibling_policy = sibling_campaign.root_installation.policy.clone();
+    let fixture = HttpFixture::start(campaign.actor.clone(), sibling_policy).await;
+    assert_eq!(
+        call(&fixture.client, "let siblingAnswer = 9 :: Int", "sibling").await["success"],
+        true
+    );
+    let observation = fixture.finish().await;
+    assert!(
+        matches!(
+            observation,
+            HostedObservation::Observed {
+                seal: SealObservation::Failed(_),
+                resident: ResidentObservation::Pending,
+                http: HttpObservation::Pending,
+            }
+        ),
+        "{observation:?}"
+    );
+    assert!(campaign.actor.terminal().get().is_none());
+    assert!(sibling.terminal().get().is_none());
+    assert!(!service_finished(&fixture.owner));
+    assert_eq!(
+        completed(&fixture.client, "sibling").await.status(),
+        reqwest::StatusCode::OK
+    );
+    let sibling_cleanup = sibling
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap()
+        .cleanup;
+    assert!(
+        matches!(account(campaign.actor.identity(), Some(sibling_cleanup)),
+        ResidentObservation::Foreign(actor) if actor == sibling.identity())
+    );
+    // Both real actors are cleaned before fixture HTTP teardown. This is not
+    // acceptance of the rejected foreign seal as authority over the expected actor.
+    campaign
+        .actor
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap();
+    confirmed_http(fixture.finish().await, campaign.actor.identity());
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    sibling_campaign.forest.shutdown().await;
+    sibling_campaign.hosted.await.unwrap();
+}
+
+struct NoFixtureHandlers;
+impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> for NoFixtureHandlers {
+    fn dispatch(
+        &mut self,
+        _: &tidepool_eval::Value,
+        _: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
+    ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
+    tidepool_testing::eval_harness::require_extract();
+    let declarations = [
+        tidepool_mcp::agent_tools_decl(),
+        tidepool_mcp::actor_decl(),
+        tidepool_mcp::actor_kernel_decl(),
+        tidepool_mcp::actor_local_decl(),
+        tidepool_mcp::fs_read_decl(),
+    ];
+    let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
+    let mut include = effects.include_paths().to_vec();
+    include.push(tidepool_testing::eval_harness::prelude_path());
+    let preamble = insert_preamble_imports(
+        &tidepool_mcp::build_preamble(&declarations, false),
+        "Tidepool.Agent.Contract",
+    );
+    let preamble = format!(
+        "{preamble}
+{}",
+        include_str!("failed_child_preamble.hs")
+    );
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
+    let roots: Vec<_> = include.iter().map(PathBuf::as_path).collect();
+    let directory = tempfile::tempdir().unwrap();
+    let compiled = match run_turn(HaskellTurnRequest {
+        turn_text: include_str!("failed_child.hs"),
+        templates: &templates,
+        include: &roots,
+        session_root: directory.path(),
+        inject_modules: &[],
+        gen: 1,
+        verdict: None,
+        target: None,
+    })
+    .unwrap()
+    {
+        TurnResult::Expr { compiled, .. } => compiled,
+        other => panic!("authored policy: {other:?}"),
+    };
+    let session = fresh_session_id();
+    let library = SessionLib::open(session, directory.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(include.clone());
+    let mut machine = ResidentSession::bootstrap(
+        &compiled.expr,
+        compiled.table.clone(),
+        NoFixtureHandlers,
+        CapturedOutput::default(),
+        include.clone(),
+        DEFAULT_NURSERY_SIZE,
+        Some(library),
+    )
+    .unwrap();
+    machine.set_effect_execution(
+        EffectRunPolicy::SuspendAll,
+        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    );
+    let outcome = machine
+        .run_with_sites(
+            "failed_child_host",
+            &compiled.expr,
+            &compiled.table,
+            &compiled.asks,
+        )
+        .unwrap();
+    let descriptor = tidepool_actor::ActorDescriptor::new(
+        "host-failed-child",
+        tidepool_actor::ActorPlacement {
+            session,
+            resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
+            lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+        },
+    );
+    let (forest, mut events) = ResidentForest::new(
+        ActorWorkbenchSource::new(preamble, include),
+        session,
+        machine,
+        None,
+        tidepool_actor::Incarnation::FIRST,
+    );
+    let (actor, task) = forest.admit_root(descriptor, outcome).await.unwrap();
+    let Some(LocalResidentDeployment::PolicyInstalled(installation)) = events.recv().await else {
+        panic!("real resident policy absent");
+    };
+    let fixture = HttpFixture::start(actor.clone(), installation.policy).await;
+    let response: serde_json::Value = fixture
+        .client
+        .post(format!("{URL}/call"))
+        .json(&serde_json::json!({
+            "protocolVersion":protocol(), "threadId":THREAD, "turnId":"spawn",
+            "callId":"spawn", "contextCallId":"spawn", "namespace":"tidepool_actor",
+            "tool":"spawn_child", "arguments":{"seed":8},
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["success"], true, "{response:?}");
+    assert_eq!(
+        completed(&fixture.client, "spawn").await.status(),
+        reqwest::StatusCode::OK
+    );
+    let observation = fixture.finish().await;
+    let HostedObservation::Observed {
+        resident: ResidentObservation::Accounted(cleanup),
+        http: HttpObservation::Pending,
+        ..
+    } = observation
+    else {
+        panic!("{observation:?}")
+    };
+    assert_eq!(cleanup.actor(), actor.identity());
+    assert!(!cleanup.is_confirmed(), "{cleanup:?}");
+    assert!(
+        matches!(
+            cleanup.children(),
+            tidepool_actor::CleanupComponentOutcome::Unconfirmed(_)
+        ),
+        "{cleanup:?}"
+    );
+    assert!(!service_finished(&fixture.owner));
+    // Fixture teardown, deliberately not claimed as consumer cleanup evidence.
+    // The consumer correctly leaves HTTP pending on the failed child domain.
+    let mut owner = fixture.owner.lock().await;
+    owner.control.drain();
+    let service = owner.service.take().unwrap();
+    drop(owner);
+    tokio::time::timeout(limit(), service)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    forest.shutdown().await;
+    task.await.unwrap();
+}
