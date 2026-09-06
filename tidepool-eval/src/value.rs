@@ -16,7 +16,7 @@ pub type SharedByteArray = Arc<Mutex<Vec<u8>>>;
 /// Represents an object in Weak Head Normal Form (WHNF). This includes
 /// fully-applied constructors, closures, literals, and references to
 /// lazy thunks.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Value {
     /// Primitive literal value (Int#, Word#, Char#, String#, Float#, Double#).
     Lit(Literal),
@@ -48,6 +48,71 @@ pub enum Value {
     ConFun(DataConId, usize, Vec<Value>),
     /// Mutable/immutable byte array (ByteArray# / MutableByteArray#).
     ByteArray(SharedByteArray),
+}
+
+/// Constructor depth belongs on the heap, including when a value crosses a
+/// runtime boundary through an ordinary `clone`. Environments retain their
+/// persistent-map sharing and byte arrays retain their shared mutation semantics.
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Con(_, fields) | Self::ConFun(_, _, fields) if !fields.is_empty() => {}
+            Self::Con(id, _) => return Self::Con(*id, Vec::new()),
+            Self::ConFun(id, arity, _) => return Self::ConFun(*id, *arity, Vec::new()),
+            Self::Lit(literal) => return Self::Lit(literal.clone()),
+            Self::ThunkRef(id) => return Self::ThunkRef(*id),
+            Self::ByteArray(bytes) => return Self::ByteArray(Arc::clone(bytes)),
+            Self::Closure { env, binder, body } => {
+                return Self::Closure {
+                    env: env.clone(),
+                    binder: *binder,
+                    body: body.clone(),
+                }
+            }
+            Self::JoinCont { params, body, env } => {
+                return Self::JoinCont {
+                    params: params.clone(),
+                    body: body.clone(),
+                    env: env.clone(),
+                }
+            }
+        }
+        recursion::expand_and_collapse::<ValueFrame<'_, recursion::PartiallyApplied>, _, _>(
+            self,
+            Value::as_frame,
+            |frame| match frame {
+                ValueFrame::Leaf(value) => value.clone(),
+                ValueFrame::Con(id, fields) => Value::Con(id, fields),
+                ValueFrame::ConFun(id, arity, args) => Value::ConFun(id, arity, args),
+            },
+        )
+    }
+}
+
+/// One layer of a value's owned constructor tree. Environments and byte arrays
+/// are leaves: their sharing semantics belong to `Env` and `SharedByteArray`.
+/// Borrowed leaves stay tied to the source for the entire traversal.
+pub enum ValueFrame<'a, X> {
+    /// A literal, thunk reference, closure, join continuation, or byte array.
+    Leaf(&'a Value),
+    /// A fully applied constructor and its recursive fields.
+    Con(DataConId, Vec<X>),
+    /// A partially applied constructor and its recursive arguments.
+    ConFun(DataConId, usize, Vec<X>),
+}
+
+impl<'a> recursion::MappableFrame for ValueFrame<'a, recursion::PartiallyApplied> {
+    type Frame<X> = ValueFrame<'a, X>;
+
+    fn map_frame<A, B>(input: Self::Frame<A>, f: impl FnMut(A) -> B) -> Self::Frame<B> {
+        match input {
+            ValueFrame::Leaf(value) => ValueFrame::Leaf(value),
+            ValueFrame::Con(id, fields) => ValueFrame::Con(id, fields.into_iter().map(f).collect()),
+            ValueFrame::ConFun(id, arity, args) => {
+                ValueFrame::ConFun(id, arity, args.into_iter().map(f).collect())
+            }
+        }
+    }
 }
 
 /// Thunk identifier — index into the thunk store.
@@ -142,6 +207,21 @@ fn render_capped_at(v: &Value, remaining: usize, out: &mut String) {
 }
 
 impl Value {
+    /// Borrow one layer for a stack-safe constructor traversal.
+    pub fn as_frame(&self) -> ValueFrame<'_, &Value> {
+        match self {
+            Value::Con(id, fields) => ValueFrame::Con(*id, fields.iter().collect()),
+            Value::ConFun(id, arity, args) => {
+                ValueFrame::ConFun(*id, *arity, args.iter().collect())
+            }
+            Value::Lit(_)
+            | Value::ThunkRef(_)
+            | Value::ByteArray(_)
+            | Value::Closure { .. }
+            | Value::JoinCont { .. } => ValueFrame::Leaf(self),
+        }
+    }
+
     /// Count total nodes in a Value tree. O(n) walk used for size checks.
     pub fn node_count(&self) -> usize {
         // Iterative: responses can be cons-spines tens of thousands deep;
@@ -441,5 +521,86 @@ mod tests {
             body: expr,
         };
         let _cloned = closure.clone();
+    }
+
+    #[test]
+    fn clone_deep_mixed_constructors_preserves_fields_on_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let depth = 100_000;
+                let mut original = Value::ThunkRef(ThunkId(17));
+                for n in 0..depth {
+                    let fields = vec![Value::Lit(Literal::LitInt(n)), original];
+                    original = if n % 2 == 0 {
+                        Value::Con(DataConId(10), fields)
+                    } else {
+                        Value::ConFun(DataConId(20), 3, fields)
+                    };
+                }
+                let cloned = original.clone();
+                // The copy owns its constructor fields independently of the source.
+                drop(original);
+                let mut current = &cloned;
+                for n in (0..depth).rev() {
+                    let fields = match current {
+                        Value::Con(DataConId(10), fields) if n % 2 == 0 => fields,
+                        Value::ConFun(DataConId(20), 3, fields) if n % 2 == 1 => fields,
+                        _ => panic!("wrong constructor at depth {n}"),
+                    };
+                    assert_eq!(fields.len(), 2);
+                    assert!(
+                        matches!(&fields[0], Value::Lit(Literal::LitInt(value)) if *value == n)
+                    );
+                    current = &fields[1];
+                }
+                assert!(matches!(current, Value::ThunkRef(ThunkId(17))));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn clone_preserves_shared_arrays_and_environment_copy_on_write() {
+        let bytes = Arc::new(Mutex::new(vec![1, 2, 3]));
+        let mut value = Value::ByteArray(Arc::clone(&bytes));
+        for _ in 0..10_000 {
+            value = Value::Con(DataConId(1), vec![value]);
+        }
+        let mut env = Env::new();
+        env.insert(VarId(1), value);
+        let body = RecursiveTree {
+            nodes: vec![CoreFrame::Var(VarId(1))],
+        };
+        let original = Value::JoinCont {
+            params: vec![VarId(2)],
+            body,
+            env,
+        };
+        let Value::JoinCont {
+            env: cloned_env,
+            params,
+            body,
+        } = &original.clone()
+        else {
+            panic!("expected join");
+        };
+        assert_eq!(params, &[VarId(2)]);
+        assert!(matches!(body.nodes.as_slice(), [CoreFrame::Var(VarId(1))]));
+        let mut updated = cloned_env.clone();
+        // Updating a shared HAMT node may clone its stored Value bindings.
+        updated.insert(VarId(2), Value::Lit(Literal::LitInt(42)));
+        assert!(cloned_env.get(&VarId(2)).is_none());
+        let mut current = updated.get(&VarId(1)).unwrap();
+        while let Value::Con(_, fields) = current {
+            current = &fields[0];
+        }
+        let Value::ByteArray(cloned_bytes) = current else {
+            panic!("expected array");
+        };
+        assert!(Arc::ptr_eq(&bytes, cloned_bytes));
+        bytes.lock().unwrap()[0] = 9;
+        assert_eq!(cloned_bytes.lock().unwrap()[0], 9);
     }
 }

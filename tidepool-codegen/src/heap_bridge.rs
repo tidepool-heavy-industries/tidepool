@@ -3,7 +3,7 @@ use crate::layout::{
     self, LIT_TAG_ADDR, LIT_TAG_ARRAY, LIT_TAG_BYTEARRAY, LIT_TAG_CHAR, LIT_TAG_DOUBLE,
     LIT_TAG_FLOAT, LIT_TAG_INT, LIT_TAG_SMALLARRAY, LIT_TAG_STRING, LIT_TAG_WORD,
 };
-use tidepool_eval::value::Value;
+use tidepool_eval::value::{Value, ValueFrame};
 use tidepool_heap::layout as heap_layout;
 use tidepool_repr::{DataConId, Literal};
 
@@ -473,27 +473,6 @@ unsafe fn heap_to_value_inner(
     }
 }
 
-/// One-layer projection of a `Value` for the stack-safe conversion hylo:
-/// leaves carry a pointer back to the original node (allocated directly at
-/// collapse time); `Con` carries the recursive position.
-enum ValueFrame<X> {
-    /// Lit / ByteArray — no children. Raw pointer rather than a reference
-    /// because `MappableFrame::Frame` is a lifetime-free GAT; the pointee is
-    /// a node of the root `&Value`, which outlives the traversal.
-    Leaf(*const Value),
-    Con(DataConId, Vec<X>),
-}
-
-impl recursion::MappableFrame for ValueFrame<recursion::PartiallyApplied> {
-    type Frame<X> = ValueFrame<X>;
-    fn map_frame<A, B>(input: Self::Frame<A>, f: impl FnMut(A) -> B) -> Self::Frame<B> {
-        match input {
-            ValueFrame::Leaf(p) => ValueFrame::Leaf(p),
-            ValueFrame::Con(id, xs) => ValueFrame::Con(id, xs.into_iter().map(f).collect()),
-        }
-    }
-}
-
 /// Convert a Value to a heap-allocated object via VMContext bump allocation.
 ///
 /// Stack-safe: runs as a fallible hylomorphism (`recursion` crate) over
@@ -505,18 +484,17 @@ impl recursion::MappableFrame for ValueFrame<recursion::PartiallyApplied> {
 ///
 /// `vmctx` must point to a valid VMContext with sufficient nursery space.
 pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, BridgeError> {
-    let vmctx_ptr: *mut VMContext = vmctx;
-    recursion::try_expand_and_collapse::<ValueFrame<recursion::PartiallyApplied>, _, _, _>(
+    recursion::try_expand_and_collapse::<ValueFrame<'_, recursion::PartiallyApplied>, _, _, _>(
         val,
         |v: &Value| match v {
-            Value::Con(id, fields) => Ok(ValueFrame::Con(*id, fields.iter().collect())),
-            Value::Lit(_) | Value::ByteArray(_) => Ok(ValueFrame::Leaf(v as *const Value)),
+            Value::Con(..) | Value::Lit(_) | Value::ByteArray(_) => Ok(v.as_frame()),
             _ => Err(BridgeError::NonConvertibleValue),
         },
-        |frame: ValueFrame<*mut u8>| match frame {
-            // SAFETY: leaf pointers reference nodes of `val`, alive for the
-            // whole traversal; vmctx_ptr is the caller's exclusive borrow.
-            ValueFrame::Leaf(p) => unsafe { leaf_to_heap(&*p, &mut *vmctx_ptr) },
+        |frame: ValueFrame<'_, *mut u8>| match frame {
+            // SAFETY: expansion admits only convertible leaves; vmctx is the
+            // caller's exclusive borrow with sufficient nursery space.
+            ValueFrame::Leaf(value) => unsafe { leaf_to_heap(value, vmctx) },
+            ValueFrame::ConFun(..) => Err(BridgeError::NonConvertibleValue),
             ValueFrame::Con(id, field_ptrs) => unsafe {
                 // The header stores num_fields as u16; silently truncating
                 // (`len as u16`) made a 65536-field Con roundtrip to ZERO
@@ -528,7 +506,7 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
                     });
                 }
                 let size = 24 + 8 * field_ptrs.len();
-                let ptr = bump_alloc_from_vmctx(&mut *vmctx_ptr, size);
+                let ptr = bump_alloc_from_vmctx(vmctx, size);
                 if ptr.is_null() {
                     return Err(BridgeError::NurseryExhausted);
                 }

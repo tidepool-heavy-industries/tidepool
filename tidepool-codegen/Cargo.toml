@@ -32,7 +32,7 @@ env_logger = "0.11"
 # cranelift-jit's own unconditional CLIF-dump `info!`s.
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 parking_lot.workspace = true
-recursion = "0.5.4"
+recursion.workspace = true
 rustc-hash.workspace = true
 # Dependency-graph traversal + topological sort for LetRec deferred-simple
 # binding order (emit/expr.rs's `topo_sort_deferred_simple`). Project-wide

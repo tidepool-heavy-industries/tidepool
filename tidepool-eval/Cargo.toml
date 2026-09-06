@@ -13,6 +13,7 @@ readme = "../README.md"
 tidepool-repr.workspace = true
 tidepool-bignum.workspace = true
 im = "15"
+recursion.workspace = true
 thiserror.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 # ISO-8601/RFC-3339 timestamp parsing for the `ParseISO8601` primop. No default
