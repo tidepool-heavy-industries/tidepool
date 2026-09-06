@@ -34,3 +34,34 @@ inherited root dialogue. Repair request/watch needed only documented operations.
 This successful reviewer launch does not waive the earlier custody failures.
 Focused Rust verification is deferred to revised candidate to avoid redundant
 expensive builds; current source inspection is not behavioral evidence.
+
+## Reviewed repair and independent verification
+
+Accept repaired candidate 2116c9c2a57a5cb7fcf470ec53fbfe236ab92957 for the
+explicitly partial inventory contract only. Reviewer merged it at
+c3c796dc0fbfe3cd49b3ca64397a3442d868fb20, inspected all repairs and independently ran:
+- `just test-lib tidepool 'test(partial_map_)'`: 5 executed/passed, 98 skipped;
+  `/tmp/run-map-review/repaired-tests.log`. Test summary 0.008s; Cargo test build
+  4m29s plus extractor/bootstrap setup. Daemon teardown explicitly reported.
+- `nix develop --command cargo build -p tidepool --example run_map`: compiled;
+  `/tmp/run-map-review/repaired-example-build.log`.
+- Direct built example on indexed historical run plus JSON assertions: passed,
+  31 actors and 145 events; `/tmp/run-map-review/repaired-map.json` and summary.
+- `cargo fmt -p tidepool --check`, `git diff --check`: passed.
+
+Example SHA256 bc769fb10f41804da09df83f11b9aa68910c447192b680441f7f27e882f2029f.
+BTreeSet retains deterministic smallest keys with bounded memory (full directory
+enumeration still required); local inbox errors preserve partial evidence; byte
+probe addition is checked at owning entry. Requested regressions executed.
+
+No custody/service acceptance, integrated usage, optional window, root-binding
+linkage, graph edges or CLI integration is implied. Parent integration is separate.
+Current review supersedes the pending status above; earlier paragraphs retain the
+specific original findings and repair provenance.
+
+Additional UX/performance observation: a five-test pure Rust selection rebuilt a
+fresh extractor and broad dependency closure in this isolated reviewer checkout,
+while selected test execution took 0.008s. This directly illustrates setup overhead,
+not proof of a particular optimization's savings. Narrow build/setup reuse merits
+measurement without weakening checkout isolation or matched-toolchain policy.
+The direct retained request/watch repair loop worked without API rediscovery.
