@@ -42,3 +42,12 @@ Context-efficiency evidence: reviewer reported 4m29 Cargo build plus extractor
 setup for 0.008s test execution. This is an observed boundary mismatch, not an
 estimated saving. Local repeated focused runs are faster but no controlled
 cache, provider-prefix, serial/tree, or cost comparison was performed.
+
+Further firsthand guidance gap: while trying to request the one-line owning
+status-decoder exposure from root, discovery found no retained root AgentRef in
+this child's scope. `AgentRosterEntry` contains IDs, not requestable handles.
+Several :type/:info/:doc calls did not resolve a legitimate parent handle;
+:bindings confirmed none was supplied. The final typed delivery carries that
+integration request rather than forging an actor handle. A documented parent
+request handle or explicit root ref in lead assignments would avoid this exact
+bookkeeping detour. No savings are quantified.

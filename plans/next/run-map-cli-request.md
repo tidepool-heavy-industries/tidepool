@@ -38,3 +38,16 @@ representative example already exercises this exact reader and flag mapping.
 This increment still reports usage Unknown until the existing backend usage
 owner supplies bounded per-response records. Do not advertise full product
 acceptance, pricing, review/integration edges, or a new dashboard.
+
+## Owning decoder exposure required before acceptance
+
+Source inspection found the existing version-enforcing status decoder is private:
+`tidepool/src/shoal.rs::decode_run_status(bytes)`. The increment currently
+projects the existing RunStatus serde shape but cannot call that private owner.
+Please expose this function as `pub(crate)` (library-internal, no external API),
+then return the baseline so run_map/metadata.rs can replace its
+`serde_json::from_slice(&bytes).ok()` with
+`crate::shoal::decode_run_status(&bytes).ok()`. Add an unsupported-status-version
+negative test then. This is a concrete owning-file aperture, not permission to
+copy STATUS_VERSION or introduce another version policy. Until incorporated,
+status-version enforcement is a known acceptance gate on this candidate.
