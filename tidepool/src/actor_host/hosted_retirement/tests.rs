@@ -433,15 +433,40 @@ async fn hosted_unsupported_seal_retains_live_actor_and_http() {
 
 #[tokio::test]
 async fn hosted_foreign_real_seal_is_rejected_without_shutdown_or_http_drain() {
+    foreign_seal_terminal_race(false).await;
+}
+
+#[tokio::test]
+async fn hosted_pending_foreign_seal_survives_waiter_loss_and_expected_terminal() {
+    foreign_seal_terminal_race(true).await;
+}
+
+async fn foreign_seal_terminal_race(terminal_while_pending: bool) {
     let campaign = test_campaign::TestCampaign::start().await;
     let sibling_campaign = test_campaign::TestCampaign::start().await;
     let sibling = sibling_campaign.actor.clone();
     let sibling_policy = sibling_campaign.root_installation.policy.clone();
-    let fixture = HttpFixture::start(campaign.actor.clone(), sibling_policy).await;
+    let endpoint = held(sibling_policy, terminal_while_pending, false);
+    let fixture = HttpFixture::start(campaign.actor.clone(), endpoint.clone()).await;
     assert_eq!(
         call(&fixture.client, "let siblingAnswer = 9 :: Int", "sibling").await["success"],
         true
     );
+    if terminal_while_pending {
+        let owner = fixture.owner.clone();
+        let waiting = tokio::spawn(async move {
+            observe(&owner, CompletionBoundary::AbortForShutdown, limit()).await
+        });
+        entered(&endpoint.seal_entered).await;
+        waiting.abort();
+        let _ = waiting.await;
+        campaign
+            .actor
+            .shutdown_with_cleanup(cancelled())
+            .await
+            .unwrap();
+        endpoint.seal_release.add_permits(1);
+    }
     let observation = fixture.finish().await;
     assert!(
         matches!(
@@ -454,7 +479,10 @@ async fn hosted_foreign_real_seal_is_rejected_without_shutdown_or_http_drain() {
         ),
         "{observation:?}"
     );
-    assert!(campaign.actor.terminal().get().is_none());
+    assert_eq!(
+        campaign.actor.terminal().get().is_some(),
+        terminal_while_pending
+    );
     assert!(sibling.terminal().get().is_none());
     assert!(!service_finished(&fixture.owner));
     assert_eq!(
@@ -462,11 +490,14 @@ async fn hosted_foreign_real_seal_is_rejected_without_shutdown_or_http_drain() {
         reqwest::StatusCode::OK
     );
     // A terminal for the expected actor cannot repair a rejected foreign seal.
-    campaign
-        .actor
-        .shutdown_with_cleanup(cancelled())
-        .await
-        .unwrap();
+    if !terminal_while_pending {
+        campaign
+            .actor
+            .shutdown_with_cleanup(cancelled())
+            .await
+            .unwrap();
+    }
+    assert_eq!(endpoint.seals.load(std::sync::atomic::Ordering::SeqCst), 1);
     let after_expected_terminal = fixture.finish().await;
     assert!(
         matches!(
