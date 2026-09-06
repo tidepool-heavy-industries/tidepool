@@ -389,6 +389,11 @@ enum DurableActorEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum TypedActorEvent {
+    Notification {
+        sender: ActorRef,
+        target: ActorRef,
+        message: String,
+    },
     ProviderTurnFailed {
         #[serde(default)]
         revision: u64,
@@ -418,6 +423,10 @@ enum TypedActorEvent {
 }
 
 impl DurableActorEvent {
+    fn is_notification(&self) -> bool {
+        matches!(self, Self::Typed(TypedActorEvent::Notification { .. }))
+    }
+
     fn session(activation: &tidepool_actor::ResidentActivation) -> Self {
         Self::Typed(TypedActorEvent::SessionReady {
             sequence: activation.id.sequence(),
@@ -440,6 +449,10 @@ impl DurableActorEvent {
             None => "elapsed time unavailable".to_owned(),
         };
         match self {
+            Self::Typed(TypedActorEvent::Notification { sender, message, .. }) => format!(
+                "Notification from actor {}@{} (no reply obligation; current assignment is unchanged):\n\n{}",
+                sender.id.0, sender.incarnation.0, message,
+            ),
             Self::Typed(TypedActorEvent::ProviderTurnFailed { actor, thread, turn, failure, .. }) => format!(
                 "actor {}@{} provider turn {turn:?} in thread {thread:?} failed: {failure:?}. The actor request remains pending. Inspect status before deciding whether to retire or recover it; further steering does not repair rejected history.",
                 actor.id.0, actor.incarnation.0,
@@ -2259,6 +2272,12 @@ async fn deliver_pending(
         .await
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
+    // Tracked notifications must never enter legacy push or its retry loop.
+    // Deliver only the preceding ordinary prefix, leaving the barrier intact.
+    let pending: Vec<_> = pending
+        .into_iter()
+        .take_while(|row| !row.payload.is_notification())
+        .collect();
     let Some(last) = pending.last() else {
         return Ok(());
     };
@@ -3807,6 +3826,60 @@ mod tests {
         ) -> InteractiveFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn notification_barrier_never_enters_legacy_push_or_batch_ack() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = Arc::new(
+            DurableInbox::open(root.path().join("rows"), root.path().join("cursor")).unwrap(),
+        );
+        let target = ActorRef::first(tidepool_actor::ActorId(7));
+        inbox
+            .publish(DurableActorEvent::Legacy("ordinary prefix".into()))
+            .unwrap();
+        inbox
+            .publish(DurableActorEvent::Typed(TypedActorEvent::Notification {
+                sender: ActorRef::first(tidepool_actor::ActorId(8)),
+                target,
+                message: "one-way text".into(),
+            }))
+            .unwrap();
+        inbox
+            .publish(DurableActorEvent::Legacy("ordinary suffix".into()))
+            .unwrap();
+        let backend = ScriptedPush {
+            fail: std::sync::atomic::AtomicBool::new(false),
+            messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let binding = root.path().join("binding.json");
+        tidepool_agent::accept_interactive_session_binding(
+            &binding,
+            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
+        )
+        .await
+        .unwrap();
+        let thread = tidepool_agent::read_interactive_binding(&binding)
+            .await
+            .unwrap();
+        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        for _ in 0..2 {
+            deliver_pending(target, &inbox, &thread, &backend, root.path(), &observation)
+                .await
+                .unwrap();
+        }
+        assert_eq!(*backend.messages.lock().unwrap(), vec!["ordinary prefix"]);
+        assert_eq!(inbox.cursor(), 1);
+        assert_eq!(
+            inbox
+                .pending()
+                .unwrap()
+                .iter()
+                .map(|row| row.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
     }
 
     #[tokio::test]
