@@ -682,3 +682,204 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
     forest.shutdown().await;
     task.await.unwrap();
 }
+
+struct ShutdownGate {
+    entered: Semaphore,
+    release: Semaphore,
+    calls: std::sync::atomic::AtomicUsize,
+}
+struct GatedBehavior(Arc<ShutdownGate>);
+impl tidepool_actor::KernelBehavior for GatedBehavior {
+    fn start<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+    ) -> BoxFuture<'a, Result<tidepool_actor::KernelStep<()>, tidepool_actor::KernelBehaviorError>>
+    {
+        Box::pin(async { Ok(tidepool_actor::KernelStep::Continue(())) })
+    }
+    fn cast<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+        _: ActorRef,
+        _: tidepool_actor::MailboxValue,
+    ) -> BoxFuture<'a, Result<tidepool_actor::KernelStep<()>, tidepool_actor::KernelBehaviorError>>
+    {
+        Box::pin(async { panic!("unexpected cast") })
+    }
+    fn call<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+        _: ActorRef,
+        _: tidepool_actor::CallAncestry,
+        _: tidepool_actor::MailboxValue,
+    ) -> BoxFuture<
+        'a,
+        Result<
+            tidepool_actor::KernelStep<tidepool_actor::MailboxValue>,
+            tidepool_actor::KernelBehaviorError,
+        >,
+    > {
+        Box::pin(async { panic!("unexpected call") })
+    }
+    fn tool<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+        _: ToolInvocation,
+    ) -> BoxFuture<
+        'a,
+        Result<
+            tidepool_actor::KernelStep<serde_json::Value>,
+            tidepool_actor::KernelInvocationFailure,
+        >,
+    > {
+        Box::pin(async { panic!("unexpected tool") })
+    }
+    fn workbench<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+        _: tidepool_runtime::session::WorkbenchRequest,
+    ) -> BoxFuture<
+        'a,
+        Result<
+            tidepool_actor::KernelStep<tidepool_runtime::session::WorkbenchResponse>,
+            tidepool_actor::KernelInvocationFailure,
+        >,
+    > {
+        Box::pin(async { panic!("unexpected workbench") })
+    }
+    fn external_application_failed<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+        _: tidepool_actor::ExternalApplicationFailure,
+    ) -> BoxFuture<'a, tidepool_actor::ExternalFailureDisposition> {
+        Box::pin(async { panic!("unexpected external application") })
+    }
+    fn shutdown<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+        _: &'a ActorTerminal,
+    ) -> BoxFuture<'a, Result<(), tidepool_actor::KernelBehaviorError>> {
+        Box::pin(async move {
+            self.0
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.entered.add_permits(1);
+            self.0.release.acquire().await.unwrap().forget();
+            Ok(())
+        })
+    }
+    fn stopped<'a>(
+        &'a mut self,
+        _: &'a tidepool_actor::KernelContext,
+        _: &'a ActorTerminal,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+    fn child_exited(&mut self, _: tidepool_actor::ChildExitNotice) -> BoxFuture<'_, ()> {
+        Box::pin(async { panic!("unexpected child") })
+    }
+}
+
+struct ActorSealEndpoint(LocalActorRef, Vec<HostedTool>);
+impl ResidentToolEndpoint for ActorSealEndpoint {
+    fn tools(&self) -> &[HostedTool] {
+        &self.1
+    }
+    fn instructions(&self) -> Option<&str> {
+        None
+    }
+    fn dispatch_boxed(&self, _: ToolInvocation) -> ResidentToolFuture {
+        Box::pin(async { Err(ResidentToolError::Unavailable("no fixture tools".into())) })
+    }
+    fn seal_hosted_work_boxed(
+        &self,
+    ) -> BoxFuture<'static, Result<HostedWorkSeal, ResidentToolError>> {
+        let actor = self.0.clone();
+        Box::pin(async move { actor.seal_hosted_work().await.map_err(Into::into) })
+    }
+}
+
+#[tokio::test]
+async fn hosted_lost_pending_shutdown_waiter_retains_real_operation() {
+    let gate = Arc::new(ShutdownGate {
+        entered: Semaphore::new(0),
+        release: Semaphore::new(0),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (actor, task) = tidepool_actor::spawn_local_actor(None, GatedBehavior(gate.clone()))
+        .await
+        .unwrap();
+    let fixture = HttpFixture::start(
+        actor.clone(),
+        Arc::new(ActorSealEndpoint(
+            actor.clone(),
+            vec![HostedTool::Custom(tidepool_tool::CustomToolDeclaration {
+                name: "unused".into(),
+                description: "No invocations supported by shutdown fixture".into(),
+            })],
+        )),
+    )
+    .await;
+    assert!(
+        matches!(observe(&fixture.owner, CompletionBoundary::AwaitingNativeDecision, limit()).await,
+        HostedObservation::Observed { seal: SealObservation::Confirmed(seal), http: HttpObservation::Pending, .. } if seal.actor() == actor.identity())
+    );
+    let owner = fixture.owner.clone();
+    let waiter = tokio::spawn(async move {
+        observe(&owner, CompletionBoundary::AbortForShutdown, limit()).await
+    });
+    entered(&gate.entered).await;
+    assert!(actor.terminal().get().is_none(), "hook is still running");
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        fixture.owner.lock().await.shutdown,
+        Some(Operation::Pending(_))
+    ));
+    assert!(matches!(
+        observe(
+            &fixture.owner,
+            CompletionBoundary::AbortForShutdown,
+            Duration::ZERO
+        )
+        .await,
+        HostedObservation::Pending
+    ));
+    assert!(matches!(
+        fixture.owner.lock().await.shutdown,
+        Some(Operation::Pending(_))
+    ));
+    assert_eq!(gate.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(actor.terminal().cleanup().is_none());
+    gate.release.add_permits(1);
+    let observation = fixture.finish().await;
+    let HostedObservation::Observed {
+        resident: ResidentObservation::Accounted(cleanup),
+        http: HttpObservation::Pending,
+        ..
+    } = observation
+    else {
+        panic!("{observation:?}")
+    };
+    assert_eq!(cleanup.actor(), actor.identity());
+    assert!(matches!(
+        cleanup.hook(),
+        tidepool_actor::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        cleanup.realm(),
+        tidepool_actor::CleanupComponentOutcome::Unsupported
+    ));
+    assert!(!cleanup.is_confirmed());
+    assert!(matches!(
+        fixture.owner.lock().await.shutdown,
+        Some(Operation::Finished(Ok(_)))
+    ));
+    assert_eq!(gate.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!service_finished(&fixture.owner));
+    fixture.dispose_http().await;
+    tokio::time::timeout(limit(), task).await.unwrap().unwrap();
+    let weak = Arc::downgrade(&fixture.owner);
+    drop(fixture);
+    assert!(weak.upgrade().is_none());
+}
