@@ -12,13 +12,15 @@ import WaveContract
 data Checked = Checked { check :: WaveCheck, selection :: Selection }
   deriving (Show)
 
-data Finding = WrongRevision | MissingIdentity | MissingEvidence | NotIndependent
+data Finding = WrongRevision | MissingIdentity | MissingEvidence | NotDirectExecution
              | NoCompleteSelection | NotExecuted | UnexpectedOutcome | NoChecks
   deriving (Eq, Show)
 
 data Verdict = PassingEvidence | ReproducedFailure | Insufficient [Finding]
   deriving (Eq, Show)
 
+-- DirectExecution means firsthand execution only, not reviewer independence.
+-- Reviewer origin/independence must be established outside this predicate.
 -- The reviewer supplies the candidate identity, not a display label from a check.
 assessCheck :: Text -> Checked -> Verdict
 assessCheck revision (Checked c counts)
@@ -33,7 +35,7 @@ assessCheck revision (Checked c counts)
           || any (Text.null . Text.strip) (checkedBinaries c)]
       , [MissingEvidence | any (Text.null . Text.strip)
           [checkCommand c, checkEvidencePath c]]
-      , [NotIndependent | checkBasis c /= DirectExecution]
+      , [NotDirectExecution | checkBasis c /= DirectExecution]
       , [NoCompleteSelection | not (hasExecutedSelection counts)]
       , [NotExecuted | checkOutcome c `elem` [CompileOnly, DidNotExecute]]
       , [UnexpectedOutcome | not (matches (checkExpectation c) (checkOutcome c))]
