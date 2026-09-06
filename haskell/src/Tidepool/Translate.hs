@@ -27,6 +27,8 @@ import Tidepool.DiagJson (SourceRejection(..))
 import GHC.Core
 import qualified GHC.Core.Utils as Core
 import GHC.Types.Id
+import GHC.Types.Id.Info (IdDetails(FCallId))
+import GHC.Types.ForeignCall (ForeignCall(..), CCallSpec(..), CCallTarget(..))
 import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey, mkUnique)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
@@ -2039,9 +2041,8 @@ translate expr =
     -- Foreign calls: map known FFI functions to our primops; unsupported ones
     -- (often over-collected into a closure, in a dead branch) become poisons.
     Var v | isFCallId v -> do
-        let pprName = showPprUnsafe v
         childIdxs <- mapM translate args
-        case mapFfiCall pprName of
+        case mapFfiCall v of
           Just name -> emitOp name childIdxs
           Nothing   -> emitFfiPoison
 
@@ -2237,7 +2238,7 @@ translateHead = \case
         -- Emit the primop or FFI call (unsupported FFI -> lazy poison).
         primIdx <- case isPrimOpId_maybe v of
                     Just pop -> emitPrimOpDispatch pop childIdxs
-                    Nothing  -> case mapFfiCall (showPprUnsafe v) of
+                    Nothing  -> case mapFfiCall v of
                                   Just name -> emitOp name childIdxs
                                   Nothing   -> emitFfiPoison
         if hasStateBinder then do
@@ -2634,26 +2635,28 @@ isUnsafeTakeVar v =
 isRealWorldVar :: Id -> Bool
 isRealWorldVar v = occNameString (nameOccName (idName v)) == "realWorld#"
 
--- | Map a foreign-call's pretty-printed name to a supported primop name, or
--- Nothing if unsupported. Unsupported FFI calls are emitted as LAZY POISONS by
--- the caller (`emitFfiPoison`), not hard errors: GHC over-collects unrelated FFI
--- into a binding's closure (e.g. __hsbase_MD5Init via GHC.Fingerprint reaches
--- rationalToDouble's closure, in a branch never taken for a Double literal). A
--- poison lets such a binding compile and only raises if the FFI is actually
--- forced at runtime — same discipline as the `error` sentinel / unresolved-var
--- poisons. (Integer/Natural now use the native ghc-bignum backend — pure Core,
--- no __gmpn_*/integer_gmp_* FFI — so those arms are gone.)
-mapFfiCall :: String -> Maybe Text
-mapFfiCall pprName
-  | "strlen" `isInfixOf` pprName                = Just (T.pack "FfiStrlen")
-  | "rintDouble" `isInfixOf` pprName            = Just (T.pack "FfiRintDouble")
-  | "_hs_text_measure_off" `isInfixOf` pprName  = Just (T.pack "FfiTextMeasureOff")
-  | "_hs_text_memchr" `isInfixOf` pprName       = Just (T.pack "FfiTextMemchr")
-  | "_hs_text_reverse" `isInfixOf` pprName      = Just (T.pack "FfiTextReverse")
-  -- Integer/Natural -> Double encoders (RTS primitives, used by both bignum backends).
-  | "__int_encodeDouble" `isInfixOf` pprName    = Just (T.pack "FfiIntEncodeDouble")
-  | "__word_encodeDouble" `isInfixOf` pprName   = Just (T.pack "FfiWordEncodeDouble")
-  | otherwise                                   = Nothing
+-- | Recognize only an exact static foreign target. Pretty-printed Core includes
+-- types and package names and is not a symbol-identity boundary. Unsupported
+-- targets remain lazy poison at the caller, preserving dead-branch laziness.
+mapFfiCall :: Id -> Maybe Text
+mapFfiCall v = case idDetails v of
+  FCallId (CCall (CCallSpec (StaticTarget _ label _ _) _ _)) ->
+    case unpackFS label of
+      "strlen" -> Just "FfiStrlen"
+      "rintDouble" -> Just "FfiRintDouble"
+      "_hs_text_measure_off" -> Just "FfiTextMeasureOff"
+      "_hs_text_memchr" -> Just "FfiTextMemchr"
+      "_hs_text_reverse" -> Just "FfiTextReverse"
+      "__int_encodeDouble" -> Just "FfiIntEncodeDouble"
+      "__word_encodeDouble" -> Just "FfiWordEncodeDouble"
+      "isFloatNaN" -> Just "FfiIsFloatNaN"
+      "isFloatInfinite" -> Just "FfiIsFloatInfinite"
+      "isFloatNegativeZero" -> Just "FfiIsFloatNegativeZero"
+      "isDoubleNaN" -> Just "FfiIsDoubleNaN"
+      "isDoubleInfinite" -> Just "FfiIsDoubleInfinite"
+      "isDoubleNegativeZero" -> Just "FfiIsDoubleNegativeZero"
+      _ -> Nothing
+  _ -> Nothing
 
 -- | Emit a lazy poison node for an unsupported (or dead-branch) construct: a
 -- tag-'E' UserError Var. The JIT lowers it to a poison closure that only raises

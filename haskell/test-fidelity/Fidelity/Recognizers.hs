@@ -8,7 +8,7 @@
 -- to an intrinsic primop, and never head-swapped onto a hidden *Sited
 -- helper (which, absent any real sibling in scope, would otherwise emit a
 -- lazy 0x45-tagged poison NVar for the call site).
-module Fidelity.Recognizers (checks) where
+module Fidelity.Recognizers (checks, floatingChecks) where
 
 import Fidelity.Harness (Check, check, extractBinding, nodeList, nvarIds)
 import Tidepool.Translate (ClosedModule)
@@ -20,7 +20,8 @@ import qualified Data.Text as T
 
 checks :: IO [Check]
 checks = concat <$> sequence
-  [ shadowCheck "e3-either-decode-value" "UEDV"      eitherDecodeValueSrc "useEDV"      (noPrimOp "JsonDecode")
+  [ floatingChecks
+  , shadowCheck "e3-either-decode-value" "UEDV"      eitherDecodeValueSrc "useEDV"      (noPrimOp "JsonDecode")
   , shadowCheck "e3-parse-iso8601"       "UPISO"     parseISO8601Src      "usePISO"     (noPrimOp "ParseISO8601")
   , shadowCheck "e3-run-llm-turn"        "URLT"      runLLMTurnSrc        "useRLT"      noPoison
   , shadowCheck "e3-run-llm-turn-fork"   "URLTF"     runLLMTurnForkSrc    "useRLTF"     noPoison
@@ -190,3 +191,20 @@ finalizeSrc = unlines
   , "useFinalize :: Maybe Int"
   , "useFinalize = finalize \"hello\""
   ]
+
+-- Real extraction protects the symbol boundary, including package-qualified FFI.
+floatingChecks :: IO [Check]
+floatingChecks = do
+  src <- readFile "test-fidelity/fixtures/FloatClassifiers.hs"
+  near <- readFile "test-fidelity/fixtures/NearFfi.hs"
+  a <- extractBinding "floating-classifiers" "FloatClassifiers" src "classifiers"
+  b <- extractBinding "floating-near-ffi" "NearFfi" near "probe"
+  pure $ case (a, b) of
+    (Right cm, Right nearCm) ->
+      [ check ("classification lowering: " ++ T.unpack name) (not (noPrimOp name cm))
+      | name <- ["FfiIsDoubleNaN", "FfiIsDoubleInfinite", "FfiIsDoubleNegativeZero",
+                 "FfiIsFloatNaN", "FfiIsFloatInfinite", "FfiIsFloatNegativeZero"] ]
+      ++ [check "near-name FFI is not recognized" (noPrimOp "FfiIsDoubleNaN" nearCm),
+          check "unsupported near-name FFI remains poison" (not (noPoison nearCm))]
+    (Left err, _) -> [check ("classifier extraction: " ++ err) False]
+    (_, Left err) -> [check ("near-name extraction: " ++ err) False]
