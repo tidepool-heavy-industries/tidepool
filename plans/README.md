@@ -8,6 +8,8 @@ archive).
 
 ## Active work
 
+- [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
+  edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers
   with selected typed context and reusable Haskell-defined tool interfaces.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): executable-memory
