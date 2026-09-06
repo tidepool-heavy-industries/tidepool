@@ -651,12 +651,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let current = if view == StatusView::Concise {
             format!(
-                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} bound_worktree={:?} workbench={:?}{}",
+                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
                 self.descriptor.label(), actor.id.0, actor.incarnation.0,
                 runtime.activation_kind, if self.policy_installed { "attached" } else { "detached" }, requests.ready_responses, unavailable_responses,
                 requests.pending_responses, requests.ready_watches, unavailable_watches,
                 requests.pending_watches, self.descriptor.effective_role().role(),
-                self.descriptor.effective_role().workspace(), self.launch_worktrees.first(),
+                self.descriptor.effective_role().workspace(),
+                self.descriptor.effective_role().descendants().maximum_depth,
+                self.descriptor.effective_role().descendants().maximum_active_children,
+                self.launch_worktrees.first(),
                 runtime.workbench_posture, roster_summary,
             )
         } else {
