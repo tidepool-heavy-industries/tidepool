@@ -74,6 +74,13 @@ fn emit_alloc_zeroed(
 /// Uninhabited token type for MappableFrame impl.
 enum EmitFrameToken {}
 
+/// Strict arguments participate in bottom-up emission; lazy arguments retain
+/// their source subtree until a heap thunk can be captured in the current env.
+enum PrimArg<A> {
+    Strict(A),
+    Lazy(usize),
+}
+
 /// A single emission frame. `A` positions are children processed stack-safely
 /// by the hylomorphism's internal explicit stack. Raw `usize` positions require
 /// top-down context setup (block creation, pattern binding) and are processed
@@ -96,7 +103,7 @@ enum EmitFrame<A> {
     },
     PrimOp {
         op: PrimOpKind,
-        args: Vec<A>,
+        args: Vec<PrimArg<A>>,
     },
     Jump {
         label: JoinId,
@@ -174,7 +181,13 @@ impl MappableFrame for EmitFrameToken {
             },
             EmitFrame::PrimOp { op, args } => EmitFrame::PrimOp {
                 op,
-                args: args.into_iter().map(&mut f).collect(),
+                args: args
+                    .into_iter()
+                    .map(|arg| match arg {
+                        PrimArg::Strict(value) => PrimArg::Strict(f(value)),
+                        PrimArg::Lazy(idx) => PrimArg::Lazy(idx),
+                    })
+                    .collect(),
             },
             EmitFrame::Jump { label, args } => EmitFrame::Jump {
                 label,
@@ -314,7 +327,14 @@ fn expand_node(
             } else {
                 Ok(EmitFrame::PrimOp {
                     op: *op,
-                    args: args.clone(),
+                    args: args
+                        .iter()
+                        .enumerate()
+                        .map(|(position, &idx)| match op.argument_demand(position) {
+                            PrimArgDemand::Strict => PrimArg::Strict(idx),
+                            PrimArgDemand::Lazy => PrimArg::Lazy(idx),
+                        })
+                        .collect(),
                 })
             }
         }
@@ -528,35 +548,15 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             );
 
             for (i, &f_idx) in field_indices.iter().enumerate() {
-                let field_val = if is_trivial_field(f_idx, args.sess.tree) {
-                    let val = EmitContext::emit_node(
-                        EmitArgs {
-                            ctx: args.ctx,
-                            sess: args.sess,
-                            builder: args.builder,
-                            tail: TailCtx::NonTail,
-                        },
-                        f_idx,
-                    )?;
-                    ensure_heap_ptr(
-                        args.builder,
-                        args.sess.vmctx,
-                        args.sess.gc_sig,
-                        args.sess.oom_func,
-                        val,
-                    )
-                } else {
-                    let thunk_val = emit_thunk(
-                        EmitArgs {
-                            ctx: args.ctx,
-                            sess: args.sess,
-                            builder: args.builder,
-                            tail: TailCtx::NonTail,
-                        },
-                        f_idx,
-                    )?;
-                    thunk_val.value()
-                };
+                let field_val = emit_lazy_heap_value(
+                    EmitArgs {
+                        ctx: args.ctx,
+                        sess: args.sess,
+                        builder: args.builder,
+                        tail: TailCtx::NonTail,
+                    },
+                    f_idx,
+                )?;
                 args.builder.ins().store(
                     MemFlags::trusted(),
                     field_val,
@@ -571,14 +571,28 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             ref op,
             args: ref prim_args,
         } => {
-            // Force thunked args: PrimOps are strict in all arguments.
-            // Case alt binders can be thunks (lazy Con fields), so force
-            // them before passing to primop unboxing.
-            let forced_args: Vec<SsaVal> = prim_args
+            let prepared_args: Vec<SsaVal> = prim_args
                 .iter()
-                .map(|a| force_thunk_ssaval(args.sess.pipeline, args.builder, args.sess.vmctx, *a))
+                .map(|arg| match arg {
+                    PrimArg::Strict(value) => demand_whnf_ssaval(
+                        args.sess.pipeline,
+                        args.builder,
+                        args.sess.vmctx,
+                        *value,
+                    ),
+                    PrimArg::Lazy(idx) => emit_lazy_heap_value(
+                        EmitArgs {
+                            ctx: args.ctx,
+                            sess: args.sess,
+                            builder: args.builder,
+                            tail: TailCtx::NonTail,
+                        },
+                        *idx,
+                    )
+                    .map(SsaVal::HeapPtr),
+                })
                 .collect::<Result<Vec<_>, EmitError>>()?;
-            primop::emit_primop(args.sess, args.builder, op, &forced_args)
+            primop::emit_primop(args.sess, args.builder, op, &prepared_args)
         }
         EmitFrame::App { fun, arg } => {
             let raw_fun_ptr = fun.value();
@@ -831,7 +845,7 @@ fn emit_subtree(mut args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
 /// Stack-safe emission of a value-position subtree via hylomorphism.
 ///
 /// INVARIANT: the hylomorphism NEVER carries a `Tail` context. Every child the
-/// recursion crate visits bottom-up (App fun/arg, PrimOp args, Case scrutinee,
+/// recursion crate visits bottom-up (App fun/arg, strict PrimOp args, Case scrutinee,
 /// Jump args, Con fields) is a *value position* — its result is consumed locally,
 /// so a tail call there would `return null` and escape as the enclosing
 /// function's result (see #313 t11). Tail-ness is owned exclusively by the
@@ -3013,58 +3027,28 @@ pub(crate) fn demand_whnf_ssaval(
     Ok(SsaVal::HeapPtr(forced))
 }
 
-/// Force a thunked SsaVal to WHNF. If the value is a HeapPtr pointing to a
-/// TAG_THUNK object, emit code to call `heap_force` and return the result.
-/// Raw values and non-thunk HeapPtrs pass through unchanged.
-pub(crate) fn force_thunk_ssaval(
-    pipeline: &mut CodegenPipeline,
-    builder: &mut FunctionBuilder,
-    vmctx: Value,
-    val: SsaVal,
-) -> Result<SsaVal, EmitError> {
-    match val {
-        SsaVal::Raw(_, _) => Ok(val),
-        SsaVal::HeapPtr(ptr) => {
-            let tag = builder.ins().load(types::I8, MemFlags::trusted(), ptr, 0);
-            let is_thunk = builder
-                .ins()
-                .icmp_imm(IntCC::Equal, tag, layout::TAG_THUNK as i64);
-
-            let force_block = builder.create_block();
-            let ready_block = builder.create_block();
-            builder.append_block_param(ready_block, types::I64);
-
-            builder.ins().brif(
-                is_thunk,
-                force_block,
-                &[],
-                ready_block,
-                &[BlockArg::Value(ptr)],
-            );
-
-            builder.switch_to_block(force_block);
-            builder.seal_block(force_block);
-
-            let force_fn = pipeline
-                .module
-                .declare_function(
-                    "heap_force",
-                    Linkage::Import,
-                    &crate::emit::heap_force_sig(pipeline.isa.default_call_conv()),
-                )
-                .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-            let force_ref = pipeline.module.declare_func_in_func(force_fn, builder.func);
-            let call = builder.ins().call(force_ref, &[vmctx, ptr]);
-            let forced = builder.inst_results(call)[0];
-            builder.declare_value_needs_stack_map(forced);
-            builder.ins().jump(ready_block, &[BlockArg::Value(forced)]);
-
-            builder.switch_to_block(ready_block);
-            builder.seal_block(ready_block);
-            let result = builder.block_params(ready_block)[0];
-            builder.declare_value_needs_stack_map(result);
-            Ok(SsaVal::HeapPtr(result))
-        }
+/// Materialize a lifted value without demanding it. Constructor fields and
+/// lazy primitive operands share thunk capture and heap-boxing semantics.
+fn emit_lazy_heap_value(args: EmitArgs, idx: usize) -> Result<Value, EmitError> {
+    if is_trivial_field(idx, args.sess.tree) {
+        let val = EmitContext::emit_node(
+            EmitArgs {
+                ctx: args.ctx,
+                sess: args.sess,
+                builder: args.builder,
+                tail: TailCtx::NonTail,
+            },
+            idx,
+        )?;
+        Ok(ensure_heap_ptr(
+            args.builder,
+            args.sess.vmctx,
+            args.sess.gc_sig,
+            args.sess.oom_func,
+            val,
+        ))
+    } else {
+        Ok(emit_thunk(args, idx)?.value())
     }
 }
 
