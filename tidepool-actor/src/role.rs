@@ -63,6 +63,7 @@ pub enum ActorEffectKey {
     WorktreeRegistry,
     WorktreeAllocation,
     WorktreeIntegration,
+    Notifications,
 }
 
 impl ActorEffectKey {
@@ -79,6 +80,7 @@ impl ActorEffectKey {
             Self::WorktreeRegistry => "WorktreeRegistry",
             Self::WorktreeAllocation => "WorktreeAllocation",
             Self::WorktreeIntegration => "WorktreeIntegration",
+            Self::Notifications => "Notifications",
         }
     }
 }
@@ -118,6 +120,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeRegistry,
                 ActorEffectKey::WorktreeAllocation,
                 ActorEffectKey::WorktreeIntegration,
+                ActorEffectKey::Notifications,
             ],
         )
     }
@@ -141,6 +144,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentInspection,
                 ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
+                ActorEffectKey::Notifications,
             ],
         )
     }
@@ -165,6 +169,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
+                ActorEffectKey::Notifications,
             ],
         )
     }
@@ -199,6 +204,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentInspection,
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
+                ActorEffectKey::Notifications,
             ],
         )
     }
@@ -422,7 +428,7 @@ mod tests {
     fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
             EffectiveRole::research().haskell_effects_type(),
-            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree]"
+            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Notifications]"
         );
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");

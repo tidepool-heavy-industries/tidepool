@@ -78,6 +78,8 @@ pub struct LocalResidentInstallation {
 
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
+    NotificationSend(Arc<crate::NotificationSend>),
+    NotificationPoll(Arc<crate::NotificationPoll>),
     PolicyInstalled(LocalResidentInstallation),
     /// A resident program opened another typed session in an already-running
     /// interactive application. The message is an ordinary User activation;
@@ -1923,6 +1925,80 @@ where
                     self.record_child_observation(poll.target);
                 }
                 Ok(outcome)
+            }
+            ResidentActorBoundary::NotificationSend {
+                continuation,
+                target,
+                message,
+            } => {
+                let permitted = self
+                    .descriptor
+                    .effective_role()
+                    .effect_keys()
+                    .contains(&crate::ActorEffectKey::Notifications);
+                let destination = kernel.resolve(target).zip(kernel.session_context(target));
+                let outcome = if !permitted {
+                    Err(crate::NotificationError::Unauthorized)
+                } else if destination.as_ref().is_none_or(|(actor, target_context)| {
+                    actor.terminal().get().is_some()
+                        || target_context.placement.session != context.placement.session
+                }) {
+                    Err(crate::NotificationError::Unavailable)
+                } else {
+                    let (command, receive) =
+                        crate::NotificationSend::new(context.actor, target, message);
+                    if self
+                        .environment
+                        .deployments
+                        .send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
+                        .is_err()
+                    {
+                        Err(crate::NotificationError::Unavailable)
+                    } else {
+                        crate::notification::receive_admission(receive)
+                            .await
+                            .and_then(crate::NotificationReceipt::into_wire)
+                    }
+                };
+                self.environment
+                    .runner
+                    .resume_notification(context.clone(), continuation, outcome)
+                    .await
+            }
+            ResidentActorBoundary::NotificationPoll {
+                continuation,
+                receipt,
+            } => {
+                let permitted = self
+                    .descriptor
+                    .effective_role()
+                    .effect_keys()
+                    .contains(&crate::ActorEffectKey::Notifications);
+                let prepared = if permitted {
+                    crate::NotificationReceipt::from_wire(receipt)
+                        .and_then(|receipt| crate::NotificationPoll::new(context.actor, receipt))
+                } else {
+                    Err(crate::NotificationError::Unauthorized)
+                };
+                let outcome = match prepared {
+                    Err(error) => Err(error),
+                    Ok((command, receive)) => {
+                        if self
+                            .environment
+                            .deployments
+                            .send(LocalResidentDeployment::NotificationPoll(Arc::new(command)))
+                            .is_err()
+                        {
+                            Err(crate::NotificationError::Unavailable)
+                        } else {
+                            crate::notification::receive_observation(receive).await
+                        }
+                    }
+                };
+                self.environment
+                    .runner
+                    .resume_notification(context.clone(), continuation, outcome)
+                    .await
             }
             ResidentActorBoundary::RequestReservation(reservation) => {
                 crate::ActorPathSegment::new(&reservation.label).map_err(|error| {

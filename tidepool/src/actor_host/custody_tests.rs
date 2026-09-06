@@ -164,6 +164,8 @@ fn custody_event_description(event: &LocalResidentDeployment) -> String {
         LocalResidentDeployment::SessionReady { activation } => {
             format!("SessionReady {activation:?}")
         }
+        LocalResidentDeployment::NotificationSend(_) => "NotificationSend".into(),
+        LocalResidentDeployment::NotificationPoll(_) => "NotificationPoll".into(),
         LocalResidentDeployment::RequestUpdate { .. } => "RequestUpdate".into(),
         LocalResidentDeployment::ChildExited { notice } => format!(
             "ChildExited owner={:?} child={:?} terminal={:?}",

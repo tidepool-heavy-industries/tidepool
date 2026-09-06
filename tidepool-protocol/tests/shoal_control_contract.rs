@@ -171,3 +171,39 @@ fn group_inspection_uses_an_identity_and_can_report_unavailability() {
         HsType::maybe(HsType::list(HsType::Named("AgentRosterEntry")))
     );
 }
+
+#[test]
+fn notifications_have_one_way_admission_and_owner_receipt_observation() {
+    let effect = tidepool_protocol::effects::notifications::notifications();
+    assert!(effect.validate().is_ok());
+    assert_eq!(
+        effect
+            .verbs
+            .iter()
+            .map(|verb| verb.ctor)
+            .collect::<Vec<_>>(),
+        ["NotifyWith", "PollNotificationWith"]
+    );
+    let address = HsType::Tuple(vec![HsType::Int, HsType::Int]);
+    let receipt = HsType::Tuple(vec![
+        address.clone(),
+        HsType::Tuple(vec![
+            address.clone(),
+            HsType::Tuple(vec![HsType::Text, HsType::Int]),
+        ]),
+    ]);
+    assert_eq!(effect.verbs[0].args[0].ty, address);
+    assert_eq!(
+        effect.verbs[0].ret,
+        HsType::either(HsType::Named("NotificationError"), receipt.clone())
+    );
+    assert_eq!(effect.verbs[1].args[0].ty, receipt);
+    assert_eq!(
+        effect.verbs[1].ret,
+        HsType::either(
+            HsType::Named("NotificationError"),
+            HsType::Named("NotificationState")
+        )
+    );
+    assert!(!format!("{effect:?}").contains("Reply "));
+}

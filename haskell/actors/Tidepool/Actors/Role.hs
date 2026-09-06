@@ -18,6 +18,7 @@ module Tidepool.Actors.Role
   , AgentLaunch
   , AgentInspection
   , AgentControl
+  , Notifications
   , BoundWorktree
   , WorktreeRegistry
   , WorktreeAllocation
@@ -46,6 +47,7 @@ import Tidepool.Agent.Watch (Watches)
 import Tidepool.Effects.Core
   ( ActorContext
   , AgentControl
+  , Notifications
   , AgentInspection
   , AgentLaunch
   , BoundWorktree
@@ -101,27 +103,28 @@ instance KnownEffect WorktreeRegistry where effectWitness = EffectWitness Effect
 instance KnownEffect WorktreeAllocation where effectWitness = EffectWitness EffectWorktreeAllocation
 instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness EffectWorktreeIntegration
 instance KnownEffect Forks where effectWitness = EffectWitness EffectForks
+instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
 
-type CoreEffects = '[Replies, Watches, ActorContext]
-type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree]
+type CoreEffects = '[Replies, Watches, ActorContext, Notifications]
+type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications]
 type ResearchEffects = ResearchCoordinatorEffects
 type ResearchCoordinatorEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree
+   , AgentInspection, AgentControl, BoundWorktree, Notifications
    ]
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeIntegration
+   , WorktreeIntegration, Notifications
    ]
 type ScaffoldEffects = CodingEffects
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
-   , AgentInspection, BoundWorktree, WorktreeIntegration
+   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications
    ]
 type RootEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration
+   , WorktreeIntegration, Notifications
    ]

@@ -48,6 +48,11 @@ module Tidepool.Actors.Internal.Agent
   , forgetAgent
   , StopOutcome (..)
   , stopAgent
+  , notify
+  , pollNotification
+  , NotificationReceipt
+  , NotificationError (..)
+  , NotificationState (..)
   ) where
 
 import Control.Monad.Freer (Eff, Member, raise, send)
@@ -86,6 +91,9 @@ import Tidepool.Effects.Core
   , ActorKernel (..)
   , ActorLaunchRole (..)
   , AgentControl (..)
+  , Notifications (..)
+  , NotificationError (..)
+  , NotificationState (..)
   , AgentStopControlOutcome (..)
   , AgentInspection (..)
   , AgentLaunch (..)
@@ -601,3 +609,13 @@ agentRole (ReadonlyWorktreeAgent _) = Actor.ResearchRole
 agentRole (CodingAgent _) = Actor.CodingRole
 agentRole (ScaffoldingAgent _) = Actor.ScaffoldingRole
 agentRole (IntegrationAgent _) = Actor.IntegrationRole
+
+
+-- | Observation locator only. Rust checks the caller and exact inbox row.
+newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))
+
+notify :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)
+notify (AgentRef target _) message = fmap (fmap NotificationReceipt) (send (NotifyWith (actorAddress target) message))
+
+pollNotification :: Member Notifications effs => NotificationReceipt -> Eff effs (Either NotificationError NotificationState)
+pollNotification (NotificationReceipt receipt) = send (PollNotificationWith receipt)

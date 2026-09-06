@@ -293,7 +293,8 @@ struct InteractiveDeployment {
     local_actor: LocalActorRef,
     pane: TmuxPaneId,
     workspace: PathBuf,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
+    notification_inbox_key: String,
     connection: InteractiveConnection,
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: PathBuf,
@@ -375,15 +376,23 @@ struct LaunchedInteractiveApplication {
 
 struct OwnerNotification {
     owner: ActorRef,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
+}
+
+type ActorInbox = DurableInbox<DurableActorEvent, NotificationProvenance>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NotificationProvenance {
+    sender: ActorRef,
+    target: ActorRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum DurableActorEvent {
     Typed(TypedActorEvent),
-    Legacy(String),
+    Text(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,7 +454,7 @@ impl DurableActorEvent {
                 actor.id.0, actor.incarnation.0,
             ),
             Self::Typed(TypedActorEvent::SessionReady { message, .. }) => message.clone(),
-            Self::Legacy(message) => message.clone(),
+            Self::Text(message) => message.clone(),
             Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
                 "watch {} {:?}: {:?} → {:?} ({}). Poll its retained handle with `pollWatch`.",
                 notification.watch.0,
@@ -939,6 +948,7 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_context_decl(),
         tidepool_mcp::agent_control_decl(),
+        tidepool_mcp::notifications_decl(),
         tidepool_mcp::agent_inspection_decl(),
         tidepool_mcp::agent_launch_decl(),
         tidepool_mcp::forks_decl(),
@@ -1329,6 +1339,21 @@ async fn run_interactive_applications(
                                 ).await
                             });
                         }
+                    }
+                    LocalResidentDeployment::NotificationSend(command) => {
+                        // No correlated notification controller is installed yet.
+                        // Reject before publication rather than route through legacy push.
+                        command.rejected(tidepool_actor::NotificationError::Unavailable);
+                    }
+                    LocalResidentDeployment::NotificationPoll(command) => {
+                        let result = deployments.iter()
+                            .find(|application| application.actor == command.receipt().target())
+                            .ok_or(tidepool_actor::NotificationError::Unavailable)
+                            .and_then(|application| observe_notification_receipt(
+                                &command, application.actor,
+                                &application.notification_inbox_key, &application.inbox,
+                            ));
+                        command.observed(result);
                     }
                     LocalResidentDeployment::RequestUpdate { delivery } => {
                         let target = delivery.target();
@@ -1916,7 +1941,7 @@ async fn launch_prepared_interactive_application(
         actor_root.join("binding.json")
     };
     let inbox = Arc::new(
-        DurableInbox::<DurableActorEvent>::open(
+        ActorInbox::open(
             actor_root.join("inbox.jsonl"),
             actor_root.join("inbox.cursor"),
         )
@@ -2137,6 +2162,12 @@ async fn launch_prepared_interactive_application(
             pane,
             workspace,
             inbox,
+            notification_inbox_key: format!(
+                "{}:{}:{}",
+                runtime_namespace(&run_root),
+                actor_identity.id.0,
+                actor_identity.incarnation.0
+            ),
             connection: InteractiveConnection::AwaitingBinding,
             service,
             socket_root,
@@ -2237,9 +2268,49 @@ fn orient_launch_instructions(
     }
 }
 
+fn observe_notification_receipt(
+    command: &tidepool_actor::NotificationPoll,
+    target: ActorRef,
+    inbox_key: &str,
+    inbox: &ActorInbox,
+) -> Result<tidepool_actor::NotificationState, tidepool_actor::NotificationError> {
+    use tidepool_actor::{NotificationError, NotificationState};
+    use tidepool_node::{DeliveryPhase, ReceiptLookup};
+    let receipt = command.receipt();
+    if receipt.owner() != command.owner() {
+        return Err(NotificationError::Unauthorized);
+    }
+    if receipt.target() != target || receipt.inbox() != inbox_key {
+        return Err(NotificationError::InvalidReceipt);
+    }
+    match inbox
+        .observe_receipt(receipt.sequence())
+        .map_err(|error| NotificationError::StorageFailure(error.to_string()))?
+    {
+        ReceiptLookup::Unavailable => Err(NotificationError::Unavailable),
+        ReceiptLookup::Retained(evidence) => {
+            if evidence.context
+                != (NotificationProvenance {
+                    sender: command.owner(),
+                    target,
+                })
+            {
+                return Err(NotificationError::Unauthorized);
+            }
+            Ok(match evidence.phase {
+                DeliveryPhase::Accepted => NotificationState::Accepted,
+                DeliveryPhase::Presented => NotificationState::Presented,
+                DeliveryPhase::InFlight | DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed => {
+                    NotificationState::Unconfirmed
+                }
+            })
+        }
+    }
+}
+
 async fn deliver_pending(
     actor: ActorRef,
-    inbox: &Arc<DurableInbox<DurableActorEvent>>,
+    inbox: &Arc<ActorInbox>,
     thread: &QueueReadyThread,
     backend: &dyn InteractiveAgentBackend,
     workspace: &Path,
@@ -2247,7 +2318,7 @@ async fn deliver_pending(
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
-    let pending = tokio::task::spawn_blocking(move || pending_inbox.pending())
+    let pending = tokio::task::spawn_blocking(move || pending_inbox.legacy_pending_prefix())
         .await
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
@@ -2310,7 +2381,7 @@ async fn deliver_pending(
 
 async fn run_delivery_pump(
     actor: ActorRef,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     thread: QueueReadyThread,
     backend: Arc<dyn InteractiveAgentBackend>,
     workspace: PathBuf,
@@ -2387,14 +2458,14 @@ async fn publish_owner_notification(
 
 async fn publish_inbox_event_for(
     actor: ActorRef,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
 ) -> (ActorRef, Result<(), String>) {
     (actor, publish_inbox_event(inbox, event).await)
 }
 
 async fn publish_inbox_event(
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -3219,7 +3290,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let rows = directory.path().join("rows");
         let cursor = directory.path().join("cursor");
-        let inbox = Arc::new(DurableInbox::open(rows.clone(), cursor.clone()).unwrap());
+        let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor.clone()).unwrap());
         let notice = |turn: &str, revision| {
             DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
                 actor: tidepool_actor::ActorRef::first(tidepool_actor::ActorId(7)),
@@ -3238,7 +3309,7 @@ mod tests {
         assert_eq!(inbox.pending().unwrap().len(), 1);
         inbox.acknowledge(1).unwrap();
         drop(inbox);
-        let inbox = Arc::new(DurableInbox::open(rows, cursor).unwrap());
+        let inbox = Arc::new(ActorInbox::open(rows, cursor).unwrap());
         publish_inbox_event(inbox.clone(), notice("first", 10))
             .await
             .unwrap();
@@ -3752,7 +3823,7 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<DurableActorEvent>(serde_json::json!("old notice"))
                 .expect("decode legacy actor event"),
-            DurableActorEvent::Legacy("old notice".into())
+            DurableActorEvent::Text("old notice".into())
         );
     }
 
@@ -3802,14 +3873,344 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notification_admission_and_poll_preserve_typed_request_bindings() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/notification_setup.hs"),
+        )
+        .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let child = match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            LocalResidentDeployment::PolicyInstalled(child) => child,
+            _ => panic!("expected recipient policy"),
+        };
+        let activation =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::SessionReady { activation } => activation,
+                _ => panic!("expected original request activation"),
+            };
+        assert_eq!(activation.id.actor(), child.actor.identity());
+        let directory = tempfile::tempdir().unwrap();
+        let inbox = ActorInbox::open(
+            directory.path().join("rows"),
+            directory.path().join("cursor"),
+        )
+        .unwrap();
+        let inbox_key = "notification-test-inbox";
+        let policy = root.clone();
+        let send = tokio::spawn(async move {
+            dispatch_haskell_script(
+                policy.as_ref(),
+                "Right receipt <- notify worker \"one-way notice\"",
+            )
+            .await
+        });
+        let command =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::NotificationSend(command) => command,
+                _ => panic!("notification fabricated another activation"),
+            };
+        assert_eq!(command.owner(), campaign.actor.identity());
+        assert_eq!(command.target(), child.actor.identity());
+        // This is real durable admission through the interpreter handoff, not a
+        // native presentation fixture. Production send remains unavailable.
+        let envelope = inbox
+            .publish_tracked(
+                DurableActorEvent::Text(command.message().to_owned()),
+                NotificationProvenance {
+                    sender: command.owner(),
+                    target: command.target(),
+                },
+            )
+            .unwrap();
+        command.admitted(inbox_key.into(), envelope.sequence);
+        let sent = send.await.unwrap();
+        assert_eq!(sent["status"], "committed", "{sent:?}");
+        let policy = root.clone();
+        let poll = tokio::spawn(async move {
+            dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
+        });
+        let poll_command =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::NotificationPoll(command) => command,
+                _ => panic!("poll fabricated another activation"),
+            };
+        let result =
+            observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox);
+        assert_eq!(result, Ok(tidepool_actor::NotificationState::Accepted));
+        assert_eq!(
+            observe_notification_receipt(
+                &poll_command,
+                child.actor.identity(),
+                "foreign-inbox",
+                &inbox
+            ),
+            Err(tidepool_actor::NotificationError::InvalidReceipt)
+        );
+        let foreign_directory = tempfile::tempdir().unwrap();
+        let foreign = ActorInbox::open(
+            foreign_directory.path().join("rows"),
+            foreign_directory.path().join("cursor"),
+        )
+        .unwrap();
+        assert_eq!(
+            observe_notification_receipt(
+                &poll_command,
+                child.actor.identity(),
+                inbox_key,
+                &foreign
+            ),
+            Err(tidepool_actor::NotificationError::Unavailable)
+        );
+        foreign
+            .publish_tracked(
+                DurableActorEvent::Text("another sender".into()),
+                NotificationProvenance {
+                    sender: child.actor.identity(),
+                    target: child.actor.identity(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            observe_notification_receipt(
+                &poll_command,
+                child.actor.identity(),
+                inbox_key,
+                &foreign
+            ),
+            Err(tidepool_actor::NotificationError::Unauthorized)
+        );
+        let stale = ActorRef {
+            incarnation: tidepool_actor::Incarnation(child.actor.identity().incarnation.0 + 1),
+            ..child.actor.identity()
+        };
+        assert_eq!(
+            observe_notification_receipt(&poll_command, stale, inbox_key, &inbox),
+            Err(tidepool_actor::NotificationError::InvalidReceipt)
+        );
+        drop(inbox);
+        let inbox = ActorInbox::open(
+            directory.path().join("rows"),
+            directory.path().join("cursor"),
+        )
+        .unwrap();
+        assert_eq!(
+            observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox),
+            Ok(tidepool_actor::NotificationState::Accepted)
+        );
+        // Submitted transport acceptance is explicitly NOT model presentation.
+        inbox
+            .begin_tracked_delivery(envelope.sequence)
+            .unwrap()
+            .submitted()
+            .unwrap();
+        assert_eq!(
+            observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox),
+            Ok(tidepool_actor::NotificationState::Unconfirmed)
+        );
+        poll_command.observed(result);
+        let observed = poll.await.unwrap();
+        assert_eq!(observed["status"], "committed", "{observed:?}");
+        assert!(
+            observed.to_string().contains("NotificationAccepted"),
+            "{observed:?}"
+        );
+        let unchanged =
+            dispatch_haskell_script(child.policy.as_ref(), "inspectFull sessionInput").await;
+        assert_eq!(unchanged["status"], "committed", "{unchanged:?}");
+        assert!(
+            unchanged.to_string().contains("original assignment"),
+            "{unchanged:?}"
+        );
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "notification created an assignment/wake obligation"
+        );
+        let reply =
+            dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
+        assert_eq!(reply["status"], "replied", "{reply:?}");
+        let answer =
+            dispatch_haskell_script(root.as_ref(), "inspectFull <$> pollResponse answer").await;
+        assert_eq!(answer["status"], "committed", "{answer:?}");
+        assert!(
+            answer.to_string().contains("original assignment"),
+            "{answer:?}"
+        );
+        let root_reply = dispatch_haskell_script(root.as_ref(), ":type respond").await;
+        assert!(
+            root_reply
+                .to_string()
+                .to_lowercase()
+                .contains("not in scope"),
+            "{root_reply:?}"
+        );
+        let idle_setup = dispatch_haskell_script(
+            root.as_ref(),
+            "idle <- startAgent (readonlyAgent \"idle-notification-recipient\")",
+        )
+        .await;
+        assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
+        let idle = match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            LocalResidentDeployment::PolicyInstalled(child) => child,
+            _ => panic!("expected never-assigned recipient policy"),
+        };
+        let policy = root.clone();
+        let idle_send = tokio::spawn(async move {
+            dispatch_haskell_script(
+                policy.as_ref(),
+                "Right idleReceipt <- notify idle \"idle notice\"",
+            )
+            .await
+        });
+        let command =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::NotificationSend(command) => command,
+                _ => panic!("idle notification fabricated request activation"),
+            };
+        assert_eq!(command.target(), idle.actor.identity());
+        let idle_directory = tempfile::tempdir().unwrap();
+        let idle_inbox = ActorInbox::open(
+            idle_directory.path().join("rows"),
+            idle_directory.path().join("cursor"),
+        )
+        .unwrap();
+        let row = idle_inbox
+            .publish_tracked(
+                DurableActorEvent::Text(command.message().into()),
+                NotificationProvenance {
+                    sender: command.owner(),
+                    target: command.target(),
+                },
+            )
+            .unwrap();
+        command.admitted("idle-inbox".into(), row.sequence);
+        let admitted = idle_send.await.unwrap();
+        assert_eq!(admitted["status"], "committed", "{admitted:?}");
+        for name in ["respond", "sessionReply", "sessionInput"] {
+            let absent =
+                dispatch_haskell_script(idle.policy.as_ref(), &format!(":type {name}")).await;
+            assert!(
+                absent.to_string().to_lowercase().contains("not in scope"),
+                "idle recipient gained {name}: {absent:?}"
+            );
+        }
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "idle admission fabricated an activation"
+        );
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_barrier_never_enters_legacy_push_or_batch_ack() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = Arc::new(
+            ActorInbox::open(root.path().join("rows"), root.path().join("cursor")).unwrap(),
+        );
+        let target = ActorRef::first(tidepool_actor::ActorId(7));
+        inbox
+            .publish(DurableActorEvent::Text("ordinary prefix".into()))
+            .unwrap();
+        inbox
+            .publish_tracked(
+                DurableActorEvent::Text("one-way text".into()),
+                NotificationProvenance {
+                    sender: ActorRef::first(tidepool_actor::ActorId(8)),
+                    target,
+                },
+            )
+            .unwrap();
+        inbox
+            .publish(DurableActorEvent::Text("ordinary suffix".into()))
+            .unwrap();
+        // An old envelope decoder ignores receipt metadata but must accept every
+        // payload before it gets the chance to reject the upgraded checkpoint.
+        // A schema-invalid final row could otherwise trigger old tail repair.
+        #[derive(Deserialize)]
+        struct OldTextEnvelope {
+            sequence: u64,
+            payload: String,
+        }
+        let rows = std::fs::read_to_string(root.path().join("rows")).unwrap();
+        let old_rows = rows
+            .lines()
+            .map(|line| serde_json::from_str::<OldTextEnvelope>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(old_rows.len(), 3);
+        assert_eq!(old_rows[1].sequence, 2);
+        assert_eq!(old_rows[1].payload, "one-way text");
+        let backend = ScriptedPush {
+            fail: std::sync::atomic::AtomicBool::new(false),
+            messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let binding = root.path().join("binding.json");
+        tidepool_agent::accept_interactive_session_binding(
+            &binding,
+            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
+        )
+        .await
+        .unwrap();
+        let thread = tidepool_agent::read_interactive_binding(&binding)
+            .await
+            .unwrap();
+        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        for _ in 0..2 {
+            deliver_pending(target, &inbox, &thread, &backend, root.path(), &observation)
+                .await
+                .unwrap();
+        }
+        assert_eq!(*backend.messages.lock().unwrap(), vec!["ordinary prefix"]);
+        assert_eq!(inbox.cursor(), 1);
+        assert_eq!(inbox.watermark(), 3);
+        assert!(matches!(
+            inbox.pending(),
+            Err(tidepool_node::InboxError::TrackedBarrier { sequence: 2 })
+        ));
+        assert!(inbox.legacy_pending_prefix().unwrap().is_empty());
+        assert!(matches!(
+            inbox.observe_receipt(2).unwrap(),
+            tidepool_node::ReceiptLookup::Retained(evidence)
+                if evidence.phase == tidepool_node::DeliveryPhase::Accepted
+        ));
+    }
+
+    #[tokio::test]
     async fn native_push_acknowledges_only_after_acceptance_and_retries_the_same_row() {
         let root = tempfile::tempdir().expect("inbox root");
         let inbox = Arc::new(
-            DurableInbox::open(root.path().join("rows"), root.path().join("cursor"))
+            ActorInbox::open(root.path().join("rows"), root.path().join("cursor"))
                 .expect("open inbox"),
         );
         inbox
-            .publish(DurableActorEvent::Legacy("child completed".into()))
+            .publish(DurableActorEvent::Text("child completed".into()))
             .expect("publish");
         let backend = ScriptedPush {
             fail: std::sync::atomic::AtomicBool::new(true),
@@ -3863,7 +4264,7 @@ mod tests {
             tidepool_actor::ActorActivationKind::RootStarted
         );
         inbox
-            .publish(DurableActorEvent::Legacy("second event".into()))
+            .publish(DurableActorEvent::Text("second event".into()))
             .expect("publish second event");
 
         backend
