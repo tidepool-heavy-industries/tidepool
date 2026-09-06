@@ -55,7 +55,7 @@ module MinimalWatchListHarness
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
 import Tidepool.Async (async, wait)
-import Tidepool.Effects (Watch (..), liftEither, mailboxNew)
+import Tidepool.Effects (EventWatch (..), liftEither, mailboxNew)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 
@@ -75,7 +75,7 @@ render st = [fmt|Minimal watch-list probe. Runs: {runs st}.|]
 -- | Captures `[WatchMailbox downMid]` (a bare list, no closure) but never
 -- reads it — matching `forkNode`'s own `NodeCtx` construction, which the
 -- body it hands to is equally free to ignore.
-asyncBody :: Int -> [Watch] -> Harness Int
+asyncBody :: Int -> [EventWatch] -> Harness Int
 asyncBody _upMid _watches = pure 0
 
 loop :: State -> Harness State

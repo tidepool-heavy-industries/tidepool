@@ -73,7 +73,7 @@ fn body(e: &Effect) -> String {
     out.push('\n');
 
     // A `foreign_types` entry names a wire type another effect's OWN generated
-    // module declares (Event's `Watch` etc. name Worktree's `WtWorktreeId`).
+    // module declares (Event's `EventWatch` etc. name Worktree's `WtWorktreeId`).
     // Every generated wire module lives in `tidepool-bridge-effects`, and the
     // crate root flattens every effect's module (`pub use generated::*;`), so
     // the foreign name is reachable at `crate::<Name>` regardless of which

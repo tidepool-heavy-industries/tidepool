@@ -1,6 +1,6 @@
 //! The pin for `gen::wire_rs`'s Event (`RepoEvent`) output — the same proof
 //! `worktree_wire_rust.rs` gives Worktree, extended with the cross-effect
-//! `foreign_types` reference (`Watch`/`HeadChangeKind`/`HeadChangeReceipt`/
+//! `foreign_types` reference (`EventWatch`/`HeadChangeKind`/`HeadChangeReceipt`/
 //! `CommitReceipt` all name Worktree's OWN types) that Worktree's lane never
 //! exercised.
 //!

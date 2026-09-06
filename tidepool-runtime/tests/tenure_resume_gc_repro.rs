@@ -79,7 +79,7 @@ const OUTER_ID: DataConId = DataConId(8);
 /// `Pair a b` — carries the shared free variable alongside whatever else a
 /// continuation produces, so its value is directly observable in the result.
 const PAIR_ID: DataConId = DataConId(9);
-/// `Event a = Event { eventWatches :: [Watch], eventProject :: r -> Maybe a }`
+/// `Event a = Event { eventWatches :: [EventWatch], eventProject :: r -> Maybe a }`
 /// (`tidepool-mcp/src/effect_defs.rs`'s generated shape) — a 2-field Con
 /// whose fields are a LIST and a CLOSURE.
 const EVENT_ID: DataConId = DataConId(10);
@@ -1570,7 +1570,7 @@ fn tiny_handled_session() -> ResidentSession<HandledThenSuspend, TestSink> {
         TestSink::default(),
         Vec::new(),
         // Deliberately tiny: forces REAL, in-flight `gc_trigger`s during
-        // ordinary allocation (Event/Watch/list/closure construction) —
+        // ordinary allocation (Event/EventWatch/list/closure construction) —
         // unlike `force_gc_for_test`, which always runs with ZERO live JIT
         // stack frames and so can never exercise a stack-map coverage gap
         // for a value still live in a register/stack slot (not yet in any

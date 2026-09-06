@@ -20,7 +20,7 @@ pub struct EvSubscriptionId {
     pub raw: i64,
 }
 
-/// Haskell `Watch` — one (worktree, kind) pair a subscription observes, or a
+/// Haskell `EventWatch` — one (worktree, kind) pair a subscription observes, or a
 /// one-shot deadline. `<|>` concatenates watches, so a merged `Event` is ONE
 /// subscription over several watches rather than several subscriptions.
 /// `WatchDeadline` carries a RELATIVE millisecond duration: the runtime fixes

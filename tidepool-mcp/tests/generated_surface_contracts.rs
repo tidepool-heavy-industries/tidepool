@@ -169,7 +169,7 @@ fn worktree_decl_imports_the_module_that_defines_the_relocated_helpers() {
 /// The FOUR helpers `tidepool-protocol`'s Event schema represents — thin
 /// wrappers over the capability-mailbox trio plus the
 /// blocking-wait primitive `nextEvent`/`awaitFirst` build on — plus the
-/// representable TYPE declarations (`Watch`/`HeadChangeKind`/
+/// representable TYPE declarations (`EventWatch`/`HeadChangeKind`/
 /// `RepositoryEvent`/… stay generated; only `Event`/`Observed` and the
 /// `Functor` instance are non-representable, see the test below).
 #[test]
@@ -182,7 +182,7 @@ fn generated_module_carries_the_authored_event_surface() {
         "mailboxDrop ::",
         "data HeadChangeKind",
         "data RepositoryEvent",
-        "data Watch",
+        "data EventWatch",
     ] {
         assert!(
             src.contains(name),
