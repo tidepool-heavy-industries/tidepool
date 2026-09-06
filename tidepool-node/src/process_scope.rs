@@ -55,6 +55,8 @@ pub struct PreparedServiceScope {
     boundary: ProcessMountBoundary,
     bubblewrap: PathBuf,
     command: ProcessInvocation,
+    #[cfg(test)]
+    omit_sync_hold: bool,
 }
 
 impl PreparedServiceScope {
@@ -70,6 +72,8 @@ impl PreparedServiceScope {
             boundary,
             bubblewrap,
             command,
+            #[cfg(test)]
+            omit_sync_hold: false,
         })
     }
 
@@ -77,6 +81,13 @@ impl PreparedServiceScope {
     /// its Child and every gate/witness resource into the noncloneable owner.
     /// The caller must not independently reap this private direct child or set
     /// SIGCHLD to automatic reaping while its init identity is being acquired.
+    ///
+    /// The executable must be host-trusted bubblewrap compatible with 0.11.0:
+    /// default PID-namespace init, blocking block-fd and init-retained sync-fd.
+    /// Cleanup relies on Linux ordering audited at v6.12.63: namespace init
+    /// drains namespace processes before publishing exit/pidfd readiness.
+    /// These prerequisites are not established by checking an executable path
+    /// or kernel version string. This API does not attest either binary.
     pub fn spawn(
         self,
         environment: ServiceEnvironment,
@@ -89,12 +100,14 @@ impl PreparedServiceScope {
         // Only the info reader is nonblocking. EAGAIN on bwrap's gate would
         // release the command because bwrap ignores that read's return value.
         rustix::fs::fcntl_setfl(&info_read, OFlags::NONBLOCK)?;
-        let inherited = [
+        #[allow(unused_mut)] // Mutated only by the test-only regression seam.
+        let mut inherited = vec![
             gate_read.as_raw_fd(),
             gate_hold.as_raw_fd(),
             info_write.as_raw_fd(),
         ];
-        let options = vec![
+        #[allow(unused_mut)] // Mutated only by the test-only regression seam.
+        let mut options = vec![
             "--unshare-pid".into(),
             "--proc".into(),
             "/proc".into(),
@@ -105,6 +118,12 @@ impl PreparedServiceScope {
             "--info-fd".into(),
             inherited[2].to_string(),
         ];
+        // Mutation exists only in the test build, never as a runtime fallback.
+        #[cfg(test)]
+        if self.omit_sync_hold {
+            inherited.remove(1);
+            options.drain(5..7);
+        }
         let invocation = self.boundary.wrap_with_options(
             self.bubblewrap.to_string_lossy().into_owned(),
             self.command,
@@ -125,7 +144,7 @@ impl PreparedServiceScope {
         // CLOEXEC. Their numbers are above stdio and cannot be concurrently reused.
         unsafe {
             command.pre_exec(move || {
-                for raw in inherited {
+                for &raw in &inherited {
                     rustix::io::fcntl_setfd(BorrowedFd::borrow_raw(raw), FdFlags::empty())?;
                 }
                 Ok(())
@@ -162,6 +181,7 @@ enum Phase {
     Pinned,
     Released,
     ReleaseUnconfirmed,
+    Stopping,
     Cleaned,
 }
 
@@ -309,6 +329,7 @@ impl ServiceScope {
                 "init has no validated lifetime witness; owner retained".into(),
             )
         })?;
+        self.phase = Phase::Stopping;
         match rustix::process::pidfd_send_signal(&init.pidfd, rustix::process::Signal::KILL) {
             Ok(()) | Err(Errno::SRCH) => {}
             Err(error) => return Err(ServiceScopeError::CleanupUnconfirmed(error.to_string())),

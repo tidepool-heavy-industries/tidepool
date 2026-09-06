@@ -36,6 +36,13 @@ pub struct ProcessMountBoundary {
 
 impl ProcessMountBoundary {
     /// Prepare an opt-in service scope without spawning or changing legacy wrap().
+    ///
+    /// Requires a host-trusted absolute bubblewrap executable compatible with
+    /// 0.11.0 default namespace init/block-fd/sync-fd semantics, and Linux init
+    /// exit ordering audited at v6.12.63 (namespace drain before pidfd readiness).
+    /// Path validation does not attest binary compatibility or kernel ordering;
+    /// deployment must establish these prerequisites before using cleanup as
+    /// evidence. See the prepared scope's spawn documentation.
     pub fn prepare_service_scope(
         &self,
         bubblewrap: PathBuf,

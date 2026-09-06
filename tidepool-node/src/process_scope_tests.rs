@@ -11,6 +11,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(script: &str) -> Self {
+        Self::with_sync_mutation(script, false)
+    }
+
+    fn with_sync_mutation(script: &str, omit_sync_hold: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path();
         let boundary =
@@ -22,7 +26,7 @@ impl Fixture {
                     "/nix/store/dqzmpjz70l4lzg7lmc3x8wih74nh5bpc-bubblewrap-0.11.0/bin/bwrap",
                 )
             });
-        let prepared = boundary
+        let mut prepared = boundary
             .prepare_service_scope(
                 bwrap,
                 ProcessInvocation {
@@ -31,6 +35,7 @@ impl Fixture {
                 },
             )
             .unwrap();
+        prepared.omit_sync_hold = omit_sync_hold;
         let log = File::create(path.join("output")).unwrap();
         let scope = prepared.spawn(ServiceEnvironment::default(), log).unwrap();
         Self { scope, directory }
@@ -62,6 +67,25 @@ impl Fixture {
         }
     }
 
+    fn observe_still_blocked(&self) {
+        // No init signal occurs in this observation interval. Polling its exact
+        // witness must time out, then the init must still be blocked in read.
+        let error = wait_readable(
+            &self.scope.init.as_ref().unwrap().pidfd,
+            Instant::now() + Duration::from_millis(250),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let pid = self.scope.info_record.as_ref().unwrap().pid;
+        assert_eq!(
+            std::fs::read_to_string(format!("/proc/{pid}/wchan"))
+                .unwrap()
+                .trim(),
+            "pipe_read"
+        );
+        self.absent();
+    }
+
     fn absent(&self) {
         assert!(!self.directory.path().join("started").exists());
     }
@@ -84,6 +108,7 @@ fn scope_gate_writer_close_does_not_release() {
     fixture.pin();
     fixture.absent();
     fixture.scope.gate.take();
+    fixture.observe_still_blocked();
     fixture.scope.terminate_and_wait(deadline()).unwrap();
     fixture.absent();
 }
@@ -94,6 +119,9 @@ fn scope_monitor_death_before_release_does_not_start() {
     fixture.pin();
     fixture.scope.gate.take();
     fixture.scope.monitor.kill().unwrap();
+    fixture.scope.monitor_status = Some(fixture.scope.monitor.wait().unwrap());
+    assert!(fixture.scope.cleanup.is_none());
+    fixture.observe_still_blocked();
     fixture.scope.terminate_and_wait(deadline()).unwrap();
     fixture.absent();
 }
@@ -145,6 +173,10 @@ fn scope_timeout_retains_owner_then_confirms_both_facts() {
         .is_err());
     assert!(fixture.scope.init.is_some());
     assert!(fixture.scope.cleanup.is_none());
+    assert!(matches!(
+        fixture.scope.release_command(),
+        Err(ServiceScopeError::WrongPhase)
+    ));
     fixture.scope.terminate_and_wait(deadline()).unwrap();
     assert!(fixture.scope.monitor_status.is_some());
     fixture.absent();
@@ -152,6 +184,15 @@ fn scope_timeout_retains_owner_then_confirms_both_facts() {
 
 #[test]
 fn scope_released_detached_descendants_and_output_pressure() {
+    released_descendants(false);
+}
+
+#[test]
+fn scope_monitor_death_after_detached_readiness_requires_init_evidence() {
+    released_descendants(true);
+}
+
+fn released_descendants(kill_monitor: bool) {
     use std::os::unix::net::UnixListener;
     // Python is resolved by the Nix shell. It announces readiness only after
     // setsid grandchild startup and output larger than pipe capacity.
@@ -190,6 +231,14 @@ fn scope_released_detached_descendants_and_output_pressure() {
     let mut pid = String::new();
     std::io::BufRead::read_line(&mut reader, &mut pid).unwrap();
     assert_eq!(pid, "ready\n");
+    if kill_monitor {
+        fixture.scope.monitor.kill().unwrap();
+        fixture.scope.monitor_status = Some(fixture.scope.monitor.wait().unwrap());
+        assert!(
+            fixture.scope.cleanup.is_none(),
+            "monitor wait alone must not issue receipt"
+        );
+    }
     fixture.scope.terminate_and_wait(deadline()).unwrap();
     let mut rest = String::new();
     reader.read_to_string(&mut rest).unwrap();
@@ -291,4 +340,22 @@ fn scope_malformed_and_missing_info_never_release() {
     assert!(fixture.scope.release_command().is_err());
     fixture.scope.terminate_and_wait(deadline()).unwrap();
     fixture.absent();
+}
+
+#[test]
+fn scope_omitted_sync_hold_mutation_releases_payload_on_writer_close() {
+    let mut fixture = Fixture::with_sync_mutation("echo started > started; exec sleep 30", true);
+    fixture.pin();
+    fixture.scope.gate.take();
+    // Positive detection is the mutation oracle: removing only the self-hold
+    // lets EOF launch a command without release_command ever being called.
+    let limit = deadline();
+    while !fixture.directory.path().join("started").exists() {
+        assert!(
+            Instant::now() < limit,
+            "mutation did not expose EOF release"
+        );
+        std::thread::yield_now();
+    }
+    fixture.scope.terminate_and_wait(deadline()).unwrap();
 }
