@@ -1,7 +1,6 @@
 # Glossary — the canonical vocabulary
 
-This file is the naming authority for tidepool. The rule (root `CLAUDE.md`,
-"Terminology"): **compositions of well-known industry terms beat coinage,
+This file is the naming authority for tidepool. The naming rule: **compositions of well-known industry terms beat coinage,
 even at some length cost** — every invented term is a comprehension tax on
 readers and a fluency tax on models. A coinage survives only when no
 reasonable composition of standard terms carries the distinction. New

@@ -2,8 +2,9 @@
 
 This directory describes current and pending Tidepool design work. A plan
 doc is scaffolding for in-flight work, not a home for standing truth — once
-work lands, load-bearing content is hoisted into the owning CLAUDE.md /
-charter / glossary and the plan file is deleted (git is the archive).
+work lands, load-bearing content is hoisted into the owning `AGENTS.md`, source
+contract, or focused design reference and the plan file is deleted (git is the
+archive).
 
 ## Active work
 
@@ -94,5 +95,5 @@ Small still-open items whose originating plan doc has been retired:
 - [Decision archive](decision-archive/README.md): the narrow exception to
   "inline doc-history is deleted, git is the store" — backstory whose loss
   would invite re-tripping a hazard already fixed once. Current architecture
-  contracts are NOT here; they stay in each `CLAUDE.md` (root's Key Decisions
-  Reference is authoritative and verbatim).
+  contracts belong in owning source, `AGENTS.md`, and focused design references,
+  not historical charters.
