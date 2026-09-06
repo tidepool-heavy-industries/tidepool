@@ -133,3 +133,20 @@ prompt/workflow improvement, not justification for another event registry.
 Before the next wave, tighten the owning shared instructions to make projection-
 first folding and decision-bearing progress the default; validate against existing
 prompt tests. Do not expand the permanent guide into a campaign framework.
+
+## Scoped-custody review: bounded acceptance is not product acceptance
+
+Root inspected candidate 5c3f2376 and review92ad42d0 after service progress38.
+The reviewer explicitly approved no-settle staging while documenting that Drop
+forgets the entire allocation and that no production launch consumes the owner.
+Service correctly rejected this as service-ownership acceptance and retained the
+implementer for repair around existing deployment retention. This is not a hidden
+test failure: the local permitted holes were wider than the product's acceptance
+conditions. Passing focused tests cannot close that gap.
+
+Next-wave scaffold improvement: when permitting an incomplete cleanup capability,
+name its production integration/recovery owner and acceptance gate before forking.
+A useful type-level impossibility (uninhabited quiescence proof) must not make an
+unaddressable leak look like completed retention. Fresh review exposed the limit;
+coordinator product judgment prevented premature integration. This demonstrates
+value in the tree, but also rework/critical-path cost to reduce, not a latency win.
