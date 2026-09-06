@@ -11,6 +11,9 @@ pub use inbox::{
     ReceiptEvidence, ReceiptLookup, MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_RECEIPTS,
     MAX_TOTAL_RECEIPT_CONTEXT_BYTES,
 };
+pub use process_boundary::service_scope::{
+    PreparedServiceScope, ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError,
+};
 pub use process_boundary::{
     ProcessBoundaryError, ProcessInvocation, ProcessMountBoundary, BUBBLEWRAP_PROGRAM,
 };

@@ -1,6 +1,6 @@
 //! Explicit canary consumer; never used by existing tmux launches.
 use std::time::{Duration, Instant};
-use tidepool_node::{ProcessInvocation, ProcessMountBoundary};
+use tidepool_node::{ProcessInvocation, ProcessMountBoundary, ServiceEnvironment, ServiceScope};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     let log = std::fs::File::create(workspace.join("service-scope.log"))?;
-    let mut scope = prepared.spawn(Default::default(), log)?;
+    let mut scope: ServiceScope = prepared.spawn(ServiceEnvironment::default(), log)?;
     if let Err(error) = scope.pin_init(Instant::now() + Duration::from_secs(10)) {
         // No validated init means even monitor exit cannot certify cleanup.
         let cleanup = scope.terminate_and_wait(Instant::now() + Duration::from_secs(10));
