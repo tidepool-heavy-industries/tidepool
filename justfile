@@ -89,5 +89,11 @@ shoal-console *args:
     test -d "$HOME/dev/shoal-console/.git" || { echo "missing $HOME/dev/shoal-console; initialize it first" >&2; exit 1; }
     {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-console"
 
+# Build this Shoal checkout and launch development in the fresh shoal-repl project.
+[positional-arguments]
+shoal-repl *args:
+    test -e "$HOME/dev/shoal-repl/.git" || { echo "missing $HOME/dev/shoal-repl; run shoal new ~/dev/shoal-repl first" >&2; exit 1; }
+    {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-repl"
+
 # Pre-review gate: checks, suite registration checks, and fixture freshness.
 verify: check suite-check fixtures-check

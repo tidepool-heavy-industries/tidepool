@@ -10,7 +10,7 @@ let Right domainLabel = branchLabel "domain"
 let Right reviewLabel = branchLabel "review"
 :{
 workers <- unfold (batch campaign wave) $
-  (,) <$> child (withEffort Low (coding @Report domainLabel projectHead domainPlan))
+  (,) <$> child (coding @Report domainLabel projectHead domainPlan)
       <*> child (researching @Review reviewLabel projectHead reviewPlan)
 :}
 let sharedAfterUnfold = ("ready" :: Text)
@@ -43,3 +43,8 @@ claiming either. Changing effort on an already running actor is not supported.
 Define your `Report`/`Review` types and `domainPlan`/`reviewPlan` values first.
 `projectHead` requires a clean source; choose `snapshotDirty projectHead`
 explicitly when the branches should inherit existing uncommitted changes.
+
+`coding` children can repeat the scaffold/fork/fold rhythm within their inherited
+descendant budget. Use `boundHead` when their children should start from the
+child-owned scaffold. `scaffolding` selects a scaffold emphasis with the same
+capabilities. Use a coding reviewer when review includes running checks.

@@ -2620,19 +2620,21 @@ fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
             allocate: true,
             integrate: true,
         },
-        tidepool_actor::ActorRole::Scaffolding => ActorWorktreeGrant {
-            enumerate: false,
-            allocate: true,
-            integrate: true,
-        },
+        tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Scaffolding => {
+            ActorWorktreeGrant {
+                enumerate: false,
+                allocate: true,
+                integrate: true,
+            }
+        }
         tidepool_actor::ActorRole::Integration => ActorWorktreeGrant {
             enumerate: false,
             allocate: false,
             integrate: true,
         },
-        tidepool_actor::ActorRole::Research
-        | tidepool_actor::ActorRole::Coding
-        | tidepool_actor::ActorRole::Inherited => ActorWorktreeGrant::default(),
+        tidepool_actor::ActorRole::Research | tidepool_actor::ActorRole::Inherited => {
+            ActorWorktreeGrant::default()
+        }
     }
 }
 
@@ -3622,7 +3624,7 @@ mod tests {
                 Some(tidepool_actor::ForkGroupId(1))
             );
             let expected_role = if installation.label.ends_with("/scaffold") {
-                tidepool_actor::ActorRole::Scaffolding
+                tidepool_actor::ActorRole::Coding
             } else {
                 tidepool_actor::ActorRole::Research
             };
@@ -3712,7 +3714,7 @@ mod tests {
         assert!(
             pending_status.contains("actors:\n")
                 && pending_status.contains("role=Research")
-                && pending_status.contains("role=Scaffolding")
+                && pending_status.contains("role=Coding")
                 && pending_status.contains("bound_worktree=Some("),
             "{pending_status}"
         );
@@ -4053,6 +4055,17 @@ mod tests {
                 installation.effective_role.role(),
                 tidepool_actor::ActorRole::Coding
             );
+            assert_eq!(
+                installation.effective_role.descendants().maximum_depth + 1,
+                scaffold_installation
+                    .effective_role
+                    .descendants()
+                    .maximum_depth
+            );
+            assert!(installation
+                .effective_role
+                .effect_keys()
+                .contains(&tidepool_actor::ActorEffectKey::Forks));
             let worktree_id =
                 tidepool_worktree::WorktreeId::from_raw(installation.launch_worktrees[0].clone());
             let worktree = worktrees
@@ -4158,6 +4171,71 @@ mod tests {
         assert_eq!(
             implementation_reply["status"], "replied",
             "{implementation_reply:?}"
+        );
+        let peer_setup = dispatch_haskell_script(
+            verification.policy.as_ref(),
+            include_str!("actor_host_fixtures/generic_actor/peer_revision.hs"),
+        )
+        .await;
+        assert_eq!(peer_setup["status"], "committed", "{peer_setup:?}");
+        let peer_repair = dispatch_haskell_script(verification.policy.as_ref(), example).await;
+        assert_eq!(peer_repair["status"], "committed", "{peer_repair:?}");
+        let repair_watch_example = refinement_doc
+            .split("```haskell\n")
+            .nth(2)
+            .unwrap()
+            .split_once("```")
+            .unwrap()
+            .0;
+        let peer_watch =
+            dispatch_haskell_script(verification.policy.as_ref(), repair_watch_example).await;
+        assert_eq!(peer_watch["status"], "committed", "{peer_watch:?}");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.id.actor() == implementation.actor.identity() =>
+                    {
+                        break
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before peer repair"),
+                }
+            }
+        })
+        .await
+        .expect("peer repair activation timeout");
+        let repaired = dispatch_haskell_script(
+            implementation.policy.as_ref(),
+            "respond (ReplyReport (sessionInput + sharedDelta))",
+        )
+        .await;
+        assert_eq!(repaired["status"], "replied", "{repaired:?}");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::WatchChanged { notification })
+                        if notification.owner == verification.actor.identity()
+                            && notification.transition
+                                == tidepool_actor::WatchTransition::Ready =>
+                    {
+                        break
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before peer review wake"),
+                }
+            }
+        })
+        .await
+        .expect("peer review wake timeout");
+        let peer_result =
+            dispatch_haskell_script(verification.policy.as_ref(), "pollWatch repairReady").await;
+        assert_eq!(peer_result["status"], "committed", "{peer_result:?}");
+        assert!(
+            peer_result["items"][0]["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("ReplyReport 11")),
+            "{peer_result:?}"
         );
         let verification_reply = dispatch_haskell_script(
             verification.policy.as_ref(),

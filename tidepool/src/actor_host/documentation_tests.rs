@@ -191,12 +191,7 @@ async fn execute_examples(
         .expect("child deployment timed out");
         match event {
             LocalResidentDeployment::PolicyInstalled(child) => {
-                let expected = if child.label.ends_with("/domain") {
-                    Some(tidepool_actor::ForkEffort::Low)
-                } else {
-                    None
-                };
-                assert_eq!(child.fork_effort, expected);
+                assert_eq!(child.fork_effort, None, "the example inherits effort");
                 let boundary = child.fork_boundary.as_ref().expect("hosted fork boundary");
                 assert_eq!(boundary.thread_id, "actor-host-vertical");
                 assert!(!boundary.call_id.is_empty());

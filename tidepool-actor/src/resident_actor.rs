@@ -1012,7 +1012,11 @@ where
                 descriptor.effective_role().role()
             )));
         }
-        if descriptor.effective_role().role() == crate::ActorRole::Scaffolding {
+        if descriptor
+            .effective_role()
+            .effect_keys()
+            .contains(&crate::ActorEffectKey::Forks)
+        {
             let parent_budget = self.descriptor.effective_role().descendants();
             let role = descriptor.effective_role().clone().with_descendant_budget(
                 crate::DescendantBudget {
@@ -1677,7 +1681,7 @@ where
                         .map_err(|error| error.to_string())?;
                     let budget = self.descriptor.effective_role().descendants();
                     if budget.maximum_depth == 0 {
-                        return Err("this actor role cannot recursively unfold context".into());
+                        return Err("cannot unfold context: descendant depth budget is exhausted".into());
                     }
                     let group_path = group.to_string();
                     let (group_id, reservations) = self

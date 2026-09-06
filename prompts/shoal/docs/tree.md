@@ -1,29 +1,50 @@
-A node can run several local scaffold/unfold/fold cycles. Write a useful
-interface, example, test, or implementation fragment in your authorized
-worktree and commit it when descendants should share that starting point.
-Use `boundHead` for a coordinator's current worktree and `projectHead` for the
-source project. Both require a clean seed unless you explicitly choose
-`snapshotDirty`.
+Scaffold / fork / fold / repeat keeps shared understanding in a coordinator
+while specialists retain implementation detail. Fork when the next work is
+independent and would otherwise fill your context with unrelated histories.
+A mature shared prefix is useful even when large; cache reuse is observed,
+not guaranteed. Choose depth and width from the actual obligations.
 
-Define only the Haskell that helps this task. A tuple and a function can be
-enough; heterogeneous records and sum types can grow as distinctions emerge.
-Use `:doc unfold` to distribute a frontier, then `:doc watch` to compose its
-settled evidence. Each descendant receives the complete inherited fork context
-and its typed assignment. Worktree and authority inheritance remain separate.
+Commit a useful interface, example, test, or partial implementation in your
+owned worktree. Name each obligation's scope, acceptance condition, and allowed
+holes. Use `boundHead` for this checkout and `projectHead` for the source
+project. Capture the seed after the scaffold commit. Both require a clean seed
+unless you explicitly choose `snapshotDirty`.
 
-A fold includes your judgment: compare evidence, select exact candidate heads,
-integrate with ordinary Git or the conservative typed merge, and revise the
-scaffold. Sibling subtrees need not synchronize their next cycles. Writable
-coordinators can implement connective changes themselves.
+One shared interface can support four branches: a pure test implementation,
+integration tests exercising the real implementation, the real implementation,
+and code using it. A testing branch may scaffold common fixtures and fork three
+responsibilities such as normal behavior, failures, and cleanup. Each parent
+owns its shared wiring and fulfills its own contract after folding its children.
 
-Keep a specialist for follow-ups when its history matters. Supply the newer
-candidate and decision delta; the retained model does not automatically see
-your intervening conversation. Fork anew when your updated context is the
-better starting point. Review the selected candidate before integration, and
-reconsider review after a refinement changes that candidate.
+Use `coding` for work that may implement and recurse. `scaffolding` has the same
+capabilities with a scaffold-focused prompt. `researching` is inspection-only;
+use a coding actor for a reviewer who must run tests. Explicitly narrowed rows
+and exhausted descendant budgets can still make an actor a leaf. Role names
+do not replace runtime authority; inspect `:status`.
 
-Ending a response idles the actor, not its pending request. A coordinator can
-register a watch on descendants, wake, inspect the typed settlements, and use
-its original `respond`. Cleanup is deliberate; integration does not require
-retiring valuable contexts. No campaign record or fixed sequence of phases is
-required by the runtime.
+Compile-only fragments and tests that fail against an explicit stub can be
+valid intermediate submissions. Record exactly what passed, only compiled,
+failed, or remains unimplemented. Removing a TODO marker is not acceptance.
+Children may introduce internal obligations but cannot weaken the contract owed
+to their parent. Return a typed decision need when that contract must change.
+
+Use `:doc unfold` for dispatch and `:doc watch` for observation. Watch independent
+submissions separately when you can integrate them separately. A fold includes
+your judgment: inspect exact commits, validate claims, integrate through ordinary
+Git or the conservative merge, and run checks for the integrated revision.
+Retain discoveries that change the shared design, not every debugging exchange.
+
+A reviewer forked after implementation returns inherits your newer context.
+Supply the exact candidate, issued contract, and implementer reference. The
+reviewer can drive typed repairs directly while your watch waits for a verdict.
+See `:doc refinement`. Integration and contract changes remain your decisions.
+
+Keep specialists for focused follow-ups; send the new candidate and decision
+delta. Fork again when your newer context is the better starting point. A
+coordinator can keep its original request pending across watches and finally
+use its original `respond`. Acceptance does not require discarding useful actors.
+
+Improve the environment during useful work. Ordinary scripts, resident helpers,
+and parameterized acceptance functions can make the next cycle easier. Prefer
+existing tools and small project definitions; promote source when actual use
+justifies it. No generic campaign schema or mandatory experiment is needed.

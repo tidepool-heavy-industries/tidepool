@@ -9,6 +9,10 @@ joined <- watch joinLabel $
 :}
 ```
 
+A combined watch is appropriate when the next decision needs both results.
+For independently integrable work, register one watch per branch so a ready
+candidate does not wait behind its sibling.
+
 End the model response normally. When the watch becomes terminal, Tidepool
 reactivates the actor and `pollWatch joined` returns its typed observation.
 

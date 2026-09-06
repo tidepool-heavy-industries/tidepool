@@ -10,7 +10,7 @@ third3 (_, _, value) = value
 -- TIDEPOOL-ITEM --
 sharedDelta <- pure (1 :: Int)
 -- TIDEPOOL-ITEM --
-workers <- unfold (batch (case campaignLabel "reply-watch" of { Right value -> value; Left _ -> error "fixture campaign" }) (case forkGroupLabel "roundtrip" of { Right value -> value; Left _ -> error "fixture group" })) ((,,) <$> child (withBranchDeadline (after (minutes 5)) (researching @ReplyReport (case branchLabel "worker" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead (41 :: Int))) <*> child (researching @EchoReport (case branchLabel "witness" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead ("cache" :: Text)) <*> child (scaffolding @ScaffoldReport (case branchLabel "scaffold" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead ("recursive" :: Text)))
+workers <- unfold (batch (case campaignLabel "reply-watch" of { Right value -> value; Left _ -> error "fixture campaign" }) (case forkGroupLabel "roundtrip" of { Right value -> value; Left _ -> error "fixture group" })) ((,,) <$> child (withBranchDeadline (after (minutes 5)) (researching @ReplyReport (case branchLabel "worker" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead (41 :: Int))) <*> child (researching @EchoReport (case branchLabel "witness" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead ("cache" :: Text)) <*> child (coding @ScaffoldReport (case branchLabel "scaffold" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead ("recursive" :: Text)))
 -- TIDEPOOL-ITEM --
 initially <- (,) <$> pollResponse (forkedResponse (first3 workers)) <*> pollResponse (forkedResponse (second3 workers))
 -- TIDEPOOL-ITEM --

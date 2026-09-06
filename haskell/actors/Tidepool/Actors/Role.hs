@@ -107,12 +107,12 @@ type ResearchCoordinatorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
    ]
-type CodingEffects = '[Replies, Watches, ActorContext, BoundWorktree]
-type ScaffoldEffects =
+type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
    , WorktreeIntegration
    ]
+type ScaffoldEffects = CodingEffects
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
    , AgentInspection, BoundWorktree, WorktreeIntegration

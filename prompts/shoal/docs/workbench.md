@@ -1,5 +1,7 @@
 Send raw Haskell to the tool. Outside `:{` / `:}`, each nonblank line is one
 input unit. Use the delimiters for a multiline declaration group or binding.
+Inside a declaration group, use `name = value` alongside `data` and function
+definitions; do not mix in GHCi `let` statements. Use a separate unit for those.
 These calls need no repository setup:
 
 ```haskell

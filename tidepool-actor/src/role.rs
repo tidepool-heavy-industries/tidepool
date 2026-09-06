@@ -132,8 +132,17 @@ impl EffectiveRole {
                 maximum_depth: 0,
                 maximum_active_children: 0,
             },
-            "coding-v1",
-            Self::research().effect_keys,
+            "coding-v2",
+            vec![
+                ActorEffectKey::Replies,
+                ActorEffectKey::Watches,
+                ActorEffectKey::Forks,
+                ActorEffectKey::ActorContext,
+                ActorEffectKey::AgentInspection,
+                ActorEffectKey::AgentControl,
+                ActorEffectKey::BoundWorktree,
+                ActorEffectKey::WorktreeIntegration,
+            ],
         )
     }
 
@@ -145,16 +154,7 @@ impl EffectiveRole {
             WorkspaceAccess::WritableBound,
             descendants,
             "scaffolding-v1",
-            vec![
-                ActorEffectKey::Replies,
-                ActorEffectKey::Watches,
-                ActorEffectKey::Forks,
-                ActorEffectKey::ActorContext,
-                ActorEffectKey::AgentInspection,
-                ActorEffectKey::AgentControl,
-                ActorEffectKey::BoundWorktree,
-                ActorEffectKey::WorktreeIntegration,
-            ],
+            Self::coding().effect_keys,
         )
     }
 
@@ -325,6 +325,34 @@ mod tests {
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");
         assert!(EffectiveRole::root().permits_child(&narrow));
+    }
+
+    #[test]
+    fn coding_recursion_requires_budget_and_preserves_narrowing() {
+        let coding = EffectiveRole::coding().with_descendant_budget(DescendantBudget {
+            maximum_depth: 2,
+            maximum_active_children: 3,
+        });
+        let child = EffectiveRole::coding().with_descendant_budget(DescendantBudget {
+            maximum_depth: 1,
+            maximum_active_children: 3,
+        });
+        assert!(coding.respects_role_ceiling());
+        assert!(coding.permits_child(&child));
+        assert!(!child.permits_child(&coding));
+        assert!(!EffectiveRole::coding().permits_child(&child));
+        assert!(!coding
+            .clone()
+            .with_effect_keys(EffectiveRole::research().effect_keys)
+            .permits_child(&child));
+        assert!(!coding
+            .clone()
+            .with_effect_keys(vec![ActorEffectKey::AgentLaunch])
+            .respects_role_ceiling());
+        assert_eq!(
+            coding.effect_keys(),
+            EffectiveRole::scaffolding(coding.descendants()).effect_keys()
+        );
     }
 
     #[test]

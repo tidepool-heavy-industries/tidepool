@@ -6,6 +6,16 @@ document. This is the next concrete campaign for
 actor architecture. Current fork semantics live in
 [the Shoal guide](../../SHOAL.md#cache-preserving-context-unfold).
 
+The accepted next product direction is
+[recursive context collaboration](recursive-context-collaboration.md): use
+scaffolds to keep implementation histories in specialists, fork reviewers from
+current parent context, and let reviewers drive typed repairs directly with
+implementers. That plan owns the complete worked scenario and prompt delivery;
+this document owns the scaffold and integration contract it builds on.
+Finish the [preparation handoff](recursive-context-collaboration-handoff.md)
+before starting the fresh `shoal-repl` project. The current task is to prepare
+prompts and interfaces for that run, not to execute an application campaign.
+
 ## Target experience
 
 An actor resolves shared design decisions, commits a partial program with
@@ -143,25 +153,28 @@ commands, and agent guidance in the standalone project. The steering actor may
 revise these as it learns. Existing children retain their issued contract;
 changes to guidance do not silently rewrite assignments in flight.
 
-Run a second feature with a different decomposition. Extract a reusable helper
-only when both campaigns demonstrate its consumer. Keep domain-specific types
+Refine these artifacts during subsequent useful work; a second feature is not
+a prerequisite experiment. Extract a reusable helper when actual consumers
+justify it. Keep domain-specific types
 and acceptance policy authored; Rust continues to own authority, Git mechanics,
 processes, scheduling, and durable observations.
 
-### 4. Measure useful granularity
+### 4. Improve granularity during useful work
 
-Compare sequential work, a coarse context tree, and a recursive microtask tree
-on matched tasks and the same acceptance checks. Repeat enough runs to avoid
-treating one cache outcome or one successful decomposition as general evidence.
+Learn from ordinary scaffold/fork/fold cycles. Do not require matched-task
+benchmarks, repeated provider trials, or a broad experiment campaign. The user
+prioritizes affordable iterated recursive self-improvement through useful work.
 
-Record total input/cached/output tokens, available billed cost, elapsed time,
-parent coordination and repair effort, discarded work, integration failures,
-and final acceptance. Attribute usage to existing actor/request identities;
-extend existing observations rather than creating another usage ledger.
+Use available input/cached/output tokens, billed cost, elapsed time, repair
+effort, and integration findings to inform the next local decomposition. Keep
+missing observations explicit and do not infer general savings from one run.
+Use existing actor/request observations rather than creating another ledger.
 
-Choose branch size from marginal inference and integration cost. Tiny branches
-are welcome when shared decisions are settled and their work is independent;
-there is no minimum ticket duration or mandatory tree depth.
+Choose branch size from independence, the value of shared understanding, and
+where new implementation detail should live. Tiny branches are welcome when
+the scaffold makes their obligations clear; there is no minimum ticket duration
+or mandatory tree depth. Fold concise evidence and consequential discoveries
+so the parent can keep using its mature context without absorbing every repair.
 
 ### 5. Add context/model choices where evidence supports them
 

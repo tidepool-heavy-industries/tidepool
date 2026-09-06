@@ -8,8 +8,11 @@ The root document for the next major feature is
 [cache-preserving context unfold](cache-preserving-context-unfold.md). It owns
 the accepted LLM interaction, recursive worked campaign, architecture
 boundaries, linear implementation handoff, and persistent implementation checklist.
-The other files in this directory are substrate contracts or superseded design
-records, not competing unfold plans.
+The next core use case and prompt delivery direction is
+[recursive context collaboration](recursive-context-collaboration.md), building
+on the [recursive scaffold campaign](recursive-scaffold-campaign.md). It applies
+the unfold substrate to recursive implementation and direct typed review/repair;
+it does not introduce a competing actor architecture.
 
 ## Thesis
 
@@ -163,6 +166,13 @@ restating it unless an acceptance test needs the detail.
    local failure, typed folds, dimensional deadlines, structured campaign
    views, stable build leases, honest non-serializing recovery, and a
    first-person permanent-root acceptance test.
+9. [Recursive context collaboration](recursive-context-collaboration.md) owns
+   the next core use case, complete interface/test/implementation/consumer
+   scenario, direct peer repair, resident acceptance ideas, and prompt delivery.
+   The [recursive scaffold campaign](recursive-scaffold-campaign.md) defines
+   the obligation and integration contract used by that scenario.
+   Its [preparation handoff](recursive-context-collaboration-handoff.md) is the
+   starting point for finishing prompt/interface changes before `shoal-repl`.
 
 ## Vocabulary
 

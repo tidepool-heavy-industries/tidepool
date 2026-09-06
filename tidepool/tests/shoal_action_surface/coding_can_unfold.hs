@@ -1,6 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 
-module CodingCannotUnfold where
+module CodingCanUnfold where
 
 import Control.Monad.Freer (Eff)
 import Tidepool.Actors.Shoal
