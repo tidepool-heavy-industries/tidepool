@@ -319,12 +319,7 @@ pub trait KernelBehavior: Send + 'static {
                 Ok(()) => crate::CleanupComponentOutcome::Confirmed,
                 Err(error) => crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
             };
-            (
-                hook,
-                crate::CleanupComponentOutcome::Unconfirmed(
-                    "behavior provides no resident realm evidence".into(),
-                ),
-            )
+            (hook, crate::CleanupComponentOutcome::Unsupported)
         })
     }
 
@@ -811,11 +806,12 @@ where
     // Include children introduced by shutdown behavior, not only an old snapshot.
     let children_after = shutdown_children(&state.context, Duration::from_secs(15)).await;
     let children = combine_cleanup(children_before, children_after);
-    let terminal = match &hook {
-        crate::CleanupComponentOutcome::Confirmed => requested,
-        crate::CleanupComponentOutcome::Unconfirmed(error) => {
+    let terminal = match (&hook, &realm) {
+        (crate::CleanupComponentOutcome::Unconfirmed(error), _)
+        | (_, crate::CleanupComponentOutcome::Unconfirmed(error)) => {
             failed_terminal(format!("actor shutdown failed: {error}"))
         }
+        _ => requested,
     };
     state
         .terminal
@@ -852,6 +848,10 @@ fn combine_cleanup(
     match (left, right) {
         (Confirmed, value) | (value, Confirmed) => value,
         (Unconfirmed(a), Unconfirmed(b)) => Unconfirmed(format!("{a}; {b}")),
+        (Unsupported, value) | (value, Unsupported) => match value {
+            Unconfirmed(_) => value,
+            _ => Unsupported,
+        },
     }
 }
 
