@@ -568,6 +568,7 @@ enum ExpressionResult {
     Raw,
     HaskellDisplay,
     OpaqueDisplay,
+    Observation,
 }
 
 fn assemble_expression_module_with_result(
@@ -632,12 +633,35 @@ fn assemble_expression_module_with_result(
         (ExpressionLift::Pure, ExpressionResult::OpaqueDisplay) => {
             "pure (__workbenchValue `seq` T.pack \"<opaque value>\")"
         }
+        (ExpressionLift::Effectful, ExpressionResult::Observation) => {
+            "do { __value <- __workbenchValue ; pure (\\() -> __value) }"
+        }
+        (ExpressionLift::Pure, ExpressionResult::Observation) => "pure (\\() -> __workbenchValue)",
     };
     out.push_str(target);
     out.push_str(" = __tidepoolInEffectRow $ ");
     out.push_str(body);
     out.push('\n');
     out
+}
+
+/// Capture one bare observation as a typed thunk. Effects run once, while
+/// retaining the result does not deep-force an arbitrary payload or its Show.
+pub fn assemble_observation_module(
+    preamble: &str,
+    target: &str,
+    effect_stack: &str,
+    expression: &str,
+    lift: ExpressionLift,
+) -> String {
+    assemble_expression_module_with_result(
+        preamble,
+        target,
+        effect_stack,
+        expression,
+        lift,
+        ExpressionResult::Observation,
+    )
 }
 
 /// Assemble the display-capable sibling of [`assemble_expression_module`].

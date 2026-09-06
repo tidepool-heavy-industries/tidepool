@@ -8,6 +8,8 @@
 -- DevSwarm belong in separately loaded application modules.
 module Tidepool.Actors.Shoal
   ( ActorEffects
+  , inspectFull
+  , FullInspection
   , ResearchActorEffects
   , CodingActorEffects
   , ScaffoldActorEffects
@@ -249,6 +251,7 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import Numeric.Natural (Natural)
 import Prelude
+import Tidepool.Inspection (FullInspection, inspectFull)
 
 import Tidepool.Agent.Reply
 import Tidepool.Agent.Watch

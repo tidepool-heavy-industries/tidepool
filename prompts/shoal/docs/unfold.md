@@ -11,7 +11,7 @@ let Right consumerLabel = branchLabel "consumer-tests"
 :{
 workers <- unfold (batch campaign wave) $
   (,) <$> child (coding @Report domainLabel projectHead domainPlan)
-      <*> child (coding @Report consumerLabel projectHead consumerPlan)
+      <*> child (withEffort Low (coding @Report consumerLabel projectHead consumerPlan))
 :}
 let sharedAfterUnfold = ("ready" :: Text)
 ```
@@ -38,7 +38,12 @@ cancelled with an explicit failure; already started children are unaffected.
 `withEffort Low`, `Medium`, or `High` requests the child's initial reasoning
 effort. Omission inherits the parent setting. The request alone is not evidence
 of provider application or cache reuse; inspect provider observations before
-claiming either. Changing effort on an already running actor is not supported.
+claiming either. The consumer branch above inherits the same committed context
+while using lower effort for a bounded obligation against an agreed interface.
+Keep more effort for shared design choices and uncertain integration work.
+`withEffort` applies at context-fork construction; it is not an API for steering
+an already active Shoal assignment. The Codex backend's configuration-update
+mechanism is a separate control layer, not a missing model capability.
 
 Define your `Report` type and `domainPlan`/`consumerPlan` values first. Commit the
 shared interface before dispatch. `domainPlan` owns implementation; `consumerPlan`

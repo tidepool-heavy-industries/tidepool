@@ -25,12 +25,16 @@ revision a returned candidate satisfies. Do not treat cancellation as an
 acknowledged contract update or a successful pause of the whole subtree.
 
 Request activations show a rendered `sessionInput` preview and the reply type's
-GHC declaration captured at its typed request site when available. Input previews are capped at 16 KiB and reply
-definitions at 4 KiB, with explicit truncation. The mounted value remains
+GHC declaration captured at its typed request site when available. Input previews
+use the workbench's compact display (a 512-character payload prefix), with an
+outer 16 KiB message cap; reply definitions are capped at 4 KiB. Omitted detail
+is marked explicitly. The mounted value remains
 authoritative. Opaque inputs remain valid; inspect their types and project useful
 fields. Reply-type dependencies are not expanded automatically. No second type lookup is performed at activation. Older artifacts without a
 captured declaration still show the exact reply type. Previewing does not settle the request.
 
 Preview limits bound message size, not the cost of a custom `Show` implementation.
-Rendering uses the ordinary workbench execution path; there is no separate
-preview timeout. A missing rendering instance produces an opaque-value marker.
+Rendering uses the shared resident execution mechanism with a compiler-checked
+pure expression; there is no separate preview timeout. A missing rendering
+instance produces an opaque-value marker. Previewing an effect-valued input
+does not execute the action it contains.

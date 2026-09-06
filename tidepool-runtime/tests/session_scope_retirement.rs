@@ -146,6 +146,30 @@ fn entry(name: &str, raw: u64, slot: RootSlot) -> BindingEntry {
     }
 }
 
+#[test]
+fn automatic_observation_expiry_releases_roots_and_preserves_explicit_capture() {
+    let mut core = session();
+    let baseline = core.persistent_roots_count();
+    let scope = core.mint_scope(ScopeId::ROOT).unwrap();
+    for n in 1..=20 {
+        let name = format!("observation{n}");
+        let slot = tenure(&mut core, &name, n);
+        let binding = entry(&name, n as u64, slot);
+        let id = binding.id;
+        core.bind_in(scope, binding).unwrap();
+        core.save_observation(id, &[]);
+        if n == 1 {
+            core.bindings_mut().preserve_observations(&[id.var()]);
+        }
+    }
+    assert_eq!(core.persistent_roots_count(), baseline + 9);
+    assert!(core.resolve_in(scope, "observation1").is_some());
+    assert!(core.resolve_in(scope, "observation12").is_none());
+    let receipt = core.retire_scope(scope);
+    assert_eq!(receipt.roots_released, 9);
+    assert_eq!(core.persistent_roots_count(), baseline);
+}
+
 /// Classes 1 and 2, read together — a scope retirement must leave BOTH exactly
 /// where it found them.
 fn classes_1_and_2(core: &PersistentSession) -> (usize, usize, usize) {

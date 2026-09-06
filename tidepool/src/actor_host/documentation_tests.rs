@@ -45,6 +45,120 @@ async fn rich_response_survives_resident_computation() {
 }
 
 #[tokio::test]
+async fn quiet_observation_retains_exact_results_without_repeating_effects() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(root.as_ref(), include_str!("quiet_observation_setup.hs")).await;
+    let child = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut child = None;
+        loop {
+            match campaign.deployments.recv().await {
+                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                    child = Some(installation)
+                }
+                Some(LocalResidentDeployment::SessionReady { .. }) => return child.unwrap(),
+                Some(_) => {}
+                None => panic!("deployment stream closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    campaign.await_watch_ready().await;
+    let first = committed(root.as_ref(), "pollWatch ready").await;
+    let saved = first["items"][0]["installedBindings"][0].as_str().unwrap();
+    let output = first["items"][0]["output"].as_str().unwrap();
+    assert!(output.starts_with("WatchReady"), "{first}");
+    assert!(output.len() < 800, "{first}");
+    assert!(
+        output.contains(&format!("inspectFull ({saved} ())")),
+        "{first}"
+    );
+    let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
+    let full_text = full["items"][0]["output"].as_str().unwrap();
+    assert!(full_text.contains("candidate-9828") && full_text.contains("tested-6c6c"));
+    assert!(full_text.contains("LIMITATION-MUST-REMAIN-AVAILABLE"));
+    assert!(full_text.len() > 50_000);
+    committed(root.as_ref(), &format!("let retained = {saved} ()")).await;
+    committed(root.as_ref(), &format!("declaredEvidence = {saved} ()")).await;
+    let second = committed(root.as_ref(), "pollWatch ready").await;
+    assert_ne!(
+        first["items"][0]["installedBindings"],
+        second["items"][0]["installedBindings"]
+    );
+    let expiring = second["items"][0]["installedBindings"][0].as_str().unwrap();
+    let failed_declaration = dispatch_haskell_script(
+        root.as_ref(),
+        "brokenDeclaration = missingObservationDependency :: Int",
+    )
+    .await;
+    assert_eq!(
+        failed_declaration["status"], "rejected",
+        "{failed_declaration}"
+    );
+    for _ in 0..9 {
+        committed(root.as_ref(), "pollWatch ready").await;
+    }
+    let expired = dispatch_haskell_script(root.as_ref(), &format!("{expiring} ()")).await;
+    assert_eq!(expired["status"], "rejected", "{expired}");
+    let retained = committed(root.as_ref(), "inspectFull retained").await;
+    assert_eq!(retained["items"][0]["output"], full["items"][0]["output"]);
+    let declared = committed(root.as_ref(), "inspectFull declaredEvidence").await;
+    assert_eq!(declared["items"][0]["output"], full["items"][0]["output"]);
+    let generic = committed(root.as_ref(), "delivery").await;
+    assert!(generic["items"][0]["output"].as_str().unwrap().len() < 900);
+    let infinite = committed(root.as_ref(), "repeat 'x'").await;
+    assert!(infinite["items"][0]["output"].as_str().unwrap().len() < 900);
+    let lifecycle = committed(root.as_ref(), "WatchReady (Costly 8)").await;
+    assert!(lifecycle["items"][0]["output"]
+        .as_str()
+        .unwrap()
+        .starts_with("WatchReady"));
+    let broken = committed(root.as_ref(), "Costly 7").await;
+    assert!(
+        broken["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("preview unavailable"),
+        "{broken}"
+    );
+    let broken_name = broken["items"][0]["installedBindings"][0].as_str().unwrap();
+    let recovered = committed(
+        root.as_ref(),
+        &format!("case {broken_name} () of Costly n -> n"),
+    )
+    .await;
+    assert_eq!(recovered["items"][0]["output"], "7");
+    let before = campaign
+        .forest
+        .inspect_graph(campaign.actor.identity())
+        .unwrap()
+        .len();
+    let spawned = committed(root.as_ref(), "startAgent (readonlyAgent \"observe-once\")").await;
+    let spawned_name = spawned["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    let inspect = format!("inspectFull (agentIdentity ({spawned_name} ()))");
+    let one = committed(root.as_ref(), &inspect).await;
+    let two = committed(root.as_ref(), &inspect).await;
+    assert_eq!(one["items"][0]["output"], two["items"][0]["output"]);
+    assert_eq!(
+        campaign
+            .forest
+            .inspect_graph(campaign.actor.identity())
+            .unwrap()
+            .len(),
+        before + 1
+    );
+    committed(root.as_ref(), &format!("stopAgent ({spawned_name} ())")).await;
+    committed(root.as_ref(), "stopAgent worker").await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn queued_unfold_survives_later_rejection() {
     execute_examples(
         false,
@@ -192,7 +306,14 @@ async fn execute_examples(
         .expect("child deployment timed out");
         match event {
             LocalResidentDeployment::PolicyInstalled(child) => {
-                assert_eq!(child.fork_effort, None, "the example inherits effort");
+                let expected_effort = child
+                    .label
+                    .ends_with("/consumer-tests")
+                    .then_some(tidepool_actor::ForkEffort::Low);
+                assert_eq!(
+                    child.fork_effort, expected_effort,
+                    "the consumer example selects low effort; the domain inherits"
+                );
                 let boundary = child.fork_boundary.as_ref().expect("hosted fork boundary");
                 assert_eq!(boundary.thread_id, "actor-host-vertical");
                 assert!(!boundary.call_id.is_empty());
@@ -308,8 +429,15 @@ async fn execute_examples(
     campaign.await_watch_ready().await;
     let first = committed(root.as_ref(), "pollWatch joined").await;
     let second = committed(root.as_ref(), "pollWatch joined").await;
-    assert_eq!(first["items"][0]["output"], second["items"][0]["output"]);
-    assert!(first["items"][0]["output"]
+    for observation in [&first, &second] {
+        assert!(observation["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .starts_with("WatchReady"));
+    }
+    let saved = first["items"][0]["installedBindings"][0].as_str().unwrap();
+    let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
+    assert!(full["items"][0]["output"]
         .as_str()
         .unwrap()
         .contains("ReplyAvailable"));
@@ -348,7 +476,16 @@ async fn execute_examples(
         assert!(result["items"][0]["output"]
             .as_str()
             .unwrap()
-            .contains("Report 9"));
+            .starts_with("ResponseReady"));
+        let saved = result["items"][0]["installedBindings"][0].as_str().unwrap();
+        let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
+        assert!(
+            full["items"][0]["output"]
+                .as_str()
+                .unwrap()
+                .contains("Report 9"),
+            "{full}"
+        );
     }
     if !rich_response {
         committed(

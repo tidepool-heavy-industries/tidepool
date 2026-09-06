@@ -44,7 +44,9 @@ use tidepool_codegen::suspension::{
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_eval::value::Value;
-use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
+use tidepool_repr::{
+    CoreExpr, DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId,
+};
 
 use super::engine::OutputSink;
 use super::{
@@ -191,6 +193,34 @@ impl PersistentSession {
     /// The value-plane binding table (mutate).
     pub fn bindings_mut(&mut self) -> &mut BindingTable {
         &mut self.bindings
+    }
+
+    /// Keep eight automatic observations per scope. Explicit persistent code
+    /// and fork tips retain their dependencies under the normal binding rules.
+    pub fn save_observation(&mut self, id: SessionVarId, dependencies: &[VarId]) {
+        let expired = self.bindings.save_observation(id, dependencies, 8);
+        self.release_binding_roots(expired);
+    }
+
+    fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
+        let mut released = Vec::new();
+        for entry in entries {
+            let slot = entry.value.root();
+            let aliased = self
+                .bindings
+                .iter_live()
+                .any(|entry| std::ptr::eq(entry.value.root().addr(), slot.addr()));
+            let Some(machine) = self.machine.as_mut() else {
+                continue;
+            };
+            let held = machine.handle_holds_root(slot);
+            debug_assert!(!held, "retiring binding root still owned by a handle");
+            if !aliased && !held && !released.contains(&slot.addr()) {
+                machine.retire_scope_root(slot);
+                released.push(slot.addr());
+            }
+        }
+        released.len()
     }
     /// The accumulated constructor table.
     pub fn session_table(&self) -> &DataConTable {
@@ -1123,37 +1153,8 @@ impl PersistentSession {
         decl_texts: &[&str],
         external: &SourceImports,
     ) -> Result<Generation, SessionError> {
-        if !self.scopes.is_live(scope) {
-            return Err(SessionError::DeadScope(scope));
-        }
-        let mut persistent_imports = external.clone();
-        persistent_imports.extend(&self.workbench_imports_in(scope));
-        let sources = decl_texts
-            .iter()
-            .map(|source| persistent_imports.declaration_source(source))
-            .collect::<Vec<_>>();
-        let source_refs = sources.iter().map(String::as_str).collect::<Vec<_>>();
-        let import_modules = self.current_val_modules_in(scope);
-        let inject_modules = self.live_val_modules();
-        #[allow(clippy::expect_used, reason = "decl plane present")]
-        let lib = self.lib.as_ref().expect("decl plane present");
-        let Some(receipt) = lib.declaration_receipt(&source_refs)? else {
-            return Ok(lib.scope_tip(scope));
-        };
-        #[allow(clippy::expect_used, reason = "decl plane present")]
-        let generation = self
-            .lib
-            .as_mut()
-            .expect("decl plane present")
-            .define_batch_with_receipt_and_vals_in(
-                scope,
-                &source_refs,
-                decl_texts,
-                &receipt,
-                &import_modules,
-                &inject_modules,
-            )?;
-        Ok(generation)
+        self.commit_declarations_in(scope, decl_texts, external)
+            .map(|receipt| receipt.generation)
     }
 
     /// Retract `name` from the decl plane (its binding migrated to the value
@@ -1358,10 +1359,22 @@ impl PersistentSession {
         scope: ScopeId,
         decl_texts: &[&str],
     ) -> Result<DeclarationPlaneCommit, SessionError> {
+        self.commit_declarations_in(scope, decl_texts, &SourceImports::new())
+    }
+
+    /// Own declaration validation, capture retention, and value-name replacement
+    /// as one commit. Neither frontend entry point can omit a lifetime step.
+    fn commit_declarations_in(
+        &mut self,
+        scope: ScopeId,
+        decl_texts: &[&str],
+        external: &SourceImports,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        let persistent_imports = self.workbench_imports_in(scope);
+        let mut persistent_imports = external.clone();
+        persistent_imports.extend(&self.workbench_imports_in(scope));
         let sources = decl_texts
             .iter()
             .map(|source| persistent_imports.declaration_source(source))
@@ -1398,13 +1411,13 @@ impl PersistentSession {
         // their old Val modules unqualified while GHC validates it.  Keep them
         // injected: already-compiled fragments may still need their ifaces,
         // but they are not visible providers in this new source turn.
-        let mut import_modules: Vec<String> = self
+        let (captured_values, mut import_modules): (Vec<_>, Vec<_>) = self
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
             .filter(|(name, _)| !replaced_names.iter().any(|replaced| replaced == &name.0))
-            .map(|(_, entry)| entry.module.module_name())
-            .collect();
+            .map(|(_, entry)| (entry.id.var(), entry.module.module_name()))
+            .unzip();
         import_modules.sort();
         import_modules.dedup();
         let inject_modules = self.live_val_modules();
@@ -1421,6 +1434,10 @@ impl PersistentSession {
                 &import_modules,
                 &inject_modules,
             )?;
+        // GHC may compile these declaration bodies later. Their exact imported
+        // value environment must outlive that future use, including any saved
+        // observations and the compiled slots those observations depend on.
+        self.bindings.preserve_observations(&captured_values);
         for name in &replaced_names {
             self.bindings.remove_current_in(scope, name);
         }
@@ -1511,57 +1528,13 @@ impl PersistentSession {
             bindings_retired: 0,
             roots_released: 0,
         };
-        // EXACTLY ONCE PER ROOT is `retire_scope_root`'s stated invariant, and
-        // two names in the SAME frame can share one slot (two mounts from one
-        // handle). The alias check below cannot see that — both entries are
-        // already drained — so already-released addresses are tracked here.
-        // Without this the second release is a ledger no-op while the receipt
-        // counts two, which is precisely the false receipt this lane rejects.
-        let mut released: Vec<*mut *mut u8> = Vec::new();
+        let mut retired = Vec::new();
         for dead in &doomed {
-            for entry in self.bindings.drain_scope(*dead) {
-                receipt.bindings_retired += 1;
-                let slot = entry.value.root();
-                // SOLE OWNERSHIP, checked against what is STILL live: the
-                // drained entry is already out of `live`, and deeper scopes
-                // drained before this one, so an alias found here belongs to a
-                // survivor (a parent-scope mount, a sibling, or an ancestor
-                // retiring later in this same walk — which then releases it).
-                let aliased_by_binding = self
-                    .bindings
-                    .iter_live()
-                    .any(|e| std::ptr::eq(e.value.root().addr(), slot.addr()));
-                let Some(machine) = self.machine.as_mut() else {
-                    // No machine, hence no registered roots: the frames are
-                    // still dropped, and the receipt honestly reports zero
-                    // releases rather than claiming one it did not make.
-                    continue;
-                };
-                // A LIVE HANDLE over a retiring value-plane root is a genuine
-                // bug, not a legitimate co-owner: mounting releases the handle
-                // (ownership transfers to the value plane) BEFORE the binding
-                // exists, so a handle still holding this slot means that
-                // transfer never happened. Asserted, then also honored — the
-                // root stays registered rather than being pulled out from
-                // under the registry in release builds.
-                let held_by_handle = machine.handle_holds_root(slot);
-                debug_assert!(
-                    !held_by_handle,
-                    "retire_scope: slot {:p} is still held by a live ValueHandle — \
-                     ownership never transferred to the value plane",
-                    slot.addr()
-                );
-                // Aliasing by a surviving BINDING is the opposite: entirely
-                // legitimate (the escaped-closure case), and precisely what
-                // the sole-ownership rule exists to skip.
-                let already_released = released.iter().any(|&a| std::ptr::eq(a, slot.addr()));
-                if !aliased_by_binding && !held_by_handle && !already_released {
-                    machine.retire_scope_root(slot);
-                    released.push(slot.addr());
-                    receipt.roots_released += 1;
-                }
-            }
+            retired.extend(self.bindings.drain_scope(*dead));
         }
+        retired.extend(self.bindings.collect_observations());
+        receipt.bindings_retired = retired.len();
+        receipt.roots_released = self.release_binding_roots(retired);
         debug_assert_eq!(
             roots_before - self.persistent_roots_count(),
             receipt.roots_released,

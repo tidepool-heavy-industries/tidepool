@@ -329,6 +329,7 @@ pub struct BindingHole {
     id: String,
     binder: BoundBinder,
     generation: Generation,
+    observation: Option<Vec<tidepool_repr::VarId>>,
 }
 
 /// See [`ResidentHole`]'s doc — a projected pattern bind retains every GHC
@@ -366,10 +367,15 @@ impl ResidentHole {
     fn mint(id: String, seed: HoleSeed) -> Self {
         match seed {
             HoleSeed::Plain => ResidentHole::Plain(PlainHole { id }),
-            HoleSeed::Binding { binder, generation } => ResidentHole::Binding(BindingHole {
+            HoleSeed::Binding {
+                binder,
+                generation,
+                observation,
+            } => ResidentHole::Binding(BindingHole {
                 id,
                 binder,
                 generation,
+                observation,
             }),
             HoleSeed::ProjectedBinding {
                 binders,
@@ -392,6 +398,7 @@ impl ResidentHole {
             ResidentHole::Binding(h) => HoleSeed::Binding {
                 binder: h.binder.clone(),
                 generation: h.generation,
+                observation: h.observation.clone(),
             },
             ResidentHole::ProjectedBinding(h) => HoleSeed::ProjectedBinding {
                 binders: h.binders.clone(),
@@ -425,6 +432,7 @@ enum HoleSeed {
     Binding {
         binder: BoundBinder,
         generation: Generation,
+        observation: Option<Vec<tidepool_repr::VarId>>,
     },
     ProjectedBinding {
         binders: Vec<BoundBinder>,
@@ -1551,6 +1559,32 @@ where
         table: &DataConTable,
         sites: &[YieldSite],
     ) -> Result<ResidentOutcome, ResidentError> {
+        // Even a discarded result can export closures through an effect.
+        self.core
+            .bindings_mut()
+            .preserve_observations(&tidepool_repr::free_vars::free_vars(expr));
+        self.run_transient_with_sites(name_hint, expr, table, sites)
+    }
+
+    /// Evaluate a compiler-checked pure inspection of retained values without
+    /// extending their lifetime. The caller must compile a pure result lifted
+    /// into Eff, so this run cannot export slot-dependent closures via effects.
+    pub fn run_inspection_with_sites(
+        &mut self,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        sites: &[YieldSite],
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_transient_with_sites("actor_observation_preview", expr, table, sites)
+    }
+
+    fn run_transient_with_sites(
+        &mut self,
+        name_hint: &str,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        sites: &[YieldSite],
+    ) -> Result<ResidentOutcome, ResidentError> {
         let provenance = self.provenance_for(expr, sites)?;
         // No reject-while-suspended: on the parked path, a new turn over
         // parked frames is ordinary (the machine is never slot-suspended).
@@ -1636,6 +1670,57 @@ where
         gen: Generation,
         sites: &[YieldSite],
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_binding_with_sites(name_hint, expr, table, binder, gen, sites, None)
+    }
+
+    /// Capture an automatic workbench observation using the same suspendable
+    /// binding path. Effectful expressions can export slot-dependent closures,
+    /// so their dependencies acquire the ordinary persistent lifetime first.
+    pub fn run_observation_with_sites(
+        &mut self,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        binder: &BoundBinder,
+        gen: Generation,
+        sites: &[YieldSite],
+        effectful: bool,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let dependencies = tidepool_repr::free_vars::free_vars(expr);
+        if effectful {
+            self.core
+                .bindings_mut()
+                .preserve_observations(&dependencies);
+        }
+        self.run_binding_with_sites(
+            "actor_observation",
+            expr,
+            table,
+            binder,
+            gen,
+            sites,
+            Some(dependencies),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "shared binding path owns retention metadata as well as compilation inputs"
+    )]
+    fn run_binding_with_sites(
+        &mut self,
+        name_hint: &str,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        binder: &BoundBinder,
+        gen: Generation,
+        sites: &[YieldSite],
+        observation: Option<Vec<tidepool_repr::VarId>>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        if observation.is_none() {
+            self.core
+                .bindings_mut()
+                .preserve_observations(&tidepool_repr::free_vars::free_vars(expr));
+        }
         // Claim the compiled value-module identity before this bind can park.
         // Another actor may compile against the same resident session while
         // this one awaits an effect; completion-time advancement would let it
@@ -1706,13 +1791,28 @@ where
         let seed = HoleSeed::Binding {
             binder: binder.clone(),
             generation: gen,
+            observation: observation.clone(),
         };
         let resident_outcome = self.classify_parked(outcome, None, seed, Arc::clone(&provenance));
         if completed {
             self.materialize_binder(binder, gen, bound)?;
             self.binding_provenance.insert(binder.var_id, provenance);
+            if let Some(dependencies) = observation {
+                self.finish_observation(binder, &dependencies);
+            }
         }
         Ok(resident_outcome)
+    }
+
+    fn finish_observation(&mut self, binder: &BoundBinder, dependencies: &[tidepool_repr::VarId]) {
+        self.core
+            .save_observation(SessionVarId::from_extract(binder.var_id), dependencies);
+        self.binding_provenance.retain(|id, _| {
+            self.core
+                .bindings()
+                .get(SessionVarId::from_extract(*id))
+                .is_some()
+        });
     }
 
     /// Run one GHC-classified pattern bind and materialize every projected
@@ -1728,6 +1828,9 @@ where
         gen: Generation,
         sites: &[YieldSite],
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.core
+            .bindings_mut()
+            .preserve_observations(&tidepool_repr::free_vars::free_vars(expr));
         let n_fields = NonZeroUsize::new(binders.len()).ok_or_else(|| {
             ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                 "a projected resident bind requires at least one GHC binder".into(),
@@ -2320,9 +2423,16 @@ where
         if completed {
             match seed {
                 HoleSeed::Plain => {}
-                HoleSeed::Binding { binder, generation } => {
+                HoleSeed::Binding {
+                    binder,
+                    generation,
+                    observation,
+                } => {
                     self.materialize_binder(&binder, generation, bound)?;
                     self.binding_provenance.insert(binder.var_id, provenance);
+                    if let Some(dependencies) = observation {
+                        self.finish_observation(&binder, &dependencies);
+                    }
                 }
                 HoleSeed::ProjectedBinding {
                     binders,

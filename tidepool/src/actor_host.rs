@@ -2785,7 +2785,7 @@ mod tests {
             dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput + 1 :: Int)")
                 .await;
         assert_eq!(replied["status"], "replied", "{replied:?}");
-        let response = submit(&operator, "pollResponse answer").await;
+        let response = submit(&operator, "inspectFull <$> pollResponse answer").await;
         assert!(
             response.items.iter().any(|item| item.output.contains("42")),
             "{response:?}"
@@ -4052,7 +4052,7 @@ mod tests {
 
         let observed = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "pollResponse (forkedResponse (first3 workers))\npollResponse (forkedResponse (second3 workers))\npollWatch readiness",
+            "inspectFull <$> pollResponse (forkedResponse (first3 workers))\ninspectFull <$> pollResponse (forkedResponse (second3 workers))\ninspectFull <$> pollWatch readiness",
         )
         .await;
         assert_eq!(observed["status"], "committed", "{observed:?}");
@@ -4185,9 +4185,11 @@ mod tests {
             followup_notification.transition,
             tidepool_actor::WatchTransition::Ready
         );
-        let followup_result =
-            dispatch_haskell_script(root_installation.policy.as_ref(), "pollResponse followup")
-                .await;
+        let followup_result = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "inspectFull <$> pollResponse followup",
+        )
+        .await;
         assert_eq!(
             followup_result["status"], "committed",
             "{followup_result:?}"
@@ -4443,8 +4445,11 @@ mod tests {
         })
         .await
         .expect("peer review wake timeout");
-        let peer_result =
-            dispatch_haskell_script(verification.policy.as_ref(), "pollWatch repairReady").await;
+        let peer_result = dispatch_haskell_script(
+            verification.policy.as_ref(),
+            "inspectFull <$> pollWatch repairReady",
+        )
+        .await;
         assert_eq!(peer_result["status"], "committed", "{peer_result:?}");
         assert!(
             peer_result["items"][0]["output"]
@@ -4511,7 +4516,7 @@ mod tests {
         );
         let scaffold_result = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "pollWatch scaffoldReadiness",
+            "inspectFull <$> pollWatch scaffoldReadiness",
         )
         .await;
         assert!(scaffold_result["items"][0]["output"]

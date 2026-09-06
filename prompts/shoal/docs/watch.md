@@ -22,8 +22,17 @@ subscription. `ReplyAvailable` carries a typed result and its evidence;
 dependency must succeed. Polling a settled watch repeatedly returns its state
 without consuming it. Compose dependencies before registration.
 
-Keep full receipts in a binding and project the report for routine reading. For
-the two `Text` reports above, this view preserves pending and failure states:
+`pollWatch joined` displays a compact lifecycle summary and saves the observation.
+Its output names the exact `inspectFull (...)` expression for the saved result.
+To keep evidence beyond the latest eight automatic observations, bind it:
+
+```haskell
+joinedState <- pollWatch joined
+inspectFull joinedState
+```
+
+Expansion does not poll or repeat effects. For a smaller task-specific view of
+the two `Text` reports above, this projection preserves pending and failure states:
 
 ```haskell
 :{
@@ -35,7 +44,7 @@ reportPairView :: WatchState (Settlement Text, Settlement Text)
 reportPairView = fmap (\(left, right) -> (reportOnly left, reportOnly right))
 :}
 joinedState <- pollWatch joined
-reportPairView joinedState
+inspectFull (reportPairView joinedState)
 ```
 
 `fmap` transforms only a ready value; pending and unavailable states survive.

@@ -9,7 +9,7 @@
 //!
 //! ## The two-layer shape (domain model §4)
 //!
-//! A mutable `name → SessionVarId` map (`current`) over an append-only set of
+//! A mutable `name → SessionVarId` map (`current`) over a retained set of
 //! `SessionVarId → BindingEntry` (`live`). Rebinding a name mints a *fresh*
 //! `SessionVarId` (a new `Val.G<g'>` module → a new `stableVarId`) and repoints
 //! only `current`, so old roots stay reachable from captures in
@@ -19,6 +19,10 @@
 //! type lives in the `.hi`, not a string. The `var_id` is minted by the
 //! Haskell extract (`Translate.stableVarId`) and stored here verbatim (see
 //! [`SessionVarId`]).
+//!
+//! Automatic observations have a bounded recent-name window. Expired roots
+//! remain live while newer observations or frozen tips reference them. Explicit
+//! persistent captures acquire the ordinary scope lifetime for their dependencies.
 //!
 //! ## Scope frames and immutable tips
 //!
@@ -62,6 +66,7 @@ pub struct BindingTipId(pub u64);
 struct BindingTip {
     id: BindingTipId,
     visible: HashMap<BindingName, SessionVarId>,
+    retained: HashSet<SessionVarId>,
 }
 
 /// The strict-force-vs-store-as-is distinction at the type level (domain §4).
@@ -126,8 +131,9 @@ pub struct BindingEntry {
 ///
 /// `current` maps a name to its newest binding's id (shadowing: latest-wins);
 /// `live` retains EVERY still-rooted binding, including shadowed older ones, so
-/// fragments compiled against an old gen keep resolving. Entries live until the
-/// session machine drops (then the persistent roots are reclaimed wholesale).
+/// fragments compiled against an old gen keep resolving. Scope retirement and
+/// automatic-observation collection return unreferenced entries to the session
+/// owner, which releases their root registrations.
 ///
 /// `current` is keyed by [`ScopeId`] FIRST: one shadowing frame per scope, so
 /// two sibling scopes can each bind `helper` without either seeing the other
@@ -151,6 +157,12 @@ pub struct BindingTable {
     /// them. They leave `live` only when the final tip releases its lease.
     retired_owners: HashSet<SessionVarId>,
     next_tip: u64,
+    observations: HashMap<SessionVarId, ObservationBinding>,
+}
+
+struct ObservationBinding {
+    dependencies: Vec<SessionVarId>,
+    recent: bool,
 }
 
 impl Default for BindingTable {
@@ -163,6 +175,7 @@ impl Default for BindingTable {
             tip_leases: HashMap::new(),
             retired_owners: HashSet::new(),
             next_tip: 1,
+            observations: HashMap::new(),
         }
     }
 }
@@ -179,6 +192,117 @@ impl Default for BindingTable {
 unsafe impl Send for BindingTable {}
 
 impl BindingTable {
+    /// Mark a compiler-issued binding as an automatic observation. Only the
+    /// newest `limit` names in its scope remain discoverable. Values referenced
+    /// by newer observations or frozen fork tips remain rooted until unused.
+    pub fn save_observation(
+        &mut self,
+        id: SessionVarId,
+        dependencies: &[VarId],
+        limit: usize,
+    ) -> Vec<BindingEntry> {
+        let Some(entry) = self.live.get(&id) else {
+            return Vec::new();
+        };
+        let scope = entry.scope;
+        let dependencies = dependencies
+            .iter()
+            .copied()
+            .map(SessionVarId::from_var)
+            .filter(|id| self.observations.contains_key(id))
+            .collect();
+        self.observations.insert(
+            id,
+            ObservationBinding {
+                dependencies,
+                recent: true,
+            },
+        );
+        let mut recent: Vec<_> = self
+            .observations
+            .iter()
+            .filter(|(_, observation)| observation.recent)
+            .filter_map(|(id, _)| {
+                self.live
+                    .get(id)
+                    .filter(|entry| entry.scope == scope)
+                    .map(|entry| (entry.module.gen(), *id))
+            })
+            .collect();
+        recent.sort_by_key(|(generation, _)| generation.0);
+        let expired = recent.len().saturating_sub(limit);
+        for (_, id) in recent.into_iter().take(expired) {
+            #[allow(
+                clippy::expect_used,
+                reason = "recent contains existing observation IDs"
+            )]
+            let observation = self
+                .observations
+                .get_mut(&id)
+                .expect("existing observation");
+            observation.recent = false;
+            if let Some(entry) = self.live.get(&id) {
+                if let Some(frame) = self.current.get_mut(&entry.scope) {
+                    if frame.get(&entry.name) == Some(&id) {
+                        frame.remove(&entry.name);
+                    }
+                }
+            }
+        }
+        self.collect_observations()
+    }
+
+    /// Explicit persistent code captures its referenced observations under the
+    /// ordinary binding lifetime, including their compiled slot dependencies.
+    pub fn preserve_observations(&mut self, referenced: &[VarId]) {
+        let mut pending: Vec<_> = referenced
+            .iter()
+            .copied()
+            .map(SessionVarId::from_var)
+            .collect();
+        while let Some(id) = pending.pop() {
+            if let Some(observation) = self.observations.remove(&id) {
+                pending.extend(observation.dependencies);
+            }
+        }
+    }
+
+    /// Collect expired automatic roots only after accounting for compiled
+    /// observation dependencies and immutable fork views.
+    pub fn collect_observations(&mut self) -> Vec<BindingEntry> {
+        self.observations.retain(|id, _| self.live.contains_key(id));
+        let mut pending: Vec<_> = self
+            .observations
+            .iter()
+            .filter(|(id, observation)| {
+                observation.recent || self.tip_leases.get(id).copied().unwrap_or(0) > 0
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let mut retained = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if retained.insert(id) {
+                if let Some(observation) = self.observations.get(&id) {
+                    pending.extend(observation.dependencies.iter().copied());
+                }
+            }
+        }
+        let expired: Vec<_> = self
+            .observations
+            .keys()
+            .filter(|id| !retained.contains(id))
+            .copied()
+            .collect();
+        let mut released = Vec::new();
+        for id in expired {
+            self.observations.remove(&id);
+            if let Some(entry) = self.remove_live(id) {
+                released.push(entry);
+            }
+        }
+        released
+    }
+
     /// Create an empty binding table.
     #[must_use]
     pub fn new() -> Self {
@@ -344,12 +468,28 @@ impl BindingTable {
             .into_iter()
             .map(|(name, entry)| (name.clone(), entry.id))
             .collect();
-        for id in visible.values().copied().collect::<HashSet<_>>() {
-            *self.tip_leases.entry(id).or_default() += 1;
+        let mut retained = HashSet::new();
+        let mut pending: Vec<_> = visible.values().copied().collect();
+        while let Some(id) = pending.pop() {
+            if retained.insert(id) {
+                if let Some(observation) = self.observations.get(&id) {
+                    pending.extend(observation.dependencies.iter().copied());
+                }
+            }
+        }
+        for id in &retained {
+            *self.tip_leases.entry(*id).or_default() += 1;
         }
         let id = BindingTipId(self.next_tip);
         self.next_tip += 1;
-        self.tips.insert(child, BindingTip { id, visible });
+        self.tips.insert(
+            child,
+            BindingTip {
+                id,
+                visible,
+                retained,
+            },
+        );
         id
     }
 
@@ -364,7 +504,7 @@ impl BindingTable {
             return Vec::new();
         };
         let mut released = Vec::new();
-        for id in tip.visible.values().copied().collect::<HashSet<_>>() {
+        for id in tip.retained {
             let Some(count) = self.tip_leases.get_mut(&id) else {
                 continue;
             };
@@ -606,6 +746,67 @@ mod tests {
             // never-bound fixture entry reads as a flat-session binding.
             scope: ScopeId::ROOT,
         }
+    }
+
+    #[test]
+    fn observations_expire_without_removing_explicit_captures() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut bindings = BindingTable::new();
+        let first = bindings.bind(entry("first", 1, (0xFE << 56) | 1, slot));
+        bindings.save_observation(first, &[], 2);
+        bindings.preserve_observations(&[first.var()]);
+        let mut expired = 0;
+        for n in 2..=12 {
+            let id = bindings.bind(entry(&format!("observation{n}"), n, (0xFE << 56) | n, slot));
+            expired += bindings.save_observation(id, &[], 2).len();
+        }
+        assert_eq!(expired, 9);
+        assert_eq!(bindings.len(), 3);
+        assert!(bindings.resolve("first").is_some());
+        assert!(bindings.resolve("observation10").is_none());
+        assert!(bindings.resolve("observation11").is_some());
+        assert!(bindings.resolve("observation12").is_some());
+    }
+
+    #[test]
+    fn observation_dependencies_survive_expiry_and_frozen_owner_retirement() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut tree = ScopeTree::new();
+        let owner = tree.mint_child(ScopeId::ROOT).unwrap();
+        let child = tree.mint_child(owner).unwrap();
+        let mut bindings = BindingTable::new();
+        let first = bindings.bind_in(owner, entry("first", 1, (0xFE << 56) | 1, slot));
+        bindings.save_observation(first, &[], 1);
+        let second = bindings.bind_in(owner, entry("second", 2, (0xFE << 56) | 2, slot));
+        assert!(bindings
+            .save_observation(second, &[first.var()], 1)
+            .is_empty());
+        assert!(bindings.resolve_in(&tree, owner, "first").is_none());
+        assert!(bindings.get(first).is_some());
+        bindings.seed_scope(&tree, owner, child);
+        assert!(bindings.drain_scope(owner).is_empty());
+        assert!(bindings.collect_observations().is_empty());
+        assert!(bindings.resolve_in(&tree, child, "second").is_some());
+        assert!(bindings.get(first).is_some());
+        assert_eq!(bindings.drain_scope(child).len(), 2);
+        assert!(bindings.collect_observations().is_empty());
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn expired_observation_dependencies_release_after_last_recent_reference() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut bindings = BindingTable::new();
+        let first = bindings.bind(entry("first", 1, (0xFE << 56) | 1, slot));
+        bindings.save_observation(first, &[], 1);
+        let second = bindings.bind(entry("second", 2, (0xFE << 56) | 2, slot));
+        bindings.save_observation(second, &[first.var()], 1);
+        let third = bindings.bind(entry("third", 3, (0xFE << 56) | 3, slot));
+        assert_eq!(bindings.save_observation(third, &[], 1).len(), 2);
+        assert_eq!(bindings.len(), 1);
     }
 
     #[test]

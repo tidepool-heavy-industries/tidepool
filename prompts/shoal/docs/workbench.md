@@ -21,7 +21,25 @@ type or apply a pure projection. `:info fmt` and `:type [fmt|hello|]` use the
 same quasiquoter imports as execution. Use `:bindings` to inspect current
 names and `:browse` for library declarations.
 
-When retained evidence becomes noisy, keep the original and define a local view:
+Bare expressions save their result and display a compact observation. Ready
+responses, watches, and progress updates show lifecycle facts without rendering
+their payload. `Text` displays a bounded text prefix, preserving line breaks.
+Other values demand at most 513 characters of `Show` and display
+at most 512. This bounds the requested prefix, not the time or allocation of an
+arbitrary `Show` instance before producing it. A preview failure leaves the saved
+result available; lifecycle summaries do not call the payload's `Show` at all.
+
+Omitted detail is explicit and includes the exact expansion expression, such as
+`inspectFull (observation12 ())`. This inspects that saved observation; it does
+not poll again or repeat the original effects. `:bindings` and the tool receipt's
+installed bindings expose automatic references even when their display fits.
+Names are unique within the actor's visible scope.
+
+The latest eight automatic observations remain available per actor scope. Use
+`let evidence = observation12 ()` before expiry to retain one under the normal
+binding lifetime, or bind directly with `evidence <- pollWatch joined`.
+`inspectFull evidence` requests its complete `Show` output, which may be large,
+expensive, or fail. Projections remain useful when choosing specific evidence:
 
 ```haskell
 let scores = map candidateScore
@@ -31,9 +49,11 @@ scores (filter judge candidates)
 ```
 
 The view is ordinary Haskell, so you can change it as the question changes.
-Long single-line values receive generic indentation; custom rendering and all
-underlying evidence remain available. Project before printing when you need
-fewer facts, rather than repeatedly dumping the complete value.
+Automatic reference expiry releases unused binding roots. Dependencies retained
+by explicit bindings, effects, or forked contexts remain live; declarations
+conservatively retain their visible observation environment. Root release does
+not immediately reclaim old-space storage. These are session values, not a
+durable archive across process restarts.
 
 Declarations and bindings persist between calls. Earlier closures keep the
 definitions they captured; later definitions do not rewrite old values or
