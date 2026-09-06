@@ -10,10 +10,10 @@ mod custody_tests;
 mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
-#[allow(dead_code)] // Staged owner; no launch switch before native/quiescence integration.
-mod scoped_custody;
 #[cfg(test)]
 mod research_policy_tests;
+#[allow(dead_code)] // Staged owner; no launch switch before native/quiescence integration.
+mod scoped_custody;
 #[cfg(test)]
 mod test_campaign;
 
@@ -118,36 +118,38 @@ struct ActorWorkspaceCustody {
     bindings: Arc<Mutex<BindingTable>>,
     binding: Option<ActiveBinding>,
     actor: ActorRef,
-    process_may_exist: std::sync::atomic::AtomicBool,
-    actor_completed: std::sync::atomic::AtomicBool,
+    state: Mutex<scoped_custody::CustodyState>,
 }
 
 impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
     fn actor_stopped(&self, terminal: &tidepool_actor::ActorTerminal) {
-        self.actor_completed.store(
-            terminal.kind == ActorExitKind::Completed,
-            std::sync::atomic::Ordering::SeqCst,
-        );
+        // Observation is monotonic: duplicate notifications cannot replace the
+        // first exact terminal or confuse "not completed" with "still active".
+        self.state
+            .lock()
+            .terminal
+            .get_or_insert_with(|| terminal.clone());
     }
     fn process_may_exist(&self) {
-        self.process_may_exist
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.state.lock().launch = scoped_custody::LaunchCustody::Legacy;
     }
 }
 
 impl Drop for ActorWorkspaceCustody {
     fn drop(&mut self) {
-        if self
-            .process_may_exist
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            tracing::error!(actor = ?self.actor, "retaining worktree custody: process cleanup is unconfirmed");
+        let state = self.state.get_mut();
+        if matches!(
+            state.launch,
+            scoped_custody::LaunchCustody::Legacy | scoped_custody::LaunchCustody::ScopedClaimed
+        ) {
+            tracing::error!(actor = ?self.actor, "retaining worktree custody: process or host cleanup is unconfirmed");
             return;
         }
         if let Some(binding) = self.binding.take() {
-            let result = if self
-                .actor_completed
-                .load(std::sync::atomic::Ordering::SeqCst)
+            let result = if state
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.kind == ActorExitKind::Completed)
             {
                 binding.complete(&mut self.bindings.lock())
             } else {
@@ -200,8 +202,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             bindings: self.bindings.clone(),
             binding: Some(binding),
             actor,
-            process_may_exist: std::sync::atomic::AtomicBool::new(false),
-            actor_completed: std::sync::atomic::AtomicBool::new(false),
+            state: Mutex::new(scoped_custody::CustodyState::default()),
         }))
     }
 
