@@ -2,6 +2,7 @@ module ArrayInitialization where
 
 import Data.Array (Array, (!), array, listArray)
 import Data.Array.ST (newArray, runSTArray, writeArray)
+import Control.Exception (ErrorCall, evaluate, try)
 import Numeric (floatToDigits)
 
 {-# NOINLINE singleton #-}
@@ -59,3 +60,25 @@ writtenDefined x = runSTArray $ do
 
 writeDefinedResult :: String
 writeDefinedResult = show (writtenDefined 7 ! 1)
+
+{-# NOINLINE delayedBottom #-}
+delayedBottom :: Int -> Int
+delayedBottom n = error ("written bottom " ++ show n)
+
+{-# NOINLINE withWrittenBottom #-}
+withWrittenBottom :: Int -> Array Int Int
+withWrittenBottom n = runSTArray $ do
+  a <- newArray (0,2) 99
+  writeArray a 1 (delayedBottom n)
+  pure a
+
+unusedWrittenBottomResult, selectedWrittenBottomResult, selectedInitializerResult :: String
+unusedWrittenBottomResult = show (withWrittenBottom 7 ! 0)
+selectedWrittenBottomResult = show (withWrittenBottom 7 ! 1)
+selectedInitializerResult = show (written 7 ! 0)
+
+-- Native errors are caught as language exceptions, never inferred from exit status.
+nativeFailure :: String -> IO ()
+nativeFailure value = do
+  outcome <- try (evaluate (length value)) :: IO (Either ErrorCall Int)
+  putStr (case outcome of Left _ -> "error-call"; Right _ -> "success")
