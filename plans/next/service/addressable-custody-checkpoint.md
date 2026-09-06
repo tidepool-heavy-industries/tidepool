@@ -95,3 +95,27 @@ Arc Drop, receipt substitution, or rebind workaround. Tests may explicitly reap
 fixtures but cannot use unreachable leaks to satisfy retention.
 
 No test/build was run for this checkpoint; only merge/source/diff/format checks.
+
+## Authorized implementation handoff
+
+Service request91 transfers the exact pending insertion/Retired/join/teardown
+and deployment/retirement scope-slot handoff regions to custody owner. Implement
+full lifetime, not only private slot. The existing map may be renamed to reflect
+that retained entries outlive pending launches; do not add a parallel registry.
+Notification sends/polls, socket creation/guard/receipts, build leases and
+host_dynamic_tools remain exclusively with their owners.
+
+Concrete top-level consumer is actor_host::run: it spawns the fleet, selects
+its join result, and later calls await_applications. Current fleet returns
+Result<(), String>, and await_applications aborts on timeout. Extend these
+actor_host-local return/consumer types as needed to carry addressable retained
+ownership, never discard it by rendering into String. Do not claim a successful
+fleet cleanup with unresolved slots, and do not claim persistence of handles
+across host process death. The implementer owns the exact private result type
+and its consuming run/await_applications changes within this transfer.
+
+New ScopedProcessSlot and ScopedHostRetention declarations are executable
+scaffold only. Replace the rejected ScopedResources/forget design, wire the
+slot through the actual existing host map and compile its production consumers.
+Use deterministic drop-before-pin recovery through that map, not a test-only
+registry. Independent review follows the concrete repaired candidate.

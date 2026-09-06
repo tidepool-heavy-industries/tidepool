@@ -12,6 +12,8 @@ mod host_incarnation;
 mod prompt_catalog;
 #[cfg(test)]
 mod research_policy_tests;
+#[allow(dead_code)] // Staged owner; no launch switch before native/quiescence integration.
+mod scoped_custody;
 mod socket_directory;
 #[cfg(test)]
 mod test_campaign;
@@ -118,36 +120,38 @@ struct ActorWorkspaceCustody {
     bindings: Arc<Mutex<BindingTable>>,
     binding: Option<ActiveBinding>,
     actor: ActorRef,
-    process_may_exist: std::sync::atomic::AtomicBool,
-    actor_completed: std::sync::atomic::AtomicBool,
+    state: Mutex<scoped_custody::CustodyState>,
 }
 
 impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
     fn actor_stopped(&self, terminal: &tidepool_actor::ActorTerminal) {
-        self.actor_completed.store(
-            terminal.kind == ActorExitKind::Completed,
-            std::sync::atomic::Ordering::SeqCst,
-        );
+        // Observation is monotonic: duplicate notifications cannot replace the
+        // first exact terminal or confuse "not completed" with "still active".
+        self.state
+            .lock()
+            .terminal
+            .get_or_insert_with(|| terminal.clone());
     }
     fn process_may_exist(&self) {
-        self.process_may_exist
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.state.lock().launch = scoped_custody::LaunchCustody::Legacy;
     }
 }
 
 impl Drop for ActorWorkspaceCustody {
     fn drop(&mut self) {
-        if self
-            .process_may_exist
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            tracing::error!(actor = ?self.actor, "retaining worktree custody: process cleanup is unconfirmed");
+        let state = self.state.get_mut();
+        if matches!(
+            state.launch,
+            scoped_custody::LaunchCustody::Legacy | scoped_custody::LaunchCustody::ScopedClaimed
+        ) {
+            tracing::error!(actor = ?self.actor, "retaining worktree custody: process or host cleanup is unconfirmed");
             return;
         }
         if let Some(binding) = self.binding.take() {
-            let result = if self
-                .actor_completed
-                .load(std::sync::atomic::Ordering::SeqCst)
+            let result = if state
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.kind == ActorExitKind::Completed)
             {
                 binding.complete(&mut self.bindings.lock())
             } else {
@@ -200,8 +204,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             bindings: self.bindings.clone(),
             binding: Some(binding),
             actor,
-            process_may_exist: std::sync::atomic::AtomicBool::new(false),
-            actor_completed: std::sync::atomic::AtomicBool::new(false),
+            state: Mutex::new(scoped_custody::CustodyState::default()),
         }))
     }
 
@@ -573,9 +576,227 @@ impl InteractiveCleanupReceipt {
     }
 }
 
-struct PendingInteractiveLaunch {
-    cancel: oneshot::Sender<()>,
+struct InteractiveApplicationOwner {
+    cancel: Option<oneshot::Sender<()>>,
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
+    custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
+    scoped_retention: Option<scoped_custody::ScopedHostRetention>,
+    launch: HostLaunchState,
+    terminal: Option<ActorTerminal>,
+    retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
+}
+
+#[derive(Clone, Copy)]
+enum HostLaunchState {
+    Pending,
+    Published,
+    Abandoned,
+    Failed,
+}
+
+type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
+
+impl InteractiveApplicationOwner {
+    #[allow(dead_code)] // Staged slot admission; production selection remains disabled.
+    fn reserve_scope(
+        &mut self,
+        custody: Arc<ActorWorkspaceCustody>,
+        actor: ActorRef,
+    ) -> Result<Arc<Mutex<scoped_custody::ScopedProcessSlot>>, scoped_custody::ScopedClaimError>
+    {
+        let erased: Arc<dyn tidepool_actor::ForkWorkspaceCustody> = custody.clone();
+        if !self
+            .custody
+            .as_ref()
+            .is_some_and(|installed| Arc::ptr_eq(installed, &erased))
+        {
+            return Err(scoped_custody::ScopedClaimError::WrongActor);
+        }
+        if self.scoped_retention.is_some() {
+            return Err(scoped_custody::ScopedClaimError::AlreadyClaimed);
+        }
+        let retention = scoped_custody::reserve(custody, actor)?;
+        let slot = retention.slot.clone();
+        self.scoped_retention = Some(retention);
+        Ok(slot)
+    }
+
+    fn cancel(&mut self) {
+        if let Some(gate) = &self.fork_gate {
+            let _ = gate.mark_failed();
+        }
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+
+    fn retired(&mut self, terminal: ActorTerminal) {
+        if let Some(custody) = &self.custody {
+            custody.actor_stopped(&terminal);
+        }
+        self.terminal.get_or_insert(terminal);
+        self.cancel();
+    }
+}
+
+/// Returned to run's real host caller, not formatted into a resource-free error.
+/// The host retains this error through shutdown. Dropping it at process exit is
+/// not settlement, nor continuity of process handles across host death.
+pub(crate) struct RetainedInteractiveFleet {
+    owners: InteractiveOwners,
+    unfinished: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    failures: Vec<Box<dyn std::error::Error>>,
+}
+impl fmt::Debug for RetainedInteractiveFleet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetainedInteractiveFleet")
+            .field("actors", &self.owners.lock().keys().collect::<Vec<_>>())
+            .field("unfinished", &self.unfinished.is_some())
+            .field("failures", &self.failures)
+            .finish()
+    }
+}
+impl fmt::Display for RetainedInteractiveFleet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for error in &self.failures {
+            write!(f, "{error}; ")?;
+        }
+        write!(f, "addressable actor resources retained: host work/process settlement remains unsupported")
+    }
+}
+impl std::error::Error for RetainedInteractiveFleet {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.failures.first().map(|error| error.as_ref())
+    }
+}
+
+/// Host-only operations. These never select a launch mode, release the command
+/// gate, establish host-work quiescence, or settle workspace custody.
+#[allow(dead_code)] // Available to the crate's host error consumer; not a model API.
+pub(crate) enum RetainedProcessOperation {
+    Observe,
+    Pin,
+    Stop,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum RetainedProcessState {
+    Reserved,
+    Spawning,
+    NotSpawned(String),
+    Owned,
+    Pinned,
+    ProcessStopped(tidepool_node::ServiceScopeCleanup),
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct RetainedProcessObservation {
+    pub(crate) actor: ActorRef,
+    pub(crate) actor_terminal: Option<ActorTerminal>,
+    pub(crate) process: RetainedProcessState,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RetainedProcessError {
+    #[error("exact actor has no retained scoped process")]
+    NoScopedActor,
+    #[error("retained process observation deadline elapsed")]
+    Deadline,
+    #[error(transparent)]
+    Scope(#[from] tidepool_node::ServiceScopeError),
+}
+
+#[allow(dead_code)]
+impl RetainedInteractiveFleet {
+    /// Recover the actual resource-bearing error after the host's ordinary
+    /// Box<dyn Error> propagation. Crate visibility lets shoal own a subsequent
+    /// recovery policy without exposing this mechanism to authored programs.
+    pub(crate) fn from_error<'a>(
+        error: &'a mut (dyn std::error::Error + 'static),
+    ) -> Option<&'a mut Self> {
+        error.downcast_mut::<Self>()
+    }
+
+    /// Blocking, deadline-bounded host operation: call outside an actor turn.
+    /// Exact identity includes incarnation. Even ProcessStopped is status only;
+    /// the row remains owned by this carrier after every result or error.
+    pub(crate) fn recover_process(
+        &self,
+        actor: ActorRef,
+        operation: RetainedProcessOperation,
+        deadline: std::time::Instant,
+    ) -> Result<RetainedProcessObservation, RetainedProcessError> {
+        if std::time::Instant::now() >= deadline {
+            return Err(RetainedProcessError::Deadline);
+        }
+        let rows = self
+            .owners
+            .try_lock_until(deadline)
+            .ok_or(RetainedProcessError::Deadline)?;
+        let retention = rows
+            .get(&actor)
+            .and_then(|row| row.scoped_retention.as_ref())
+            .ok_or(RetainedProcessError::NoScopedActor)?;
+        let mut slot = retention
+            .slot
+            .try_lock_until(deadline)
+            .ok_or(RetainedProcessError::Deadline)?;
+        use scoped_custody::ScopedProcessSlot;
+        let process = match (operation, &mut *slot) {
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Reserved) => {
+                RetainedProcessState::Reserved
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Spawning) => {
+                RetainedProcessState::Spawning
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::NotSpawned(error)) => {
+                RetainedProcessState::NotSpawned(error.to_string())
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Owned(_)) => {
+                RetainedProcessState::Owned
+            }
+            (RetainedProcessOperation::Pin, ScopedProcessSlot::Owned(scope)) => {
+                scope.pin_init(deadline)?;
+                RetainedProcessState::Pinned
+            }
+            (RetainedProcessOperation::Stop, ScopedProcessSlot::Owned(scope)) => {
+                RetainedProcessState::ProcessStopped(scope.terminate_and_wait(deadline)?)
+            }
+            _ => return Err(tidepool_node::ServiceScopeError::WrongPhase.into()),
+        };
+        Ok(RetainedProcessObservation {
+            actor,
+            actor_terminal: retention
+                .terminal_until(deadline)
+                .ok_or(RetainedProcessError::Deadline)?,
+            process,
+        })
+    }
+}
+
+fn handoff_application_owners(
+    owners: InteractiveOwners,
+    task: tokio::task::JoinHandle<Result<(), String>>,
+    cleanup: Result<(), Box<dyn std::error::Error>>,
+    run_result: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let retained = owners
+        .lock()
+        .values()
+        .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
+    let unfinished = !task.is_finished();
+    if retained || unfinished {
+        return Err(Box::new(RetainedInteractiveFleet {
+            owners,
+            unfinished: unfinished.then_some(task),
+            // Preserve the errors themselves: they may own resources too.
+            failures: cleanup.err().into_iter().chain(run_result.err()).collect(),
+        }));
+    }
+    cleanup?;
+    run_result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -815,8 +1036,10 @@ pub async fn run(
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
     let (shutdown, shutdown_rx) = watch::channel(false);
     let (root_config, root_config_rx) = watch::channel(config.clone());
+    let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
+        application_owners.clone(),
         InteractiveFleet {
             root: root_actor.clone(),
             config: config.clone(),
@@ -869,10 +1092,12 @@ pub async fn run(
     operator.shutdown().await;
     forest.shutdown().await;
     shutdown.send_replace(true);
-    if !applications_finished {
-        await_applications(&mut applications_task).await?;
-    }
-    result
+    let cleanup = if !applications_finished {
+        await_applications(&mut applications_task, APPLICATION_SHUTDOWN_TIMEOUT).await
+    } else {
+        Ok(())
+    };
+    handoff_application_owners(application_owners, applications_task, cleanup, result)
 }
 
 /// Classify an intentional completion or prepare an abnormal root for a fresh
@@ -923,13 +1148,15 @@ async fn root_recovery_launch_mode(
 
 async fn await_applications(
     task: &mut tokio::task::JoinHandle<Result<(), String>>,
+    timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, &mut *task).await {
+    match tokio::time::timeout(timeout, &mut *task).await {
         Ok(result) => result.map_err(join_error)?.map_err(runtime_error),
         Err(_) => {
-            task.abort();
+            // The caller transfers the unfinished task AND its addressable
+            // owner map into the host result; timeout is not cancellation proof.
             Err(runtime_error(format!(
-                "interactive fleet did not stop within {APPLICATION_SHUTDOWN_TIMEOUT:?}"
+                "interactive fleet did not stop within {timeout:?}"
             )))
         }
     }
@@ -1165,8 +1392,48 @@ fn render_root_compile_failure(
     ))
 }
 
+fn spawn_owned_retirement(
+    retirements: &mut JoinSet<InteractiveCleanupReceipt>,
+    deployment: InteractiveDeployment,
+    tmux: TmuxSession,
+    owners: &InteractiveOwners,
+) {
+    let (scope, receipt_slot) = {
+        let rows = owners.lock();
+        let row = rows
+            .get(&deployment.actor)
+            .expect("exact deployment retention row");
+        (
+            row.scoped_retention
+                .as_ref()
+                .map(|retention| retention.slot.clone()),
+            row.retirement.clone(),
+        )
+    };
+    // Only slots cross the task boundary; neither owns a back-reference to its
+    // map row. Namespace cleanup is status only and does not discharge host work.
+    retirements.spawn(async move {
+        if let Some(scope) = scope {
+            let stopped = tokio::task::spawn_blocking(move || {
+                scoped_custody::stop_slot(
+                    &scope,
+                    std::time::Instant::now() + APPLICATION_SHUTDOWN_TIMEOUT,
+                )
+            })
+            .await;
+            if !matches!(stopped, Ok(Ok(_))) {
+                tracing::warn!("scoped process cleanup remains unconfirmed in retained owner");
+            }
+        }
+        let receipt = retire_interactive_application_guarded(deployment, &tmux).await;
+        receipt_slot.lock().get_or_insert_with(|| receipt.clone());
+        receipt
+    });
+}
+
 async fn run_interactive_applications(
     mut lifecycle: mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    application_owners: InteractiveOwners,
     fleet: InteractiveFleet,
     shutdown: watch::Receiver<bool>,
     mut root_config: watch::Receiver<ActorHostConfig>,
@@ -1198,7 +1465,6 @@ async fn run_interactive_applications(
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
     let mut launches = JoinSet::new();
     let mut binding_discoveries = JoinSet::new();
-    let mut pending_launches = HashMap::new();
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
@@ -1291,14 +1557,20 @@ async fn run_interactive_applications(
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
                         let (cancel, cancelled) = oneshot::channel();
-                        let previous = pending_launches.insert(
-                            actor,
-                            PendingInteractiveLaunch {
-                                cancel,
-                                fork_gate: installation.fork_gate.clone(),
-                            },
-                        );
-                        debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
+                        let mut owners = application_owners.lock();
+                        if owners.contains_key(&actor) {
+                            break Some(format!("duplicate application owner for {actor:?}"));
+                        }
+                        owners.insert(actor, InteractiveApplicationOwner {
+                            cancel: Some(cancel),
+                            fork_gate: installation.fork_gate.clone(),
+                            custody: installation.worktree_custody.clone(),
+                            scoped_retention: None, // No scope launch selection before native pin.
+                            launch: HostLaunchState::Pending,
+                            terminal: None,
+                            retirement: Arc::new(Mutex::new(None)),
+                        });
+                        drop(owners);
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
                             let result = AssertUnwindSafe(launch_interactive_application(
@@ -1353,24 +1625,14 @@ async fn run_interactive_applications(
                             application.last_activation_sequence = sequence;
                         }
                     }
-                    LocalResidentDeployment::Retired { actor, terminal: _ } => {
+                    LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
-                        let pending = pending_launches.remove(&actor);
-                        if let Some(pending) = pending {
-                            if let Some(gate) = pending.fork_gate {
-                                let _ = gate.mark_failed();
-                            }
-                            let _ = pending.cancel.send(());
+                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
+                            owner.retired(terminal);
                         }
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
-                            let tmux = tmux.clone();
-                            retirements.spawn(async move {
-                                retire_interactive_application_guarded(
-                                    deployment,
-                                    &tmux,
-                                ).await
-                            });
+                            spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
                         }
                     }
                     LocalResidentDeployment::NotificationSend(command) => {
@@ -1451,8 +1713,17 @@ async fn run_interactive_applications(
                 match launched {
                     Some(Ok((local_actor, Ok(Some(launched))))) => {
                         let actor = local_actor.identity();
-                        pending_launches.remove(&actor);
+                        let already_retired = {
+                            let mut owners = application_owners.lock();
+                            let owner = owners.get_mut(&actor).expect("registered launch owner");
+                            owner.launch = HostLaunchState::Published;
+                            owner.terminal.is_some()
+                        };
                         let deployment = launched.deployment;
+                        if already_retired {
+                            spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
+                            continue;
+                        }
                         if actor == root_identity {
                             let _ = readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity });
                         }
@@ -1510,18 +1781,16 @@ async fn run_interactive_applications(
                     }
                     Some(Ok((local_actor, Ok(None)))) => {
                         let actor = local_actor.identity();
-                        if let Some(pending) = pending_launches.remove(&actor) {
-                            if let Some(gate) = pending.fork_gate {
-                                let _ = gate.mark_failed();
-                            }
+                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
+                            owner.launch = HostLaunchState::Abandoned;
+                            owner.cancel();
                         }
                     }
                     Some(Ok((local_actor, Err(error)))) => {
                         let actor = local_actor.identity();
-                        if let Some(pending) = pending_launches.remove(&actor) {
-                            if let Some(gate) = pending.fork_gate {
-                                let _ = gate.mark_failed();
-                            }
+                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
+                            owner.launch = HostLaunchState::Failed;
+                            owner.cancel();
                         }
                         if let Err(error) = apply_application_failure(
                             root_identity,
@@ -1602,6 +1871,9 @@ async fn run_interactive_applications(
             retired = retirements.join_next(), if !retirements.is_empty() => {
                 match retired {
                     Some(Ok(receipt)) => {
+                        if let Some(owner) = application_owners.lock().get_mut(&receipt.actor) {
+                            owner.retirement.lock().get_or_insert_with(|| receipt.clone());
+                        }
                         let degraded = receipt.degraded();
                         if degraded {
                             tracing::warn!(actor = ?receipt.actor, components = ?receipt.components, "interactive application cleanup degraded");
@@ -1658,8 +1930,8 @@ async fn run_interactive_applications(
         }
     };
 
-    for (_, pending) in pending_launches.drain() {
-        let _ = pending.cancel.send(());
+    for owner in application_owners.lock().values_mut() {
+        owner.cancel();
     }
     let launch_cleanup =
         drain_launches_for_shutdown(&mut launches, APPLICATION_SHUTDOWN_TIMEOUT).await;
@@ -1684,9 +1956,12 @@ async fn run_interactive_applications(
     binding_discoveries.abort_all();
     while binding_discoveries.join_next().await.is_some() {}
     for deployment in deployments {
-        let tmux = tmux.clone();
-        retirements
-            .spawn(async move { retire_interactive_application_guarded(deployment, &tmux).await });
+        spawn_owned_retirement(
+            &mut retirements,
+            deployment,
+            tmux.clone(),
+            &application_owners,
+        );
     }
     let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
@@ -1705,6 +1980,11 @@ async fn run_interactive_applications(
     let cleanup_failure = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
         while let Some(result) = retirements.join_next().await {
+            if let Ok(receipt) = &result {
+                if let Some(owner) = application_owners.lock().get_mut(&receipt.actor) {
+                    owner.retirement.lock().get_or_insert_with(|| receipt.clone());
+                }
+            }
             match result {
                 Ok(receipt) if receipt.degraded() && receipt.actor == root_identity => {
                     failure.get_or_insert_with(|| receipt.render());
