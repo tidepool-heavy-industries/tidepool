@@ -1,70 +1,15 @@
-//! A generic durable JSONL append/read primitive — the shared mechanism
-//! behind every hand-rolled JSONL journal/log/observer in the workspace
-//! (`tidepool-worktree::journal::EventJournal`,
-//! `tidepool-handlers::handlers::journal::{JournalHandler, load_journal}`,
-//! `tidepool-harness::log::writer::LogWriter`,
-//! `tidepool-harness::selfharness::persistence::JsonlObserver`).
+//! Shared schema-independent JSONL append/read mechanism.
 //!
-//! ## Design note (dedupe-io-substrate consolidation)
+//! Callers own row schemas, ordering, sequence numbers and synchronization across
+//! writers. [`append_new_line`] owns the path and syncs its directory for strict
+//! policies; [`write_line`] owns only a borrowed file and cannot establish its path.
+//! Directory creation remains explicit: durable store owners use
+//! `tidepool_atomic_write::create_dir_all_durable` before first publication.
 //!
-//! What lives here is MECHANISM only — how a line is durably appended and how
-//! a torn final line is read back — never a row SCHEMA, an envelope (sequence
-//! numbers, cursors, segment ordinals), or a durability POLICY (whether/how a
-//! given consumer fsyncs). Each consumer keeps its own row type, its own
-//! seq/cursor bookkeeping, and its own choice of [`SyncPolicy`]:
-//!
-//! - `EventJournal` — row
-//!   `ObservationBatch{cursor,event_id,events,recorded_at_ms}`, cursor derived
-//!   from the last batch, [`SyncPolicy::All`], with its single-writer contract
-//!   enforced by a lifetime lock owned by the journal.
-//! - `JournalHandler`/`load_journal` — row `JournalEntry{seq,kind,key,payload}`,
-//!   seq composed from a segment ordinal + a per-handler local counter,
-//!   [`SyncPolicy::Data`], appends serialized under the handler's OWN
-//!   `Arc<Mutex<()>>` (this module provides no locking of its own — a single
-//!   owning `&mut self` needs none, and a `Clone`-able handler already has
-//!   its own lock, so baking a second one in here would just be a second lock
-//!   to keep in sync with the first).
-//! - `LogWriter` — a header-first envelope, `EventRecord{seq,event}` rows,
-//!   [`SyncPolicy::All`], `create_new`-only (never overwrites an existing
-//!   run's log), holds its own [`File`] open for the writer's lifetime.
-//! - `JsonlObserver` — the degenerate sink: no envelope, no fsync at all
-//!   ([`SyncPolicy::None`]) by design — a transcript observer's own writes are
-//!   best-effort, never load-bearing for correctness the way a journal's are.
-//!
-//! ## Tail policy: `Repair` vs `Observe` — a real, per-consumer choice
-//!
-//! A malformed final line is the torn-write shape (a crash mid-`write`) and
-//! is always FORGIVEN — it never fails the read — but what happens to the
-//! bytes on disk is a genuine per-consumer policy choice, [`TailPolicy`]:
-//!
-//! - **`Repair`** — truncate the file to the last good row, so a later append
-//!   lands after good data, not after garbage. Right for a single-owner file
-//!   nothing else ever reads or writes (`EventJournal`, where `&mut self` is
-//!   the only handle that will ever touch this path again).
-//! - **`Observe`** — leave the file byte-for-byte untouched; the torn row is
-//!   still reported (so the caller can warn) but never truncated away. Right
-//!   for `load_journal`, which folds SEGMENT files it does not own — the
-//!   segmented journal's "retain first, nothing ever rewrites, truncates, or
-//!   deletes a segment" invariant (`tidepool-harness::selfharness::resume`)
-//!   extends to a torn tail too: a later boot redoes the lost row into its
-//!   OWN fresh segment rather than editing a segment some other process
-//!   (possibly still alive, possibly the subject of a later forensic read)
-//!   exclusively claimed.
-//!
-//! This was flagged as an open design point in the duplication survey that
-//! motivated this consolidation ("whether the shared reader always repairs
-//! the tail or exposes `RepairTail` versus `ObserveOnly`"); testing against
-//! `resume.rs`'s own pinned invariant
-//! (`a_segment_with_a_torn_tail_never_poisons_a_later_boot`) settled it in
-//! favor of keeping BOTH — a single global policy would have either corrupted
-//! `EventJournal`'s single-writer-file assumption's safety margin (mutating
-//! under `Observe` everywhere) or broken the segmented design (mutating under
-//! `Repair` everywhere).
-//!
-//! A malformed line ANYWHERE ELSE — not the final line — is loud regardless
-//! of policy: the append-only invariant means only the very last line can
-//! ever be incomplete, so an earlier bad line is real corruption and is never
-//! silently absorbed.
+//! [`TailPolicy::Repair`] truncates a malformed final row for a single-owner
+//! journal. [`TailPolicy::Observe`] leaves artifacts untouched for read-only or
+//! retain-first consumers. Malformed rows before another row are corruption and
+//! fail under either policy. Parsing and repair are not version-migration policy.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -76,10 +21,11 @@ pub enum SyncPolicy {
     /// No fsync at all — the degenerate/best-effort case
     /// (`JsonlObserver`'s transcript writes).
     None,
-    /// `File::sync_data` — durable, skipping the metadata sync that doesn't
-    /// affect readability.
+    /// Sync file data and metadata required to read it. Path-based append also
+    /// syncs its containing directory; borrowed-file writes cannot do that.
     Data,
-    /// `File::sync_all` — durable, including metadata.
+    /// Sync all file metadata as well as data, and the containing directory for
+    /// path-based append. Newly created ancestry must be established separately.
     All,
 }
 
@@ -91,32 +37,35 @@ fn sync(file: &File, policy: SyncPolicy) -> std::io::Result<()> {
     }
 }
 
-/// Append `line` (one JSON row, WITHOUT a trailing newline) to `path`,
-/// creating the file if needed (but NOT its parent directory — a missing
-/// parent is a real failure to report, not to silently paper over by
-/// recreating it; a caller that wants mkdir-p-on-append, as
-/// `JournalHandler` does, calls `std::fs::create_dir_all` itself first),
-/// opened in append mode. ONE `write_all` for the whole row plus its
-/// newline, not two syscalls — so a burst of appends can never land
-/// interleaved under `O_APPEND` (see `SyncPolicy`'s callers for why this
-/// matters more or less depending on their own locking).
+/// Append one JSON row (WITHOUT newline), creating the file but not its parent.
+/// `Data` and `All` sync the file and its containing directory on every append,
+/// including retries after an earlier uncertain first-file publication. `None`
+/// performs no sync. The caller owns durable parent creation and serializes writers.
 ///
-/// Serialization across CONCURRENT writers (multiple threads, multiple
-/// clones of one handler) is the CALLER's job — wrap this in the caller's own
-/// lock, exactly as `JournalHandler` already does. A single owning `&mut
-/// self` (as `EventJournal` has) is exclusive by construction and needs none.
+/// An error can follow a visible append; it does not prove the row was absent and
+/// must not cause an automatic retry. One `write_all` includes row and newline,
+/// but may issue multiple OS writes; callers must not assume row atomicity across
+/// concurrent writers from `O_APPEND` alone.
 pub fn append_new_line(path: &Path, line: &str, sync_policy: SyncPolicy) -> std::io::Result<()> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let mut row = line.to_string();
     row.push('\n');
     file.write_all(row.as_bytes())?;
-    sync(&file, sync_policy)
+    sync(&file, sync_policy)?;
+    if sync_policy != SyncPolicy::None {
+        tidepool_atomic_write::sync_parent_directory(path)
+            .map_err(|error| std::io::Error::new(error.source.kind(), error))?;
+    }
+    Ok(())
 }
 
 /// Write `line` (WITHOUT a trailing newline) to an ALREADY-OPEN file — the
 /// shape a writer that holds its own file handle for its whole lifetime wants
 /// (`LogWriter`, `JsonlObserver`), as opposed to [`append_new_line`]'s
-/// open-write-close-per-call shape.
+/// open-write-close-per-call shape. This syncs only the file: the caller must
+/// establish new-file directory entries and newly created ancestry separately.
+/// Errors can follow a partial or complete visible write, so they do not authorize
+/// blind retry.
 pub fn write_line(file: &mut File, line: &str, sync_policy: SyncPolicy) -> std::io::Result<()> {
     let mut row = line.to_string();
     row.push('\n');
