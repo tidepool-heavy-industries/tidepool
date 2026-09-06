@@ -1619,4 +1619,53 @@ mod tests {
         shutdown_rx.await.expect("shutdown reply");
         owner_task.await.expect("owner task");
     }
+    #[tokio::test]
+    async fn cleanup_child_force_and_terminal_only_never_confirm() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("first"),
+                reply: reply.into(),
+            })
+            .unwrap();
+        for _ in 0..1000 {
+            if fixture.calls.lock().contains(&"first-start") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(fixture.calls.lock().contains(&"first-start"));
+        let context = KernelContext {
+            identity: actor.identity(),
+            myself: actor.address().clone(),
+            children: Arc::new(Mutex::new(HashMap::from([(
+                actor.address().get_id(),
+                actor.clone(),
+            )]))),
+            directory: LocalActorDirectory::default(),
+        };
+        let result = shutdown_children(&context, Duration::from_millis(1)).await;
+        assert!(matches!(
+            result,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        task.await.unwrap();
+        let _ = receiver.await;
+        assert!(
+            actor.terminal().cleanup().is_none(),
+            "forced terminal must not manufacture component proof"
+        );
+        let observed = actor
+            .shutdown_with_cleanup(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "observe only".into(),
+            })
+            .await
+            .unwrap();
+        assert!(!observed.cleanup.is_confirmed());
+        assert_eq!(observed.cleanup.actor(), actor.identity());
+    }
 }
