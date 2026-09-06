@@ -24,9 +24,208 @@ async fn committed(
     result
 }
 
+fn open_test_fork(
+    campaign: &TestCampaign,
+    child: &tidepool_actor::LocalResidentInstallation,
+) -> tidepool_worktree::ActiveBinding {
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        worktree_grant(child.effective_role.role()),
+    );
+    let [worktree_id] = child.launch_worktrees.as_slice() else {
+        panic!("child must have one worktree")
+    };
+    let worktree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(worktree_id))
+        .unwrap()
+        .unwrap();
+    let principal = WorktreePrincipal::exact_actor(
+        &runtime_namespace(campaign.session_root.path()),
+        child.actor.identity().id.0,
+        child.actor.identity().incarnation.0,
+    );
+    let binding = campaign
+        .bindings
+        .lock()
+        .bind(worktree.id(), &principal, current_time_ms())
+        .unwrap();
+    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    binding
+}
+
 #[tokio::test]
 async fn published_unfold_watch_and_request_examples_execute() {
     execute_examples(false, None, CompletionAction::Acknowledge).await;
+}
+
+#[tokio::test]
+async fn base_prompt_coordination_example_executes() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        "let seed = projectHead\nlet task = \"Check the hit targets.\" :: Text",
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        example(include_str!("../../../prompts/shoal/base.md")),
+    )
+    .await;
+    let mut binding = None;
+    let child = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut child = None;
+        loop {
+            match campaign.deployments.recv().await {
+                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                    binding = Some(open_test_fork(&campaign, &installation));
+                    child = Some(installation)
+                }
+                Some(LocalResidentDeployment::SessionReady { activation }) => {
+                    assert!(activation.message.contains("Check the hit targets."));
+                    return child.unwrap();
+                }
+                Some(_) => {}
+                None => panic!("deployment stream closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(child.fork_effort, Some(tidepool_actor::ForkEffort::Low));
+    let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    campaign.await_watch_ready().await;
+    committed(root.as_ref(), "result <- pollWatch ready").await;
+    let result = committed(root.as_ref(), "inspectFull result").await;
+    assert!(result["items"][0]["output"]
+        .as_str()
+        .unwrap()
+        .contains("Check the hit targets."));
+    let original = committed(root.as_ref(), "pollResponse (forkedResponse worker)").await;
+    assert!(original["items"][0]["output"]
+        .as_str()
+        .unwrap()
+        .starts_with("ResponseReady"));
+    committed(root.as_ref(), "stopAgent (forkedActor worker)").await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn activation_presents_prose_and_preserves_exact_inputs() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let mut child = None;
+    committed(root.as_ref(), "data Report = Report Int deriving Show\nworker <- startAgent (readonlyAgent \"activation-preview-worker\")").await;
+    committed(
+        root.as_ref(),
+        include_str!("../actor_host_fixtures/generic_actor/activation_preview_setup.hs"),
+    )
+    .await;
+    for (label, input, expected, reply) in [
+        (
+            "preview-text",
+            "textPreview",
+            "first line\nλ second line",
+            "respond (Report 1)",
+        ),
+        (
+            "preview-long-text",
+            "longTextPreview",
+            "FINAL-ACCEPTANCE-CONDITION",
+            "respond (Report 1)",
+        ),
+        (
+            "preview-oversized-text",
+            "oversizedTextPreview",
+            "expand with `inspectFull sessionInput`",
+            "respond (Report 1)",
+        ),
+        (
+            "preview-opaque",
+            "opaquePreview",
+            "<opaque value>",
+            "respond (Report (sessionInput 16))",
+        ),
+        (
+            "preview-effect",
+            "effectPreview",
+            "<opaque value>",
+            "respond (Report 1)",
+        ),
+        (
+            "preview-failure",
+            "brokenPreview",
+            "rendering unavailable",
+            "case sessionInput of BrokenPreview n -> respond (Report n)",
+        ),
+    ] {
+        committed(root.as_ref(), &format!("let Right previewLabel = requestLabel \"{label}\"\npreviewResponse <- request @Report worker previewLabel {input}")).await;
+        let activation = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match campaign.deployments.recv().await {
+                    Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                        child = Some(installation)
+                    }
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.message.contains(label) =>
+                    {
+                        break activation
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment stream closed"),
+                }
+            }
+        })
+        .await
+        .expect("preview activation");
+        assert!(
+            activation.message.contains(expected),
+            "{}",
+            activation.message
+        );
+        assert!(
+            activation.message.contains("data Report"),
+            "{}",
+            activation.message
+        );
+        if label == "preview-long-text" {
+            assert!(
+                !activation.message.contains("omitted"),
+                "{}",
+                activation.message
+            );
+            let observation =
+                committed(child.as_ref().unwrap().policy.as_ref(), "sessionInput").await;
+            assert!(!observation["items"][0]["output"]
+                .as_str()
+                .unwrap()
+                .contains("FINAL-ACCEPTANCE-CONDITION"));
+        }
+        if label == "preview-oversized-text" {
+            assert!(activation.message.len() < 17 * 1024);
+            assert!(!activation.message.contains("RETAINED-ASSIGNMENT-TAIL"));
+            let expanded = committed(
+                child.as_ref().unwrap().policy.as_ref(),
+                "inspectFull sessionInput",
+            )
+            .await;
+            assert!(
+                expanded["items"][0]["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("RETAINED-ASSIGNMENT-TAIL"),
+                "{expanded}"
+            );
+        }
+        let result = dispatch_haskell_script(child.as_ref().unwrap().policy.as_ref(), reply).await;
+        assert_eq!(result["status"], "replied", "{result:?}");
+    }
+    committed(root.as_ref(), "stopAgent worker").await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
@@ -325,31 +524,7 @@ async fn execute_examples(
                 } else {
                     fork_boundary = Some(boundary.clone());
                 }
-                campaign.authority.install_grant(
-                    child.actor.identity().into(),
-                    worktree_grant(child.effective_role.role()),
-                );
-                let [worktree_id] = child.launch_worktrees.as_slice() else {
-                    panic!("child must have one worktree")
-                };
-                let worktree = campaign
-                    .worktrees
-                    .lookup(&tidepool_worktree::WorktreeId::from_raw(worktree_id))
-                    .unwrap()
-                    .unwrap();
-                let principal = WorktreePrincipal::exact_actor(
-                    &runtime_namespace(campaign.session_root.path()),
-                    child.actor.identity().id.0,
-                    child.actor.identity().incarnation.0,
-                );
-                bindings.push(
-                    campaign
-                        .bindings
-                        .lock()
-                        .bind(worktree.id(), &principal, current_time_ms())
-                        .unwrap(),
-                );
-                child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+                bindings.push(open_test_fork(&campaign, &child));
                 children.push(child);
             }
             LocalResidentDeployment::Retired { actor, terminal } => {
@@ -385,7 +560,7 @@ async fn execute_examples(
             );
             if !rich_response && child.label.ends_with("/domain") {
                 assert!(
-                    activation.message.contains("sessionInput :: Int\n7"),
+                    activation.message.contains("sessionInput :: Int`):\n\n7"),
                     "{}",
                     activation.message
                 );
@@ -486,66 +661,6 @@ async fn execute_examples(
                 .contains("Report 9"),
             "{full}"
         );
-    }
-    if !rich_response {
-        committed(
-            root.as_ref(),
-            include_str!("../actor_host_fixtures/generic_actor/activation_preview_setup.hs"),
-        )
-        .await;
-        for (label, input, expected, reply) in [
-            (
-                "preview-text",
-                "textPreview",
-                "first line\nλ second line",
-                "respond (Report 1)",
-            ),
-            (
-                "preview-opaque",
-                "opaquePreview",
-                "<opaque value>",
-                "respond (Report (sessionInput 16))",
-            ),
-            (
-                "preview-effect",
-                "effectPreview",
-                "<opaque value>",
-                "respond (Report 1)",
-            ),
-            (
-                "preview-failure",
-                "brokenPreview",
-                "rendering unavailable",
-                "case sessionInput of BrokenPreview n -> respond (Report n)",
-            ),
-        ] {
-            committed(root.as_ref(), &format!("let Right previewLabel = requestLabel \"{label}\"\npreviewResponse <- request @Report worker previewLabel {input}")).await;
-            let activation = tokio::time::timeout(Duration::from_secs(120), async {
-                loop {
-                    if let Some(LocalResidentDeployment::SessionReady { activation }) =
-                        campaign.deployments.recv().await
-                    {
-                        if activation.message.contains(label) {
-                            break activation;
-                        }
-                    }
-                }
-            })
-            .await
-            .expect("preview activation");
-            assert!(
-                activation.message.contains(expected),
-                "{}",
-                activation.message
-            );
-            assert!(
-                activation.message.contains("data Report"),
-                "{}",
-                activation.message
-            );
-            let result = dispatch_haskell_script(domain.policy.as_ref(), reply).await;
-            assert_eq!(result["status"], "replied", "{result:?}");
-        }
     }
     for child in children {
         child

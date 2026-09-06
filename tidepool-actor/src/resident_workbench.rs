@@ -1361,25 +1361,24 @@ where
         let input = match self
             .access
             .with_machine(context, move |session, context, _| {
-                render_observation(session, context, &source, &type_modules, "sessionInput")
+                render_observation(
+                    session, context, &source, &type_modules, "sessionInput",
+                    ObservationPurpose::Assignment,
+                )
             })
             .await
         {
-            Ok((text, omitted)) => {
-                if omitted {
-                    format!("{text}\n<preview truncated or opaque; inspect sessionInput>")
-                } else {
-                    text
-                }
-            }
-            Err(_) => "<input rendering unavailable; inspect sessionInput>".into(),
+            Ok((text, omitted)) => bounded_activation_text(
+                text, ACTIVATION_INPUT_LIMIT, omitted, "inspectFull sessionInput",
+            ),
+            Err(_) => "<input rendering unavailable; use `:type sessionInput` and select or apply the value; `inspectFull sessionInput` requires Show>".into(),
         };
         let reply = reply_declaration.unwrap_or_else(|| {
             format!("{reply_type} (no declaration captured at the request site)")
         });
         (
-            bounded_activation_text(input, 16 * 1024, "sessionInput"),
-            bounded_activation_text(reply, 4 * 1024, &format!(":info {reply_type}")),
+            input,
+            bounded_activation_text(reply, 4 * 1024, false, &format!(":info {reply_type}")),
         )
     }
 
@@ -1723,6 +1722,7 @@ where
                         &source,
                         &type_modules,
                         &format!("{name} ()"),
+                        ObservationPurpose::Inspection,
                     );
                     let (text, omitted) = preview
                         .unwrap_or_else(|error| (format!("preview unavailable: {error}"), true));
@@ -1785,28 +1785,54 @@ mod activation_preview_tests {
 
     #[test]
     fn preview_bounds_preserve_unicode_and_mark_omission() {
-        assert_eq!(bounded_activation_text("".into(), 4, "sessionInput"), "");
         assert_eq!(
-            bounded_activation_text("a\nλ".into(), 4, "sessionInput"),
+            bounded_activation_text("".into(), 4, false, "inspectFull sessionInput"),
+            ""
+        );
+        assert_eq!(
+            bounded_activation_text("a\nλ".into(), 4, false, "inspectFull sessionInput"),
             "a\nλ"
         );
         assert_eq!(
-            bounded_activation_text("aλz".into(), 2, "sessionInput"),
-            "a\n<preview truncated; inspect sessionInput>"
+            bounded_activation_text("aλz".into(), 2, true, "inspectFull sessionInput"),
+            "a\n<additional detail omitted; expand with `inspectFull sessionInput`>"
+        );
+        assert_eq!(
+            bounded_activation_text("data R".into(), 4, false, ":info R"),
+            "data\n<additional detail omitted; expand with `:info R`>"
         );
     }
 }
 
-fn bounded_activation_text(mut text: String, maximum: usize, inspect: &str) -> String {
+// Bound the demanded character prefix as well as the rendered UTF-8 bytes.
+// The final byte clipping can shorten a multibyte prefix further.
+const ACTIVATION_INPUT_LIMIT: usize = 16 * 1024;
+
+fn bounded_activation_text(
+    mut text: String,
+    maximum: usize,
+    mut omitted: bool,
+    expansion: &str,
+) -> String {
     if text.len() > maximum {
         let mut end = maximum;
         while !text.is_char_boundary(end) {
             end -= 1;
         }
         text.truncate(end);
-        text.push_str(&format!("\n<preview truncated; inspect {inspect}>"));
+        omitted = true;
+    }
+    if omitted {
+        text.push_str(&format!(
+            "\n<additional detail omitted; expand with `{expansion}`>"
+        ));
     }
     text
+}
+
+enum ObservationPurpose {
+    Inspection,
+    Assignment,
 }
 
 fn render_observation<H, O>(
@@ -1815,6 +1841,7 @@ fn render_observation<H, O>(
     source: &ActorWorkbenchSource,
     type_modules: &[String],
     expression: &str,
+    purpose: ObservationPurpose,
 ) -> Result<(String, bool), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -1826,8 +1853,15 @@ where
     let view = actor_compile_view(session, context, source, type_modules)?;
     let prepared = source.prepare(&view);
     let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-    let render = format!("TidepoolInspection.workbenchDisplay ({expression})");
-    let templates: Vec<_> = [render.as_str(), "(T.pack \"<opaque value>\", True)"]
+    let (renderer, opaque) = match purpose {
+        ObservationPurpose::Inspection => ("workbenchDisplay".to_owned(), "(T.pack \"<opaque value>\", True)"),
+        ObservationPurpose::Assignment => (
+            format!("workbenchActivationDisplay {ACTIVATION_INPUT_LIMIT}"),
+            "(T.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput; full printing requires Show.\", False)",
+        ),
+    };
+    let render = format!("TidepoolInspection.{renderer} ({expression})");
+    let templates: Vec<_> = [render.as_str(), opaque]
         .into_iter()
         .map(|expression| TurnTemplate {
             kind: TemplateSelector::Expr,

@@ -62,14 +62,21 @@ waits up to five minutes for confirmation after connection, so a longer tool
 call can leave an update unconfirmed. Report intended changes and later
 incorporation with task-specific progress or a typed result.
 
-Request activations show a rendered `sessionInput` preview and the reply type's
-GHC declaration captured at its typed request site when available. Input previews
-use the workbench's compact display (a 512-character payload prefix), with an
-outer 16 KiB message cap; reply definitions are capped at 4 KiB. Omitted detail
-is marked explicitly. The mounted value remains
-authoritative. Opaque inputs remain valid; inspect their types and project useful
-fields. Reply-type dependencies are not expanded automatically. No second type lookup is performed at activation. Older artifacts without a
-captured declaration still show the exact reply type. Previewing does not settle the request.
+Request activations present `Text` inputs as assignment prose, up to 16 KiB of
+UTF-8 text, without Haskell string quoting. Read it there; `sessionInput` retains
+the exact input for later use. Structured inputs use the ordinary compact display
+(a 512-character payload prefix by default). Both have a 16 KiB byte cap, followed
+by an omission cue where needed. Expand omitted prose directly with
+`inspectFull sessionInput`; a bare `sessionInput` observation still uses the
+ordinary quiet display. Explicit text inspection returns the original text
+without a `Show` conversion, quoting, or escaping. Opaque inputs remain valid:
+use their types to select fields or apply them. Other values use `Show` by default.
+
+The reply type's GHC declaration is captured at its typed request site when
+available and capped at 4 KiB, with a direct `:info` cue if truncated. Reply-type
+dependencies are not expanded automatically; no second type lookup is performed
+at activation. Older artifacts without a captured declaration still show the
+exact reply type. Presentation does not settle the request.
 
 Preview limits bound message size, not the cost of a custom `Show` implementation.
 Rendering uses the shared resident execution mechanism with a compiler-checked

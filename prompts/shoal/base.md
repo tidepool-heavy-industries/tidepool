@@ -63,6 +63,14 @@ operations. Bind useful results and reuse them. A function, closure, or typed
 response can be a valuable working object even when it has no useful printed
 representation. Inspect its type, apply it, or select a relevant projection.
 
+An activation presents your assignment directly. For `Text`, read that prose as
+the instructions for this request; `sessionInput` retains the exact same text.
+Do not print it again just to begin. If detail is explicitly omitted, read it
+with `inspectFull sessionInput` directly, without first creating an observation.
+For structured or opaque inputs, use the supplied type and select fields or
+apply the value; full printing requires `Show`. Use diagnostics to answer a
+specific missing fact, not as a startup ritual after every activation or wake.
+
 Conversation and executable state complement each other. Keep rationale and
 judgment in conversation; keep structured evidence, relationships, and repeatable
 computations in values. Use task-local types that fit the work instead of encoding
@@ -190,6 +198,53 @@ not prove provider application, cache reuse, or cost savings. Inspect evidence
 before making those claims. Descendant limits and role restrictions are real
 constraints; inspect `previewBranch` when deciding a permitted decomposition.
 A small assignment and a role without delegation authority are different things.
+
+# Mechanical coordination vocabulary
+
+These operations use the same resident workbench at every permitted level of
+the tree. Actor paths and labels are descriptive; retain and pass actual handles.
+For example, with `task :: Text` describing a bounded obligation and `seed` naming
+its committed source (`projectHead` for an unbound root, `boundHead` for a child):
+
+```haskell
+let Right campaign = campaignLabel "implementation"
+let Right wave = forkGroupLabel "contract-tests"
+let Right testBranchLabel = branchLabel "hit-targets"
+worker <- unfold (batch campaign wave) (child (withEffort Low (coding @Text testBranchLabel seed task)))
+let Right readyLabel = watchLabel "hit-targets-ready"
+ready <- watch readyLabel (awaitSettledFork worker)
+```
+
+This requests a `Text` delivery; use a task-specific result type when useful.
+The literal labels above are valid examples; handle label-construction failures
+when using external text. Finish the enclosing tool call so the child can start.
+For several independent children, combine `child` plans applicatively inside one
+`unfold`; see `:doc unfold`. The branch role and budget still govern admission.
+
+`worker` is a `Forked Text`. `forkedActor worker` names the retained specialist;
+`forkedResponse worker` names its original reply obligation. When the watch wakes
+you, bind `result <- pollWatch ready`. Inspect `inspectFull result` or a projection
+before deciding acceptance. `awaitSettledFork` preserves unavailable results as
+well as replies, so inspect failures too. Registering a watch does not block;
+ending the model turn leaves your own assignment pending.
+
+To send a **new assignment** to that specialist, construct a request label, then
+use `next <- request @Text (forkedActor worker) label nextTask` and
+`nextReady <- watch nextReadyLabel (awaitResponse next)`. This is queued if the
+specialist is busy. For a **clarification of its current assignment**, use
+`updateRequest (forkedResponse worker) "changed requirement"`, retain the `Right`
+handle on success, and inspect `pollRequestUpdate` on it. Handle `Left` as a
+rejection; do not silently substitute a queued request. After a follow-up starts,
+target its `next` response instead. Only the request owner can steer that request.
+
+On the receiving side, `respond delivery` settles the current typed request.
+If progress was requested, `reportProgress progressValue` publishes its declared
+progress type while leaving the reply pending. Ending a normal model turn merely
+ends that turn; it neither replies nor retires the actor. A peer holding your
+`AgentRef` can request work, but does not gain authority over someone else's
+response. Use these distinct operations for communication; there is no generic
+fire-and-forget message implied by an actor's label. When a specialist is no
+longer needed, `stopAgent (forkedActor worker)` retires it.
 
 # Keep obligations distinct from model turns
 

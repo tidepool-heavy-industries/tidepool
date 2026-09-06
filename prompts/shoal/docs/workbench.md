@@ -38,8 +38,10 @@ Names are unique within the actor's visible scope.
 The latest eight automatic observations remain available per actor scope. Use
 `let evidence = observation12 ()` before expiry to retain one under the normal
 binding lifetime, or bind directly with `evidence <- pollWatch joined`.
-`inspectFull evidence` requests its complete `Show` output, which may be large,
-expensive, or fail. Projections remain useful when choosing specific evidence:
+`inspectFull evidence` returns `Text` directly; other values use complete `Show`
+output by default, which may be large, expensive, or fail. Text inspection avoids
+quoting, escaping, and conversion through a character list. Projections remain
+useful when choosing specific evidence:
 
 ```haskell
 let scores = map candidateScore

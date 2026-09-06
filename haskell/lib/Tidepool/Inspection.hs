@@ -6,7 +6,7 @@
 module Tidepool.Inspection
   ( WorkbenchDisplay (..)
   , FullInspection
-  , inspectFull
+  , FullDisplay (inspectFull)
   ) where
 
 import Data.Text (Text)
@@ -19,6 +19,10 @@ import Tidepool.Agent.Watch.Internal
 -- Show prefix, not the evaluation time of an arbitrary Show implementation.
 class WorkbenchDisplay a where
   workbenchDisplay :: a -> (Text, Bool)
+  -- | Assignments need readable instructions on arrival. Structured inputs
+  -- retain their ordinary compact presentation; the host also caps UTF-8 bytes.
+  workbenchActivationDisplay :: Int -> a -> (Text, Bool)
+  workbenchActivationDisplay _ = workbenchDisplay
 
 instance {-# OVERLAPPABLE #-} Show a => WorkbenchDisplay a where
   workbenchDisplay value =
@@ -29,12 +33,22 @@ instance WorkbenchDisplay Text where
   workbenchDisplay value =
     let prefix = Text.take 513 value
     in (Text.take 512 prefix, Text.length prefix > 512)
+  workbenchActivationDisplay limit value =
+    let prefix = Text.take (limit + 1) value
+    in (Text.take limit prefix, Text.length prefix > limit)
 
 newtype FullInspection = FullInspection Text
 
--- | Render a saved value explicitly. This can be expensive or fail, like Show.
-inspectFull :: Show a => a -> FullInspection
-inspectFull value = FullInspection (Text.pack (show value))
+-- | Render a saved value explicitly. Text is already a presentation; other
+-- values use Show by default, which can be expensive or fail.
+class FullDisplay a where
+  inspectFull :: a -> FullInspection
+
+instance {-# OVERLAPPABLE #-} Show a => FullDisplay a where
+  inspectFull value = FullInspection (Text.pack (show value))
+
+instance FullDisplay Text where
+  inspectFull = FullInspection
 
 instance WorkbenchDisplay FullInspection where
   workbenchDisplay (FullInspection text) = (text, False)

@@ -69,7 +69,7 @@ impl ActivationContract {
             .map_or(String::new(), |ty| {
                 format!("\nProgress updates: `reportProgress` accepts {ty}.")
             });
-        format!("Request {}{}\n\nsessionInput :: {}\n{}\n\nReturn with `respond` (reply type {}):\n{}{}",
+        format!("Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}\n\nReturn with `respond` (reply type {}):\n{}{}",
             request.0, guidance.map(|text| format!(": {text}")).unwrap_or_default(),
             self.input_type, self.input_preview, self.response.expected_type(), self.reply_preview, progress)
     }
@@ -200,7 +200,7 @@ mod tests {
         );
         assert_eq!(
             activation.message,
-            "Request 11: Review this candidate.\n\nsessionInput :: Candidate\ncandidate\n\nReturn with `respond` (reply type Review):\ndata Review = Accepted | Rejected"
+            "Request 11: Review this candidate.\n\nAssignment (available as `sessionInput :: Candidate`):\n\ncandidate\n\nReturn with `respond` (reply type Review):\ndata Review = Accepted | Rejected"
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }
