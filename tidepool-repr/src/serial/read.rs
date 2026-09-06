@@ -747,6 +747,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn float_ingress_rejects_noncanonical_high_bits() {
+        let literal = Value::Array(vec![
+            Value::Text("LitFloat".into()),
+            Value::Integer(((1u64 << 32) | u64::from(1.0f32.to_bits())).into()),
+        ]);
+        assert!(matches!(decode_literal(&literal), Err(ReadError::InvalidLiteral(_))));
+    }
+
+    #[test]
     fn test_strip_header_valid() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&super::super::HEADER_MAGIC);
