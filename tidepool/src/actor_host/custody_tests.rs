@@ -1,5 +1,5 @@
 use super::*;
-use tidepool_actor::ForkWorkspaceCustody;
+use tidepool_actor::{ForkWorkspaceCustody, ResidentToolEndpoint};
 
 fn custody_fixture() -> (
     tidepool_worktree::testing::TestRepo,
@@ -137,6 +137,42 @@ impl ForkWorkspaceAdmission for DelayedCustody {
     }
 }
 
+// Keep activation observations rather than consuming them while waiting for attachment:
+// attachment is earlier than RunRequest's initial worktreeHead.
+async fn custody_activation(
+    deployments: &mut mpsc::UnboundedReceiver<LocalResidentDeployment>,
+) -> tidepool_actor::ResidentActivation {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        match deployments.recv().await.expect("deployment stream") {
+            LocalResidentDeployment::SessionReady { activation } => activation,
+            LocalResidentDeployment::Retired { actor, terminal } => {
+                panic!("{actor:?} retired before activation: {terminal:?}")
+            }
+            _ => panic!("unexpected event before activation"),
+        }
+    })
+    .await
+    .expect("exact request activation")
+}
+
+async fn custody_assert_request(
+    policy: &dyn ResidentToolEndpoint,
+    expression: &str,
+    activation: &tidepool_actor::ResidentActivation,
+) {
+    let result = tests::dispatch_haskell_script(
+        policy,
+        &format!("inspectFull (requestId (forkedResponse {expression}))"),
+    )
+    .await;
+    assert_eq!(result["status"], "committed", "{result:?}");
+    assert_eq!(
+        result["items"][0]["output"].as_str().unwrap().trim(),
+        format!("RequestId {}", activation.request.0),
+        "{result:?}"
+    );
+}
+
 #[tokio::test]
 async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     let (entered, mut installing) = mpsc::unbounded_channel();
@@ -170,49 +206,215 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                 actor.incarnation.0,
             ))
             .is_none());
-        while let Ok(event) = campaign.deployments.try_recv() {
-            if let LocalResidentDeployment::PolicyInstalled(child) = event {
-                panic!(
-                    "provider published before custody release: {:?}",
-                    child.actor.identity()
-                );
-            }
-        }
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "publication before custody"
+        );
         release.send(()).unwrap();
-        let child = tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                match campaign.deployments.recv().await.unwrap() {
-                    LocalResidentDeployment::PolicyInstalled(child) => break child,
-                    LocalResidentDeployment::Retired { actor, terminal } => {
-                        panic!("{actor:?}: {terminal:?}")
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let child = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let LocalResidentDeployment::PolicyInstalled(child) = child else {
+            panic!("expected attachment");
+        };
         assert_eq!(child.actor.identity(), actor);
         assert!(child.worktree_custody.is_some());
-        child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+        campaign
+            .authority
+            .install_grant(actor.into(), worktree_grant(child.effective_role.role()));
         installed.push(child);
+    }
+    // Neither child can run before the whole fork boundary is acknowledged.
+    assert!(campaign.deployments.try_recv().is_err());
+    for child in &installed {
+        child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     }
     let result = tokio::time::timeout(Duration::from_secs(120), launched)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(result["status"], "committed", "{result:?}");
+    installed.sort_by(|a, b| a.label.cmp(&b.label));
+    assert!(installed[0].label.ends_with("/first"));
+    assert!(installed[1].label.ends_with("/second"));
     assert_ne!(installed[0].launch_worktrees, installed[1].launch_worktrees);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    let mut seen = [false; 2];
+    for _ in 0..2 {
+        let activation = custody_activation(&mut campaign.deployments).await;
+        let index = installed
+            .iter()
+            .position(|child| child.actor.identity() == activation.id.actor())
+            .expect("exact sibling actor");
+        assert!(!seen[index], "duplicate sibling activation");
+        seen[index] = true;
+        custody_assert_request(
+            campaign.root_installation.policy.as_ref(),
+            if index == 0 {
+                "(fst siblings)"
+            } else {
+                "(snd siblings)"
+            },
+            &activation,
+        )
+        .await;
+    }
+    assert_eq!(seen, [true, true]);
+
+    // Give boundHead a distinguishable source, not the root/sibling seed.
+    let parent_tree = campaign
+        .worktrees
+        .lookup(&WorktreeId::from_raw(&installed[0].launch_worktrees[0]))
+        .unwrap()
+        .unwrap();
+    campaign
+        .worktrees
+        .git()
+        .try_run(
+            parent_tree.cwd(),
+            &[
+                "-c",
+                "user.name=Custody Test",
+                "-c",
+                "user.email=custody@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "distinct nested source",
+            ],
+        )
+        .unwrap();
+    let sibling_tree = campaign
+        .worktrees
+        .lookup(&WorktreeId::from_raw(&installed[1].launch_worktrees[0]))
+        .unwrap()
+        .unwrap();
+    let sibling_head = campaign
+        .worktrees
+        .git()
+        .try_run(sibling_tree.cwd(), &["rev-parse", "HEAD"])
+        .unwrap();
+
+    let policy = installed[0].policy.clone();
+    let nested = tokio::spawn(async move {
+        tests::dispatch_haskell_script(policy.as_ref(), include_str!("custody_nested.hs")).await
+    });
+    let (actor, release) = tokio::time::timeout(Duration::from_secs(120), installing.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(campaign
+        .bindings
+        .lock()
+        .active_for_agent(&WorktreePrincipal::exact_actor(
+            &runtime_namespace(campaign.session_root.path()),
+            actor.id.0,
+            actor.incarnation.0,
+        ))
+        .is_none());
+    assert!(
+        campaign.deployments.try_recv().is_err(),
+        "nested publication before custody"
+    );
+    release.send(()).unwrap();
+    let child = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let LocalResidentDeployment::PolicyInstalled(leaf) = child else {
+        panic!("expected nested attachment");
+    };
+    assert_eq!(leaf.actor.identity(), actor);
+    assert_eq!(leaf.context_parent, Some(installed[0].actor.identity()));
+    campaign
+        .authority
+        .install_grant(actor.into(), worktree_grant(leaf.effective_role.role()));
+    let leaf_tree = campaign
+        .worktrees
+        .lookup(&WorktreeId::from_raw(&leaf.launch_worktrees[0]))
+        .unwrap()
+        .unwrap();
+    let parent_head = campaign
+        .worktrees
+        .git()
+        .try_run(parent_tree.cwd(), &["rev-parse", "HEAD"])
+        .unwrap();
+    assert_eq!(leaf_tree.source_head().as_str(), parent_head.trimmed());
+    assert_ne!(parent_head.trimmed(), sibling_head.trimmed());
+    leaf.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(120), nested)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["status"], "committed", "{result:?}");
+    let activation = custody_activation(&mut campaign.deployments).await;
+    assert_eq!(activation.id.actor(), leaf.actor.identity());
+    custody_assert_request(installed[0].policy.as_ref(), "nested", &activation).await;
+    let watch = tests::dispatch_haskell_script(installed[0].policy.as_ref(),
+        "let Right readyLabel = watchLabel \"custody-leaf-ready\"\nleafReady <- watch readyLabel (awaitFork nested)").await;
+    assert_eq!(watch["status"], "committed", "{watch:?}");
+    let reply =
+        tests::dispatch_haskell_script(leaf.policy.as_ref(), "respond (sessionInput :: Text)")
+            .await;
+    assert_eq!(reply["status"], "replied", "{reply:?}");
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::WatchChanged { notification }
+                    if notification.owner == installed[0].actor.identity()
+                        && notification.label == "custody-leaf-ready" =>
+                {
+                    assert_eq!(
+                        notification.transition,
+                        tidepool_actor::WatchTransition::Ready
+                    );
+                    break;
+                }
+                LocalResidentDeployment::SessionReady { activation } => {
+                    panic!("unexpected additional activation: {activation:?}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let reply = tests::dispatch_haskell_script(
+        installed[0].policy.as_ref(),
+        include_str!("custody_nested_reply.hs"),
+    )
+    .await;
+    assert_eq!(reply["status"], "committed", "{reply:?}");
+    assert_eq!(
+        reply["items"].as_array().unwrap().last().unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .trim(),
+        "True"
+    );
+    installed.push(leaf);
     let ids: Vec<_> = installed
         .iter()
         .map(|child| WorktreeId::from_raw(&child.launch_worktrees[0]))
         .collect();
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        3
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
     drop(installed);
     while campaign.deployments.try_recv().is_ok() {}
     for id in ids {
         assert!(campaign.bindings.lock().current(&id).is_none());
+        assert!(campaign
+            .worktrees
+            .lookup(&id)
+            .unwrap()
+            .unwrap()
+            .cwd()
+            .join("README.md")
+            .exists());
     }
 }
 
