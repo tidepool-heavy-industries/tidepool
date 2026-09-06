@@ -441,9 +441,20 @@ where
         Ok(Some(envelope))
     }
 
+    /// Legacy whole-queue delivery fails closed before exposing tracked payloads.
+    /// Mixed consumers must explicitly use `legacy_pending_prefix` and send permits.
     pub fn pending(&self) -> Result<Vec<DurableEnvelope<T, R>>, InboxError> {
         let state = lock_state(&self.state);
         healthy(&state)?;
+        if let Some(row) = state
+            .pending
+            .iter()
+            .find(|row| row.receipt_context.is_some())
+        {
+            return Err(InboxError::TrackedBarrier {
+                sequence: row.sequence,
+            });
+        }
         Ok(state.pending.iter().cloned().collect())
     }
     /// Legacy delivery may not concatenate tracked notifications into its batch.

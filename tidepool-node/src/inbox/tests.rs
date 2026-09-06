@@ -366,7 +366,7 @@ fn uncertain_append_never_reuses_a_sequence_until_reopen_reconciles_the_row() {
     assert!(matches!(inbox.pending(), Err(InboxError::Poisoned)));
     drop(inbox);
     let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
-    assert_eq!(reopened.pending().unwrap().len(), 1);
+    assert_eq!(lock_state(&reopened.state).pending.len(), 1);
     assert_eq!(phase(&reopened, 1), DeliveryPhase::Accepted);
     assert_eq!(reopened.publish("new".into()).unwrap().sequence, 2);
 }
@@ -451,7 +451,10 @@ fn explicit_null_context_remains_tracked_after_reopen() {
     let row = inbox.publish_tracked("unit provenance".into(), ()).unwrap();
     drop(inbox);
     let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
-    assert_eq!(reopened.pending().unwrap()[0].receipt_context, Some(()));
+    assert_eq!(
+        lock_state(&reopened.state).pending[0].receipt_context,
+        Some(())
+    );
     assert!(reopened.legacy_pending_prefix().unwrap().is_empty());
     assert!(matches!(
         reopened.acknowledge(row.sequence),
@@ -472,7 +475,10 @@ fn unresolved_count_capacity_never_evicts_a_pending_receipt() {
         Err(InboxError::ReceiptCapacity)
     ));
     assert_eq!(phase(&inbox, 1), DeliveryPhase::Accepted);
-    assert_eq!(inbox.pending().unwrap().len(), MAX_RETAINED_RECEIPTS);
+    assert_eq!(
+        lock_state(&inbox.state).pending.len(),
+        MAX_RETAINED_RECEIPTS
+    );
 }
 
 #[test]
@@ -490,12 +496,29 @@ fn panicked_mutation_owner_requires_reopen_not_mutex_poison_recovery() {
         Err(InboxError::Poisoned)
     ));
     drop(inbox);
-    assert_eq!(
-        DurableInbox::<String, String>::open(rows, cursor)
-            .unwrap()
-            .pending()
-            .unwrap()
-            .len(),
-        1
+    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    assert_eq!(lock_state(&reopened.state).pending.len(), 1);
+}
+
+#[test]
+fn legacy_pending_cannot_expose_tracked_payload_before_or_after_restart() {
+    let (_dir, rows, cursor, inbox) = tracked();
+    let before = inbox.publish("before".into()).unwrap();
+    let row = inbox
+        .publish_tracked("notification".into(), "owner".into())
+        .unwrap();
+    assert!(
+        matches!(inbox.pending(), Err(InboxError::TrackedBarrier { sequence }) if sequence == row.sequence)
     );
+    assert_eq!(inbox.legacy_pending_prefix().unwrap(), vec![before.clone()]);
+    inbox.acknowledge(before.sequence).unwrap();
+    drop(inbox.begin_tracked_delivery(row.sequence).unwrap());
+    drop(inbox);
+    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    assert!(
+        matches!(reopened.pending(), Err(InboxError::TrackedBarrier { sequence }) if sequence == row.sequence)
+    );
+    assert!(reopened.legacy_pending_prefix().unwrap().is_empty());
+    assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Unconfirmed);
+    assert!(reopened.begin_tracked_delivery(row.sequence).is_err());
 }
