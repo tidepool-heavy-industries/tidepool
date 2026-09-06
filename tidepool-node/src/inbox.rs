@@ -4,6 +4,8 @@
 //! existing checkpoint. The checkpoint is upgraded before the first tracked row;
 //! old binaries deliberately cannot read that shape. This type assumes one open
 //! owner per pair of paths, just as the append/ack queue did before receipts.
+//! The owner also controls both hierarchies against concurrent rename/removal;
+//! symlink entries, targets and target ancestry must already be durable.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -234,6 +236,11 @@ where
         // Reject an unsupported checkpoint before repairing any row tail.
         let (mut checkpoint, versioned) = read_cursor::<R>(&cursor_path)?;
         let rows = read_rows::<T, R>(&rows_path)?;
+        // Reopening visible bytes after uncertain I/O is reconciliation, not proof
+        // they reached storage. Stabilize both surviving files (including any
+        // repaired row tail) before exposing receipts or a new send capability.
+        stabilize_existing_file(&rows_path)?;
+        stabilize_existing_file(&cursor_path)?;
         let cursor = checkpoint.sequence;
         let first = rows.first().map(|row| row.sequence);
         let last = rows.last().map(|row| row.sequence).unwrap_or(cursor);
@@ -730,10 +737,20 @@ fn total_context_bytes<R: Serialize>(
     })
 }
 fn create_parent(path: &Path) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(())
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    tidepool_atomic_write::create_dir_all_durable(parent)
+        .map_err(|error| std::io::Error::new(error.source.kind(), error))
+}
+
+fn stabilize_existing_file(path: &Path) -> Result<(), std::io::Error> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    file.sync_all()?;
+    tidepool_atomic_write::sync_parent_directory(path)
+        .map_err(|error| std::io::Error::new(error.source.kind(), error))
 }
 fn migrate_legacy(value: serde_json::Value) -> Result<serde_json::Value, MigrationError> {
     let legacy = if let Some(sequence) = value.as_u64() {
