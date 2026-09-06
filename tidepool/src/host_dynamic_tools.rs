@@ -1089,3 +1089,7 @@ mod tests {
         let _ = server.await;
     }
 }
+
+#[cfg(test)]
+#[path = "host_dynamic_tools_drain_tests.rs"]
+mod drain_tests;
