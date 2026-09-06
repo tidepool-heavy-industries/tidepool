@@ -79,3 +79,45 @@ alone does not establish either. Exact host binary hash/build revision is unknow
 the native c8460ff installation identification is inherited, not independently
 rechecked for these two children. Regression validation targets the authorization
 class; it cannot retrospectively establish the original timing/cause.
+
+## Service integration checks and newly identified coverage gap
+
+Service integrated reviewed custody candidate 0cb389a6 at
+467a546701cef058ead8388136b6ea45e593e83f (staged only). Direct service reruns:
+
+- `NEXTEST_TEST_THREADS=1 just test-lib tidepool 'test(custody)'`: 9 executed,
+  9 passed (98 excluded), nextest d043bc0c-01bb-4262-8ca6-13d762c0d8fe.
+- `NEXTEST_TEST_THREADS=1 just test-lib tidepool-actor
+  'test(shutdown_intent_does_not_publish_terminal_or_replace_first_request) |
+  test(shutdown_releases_mailbox_custody_deferred_behind_external_work) |
+  test(independent_roots_share_routing_but_not_supervision)'`: 3 executed,
+  3 passed (90 excluded).
+- `NEXTEST_TEST_THREADS=1 just test-lib tidepool-handlers
+  'test(actor_worktree_authority_is_exact_to_resource_and_incarnation)'`:
+  1 executed, 1 passed (197 excluded); owning authority denies wrong actor,
+  incarnation, resource and released binding.
+- `nix develop --command cargo build -p tidepool --bin shoal`: built, NOT launched.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Logs/identities: `target/service-custody-validation/` in service worktree
+wt-2ab5550a-d87c-4d8f-8d32-69b476583c44. Shoal SHA-256
+2ee9e96fbb381fccf34f3767b182278ac94d8f34ab587e6450de9e573e33949f;
+host test binary 83d58b6f7066889ba6366063e3ee4722ee0dd3920501a8aefa13b31dd385e6e4.
+Matched frontend/worker hashes and other test binaries are in `binaries.sha256`.
+Each test wrapper observed its private compile-daemon teardown. No live host or
+native process replaced.
+
+Custody owner incorporated 467a5467 and confirmed production/test equality with
+reviewed candidate. It identified an important qualification: the sibling test
+awaits PolicyInstalled, marks the fork gate ready, and observes the parent unfold
+commit; it does not explicitly await both SessionReady activations. The first
+RunRequest's worktreeHead follows initial policy installation. Therefore these
+13 passing tests do not yet directly prove success of that exact operation.
+Service requested a bounded repair: require both exact SessionReady events and
+exercise a nested boundHead unfold/leaf response, with independent review. This
+uses private TestCampaign hosted Haskell, not native inference or observer TUI.
+The current validation obligation remains pending on that strengthened evidence.
+
+Post-submission custody deliberately remains retained: the tmux boundary cannot
+prove exact process reaping. This is a product gate, not a passing cleanup path.
+Do not deploy this staged candidate as complete service/custody support.
