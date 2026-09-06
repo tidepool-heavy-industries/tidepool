@@ -579,15 +579,32 @@ mod actual_seal {
             Incarnation::FIRST,
         );
 
-        let (actor, hosted) = forest
-            .new_program_root(
-                "http-seal".into(),
-                tidepool_actor::EffectiveRole::root(),
-                program,
-            )
-            .await
-            .unwrap();
-        let LocalResidentDeployment::PolicyInstalled(installation) = events.recv().await.unwrap()
+        let forest = Arc::new(forest);
+        let launch_forest = forest.clone();
+        let mut startup = tokio::spawn(async move {
+            launch_forest
+                .new_program_root(
+                    "http-seal".into(),
+                    tidepool_actor::EffectiveRole::root(),
+                    program,
+                )
+                .await
+        });
+        let mut hosted_task = None;
+        let mut server_task = None;
+        let mut late_task = None;
+        let mut retained_control = None;
+        let mut retained_endpoint: Option<Arc<DelegatedEndpoint>> = None;
+        let mut late_joined = false;
+        let mut startup_joined = false;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tools.sock");
+        let exercise = AssertUnwindSafe(async {
+        let startup_result = tokio::time::timeout(Duration::from_secs(90), &mut startup).await.expect("root startup bounded");
+        startup_joined = true;
+        let (actor, hosted) = startup_result.unwrap().unwrap();
+        hosted_task = Some(hosted);
+        let LocalResidentDeployment::PolicyInstalled(installation) = tokio::time::timeout(Duration::from_secs(30), events.recv()).await.unwrap().unwrap()
         else {
             panic!("expected actual policy");
         };
@@ -599,13 +616,13 @@ mod actual_seal {
             release_seal: Arc::new(Semaphore::new(0)),
             seals: AtomicUsize::new(0),
         });
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("tools.sock");
+        retained_endpoint = Some(endpoint.clone());
         let service =
             HostDynamicToolService::new(endpoint.clone(), dir.path().join("binding"), None)
                 .unwrap();
         let control = service.control();
-        let mut server = tokio::spawn(service.serve(UnixListener::bind(&socket).unwrap()));
+        retained_control = Some(control.clone());
+        server_task = Some(tokio::spawn(service.serve(UnixListener::bind(&socket).unwrap())));
         let c = client(&socket);
         attach(&c).await;
         let mut request = call_request();
@@ -620,12 +637,15 @@ mod actual_seal {
             .await
             .unwrap();
         assert_eq!(result["success"], true, "{result}");
-        assert!(result.to_string().contains("42"), "{result}");
+        let items = result["contentItems"].as_array().expect("typed content items");
+        assert_eq!(items.len(), 1, "{result}");
+        assert_eq!(items[0]["type"], "inputText", "{result}");
+        assert_eq!(items[0]["text"].as_str().unwrap().lines().collect::<Vec<_>>(), ["42"], "{result}");
         endpoint.delay_dispatch.store(true, Ordering::SeqCst);
         request["callId"] = serde_json::json!("late");
         request["contextCallId"] = serde_json::json!("late");
         let late_client = client(&socket);
-        let late = tokio::spawn(async move {
+        late_task = Some(tokio::spawn(async move {
             late_client
                 .post(format!("{URL}/call"))
                 .json(&request)
@@ -635,7 +655,7 @@ mod actual_seal {
                 .json::<serde_json::Value>()
                 .await
                 .unwrap()
-        });
+        }));
         tokio::time::timeout(Duration::from_secs(5), endpoint.entered.acquire())
             .await
             .unwrap()
@@ -654,7 +674,8 @@ mod actual_seal {
         assert_eq!(proof.actor(), actor.identity());
         assert_eq!(endpoint.seals.load(Ordering::SeqCst), 1);
         endpoint.release_dispatch.add_permits(1);
-        let denied_late = late.await.unwrap();
+        let denied_late = tokio::time::timeout(Duration::from_secs(30), late_task.as_mut().unwrap()).await.unwrap().unwrap();
+        late_joined = true;
         assert_eq!(denied_late["success"], false);
         assert!(
             denied_late
@@ -694,7 +715,8 @@ mod actual_seal {
             },
         ] {
             endpoint.release_seal.add_permits(1);
-            match control.quiesce_and_seal(expected).await {
+            let mut foreign_seal = control.quiesce_and_seal(expected);
+            match tokio::time::timeout(Duration::from_secs(30), &mut foreign_seal).await.unwrap() {
                 Err(HostToolSealError::ForeignActor {
                     expected: e,
                     actual,
@@ -705,13 +727,67 @@ mod actual_seal {
                 other => panic!("expected foreign seal error: {other:?}"),
             }
         }
-        control.drain();
-        tokio::time::timeout(Duration::from_secs(5), &mut server)
+        }).catch_unwind().await;
+        // Test-local recovery, not production cleanup evidence. Always release
+        // our artificial gates before requesting real owners to stop.
+        if let Some(endpoint) = retained_endpoint {
+            endpoint.release_dispatch.add_permits(8);
+            endpoint.release_seal.add_permits(8);
+        }
+        if let Some(control) = retained_control {
+            control.drain();
+        }
+        let mut cleanup_failures = Vec::new();
+        if let Some(task) = late_task.as_mut().filter(|_| !late_joined) {
+            if finish_test_task(task).await.is_none() {
+                cleanup_failures.push("late HTTP task");
+            }
+        }
+        if !startup_joined {
+            match tokio::time::timeout(Duration::from_secs(30), &mut startup).await {
+                Ok(Ok(Ok((_, hosted)))) => hosted_task = Some(hosted),
+                Ok(_) => cleanup_failures.push("root startup failed"),
+                Err(_) => {
+                    startup.abort();
+                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut startup).await;
+                    cleanup_failures.push("root startup aborted without completion proof");
+                }
+            }
+        }
+        if tokio::time::timeout(Duration::from_secs(45), forest.shutdown())
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        forest.shutdown().await;
-        hosted.await.unwrap();
+            .is_err()
+        {
+            cleanup_failures.push("forest shutdown");
+        }
+        if let Some(task) = server_task.as_mut() {
+            if !matches!(finish_test_task(task).await, Some(Ok(()))) {
+                cleanup_failures.push("HTTP server");
+            }
+        }
+        if let Some(task) = hosted_task.as_mut() {
+            if finish_test_task(task).await.is_none() {
+                cleanup_failures.push("hosted actor");
+            }
+        }
+        if let Err(panic) = exercise {
+            eprintln!("test cleanup failures after original panic: {cleanup_failures:?}");
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            cleanup_failures.is_empty(),
+            "test cleanup failed: {cleanup_failures:?}"
+        );
+    }
+
+    async fn finish_test_task<T>(task: &mut tokio::task::JoinHandle<T>) -> Option<T> {
+        match tokio::time::timeout(Duration::from_secs(30), &mut *task).await {
+            Ok(result) => result.ok(),
+            Err(_) => {
+                task.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+                None // emergency abort is not a successful drain
+            }
+        }
     }
 }
