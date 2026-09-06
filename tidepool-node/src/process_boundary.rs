@@ -145,6 +145,15 @@ impl ProcessMountBoundary {
         bubblewrap: impl Into<String>,
         command: ProcessInvocation,
     ) -> ProcessInvocation {
+        self.wrap_with_options(bubblewrap.into(), command, &[])
+    }
+
+    fn wrap_with_options(
+        &self,
+        bubblewrap: String,
+        command: ProcessInvocation,
+        options: &[String],
+    ) -> ProcessInvocation {
         let mut args = vec![
             "--bind".into(),
             "/".into(),
@@ -184,6 +193,7 @@ impl ProcessMountBoundary {
                 target.to_string_lossy().into_owned(),
             ]);
         }
+        args.extend_from_slice(options);
         args.extend([
             "--chdir".into(),
             self.project_root.to_string_lossy().into_owned(),

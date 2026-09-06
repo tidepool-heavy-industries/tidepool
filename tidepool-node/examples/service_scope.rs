@@ -20,8 +20,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let log = std::fs::File::create(workspace.join("service-scope.log"))?;
     let mut scope = prepared.spawn(Default::default(), log)?;
-    scope.pin_init(Instant::now() + Duration::from_secs(10))?;
-    scope.release_command()?;
+    if let Err(error) = scope.pin_init(Instant::now() + Duration::from_secs(10)) {
+        // No validated init means even monitor exit cannot certify cleanup.
+        let cleanup = scope.terminate_and_wait(Instant::now() + Duration::from_secs(10));
+        return Err(format!(
+            "pin failed: {error}; cleanup: {cleanup:?}; no custody release authorized"
+        )
+        .into());
+    }
+    if let Err(error) = scope.release_command() {
+        let cleanup = scope.terminate_and_wait(Instant::now() + Duration::from_secs(10));
+        return Err(format!("release failed: {error}; cleanup: {cleanup:?}").into());
+    }
     let receipt = scope.terminate_and_wait(Instant::now() + Duration::from_secs(10))?;
     println!(
         "confirmed namespace drain; monitor status: {}",
