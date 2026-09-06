@@ -10,10 +10,8 @@ mod custody_tests;
 mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
-// Scaffold: deployment wiring follows in the bounded socket consumer branch.
 #[cfg(test)]
 mod research_policy_tests;
-#[allow(dead_code)]
 mod socket_directory;
 #[cfg(test)]
 mod test_campaign;
@@ -69,6 +67,7 @@ use tokio::task::JoinSet;
 
 use self::host_incarnation::HostIncarnationLease;
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
+use self::socket_directory::SocketDirectory;
 
 /// Every interactive actor sees its own repository at this path. Bubblewrap
 /// mount namespaces make the shared name safe across concurrent actors, while
@@ -300,7 +299,7 @@ struct InteractiveDeployment {
     notification_inbox_key: String,
     connection: InteractiveConnection,
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
-    socket_root: PathBuf,
+    socket_directory: SocketDirectory,
     worktree_custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     failure_reported: bool,
     last_activation_sequence: u64,
@@ -1942,34 +1941,18 @@ async fn launch_prepared_interactive_application(
         actor_identity.id.0,
         actor_identity.incarnation.0
     ));
-    std::fs::create_dir(&socket_root).map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_root, std::fs::Permissions::from_mode(0o700)).map_err(
-            |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
-        )?;
-    }
-    let endpoint = socket_root.join("host-tools.sock");
-    let listener = UnixListener::bind(&endpoint).map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::BindToolHost, error)
-    })?;
+    let (mut socket_directory, listener, inbox) = prepare_socket_inbox(
+        actor_identity,
+        socket_root,
+        actor_root.join("inbox.jsonl"),
+        actor_root.join("inbox.cursor"),
+    )?;
+    let endpoint = socket_directory.path().join("host-tools.sock");
     let binding_path = if actor_identity == root {
         config.root_binding_path.clone()
     } else {
         actor_root.join("binding.json")
     };
-    let inbox = Arc::new(
-        ActorInbox::open(
-            actor_root.join("inbox.jsonl"),
-            actor_root.join("inbox.cursor"),
-        )
-        .map_err(|error| {
-            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-        })?,
-    );
     let launch_mode = if let Some(parent) = fork_parent_thread.clone() {
         let boundary = installation
             .fork_boundary
@@ -2068,6 +2051,9 @@ async fn launch_prepared_interactive_application(
         expected_resume.clone(),
     )
     .map_err(|error| application_error(actor_identity, InteractiveOperation::BuildPolicy, error))?;
+    // Accepted hosted work may outlive listener cancellation. Retention starts
+    // before either hosted submission or native process submission can occur.
+    socket_directory.work_may_exist();
     let service = tokio::spawn(async move {
         server.serve(listener).await.map_err(|error| {
             application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
@@ -2076,8 +2062,12 @@ async fn launch_prepared_interactive_application(
     if cancelled.try_recv().is_ok() {
         service.abort();
         let _ = service.await;
-        let _ = std::fs::remove_dir_all(&socket_root);
-        return Ok(None);
+        return Err(socket_launch_failure(
+            actor_identity,
+            InteractiveOperation::LaunchProcess,
+            "launch cancelled after hosted work submission",
+            socket_directory,
+        ));
     }
     let mut launch_environment = actor_launch_environment(
         config.pane_environment.clone(),
@@ -2126,47 +2116,54 @@ async fn launch_prepared_interactive_application(
         Ok(Err(error)) => {
             service.abort();
             let _ = service.await;
-            let _ = std::fs::remove_dir_all(&socket_root);
-            return Err(application_error(
+            return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
                 error,
+                socket_directory,
             ));
         }
         Err(_) => {
             service.abort();
             let _ = service.await;
-            let _ = std::fs::remove_dir_all(&socket_root);
-            return Err(application_error(
+            return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
                 format!("tmux launch exceeded {PROCESS_OPERATION_TIMEOUT:?}"),
+                socket_directory,
             ));
         }
     };
 
     if let Err(error) = tmux.retain_pane_on_exit(&pane).await {
-        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-        return Err(application_error(
+        abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
+        return Err(socket_launch_failure(
             actor_identity,
             InteractiveOperation::LaunchProcess,
             format!("cannot retain actor pane for exit diagnosis: {error}"),
+            socket_directory,
         ));
     }
 
     if actor_identity == root {
         if let Err(error) = tmux.select_window_for_pane(&pane).await {
-            abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-            return Err(application_error(
+            abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
+            return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
                 error,
+                socket_directory,
             ));
         }
     }
     if cancelled.try_recv().is_ok() {
-        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-        return Ok(None);
+        abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
+        return Err(socket_launch_failure(
+            actor_identity,
+            InteractiveOperation::LaunchProcess,
+            "launch cancelled after native submission",
+            socket_directory,
+        ));
     }
     tracing::info!(
         actor = ?actor_identity,
@@ -2194,7 +2191,7 @@ async fn launch_prepared_interactive_application(
             ),
             connection: InteractiveConnection::AwaitingBinding,
             service,
-            socket_root,
+            socket_directory,
             worktree_custody: installation.worktree_custody.clone(),
             failure_reported: false,
             last_activation_sequence: 0,
@@ -2209,6 +2206,66 @@ async fn launch_prepared_interactive_application(
             expected: expected_resume,
         },
     }))
+}
+
+/// Acquire exclusive path custody before the first fallible preparation step.
+fn prepare_socket_inbox(
+    actor: ActorRef,
+    socket_root: PathBuf,
+    rows: PathBuf,
+    cursor: PathBuf,
+) -> Result<(SocketDirectory, UnixListener, Arc<ActorInbox>), InteractiveApplicationError> {
+    let socket = SocketDirectory::create(socket_root)
+        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
+    let prepared: Result<_, InteractiveApplicationError> = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(socket.path(), std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| {
+                    application_error(actor, InteractiveOperation::PrepareRuntime, error)
+                })?;
+        }
+        let listener = UnixListener::bind(socket.path().join("host-tools.sock"))
+            .map_err(|error| application_error(actor, InteractiveOperation::BindToolHost, error))?;
+        let inbox = ActorInbox::open(rows, cursor).map_err(|error| {
+            application_error(actor, InteractiveOperation::PrepareRuntime, error)
+        })?;
+        Ok((listener, Arc::new(inbox)))
+    })();
+    match prepared {
+        Ok((listener, inbox)) => Ok((socket, listener, inbox)),
+        Err(error) => Err(socket_launch_failure(
+            actor,
+            error.operation,
+            error.detail,
+            socket,
+        )),
+    }
+}
+
+fn socket_cleanup_outcome(socket: SocketDirectory) -> CleanupComponentOutcome {
+    match socket.release() {
+        Ok(()) => CleanupComponentOutcome::Completed,
+        Err(error) => CleanupComponentOutcome::Failed {
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn socket_launch_failure(
+    actor: ActorRef,
+    operation: InteractiveOperation,
+    cause: impl fmt::Display,
+    socket: SocketDirectory,
+) -> InteractiveApplicationError {
+    let detail = match socket_cleanup_outcome(socket) {
+        CleanupComponentOutcome::Failed { detail } => {
+            format!("{cause}; socket cleanup failed: {detail}")
+        }
+        _ => cause.to_string(),
+    };
+    application_error(actor, operation, detail)
 }
 
 fn accepts_activation(
@@ -2592,15 +2649,7 @@ async fn retire_interactive_application(
     });
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Socket,
-        outcome: match std::fs::remove_dir_all(&deployment.socket_root) {
-            Ok(()) => CleanupComponentOutcome::Completed,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                CleanupComponentOutcome::Completed
-            }
-            Err(error) => CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            },
-        },
+        outcome: socket_cleanup_outcome(deployment.socket_directory),
     });
     let build_outcome =
         deployment
@@ -2685,7 +2734,9 @@ async fn abandon_interactive_application(
     let _ = tmux.kill_pane(pane).await;
     service.abort();
     let _ = service.await;
-    let _ = std::fs::remove_dir_all(socket_root);
+    // The path is diagnostic, not deletion authority. The caller's custody guard
+    // remains retained and reports a failed cleanup alongside the launch error.
+    tracing::warn!(path = %socket_root.display(), "abandoned socket directory retained: exact process and accepted hosted work cleanup unconfirmed");
 }
 
 async fn discover_interactive_binding(
@@ -3893,6 +3944,97 @@ mod tests {
             _thread: &'a QueueReadyThread,
         ) -> InteractiveFuture<'a, ()> {
             Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn socket_preparation_cleans_failed_inbox_open_and_preserves_collision() {
+        let root = tempfile::tempdir().unwrap();
+        let actor = ActorRef::first(tidepool_actor::ActorId(77));
+        let socket_path = root.path().join("socket");
+        let rows = root.path().join("rows");
+        let cursor = root.path().join("cursor");
+        std::fs::write(&cursor, b"not a checkpoint").unwrap();
+        let error = prepare_socket_inbox(actor, socket_path.clone(), rows.clone(), cursor.clone())
+            .err()
+            .expect("invalid inbox checkpoint must fail preparation");
+        assert!(matches!(
+            error.operation,
+            InteractiveOperation::PrepareRuntime
+        ));
+        assert!(error.detail.contains("expected"), "{error}");
+        // BindToolHost succeeded before the malformed checkpoint was read. Its
+        // named socket and exclusively created parent must both be removed.
+        assert!(!socket_path.join("host-tools.sock").exists());
+        assert!(!socket_path.exists());
+        assert_eq!(std::fs::read(&cursor).unwrap(), b"not a checkpoint");
+
+        std::fs::create_dir(&socket_path).unwrap();
+        let preexisting = UnixListener::bind(socket_path.join("host-tools.sock")).unwrap();
+        std::fs::write(socket_path.join("marker"), b"belongs to another owner").unwrap();
+        assert!(prepare_socket_inbox(actor, socket_path.clone(), rows, cursor).is_err());
+        assert!(socket_path.join("host-tools.sock").exists());
+        assert_eq!(
+            std::fs::read(socket_path.join("marker")).unwrap(),
+            b"belongs to another owner"
+        );
+        drop(preexisting);
+    }
+
+    #[tokio::test]
+    async fn socket_preparation_cleans_bind_failure() {
+        let root = tempfile::tempdir().unwrap();
+        // Valid directory component, but longer than Unix socket sockaddr paths.
+        let path = root.path().join("s".repeat(150));
+        let error = prepare_socket_inbox(
+            ActorRef::first(tidepool_actor::ActorId(79)),
+            path.clone(),
+            root.path().join("rows"),
+            root.path().join("cursor"),
+        )
+        .err()
+        .expect("overlong socket endpoint must fail to bind");
+        assert!(matches!(
+            error.operation,
+            InteractiveOperation::BindToolHost
+        ));
+        assert!(!path.exists());
+        assert!(!root.path().join("rows").exists());
+    }
+
+    #[tokio::test]
+    async fn socket_postsubmission_error_and_retirement_report_retention() {
+        let root = tempfile::tempdir().unwrap();
+        let actor = ActorRef::first(tidepool_actor::ActorId(78));
+        for retire in [false, true] {
+            let path = root.path().join(if retire { "retire" } else { "launch" });
+            let (mut socket, listener, _) = prepare_socket_inbox(
+                actor,
+                path.clone(),
+                root.path().join("rows"),
+                root.path().join("cursor"),
+            )
+            .unwrap();
+            socket.work_may_exist();
+            // Dropping/aborting the listener does not prove accepted hosted work
+            // or a native process is finished.
+            drop(listener);
+            if retire {
+                assert!(matches!(socket_cleanup_outcome(socket),
+                    CleanupComponentOutcome::Failed { detail } if detail.contains("unconfirmed")));
+            } else {
+                let error = socket_launch_failure(
+                    actor,
+                    InteractiveOperation::LaunchProcess,
+                    "launch timed out",
+                    socket,
+                );
+                assert!(error
+                    .detail
+                    .contains("launch timed out; socket cleanup failed:"));
+                assert!(error.detail.contains("unconfirmed"));
+            }
+            assert!(path.join("host-tools.sock").exists());
         }
     }
 
