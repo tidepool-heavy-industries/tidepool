@@ -180,3 +180,106 @@ fn lazy_poison_applied_at_runtime_reports_message() {
     });
     assert_clean_boom("lazy-poison-applied", &run(b.build()));
 }
+
+// Unsupported FFI lowers to this same bare sentinel, not an error application.
+fn demand_case(literal: bool, dead: bool) -> CoreExpr {
+    use tidepool_repr::{Alt, AltCon};
+    let mut b = TreeBuilder::new();
+    let poison = b.push(CoreFrame::Var(VarId(SENTINEL_USERERROR)));
+    let zero = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let success = b.push(CoreFrame::Lit(Literal::LitInt(42)));
+    let alts = if literal {
+        vec![
+            Alt {
+                con: AltCon::LitAlt(Literal::LitInt(0)),
+                binders: vec![],
+                body: success,
+            },
+            Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: if dead { poison } else { success },
+            },
+        ]
+    } else {
+        vec![Alt {
+            con: AltCon::Default,
+            binders: vec![],
+            body: success,
+        }]
+    };
+    b.push(CoreFrame::Case {
+        scrutinee: if dead { zero } else { poison },
+        binder: VarId(900),
+        alts,
+    });
+    b.build()
+}
+
+fn assert_demand_error(expr: CoreExpr) {
+    use tidepool_codegen::{
+        host_fns::RuntimeError,
+        jit_machine::{JitEffectMachine, JitError},
+        yield_type::YieldError,
+    };
+    let table = tidepool_testing::proptest::build_table_for_expr(&expr);
+    let env = tidepool_eval::env_from_datacon_table(&table);
+    assert!(matches!(
+        tidepool_eval::eval(&expr, &env, &mut tidepool_eval::VecHeap::new()),
+        Err(tidepool_eval::EvalError::UserError)
+    ));
+    let got = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let mut m = JitEffectMachine::compile(&expr, &table, 1 << 20)
+                .expect("compile demand regression");
+            m.run_pure()
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(
+        matches!(
+            got,
+            Err(JitError::Yield(YieldError::Runtime(
+                RuntimeError::UserError
+            )))
+        ),
+        "demand must preserve the original error, got {got:?}"
+    );
+}
+
+#[test]
+fn strict_demand_literal_case_rejects_lazy_poison() {
+    assert_demand_error(demand_case(true, false));
+}
+
+#[test]
+fn strict_demand_default_only_rejects_lazy_poison() {
+    assert_demand_error(demand_case(false, false));
+}
+
+#[test]
+fn strict_demand_dead_literal_branch_remains_lazy() {
+    let expr = demand_case(true, true);
+    let table = tidepool_testing::proptest::build_table_for_expr(&expr);
+    let env = tidepool_eval::env_from_datacon_table(&table);
+    assert!(matches!(
+        tidepool_eval::eval(&expr, &env, &mut tidepool_eval::VecHeap::new()),
+        Ok(tidepool_eval::Value::Lit(Literal::LitInt(42)))
+    ));
+    let got = run(expr);
+    assert_eq!(got, "UNEXPECTED-OK Lit(LitInt(42))");
+}
+
+#[test]
+fn strict_demand_numeric_operand_rejects_lazy_poison() {
+    let mut b = TreeBuilder::new();
+    let poison = b.push(CoreFrame::Var(VarId(SENTINEL_USERERROR)));
+    let one = b.push(CoreFrame::Lit(Literal::LitInt(1)));
+    b.push(CoreFrame::PrimOp {
+        op: tidepool_repr::PrimOpKind::IntAdd,
+        args: vec![poison, one],
+    });
+    assert_demand_error(b.build());
+}
