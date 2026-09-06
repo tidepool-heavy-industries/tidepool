@@ -164,6 +164,9 @@ impl ActorRuntimeObservation {
         if let Some(workspace) = &self.workspace {
             text.push_str("\nWorkspace binding: ");
             text.push_str(&workspace.summary());
+            if role.role() == crate::ActorRole::Root && workspace.worktree_id.is_none() {
+                text.push_str("\nRoot checkout: writable project repository, no allocated worktree handle. Use projectHead to seed children; boundHead requires an allocated bound worktree. WritableBound describes write access, not the presence of that handle.");
+            }
         }
         Some(text)
     }

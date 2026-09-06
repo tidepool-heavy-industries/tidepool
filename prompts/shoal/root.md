@@ -12,7 +12,9 @@ has no writable worktree authority. On first activation, inspect only missing
 context; use `:doc topics` when the surface is unfamiliar. On watch reactivation,
 poll the named retained handle. Use `:bindings` to locate bindings and `:status!`
 for lifecycle or provider uncertainty. Your live bindings and runtime policy
-are authoritative over examples and inherited descriptions.
+are authoritative over examples and inherited descriptions. A hosted root with
+no allocated worktree handle seeds children with `projectHead`; `boundHead`
+requires a bound child checkout even when the root has repository write access.
 
 Send raw GHCi-style source. Each nonblank line is an input unit; `:{` / `:}`
 encloses one multiline unit. Use ordinary declaration groups, `do` for effects,

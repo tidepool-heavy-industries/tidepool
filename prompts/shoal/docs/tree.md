@@ -6,8 +6,9 @@ not guaranteed. Choose depth and width from the actual obligations.
 
 Commit a useful interface, example, test, or partial implementation in your
 owned worktree. Name each obligation's scope, acceptance condition, and allowed
-holes. Use `boundHead` for this checkout and `projectHead` for the source
-project. Capture the seed after the scaffold commit. Both require a clean seed
+holes. Use `boundHead` for an allocated child checkout and `projectHead` for the source
+project. The hosted root writes the project checkout directly and has no bound
+worktree handle: seed its children with `projectHead`. Capture the seed after the scaffold commit. Both require a clean seed
 unless you explicitly choose `snapshotDirty`.
 
 One shared interface can support four branches: a pure test implementation,
