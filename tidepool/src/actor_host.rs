@@ -76,7 +76,6 @@ const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Shoal";
 const DRIVER_ENTRY: &str = "rootDriver";
 const DRIVER_EFFECTS: &str = "RootEffects";
 const SHOAL_REPLACED_EFFECT_NAMES: &[&str] = &[
-    "Watch",
     "boundWorktree",
     "createWorktree",
     "listWorktrees",
