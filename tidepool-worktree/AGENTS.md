@@ -24,3 +24,18 @@ and administrative metadata share the source repository's namespace.
   merge/abort boundary; conflict resolution stays authored policy.
 - Test git behavior against real temporary repositories, never a mocked git.
   This crate is GHC-free and suitable for focused ordinary Cargo tests.
+
+## Source provenance and integration
+
+- A committed seed and a dirty snapshot are different inputs. Select snapshots
+  explicitly; do not smuggle uncommitted parent changes into a committed seed.
+- Checkout write access is not an allocated worktree handle. Keep project-root
+  observation separate from operations requiring a registry-bound checkout.
+- `submission.rs` owns candidate observation; `merge.rs` owns merge receipts.
+  Publishing a candidate does not prove parent acceptance, successful merge,
+  or that another actor incorporated and checked the integrated revision.
+- Preserve user changes and report conflicts/dirty state explicitly. Do not
+  infer a clean worktree from a commit hash or a successful earlier command.
+- For focused verification use `just test-lib tidepool-worktree 'test(<name>)'`.
+  Exercise retained checkout, dirty/conflicting merge, and cleanup failures
+  when those owning paths change; avoid broad batteries across worktrees.
