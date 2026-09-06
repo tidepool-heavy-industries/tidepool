@@ -674,8 +674,9 @@ mod actual_seal {
         assert_eq!(proof.actor(), actor.identity());
         assert_eq!(endpoint.seals.load(Ordering::SeqCst), 1);
         endpoint.release_dispatch.add_permits(1);
-        let denied_late = tokio::time::timeout(Duration::from_secs(30), late_task.as_mut().unwrap()).await.unwrap().unwrap();
+        let late_result = tokio::time::timeout(Duration::from_secs(30), late_task.as_mut().unwrap()).await.unwrap();
         late_joined = true;
+        let denied_late = late_result.unwrap();
         assert_eq!(denied_late["success"], false);
         assert!(
             denied_late
