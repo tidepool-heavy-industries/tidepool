@@ -23,17 +23,27 @@ notification. Provider idle does not imply no active request. Notification handl
 must not mount sessionInput/sessionReply/respond; existing request mounting remains
 sole owner. Retained historical bindings are not a newly granted reply capability.
 
-Scaffold consumer currently rejects send and poll as Unavailable before publication:
-there is no correlated native controller. This is an explicit hole, not working
-notification behavior. The host implementation must use the sole DurableInbox for
-accepted publication/evidence. Legacy push/ack cannot establish presentation and
-must not accidentally deliver tracked notifications in its ordinary batch.
+Production send rejects Unavailable before publication: there is no correlated
+native controller. Production poll validates the exact inbox key and persisted
+sender/target provenance. This is an explicit missing send seam, not mounted
+notification delivery. Host tests drive actual interpreter handoffs into the sole
+DurableInbox and preserve original request bindings; they do not model a native
+provider receiving a notification.
 
-Durability design is pending the inbox specialist: record before-send ambiguity
-fence before touching transport; uncertain publication/send cannot be auto-retried.
-Ack/compaction/reopen must not invent Presented. Observation retention is bounded,
-with explicit unavailable/expired result rather than false success. Generic node
-payload contains sender identity; node must not depend on actor/runtime types.
+DurableInbox owns bounded receipt evidence and a noncloneable pre-send attempt.
+Legacy pending() fails closed on tracked rows; the host uses legacy_pending_prefix
+so ordinary prefix rows can progress without sending or acknowledging tracked
+rows. Notification rows use existing text payload encoding plus typed envelope
+receipt provenance, not a new payload variant that old tail repair cannot decode.
+New-format inboxes still must not be reopened by old binaries.
+
+Durability acceptance is OPEN: independent review demonstrated ignored parent
+open/fsync errors in atomic-write::write_durable using deterministic EIO injection.
+First-file JSONL admission and new directory ancestry also need owning primitive
+repair. Process reopen tests prove process-level persistence only, not power-crash
+safety. Native send remains unavailable independently of this durability gate.
+Submitted transport acceptance maps to Unconfirmed, never Presented; only explicit
+correlated presentation evidence may establish Presented.
 
 Ownership: schema/runtime worker owns notification.rs, actor effect plumbing,
 protocol/generated consumers, Haskell facade and focused actor tests. Inbox worker
