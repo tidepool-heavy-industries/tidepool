@@ -14,3 +14,12 @@ unambiguous before any consumer is defined. Use `requestWith` to add guidance
 or a dimensional deadline to the labeled request.
 Replying settles this request, not the actor, so the same `AgentRef` can accept
 later refinements.
+
+An actor serves one request at a time. A follow-up to a busy actor queues another
+assignment; do not assume it steers the active request. Establish coordination
+before forking: identify the contract revision, owned deliverable, acceptance
+condition, and decisions requiring a checkpoint. A worker needing a decision
+should state the choice and what can continue. Avoid circular request waits.
+Send revised contracts with their commit and decision delta; confirm which
+revision a returned candidate satisfies. Do not treat cancellation as an
+acknowledged contract update or a successful pause of the whole subtree.

@@ -244,5 +244,8 @@ usageTotals context = fmap project (contextUsageSummary context)
 latestWorkerTurn :: AgentRosterEntry -> Maybe ProviderUsageSummary
 latestWorkerTurn = rosterLatestTurnUsage
 
+watchReport :: WatchState (ResponseResult Text) -> WatchState Text
+watchReport = fmap responseValue
+
 result :: Int
 result = 42

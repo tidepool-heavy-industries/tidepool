@@ -32,13 +32,15 @@ reportOnly (ReplyAvailable result) = Right (responseValue result)
 reportOnly (ReplyUnavailable failure) = Left failure
 reportPairView :: WatchState (Settlement Text, Settlement Text)
                -> WatchState (Either ResponseFailure Text, Either ResponseFailure Text)
-reportPairView WatchPending = WatchPending
-reportPairView (WatchUnavailable failure) = WatchUnavailable failure
-reportPairView (WatchReady (left, right)) = WatchReady (reportOnly left, reportOnly right)
+reportPairView = fmap (\(left, right) -> (reportOnly left, reportOnly right))
 :}
 joinedState <- pollWatch joined
 reportPairView joinedState
 ```
+
+`fmap` transforms only a ready value; pending and unavailable states survive.
+For a watch built with `awaitResponse`, use `fmap responseValue` instead:
+its ready payload is `ResponseResult a`, not `Settlement a`.
 
 Inspect `joinedState` further when deciding integration or checking provenance.
 `responseValue` is the actor's reported conclusion; `responseExecution` and

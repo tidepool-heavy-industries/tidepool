@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
@@ -102,7 +103,7 @@ data WatchState result
   = WatchPending
   | WatchReady result
   | WatchUnavailable WatchFailure
-  deriving (Show, Eq)
+  deriving (Show, Eq, Functor)
 
 data RawWatchObservation
   = RawWatchPending
