@@ -54,3 +54,28 @@ an explicit design-escalation finding/blockers, not acceptance. Consider a small
 watch readiness and acceptance distinct. Prefer a progress checkpoint for a decision
 while independent custody work continues. No production lifecycle semantics changed
 by this document.
+
+## Run-map owner delivery
+
+Retained `liveEvidenceResult` is a reply from actor 2@1, request 16, at
+fd6f1358d7f5b488d70f1cca6ef7caea661e6984. Its artifact is
+`plans/next/run-map-custody-evidence.md` at that commit.
+
+Reader: actor 6@1, request 7, worktree wt-ddb3c147-1550-4278-8b18-dd90a2f0a273.
+Historical: actor 8@1, request 8, worktree wt-48a0d372-fe14-4430-9c79-1698c60946f9.
+Both were admitted in fork group 3 from clean boundHead
+936c707f55f38ac82eeeb74d63fa8c5eebc6469f with WriteForkWorktree;
+supervisor/context parent 2@1, no dirty snapshot.
+
+Both exact settlements were ReplyUnavailable / ResponseTargetFailed with:
+`actor cast failed: resident workbench execution failed: turn run failed: yield
+error: Haskell error: WorktreeUnauthorized (WorktreeId "<exact worktree ID above>")`.
+
+Correction to any stronger interpretation of the original report: admission and
+allocation succeeded, but the supplied evidence has no operation stack, child
+command or provider-start observation. The precise bootstrap phase and whether
+provider start preceded failure remain UNKNOWN. launchedProviderParent Nothing
+alone does not establish either. Exact host binary hash/build revision is unknown;
+the native c8460ff installation identification is inherited, not independently
+rechecked for these two children. Regression validation targets the authorization
+class; it cannot retrospectively establish the original timing/cause.
