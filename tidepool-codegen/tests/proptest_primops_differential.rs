@@ -1306,3 +1306,129 @@ fn cfg_float() -> Config {
     c.source_file = Some(file!());
     c
 }
+
+/// Independent IEEE arithmetic oracle: exact bits except NaN payload/sign,
+/// which arithmetic does not promise to preserve. Signed zero is significant.
+/// Host Rust is an independent lowering oracle, NOT the native-GHC oracle.
+fn assert_ieee_result(op: PrimOpKind, args: Vec<Literal>, expected: Literal) {
+    let mut builder = TreeBuilder::new();
+    let inputs = args
+        .iter()
+        .cloned()
+        .map(|x| builder.push(CoreFrame::Lit(x)))
+        .collect();
+    builder.push(CoreFrame::PrimOp { op, args: inputs });
+    let tree = builder.build();
+    let table = build_table_for_expr(&tree);
+    let mut heap = VecHeap::new();
+    let reference =
+        eval(&tree, &env_from_datacon_table(&table), &mut heap).expect("reference evaluation");
+    let compiled = JitEffectMachine::compile(&tree, &table, 64 * 1024)
+        .and_then(|mut machine| machine.run_pure())
+        .expect("JIT evaluation");
+    for (engine, value) in [("reference", reference), ("JIT", compiled)] {
+        let Value::Lit(ref actual) = value else {
+            panic!("{engine}: nonliteral {value:?}")
+        };
+        let equal = match (actual, &expected) {
+            (Literal::LitFloat(a), Literal::LitFloat(b)) => {
+                a == b || (f32::from_bits(*a as u32).is_nan() && f32::from_bits(*b as u32).is_nan())
+            }
+            (Literal::LitDouble(a), Literal::LitDouble(b)) => {
+                a == b || (f64::from_bits(*a).is_nan() && f64::from_bits(*b).is_nan())
+            }
+            _ => *actual == expected,
+        };
+        assert!(
+            equal,
+            "{engine} {op:?} {args:?}: {actual:?} != {expected:?}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn ieee_edge_bits_independent_oracle() {
+    macro_rules! width {
+        ($ty:ty, $lit:ident, $add:ident, $sub:ident, $mul:ident, $div:ident,
+         $eq:ident, $lt:ident, $neg:ident, $convert:ident, $out:ident, $other:ty) => {{
+            let values: [$ty; 12] = [
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                <$ty>::from_bits(1),
+                -<$ty>::from_bits(1),
+                <$ty>::MIN_POSITIVE,
+                <$ty>::MAX,
+                -<$ty>::MAX,
+                <$ty>::INFINITY,
+                <$ty>::NEG_INFINITY,
+                <$ty>::NAN,
+            ];
+            for a in values {
+                let input = Literal::$lit(a.to_bits() as u64);
+                assert_ieee_result(
+                    PrimOpKind::$neg,
+                    vec![input.clone()],
+                    Literal::$lit((-a).to_bits() as u64),
+                );
+                assert_ieee_result(
+                    PrimOpKind::$convert,
+                    vec![input.clone()],
+                    Literal::$out((a as $other).to_bits() as u64),
+                );
+                // Rotate across boundary operands without a costly full Cartesian battery.
+                for b in [0.0, -1.0, <$ty>::from_bits(1), <$ty>::INFINITY] {
+                    let args = vec![input.clone(), Literal::$lit(b.to_bits() as u64)];
+                    for (op, answer) in [
+                        (PrimOpKind::$add, a + b),
+                        (PrimOpKind::$sub, a - b),
+                        (PrimOpKind::$mul, a * b),
+                        (PrimOpKind::$div, a / b),
+                    ] {
+                        assert_ieee_result(
+                            op,
+                            args.clone(),
+                            Literal::$lit(answer.to_bits() as u64),
+                        );
+                    }
+                    assert_ieee_result(
+                        PrimOpKind::$eq,
+                        args.clone(),
+                        Literal::LitInt((a == b) as i64),
+                    );
+                    assert_ieee_result(PrimOpKind::$lt, args, Literal::LitInt((a < b) as i64));
+                }
+            }
+        }};
+    }
+    width!(
+        f32,
+        LitFloat,
+        FloatAdd,
+        FloatSub,
+        FloatMul,
+        FloatDiv,
+        FloatEq,
+        FloatLt,
+        FloatNegate,
+        Float2Double,
+        LitDouble,
+        f64
+    );
+    width!(
+        f64,
+        LitDouble,
+        DoubleAdd,
+        DoubleSub,
+        DoubleMul,
+        DoubleDiv,
+        DoubleEq,
+        DoubleLt,
+        DoubleNegate,
+        Double2Float,
+        LitFloat,
+        f32
+    );
+}
