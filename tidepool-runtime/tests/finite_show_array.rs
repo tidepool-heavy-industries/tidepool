@@ -41,3 +41,4 @@ probe!(array_write_preserves_lazy_untouched_cells, "writeResult");
 probe!(array_loop_writes, "loopResult");
 probe!(finite_float_to_digits, "digitsResult");
 probe!(finite_prelude_show, "finiteShowResult");
+probe!(array_write_defined_initializer, "writeDefinedResult");

@@ -49,3 +49,13 @@ digits = floatToDigits 10
 digitsResult, finiteShowResult :: String
 digitsResult = show (digits 1)
 finiteShowResult = show (1 :: Double)
+
+{-# NOINLINE writtenDefined #-}
+writtenDefined :: Int -> Array Int Int
+writtenDefined x = runSTArray $ do
+  a <- newArray (0,2) 99
+  writeArray a 1 x
+  pure a
+
+writeDefinedResult :: String
+writeDefinedResult = show (writtenDefined 7 ! 1)
