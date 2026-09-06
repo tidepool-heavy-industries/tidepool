@@ -4,11 +4,11 @@ Parent seed a33ed927 supplies compiled one-shot host handoffs and explicit
 unsupported host consumer. No native presentation claim.
 
 Generated effect Notifications:
-- `NotifyWith :: (Int, Int) -> Text -> Notifications (Either NotificationError ((Int, Int), (Int, Int), Text, Int))`
-- `PollNotificationWith :: ((Int, Int), (Int, Int), Text, Int) -> Notifications (Either NotificationError NotificationState)`
+- `NotifyWith :: (Int, Int) -> Text -> Notifications (Either NotificationError ((Int, Int), ((Int, Int), (Text, Int))))`
+- `PollNotificationWith :: ((Int, Int), ((Int, Int), (Text, Int))) -> Notifications (Either NotificationError NotificationState)`
 - Rust decoder: NotificationsReq in generated/notifications.rs.
 
-Receipt tuple is issuing owner, target, existing inbox key, sequence. Facade owns
+Receipt nests issuing owner, target and (existing inbox key, sequence) in pairs; the bridge supports pairs/triples, not generic four-tuples. Facade owns
 abstract NotificationReceipt wrapping tuple; notify/pollNotification are Member
 Notifications wrappers in existing internal Agent module (which already owns
 AgentRef). Effect declaration/schema does not depend on that wrapper or module.

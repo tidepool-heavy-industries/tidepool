@@ -35,6 +35,7 @@ pub mod fork;
 pub mod forks;
 pub mod green;
 pub mod journal;
+pub mod notifications;
 pub mod read_state;
 pub mod run_llm_turn;
 pub mod subagent;
@@ -74,6 +75,7 @@ pub fn all() -> Vec<Effect> {
         actor_kernel::actor_kernel(),
         actor_local::actor_local(),
         agent_control::agent_control(),
+        notifications::notifications(),
         agent_inspection::agent_inspection(),
         agent_launch::agent_launch(),
         forks::forks(),

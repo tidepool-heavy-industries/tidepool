@@ -17,7 +17,7 @@ pub fn forks_decl() -> crate::EffectDecl {
         ],
         type_defs: &[
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",
-            "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration deriving (Show, Eq)",
+            "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectNotifications deriving (Show, Eq)",
             "data ForkGroupCleanupOutcome = ForkGroupCleaned | ForkGroupStillActive [(Int, Int)] | ForkGroupCleanupRejected Text deriving (Show, Eq)",
         ],
         extra_imports: &[],
