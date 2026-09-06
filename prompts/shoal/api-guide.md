@@ -142,6 +142,7 @@ updateRequest :: Member Replies effects
               => Response result -> Text -> Eff effects (Either ReplyError RequestUpdate)
 pollRequestUpdate :: Member Replies effects
                   => RequestUpdate -> Eff effects (Either ReplyError RequestUpdateState)
+stopAgent :: Member AgentControl effects => AgentRef -> Eff effects StopOutcome
 
 data RequestUpdateState
   = UpdateQueued | UpdatePresented | UpdateTooLate
@@ -180,6 +181,5 @@ to collect every inherited name at startup. Visibility does not transfer
 ownership or authority. Use `:status!` for lifecycle/provider uncertainty and
 `:recovery` after recreation; conversation names do not restore lost handles.
 
-`stopAgent :: Member AgentControl effects => AgentRef -> Eff effects StopOutcome`
-retires an actor when authorized. It is separate from accepting its result;
+`stopAgent` retires an actor when authorized. It is separate from accepting its result;
 retain useful specialists and inspect the outcome and cleanup evidence.

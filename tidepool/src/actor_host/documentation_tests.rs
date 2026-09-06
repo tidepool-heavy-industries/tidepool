@@ -15,6 +15,32 @@ fn example(document: &str) -> &str {
         .0
 }
 
+/// Check the reference signatures from the published guide itself, without
+/// maintaining a second list of API types in a fixture.
+fn guide_signature_query(document: &str) -> String {
+    let mut signatures: Vec<(String, String)> = Vec::new();
+    for block in document.split("```text\n").skip(1) {
+        for line in block.split_once("```").unwrap().0.lines() {
+            if let Some((name, signature)) = line.split_once("::") {
+                signatures.push((name.trim().into(), signature.trim().into()));
+            } else if line.trim_start().starts_with("=>") || line.trim_start().starts_with("->") {
+                let (_, signature) = signatures.last_mut().unwrap();
+                signature.push(' ');
+                signature.push_str(line.trim());
+            }
+        }
+    }
+    assert!(!signatures.is_empty(), "guide has no signature references");
+    format!(
+        ":type ({})",
+        signatures
+            .iter()
+            .map(|(name, signature)| format!("({name} :: {signature})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 async fn committed(
     policy: &dyn tidepool_actor::ResidentToolEndpoint,
     source: &str,
@@ -117,11 +143,14 @@ async fn base_prompt_coordination_example_executes() {
 async fn shared_api_guide_example_handles_success_and_unavailable() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    committed(
-        root.as_ref(),
-        example(include_str!("../../../prompts/shoal/api-guide.md")),
-    )
-    .await;
+    let guide = include_str!("../../../prompts/shoal/api-guide.md");
+    let signatures = committed(root.as_ref(), &guide_signature_query(guide)).await;
+    // Diagnostic errors do not reject a whole tool block; inspect the unit too.
+    assert_eq!(
+        signatures["items"][0]["status"], "committed",
+        "{signatures}"
+    );
+    committed(root.as_ref(), example(guide)).await;
     let mut binding = None;
     let child = tokio::time::timeout(Duration::from_secs(120), async {
         let mut child = None;
