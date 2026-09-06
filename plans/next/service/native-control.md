@@ -9,6 +9,50 @@ to the external session if a concrete missing capability makes changes necessary
 Shoal may inspect and specify the dependency, then integrate the delivered revision;
 it must not implement native changes even through an allocated Codex worktree.
 
+## Pre-wave verdict — native change required for attached observer TUI
+
+Rechecked the pinned checkout on 2026-09-06 at the exact revision below. **Yes,
+the agreed direct observer-TUI architecture requires Codex changes.** This is a
+source-verified missing ownership mechanism, not another transport guess:
+
+- `app-server/src/lib.rs:1137` receives a response with a known connection ID but
+  calls `process_response(response)` without passing that identity.
+- `app-server/src/message_processor.rs:838` forwards only response ID/result.
+- `app-server/src/outgoing_message.rs:383,457` removes the pending callback by
+  request ID alone; an attached peer is not checked against responder ownership.
+- `app-server/src/thread_state.rs:328` has no observer/controller capability.
+- `app-server/src/request_processors/thread_processor/readiness.rs:6` acknowledges
+  readiness without caller identity. TUI dynamic-tool forwarding is active code,
+  not an observer-only connection mode.
+
+Mandatory native deliverable: enforce single controller/mutator/responder custody
+(including response/error paths and readiness); provide side-effect-free observer
+TUI attachment; define disconnect/reconnect fencing and pending-request disposition.
+The external implementer chooses the smallest compatible protocol shape, backed by
+real two-client tests. It need not invent Shoal assignment or notification schemas.
+
+Already available / not reasons to change Codex: explicit Unix service transport,
+full-prefix fork boundaries, readiness machinery, ordinary turn submission/steering.
+Shoal implements its typed RPC versus one-way notification distinction, mounted
+service lifecycle, persistent client and hosted-tool bridge in Tidepool. Do not
+expand this native request into a generic actor scheduler or messaging framework.
+Seamless controller recovery is not to be claimed prematurely: explicit fail-closed
+recovery is acceptable if pending effects remain honest and cannot execute twice.
+
+A no-native-change *reduced* milestone is possible: controller-only headless service,
+no directly attached native TUI. It can exercise transport/host tools but does not
+satisfy the agreed observer acceptance gate. A filtering TUI proxy or custom UI could
+avoid native edits only by adding a new policy/presentation layer; that is not the
+recommended ownership boundary and is not an approved silent substitution.
+
+**Human-managed handoff:** give this file to the Codex-repository LLM outside Shoal
+before the next service integration wave. Ask it to return the reviewed commit,
+protocol/CLI contract, binary/build instructions, tests and limitations. The human
+brings those artifacts back to Shoal. No cross-repo actor handle is presumed. While
+it runs, independent run-map, usage and custody work may proceed; attached-TUI
+integration stays gated on that delivery. Further native gaps must be escalated to
+the human, not implemented from Shoal.
+
 ## Bounded external assignment
 
 Implement/review the native Codex portion of the accepted Shoal architecture:
@@ -35,7 +79,7 @@ Under `codex-rs/`:
   not controller identity. Hiding TUI input does not enforce ownership.
 - `app-server/src/thread_state.rs`: connection capabilities (inspected shape only
   had request_attestation); extend the owning connection/subscription mechanism.
-- `app-server/src/thread_processor/readiness.rs`: readiness needs role checks too.
+- `app-server/src/request_processors/thread_processor/readiness.rs`: readiness needs role checks too.
 - `tui/src/host_dynamic_tools.rs` and `tui/src/app/app_server_events.rs`: existing
   host bridge/tool forwarding; service TL moves/reuses controller-side forwarding.
 - `tui/src/app_server_session/cli_fork.rs`, CLI Unix remote resume/listen paths:

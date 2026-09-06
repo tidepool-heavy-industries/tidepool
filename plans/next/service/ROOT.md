@@ -92,14 +92,17 @@ from “process exists” or “TCP/Unix connection opened”.
 ## Recursive waves and deliverable
 
 First commit local interface/ownership scaffold compatible with root contract.
-Fork custody and bounded native-capability assessment obligations immediately. In parallel inspect and
+Fork custody immediately. The pre-wave native assessment established a missing
+controller/observer ownership contract; root/human manages the external handoff
+in `native-control.md`. Verify its returned revision rather than rediscovering the
+need halfway through implementation. In parallel inspect and
 prepare controller/bridge consumer against explicit unsupported holes. Avoid two
 writers to actor_host; worker returns a scoped candidate, TL integrates it.
 Prefer completing the architecture using existing native capabilities. Required
 Codex tweaks remain in scope but must be implemented/reviewed **outside Shoal, in a
 separate session in the Codex repository**. No native implementation Shoal fork,
-including one with a separately allocated worktree. Prepare the smallest justified
-contract/test handoff for that session; continue independent Tidepool work while
+including one with a separately allocated worktree. The human manages the Codex-repository LLM handoff; provide the bounded
+contract/test document and consume the artifacts the human returns; continue independent Tidepool work while
 blocked. Root integrates the externally delivered revision/pin. Do not weaken
 controller ownership merely to avoid acknowledging a necessary native dependency.
 

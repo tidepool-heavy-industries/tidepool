@@ -24,7 +24,7 @@ repair loops and incremental integration. No fixed headcount target.
   daemon framework or a patch to the accidental embedded-TUI endpoint.
 - **Codex changes are an external dependency, not a Shoal fork.** Prefer existing
   native capabilities. If tweaks prove necessary, prepare a precise handoff for a
-  separate, out-of-Shoal session in the Codex repository. Do not launch native
+  separate, out-of-Shoal session in the Codex repository, managed by the human. Do not launch native
   implementation/review workers within this Shoal tree or edit Codex from it.
   Integrate the externally delivered revision/pin and verify the resulting pair.
 - One control connection carries distinct operations: typed assignment, exact
@@ -59,6 +59,12 @@ Native app-server already has explicit Unix listen, remote TUI, after-call fork
 boundaries and readiness machinery. **Missing: server-enforced controller/observer
 ownership.** Ordinary attached clients can currently race to answer tool requests.
 Moving the process without moving hosted-tool forwarding out of the TUI is not a fix.
+Pre-wave reinspection confirms a native dependency for the agreed directly attached
+observer TUI: responses lose connection identity before pending-callback completion,
+and readiness has no caller role check. **Prepare the human-managed Codex handoff
+now, not mid-wave.** The [external handoff and evidence](plans/next/service/native-control.md)
+separate required ownership/TUI changes from existing capabilities. A headless-only
+service could use existing Codex but would not close the agreed observer gate.
 These findings constrain the architecture below.
 
 ## Tree and sequencing
@@ -66,7 +72,7 @@ These findings constrain the architecture below.
 ```text
 root: shared contract, manifests/pin integration, final product acceptance
 ├── service TL                         [first parallel wave]
-│   ├── native capability assessment → external Codex handoff only if needed
+│   ├── external Codex dependency (human-managed; prepare before wave)
 │   ├── custody-before-bootstrap + independent review
 │   └── persistent client/host bridge; then mounted integration & repair
 ├── run-map TL                         [first parallel wave]
@@ -98,7 +104,9 @@ append conflicts last time.
 
 ### First actions after restart
 
-1. Verify workspace/branch/cleanliness and installed host, extractor, worker and
+1. Check whether the human-managed external Codex handoff has returned; retain its
+   revision/contract or gate attached-TUI integration while independent work proceeds.
+   Verify workspace/branch/cleanliness and installed host, extractor, worker and
    pinned native executable identities. A restart alone does not build changed
    binaries. `just shoal-init` is the repository launcher/build entry; inspect its
    current help/script before choosing a new session. The user owns restarting
