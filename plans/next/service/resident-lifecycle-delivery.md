@@ -63,3 +63,26 @@ its independently owned process, host, storage and native completion evidence.
 The child-admission barrier is source-reviewed and exercised by existing child
 shutdown paths; a deterministic concurrent detached-startup race test is not
 authored here and remains a focused review/validation opportunity.
+
+## Startup cancellation repair (4793ba37)
+
+StartupCustody records unconfirmed evidence on cancellation before the admission
+read lease is dropped. It disarms only after child registration or an explicit
+failure evidence write. Forgetting holds the existing children lock through
+aggregate update/removal; shutdown samples that map and aggregate under the same
+lock order, preventing an omitted-child/stale-aggregate snapshot.
+
+Pinned ractor 0.16.5 (Cargo.lock) actor.rs:796-826 awaits pre_start inline through
+run_with_signal before supervision linking and before spawning the processing
+loop; do_pre_start at 1129 directly awaits the handler. Dropping that future does
+not run our retained shutdown protocol. Resource destruction is not inferred from
+Rust future destruction; cancelled startup therefore remains Unconfirmed.
+
+The deterministic gated ProbeBehavior test enters actual pre_start, observes
+the admission write barrier unavailable, then either completes startup and
+verifies registration before closing or aborts its waiter and verifies retained
+uncertainty before closing. It also checks post-close rejection. Generic probe
+realm evidence is Unsupported; this test intentionally does not fabricate a
+Confirmed resource cleanup result. Existing authored seal and force tests passed
+alongside it (3 passed, 97 excluded), evidence startup-repair.log. This is not an
+authored external-resource cancellation proof.
