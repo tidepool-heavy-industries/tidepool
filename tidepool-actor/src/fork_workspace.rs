@@ -47,7 +47,6 @@ pub trait ForkWorkspaceCustody: Send + Sync + 'static {
 pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
     /// Install custody before executing the child entry. This is separate from
     /// provider readiness; implementations must fail closed on stale ownership.
-
     fn install_custody(
         &self,
         actor: ActorRef,

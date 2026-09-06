@@ -197,6 +197,18 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                 detail: "invalid custody worktree id".into(),
             });
         }
+        if self
+            .manager
+            .lookup(&WorktreeId::from_raw(worktree))
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?
+            .is_none()
+        {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "custody worktree is not registered".into(),
+            });
+        }
         let principal =
             WorktreePrincipal::exact_actor(&self.runtime, actor.id.0, actor.incarnation.0);
         let binding = self
@@ -1334,7 +1346,7 @@ async fn run_interactive_applications(
                             application.last_activation_sequence = sequence;
                         }
                     }
-                    LocalResidentDeployment::Retired { actor, terminal } => {
+                    LocalResidentDeployment::Retired { actor, terminal: _ } => {
                         worktree_authority.remove_grant(actor.into());
                         let pending = pending_launches.remove(&actor);
                         if let Some(pending) = pending {
@@ -1645,7 +1657,6 @@ async fn run_interactive_applications(
     while binding_discoveries.join_next().await.is_some() {}
     for deployment in deployments {
         let tmux = tmux.clone();
-        let bindings = Arc::clone(&bindings);
         retirements
             .spawn(async move { retire_interactive_application_guarded(deployment, &tmux).await });
     }
@@ -2850,7 +2861,7 @@ mod tests {
             while children.len() < 2 {
                 match campaign.deployments.recv().await {
                     Some(LocalResidentDeployment::PolicyInstalled(child)) => children.push(child),
-                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
+                    Some(LocalResidentDeployment::Retired { actor, terminal: _ }) => {
                         panic!("{actor:?}: {terminal:?}")
                     }
                     Some(_) => {}
