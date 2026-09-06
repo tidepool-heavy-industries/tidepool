@@ -95,11 +95,8 @@ async fn base_prompt_coordination_example_executes() {
         "let seed = projectHead\nlet task = \"Check the hit targets.\" :: Text",
     )
     .await;
-    committed(
-        root.as_ref(),
-        example(include_str!("../../../prompts/shoal/base.md")),
-    )
-    .await;
+    let mut snippets = examples(include_str!("../../../prompts/shoal/base.md"));
+    committed(root.as_ref(), snippets.next().unwrap()).await;
     let mut binding = None;
     let child = tokio::time::timeout(Duration::from_secs(120), async {
         let mut child = None;
@@ -135,7 +132,17 @@ async fn base_prompt_coordination_example_executes() {
         .as_str()
         .unwrap()
         .starts_with("ResponseReady"));
-    committed(root.as_ref(), "stopAgent (forkedActor worker)").await;
+    let projected = committed(root.as_ref(), snippets.next().unwrap()).await;
+    assert!(projected["items"][4]["output"]
+        .as_str()
+        .unwrap()
+        .contains("ResponseReady"));
+    campaign.await_watch_ready().await;
+    let counted = committed(root.as_ref(), snippets.next().unwrap()).await;
+    assert_eq!(counted["items"][1]["output"], "WatchReady 1");
+    let stopped = committed(root.as_ref(), snippets.next().unwrap()).await;
+    assert_eq!(stopped["items"][1]["output"], "[StoppedNow]");
+    assert!(snippets.next().is_none(), "untested base-prompt example");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

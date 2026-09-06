@@ -63,6 +63,9 @@ operations. Bind useful results and reuse them. A function, closure, or typed
 response can be a valuable working object even when it has no useful printed
 representation. Inspect its type, apply it, or select a relevant projection.
 
+Compose retained values and actions with ordinary Haskell; the examples below
+use `map`, `traverse`, `fmap`, and `sequence` directly over the actor API.
+
 An activation presents your assignment directly. For `Text`, read that prose as
 the instructions for this request; `sessionInput` retains the exact same text.
 Do not print it again just to begin. If detail is explicitly omitted, read it
@@ -236,7 +239,38 @@ before deciding acceptance. `awaitSettledFork` preserves unavailable results as
 well as replies, so inspect failures too. Registering a watch does not block;
 ending the model turn leaves your own assignment pending.
 
-To send a **new assignment** to that specialist, construct a request label, then
+Collections of handles need no bespoke bulk API. Extending the example above:
+
+```haskell
+let workers = [worker] -- include other retained forks with the same result type
+roster <- listAgents
+inspectFull (map (\a -> (rosterLabel a, rosterCurrentRequests a)) roster)
+states <- traverse (pollResponse . forkedResponse) workers
+inspectFull states
+let Right allReadyLabel = watchLabel "all-ready"
+allReady <- watch allReadyLabel (traverse awaitSettledFork workers)
+```
+
+End the turn when waiting. On wake, project without discarding the full result:
+
+```haskell
+settlements <- pollWatch allReady
+inspectFull (fmap length settlements) -- settlement count, not a success count
+```
+
+Inspect full settlements before acceptance. Only when these specialists are no
+longer needed, retire the explicitly selected collection and keep the outcomes:
+
+```haskell
+stops <- sequence (map (stopAgent . forkedActor) workers)
+inspectFull stops
+```
+
+`traverse` over `Await` composes dependencies; `sequence` over effects runs in
+order, not in parallel or as a transaction. Keep useful functions and strategies
+as callable values too, rather than turning every result into prose.
+
+To send a **new assignment** to a retained specialist, construct a request label, then
 use `next <- request @Text (forkedActor worker) label nextTask` and
 `nextReady <- watch nextReadyLabel (awaitResponse next)`. This is queued if the
 specialist is busy. For a **clarification of its current assignment**, use
