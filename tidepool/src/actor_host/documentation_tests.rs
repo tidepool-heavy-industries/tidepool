@@ -194,7 +194,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     campaign.await_watch_ready().await;
     let unavailable = committed(
         root.as_ref(),
-        "state <- pollWatch failureReady\ninspectFull (fmap (either (const True) (const False) . reportOnly) state)",
+        "state <- pollWatch retainedFailureReady\ninspectFull (fmap (either (const True) (const False) . reportOnly) state)",
     )
     .await;
     assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
