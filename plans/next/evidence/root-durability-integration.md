@@ -41,3 +41,45 @@ fault tests, retain-first uncertainty, no unsafe further writes before authorita
 reconciliation/reopen, exact binding generations and independent review. No double-
 bind exploit was established by the initial finding. This does not reopen accepted
 strict writer mechanics or authorize a broad storage redesign.
+
+## Consumer repair accepted and integrated
+
+Reviewed exact candidate 8a73dffa0f8dc99c122bf0020c28ed4520c3f253;
+root merge and directly tested source: 9d64a066afa95ff5eaeec0842e0e9763e76c1bcf.
+Root examined production diffs, binding public-path assertions and the independent
+reviewer's retained review.md. Accepted EventJournal/monitor mutation fencing,
+BindingTable whole-owner mutation AND authorization fencing, exclusive reopen
+reconciliation, and LogWriter durable creation/uncertain-sequence fencing.
+No serialized format change. Uncertain binding state sacrifices availability;
+loaded Active rows remain blocking without fabricating a releasable generation.
+
+Root executed, in the existing Nix environment:
+- cargo test -p tidepool-worktree --test journal_uncertainty owning_paths_poison_and_reopen_without_reusing_sequences -- --exact --nocapture: passed (6 subprocess cases).
+- cargo test -p tidepool-worktree --test binding_uncertainty binding_public_paths_fence_uncertain_custody_until_reopen -- --exact --nocapture: passed (6 cases).
+- cargo test -p tidepool-worktree --test storage_errors binding_failed_ -- --nocapture: 2 passed, no skips.
+- cargo test -p tidepool-harness --lib log::writer::fault_tests::public_writer_faults_retain_publication_and_fence_sequence -- --exact --nocapture: passed (4 cases).
+- cargo test -p tidepool-harness --lib log::tests: 9 passed.
+- cargo check -p tidepool --bin tidepool-selfharness: CompileOnly passed.
+- cargo fmt -p tidepool-worktree -p tidepool-harness --check and git diff --check: passed.
+Logs and exact fault-binary hashes: /tmp/root-consumer-evidence/.
+No physical crash test or live host replacement was performed.
+
+Service incorporation requirement: merge 9d64a066 (or its evidence descendant),
+preserving staged service changes. Confirm resulting revision and focused custody/
+inbox checks; table uncertainty now revokes current()/active_for_agent() authority.
+This does not replace the service-owned separate rows/checkpoint-parent fault,
+poison/reopen and process/HTTP/effect-drain gates. Root publication is not evidence
+that the busy service lead has received or incorporated it. Known-broken active
+amendment transport was not retried or disguised as a queued fallback.
+
+Consumer lead incorporation/cleanup receipt: fast-forwarded to exact root merge
+9d64a066 with clean checkout, then used traverse (stopAgent . forkedActor) over
+journalOwner, bindingOwner and consumerReviewer. Observed three StoppedNow
+outcomes; post-retirement native checks found retained fault logs, independent
+review.md and local hash evidence. Lead remains available. Its report repeated
+the assignment-time fact that root checks were running; the completed root checks
+above supersede that statement, not vice versa. No child rerun was claimed.
+
+This is a concrete compositional-Haskell cleanup example: one traversal, retained
+typed outcomes, no API discovery (lead report). It establishes successful use,
+not a quantified cost or latency comparison with another orchestration system.

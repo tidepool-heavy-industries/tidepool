@@ -46,8 +46,12 @@ ancestry must already be durable; concurrent hierarchy replacement is excluded.
 At integrated source c5b74bf8, 22 inbox tests (including 20 hit-checked syscall-fault
 subprocess cases) and 3 notification host regressions passed. These prove failure
 propagation, poison/no retry and process reconciliation, not physical power-loss
-safety. Native send remains unavailable. Pre-deployment socket cleanup on failed
-inbox open remains a separate service-owned startup obligation.
+safety. Native send remains unavailable. Exclusive socket-directory custody now
+cleans pre-submission preparation failures, including failed inbox open, without
+deleting preexisting collisions. Once hosted or native work may exist, paths are
+retained and cleanup is reported failed until exact process and accepted hosted
+work completion are proven. Shutdown preserves launch failures and completed
+deployment custody across its deadline; abort is not successful cleanup.
 Submitted transport acceptance maps to Unconfirmed, never Presented; only explicit
 correlated presentation evidence may establish Presented.
 
