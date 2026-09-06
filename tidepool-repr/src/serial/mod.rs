@@ -8,7 +8,7 @@ pub mod read;
 pub mod write;
 
 pub use read::read_cbor;
-pub use read::{MetaWarnings, read_metadata};
+pub use read::{read_metadata, MetaWarnings};
 pub use write::write_cbor;
 pub use write::write_metadata;
 
