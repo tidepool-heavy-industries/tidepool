@@ -1,9 +1,242 @@
-//! Host-owned completion policy, distinct from actor cleanup and HTTP drain.
+//! Exact resident cleanup and HTTP drain remain separate from native/external work.
+use super::*;
+use crate::host_dynamic_tools::HostDynamicToolService;
+use futures_util::future::BoxFuture;
+use tidepool_actor::{HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown};
 
-/// Only the host lifecycle owner selects the abort boundary. Native successful
-/// completion/release is not implemented by the current service controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CompletionBoundary {
     AwaitingNativeDecision,
     AbortForShutdown,
 }
+pub(super) type HostedOwner = Arc<tokio::sync::Mutex<HostedRetirement>>;
+pub(super) type HostedSlot = Arc<Mutex<Option<HostedOwner>>>;
+
+enum Operation<T> {
+    Pending(BoxFuture<'static, Result<T, String>>),
+    Finished(Result<T, String>),
+}
+impl<T> Operation<T> {
+    async fn finish(&mut self) {
+        if let Self::Pending(future) = self {
+            let result = future.await;
+            *self = Self::Finished(result);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum SealObservation {
+    Pending,
+    TerminalPath,
+    Confirmed(HostedWorkSeal),
+    Failed(String),
+}
+#[derive(Debug, Clone)]
+pub(super) enum ResidentObservation {
+    Pending,
+    Absent,
+    Foreign(ActorRef),
+    Accounted(ResidentCleanupOutcome),
+    Failed(String),
+}
+#[derive(Debug, Clone)]
+pub(super) enum HttpObservation {
+    Pending,
+    Drained,
+    Failed(String),
+}
+#[derive(Debug, Clone)]
+pub(super) enum HostedObservation {
+    Pending,
+    Observed {
+        seal: SealObservation,
+        resident: ResidentObservation,
+        http: HttpObservation,
+        // These domains never constitute native/external cleanup evidence.
+    },
+}
+
+pub(super) struct HostedRetirement {
+    actor: LocalActorRef,
+    control: crate::host_dynamic_tools::HostToolControl,
+    boundary: CompletionBoundary,
+    terminal_path: bool,
+    seal: Option<Operation<HostedWorkSeal>>,
+    shutdown: Option<Operation<ResidentShutdown>>,
+    resident: ResidentObservation,
+    service: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    service_result: Option<Result<(), String>>,
+}
+
+/// Store control and the gated task in the pre-existing exact owner slot before
+/// opening the service start gate. The task captures no owner/slot back-reference.
+pub(super) fn start(
+    slot: &HostedSlot,
+    actor: LocalActorRef,
+    server: HostDynamicToolService,
+    listener: tokio::net::UnixListener,
+) -> Result<HostedOwner, String> {
+    let mut entry = slot.lock();
+    if entry.is_some() {
+        return Err("host service already installed".into());
+    }
+    let control = server.control();
+    let (start, ready) = oneshot::channel();
+    let service = tokio::spawn(async move {
+        ready
+            .await
+            .map_err(|_| "service start cancelled".to_string())?;
+        server
+            .serve(listener)
+            .await
+            .map_err(|error| error.to_string())
+    });
+    let owner = Arc::new(tokio::sync::Mutex::new(HostedRetirement {
+        actor,
+        control,
+        boundary: CompletionBoundary::AwaitingNativeDecision,
+        terminal_path: false,
+        seal: None,
+        shutdown: None,
+        resident: ResidentObservation::Pending,
+        service: Some(service),
+        service_result: None,
+    }));
+    *entry = Some(owner.clone());
+    start
+        .send(())
+        .map_err(|_| "service start receiver lost".to_string())?;
+    Ok(owner)
+}
+
+pub(super) fn service_finished(owner: &HostedOwner) -> bool {
+    owner.try_lock().is_ok_and(|state| {
+        state.service_result.is_some()
+            || state
+                .service
+                .as_ref()
+                .is_some_and(|task| task.is_finished())
+    })
+}
+
+/// Cancellation/timeout drops only this waiter. Every polled operation and its
+/// result remain in the original owner; no seal/shutdown/service retry is created.
+pub(super) async fn observe(
+    owner: &HostedOwner,
+    boundary: CompletionBoundary,
+    timeout: Duration,
+) -> HostedObservation {
+    tokio::time::timeout(timeout, async {
+        let mut state = owner.lock().await;
+        if boundary == CompletionBoundary::AbortForShutdown {
+            state.boundary = boundary;
+        }
+        state.advance().await;
+        state.observation()
+    })
+    .await
+    .unwrap_or(HostedObservation::Pending)
+}
+
+fn account(expected: ActorRef, cleanup: Option<ResidentCleanupOutcome>) -> ResidentObservation {
+    match cleanup {
+        None => ResidentObservation::Absent,
+        Some(cleanup) if cleanup.actor() != expected => {
+            ResidentObservation::Foreign(cleanup.actor())
+        }
+        Some(cleanup) => ResidentObservation::Accounted(cleanup),
+    }
+}
+impl HostedRetirement {
+    async fn advance(&mut self) {
+        let exact = self.actor.identity();
+        if self.seal.is_none() && !self.terminal_path {
+            if self.actor.terminal().get().is_some() {
+                self.terminal_path = true;
+                self.control.quiesce();
+            } else {
+                let control = self.control.clone();
+                // quiesce_and_seal changes HTTP admission synchronously, so call
+                // it INSIDE the stored future, not before storing that future.
+                self.seal = Some(Operation::Pending(Box::pin(async move {
+                    control
+                        .quiesce_and_seal(exact)
+                        .await
+                        .map_err(|error| error.to_string())
+                })));
+            }
+        }
+        if let Some(seal) = &mut self.seal {
+            seal.finish().await;
+        }
+        if self.boundary != CompletionBoundary::AbortForShutdown {
+            return;
+        }
+        if self.actor.terminal().get().is_some() {
+            self.resident = account(exact, self.actor.terminal().cleanup());
+        } else {
+            if !matches!(&self.seal, Some(Operation::Finished(Ok(seal))) if seal.actor() == exact) {
+                return;
+            }
+            if self.shutdown.is_none() {
+                let actor = self.actor.clone();
+                self.shutdown = Some(Operation::Pending(Box::pin(async move {
+                    actor
+                        .shutdown_with_cleanup(ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "host selected completion abort for shutdown".into(),
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                })));
+            }
+            self.shutdown.as_mut().unwrap().finish().await;
+            self.resident = match self.shutdown.as_ref().unwrap() {
+                Operation::Finished(Ok(result)) => account(exact, Some(result.cleanup.clone())),
+                Operation::Finished(Err(error)) => ResidentObservation::Failed(error.clone()),
+                Operation::Pending(_) => unreachable!(),
+            };
+        }
+        // Check every owned resident component; unsupported/absent/foreign
+        // outcomes cannot become permission to claim HTTP drain or settlement.
+        if !matches!(&self.resident, ResidentObservation::Accounted(cleanup)
+            if cleanup.is_confirmed())
+        {
+            return;
+        }
+        self.control.drain();
+        if self.service_result.is_none() {
+            if let Some(task) = &mut self.service {
+                let result = task
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result);
+                self.service_result = Some(result);
+                self.service.take();
+            }
+        }
+    }
+    fn observation(&self) -> HostedObservation {
+        HostedObservation::Observed {
+            seal: if self.terminal_path {
+                SealObservation::TerminalPath
+            } else {
+                match &self.seal {
+                    Some(Operation::Finished(Ok(seal))) => SealObservation::Confirmed(seal.clone()),
+                    Some(Operation::Finished(Err(error))) => SealObservation::Failed(error.clone()),
+                    _ => SealObservation::Pending,
+                }
+            },
+            resident: self.resident.clone(),
+            http: match &self.service_result {
+                None => HttpObservation::Pending,
+                Some(Ok(())) => HttpObservation::Drained,
+                Some(Err(error)) => HttpObservation::Failed(error.clone()),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
