@@ -116,6 +116,20 @@ impl HostDynamicToolService {
     }
 
     pub(crate) async fn serve(self, listener: UnixListener) -> Result<(), std::io::Error> {
+        self.serve_until(listener, std::future::pending()).await
+    }
+
+    /// Stop accepting connections and await accepted HTTP work. This is not a
+    /// resident-effect retirement receipt: submitted work remains owned by the
+    /// resident endpoint even if its HTTP client disconnected.
+    ///
+    /// Integration gate: callers must not infer an admission fence or custody
+    /// release from this primitive; explicit handler fencing is still required.
+    pub(crate) async fn serve_until(
+        self,
+        listener: UnixListener,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), std::io::Error> {
         let app = Router::new()
             .route("/v1/dynamic-tools/registration", get(registration))
             .route("/v1/dynamic-tools/session", post(attach_session))
@@ -123,7 +137,9 @@ impl HostDynamicToolService {
             .route("/v1/dynamic-tools/completed", post(completed))
             .layer(DefaultBodyLimit::max(REQUEST_LIMIT))
             .with_state(self.state);
-        axum::serve(listener, app).await
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
     }
 }
 
