@@ -10,6 +10,15 @@ self-contained plan. Do not preload every specialist document into the shared
 prefix. The documents remove dependence on this conversation or old live handles;
 they do not change the default of exact full-prefix runtime forks.
 
+**Handoff completeness:** this file and its linked fork plans are sufficient to
+start the scoped Tidepool wave in a fresh context. Goals, ownership, dependencies,
+sequencing and acceptance are specified; leads still own concrete implementation
+design and must scaffold those contracts before their implementation forks. No old
+conversation or resident handles are required. The human has assigned the Codex
+work to a separate tmux window/session, using `~/dev/codex/TASK.md`. Do not duplicate
+that work or steer that session from Shoal. Consume its human-relayed delivery;
+independent Tidepool work can proceed while native-dependent integration stays gated.
+
 Before implementation, inspect current source and nearest `AGENTS.md`; this handoff
 records inspected facts, not a substitute for checking changed source. Scaffold
 shared executable contracts and commit a clean seed before implementation forks.
