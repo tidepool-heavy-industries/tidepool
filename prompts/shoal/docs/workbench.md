@@ -56,3 +56,8 @@ Status also shows the assigned worktree and expected branch when available.
 Check `git branch --show-current` and Git worktree identity against that assignment
 before diagnosing a routing problem. The expected branch is launch evidence;
 an intentional checkout change can make current Git state differ.
+
+The concise status roster shows each actor's actual `supervisor` identity.
+Actor labels are names, not proof of ancestry; `:lineage` exposes supervision
+and context ancestry separately. Request settlement and runtime posture do not
+establish that a parent has reviewed, accepted, or integrated a submission.

@@ -560,8 +560,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 let usage = runtime.latest_provider_usage();
                 if view == StatusView::Concise {
                     return Some(format!(
-                        "  - {:?} ({}@{}) role={:?} bound_worktree={:?} state={state} {}",
+                        "  - {:?} ({}@{}) supervisor={} role={:?} bound_worktree={:?} state={state} {}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
+                        record.descriptor.supervisor_parent().map_or_else(
+                            || "none".to_owned(),
+                            |parent| format!("{}@{}", parent.id.0, parent.incarnation.0),
+                        ),
                         record.descriptor.effective_role().role(),
                         record.bound_worktree,
                         runtime.usage_summary_display(),
