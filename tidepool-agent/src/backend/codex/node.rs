@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn host_directed_children_disable_goals_without_changing_root_configuration() {
+    fn goal_policy_is_preserved_for_fresh_resumed_and_forked_launches() {
         for mode in [
             InteractiveLaunchMode::Fresh,
             InteractiveLaunchMode::Resume(BackendThreadId(THREAD.into())),
