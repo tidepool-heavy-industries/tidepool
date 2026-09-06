@@ -605,7 +605,7 @@ async fn execute_examples(
                     .then_some(tidepool_actor::ForkEffort::Low);
                 assert_eq!(
                     child.fork_effort, expected_effort,
-                    "the consumer example selects low effort; the domain inherits"
+                    "the consumer explicitly requests Low; the domain leaves selection to the host Low default"
                 );
                 let boundary = child.fork_boundary.as_ref().expect("hosted fork boundary");
                 assert_eq!(boundary.thread_id, "actor-host-vertical");

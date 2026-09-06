@@ -91,6 +91,7 @@ Coding/scaffolding/integration branches have coding worktrees; research branches
 are inspection-only. `researchingLeaf` omits delegation. Available effects and
 runtime depth/width still limit admission. For recursive budget proposals use
 `:doc unfold` and `previewBranch`; do not infer permission from visible handles.
+Unspecified fork effort defaults to Low, not the parent setting.
 `withEffort` requests initial effort, not a change to a running actor or proof
 of provider application.
 
