@@ -103,6 +103,13 @@ pub(super) fn spawn_into(
 }
 
 impl ScopedHostRetention {
+    pub(super) fn terminal_until(&self, deadline: Instant) -> Option<Option<ActorTerminal>> {
+        self.custody
+            .state
+            .try_lock_until(deadline)
+            .map(|state| state.terminal.clone())
+    }
+
     pub(super) fn pin(&mut self, deadline: Instant) -> Result<(), ServiceScopeError> {
         match &mut *self.slot.lock() {
             ScopedProcessSlot::Owned(scope) => scope.pin_init(deadline),

@@ -45,7 +45,7 @@ impl Fixture {
         }
     }
 
-    fn prepared(&self, executable: &str) -> PreparedServiceScope {
+    fn prepared(&self, executable: impl Into<PathBuf>) -> PreparedServiceScope {
         ProcessMountBoundary::new(
             self.tree.cwd(),
             [self.tree.cwd().to_owned()],
@@ -115,8 +115,12 @@ impl Fixture {
     }
 }
 
-fn bwrap() -> &'static str {
-    "/nix/store/dqzmpjz70l4lzg7lmc3x8wih74nh5bpc-bubblewrap-0.11.0/bin/bwrap"
+fn bwrap() -> PathBuf {
+    std::env::var_os("SERVICE_SCOPE_BWRAP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from("/nix/store/dqzmpjz70l4lzg7lmc3x8wih74nh5bpc-bubblewrap-0.11.0/bin/bwrap")
+        })
 }
 fn deadline() -> Instant {
     Instant::now() + std::time::Duration::from_secs(10)
@@ -267,11 +271,11 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
         !task.is_finished(),
         "timeout must not abort the fleet owner"
     );
-    let mut teardown = RetainedInteractiveFleet {
-        owners: map,
-        unfinished: Some(task),
-        failure: "host work pending".into(),
-    };
+    let mut error =
+        handoff_application_owners(map, task, Err(runtime_error("host work pending")), Ok(()))
+            .unwrap_err();
+    let teardown =
+        RetainedInteractiveFleet::from_error(error.as_mut()).expect("actual host carrier");
     resume.send(()).unwrap();
     teardown.unfinished.take().unwrap().await.unwrap().unwrap();
     fixture.retained();
@@ -288,7 +292,7 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
             .lock(),
         ScopedProcessSlot::Owned(_)
     ));
-    drop(teardown); // Fixture namespace was explicitly stopped through exact slot.
+    drop(error); // Fixture namespace was explicitly stopped through exact slot.
     assert_eq!(
         Arc::strong_count(&fixture.custody),
         1,
@@ -421,4 +425,152 @@ fn scoped_custody_pin_error_retains_owner() {
     drop(slot);
     drop(map);
     assert_eq!(Arc::strong_count(&fixture.custody), 1);
+}
+
+#[tokio::test]
+async fn scoped_custody_production_handoff_recovers_completed_and_timed_out_fleets() {
+    for completed in [true, false] {
+        let fixture = Fixture::new(1);
+        let map = owners();
+        fixture.register(&map);
+        let slot = fixture.claim(&map, fixture.custody.actor).unwrap();
+        let prepared = fixture.prepared(bwrap());
+        let output = File::create(fixture.tree.cwd().join("scope.log")).unwrap();
+        let (notice, receive) = tokio::sync::oneshot::channel::<()>();
+        drop(receive); // No pin has occurred and the receiver is already gone.
+        tokio::task::spawn_blocking(move || {
+            spawn_into(slot, prepared, ServiceEnvironment::default(), output).unwrap();
+            assert!(notice.send(()).is_err());
+        })
+        .await
+        .unwrap();
+        map.lock()
+            .get_mut(&fixture.custody.actor)
+            .unwrap()
+            .retired(cancelled());
+
+        let (resume, blocked) = tokio::sync::oneshot::channel();
+        let mut task = tokio::spawn(async move {
+            blocked.await.unwrap();
+            Ok(())
+        });
+        let (cleanup, resume) = if completed {
+            resume.send(()).unwrap();
+            (
+                await_applications(&mut task, Duration::from_secs(10)).await,
+                None,
+            )
+        } else {
+            let cleanup = await_applications(&mut task, Duration::ZERO).await;
+            assert!(cleanup.is_err());
+            (cleanup, Some(resume))
+        };
+        // This is run's actual predicate/construction, not a hand-built owner.
+        let mut error: Box<dyn std::error::Error> =
+            handoff_application_owners(map, task, cleanup, Ok(())).unwrap_err();
+        let carrier = RetainedInteractiveFleet::from_error(error.as_mut()).unwrap();
+        assert_eq!(carrier.unfinished.is_none(), completed);
+        let mut wrong = fixture.custody.actor;
+        wrong.incarnation = tidepool_actor::Incarnation(2);
+        assert!(matches!(
+            carrier.recover_process(wrong, RetainedProcessOperation::Observe, deadline()),
+            Err(RetainedProcessError::NoScopedActor)
+        ));
+        assert!(matches!(
+            carrier.recover_process(
+                fixture.custody.actor,
+                RetainedProcessOperation::Pin,
+                Instant::now()
+            ),
+            Err(RetainedProcessError::Deadline)
+        ));
+        let observed = carrier
+            .recover_process(
+                fixture.custody.actor,
+                RetainedProcessOperation::Observe,
+                deadline(),
+            )
+            .unwrap();
+        assert_eq!(observed.actor, fixture.custody.actor);
+        assert_eq!(observed.actor_terminal, Some(cancelled()));
+        assert!(matches!(observed.process, RetainedProcessState::Owned));
+        assert!(matches!(
+            carrier
+                .recover_process(
+                    fixture.custody.actor,
+                    RetainedProcessOperation::Pin,
+                    deadline()
+                )
+                .unwrap()
+                .process,
+            RetainedProcessState::Pinned
+        ));
+        for _ in 0..2 {
+            let observed = carrier
+                .recover_process(
+                    fixture.custody.actor,
+                    RetainedProcessOperation::Stop,
+                    deadline(),
+                )
+                .unwrap();
+            assert_eq!(observed.actor_terminal, Some(cancelled()));
+            assert!(matches!(
+                observed.process,
+                RetainedProcessState::ProcessStopped(_)
+            ));
+        }
+        fixture.retained(); // Stopped process is not host-work settlement.
+        if let Some(resume) = resume {
+            resume.send(()).unwrap();
+            carrier.unfinished.take().unwrap().await.unwrap().unwrap();
+        }
+        drop(error);
+        assert_eq!(
+            Arc::strong_count(&fixture.custody),
+            1,
+            "no carrier/slot cycle"
+        );
+        fixture.retained();
+    }
+}
+
+#[derive(Debug)]
+struct HandoffError(&'static str);
+impl std::fmt::Display for HandoffError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for HandoffError {}
+
+#[tokio::test]
+async fn scoped_custody_handoff_preserves_unretained_results() {
+    for (cleanup_failed, run_failed) in [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let mut task = tokio::spawn(async { Ok(()) });
+        await_applications(&mut task, Duration::from_secs(10))
+            .await
+            .unwrap();
+        let cleanup = if cleanup_failed {
+            Err(Box::new(HandoffError("cleanup")) as Box<dyn std::error::Error>)
+        } else {
+            Ok(())
+        };
+        let result = if run_failed {
+            Err(Box::new(HandoffError("run")) as Box<dyn std::error::Error>)
+        } else {
+            Ok(())
+        };
+        let result = handoff_application_owners(owners(), task, cleanup, result);
+        if cleanup_failed || run_failed {
+            let error = result.unwrap_err();
+            // Preserve concrete error identity, not a String replacement.
+            assert_eq!(
+                error.downcast_ref::<HandoffError>().unwrap().0,
+                if cleanup_failed { "cleanup" } else { "run" }
+            );
+        } else {
+            result.unwrap();
+        }
+    }
 }

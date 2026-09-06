@@ -640,30 +640,162 @@ impl InteractiveApplicationOwner {
 /// Returned to run's real host caller, not formatted into a resource-free error.
 /// The host retains this error through shutdown. Dropping it at process exit is
 /// not settlement, nor continuity of process handles across host death.
-struct RetainedInteractiveFleet {
+pub(crate) struct RetainedInteractiveFleet {
     owners: InteractiveOwners,
     unfinished: Option<tokio::task::JoinHandle<Result<(), String>>>,
-    failure: String,
+    failures: Vec<Box<dyn std::error::Error>>,
 }
 impl fmt::Debug for RetainedInteractiveFleet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RetainedInteractiveFleet")
             .field("actors", &self.owners.lock().keys().collect::<Vec<_>>())
             .field("unfinished", &self.unfinished.is_some())
-            .field("failure", &self.failure)
+            .field("failures", &self.failures)
             .finish()
     }
 }
 impl fmt::Display for RetainedInteractiveFleet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}; addressable actor resources retained, not settled",
-            self.failure
-        )
+        for error in &self.failures {
+            write!(f, "{error}; ")?;
+        }
+        write!(f, "addressable actor resources retained: host work/process settlement remains unsupported")
     }
 }
-impl std::error::Error for RetainedInteractiveFleet {}
+impl std::error::Error for RetainedInteractiveFleet {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.failures.first().map(|error| error.as_ref())
+    }
+}
+
+/// Host-only operations. These never select a launch mode, release the command
+/// gate, establish host-work quiescence, or settle workspace custody.
+#[allow(dead_code)] // Available to the crate's host error consumer; not a model API.
+pub(crate) enum RetainedProcessOperation {
+    Observe,
+    Pin,
+    Stop,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum RetainedProcessState {
+    Reserved,
+    Spawning,
+    NotSpawned(String),
+    Owned,
+    Pinned,
+    ProcessStopped(tidepool_node::ServiceScopeCleanup),
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct RetainedProcessObservation {
+    pub(crate) actor: ActorRef,
+    pub(crate) actor_terminal: Option<ActorTerminal>,
+    pub(crate) process: RetainedProcessState,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RetainedProcessError {
+    #[error("exact actor has no retained scoped process")]
+    NoScopedActor,
+    #[error("retained process observation deadline elapsed")]
+    Deadline,
+    #[error(transparent)]
+    Scope(#[from] tidepool_node::ServiceScopeError),
+}
+
+#[allow(dead_code)]
+impl RetainedInteractiveFleet {
+    /// Recover the actual resource-bearing error after the host's ordinary
+    /// Box<dyn Error> propagation. Crate visibility lets shoal own a subsequent
+    /// recovery policy without exposing this mechanism to authored programs.
+    pub(crate) fn from_error<'a>(
+        error: &'a mut (dyn std::error::Error + 'static),
+    ) -> Option<&'a mut Self> {
+        error.downcast_mut::<Self>()
+    }
+
+    /// Blocking, deadline-bounded host operation: call outside an actor turn.
+    /// Exact identity includes incarnation. Even ProcessStopped is status only;
+    /// the row remains owned by this carrier after every result or error.
+    pub(crate) fn recover_process(
+        &self,
+        actor: ActorRef,
+        operation: RetainedProcessOperation,
+        deadline: std::time::Instant,
+    ) -> Result<RetainedProcessObservation, RetainedProcessError> {
+        if std::time::Instant::now() >= deadline {
+            return Err(RetainedProcessError::Deadline);
+        }
+        let rows = self
+            .owners
+            .try_lock_until(deadline)
+            .ok_or(RetainedProcessError::Deadline)?;
+        let retention = rows
+            .get(&actor)
+            .and_then(|row| row.scoped_retention.as_ref())
+            .ok_or(RetainedProcessError::NoScopedActor)?;
+        let mut slot = retention
+            .slot
+            .try_lock_until(deadline)
+            .ok_or(RetainedProcessError::Deadline)?;
+        use scoped_custody::ScopedProcessSlot;
+        let process = match (operation, &mut *slot) {
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Reserved) => {
+                RetainedProcessState::Reserved
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Spawning) => {
+                RetainedProcessState::Spawning
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::NotSpawned(error)) => {
+                RetainedProcessState::NotSpawned(error.to_string())
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Owned(_)) => {
+                RetainedProcessState::Owned
+            }
+            (RetainedProcessOperation::Pin, ScopedProcessSlot::Owned(scope)) => {
+                scope.pin_init(deadline)?;
+                RetainedProcessState::Pinned
+            }
+            (RetainedProcessOperation::Stop, ScopedProcessSlot::Owned(scope)) => {
+                RetainedProcessState::ProcessStopped(scope.terminate_and_wait(deadline)?)
+            }
+            _ => return Err(tidepool_node::ServiceScopeError::WrongPhase.into()),
+        };
+        Ok(RetainedProcessObservation {
+            actor,
+            actor_terminal: retention
+                .terminal_until(deadline)
+                .ok_or(RetainedProcessError::Deadline)?,
+            process,
+        })
+    }
+}
+
+fn handoff_application_owners(
+    owners: InteractiveOwners,
+    task: tokio::task::JoinHandle<Result<(), String>>,
+    cleanup: Result<(), Box<dyn std::error::Error>>,
+    run_result: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let retained = owners
+        .lock()
+        .values()
+        .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
+    let unfinished = !task.is_finished();
+    if retained || unfinished {
+        return Err(Box::new(RetainedInteractiveFleet {
+            owners,
+            unfinished: unfinished.then_some(task),
+            // Preserve the errors themselves: they may own resources too.
+            failures: cleanup.err().into_iter().chain(run_result.err()).collect(),
+        }));
+    }
+    cleanup?;
+    run_result
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootRunDisposition {
@@ -963,23 +1095,7 @@ pub async fn run(
     } else {
         Ok(())
     };
-    let retained = application_owners
-        .lock()
-        .values()
-        .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
-    if retained || !applications_task.is_finished() {
-        return Err(Box::new(RetainedInteractiveFleet {
-            owners: application_owners,
-            unfinished: (!applications_task.is_finished()).then_some(applications_task),
-            failure: cleanup
-                .err()
-                .map(|error| error.to_string())
-                .or_else(|| result.as_ref().err().map(|error| error.to_string()))
-                .unwrap_or_else(|| "host work/process settlement remains unsupported".into()),
-        }));
-    }
-    cleanup?;
-    result
+    handoff_application_owners(application_owners, applications_task, cleanup, result)
 }
 
 /// Classify an intentional completion or prepare an abnormal root for a fresh
