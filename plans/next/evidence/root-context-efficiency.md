@@ -95,3 +95,15 @@ between them. Shared-prefix forks, parallel execution and retained specialist re
 are hypotheses for lower context cost and critical-path latency. Distinguish fixable
 UX/mechanism defects from architectural limits; anticipated gains remain hypotheses
 until matched revision/provider usage and accepted-outcome measurements support them.
+
+## Expressive compression, separate from prefix caching
+
+User clarified that Haskell's composition itself is a key advantage: map,
+traverse/sequence, folds, closures and sum types can express useful coordination
+with fewer tokens and less repeated state explanation than simpler tool surfaces.
+Evaluate model fluency and conceptual leverage separately from provider cached
+input. Retained typed repair/watch flows in the fresh run-map review worked
+without rediscovery (reviewer report); root also observed that build/setup latency
+can dominate even when coordination is fluent. Seek small reliable primitives
+and enough guidance to compose them, not a bespoke bulk API or larger default
+prompt for every workflow. Claimed token savings still require measurement.
