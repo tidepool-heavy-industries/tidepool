@@ -138,6 +138,12 @@ fn execution_id(actor: crate::ActorRef, operation: &WorkbenchCallKey) -> Workben
 }
 
 impl ResidentToolClient {
+    pub(crate) async fn seal(&self) -> Result<crate::HostedWorkSeal, ResidentToolError> {
+        self.actor
+            .seal_hosted_work()
+            .await
+            .map_err(ResidentToolError::Invocation)
+    }
     pub(crate) fn local(actor: crate::LocalActorRef) -> Self {
         Self {
             actor,
@@ -265,6 +271,20 @@ impl ResidentToolPolicy {
 }
 
 impl ResidentToolEndpoint for ResidentToolPolicy {
+    fn seal_hosted_work_boxed(
+        &self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::HostedWorkSeal, ResidentToolError>> + Send + 'static>,
+    > {
+        let actor = self.client.actor.clone();
+        Box::pin(async move {
+            actor
+                .seal_hosted_work()
+                .await
+                .map_err(ResidentToolError::Invocation)
+        })
+    }
+
     fn tools(&self) -> &[HostedTool] {
         self.tools()
     }
