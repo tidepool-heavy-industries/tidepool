@@ -39,3 +39,23 @@ structured review/integration/tested revision links and existing Shoal CLI
 integration remain outstanding. Reader reports usage/acceptance Unknown rather
 than fabricating support. Independent review is blocked by the recursive
 custody failure; fixing that defect remains required, not waived by local work.
+
+## Verification of source db5e4fdc220aedeb4af084712c9082dea6e3128f
+
+- `just test-lib tidepool 'test(partial_map_)'`: 2 executed/passed,
+  98 unrelated tests skipped; includes missing binding, torn tail, oversized
+  records and actor-count bound. Log `/tmp/run-map-evidence/tests.log`.
+- `nix develop --command cargo check -p tidepool --example run_map`: compiled.
+- `nix develop --command cargo run -p tidepool --example run_map -- <indexed run>`:
+  executed successfully. Nix shell setup adds stdout text, so a subsequent
+  invocation of the same built example binary provided clean JSON stdout.
+  The JSON parsed successfully: 31 actor directories, 145 inbox events,
+  one diagnostic (missing actor9 inbox). Usage and acceptance remain Unknown.
+- Binary identity `/tmp/run-map-evidence/example.sha256`; clean JSON
+  `/tmp/run-map-evidence/partial-map.json`; summary
+  `/tmp/run-map-evidence/partial-map-summary.txt`. No raw prompt bodies emitted.
+- `cargo fmt -p tidepool --check` and `git diff --check`: passed.
+
+The Nix stdout prefix caused the first attempt to parse the shell-wrapped
+command's output as JSON to fail; it was not a parser failure in the example.
+Compile and test commands did not replace the running Shoal host.
