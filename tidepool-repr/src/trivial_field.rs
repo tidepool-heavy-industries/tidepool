@@ -1,47 +1,20 @@
-//! Shared conservative safety test for eager materialization in a lazy position.
+//! Shared shallow safety test for materializing a value in a lazy position.
 //!
-//! Eval constructor fields and JIT constructor fields, bindings, and lazy
-//! primitive operands use this owner. Primitive applications are computations,
-//! even with literal operands: they may fail, have effects, or demand a bottom
-//! through a variable. Keep them thunked rather than maintaining a second
-//! registry of supposedly total operations.
-//!
-//! The explicit work stack keeps deeply nested constructor spines stack-safe.
+//! Constructors are values even when their fields contain computations. Both
+//! backends must materialize their fields lazily; this predicate never grants
+//! permission to evaluate a constructor's descendants. Primitive applications
+//! remain computations, including those whose arguments happen to be literals.
 
 use crate::{CoreExpr, CoreFrame};
 
-/// Returns true if the expression at `idx` is trivial (safe to evaluate
-/// eagerly). Trivial expressions are already in WHNF or produce values with
-/// no computation.
+/// Whether a node can be materialized without demanding a computation.
+/// References reuse an existing value, lambdas allocate closures, and
+/// constructors allocate data with separately suspended computation fields.
 pub fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
-    enum Work {
-        Visit(usize),
-        Combine(usize), // number of children just visited, to AND together
-    }
-    let mut stack = vec![Work::Visit(idx)];
-    let mut results: Vec<bool> = Vec::new();
-    while let Some(w) = stack.pop() {
-        match w {
-            Work::Visit(i) => match &expr.nodes[i] {
-                CoreFrame::Var(_) | CoreFrame::Lit(_) | CoreFrame::Lam { .. } => results.push(true),
-                CoreFrame::Con { fields, .. } => {
-                    stack.push(Work::Combine(fields.len()));
-                    for &f in fields.iter().rev() {
-                        stack.push(Work::Visit(f));
-                    }
-                }
-                CoreFrame::PrimOp { .. } => results.push(false),
-                _ => results.push(false), // App, Case, LetNonRec, LetRec, Join, Jump
-            },
-            Work::Combine(n) => {
-                let start = results.len() - n;
-                let all = results[start..].iter().all(|&b| b);
-                results.truncate(start);
-                results.push(all);
-            }
-        }
-    }
-    results.pop().unwrap_or(false)
+    matches!(
+        expr.nodes[idx],
+        CoreFrame::Var(_) | CoreFrame::Lit(_) | CoreFrame::Lam { .. } | CoreFrame::Con { .. }
+    )
 }
 
 #[cfg(test)]
@@ -101,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn con_is_trivial_iff_all_fields_are() {
+    fn constructor_materialization_does_not_demand_fields() {
         use crate::types::DataConId;
 
         let expr = tree(vec![
@@ -123,7 +96,7 @@ mod tests {
                 fields: vec![0],
             },
         ]);
-        assert!(!is_trivial_field(1, &expr));
+        assert!(is_trivial_field(1, &expr));
     }
 
     #[test]

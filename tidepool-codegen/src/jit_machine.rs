@@ -858,6 +858,7 @@ impl JitEffectMachine {
         exec_start: &str,
         resume_suffix: &str,
     ) -> Result<MaterializeResult, JitError> {
+        self.pipeline.ensure_usable()?;
         let _ = l7_msg;
         let tags = match &mode {
             RunTarget::Pure => None,
@@ -1332,6 +1333,7 @@ impl JitEffectMachine {
         materialization: ResultMaterialization,
         park: ParkTarget,
     ) -> Result<ParkedRaw, JitError> {
+        self.pipeline.ensure_usable()?;
         assert!(
             self.session.is_some(),
             "run_suspendable requires a session machine (compile_session)"
@@ -2184,6 +2186,12 @@ impl JitEffectMachine {
         self.machine_state.stowed_roots_count()
     }
 
+    /// A failed compilation leaves unresolved definitions in this module.
+    /// Its owning resident session must retire it rather than admit another turn.
+    pub fn compilation_failed(&self) -> bool {
+        self.pipeline.compilation_failed()
+    }
+
     /// Read-only heap/GC snapshot (observatory heap pane) — EXISTING counters
     /// only, no new instrumentation inside the collector. `nursery_bytes` is
     /// the nursery's total capacity; `live_bytes` is the session heap's bump
@@ -2372,6 +2380,7 @@ impl JitEffectMachine {
         user: &U,
         input: ResumeInput,
     ) -> Result<ParkedOutcome, JitError> {
+        self.pipeline.ensure_usable()?;
         // Inspect without removing: validation failures must leave the frame
         // parked and rooted so the caller can retry.
         let (realm, principal, kind, effect_policy, live_payload) =
@@ -2609,6 +2618,7 @@ impl JitEffectMachine {
         &mut self,
         handle: ValueHandle,
     ) -> Result<tidepool_eval::value::Value, JitError> {
+        self.pipeline.ensure_usable()?;
         let entry = match self.resources.handle(handle) {
             Some(e) => e,
             None => return Err(JitError::UnknownValueHandle(handle)),

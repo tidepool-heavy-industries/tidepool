@@ -1256,6 +1256,11 @@ where
             }));
             match outcome {
                 Ok(outcome) => {
+                    if session.compilation_failed() {
+                        machines.settle_retire(receipt);
+                        return outcome;
+                    }
+
                     let holes = session
                         .parked_holes()
                         .into_iter()
@@ -4287,6 +4292,65 @@ fn projected_binding_receipt(
 #[cfg(test)]
 mod request_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn incomplete_compilation_retires_only_its_registered_machine() {
+        use tidepool_repr::{CoreFrame, Literal, PrimOpKind, SessionId, TreeBuilder, VarId};
+        let machines = Arc::new(SessionRegistry::new());
+        for id in [SessionId(1), SessionId(2)] {
+            let mut b = TreeBuilder::new();
+            b.push(CoreFrame::Lit(Literal::LitInt(42)));
+            let session = ResidentSession::bootstrap(
+                &b.build(),
+                DataConTable::new(),
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                Vec::new(),
+                64 * 1024,
+                None,
+            )
+            .unwrap();
+            machines.insert_idle(id, session);
+        }
+        let access =
+            ResidentMachineAccess::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+        let failed = access
+            .with_host_machine(SessionId(1), None, |session, _| {
+                let mut b = TreeBuilder::new();
+                let invalid = b.push(CoreFrame::PrimOp {
+                    op: PrimOpKind::SeqOp,
+                    args: vec![],
+                });
+                b.push(CoreFrame::Lam {
+                    binder: VarId(1),
+                    body: invalid,
+                });
+                session
+                    .run("invalid_job", &b.build(), &DataConTable::new())
+                    .map(|_| ())
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await;
+        assert!(matches!(
+            failed,
+            Err(ResidentActorWorkbenchError::Resident(
+                ResidentError::AddFunction(_)
+            ))
+        ));
+        assert!(matches!(
+            machines.checkout_run(SessionId(1)),
+            Err(CheckoutError::Unknown(SessionId(1)))
+        ));
+        let sibling = access
+            .with_host_machine(SessionId(2), None, |session, _| {
+                assert!(!session.compilation_failed());
+                Ok(42)
+            })
+            .await
+            .unwrap();
+        assert_eq!(sibling, 42);
+        assert!(machines.checkout_run(SessionId(2)).is_ok());
+    }
 
     #[test]
     fn runtime_rejection_identifies_input_and_preserves_pattern_cause() {

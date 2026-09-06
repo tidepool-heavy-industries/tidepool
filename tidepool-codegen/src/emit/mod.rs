@@ -109,15 +109,11 @@ pub struct EmitSession<'a> {
     /// Boxed-literal wrapper constructor ids for runtime Lit-tolerance in
     /// data-case dispatch. Copied verbatim into every nested session.
     pub lit_wrappers: LitWrapperIds,
-    /// Free-variable sets for every node index of `tree`, computed once when
-    /// this session was constructed. MUST be rebuilt (never carried over)
-    /// whenever `tree` changes — a nested Lam/Thunk body compiles against a
-    /// freshly extracted, re-indexed `CoreExpr` (a distinct `tree` value with
-    /// its own index space), so an index built from a different tree's node
-    /// numbering would silently return answers for the wrong nodes. Each of
-    /// the four `EmitSession` construction sites in `emit/expr.rs` builds
-    /// this from its own `tree` right there, so the two can never drift.
-    pub free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex,
+    /// Shared analysis in the original tree's index space for all closure jobs.
+    pub free_vars_idx: &'a tidepool_repr::free_vars::FreeVarsIndex,
+    pub(crate) app_arg_positions: &'a std::collections::HashSet<usize>,
+    pub(crate) body_root: usize,
+    pub(crate) compilation: &'a mut expr::Compilation,
     /// Per-function cache of the application protocol's imported `FuncRef`s;
     /// see `apply::FunctionImports` for the FuncRef-scoping invariant this
     /// field's per-session lifetime exists to satisfy.
@@ -320,7 +316,6 @@ pub struct EmitContext {
     /// one-shot eval path.
     pub external_env: ExternalEnv,
     pub(crate) join_blocks: JoinPointRegistry,
-    pub lambda_counter: u32,
     pub prefix: String,
     /// Name of the function currently being emitted (diagnostics: lets
     /// runtime traps identify their enclosing compiled function).
@@ -405,7 +400,6 @@ impl EmitContext {
             env: ScopedEnv::new(),
             external_env: ExternalEnv::new(),
             join_blocks: JoinPointRegistry::new(),
-            lambda_counter: 0,
             current_fn: prefix.clone(),
             prefix,
             letrec_states: Vec::new(),
@@ -414,17 +408,5 @@ impl EmitContext {
 
     pub fn trace_scope(&self, msg: &str) {
         log::trace!(target: "tidepool::scope", "[{}] {}", self.prefix, msg);
-    }
-
-    pub fn next_lambda_name(&mut self) -> String {
-        let n = self.lambda_counter;
-        self.lambda_counter += 1;
-        format!("{}_lambda_{}", self.prefix, n)
-    }
-
-    pub fn next_thunk_name(&mut self) -> String {
-        let n = self.lambda_counter;
-        self.lambda_counter += 1;
-        format!("{}_thunk_{}", self.prefix, n)
     }
 }

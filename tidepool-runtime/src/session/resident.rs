@@ -1346,6 +1346,13 @@ where
         self.core.machine().map_or(0, |m| m.value_handle_count())
     }
 
+    /// Whether the resident compiler has an incomplete, unusable module.
+    pub fn compilation_failed(&self) -> bool {
+        self.core
+            .machine()
+            .is_some_and(|machine| machine.compilation_failed())
+    }
+
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
         self.core.machine().map(|m| m.heap_stats())
     }

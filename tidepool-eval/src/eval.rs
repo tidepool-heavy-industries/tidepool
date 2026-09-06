@@ -338,15 +338,9 @@ fn con_step(
     };
     while pos < fields.len() {
         let f = fields[pos];
-        // Thunkify non-trivial fields to enable lazy evaluation, using the
-        // SAME triviality predicate as the JIT
-        // (`tidepool_repr::trivial_field::is_trivial_field`). A field is
-        // evaluated eagerly only
-        // when it is already in WHNF or built entirely from trivial parts;
-        // anything that could diverge or error when forced — including a
-        // `PrimOp`/`Con` with a non-trivial argument like
-        // `Just (1 + <diverging>)` — is thunked, so constructing a Con never
-        // forces it on either backend.
+        // Constructors are values; only computation fields need thunks.
+        // ConField resumes on the explicit evaluator stack, so nested data
+        // never recursively enters its fields or consumes the native stack.
         if is_trivial_field(f, expr) {
             stack.push(Frame::ConField {
                 node_idx,

@@ -2736,6 +2736,56 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn roster_observation_preserves_host_and_sibling_workbenches() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup =
+            dispatch_haskell_script(root.as_ref(), include_str!("actor_host/roster_setup.hs"))
+                .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let children = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut children = Vec::new();
+            while children.len() < 2 {
+                match campaign.deployments.recv().await {
+                    Some(LocalResidentDeployment::PolicyInstalled(child)) => children.push(child),
+                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
+                        panic!("{actor:?}: {terminal:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed"),
+                }
+            }
+            children
+        })
+        .await
+        .unwrap();
+        for policy in
+            std::iter::once(root.as_ref()).chain(children.iter().map(|child| child.policy.as_ref()))
+        {
+            let observed =
+                dispatch_haskell_script(policy, include_str!("actor_host/roster_observe.hs")).await;
+            assert_eq!(observed["status"], "committed", "{observed:?}");
+            assert!(
+                observed["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["output"]
+                        .as_str()
+                        .is_some_and(|output| output.contains("rosterActorId"))),
+                "{observed:?}"
+            );
+            let next = dispatch_haskell_script(policy, "40 + 2 :: Int").await;
+            assert_eq!(next["status"], "committed", "{next:?}");
+            assert_eq!(next["items"][0]["output"], "42", "{next:?}");
+        }
+        let status = dispatch_haskell_script(root.as_ref(), ":status!").await;
+        assert_ne!(status["status"], "failed", "{status:?}");
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn forest_operator_survives_model_root_recovery() {
         let campaign = test_campaign::TestCampaign::start().await;
         let operator = campaign

@@ -3037,16 +3037,12 @@ fn test_holistic_join_in_letrec_body() {
 }
 
 #[test]
-fn test_holistic_multi_layer_thunk_force() {
-    // A thunked Con field that, when forced, produces another Con with
-    // a thunked field. Tests that the data dispatch tag < 2 check + heap_force
-    // handles multi-layer resolution.
+fn test_nested_constructor_computation_field_force() {
+    // Nested constructors materialize directly; matching their data tags
+    // leaves the computation field suspended until arithmetic demands it.
     //
     // inner = Con(I#, [IntAdd(1,2)])    -- thunked field: thunk(3)
-    // outer = Con(Box, [inner])          -- inner is non-trivial (Con with thunk) → thunked
-    //
-    // Actually, Con(I#, [IntAdd(1,2)]) has a non-trivial field so
-    // is_trivial_field returns false → it becomes a thunk when nested.
+    // outer = Con(Box, [inner])       -- materialized constructor field
     //
     // case outer of { Box payload ->
     //   case payload of { I# n -> n + 100 }

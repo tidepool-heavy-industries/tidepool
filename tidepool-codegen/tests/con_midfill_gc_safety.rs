@@ -1,24 +1,6 @@
-//! Prior bug: allocate-then-fill emit paths (`ThunkCon`, LetRec `Lam`/`Con`
-//! pre-alloc, `emit_lam` capture fill, `emit_thunk_promised`) could leave
-//! counted heap-object slots uninitialized across a GC point that landed
-//! mid-fill. A GC scanning the object (it's already stack-mapped at that
-//! point) would then treat stale bump-heap bytes in an unfilled slot as a
-//! live pointer — "evacuating" garbage (reading a bogus size, writing a
-//! forwarding word into whatever that garbage pointed at).
-//!
-//! This is hard to reproduce deterministically at the unit level — it needs
-//! a GC to land in the exact window between a Con's allocation and its
-//! field-loop finishing. This test
-//! instead STRESS-tests the window: many independent `Just (goSum ...)`
-//! shapes (a `Con` with one thunked, non-trivial field — the `ThunkCon` arm,
-//! Finding 1a) evaluated back to back under a forced-tiny nursery, so many
-//! GCs land across many Con-allocate/field-thunk-allocate boundaries. Before
-//! the fix, this reliably tripped the `TIDEPOOL_HEAP_VERIFY=1` post-GC
-//! verifier (garbage bytes read back as an out-of-range/misaligned pointer)
-//! or corrupted the final sum; after the fix (the shared `emit_alloc_zeroed`
-//! helper), the ThunkCon's field slot is zeroed before the field's own thunk
-//! allocation ever runs, so a GC landing in that window sees a null field,
-//! not garbage.
+//! Stress constructor fields and recursive closure captures under a tiny nursery.
+//! Materialized fields must remain rooted until their constructor is allocated;
+//! preallocated recursive objects must zero every pointer slot before any GC.
 
 use tidepool_codegen::host_fns::{heap_verify_run_count, set_heap_verify};
 use tidepool_codegen::jit_machine::JitEffectMachine;
@@ -146,12 +128,9 @@ fn push_strict_sum(b: &mut TreeBuilder, n: i64) -> usize {
 /// `let j0 = Just (sumTo n0) in let j1 = Just (sumTo n1) in ... in`
 /// `case j0 of Just x0 -> case x0 of I# v0 -> case j1 of Just x1 -> ... -> v0+v1+...`
 ///
-/// Each `Just (sumTo n)` is a `ThunkCon`: the Con is allocated with
-/// `num_fields=1` and the field is compiled as a thunk (a GC point) —
-/// exactly the allocate-then-fill window described above. `count` independent
-/// instances, interleaved with the strict sums' own allocation traffic, give a
-/// tiny nursery many chances to land a GC inside that window.
-fn build_many_thunkcon_justs(count: usize, n: i64) -> (CoreExpr, i64) {
+/// Each `Just (sumTo n)` keeps its computed field lazy. Repeated allocation
+/// and forcing exercises roots across constructor and thunk allocation.
+fn build_many_lazy_justs(count: usize, n: i64) -> (CoreExpr, i64) {
     reset_ctr();
     let mut b = TreeBuilder::new();
 
@@ -223,11 +202,11 @@ fn build_many_thunkcon_justs(count: usize, n: i64) -> (CoreExpr, i64) {
 }
 
 #[test]
-fn thunkcon_just_survives_midfill_gc_under_tiny_nursery() {
+fn lazy_constructor_fields_survive_tiny_nursery() {
     set_heap_verify(true);
     let before = heap_verify_run_count();
 
-    let (expr, expected) = build_many_thunkcon_justs(40, 60);
+    let (expr, expected) = build_many_lazy_justs(40, 60);
     let table = build_table_for_expr(&expr);
     let mut machine = JitEffectMachine::compile(&expr, &table, 512)
         .unwrap_or_else(|e| panic!("compile failed: {e:?}"));

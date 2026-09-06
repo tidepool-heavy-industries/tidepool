@@ -81,10 +81,16 @@ enum PrimArg<A> {
     Lazy(usize),
 }
 
+/// Constructor fields are materialized values or suspended computations.
+enum HeapField<A> {
+    Value(A),
+    Thunk(usize),
+}
+
 /// A single emission frame. `A` positions are children processed stack-safely
 /// by the hylomorphism's internal explicit stack. Raw `usize` positions require
 /// top-down context setup (block creation, pattern binding) and are processed
-/// via bounded recursive calls in the collapse phase.
+/// through guarded emission or deferred closure jobs in the collapse phase.
 enum EmitFrame<A> {
     // Leaf nodes
     Var(VarId),
@@ -95,7 +101,7 @@ enum EmitFrame<A> {
     // Simple recursive \u2014 children are A (stack-safe)
     Con {
         tag: DataConId,
-        fields: Vec<A>,
+        fields: Vec<HeapField<A>>,
     },
     App {
         fun: A,
@@ -117,7 +123,7 @@ enum EmitFrame<A> {
         alts: Vec<Alt<usize>>,
     },
 
-    // Lam: body compiled in a NEW function context in collapse
+    // Lam: collapse queues the body for its own function context.
     Lam {
         binder: VarId,
         body_idx: usize,
@@ -129,13 +135,6 @@ enum EmitFrame<A> {
         params: Vec<VarId>,
         rhs_idx: usize,
         body_idx: usize,
-    },
-
-    // Con with non-trivial fields: all field indices are raw usize,
-    // handled in collapse by emitting thunks for non-trivial fields.
-    ThunkCon {
-        tag: DataConId,
-        field_indices: Vec<usize>,
     },
 
     // Let: delegate to emit_node's iterative loop
@@ -173,7 +172,13 @@ impl MappableFrame for EmitFrameToken {
             EmitFrame::LitByteArray(b) => EmitFrame::LitByteArray(b),
             EmitFrame::Con { tag, fields } => EmitFrame::Con {
                 tag,
-                fields: fields.into_iter().map(&mut f).collect(),
+                fields: fields
+                    .into_iter()
+                    .map(|field| match field {
+                        HeapField::Value(value) => HeapField::Value(f(value)),
+                        HeapField::Thunk(idx) => HeapField::Thunk(idx),
+                    })
+                    .collect(),
             },
             EmitFrame::App { fun, arg } => EmitFrame::App {
                 fun: f(fun),
@@ -214,9 +219,6 @@ impl MappableFrame for EmitFrameToken {
                 rhs_idx,
                 body_idx,
             },
-            EmitFrame::ThunkCon { tag, field_indices } => {
-                EmitFrame::ThunkCon { tag, field_indices }
-            }
             EmitFrame::LetBoundary(idx) => EmitFrame::LetBoundary(idx),
             EmitFrame::RaiseLazy { kind, msg } => EmitFrame::RaiseLazy { kind, msg },
             EmitFrame::Raise { kind, msg, arg } => EmitFrame::Raise {
@@ -251,29 +253,29 @@ fn expand_node(
     tree: &CoreExpr,
     idx: usize,
     arg_positions: &std::collections::HashSet<usize>,
+    scope_root: usize,
 ) -> Result<EmitFrame<usize>, EmitError> {
     match &tree.nodes[idx] {
         CoreFrame::Var(v) => Ok(EmitFrame::Var(*v)),
         CoreFrame::Lit(Literal::LitString(bytes)) => Ok(EmitFrame::LitString(bytes.clone())),
         CoreFrame::Lit(Literal::LitByteArray(bytes)) => Ok(EmitFrame::LitByteArray(bytes.clone())),
         CoreFrame::Lit(lit) => Ok(EmitFrame::Lit(lit.clone())),
-        CoreFrame::Con { tag, fields } => {
-            let has_non_trivial = fields.iter().any(|&f| !is_trivial_field(f, tree));
-            if has_non_trivial {
-                Ok(EmitFrame::ThunkCon {
-                    tag: *tag,
-                    field_indices: fields.clone(),
+        CoreFrame::Con { tag, fields } => Ok(EmitFrame::Con {
+            tag: *tag,
+            fields: fields
+                .iter()
+                .map(|&idx| {
+                    if is_trivial_field(idx, tree) {
+                        HeapField::Value(idx)
+                    } else {
+                        HeapField::Thunk(idx)
+                    }
                 })
-            } else {
-                Ok(EmitFrame::Con {
-                    tag: *tag,
-                    fields: fields.clone(),
-                })
-            }
-        }
+                .collect(),
+        }),
         CoreFrame::App { fun, arg } => {
             if EmitContext::rhs_is_error_call(tree, idx) {
-                if let Some(msg) = EmitContext::extract_error_message(tree, idx) {
+                if let Some(msg) = EmitContext::extract_error_message(tree, idx, scope_root) {
                     let kind = EmitContext::extract_error_kind(tree, idx);
                     // Error call consumed as an App ARGUMENT: emit a LAZY poison
                     // closure (carrying the static message) instead of eagerly
@@ -281,7 +283,7 @@ fn expand_node(
                     // statically-dead arg slot; raising it here is wrong because
                     // the JIT evaluates App args eagerly. The poison closure
                     // raises only if the slot is actually forced.
-                    if arg_positions.contains(&idx) {
+                    if idx != scope_root && arg_positions.contains(&idx) {
                         return Ok(EmitFrame::RaiseLazy {
                             kind,
                             msg: Some(msg),
@@ -380,7 +382,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             args.sess.gc_sig,
             args.sess.oom_func,
             bytes,
-            &mut args.ctx.lambda_counter,
+            &mut args.sess.compilation.symbol_counter,
         ),
         EmitFrame::LitByteArray(ref bytes) => emit_lit_bytearray_literal(
             args.sess.pipeline,
@@ -389,7 +391,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             args.sess.gc_sig,
             args.sess.oom_func,
             bytes,
-            &mut args.ctx.lambda_counter,
+            &mut args.sess.compilation.symbol_counter,
         ),
         EmitFrame::Lit(ref lit) => emit_lit(
             args.builder,
@@ -465,18 +467,28 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             }
         },
         EmitFrame::Con { tag, fields } => {
-            let field_vals: Vec<Value> = fields
-                .iter()
-                .map(|v| {
-                    ensure_heap_ptr(
-                        args.builder,
-                        args.sess.vmctx,
-                        args.sess.gc_sig,
-                        args.sess.oom_func,
-                        *v,
-                    )
-                })
-                .collect();
+            let mut field_vals = Vec::with_capacity(fields.len());
+            for field in fields {
+                let value = match field {
+                    HeapField::Value(value) => value,
+                    HeapField::Thunk(idx) => emit_thunk(
+                        EmitArgs {
+                            ctx: args.ctx,
+                            sess: args.sess,
+                            builder: args.builder,
+                            tail: TailCtx::NonTail,
+                        },
+                        idx,
+                    )?,
+                };
+                field_vals.push(ensure_heap_ptr(
+                    args.builder,
+                    args.sess.vmctx,
+                    args.sess.gc_sig,
+                    args.sess.oom_func,
+                    value,
+                ));
+            }
 
             let num_fields = field_vals.len();
             let size = 24 + 8 * num_fields as u64;
@@ -519,52 +531,6 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
             }
 
             args.builder.declare_value_needs_stack_map(ptr);
-            Ok(SsaVal::HeapPtr(ptr))
-        }
-        EmitFrame::ThunkCon { tag, field_indices } => {
-            let num_fields = field_indices.len();
-            let size = 24 + 8 * num_fields as u64;
-            let ptr = emit_alloc_zeroed(
-                args.builder,
-                args.sess.vmctx,
-                args.sess.gc_sig,
-                args.sess.oom_func,
-                layout::TAG_CON,
-                size,
-                CON_FIELDS_OFFSET,
-                num_fields,
-            );
-
-            let con_tag_val = args.builder.ins().iconst(types::I64, tag.0 as i64);
-            args.builder
-                .ins()
-                .store(MemFlags::trusted(), con_tag_val, ptr, CON_TAG_OFFSET);
-            let num_fields_val = args.builder.ins().iconst(types::I16, num_fields as i64);
-            args.builder.ins().store(
-                MemFlags::trusted(),
-                num_fields_val,
-                ptr,
-                CON_NUM_FIELDS_OFFSET,
-            );
-
-            for (i, &f_idx) in field_indices.iter().enumerate() {
-                let field_val = emit_lazy_heap_value(
-                    EmitArgs {
-                        ctx: args.ctx,
-                        sess: args.sess,
-                        builder: args.builder,
-                        tail: TailCtx::NonTail,
-                    },
-                    f_idx,
-                )?;
-                args.builder.ins().store(
-                    MemFlags::trusted(),
-                    field_val,
-                    ptr,
-                    CON_FIELDS_OFFSET + 8 * i as i32,
-                );
-            }
-
             Ok(SsaVal::HeapPtr(ptr))
         }
         EmitFrame::PrimOp {
@@ -727,7 +693,7 @@ fn collapse_frame(args: EmitArgs, frame: EmitFrame<SsaVal>) -> Result<SsaVal, Em
                     args.sess.gc_sig,
                     args.sess.oom_func,
                     &bytes,
-                    &mut args.ctx.lambda_counter,
+                    &mut args.sess.compilation.symbol_counter,
                 )?;
                 let msg_ptr = msg_val.value();
 
@@ -854,10 +820,11 @@ fn emit_subtree(mut args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
 /// hylomorphism for value positions. The `collapse_frame` Case/Join branches thus
 /// always run NonTail here; the spine supplies Tail to their alts/body separately.
 fn emit_subtree_with_tail(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitError> {
-    let arg_positions = collect_app_arg_positions(args.sess.tree);
+    let arg_positions = args.sess.app_arg_positions;
+    let scope_root = args.sess.body_root;
     try_expand_and_collapse::<EmitFrameToken, _, _, _>(
         idx,
-        |idx| expand_node(args.sess.tree, idx, &arg_positions),
+        |idx| expand_node(args.sess.tree, idx, arg_positions, scope_root),
         |frame| {
             collapse_frame(
                 EmitArgs {
@@ -1026,13 +993,12 @@ fn topo_sort_deferred_simple(
 /// If `exclude` is Some, that VarId is removed from free vars (for lambda binders).
 fn compute_captures(
     ctx: &EmitContext,
-    tree: &CoreExpr,
     free_vars_idx: &tidepool_repr::free_vars::FreeVarsIndex,
     body_idx: usize,
     exclude: Option<VarId>,
     label: &str,
-) -> (CoreExpr, Vec<VarId>) {
-    compute_captures_promised(ctx, tree, free_vars_idx, body_idx, exclude, label, None)
+) -> Vec<VarId> {
+    compute_captures_promised(ctx, free_vars_idx, body_idx, exclude, label, None)
 }
 
 /// [`compute_captures`] with a `promised` set: free vars in it are KEPT in the
@@ -1041,19 +1007,12 @@ fn compute_captures(
 /// LetRec value-knot case; see the Phase 3c knot-tying comment).
 fn compute_captures_promised(
     ctx: &EmitContext,
-    tree: &CoreExpr,
     free_vars_idx: &tidepool_repr::free_vars::FreeVarsIndex,
     body_idx: usize,
     exclude: Option<VarId>,
     label: &str,
     promised: Option<&FxHashSet<VarId>>,
-) -> (CoreExpr, Vec<VarId>) {
-    // `free_vars_idx` is built from `tree` (see `EmitSession::free_vars_idx`'s
-    // doc), so querying it at `body_idx` is equivalent to computing free vars
-    // on the extracted `body_tree` directly, without a second walk.
-    // `extract_subtree` still runs regardless: `body_tree` becomes the nested
-    // Lam/Thunk's own EmitSession tree, not just a free-vars scratch value.
-    let body_tree = tree.extract_subtree(body_idx);
+) -> Vec<VarId> {
     let fvs = free_vars_idx.free_vars_at(body_idx);
     let keep = |v: &VarId| ctx.env.contains_key(v) || promised.is_some_and(|p| p.contains(v));
 
@@ -1073,71 +1032,126 @@ fn compute_captures_promised(
             sorted_fvs.remove(idx);
         }
     }
-    (body_tree, sorted_fvs)
+    sorted_fvs
 }
 
-/// What varies between the three nested-function compilation sites
-/// ([`emit_lam`], [`emit_thunk_promised`], and LetRec phase 3a): arity,
-/// capture-slot stride, and tail position. Everything else — signature
-/// shape, function declaration, the inner `FunctionBuilder`/block/stack-map
-/// setup, the `runtime_oom` import, capture loading, body emission, and the
-/// `ensure_heap_ptr`'d return — is identical and lives in
-/// [`compile_nested_body`].
-struct NestedFnSpec<'a> {
-    /// Already minted via `next_lambda_name()`/`next_thunk_name()` — naming
-    /// policy (and which counter it draws from) stays with the caller.
+/// Immutable input and analyses shared by every function in a compilation.
+struct CompilationInput<'a> {
+    tree: &'a CoreExpr,
+    free_vars: tidepool_repr::free_vars::FreeVarsIndex,
+    app_arg_positions: std::collections::HashSet<usize>,
+    prefix: &'a str,
+    external_env: &'a ExternalEnv,
+}
+
+/// One compilation owns symbol issuance and all deferred closure bodies.
+/// Jobs borrow the compilation's original tree through their node indices;
+/// no Cranelift values or function-local imports survive a job.
+#[derive(Default)]
+pub(crate) struct Compilation {
+    pub(crate) symbol_counter: u32,
+    pending: std::collections::VecDeque<NestedFunction>,
+}
+
+impl Compilation {
+    fn next_name(&mut self, prefix: &str, kind: ClosureKind) -> String {
+        let n = self.symbol_counter;
+        self.symbol_counter += 1;
+        let suffix = match kind {
+            ClosureKind::Function(_) => "lambda",
+            ClosureKind::Thunk => "thunk",
+        };
+        format!("{prefix}_{suffix}_{n}")
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ClosureKind {
+    Function(VarId),
+    Thunk,
+}
+
+impl ClosureKind {
+    fn binder(self) -> Option<VarId> {
+        match self {
+            Self::Function(binder) => Some(binder),
+            Self::Thunk => None,
+        }
+    }
+    fn captured_offset(self) -> i32 {
+        match self {
+            Self::Function(_) => CLOSURE_CAPTURED_OFFSET,
+            Self::Thunk => THUNK_CAPTURED_OFFSET,
+        }
+    }
+    fn tail(self) -> TailCtx {
+        match self {
+            Self::Function(_) => TailCtx::Tail,
+            Self::Thunk => TailCtx::NonTail,
+        }
+    }
+}
+
+struct NestedFnSpec {
+    kind: ClosureKind,
+    capture_vars: Vec<VarId>,
+    body_root: usize,
+}
+
+struct NestedFunction {
+    func_id: FuncId,
     name: String,
-    /// `Some(binder)` gives the function a third `arg` parameter, bound to
-    /// `binder` in the body's env — a Lam (ordinary or LetRec-recursive).
-    /// `None` omits the parameter entirely — a Thunk, which takes no
-    /// argument.
-    arg_binder: Option<VarId>,
-    /// Byte offset of the first capture slot in `self`
-    /// (`CLOSURE_CAPTURED_OFFSET` or `THUNK_CAPTURED_OFFSET`) — every
-    /// capture site uses the same 8-byte stride.
-    captured_offset: i32,
-    /// Captures to load from `self`, in slot order: index `i` loads from
-    /// `captured_offset + 8*i` and binds it to `capture_vars[i]`.
-    capture_vars: &'a [VarId],
-    /// The already-extracted, standalone body tree (`compute_captures`/
-    /// `compute_captures_promised` already ran; this is their `body_tree`).
-    body_tree: &'a CoreExpr,
-    tail: TailCtx,
+    spec: NestedFnSpec,
 }
 
-/// Compile `spec` as a fresh Cranelift function — `(vmctx, self[, arg]) -> i64`
-/// — and return the CODE POINTER as an outer-function `Value` (via
-/// `declare_func_in_func` + `func_addr`), ready for the caller to store into
-/// a closure/thunk object. Declaration, allocation, and capture-slot FILLING
-/// stay with the caller: a Lam allocates its own closure and already has
-/// every capture value in hand; a Thunk allocates its own thunk object and
-/// may leave some captures as `promised` null placeholders; LetRec phase 3a
-/// fills a closure Phase 1 already pre-allocated and may defer some captures
-/// to `pending_capture_updates`. Those three shapes are real, not
-/// accidental duplication — only the function-compilation machinery below
-/// was.
-fn compile_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value, EmitError> {
-    let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
-    sig.params.push(AbiParam::new(types::I64)); // vmctx
-    sig.params.push(AbiParam::new(types::I64)); // self
-    if spec.arg_binder.is_some() {
-        sig.params.push(AbiParam::new(types::I64)); // arg
+fn nested_signature(pipeline: &CodegenPipeline, kind: ClosureKind) -> Signature {
+    let mut sig = Signature::new(pipeline.isa.default_call_conv());
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    if kind.binder().is_some() {
+        sig.params.push(AbiParam::new(types::I64));
     }
     sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
 
+/// Declare code before emitting its body, as for forward references in a
+/// recursive binding group. Every queued body is defined before finalization.
+fn declare_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value, EmitError> {
+    let name = args.sess.compilation.next_name(&args.ctx.prefix, spec.kind);
+    let sig = nested_signature(args.sess.pipeline, spec.kind);
     let func_id = args
         .sess
         .pipeline
         .module
-        .declare_function(&spec.name, Linkage::Local, &sig)
+        .declare_function(&name, Linkage::Local, &sig)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    args.sess
+    args.sess.pipeline.register_lambda(func_id, name.clone());
+    args.sess.compilation.pending.push_back(NestedFunction {
+        func_id,
+        name,
+        spec,
+    });
+    let func_ref = args
+        .sess
         .pipeline
-        .register_lambda(func_id, spec.name.clone());
-    if let Some(binder) = spec.arg_binder {
-        log::trace!(target: "tidepool::calls", "[emit] {} binder={:#x}", spec.name, binder.0);
-    }
+        .module
+        .declare_func_in_func(func_id, args.builder.func);
+    Ok(args.builder.ins().func_addr(types::I64, func_ref))
+}
 
+fn emit_nested_body(
+    pipeline: &mut CodegenPipeline,
+    input: &CompilationInput<'_>,
+    compilation: &mut Compilation,
+    job: NestedFunction,
+) -> Result<(), EmitError> {
+    let NestedFunction {
+        func_id,
+        name,
+        spec,
+    } = job;
+    let sig = nested_signature(pipeline, spec.kind);
     let mut inner_ctx = Context::new();
     inner_ctx.func.signature = sig;
     inner_ctx.func.name = UserFuncName::default();
@@ -1152,7 +1166,8 @@ fn compile_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value,
     let inner_vmctx = inner_builder.block_params(inner_block)[0];
     let inner_self = inner_builder.block_params(inner_block)[1];
     let inner_arg = spec
-        .arg_binder
+        .kind
+        .binder()
         .map(|_| inner_builder.block_params(inner_block)[2]);
 
     inner_builder.declare_value_needs_stack_map(inner_self);
@@ -1160,40 +1175,36 @@ fn compile_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value,
         inner_builder.declare_value_needs_stack_map(arg_val);
     }
 
-    let mut inner_gc_sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+    let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
     inner_gc_sig.params.push(AbiParam::new(types::I64));
     let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
 
     let inner_oom_func = {
-        let mut sig = Signature::new(args.sess.pipeline.isa.default_call_conv());
+        let mut sig = Signature::new(pipeline.isa.default_call_conv());
         sig.returns.push(AbiParam::new(types::I64));
-        let func_id = args
-            .sess
-            .pipeline
+        let func_id = pipeline
             .module
             .declare_function("runtime_oom", Linkage::Import, &sig)
             .map_err(|e| EmitError::CraneliftError(format!("declare runtime_oom: {e}")))?;
-        args.sess
-            .pipeline
+        pipeline
             .module
             .declare_func_in_func(func_id, inner_builder.func)
     };
 
-    let mut inner_emit = EmitContext::new(args.ctx.prefix.clone());
+    let mut inner_emit = EmitContext::new(input.prefix.to_owned());
     // Propagate session bindings into the nested function's own context so a
     // Var-miss inside the body can resolve them. Empty in the one-shot path.
     // See the `external_env` per-function-Value invariant.
-    inner_emit.external_env = args.ctx.external_env.clone();
-    inner_emit.lambda_counter = args.ctx.lambda_counter;
-    inner_emit.current_fn = spec.name.clone();
+    inner_emit.external_env = input.external_env.clone();
+    inner_emit.current_fn = name;
 
-    if let (Some(binder), Some(arg_val)) = (spec.arg_binder, inner_arg) {
+    if let (Some(binder), Some(arg_val)) = (spec.kind.binder(), inner_arg) {
         inner_emit.trace_scope(&format!("insert lam binder {:?}", binder));
         inner_emit.env.insert(binder, SsaVal::HeapPtr(arg_val));
     }
 
     for (i, var_id) in spec.capture_vars.iter().enumerate() {
-        let offset = spec.captured_offset + 8 * i as i32;
+        let offset = spec.kind.captured_offset() + 8 * i as i32;
         let val = inner_builder
             .ins()
             .load(types::I64, MemFlags::trusted(), inner_self, offset);
@@ -1202,15 +1213,19 @@ fn compile_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value,
         inner_emit.env.insert(*var_id, SsaVal::HeapPtr(val));
     }
 
-    let body_root = spec.body_tree.nodes.len() - 1;
+    let body_root = spec.body_root;
+    let lit_wrappers = pipeline.lit_wrappers;
     let mut inner_sess = EmitSession {
-        pipeline: args.sess.pipeline,
+        pipeline,
         vmctx: inner_vmctx,
         gc_sig: inner_gc_sig_ref,
         oom_func: inner_oom_func,
-        tree: spec.body_tree,
-        lit_wrappers: args.sess.lit_wrappers,
-        free_vars_idx: tidepool_repr::free_vars::FreeVarsIndex::compute(spec.body_tree),
+        tree: input.tree,
+        lit_wrappers,
+        free_vars_idx: &input.free_vars,
+        compilation,
+        app_arg_positions: &input.app_arg_positions,
+        body_root,
         function_imports: FunctionImports::default(),
     };
     let body_result = EmitContext::emit_node(
@@ -1218,7 +1233,7 @@ fn compile_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value,
             ctx: &mut inner_emit,
             sess: &mut inner_sess,
             builder: &mut inner_builder,
-            tail: spec.tail,
+            tail: spec.kind.tail(),
         },
         body_root,
     )?;
@@ -1233,25 +1248,14 @@ fn compile_nested_body(args: &mut EmitArgs, spec: NestedFnSpec) -> Result<Value,
     inner_builder.ins().return_(&[ret_val]);
     inner_builder.finalize();
 
-    args.ctx.lambda_counter = inner_emit.lambda_counter;
-
-    args.sess
-        .pipeline
-        .define_function(func_id, &mut inner_ctx)?;
-
-    let func_ref = args
-        .sess
-        .pipeline
-        .module
-        .declare_func_in_func(func_id, args.builder.func);
-    Ok(args.builder.ins().func_addr(types::I64, func_ref))
+    pipeline.define_function(func_id, &mut inner_ctx)?;
+    Ok(())
 }
 
 fn emit_lam(mut args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal, EmitError> {
-    let (body_tree, sorted_fvs) = compute_captures(
+    let sorted_fvs = compute_captures(
         args.ctx,
-        args.sess.tree,
-        &args.sess.free_vars_idx,
+        args.sess.free_vars_idx,
         body_idx,
         Some(binder),
         "lam",
@@ -1274,16 +1278,12 @@ fn emit_lam(mut args: EmitArgs, binder: VarId, body_idx: usize) -> Result<SsaVal
         .collect::<Result<Vec<_>, EmitError>>()?;
     let capture_vars: Vec<VarId> = captures.iter().map(|(v, _)| *v).collect();
 
-    let lambda_name = args.ctx.next_lambda_name();
-    let code_ptr = compile_nested_body(
+    let code_ptr = declare_nested_body(
         &mut args,
         NestedFnSpec {
-            name: lambda_name,
-            arg_binder: Some(binder),
-            captured_offset: CLOSURE_CAPTURED_OFFSET,
-            capture_vars: &capture_vars,
-            body_tree: &body_tree,
-            tail: TailCtx::Tail,
+            kind: ClosureKind::Function(binder),
+            capture_vars,
+            body_root: body_idx,
         },
     )?;
 
@@ -1361,10 +1361,9 @@ fn emit_thunk_promised(
     body_idx: usize,
     promised: Option<&FxHashSet<VarId>>,
 ) -> Result<(SsaVal, Vec<(VarId, i32)>), EmitError> {
-    let (body_tree, sorted_fvs) = compute_captures_promised(
+    let sorted_fvs = compute_captures_promised(
         args.ctx,
-        args.sess.tree,
-        &args.sess.free_vars_idx,
+        args.sess.free_vars_idx,
         body_idx,
         None,
         "thunk",
@@ -1386,16 +1385,12 @@ fn emit_thunk_promised(
         })
         .collect::<Result<Vec<_>, EmitError>>()?;
 
-    let thunk_name = args.ctx.next_thunk_name();
-    let code_ptr = compile_nested_body(
+    let code_ptr = declare_nested_body(
         &mut args,
         NestedFnSpec {
-            name: thunk_name,
-            arg_binder: None,
-            captured_offset: THUNK_CAPTURED_OFFSET,
-            capture_vars: &sorted_fvs,
-            body_tree: &body_tree,
-            tail: TailCtx::NonTail,
+            kind: ClosureKind::Thunk,
+            capture_vars: sorted_fvs,
+            body_root: body_idx,
         },
     )?;
 
@@ -1477,13 +1472,28 @@ pub fn compile_expr(
     name: &str,
     external_env: &ExternalEnv,
 ) -> Result<FuncId, EmitError> {
-    // Built once, up front, for the whole compilation: this compile_expr call
-    // is one `EmitSession::tree` scope end to end (nested Lam/Thunk bodies
-    // get their OWN fresh index over their own extracted tree — see
-    // `EmitSession::free_vars_idx`'s doc), so the top-level `EmitSession`
-    // constructed further down can reuse this one analysis rather than
-    // re-deriving it.
-    let free_vars_idx = tidepool_repr::free_vars::FreeVarsIndex::compute(tree);
+    pipeline.ensure_usable()?;
+    let result = compile_expr_inner(pipeline, tree, name, external_env);
+    if result.is_err() {
+        pipeline.invalidate();
+    }
+    result
+}
+
+fn compile_expr_inner(
+    pipeline: &mut CodegenPipeline,
+    tree: &CoreExpr,
+    name: &str,
+    external_env: &ExternalEnv,
+) -> Result<FuncId, EmitError> {
+    let input = CompilationInput {
+        tree,
+        free_vars: tidepool_repr::free_vars::FreeVarsIndex::compute(tree),
+        app_arg_positions: collect_app_arg_positions(tree),
+        prefix: name,
+        external_env,
+    };
+    let mut compilation = Compilation::default();
 
     let sig = pipeline.make_func_signature();
     let func_id = pipeline.declare_function(name)?;
@@ -1531,7 +1541,10 @@ pub fn compile_expr(
         oom_func,
         tree,
         lit_wrappers,
-        free_vars_idx,
+        free_vars_idx: &input.free_vars,
+        compilation: &mut compilation,
+        app_arg_positions: &input.app_arg_positions,
+        body_root: tree.nodes.len() - 1,
         function_imports: FunctionImports::default(),
     };
 
@@ -1550,7 +1563,9 @@ pub fn compile_expr(
     builder.finalize();
 
     pipeline.define_function(func_id, &mut ctx)?;
-
+    while let Some(job) = compilation.pending.pop_front() {
+        emit_nested_body(pipeline, &input, &mut compilation, job)?;
+    }
     Ok(func_id)
 }
 
@@ -1609,7 +1624,11 @@ impl EmitContext {
     }
 
     /// Extract the error message from an error call (walks App chain to find LitString).
-    fn extract_error_message(tree: &CoreExpr, rhs_idx: usize) -> Option<Vec<u8>> {
+    fn extract_error_message(
+        tree: &CoreExpr,
+        rhs_idx: usize,
+        scope_root: usize,
+    ) -> Option<Vec<u8>> {
         let mut idx = rhs_idx;
         loop {
             match &tree.nodes[idx] {
@@ -1619,7 +1638,7 @@ impl EmitContext {
                     // and OverloadedStrings literals arrive via pack/unpackCString#
                     // wrappers. Scan the argument subtree for the first string
                     // literal instead of requiring an exact shape.
-                    if let Some(bytes) = Self::find_first_lit_string(tree, *arg) {
+                    if let Some(bytes) = Self::find_first_lit_string(tree, *arg, scope_root) {
                         return Some(bytes);
                     }
                     idx = *fun; // continue walking the App chain
@@ -1637,7 +1656,7 @@ impl EmitContext {
     /// `Var` references are resolved through let-bindings (one extra lookup
     /// pass, built lazily): GHC floats message literals to outer bindings in
     /// larger modules, so the literal is often behind `error (unpack lvl)`.
-    fn find_first_lit_string(tree: &CoreExpr, root: usize) -> Option<Vec<u8>> {
+    fn find_first_lit_string(tree: &CoreExpr, root: usize, scope_root: usize) -> Option<Vec<u8>> {
         const NODE_BUDGET: usize = 64;
         let mut binder_rhs: Option<std::collections::HashMap<VarId, usize>> = None;
         let mut stack = vec![root];
@@ -1653,7 +1672,10 @@ impl EmitContext {
                     // Resolve through let-bound vars (floated literals).
                     let map = binder_rhs.get_or_insert_with(|| {
                         let mut m = std::collections::HashMap::new();
-                        for node in &tree.nodes {
+                        let mut pending = vec![scope_root];
+                        while let Some(idx) = pending.pop() {
+                            let node = &tree.nodes[idx];
+                            pending.extend(tidepool_repr::tree::get_children(node));
                             match node {
                                 CoreFrame::LetNonRec { binder, rhs, .. } => {
                                     m.insert(*binder, *rhs);
@@ -1713,28 +1735,10 @@ impl EmitContext {
         None
     }
 
-    /// Trampoline-based emit_node: converts recursive Let-chain evaluation to
-    /// an explicit work stack. This prevents Rust stack overflow during JIT
-    /// compilation of deeply nested GHC Core ASTs.
-    ///
-    /// Recursive calls that remain (bounded, safe):
-    /// - emit_lam/emit_thunk: create new EmitContext, bounded by lambda nesting
-    /// - emit_case/emit_join: called from hylomorphism collapse, bounded by case nesting
-    /// - Trivial Con field eval: constant stack depth (Var/Lit)
+    /// Let chains and constructor fields use explicit work stacks; closure
+    /// bodies are queued. Case and join alternatives still re-enter emission,
+    /// so grow the stack at this remaining recursive boundary.
     pub fn emit_node(args: EmitArgs, root_idx: usize) -> Result<SsaVal, EmitError> {
-        // Stack-growth insurance at the emit recursion spine.
-        //
-        // `emit_node`'s Let chain is already trampolined onto an explicit work
-        // stack, but case-ALT body emission still re-enters `emit_node`
-        // natively (emit_node → emit_case/dispatch → emit_node), so deeply
-        // case-nested programs grow the call stack ~one large frame per level.
-        // The production/proptest path already runs emit on a large worker
-        // stack; this `maybe_grow` is the cheap guarantee for any path where
-        // that discipline slips — if the remaining red zone is below 64 KiB it
-        // allocates a fresh 4 MiB segment and continues there. Cost is ~nil
-        // when there is ample stack, so it is left unconditional.
-        //
-        // 64 KiB red zone / 4 MiB growth (the rustc defaults).
         stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, move || {
             Self::emit_node_impl(args, root_idx)
         })
@@ -1755,18 +1759,11 @@ impl EmitContext {
                                 let binder = *binder;
                                 let rhs = *rhs;
                                 let body = *body;
-                                // Dead code elimination: skip RHS if binder is unused in body.
-                                // The extracted subtree is scoped to the walk so it is
-                                // freed before the branches below re-enter emission —
-                                // an emit_thunk recursion holding one clone per level
-                                // would otherwise stack them up.
-                                let body_fvs = {
-                                    let body_subtree = args.sess.tree.extract_subtree(body);
-                                    tidepool_repr::free_vars::free_vars(&body_subtree)
-                                };
+                                // Skip unused RHSs without copying or reanalyzing the body.
+                                let body_fvs = args.sess.free_vars_idx.free_vars_at(body);
                                 if body_fvs.binary_search(&binder).is_ok() {
                                     if is_trivial_field(rhs, args.sess.tree) {
-                                        // Trivial RHS (Var/Lit/Lam or safe Con): materialize eagerly. This is
+                                        // Value RHS (Var/Lit/Lam/Con): materialize eagerly. This is
                                         // the fast path; no thunk allocation.
                                         // Push work in LIFO order: cleanup, eval body, bind, eval rhs
                                         // After rhs eval \u2192 bind \u2192 eval body \u2192 cleanup
@@ -2066,7 +2063,7 @@ impl EmitContext {
             let deferred_simple: Vec<(VarId, usize)> =
                 simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
             let deferred_simple =
-                topo_sort_deferred_simple(deferred_simple, bindings, &args.sess.free_vars_idx);
+                topo_sort_deferred_simple(deferred_simple, bindings, args.sess.free_vars_idx);
             let letrec_binders: FxHashSet<VarId> = bindings.iter().map(|(b, _)| *b).collect();
             for (binder, rhs_idx) in deferred_simple.iter() {
                 let fvs = args.sess.free_vars_idx.free_vars_at(*rhs_idx);
@@ -2287,7 +2284,7 @@ impl EmitContext {
         let deferred_simple: Vec<(VarId, usize)> =
             simple_bindings.iter().map(|(b, r)| (*b, *r)).collect();
 
-        // Phase 3a: Compile Lam bodies and set code pointers.
+        // Phase 3a: Declare Lam bodies and set code pointers.
         // Capture VALUES are NOT filled here \u2014 some captures reference
         // deferred simple bindings (Phase 3c) that aren't in env yet.
         let mut pending_capture_updates: FxHashMap<VarId, Vec<ClosureCaptureSlot>> =
@@ -2309,18 +2306,13 @@ impl EmitContext {
                     )))
                 }
             };
-            let lam_body_tree = args.sess.tree.extract_subtree(lam_body);
 
-            let lambda_name = args.ctx.next_lambda_name();
-            let code_ptr = compile_nested_body(
+            let code_ptr = declare_nested_body(
                 &mut args,
                 NestedFnSpec {
-                    name: lambda_name,
-                    arg_binder: Some(lam_binder),
-                    captured_offset: CLOSURE_CAPTURED_OFFSET,
-                    capture_vars: sorted_fvs,
-                    body_tree: &lam_body_tree,
-                    tail: TailCtx::Tail,
+                    kind: ClosureKind::Function(lam_binder),
+                    capture_vars: sorted_fvs.clone(),
+                    body_root: lam_body,
                 },
             )?;
             args.builder.ins().store(
@@ -2368,7 +2360,7 @@ impl EmitContext {
         // A plain fn, not a capturing closure: `field_deferred_deps` is called
         // both before and after the mutable `args.sess` reborrows in the loop
         // below (`emit_subtree`/`emit_thunk`), so a closure holding
-        // `&args.sess.free_vars_idx` across that whole span would conflict
+        // `args.sess.free_vars_idx` across that whole span would conflict
         // with those reborrows. Taking the index by parameter instead means
         // each call borrows `args.sess.free_vars_idx` only for its own
         // expression.
@@ -2393,7 +2385,7 @@ impl EmitContext {
             } = pa
             {
                 let needs_simple = field_indices.iter().any(|&f_idx| {
-                    !field_deferred_deps(&args.sess.free_vars_idx, &simple_binder_set, f_idx)
+                    !field_deferred_deps(args.sess.free_vars_idx, &simple_binder_set, f_idx)
                         .is_empty()
                 });
                 if needs_simple {
@@ -2443,14 +2435,14 @@ impl EmitContext {
         // Bind deferred simple bindings in topological order (deps first) so each
         // thunk captures its already-bound siblings (see Phase 3c below).
         let deferred_simple =
-            topo_sort_deferred_simple(deferred_simple, bindings, &args.sess.free_vars_idx);
+            topo_sort_deferred_simple(deferred_simple, bindings, args.sess.free_vars_idx);
 
         let mut deferred_con_deps: Vec<DeferredConDep> = Vec::with_capacity(deferred_cons.len());
         for (_, ptr, field_indices) in &deferred_cons {
             let deps: FxHashSet<VarId> = field_indices
                 .iter()
                 .flat_map(|&f_idx| {
-                    field_deferred_deps(&args.sess.free_vars_idx, &simple_binder_set, f_idx)
+                    field_deferred_deps(args.sess.free_vars_idx, &simple_binder_set, f_idx)
                 })
                 .collect();
             deferred_con_deps.push(DeferredConDep {

@@ -66,8 +66,10 @@ machines are bounded by fragment-count rotation at a quiescent loop boundary.
 Rotation preserves checkpointed durable state and reports machine-local state
 that cannot be reconstructed.
 
-Cranelift executable arenas are not reclaimed by ordinary machine drop, so a
-machine must not grow without a rotation bound.
+The pipeline owns Cranelift executable arenas and frees them on machine drop.
+Rotation bounds their growth while a machine remains live. An incomplete
+compilation makes the pipeline unusable; its resident owner retires the machine
+instead of publishing unresolved code or restoring it for another turn.
 
 ## Main entry points
 

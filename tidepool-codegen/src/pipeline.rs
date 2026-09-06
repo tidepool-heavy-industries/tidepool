@@ -51,6 +51,8 @@ impl Drop for OwnedJitModule {
 /// Errors from the Cranelift compilation pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
+    #[error("pipeline contains an incomplete compilation and must be retired")]
+    IncompleteCompilation,
     /// Pipeline initialization failed (ISA detection, memory reservation).
     #[error("pipeline init failed: {0}")]
     Init(String),
@@ -68,11 +70,21 @@ pub enum PipelineError {
     Finalization(String),
 }
 
+const COMPILER_STACK_RESERVE: usize = 1024 * 1024;
+const COMPILER_STACK_SEGMENT: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompilationState {
+    Ready,
+    Failed,
+}
+
 /// Cranelift JIT compilation pipeline.
 ///
 /// Single-compile strategy: `module.define_function()` compiles and links,
 /// then stack maps are extracted from `ctx.compiled_code()`.
 pub struct CodegenPipeline {
+    compilation_state: CompilationState,
     /// The JIT module that manages executable memory.
     ///
     /// This field is public as an **escape hatch** for advanced use cases and tests
@@ -102,6 +114,8 @@ pub struct CodegenPipeline {
     /// How many of `lambda_names`'s entries are already folded into
     /// `lambda_registry`.
     lambda_registry_built_upto: usize,
+    /// Only finalized names may be resolved, including during failed-job cleanup.
+    lambda_names_finalized: usize,
     /// Boxed-literal wrapper constructor ids (I#/W#/C#/F#/D#) for this compile,
     /// set by the JIT entry point from the DataConTable. Transported here so
     /// `compile_expr` can stamp it onto every `EmitSession` without threading
@@ -178,6 +192,7 @@ impl CodegenPipeline {
         let module = OwnedJitModule::new(JITModule::new(jit_builder));
 
         Ok(Self {
+            compilation_state: CompilationState::Ready,
             module,
             isa,
             stack_maps: StackMapRegistry::new(),
@@ -185,11 +200,29 @@ impl CodegenPipeline {
             lambda_names: Vec::new(),
             lambda_registry: Rc::new(LambdaRegistry::new()),
             lambda_registry_built_upto: 0,
+            lambda_names_finalized: 0,
             lit_wrappers: crate::emit::LitWrapperIds::default(),
             functions_defined: 0,
             blocks_emitted: 0,
             name_arena: HashSet::new(),
         })
+    }
+
+    /// An incomplete module cannot be finalized or accept another fragment.
+    pub fn compilation_failed(&self) -> bool {
+        self.compilation_state == CompilationState::Failed
+    }
+
+    pub(crate) fn ensure_usable(&self) -> Result<(), PipelineError> {
+        if self.compilation_failed() {
+            Err(PipelineError::IncompleteCompilation)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.compilation_state = CompilationState::Failed;
     }
 
     /// Intern `name` in the pipeline-owned arena, returning a raw pointer +
@@ -238,6 +271,7 @@ impl CodegenPipeline {
 
     /// Declare a function in the JIT module.
     pub fn declare_function(&mut self, name: &str) -> Result<FuncId, PipelineError> {
+        self.ensure_usable()?;
         let sig = self.make_func_signature();
         self.module
             .declare_function(name, Linkage::Export, &sig)
@@ -251,6 +285,24 @@ impl CodegenPipeline {
     ///
     /// After calling this for all functions, call `finalize()` to make them callable.
     pub fn define_function(
+        &mut self,
+        func_id: FuncId,
+        ctx: &mut Context,
+    ) -> Result<(), PipelineError> {
+        self.ensure_usable()?;
+        // Cranelift has its own substantial native frames. Emission guards
+        // cannot protect compilation after returning to their caller's stack.
+        self.invalidate();
+        let result = stacker::maybe_grow(COMPILER_STACK_RESERVE, COMPILER_STACK_SEGMENT, || {
+            self.define_function_inner(func_id, ctx)
+        });
+        if result.is_ok() {
+            self.compilation_state = CompilationState::Ready;
+        }
+        result
+    }
+
+    fn define_function_inner(
         &mut self,
         func_id: FuncId,
         ctx: &mut Context,
@@ -303,6 +355,8 @@ impl CodegenPipeline {
     /// Finalize all defined functions, making them callable.
     /// Also registers stack maps now that we have function base pointers.
     pub fn finalize(&mut self) -> Result<(), PipelineError> {
+        self.ensure_usable()?;
+        self.invalidate();
         self.module
             .finalize_definitions()
             .map_err(|e| PipelineError::Finalization(e.to_string()))?;
@@ -313,6 +367,8 @@ impl CodegenPipeline {
             let base_ptr = self.module.get_finalized_function(func_id) as usize;
             self.stack_maps.register(base_ptr, func_size, &raw_maps);
         }
+        self.lambda_names_finalized = self.lambda_names.len();
+        self.compilation_state = CompilationState::Ready;
         Ok(())
     }
 
@@ -345,13 +401,15 @@ impl CodegenPipeline {
     /// parent's registry handle is still installed) — correctness-preserving,
     /// just not O(1)/O(new) in that rarer reentrant case.
     pub fn build_lambda_registry(&mut self) -> Rc<LambdaRegistry> {
-        if self.lambda_registry_built_upto < self.lambda_names.len() {
+        if self.lambda_registry_built_upto < self.lambda_names_finalized {
             let registry = Rc::make_mut(&mut self.lambda_registry);
-            for (func_id, name) in &self.lambda_names[self.lambda_registry_built_upto..] {
+            for (func_id, name) in
+                &self.lambda_names[self.lambda_registry_built_upto..self.lambda_names_finalized]
+            {
                 let ptr = self.module.get_finalized_function(*func_id) as usize;
                 registry.register(ptr, name.clone());
             }
-            self.lambda_registry_built_upto = self.lambda_names.len();
+            self.lambda_registry_built_upto = self.lambda_names_finalized;
         }
         Rc::clone(&self.lambda_registry)
     }
@@ -381,16 +439,44 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn module_drop_releases_code_after_success_and_definition_failure() {
-        for fail in [false, true] {
+        enum Failure {
+            None,
+            Definition,
+            ClosureJob,
+        }
+        for fail in [Failure::None, Failure::Definition, Failure::ClosureJob] {
             let address = {
                 let mut pipeline = CodegenPipeline::new(&[]).unwrap();
                 let function = define_trivial_lambda(&mut pipeline, "owned_code", 42);
                 pipeline.finalize().unwrap();
                 let address = pipeline.get_function_ptr(function) as usize;
                 assert!(address_is_executable(address));
-                if fail {
-                    let mut ctx = pipeline.module.make_context();
-                    assert!(pipeline.define_function(function, &mut ctx).is_err());
+                match fail {
+                    Failure::None => {}
+                    Failure::Definition => {
+                        let mut ctx = pipeline.module.make_context();
+                        assert!(pipeline.define_function(function, &mut ctx).is_err());
+                    }
+                    Failure::ClosureJob => {
+                        use tidepool_repr::{CoreFrame, PrimOpKind, TreeBuilder, VarId};
+                        let mut tree = TreeBuilder::new();
+                        let invalid = tree.push(CoreFrame::PrimOp {
+                            op: PrimOpKind::SeqOp,
+                            args: vec![],
+                        });
+                        tree.push(CoreFrame::Lam {
+                            binder: VarId(1),
+                            body: invalid,
+                        });
+                        assert!(crate::emit::expr::compile_expr(
+                            &mut pipeline,
+                            &tree.build(),
+                            "failed_job",
+                            &crate::emit::ExternalEnv::new()
+                        )
+                        .is_err());
+                        assert!(pipeline.compilation_failed());
+                    }
                 }
                 address
             };

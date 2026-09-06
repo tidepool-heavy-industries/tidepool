@@ -24,6 +24,8 @@ mod boxed_array_behavior;
 mod call_depth_sequential_vs_nested;
 #[path = "../case_trap_scrut_ptr.rs"]
 mod case_trap_scrut_ptr;
+#[path = "../closure_compilation.rs"]
+mod closure_compilation;
 #[path = "../contags_refresh_on_add_function.rs"]
 mod contags_refresh_on_add_function;
 #[path = "../datacon_never_used_as_value.rs"]
