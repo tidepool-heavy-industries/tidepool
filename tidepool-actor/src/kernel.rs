@@ -332,12 +332,21 @@ impl LocalActorRef {
     ) -> Result<ActorTerminal, KernelInvocationFailure> {
         let terminal = self.terminal.request_shutdown(terminal);
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
+        if self
+            .address
             .send_message(KernelMessage::Shutdown {
                 terminal,
                 reply: reply.into(),
             })
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+            .is_err()
+        {
+            // A concurrent bootstrap can finish between recording intent and
+            // enqueueing the mailbox operation. Reuse only its published exit.
+            return self
+                .terminal
+                .get()
+                .ok_or(KernelInvocationFailure::ActorExited(self.identity));
+        }
         match receive.await {
             Ok(terminal) => Ok(terminal),
             // Bootstrap may observe the request before draining its mailbox.
