@@ -15,6 +15,7 @@ impl HostedWorkSeal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanupComponentOutcome {
     Confirmed,
+    Unsupported,
     Unconfirmed(String),
 }
 

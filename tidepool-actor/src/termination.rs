@@ -31,6 +31,7 @@ pub struct ActorExitAlreadyPublished {
 
 struct ExitState {
     terminal: Mutex<Option<ActorTerminal>>,
+    cleanup: Mutex<Option<crate::ResidentCleanupOutcome>>,
     requested_shutdown: Mutex<Option<ActorTerminal>>,
     acknowledged_retirement: Mutex<Option<crate::ActorRef>>,
     changed: watch::Sender<u64>,
@@ -62,6 +63,15 @@ impl Default for RetainedActorExit {
 }
 
 impl RetainedActorExit {
+    /// Terminal-only legacy/forced exits deliberately have no cleanup proof.
+    pub fn cleanup(&self) -> Option<crate::ResidentCleanupOutcome> {
+        self.state.cleanup.lock().clone()
+    }
+
+    pub(crate) fn retain_cleanup(&self, outcome: crate::ResidentCleanupOutcome) {
+        self.state.cleanup.lock().get_or_insert(outcome);
+    }
+
     /// Record intent without publishing an exit. Bootstrap checks this at safe
     /// boundaries; only ordinary lifecycle cleanup may publish the terminal.
     pub(crate) fn request_shutdown(&self, terminal: ActorTerminal) -> ActorTerminal {
@@ -91,6 +101,7 @@ impl RetainedActorExit {
         Self {
             state: Arc::new(ExitState {
                 terminal: Mutex::new(None),
+                cleanup: Mutex::new(None),
                 requested_shutdown: Mutex::new(None),
                 acknowledged_retirement: Mutex::new(None),
                 changed,

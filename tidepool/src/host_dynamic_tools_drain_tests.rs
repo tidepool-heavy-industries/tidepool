@@ -374,3 +374,45 @@ async fn http_seal_timeout_retains_single_future_and_failure_keeps_completion() 
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn http_seal_already_draining_never_invokes_endpoint() {
+    for serve_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tools.sock");
+        let endpoint = Arc::new(FailingSealEndpoint {
+            inner: endpoint(),
+            seals: AtomicUsize::new(0),
+            release_seal: Arc::new(Semaphore::new(0)),
+        });
+        let service =
+            HostDynamicToolService::new(endpoint.clone(), dir.path().join("binding"), None)
+                .unwrap();
+        let control = service.control();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut server = if serve_first {
+            let server = tokio::spawn(service.serve(listener));
+            attach(&client(&socket)).await;
+            control.drain();
+            server
+        } else {
+            control.drain();
+            tokio::spawn(service.serve(listener))
+        };
+        let seal =
+            control.quiesce_and_seal(tidepool_actor::ActorRef::first(tidepool_actor::ActorId(43)));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), seal)
+                .await
+                .unwrap(),
+            Err(HostToolSealError::AlreadyDraining)
+        ));
+        assert_eq!(endpoint.seals.load(Ordering::SeqCst), 0);
+        assert!(!control.admits(AdmissionKind::CompletionOrRead));
+        tokio::time::timeout(Duration::from_secs(5), &mut server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}

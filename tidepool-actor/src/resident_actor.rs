@@ -4260,6 +4260,29 @@ where
         terminal: &'a ActorTerminal,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
+            let (hook, realm) = self.shutdown_components(kernel, terminal).await;
+            for component in [hook, realm] {
+                if let crate::CleanupComponentOutcome::Unconfirmed(detail) = component {
+                    return Err(KernelBehaviorError { detail });
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn shutdown_components<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        terminal: &'a ActorTerminal,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        (
+            crate::CleanupComponentOutcome,
+            crate::CleanupComponentOutcome,
+        ),
+    > {
+        Box::pin(async move {
+            use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
             let context = self.context(kernel.identity());
             let notifications = self
                 .environment
@@ -4272,8 +4295,9 @@ where
                 "fork owner stopped before tool completion",
             )
             .await;
-            if let Some(hook) = self.shutdown_hook.take() {
-                self.environment
+            let hook = if let Some(hook) = self.shutdown_hook.take() {
+                match self
+                    .environment
                     .runner
                     .run_shutdown(
                         context.clone(),
@@ -4283,23 +4307,32 @@ where
                         std::time::Duration::from_secs(30),
                     )
                     .await
-                    .map_err(Self::failure)?;
-            }
-            if self.descriptor.supervisor_parent().is_none() {
+                {
+                    Ok(()) => Confirmed,
+                    Err(error) => Unconfirmed(error.to_string()),
+                }
+            } else {
+                Confirmed
+            };
+            // Realm retirement obtains its own exclusive checkout. A failed hook
+            // does not skip this safe cleanup; it also never becomes success.
+            let realm_result = if self.descriptor.supervisor_parent().is_none() {
                 self.environment
                     .runner
                     .retire_root_placement(self.descriptor.placement())
                     .await
-                    .map_err(Self::failure)?;
             } else {
                 self.environment
                     .runner
                     .close_realm(context, self.descriptor.placement().resource_scope)
                     .await
-                    .map_err(Self::failure)?;
-            }
+            };
+            let realm = match realm_result {
+                Ok(()) => Confirmed,
+                Err(error) => Unconfirmed(error.to_string()),
+            };
             self.standing = ResidentStanding::Terminal;
-            Ok(())
+            (hook, realm)
         })
     }
 

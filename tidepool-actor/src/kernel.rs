@@ -145,6 +145,9 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    SealHostedWork {
+        reply: RpcReplyPort<crate::HostedWorkSeal>,
+    },
     Cast {
         sender: ActorRef,
         request: MailboxValue,
@@ -191,6 +194,7 @@ pub enum KernelMessage {
 impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SealHostedWork { .. } => formatter.write_str("SealHostedWork"),
             Self::Cast { sender, request } => formatter
                 .debug_struct("Cast")
                 .field("sender", sender)
@@ -314,6 +318,37 @@ impl LocalActorRef {
         receive
             .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+    }
+
+    pub async fn seal_hosted_work(&self) -> Result<crate::HostedWorkSeal, KernelInvocationFailure> {
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::SealHostedWork {
+                reply: reply.into(),
+            })
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+        receive
+            .await
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+    }
+
+    /// Observe the same actor-owned retirement after waiter loss. A legacy or
+    /// forced terminal never becomes confirmed cleanup by observation.
+    pub async fn shutdown_with_cleanup(
+        &self,
+        terminal: ActorTerminal,
+    ) -> Result<crate::ResidentShutdown, KernelInvocationFailure> {
+        let terminal = self.shutdown(terminal).await?;
+        let cleanup = self
+            .terminal
+            .cleanup()
+            .unwrap_or_else(|| crate::ResidentCleanupOutcome {
+                actor: self.identity,
+                hook: crate::CleanupComponentOutcome::Unconfirmed("terminal-only exit".into()),
+                realm: crate::CleanupComponentOutcome::Unconfirmed("terminal-only exit".into()),
+                children: crate::CleanupComponentOutcome::Unconfirmed("terminal-only exit".into()),
+            });
+        Ok(crate::ResidentShutdown { terminal, cleanup })
     }
 
     pub async fn shutdown(
