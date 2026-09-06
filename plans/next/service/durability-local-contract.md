@@ -66,3 +66,16 @@ post-rename directory failure (file-fsync errors already complicate append owner
 No double-bind defect is established here: binding returns no lease on failure,
 and failed settlement retains the active in-memory lease. Root should keep the
 caller uncertainty boundary visible rather than broaden this into a storage redesign.
+
+Independent owner review approved production revision `0e68a310`, executing the
+11 committed subprocess cases and 16 additional injected-fault cases (nested
+leaf/intermediate/root open and sync, repeated failure with existing ancestry,
+and JSONL All/Data new/existing directory-open failure). These are syscall-error
+checks, not a power-crash simulation. The later contract updates are docs only.
+
+Additional cross-owner review findings, not repaired in this bounded change:
+`EventJournal::append` advances memory only on successful append, so continuation
+after an ambiguous visible append can reuse the cursor. `LogWriter::create`
+uses create_new plus borrowed-file writes without directory persistence despite
+its module's no-loss claim. These owners need explicit uncertainty/reconciliation
+and durable path establishment, not duplicate writers or fd-to-path recovery.
