@@ -45,9 +45,18 @@ impl DispatchEffect<TestSink> for NoHandlers {
 
 #[tokio::test]
 async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
+    resident_cleanup_case(false).await;
+}
+
+#[tokio::test]
+async fn authored_failed_shutdown_hook_remains_unconfirmed_in_parent_cleanup() {
+    resident_cleanup_case(true).await;
+}
+
+async fn resident_cleanup_case(fail_hook: bool) {
     eval_harness::require_extract();
 
-    let session = support::process_unique_session(177);
+    let session = support::process_unique_session(if fail_hook { 178 } else { 177 });
     let declarations = [
         tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
@@ -78,7 +87,11 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().expect("session root");
     let compiled = match run_turn(HaskellTurnRequest {
-        turn_text: include_str!("resident_local_actor/policy.hs"),
+        turn_text: if fail_hook {
+            include_str!("resident_local_actor/policy_failed_hook.hs")
+        } else {
+            include_str!("resident_local_actor/policy.hs")
+        },
         templates: &templates,
         include: &include_refs,
         session_root: session_root.path(),
@@ -264,13 +277,13 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     assert!(!spawned.is_error.unwrap_or(false), "{spawned:?}");
     assert_eq!(
         spawned.structured_content,
-        Some(serde_json::json!({"started": true}))
+        Some(serde_json::json!({"started": !fail_hook}))
     );
     let child_retired = deployments.recv().await.expect("child retirement");
     assert!(matches!(
         child_retired,
         LocalResidentDeployment::Retired { ref terminal, .. }
-            if terminal.kind == tidepool_actor::ActorExitKind::Completed
+            if terminal.kind == if fail_hook { tidepool_actor::ActorExitKind::Failed } else { tidepool_actor::ActorExitKind::Completed }
     ));
     let finished = server
         .dispatch_tool("finish_value", serde_json::Map::new())
@@ -281,6 +294,20 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
         Some(serde_json::json!({"current": 0}))
     );
     task.await.expect("root actor task");
+    let cleanup = actor.terminal().cleanup().expect("retained cleanup");
+    assert_eq!(cleanup.actor(), actor.identity());
+    assert_eq!(cleanup.is_confirmed(), !fail_hook, "{cleanup:?}");
+    assert!(matches!(
+        cleanup.realm(),
+        tidepool_actor::CleanupComponentOutcome::Confirmed
+    ));
+    if fail_hook {
+        assert!(matches!(
+            cleanup.children(),
+            tidepool_actor::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+    }
+
     assert_eq!(
         actor.terminal().wait().await.kind,
         tidepool_actor::ActorExitKind::Completed
