@@ -2763,16 +2763,10 @@ fn emit_addr_deref_guard(
 /// so an arbitrary multi-field Con can never be silently unwrapped.
 ///
 /// Returns the final (non-Con) heap value — NOT yet known to be a `TAG_LIT`
-/// of any particular class. Shared by `unbox_addr`, `unbox_bytearray`, and
-/// `case::emit_lit_dispatch` (a literal-case scrutinee reaching this point
-/// boxed — e.g. a `Word`/`Int` computed by un-inlined cross-module generic
-/// code, such as a `Member` dictionary's `elemNo` — needs the identical
-/// traversal before its value can be compared against a literal alt);
-/// each applies its own class-specific guard afterward (`unbox_addr`'s
-/// address-class check, `unbox_bytearray`'s array-class check) before
-/// reading the payload — the accepted literal classes and payload-offset
-/// adjustment genuinely differ per consumer, so only this traversal is
-/// shared.
+/// of any particular class. Shared by `unbox_addr` and `unbox_bytearray`;
+/// each applies its class-specific guard before reading the payload. Their
+/// accepted literal classes and payload adjustments differ, so only the
+/// traversal is shared.
 pub(crate) fn unwrap_boxing_chain(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
@@ -3217,9 +3211,9 @@ fn unbox_numeric(
             // continuation — `Double(3.5)`, whose IEEE-754 bits would
             // otherwise load as a garbage i64). Trap cleanly via
             // runtime_shape_trap (kind LitClass) instead; the poison object it
-            // returns is loaded from below, but the pending RuntimeError is
-            // surfaced before the garbage can be observed. Only ill-typed Core
-            // reaches a class mismatch — valid GHC output emits explicit
+            // returns terminates this function before any payload load or
+            // continuation can observe a fabricated numeric value. Only ill-typed
+            // Core reaches a class mismatch — valid GHC output emits explicit
             // Int2Double/Double2Int — so this cannot regress well-typed programs.
             let obj_tag = builder
                 .ins()
@@ -3288,7 +3282,7 @@ fn unbox_numeric(
                 .ins()
                 .call(trap_ref, &[kind, v_final, zero, dummy_addr, zero, zero]);
             let poison = builder.inst_results(call)[0];
-            builder.ins().jump(load_block, &[BlockArg::Value(poison)]);
+            builder.ins().return_(&[poison]);
 
             builder.switch_to_block(load_block);
             builder.seal_block(load_block);

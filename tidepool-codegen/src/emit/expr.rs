@@ -2973,6 +2973,46 @@ fn emit_lit_string(
     Ok(SsaVal::HeapPtr(ptr))
 }
 
+/// Demand a case scrutinee, propagating bottom before executing an alternative.
+/// Ordinary closures are WHNF; constructor fields remain lazy.
+pub(crate) fn demand_whnf_ssaval(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    vmctx: Value,
+    val: SsaVal,
+) -> Result<SsaVal, EmitError> {
+    let SsaVal::HeapPtr(ptr) = val else {
+        return Ok(val);
+    };
+    let demand_fn = pipeline
+        .module
+        .declare_function(
+            "heap_demand",
+            Linkage::Import,
+            &crate::emit::heap_force_sig(pipeline.isa.default_call_conv()),
+        )
+        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
+    let demand_ref = pipeline
+        .module
+        .declare_func_in_func(demand_fn, builder.func);
+    let call = builder.ins().call(demand_ref, &[vmctx, ptr]);
+    let forced = builder.inst_results(call)[0];
+    builder.declare_value_needs_stack_map(forced);
+    let poison = builder
+        .ins()
+        .iconst(types::I64, crate::host_fns::error_poison_ptr() as i64);
+    let failed = builder.ins().icmp(IntCC::Equal, forced, poison);
+    let fail = builder.create_block();
+    let ready = builder.create_block();
+    builder.ins().brif(failed, fail, &[], ready, &[]);
+    builder.switch_to_block(fail);
+    builder.seal_block(fail);
+    builder.ins().return_(&[forced]);
+    builder.switch_to_block(ready);
+    builder.seal_block(ready);
+    Ok(SsaVal::HeapPtr(forced))
+}
+
 /// Force a thunked SsaVal to WHNF. If the value is a HeapPtr pointing to a
 /// TAG_THUNK object, emit code to call `heap_force` and return the result.
 /// Raw values and non-thunk HeapPtrs pass through unchanged.
