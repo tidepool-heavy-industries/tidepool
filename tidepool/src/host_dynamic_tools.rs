@@ -52,9 +52,65 @@ enum AdmissionKind {
 #[derive(Clone)]
 pub(crate) struct HostToolControl {
     phase: tokio::sync::watch::Sender<HostToolPhase>,
+    endpoint: Arc<dyn ResidentToolEndpoint>,
+}
+
+pub(crate) type HostToolSealFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<tidepool_actor::HostedWorkSeal, HostToolSealError>>
+            + Send,
+    >,
+>;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HostToolSealError {
+    #[error("HTTP tool service is already draining")]
+    AlreadyDraining,
+    #[error(transparent)]
+    Endpoint(#[from] ResidentToolError),
+    #[error("resident seal belongs to {actual:?}, expected {expected:?}")]
+    ForeignActor {
+        expected: tidepool_actor::ActorRef,
+        actual: tidepool_actor::ActorRef,
+    },
 }
 
 impl HostToolControl {
+    /// Immediately quiesce HTTP admission, then return the exact endpoint barrier
+    /// future. The host must retain this future (or its owned task/result) across
+    /// bounded waits; dropping it is uncertainty, not cancellation or permission
+    /// to retry. Already-Draining admission is rejected without invoking the
+    /// endpoint. The host must separately serialize raw drain against pending
+    /// seals/completions; this operation does not reserve completion access.
+    /// A seal is not cleanup.
+    #[allow(dead_code)] // Parent pending/lifecycle consumer is staged separately.
+    pub(crate) fn quiesce_and_seal(
+        &self,
+        expected: tidepool_actor::ActorRef,
+    ) -> HostToolSealFuture {
+        let mut already_draining = false;
+        self.phase.send_modify(|phase| match phase {
+            HostToolPhase::Draining => already_draining = true,
+            HostToolPhase::Serving | HostToolPhase::Quiescing => {
+                *phase = HostToolPhase::Quiescing;
+            }
+        });
+        if already_draining {
+            return Box::pin(async { Err(HostToolSealError::AlreadyDraining) });
+        }
+        let endpoint = Arc::clone(&self.endpoint);
+        Box::pin(async move {
+            let seal = endpoint.seal_hosted_work_boxed().await?;
+            if seal.actor() != expected {
+                return Err(HostToolSealError::ForeignActor {
+                    expected,
+                    actual: seal.actor(),
+                });
+            }
+            Ok(seal)
+        })
+    }
+
     // Parent host integration is staged separately from this owning primitive.
     #[allow(dead_code)]
     pub(crate) fn quiesce(&self) {
@@ -154,6 +210,7 @@ impl HostDynamicToolService {
             state: HostState {
                 control: HostToolControl {
                     phase: tokio::sync::watch::channel(HostToolPhase::Serving).0,
+                    endpoint: Arc::clone(&endpoint),
                 },
                 registration: Arc::new(registration),
                 tools: Arc::new(identities),
