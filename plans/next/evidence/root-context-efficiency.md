@@ -107,3 +107,29 @@ without rediscovery (reviewer report); root also observed that build/setup laten
 can dominate even when coordination is fluent. Seek small reliable primitives
 and enough guidance to compose them, not a bespoke bulk API or larger default
 prompt for every workflow. Claimed token savings still require measurement.
+
+## Consumer-repair fold: root-side efficiency corrections
+
+Direct root observation: expanding the full repeated-path WaveDelivery followed
+by a multi-file production diff exceeded the available display/context budget.
+The data was retained, so the corrective workflow is projection-first: candidate,
+blockers, outcome/revision/basis summaries, then selected evidence and bounded
+per-owner diffs. This turn used the retained settlement with a small fmap/case
+projection rather than inventing a summary registry. One attempted filtered
+`:bindings durabilityConsumers` was rejected: :bindings has no argument filter.
+The already-known handle was usable without any inventory; the attempted discovery
+was unnecessary. Do not add a startup discovery ritual to compensate.
+
+Attributed consumer lead/reviewer observation: this follow-up needed no Haskell
+API discovery or permission recovery. Tuple admission and mapped evidence kept
+bookkeeping bounded. Early short native-build polling was avoidable; retain a
+session and use longer waits. No token/cost delta was measured.
+
+Service progress has required more than thirty root wake turns. Progress is
+already coalescing, but each published intermediate step can still wake a fast
+root: leads should batch local bookkeeping and publish when integration decisions,
+blockers, review gates or independently useful candidates change. This is a
+prompt/workflow improvement, not justification for another event registry.
+Before the next wave, tighten the owning shared instructions to make projection-
+first folding and decision-bearing progress the default; validate against existing
+prompt tests. Do not expand the permanent guide into a campaign framework.
