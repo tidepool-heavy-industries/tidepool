@@ -17,7 +17,7 @@ pub enum ActorExitKind {
 /// Successful domain values are deliberately absent. They remain in the
 /// shared Haskell exit cell carried by `Tidepool.Actor.ActorRef`; this record
 /// supplies only the Rust-owned lifecycle fact that sequences reading it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActorTerminal {
     pub kind: ActorExitKind,
     pub summary: String,

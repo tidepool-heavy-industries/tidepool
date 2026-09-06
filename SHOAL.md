@@ -642,3 +642,7 @@ lower `default_depth` to make deeper delegation opt-in. Defaults are themselves
 clamped to the ceiling. Zero width prevents child admission. Policy is loaded at
 host startup; changes do not alter existing actors. Model and effort remain under
 `[defaults]`.
+
+Operator consoles and TUI graph clients can attach over the host's protected Unix
+socket. See [operator HTTP and graph API](docs/SHOAL-OPERATOR-HTTP.md) for provisioning,
+attachment commands, JSON graph fields, and execution semantics.

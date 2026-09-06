@@ -10,6 +10,8 @@ pub(super) struct TestCampaign {
     pub bindings: Arc<Mutex<BindingTable>>,
     pub authority: ActorWorktreeAuthority,
     pub actor: tidepool_actor::LocalActorRef,
+    pub forest: Arc<ResidentForest<ShoalHandlerStack, CapturedOutput>>,
+    pub program: Arc<tidepool_runtime::session::CompiledTurn>,
     pub hosted: tokio::task::JoinHandle<()>,
     pub deployments: tokio::sync::mpsc::UnboundedReceiver<LocalResidentDeployment>,
     pub root_installation: tidepool_actor::LocalResidentInstallation,
@@ -76,22 +78,27 @@ impl TestCampaign {
             runtime_namespace(session_root.path()),
             Arc::clone(&bindings),
         );
-        let (source, root) = compile_root(
+        let (source, root, program) = compile_root(
             &config,
             session_root.path(),
             worktrees.clone(),
             authority.clone(),
         )
         .expect("compile permanent root");
-        let (actor, hosted, mut deployments) =
-            tidepool_actor::spawn_resident_root_with_fork_admission(
-                source,
-                root,
-                Some(fork_workspace_admission(
-                    worktrees.clone(),
-                    authority.clone(),
-                )),
-            )
+        let (descriptor, machine, outcome) = root.into_parts();
+        let (forest, mut deployments) = ResidentForest::new(
+            source,
+            descriptor.placement().session,
+            machine,
+            Some(fork_workspace_admission(
+                worktrees.clone(),
+                authority.clone(),
+            )),
+            tidepool_actor::Incarnation::FIRST,
+        );
+        let forest = Arc::new(forest);
+        let (actor, hosted) = forest
+            .admit_root(descriptor, outcome)
             .await
             .expect("spawn permanent root");
         authority.install_root(actor.identity().into());
@@ -108,6 +115,8 @@ impl TestCampaign {
             bindings,
             authority,
             actor,
+            forest,
+            program,
             hosted,
             deployments,
             root_installation,

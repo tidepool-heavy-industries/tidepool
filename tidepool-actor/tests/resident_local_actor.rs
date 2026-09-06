@@ -1,8 +1,7 @@
 //! The real resident MCP policy driven directly by the canonical local actor.
 
 use tidepool_actor::{
-    spawn_resident_root, ActorDescriptor, ActorPlacement, ActorWorkbenchSource,
-    LocalResidentDeployment, ResidentActorRoot,
+    ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -130,12 +129,77 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
             lexical_scope: ScopeId::ROOT,
         },
     );
-    let (actor, task, mut deployments) = spawn_resident_root(
+    let sibling_scope = machine.mint_isolated_scope();
+    let sibling_realm = RealmId::fresh();
+    machine
+        .set_actor_execution(
+            tidepool_runtime::session::SessionRunContext {
+                resource_scope: sibling_realm,
+                lexical_scope: sibling_scope,
+                ..tidepool_runtime::session::SessionRunContext::ROOT
+            },
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .expect("independent root scope");
+    let sibling_outcome = machine
+        .run_with_sites(
+            "resident_sibling_policy",
+            &compiled.expr,
+            &compiled.table,
+            &compiled.asks,
+        )
+        .expect("sibling policy boundary");
+    let sibling_descriptor = ActorDescriptor::new(
+        "sibling",
+        ActorPlacement {
+            session,
+            resource_scope: sibling_realm,
+            lexical_scope: sibling_scope,
+        },
+    );
+    let (forest, mut deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include),
-        ResidentActorRoot::new(descriptor, machine, outcome),
-    )
-    .await
-    .expect("spawn local resident root");
+        session,
+        machine,
+        None,
+        tidepool_actor::Incarnation::FIRST,
+    );
+    for invalid in [
+        ActorDescriptor::new(
+            "foreign",
+            ActorPlacement {
+                session: support::process_unique_session(178),
+                ..descriptor.placement()
+            },
+        ),
+        descriptor
+            .clone()
+            .with_supervisor_parent(tidepool_actor::ActorRef {
+                id: tidepool_actor::ActorId(1),
+                incarnation: tidepool_actor::Incarnation::FIRST,
+            }),
+        descriptor
+            .clone()
+            .with_context_parent(tidepool_actor::ActorRef {
+                id: tidepool_actor::ActorId(1),
+                incarnation: tidepool_actor::Incarnation::FIRST,
+            }),
+    ] {
+        assert!(forest
+            .admit_root(
+                invalid,
+                tidepool_runtime::session::ResidentOutcome::BindingsCommitted {
+                    output: Vec::new()
+                },
+            )
+            .await
+            .is_err());
+    }
+    let (actor, task) = forest
+        .admit_root(descriptor, outcome)
+        .await
+        .expect("spawn local resident root");
 
     let LocalResidentDeployment::PolicyInstalled(installation) =
         deployments.recv().await.expect("policy installation")
@@ -145,6 +209,35 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     assert_eq!(installation.actor.identity(), actor.identity());
     let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(installation.policy)
         .expect("MCP projection");
+    let (sibling, sibling_task) = forest
+        .admit_root(sibling_descriptor, sibling_outcome)
+        .await
+        .expect("admit independent sibling");
+    let LocalResidentDeployment::PolicyInstalled(sibling_installation) = deployments
+        .recv()
+        .await
+        .expect("sibling policy installation")
+    else {
+        panic!("sibling retired before installation")
+    };
+    assert_eq!(sibling_installation.actor.identity(), sibling.identity());
+    assert_eq!(sibling_installation.supervisor_parent, None);
+    assert_eq!(sibling_installation.context_parent, None);
+    let sibling_server =
+        tidepool_mcp::DynamicMcpServer::from_resident_policy(sibling_installation.policy)
+            .expect("sibling MCP projection");
+    let changed = sibling_server
+        .dispatch_tool(
+            "set_value",
+            serde_json::json!({"next": 73}).as_object().unwrap().clone(),
+        )
+        .await
+        .expect("change sibling state");
+    assert_eq!(
+        changed.structured_content,
+        Some(serde_json::json!({"current": 73}))
+    );
+
     let arguments = serde_json::json!({"value": 6})
         .as_object()
         .expect("arguments")
@@ -197,4 +290,22 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
         Some(LocalResidentDeployment::Retired { actor: retired, .. })
             if retired == actor.identity()
     ));
+    // The first tree's retirement must preserve the sibling's live closures.
+    let retained = sibling_server
+        .dispatch_tool("current_value", serde_json::Map::new())
+        .await
+        .expect("sibling survives root retirement");
+    assert_eq!(
+        retained.structured_content,
+        Some(serde_json::json!({"current": 73}))
+    );
+    sibling_server
+        .dispatch_tool("finish_value", serde_json::Map::new())
+        .await
+        .expect("retire sibling");
+    sibling_task.await.expect("sibling task");
+    assert_eq!(
+        sibling.terminal().wait().await.kind,
+        tidepool_actor::ActorExitKind::Completed
+    );
 }

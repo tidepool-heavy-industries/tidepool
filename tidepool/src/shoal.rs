@@ -479,6 +479,10 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         }
     }
     println!("status: {}", status_path.display());
+    println!(
+        "operator socket: {}",
+        run_root.join("operator/operator.sock").display()
+    );
     println!("agent:  model={} effort={}", agent.model, agent.effort);
     println!("config: {}", workspace.join(SHOAL_CONFIG).display());
     if options.no_attach {

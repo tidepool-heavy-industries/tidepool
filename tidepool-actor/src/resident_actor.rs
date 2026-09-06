@@ -53,7 +53,7 @@ impl<H, O> ResidentActorRoot<H, O> {
         }
     }
 
-    fn into_parts(self) -> (ActorDescriptor, ResidentSession<H, O>, ResidentOutcome) {
+    pub fn into_parts(self) -> (ActorDescriptor, ResidentSession<H, O>, ResidentOutcome) {
         (self.descriptor, self.machine, self.outcome)
     }
 }
@@ -111,17 +111,24 @@ struct ResidentEnvironment<H, O> {
 
 #[derive(Clone)]
 struct ResidentActorRecord {
+    forest_control: bool,
     descriptor: ActorDescriptor,
     bound_worktree: Option<String>,
     terminal: Option<ActorTerminal>,
     runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
-fn actor_is_self_or_descendant(
+fn actor_can_access(
     owner: ActorRef,
     candidate: ActorRef,
     records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
 ) -> bool {
+    if records
+        .get(&owner)
+        .is_some_and(|record| record.forest_control && record.terminal.is_none())
+    {
+        return true;
+    }
     let mut cursor = candidate;
     loop {
         if cursor == owner {
@@ -152,11 +159,13 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
 }
 
 enum ResidentBoot {
+    Workbench,
     Prepared(Box<ResidentOutcome>),
     Entry(RootCustody),
 }
 
 enum ResidentStanding {
+    Workbench,
     Boot,
     Receiving(InstalledReceiver),
     Tools(crate::resident_tools::ResidentToolAwait),
@@ -323,6 +332,7 @@ pub struct ResidentKernelBehavior<H, O> {
     shutdown_hook: Option<RootCustody>,
     launch_worktrees: Vec<String>,
     policy_installed: bool,
+    forest_control: bool,
     pending_program: Option<ResidentOutcome>,
     pending_reply: Option<crate::RequestId>,
     pending_cancellation: Option<crate::RequestId>,
@@ -389,25 +399,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         environment: ResidentEnvironment<H, O>,
         outcome: ResidentOutcome,
     ) -> Self {
-        Self {
+        Self::with_boot(
             descriptor,
             environment,
-            boot: Some(ResidentBoot::Prepared(Box::new(outcome))),
-            standing: ResidentStanding::Boot,
-            shutdown_hook: None,
-            launch_worktrees: Vec::new(),
-            policy_installed: false,
-            pending_program: None,
-            pending_reply: None,
-            pending_cancellation: None,
-            suspended_cast: None,
-            child_exit_observations: ChildExitObservations::default(),
-            deferred_child_failures: Vec::new(),
-            next_activation_sequence: 1,
-            runtime_observation: crate::ActorRuntimeObservationHandle::default(),
-            completed_workbenches: CompletedWorkbenchExecutions::default(),
-            active_fork_boundary: None,
-        }
+            ResidentBoot::Prepared(Box::new(outcome)),
+            Vec::new(),
+        )
     }
 
     fn child(
@@ -416,14 +413,29 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         entry: RootCustody,
         launch_worktrees: Vec<String>,
     ) -> Self {
+        Self::with_boot(
+            descriptor,
+            environment,
+            ResidentBoot::Entry(entry),
+            launch_worktrees,
+        )
+    }
+
+    fn with_boot(
+        descriptor: ActorDescriptor,
+        environment: ResidentEnvironment<H, O>,
+        boot: ResidentBoot,
+        launch_worktrees: Vec<String>,
+    ) -> Self {
         Self {
             descriptor,
             environment,
-            boot: Some(ResidentBoot::Entry(entry)),
+            boot: Some(boot),
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             launch_worktrees,
             policy_installed: false,
+            forest_control: false,
             pending_program: None,
             pending_reply: None,
             pending_cancellation: None,
@@ -436,7 +448,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             active_fork_boundary: None,
         }
     }
-
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
         self.descriptor.session_context(actor)
     }
@@ -505,6 +516,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn status_text(&self, kernel: &KernelContext, actor: ActorRef, view: StatusView) -> String {
         let (standing, current_request) = match &self.standing {
+            ResidentStanding::Workbench => ("operator-workbench", None),
             ResidentStanding::Boot => ("booting", None),
             ResidentStanding::Receiving(_) => ("receiving", None),
             ResidentStanding::Tools(_) => ("awaiting-tool", None),
@@ -1220,8 +1232,8 @@ where
             ResidentActorBoundary::AgentInspect(inspection) => {
                 let records = self.environment.actors.lock().clone();
                 let observation = records.get(&inspection.target).and_then(|record| {
-                    actor_is_self_or_descendant(context.actor, inspection.target, &records).then(
-                        || crate::resident_workbench::AgentRosterProjection {
+                    actor_can_access(context.actor, inspection.target, &records).then(|| {
+                        crate::resident_workbench::AgentRosterProjection {
                             requests: self.environment.requests.work_for_target(inspection.target),
                             actor: inspection.target,
                             descriptor: record.descriptor.clone(),
@@ -1232,8 +1244,8 @@ where
                                     .and_then(|actor| actor.terminal().get())
                             }),
                             runtime: record.runtime_observation.snapshot(),
-                        },
-                    )
+                        }
+                    })
                 });
                 self.environment
                     .runner
@@ -1244,9 +1256,7 @@ where
                 let records = self.environment.actors.lock().clone();
                 let mut roster = records
                     .iter()
-                    .filter(|(actor, _)| {
-                        actor_is_self_or_descendant(context.actor, **actor, &records)
-                    })
+                    .filter(|(actor, _)| actor_can_access(context.actor, **actor, &records))
                     .map(
                         |(actor, record)| crate::resident_workbench::AgentRosterProjection {
                             requests: self.environment.requests.work_for_target(*actor),
@@ -1310,7 +1320,7 @@ where
                 let authorized_terminal = {
                     let records = self.environment.actors.lock();
                     records.get(&forget.target).and_then(|record| {
-                        actor_is_self_or_descendant(context.actor, forget.target, &records)
+                        actor_can_access(context.actor, forget.target, &records)
                             .then(|| {
                                 record.terminal.clone().or_else(|| {
                                     kernel
@@ -1324,7 +1334,7 @@ where
                 let outcome = if authorized_terminal.is_none() {
                     let records = self.environment.actors.lock();
                     if records.contains_key(&forget.target)
-                        && actor_is_self_or_descendant(context.actor, forget.target, &records)
+                        && actor_can_access(context.actor, forget.target, &records)
                     {
                         crate::resident_workbench::AgentForgetProjection::Running
                     } else {
@@ -1361,7 +1371,7 @@ where
                     (
                         records.contains_key(&stop.target),
                         stop.target != context.actor
-                            && actor_is_self_or_descendant(context.actor, stop.target, &records),
+                            && actor_can_access(context.actor, stop.target, &records),
                     )
                 };
                 let outcome = if stop.target == context.actor {
@@ -2409,6 +2419,11 @@ where
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
         let outcome = match boot {
+            ResidentBoot::Workbench => {
+                self.standing = ResidentStanding::Workbench;
+                self.policy_installed = true;
+                return Ok(KernelStep::Continue(()));
+            }
             ResidentBoot::Prepared(outcome) => *outcome,
             ResidentBoot::Entry(entry) => {
                 let mut outcome = self
@@ -2955,7 +2970,9 @@ where
                 awaiting.request.request,
                 awaiting.request.type_modules(),
             ),
-            ResidentStanding::Receiving(_) if self.policy_installed => {
+            ResidentStanding::Workbench | ResidentStanding::Receiving(_)
+                if self.policy_installed =>
+            {
                 self.environment.runner.application_workbench()
             }
             _ => {
@@ -3568,6 +3585,7 @@ where
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {
+                    forest_control: self.forest_control,
                     descriptor: self.descriptor.clone(),
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
@@ -3882,7 +3900,9 @@ where
             if !self.policy_installed
                 || !matches!(
                     self.standing,
-                    ResidentStanding::Interactive(_) | ResidentStanding::Receiving(_)
+                    ResidentStanding::Interactive(_)
+                        | ResidentStanding::Receiving(_)
+                        | ResidentStanding::Workbench
                 )
             {
                 return Err(KernelInvocationFailure::Rejected {
@@ -4088,11 +4108,19 @@ where
                     .await
                     .map_err(Self::failure)?;
             }
-            self.environment
-                .runner
-                .close_realm(context, self.descriptor.placement().resource_scope)
-                .await
-                .map_err(Self::failure)?;
+            if self.descriptor.supervisor_parent().is_none() {
+                self.environment
+                    .runner
+                    .retire_root_placement(self.descriptor.placement())
+                    .await
+                    .map_err(Self::failure)?;
+            } else {
+                self.environment
+                    .runner
+                    .close_realm(context, self.descriptor.placement().resource_scope)
+                    .await
+                    .map_err(Self::failure)?;
+            }
             self.standing = ResidentStanding::Terminal;
             Ok(())
         })
@@ -4191,25 +4219,250 @@ where
     O: OutputSink + Sync + 'static,
 {
     let (descriptor, machine, outcome) = root.into_parts();
-    let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
-    let session = descriptor.placement().session;
-    debug_assert!(machines.insert_idle(session, machine).is_none());
-    let runner = ResidentActorRunner::new(machines, source);
-    let (deployments, receiver) = mpsc::unbounded_channel();
-    let lineage = crate::ActorLineageRegistry::default();
-    let environment = ResidentEnvironment {
-        runner,
-        deployments,
-        retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        requests: Arc::new(RequestRegistry::default()),
-        fork_groups: crate::ForkGroupRegistry::new(lineage),
-        actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    let (forest, receiver) = ResidentForest::new(
+        source,
+        descriptor.placement().session,
+        machine,
         fork_workspaces,
-    };
-    let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
-    let (actor, task) =
-        crate::spawn_local_actor_in_incarnation(None, behavior, incarnation).await?;
+        incarnation,
+    );
+    let (actor, task) = forest.admit_root(descriptor, outcome).await?;
     Ok((actor, task, receiver))
+}
+
+/// A point-in-time graph projection. Parent links are exact incarnation IDs;
+/// callers can build a forest without parsing Haskell or display text.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActorGraphNode {
+    pub actor: ActorRef,
+    pub label: String,
+    pub supervisor_parent: Option<ActorRef>,
+    pub context_parent: Option<ActorRef>,
+    pub terminal: Option<ActorTerminal>,
+    pub workbench: crate::ActorWorkbenchPosture,
+    pub provider_thread: Option<String>,
+    pub provider_turn: Option<tidepool_model::ProviderTurnObservation>,
+    pub provider_observation_stale: bool,
+    pub bound_worktree: Option<String>,
+    pub active_requests: Vec<crate::RequestId>,
+    pub queued_requests: Vec<crate::RequestId>,
+}
+
+/// Host-owned routing and resident execution domain. Every root uses the same
+/// machine registry, heap, request registry, lineage and deployment channel.
+/// Supervision and resource retirement remain local to each admitted tree.
+pub struct ResidentForest<H, O> {
+    environment: ResidentEnvironment<H, O>,
+    directory: crate::LocalActorDirectory,
+    session: tidepool_repr::SessionId,
+    incarnation: crate::Incarnation,
+}
+
+impl<H, O> ResidentForest<H, O>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    pub fn new(
+        source: ActorWorkbenchSource,
+        session: tidepool_repr::SessionId,
+        machine: ResidentSession<H, O>,
+        fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+        incarnation: crate::Incarnation,
+    ) -> (Self, mpsc::UnboundedReceiver<LocalResidentDeployment>) {
+        let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
+        machines.insert_idle(session, machine);
+        let runner = ResidentActorRunner::new(machines, source);
+        let (deployments, receiver) = mpsc::unbounded_channel();
+        let environment = ResidentEnvironment {
+            runner,
+            deployments,
+            retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            requests: Arc::new(RequestRegistry::default()),
+            fork_groups: crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default()),
+            actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            fork_workspaces,
+        };
+        (
+            Self {
+                environment,
+                directory: crate::LocalActorDirectory::default(),
+                session,
+                incarnation,
+            },
+            receiver,
+        )
+    }
+
+    /// Observe only actors the exact requester can inspect. This does not enter
+    /// an actor turn or wait for its Haskell workbench, so running work is visible.
+    pub fn inspect_graph(&self, requester: ActorRef) -> Option<Vec<ActorGraphNode>> {
+        if self
+            .directory
+            .resolve(requester)?
+            .terminal()
+            .get()
+            .is_some()
+        {
+            return None;
+        }
+        let records = self.environment.actors.lock();
+        if !records.contains_key(&requester) {
+            return None;
+        }
+        let mut nodes = records
+            .iter()
+            .filter(|(actor, _)| actor_can_access(requester, **actor, &records))
+            .map(|(actor, record)| {
+                let runtime = record.runtime_observation.snapshot();
+                let (active_requests, queued_requests) =
+                    self.environment.requests.work_for_target(*actor);
+                ActorGraphNode {
+                    actor: *actor,
+                    label: record.descriptor.label().to_owned(),
+                    supervisor_parent: record.descriptor.supervisor_parent(),
+                    context_parent: record.descriptor.context_parent(),
+                    terminal: record.terminal.clone().or_else(|| {
+                        self.directory
+                            .resolve(*actor)
+                            .and_then(|a| a.terminal().get())
+                    }),
+                    workbench: runtime.workbench_posture,
+                    provider_thread: runtime.provider_thread,
+                    provider_turn: runtime.provider_turn,
+                    provider_observation_stale: runtime.provider_observation_stale,
+                    bound_worktree: record.bound_worktree.clone(),
+                    active_requests,
+                    queued_requests,
+                }
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by_key(|node| (node.actor.id, node.actor.incarnation));
+        Some(nodes)
+    }
+
+    pub async fn new_program_root(
+        &self,
+        label: String,
+        role: crate::EffectiveRole,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+    ) -> Result<
+        (LocalActorRef, ractor::concurrency::JoinHandle<()>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let (placement, outcome) = self
+            .environment
+            .runner
+            .prepare_root_program(self.session, compiled)
+            .await?;
+        match self
+            .admit_root(
+                ActorDescriptor::new(label, placement).with_effective_role(role),
+                outcome,
+            )
+            .await
+        {
+            Ok(root) => Ok(root),
+            Err(error) => {
+                self.environment
+                    .runner
+                    .retire_root_placement(placement)
+                    .await?;
+                Err(Box::new(error))
+            }
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        let roots = self
+            .environment
+            .actors
+            .lock()
+            .iter()
+            .filter(|(_, record)| record.descriptor.supervisor_parent().is_none())
+            .filter_map(|(actor, _)| self.directory.resolve(*actor))
+            .collect::<Vec<_>>();
+        for root in roots {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                root.shutdown(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "forest host shutdown".into(),
+                }),
+            )
+            .await;
+            if !matches!(result, Ok(Ok(_))) {
+                root.address().kill();
+            }
+        }
+    }
+
+    /// Provision a host-authorized workbench without a provider attachment.
+    pub async fn new_workbench(
+        &self,
+        label: String,
+        role: crate::EffectiveRole,
+    ) -> Result<LocalActorRef, Box<dyn std::error::Error + Send + Sync>> {
+        let placement = self
+            .environment
+            .runner
+            .provision_root_scope(self.session)
+            .await?;
+        let descriptor = ActorDescriptor::new(label, placement).with_effective_role(role);
+        let mut behavior = ResidentKernelBehavior::with_boot(
+            descriptor,
+            self.environment.clone(),
+            ResidentBoot::Workbench,
+            Vec::new(),
+        );
+        behavior.forest_control = true;
+        match crate::local_actor::spawn_local_actor_in_directory(
+            None,
+            behavior,
+            self.incarnation,
+            self.directory.clone(),
+        )
+        .await
+        {
+            Ok((actor, _task)) => Ok(actor),
+            Err(error) => {
+                self.environment
+                    .runner
+                    .retire_root_placement(placement)
+                    .await?;
+                Err(Box::new(error))
+            }
+        }
+    }
+
+    /// Admit a prepared independent root. Its continuation and scopes must have
+    /// been prepared in this forest's machine, just as for a child entry.
+    pub async fn admit_root(
+        &self,
+        descriptor: ActorDescriptor,
+        outcome: ResidentOutcome,
+    ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
+        if descriptor.placement().session != self.session
+            || descriptor.supervisor_parent().is_some()
+            || descriptor.context_parent().is_some()
+        {
+            return Err(ractor::SpawnErr::StartupFailed(Box::new(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "forest root must be independent and belong to the forest machine",
+                ),
+            )));
+        }
+        let behavior =
+            ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+        crate::local_actor::spawn_local_actor_in_directory(
+            None,
+            behavior,
+            self.incarnation,
+            self.directory.clone(),
+        )
+        .await
+    }
 }
 
 fn completed_terminal() -> ActorTerminal {

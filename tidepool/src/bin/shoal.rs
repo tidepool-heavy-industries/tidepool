@@ -12,6 +12,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Provision, inspect, or retire operator workbenches in a running host.
+    Operator {
+        /// The running host's protected operator socket.
+        #[arg(long)]
+        socket: PathBuf,
+        #[command(subcommand)]
+        action: OperatorCommand,
+    },
     /// Initialize an empty Git repository for Shoal orchestration.
     New {
         /// Directory to initialize. Defaults to the current directory.
@@ -62,6 +70,13 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum OperatorCommand {
+    New,
+    List,
+    Stop { session: String },
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum Effort {
     Low,
@@ -82,6 +97,16 @@ impl From<Effort> for ShoalEffort {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::Operator { socket, action } => {
+            let action = match action {
+                OperatorCommand::New => tidepool::operator::OperatorAction::New,
+                OperatorCommand::List => tidepool::operator::OperatorAction::List,
+                OperatorCommand::Stop { session } => {
+                    tidepool::operator::OperatorAction::Stop { session }
+                }
+            };
+            tidepool::operator::command(&socket, action).await
+        }
         Command::New { path } => tidepool::shoal::new(tidepool::shoal::NewOptions { path }).await,
         Command::Init {
             workspace,

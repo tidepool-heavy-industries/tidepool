@@ -36,3 +36,5 @@ pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::Value;
 pub use tidepool_repr::{CoreExpr, DataConTable};
 pub use tidepool_runtime::{compile_and_run, compile_haskell, EvalResult, RuntimeError};
+
+pub mod operator;

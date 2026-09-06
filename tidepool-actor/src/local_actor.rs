@@ -70,8 +70,8 @@ pub struct KernelContext {
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
 /// owns runnable actors and mailboxes; each actor owns its terminal cell. The
 /// directory only resolves the identity carried by a live Haskell `ActorRef`
-/// to that pair of owners. Entries intentionally live for the root ownership
-/// tree's lifetime: an exited exact reference must remain resolvable so any
+/// to that pair of owners. Entries intentionally live for the routing
+/// domain's lifetime: an exited exact reference must remain resolvable so any
 /// number of late `wait` operations can observe its retained result.
 #[derive(Clone, Default)]
 pub struct LocalActorDirectory {
@@ -636,8 +636,22 @@ pub async fn spawn_local_actor_in_incarnation<B>(
 where
     B: KernelBehavior,
 {
+    spawn_local_actor_in_directory(name, behavior, incarnation, LocalActorDirectory::default())
+        .await
+}
+
+/// Admit an independent root to an existing routing domain. Ractor still owns
+/// supervision; sharing a directory does not make one root another's child.
+pub(crate) async fn spawn_local_actor_in_directory<B>(
+    name: Option<String>,
+    behavior: B,
+    incarnation: crate::Incarnation,
+    directory: LocalActorDirectory,
+) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr>
+where
+    B: KernelBehavior,
+{
     let terminal = RetainedActorExit::new();
-    let directory = LocalActorDirectory::default();
     let (address, task) = Actor::spawn(
         name,
         LocalActor::<B>(PhantomData),
@@ -1339,6 +1353,85 @@ mod tests {
             .expect("queue shutdown");
         shutdown_rx.await.expect("shutdown reply");
         task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn independent_roots_share_routing_but_not_supervision() {
+        let directory = LocalActorDirectory::default();
+        let first = behavior(false);
+        let second = behavior(false);
+        let (owner, owner_task) = spawn_local_actor_in_directory(
+            None,
+            first.behavior,
+            crate::Incarnation(41),
+            directory.clone(),
+        )
+        .await
+        .expect("first root");
+        let (sibling, sibling_task) = spawn_local_actor_in_directory(
+            None,
+            second.behavior,
+            crate::Incarnation(41),
+            directory.clone(),
+        )
+        .await
+        .expect("second root");
+        assert!(directory.resolve(owner.identity()).is_some());
+        assert!(directory.resolve(sibling.identity()).is_some());
+        assert!(directory
+            .resolve(crate::ActorRef {
+                incarnation: crate::Incarnation(42),
+                ..owner.identity()
+            })
+            .is_none());
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        owner
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("spawn"),
+                reply: spawn_tx.into(),
+            })
+            .expect("spawn child");
+        spawn_rx
+            .await
+            .expect("spawn response")
+            .expect("spawn result");
+        let child = first.spawned_child.lock().clone().expect("child");
+        assert!(directory.resolve(child.identity()).is_some());
+        owner
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "retire first tree".into(),
+            })
+            .await
+            .expect("retire first");
+        owner_task.await.expect("first task");
+        assert!(child.terminal().get().is_some());
+        assert!(sibling.terminal().get().is_none());
+        // Exact retired addresses retain their exits for late observers.
+        assert!(directory
+            .resolve(owner.identity())
+            .unwrap()
+            .terminal()
+            .get()
+            .is_some());
+        let (ping_tx, ping_rx) = oneshot::channel();
+        sibling
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("second"),
+                reply: ping_tx.into(),
+            })
+            .expect("sibling still callable");
+        assert_eq!(ping_rx.await.expect("sibling reply").unwrap(), "second");
+        sibling
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "retire sibling".into(),
+            })
+            .await
+            .expect("retire sibling");
+        sibling_task.await.expect("sibling task");
     }
 
     #[tokio::test]

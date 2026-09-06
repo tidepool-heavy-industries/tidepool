@@ -63,7 +63,8 @@ pub enum CacheBoundaryReason {
 /// This deliberately distinguishes running Haskell from waiting inside a
 /// named effect handler. It is an observation only; scheduler control remains
 /// in the actor and resident machine owners.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActorWorkbenchPosture {
     #[default]
     Idle,
@@ -82,7 +83,8 @@ pub enum ActorWorkbenchPosture {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActorWorkbenchTransfer {
     Reply,
     CancellationAcknowledgement,

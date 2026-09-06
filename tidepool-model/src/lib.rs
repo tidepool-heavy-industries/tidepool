@@ -214,7 +214,8 @@ pub struct ProviderUsageSummary {
 }
 
 /// Endpoints and authoritative aggregates of the provider's response history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "failure", rename_all = "snake_case")]
 pub enum ProviderTurnState {
     Active,
     Succeeded,
@@ -229,7 +230,7 @@ pub enum ProviderFailure {
     Other(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderTurnObservation {
     pub thread: String,
     pub turn: String,

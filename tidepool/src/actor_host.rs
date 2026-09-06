@@ -25,11 +25,11 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tidepool_actor::{
-    spawn_resident_root_in_incarnation, ActorDescriptor, ActorEffectProfile, ActorExitKind,
-    ActorPlacement, ActorRef, ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
-    ExternalApplicationFailureClass, ExternalFailureDisposition, ForkWorkspaceAdmission,
-    ForkWorkspaceAdmissionError, ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment,
-    LocalResidentInstallation, ResidentActorRoot,
+    ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal,
+    ActorWorkbenchSource, ExternalApplicationFailure, ExternalApplicationFailureClass,
+    ExternalFailureDisposition, ForkWorkspaceAdmission, ForkWorkspaceAdmissionError,
+    ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
+    ResidentActorRoot, ResidentForest,
 };
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
@@ -37,7 +37,6 @@ use tidepool_agent::{
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
     QueueReadyThread, ReasoningEffort,
 };
-use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
     ActorBoundWorktreeHandler, ActorWorktreeAllocationHandler, ActorWorktreeAuthority,
@@ -501,7 +500,7 @@ enum InteractiveFailureDomain {
         actor: ActorRef,
         failure: ExternalApplicationFailure,
     },
-    FleetFatal {
+    RootRestartRequired {
         detail: String,
     },
 }
@@ -512,7 +511,7 @@ fn classify_application_failure(
     failure: ExternalApplicationFailure,
 ) -> InteractiveFailureDomain {
     if actor == root {
-        InteractiveFailureDomain::FleetFatal {
+        InteractiveFailureDomain::RootRestartRequired {
             detail: format!("root {root:?}: {}", failure.detail),
         }
     } else {
@@ -527,7 +526,14 @@ async fn apply_application_failure(
 ) -> Result<(), String> {
     let identity = actor.identity();
     match classify_application_failure(root, identity, failure) {
-        InteractiveFailureDomain::FleetFatal { detail } => Err(detail),
+        InteractiveFailureDomain::RootRestartRequired { detail } => actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Failed,
+                summary: detail,
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
         InteractiveFailureDomain::ActorDegraded {
             actor: classified,
             failure,
@@ -606,139 +612,122 @@ pub async fn run(
         )));
     }
     let backend = native_interactive_backend(config.interactive_agent.clone());
-    let mut recovery = 0_u64;
-
-    loop {
-        let session_root = if recovery == 0 {
-            run_root.clone()
-        } else {
-            run_root.join(format!("root-recovery-{recovery}"))
-        };
-        let (source, root) = compile_root(
-            &config,
-            &session_root,
+    let (source, root, program) = compile_root(
+        &config,
+        &run_root,
+        worktrees.clone(),
+        worktree_authority.clone(),
+    )?;
+    let (descriptor, machine, outcome) = root.into_parts();
+    let (forest, deployments) = ResidentForest::new(
+        source,
+        descriptor.placement().session,
+        machine,
+        Some(fork_workspace_admission(
             worktrees.clone(),
             worktree_authority.clone(),
-        )?;
-        let fork_workspaces =
-            fork_workspace_admission(worktrees.clone(), worktree_authority.clone());
-        let (root_actor, mut root_task, deployments) = spawn_resident_root_in_incarnation(
-            source,
-            root,
-            Some(fork_workspaces),
-            host_incarnation.incarnation(),
-        )
-        .await?;
-        worktree_authority.install_root(root_actor.identity().into());
-
-        let (shutdown, shutdown_rx) = watch::channel(false);
-        let mut applications_task = tokio::spawn(run_interactive_applications(
-            deployments,
-            InteractiveFleet {
-                root: root_actor.clone(),
-                config: config.clone(),
-                run_root: run_root.clone(),
-                tmux: tmux.clone(),
-                backend: Arc::clone(&backend),
-                worktrees: worktrees.clone(),
-                bindings: Arc::clone(&bindings),
-                readiness: readiness.clone(),
-                worktree_authority: worktree_authority.clone(),
-            },
-            shutdown_rx,
-        ));
-
-        enum FirstStop {
-            Signal,
-            Root,
-            Applications(Result<(), String>),
+        )),
+        host_incarnation.incarnation(),
+    );
+    let forest = Arc::new(forest);
+    let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
+    worktree_authority.install_root(root_actor.identity().into());
+    let provision_forest = forest.clone();
+    let provision_authority = worktree_authority.clone();
+    let operator_role =
+        tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy);
+    let operator_socket = run_root.join("operator").join("operator.sock");
+    if operator_socket.exists() {
+        std::fs::remove_file(&operator_socket)?;
+    }
+    let inspection_forest = forest.clone();
+    let operator = crate::operator::OperatorService::bind(
+        operator_socket.clone(),
+        Arc::new(move || {
+            let forest = provision_forest.clone();
+            let role = operator_role.clone();
+            let authority = provision_authority.clone();
+            Box::pin(async move {
+                let grant = worktree_grant(role.role());
+                let actor = forest
+                    .new_workbench("operator".into(), role)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                authority.install_grant(actor.identity().into(), grant);
+                Ok(actor)
+            })
+        }),
+        Arc::new(move |requester| inspection_forest.inspect_graph(requester)),
+    )
+    .await;
+    let operator = match operator {
+        Ok(operator) => operator,
+        Err(error) => {
+            forest.shutdown().await;
+            return Err(Box::new(error));
         }
-        let first = tokio::select! {
-            signal = operator_shutdown() => {
-                signal?;
-                FirstStop::Signal
-            }
-            result = &mut root_task => {
-                result.map_err(join_error)?;
-                FirstStop::Root
-            },
-            result = &mut applications_task => FirstStop::Applications(result.map_err(join_error)?),
-        };
-        shutdown.send_replace(true);
-
-        match first {
-            FirstStop::Signal => {
-                shutdown_root(
-                    &root_actor,
-                    &mut root_task,
-                    ActorTerminal {
-                        kind: ActorExitKind::Cancelled,
-                        summary: "Shoal operator requested shutdown".into(),
-                    },
-                )
-                .await?;
-                await_applications(&mut applications_task).await?;
-                return Ok(());
-            }
-            FirstStop::Root => {
-                await_applications(&mut applications_task).await?;
-                let terminal = root_actor.terminal().get().ok_or_else(|| {
-                    runtime_error("Shoal root stopped without publishing a terminal result")
-                })?;
-                if matches!(
-                    prepare_root_recovery(
-                        &mut config,
-                        root_actor.identity(),
-                        terminal,
-                        &mut recovery,
-                    )
-                    .await?,
-                    RootRunDisposition::Complete
-                ) {
-                    return Ok(());
+    };
+    tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let (root_config, root_config_rx) = watch::channel(config.clone());
+    let mut applications_task = tokio::spawn(run_interactive_applications(
+        deployments,
+        InteractiveFleet {
+            root: root_actor.clone(),
+            config: config.clone(),
+            run_root: run_root.clone(),
+            tmux,
+            backend,
+            worktrees,
+            bindings,
+            readiness,
+            worktree_authority: worktree_authority.clone(),
+        },
+        shutdown_rx,
+        root_config_rx,
+    ));
+    let mut recovery = 0_u64;
+    let mut applications_finished = false;
+    let mut root_active = true;
+    let result: Result<(), Box<dyn std::error::Error>> = async {
+        loop {
+            tokio::select! {
+                signal = operator_shutdown() => { signal?; break Ok(()); }
+                result = &mut applications_task => {
+                    applications_finished = true;
+                    break result.map_err(join_error)?.map_err(runtime_error);
                 }
-            }
-            FirstStop::Applications(result) => {
-                let terminal = root_actor.terminal().get();
-                let application_error = result.err().map(runtime_error);
-                let shutdown_result = shutdown_root(
-                    &root_actor,
-                    &mut root_task,
-                    ActorTerminal {
-                        kind: ActorExitKind::Failed,
-                        summary: "Shoal interactive application fleet stopped".into(),
-                    },
-                )
-                .await;
-                match (application_error, shutdown_result) {
-                    (Some(error), Ok(())) => return Err(error),
-                    (Some(error), Err(shutdown)) => {
-                        return Err(runtime_error(format!("{error}; cleanup: {shutdown}")))
-                    }
-                    (None, Err(error)) => return Err(error),
-                    (None, Ok(())) => {
-                        let terminal = terminal.ok_or_else(|| {
-                            runtime_error(
-                                "Shoal interactive application fleet stopped while the root was live",
-                            )
-                        })?;
-                        if matches!(
-                            prepare_root_recovery(
-                                &mut config,
-                                root_actor.identity(),
-                                terminal,
-                                &mut recovery,
-                            )
-                            .await?,
-                            RootRunDisposition::Complete
-                        ) {
-                            return Ok(());
+                result = &mut root_task, if root_active => {
+                    result.map_err(join_error)?;
+                    let terminal = root_actor.terminal().get().ok_or_else(|| runtime_error("root stopped without terminal"))?;
+                    match prepare_root_recovery(&mut config, root_actor.identity(), terminal, &mut recovery).await {
+                        Ok(RootRunDisposition::Recover) => {}
+                        Ok(RootRunDisposition::Complete) => {
+                            root_active = false;
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "model root recovery unavailable; operator forest remains attached");
+                            root_active = false;
+                            continue;
                         }
                     }
+                    root_config.send_replace(config.clone());
+                    (root_actor, root_task) = forest.new_program_root("shoal-root".into(),
+                        tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy), program.clone())
+                        .await.map_err(|e| runtime_error(e.to_string()))?;
+                    worktree_authority.install_root(root_actor.identity().into());
                 }
             }
         }
+    }.await;
+    operator.shutdown().await;
+    forest.shutdown().await;
+    shutdown.send_replace(true);
+    if !applications_finished {
+        await_applications(&mut applications_task).await?;
     }
+    result
 }
 
 /// Classify an intentional completion or prepare an abnormal root for a fresh
@@ -785,40 +774,6 @@ async fn root_recovery_launch_mode(
         InteractiveLaunchMode::Resume(thread.id().clone()),
         thread,
     )))
-}
-
-async fn shutdown_root(
-    root: &LocalActorRef,
-    task: &mut tokio::task::JoinHandle<()>,
-    terminal: ActorTerminal,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, root.shutdown(terminal)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(
-                actor = ?root.identity(),
-                %error,
-                "Shoal root shutdown failed; killing the exact actor"
-            );
-            root.address().kill();
-        }
-        Err(_) => {
-            tracing::warn!(
-                actor = ?root.identity(),
-                "Shoal root did not acknowledge shutdown; killing the exact actor"
-            );
-            root.address().kill();
-        }
-    }
-    match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, &mut *task).await {
-        Ok(result) => result.map_err(join_error),
-        Err(_) => {
-            task.abort();
-            Err(runtime_error(format!(
-                "Shoal root did not stop within {APPLICATION_SHUTDOWN_TIMEOUT:?}"
-            )))
-        }
-    }
 }
 
 async fn await_applications(
@@ -874,13 +829,8 @@ fn runtime_namespace(run_root: &Path) -> String {
         .to_owned()
 }
 
-fn compile_root(
-    config: &ActorHostConfig,
-    run_root: &Path,
-    worktrees: WorktreeManager,
-    worktree_authority: ActorWorktreeAuthority,
-) -> Result<(ActorWorkbenchSource, ShoalRoot), Box<dyn std::error::Error>> {
-    let declarations = [
+pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
+    vec![
         tidepool_mcp::agent_session_decl(),
         tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
@@ -897,7 +847,23 @@ fn compile_root(
         tidepool_mcp::worktree_registry_decl(),
         tidepool_mcp::worktree_allocation_decl(),
         tidepool_mcp::worktree_integration_decl(),
-    ];
+    ]
+}
+
+fn compile_root(
+    config: &ActorHostConfig,
+    run_root: &Path,
+    worktrees: WorktreeManager,
+    worktree_authority: ActorWorktreeAuthority,
+) -> Result<
+    (
+        ActorWorkbenchSource,
+        ShoalRoot,
+        Arc<tidepool_runtime::session::CompiledTurn>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let declarations = shoal_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
     include.push(config.haskell_root.clone());
@@ -977,6 +943,16 @@ fn compile_root(
         EffectRunPolicy::HandleOrSuspend,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
+    let lexical_scope = machine.mint_isolated_scope();
+    machine.set_actor_execution(
+        tidepool_runtime::session::SessionRunContext {
+            lexical_scope,
+            resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
+            ..tidepool_runtime::session::SessionRunContext::ROOT
+        },
+        EffectRunPolicy::HandleOrSuspend,
+        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    )?;
     let outcome = machine.run_with_sites(
         "shoal_root_driver",
         &compiled.expr,
@@ -998,7 +974,7 @@ fn compile_root(
         ActorPlacement {
             session,
             resource_scope,
-            lexical_scope: ScopeId::ROOT,
+            lexical_scope,
         },
     )
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
@@ -1012,6 +988,7 @@ fn compile_root(
             .with_default_browse_module(WORKBENCH_SURFACE_MODULE)
             .with_default_quasiquoters(),
         ResidentActorRoot::new(descriptor, machine, outcome),
+        Arc::new(compiled),
     ))
 }
 
@@ -1046,6 +1023,7 @@ async fn run_interactive_applications(
     mut lifecycle: mpsc::UnboundedReceiver<LocalResidentDeployment>,
     fleet: InteractiveFleet,
     shutdown: watch::Receiver<bool>,
+    mut root_config: watch::Receiver<ActorHostConfig>,
 ) -> Result<(), String> {
     let InteractiveFleet {
         root,
@@ -1058,8 +1036,8 @@ async fn run_interactive_applications(
         readiness,
         worktree_authority,
     } = fleet;
-    let root_identity = root.identity();
-    let launch_context = InteractiveLaunchContext {
+    let mut root_identity = root.identity();
+    let mut launch_context = InteractiveLaunchContext {
         root: root_identity,
         config,
         run_root,
@@ -1079,6 +1057,9 @@ async fn run_interactive_applications(
         tokio::select! {
             biased;
             _ = wait_for_shutdown(shutdown.clone()) => break None,
+            changed = root_config.changed() => {
+                if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
+            }
             _ = health.tick() => {
                 for index in 0..deployments.len() {
                     let deployment = &deployments[index];
@@ -1137,6 +1118,10 @@ async fn run_interactive_applications(
                 let Some(event) = event else { break None };
                 match event {
                     LocalResidentDeployment::PolicyInstalled(installation) => {
+                        if installation.supervisor_parent.is_none() {
+                            root_identity = installation.actor.identity();
+                            launch_context.root = root_identity;
+                        }
                         worktree_authority.install_grant(
                             installation.actor.identity().into(),
                             worktree_grant(installation.effective_role.role()),
@@ -2723,6 +2708,131 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn forest_operator_survives_model_root_recovery() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let operator = campaign
+            .forest
+            .new_workbench("operator".into(), tidepool_actor::EffectiveRole::root())
+            .await
+            .unwrap();
+        assert_eq!(
+            campaign
+                .forest
+                .inspect_graph(campaign.actor.identity())
+                .unwrap()
+                .len(),
+            1,
+            "ordinary roots cannot inspect other trees"
+        );
+        assert_eq!(
+            campaign
+                .forest
+                .inspect_graph(operator.identity())
+                .unwrap()
+                .len(),
+            2
+        );
+        async fn submit(
+            actor: &LocalActorRef,
+            source: &str,
+        ) -> tidepool_runtime::session::WorkbenchResponse {
+            let (reply, receive) = tokio::sync::oneshot::channel();
+            actor
+                .address()
+                .send_message(tidepool_actor::KernelMessage::Workbench {
+                    request: tidepool_runtime::session::WorkbenchRequest::from_ghci_input(source)
+                        .unwrap(),
+                    reply: reply.into(),
+                })
+                .unwrap();
+            receive.await.unwrap().unwrap()
+        }
+        let bound = submit(&operator, "let retainedOperatorValue = 123").await;
+        assert_eq!(
+            bound.status,
+            tidepool_runtime::session::WorkbenchRunStatus::Committed
+        );
+        let requested = submit(&operator, include_str!("actor_host/operator_request.hs")).await;
+        assert_eq!(
+            requested.status,
+            tidepool_runtime::session::WorkbenchRunStatus::Committed,
+            "{requested:?}"
+        );
+        let mut deployments = campaign.deployments;
+        let child = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(LocalResidentDeployment::PolicyInstalled(child)) =
+                    deployments.recv().await
+                {
+                    break child;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(child.supervisor_parent, Some(operator.identity()));
+        assert_eq!(child.context_parent, None);
+        assert_eq!(
+            campaign
+                .forest
+                .inspect_graph(child.actor.identity())
+                .unwrap()
+                .len(),
+            1,
+            "operator forest grant must not propagate to descendants"
+        );
+        let replied =
+            dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput + 1 :: Int)")
+                .await;
+        assert_eq!(replied["status"], "replied", "{replied:?}");
+        let response = submit(&operator, "pollResponse answer").await;
+        assert!(
+            response.items.iter().any(|item| item.output.contains("42")),
+            "{response:?}"
+        );
+        campaign
+            .actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Failed,
+                summary: "recovery test".into(),
+            })
+            .await
+            .unwrap();
+        campaign.hosted.await.unwrap();
+        let (replacement, task) = campaign
+            .forest
+            .new_program_root(
+                "replacement".into(),
+                tidepool_actor::EffectiveRole::root(),
+                campaign.program.clone(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(replacement.identity(), campaign.actor.identity());
+        assert_eq!(
+            submit(&operator, "retainedOperatorValue").await.items[0].output,
+            "123"
+        );
+        assert_eq!(
+            campaign
+                .forest
+                .inspect_graph(replacement.identity())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(campaign
+            .forest
+            .inspect_graph(operator.identity())
+            .unwrap()
+            .iter()
+            .any(|node| node.actor == replacement.identity()));
+        campaign.forest.shutdown().await;
+        task.await.unwrap();
+        assert!(operator.terminal().get().is_some());
+    }
+
+    #[tokio::test]
     async fn progress_retains_closures_and_watch_snapshots_across_calls() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();
@@ -3575,7 +3685,7 @@ mod tests {
         ));
         assert!(matches!(
             classify_application_failure(root, root, failure()),
-            InteractiveFailureDomain::FleetFatal { .. }
+            InteractiveFailureDomain::RootRestartRequired { .. }
         ));
     }
 
@@ -3637,6 +3747,7 @@ mod tests {
             hosted,
             mut deployments,
             root_installation,
+            ..
         } = test_campaign::TestCampaign::start().await;
 
         let ergonomics = dispatch_haskell_script(

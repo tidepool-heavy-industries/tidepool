@@ -1178,7 +1178,34 @@ where
     where
         ResultValue: Send + 'static,
     {
-        let session_id = context.placement.session;
+        self.with_host_machine(
+            context.placement.session,
+            max_wait,
+            move |session, source| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                operation(session, &context, source)
+            },
+        )
+        .await
+    }
+
+    async fn with_host_machine<T: Send + 'static>(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        max_wait: Option<Duration>,
+        operation: impl FnOnce(
+                &mut ResidentSession<H, O>,
+                &ActorWorkbenchSource,
+            ) -> Result<T, ResidentActorWorkbenchError>
+            + Send
+            + 'static,
+    ) -> Result<T, ResidentActorWorkbenchError> {
         let request = tidepool_runtime::session::registry::CheckoutRequest::Run;
         let admission_started = std::time::Instant::now();
         let checkout = match max_wait {
@@ -1190,7 +1217,7 @@ where
             None => self.machines.checkout_queued(session_id, request).await,
         }
         .map_err(ResidentActorWorkbenchError::Checkout)?;
-        tracing::debug!(actor = ?context.actor, session = ?session_id,
+        tracing::debug!(session = ?session_id,
             waited_ms = admission_started.elapsed().as_millis(),
             "resident machine checkout admitted");
         let (mut session, receipt) = checkout.into_parts();
@@ -1203,22 +1230,7 @@ where
             // cancelled while this closure is running; settlement must not
             // depend on that caller continuing to poll the JoinHandle.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                tracing::debug!(
-                    actor_id = context.actor.id.0,
-                    incarnation = context.actor.incarnation.0,
-                    session = ?context.placement.session,
-                    resource_scope = ?context.placement.resource_scope,
-                    lexical_scope = ?context.placement.lexical_scope,
-                    "entering resident actor machine"
-                );
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
-                operation(&mut session, &context, &source)
+                operation(&mut session, &source)
             }));
             match outcome {
                 Ok(outcome) => {
@@ -3336,6 +3348,81 @@ where
                     .rehome_custody(custody, owner)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 Ok(crate::MailboxValue::new(session_id, custody))
+            })
+            .await
+    }
+
+    pub(crate) async fn prepare_root_program(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+    ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
+        self.access
+            .with_host_machine(session_id, None, move |session, _| {
+                let placement = crate::ActorPlacement {
+                    session: session_id,
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: session.mint_isolated_scope(),
+                };
+                let prepared = (|| {
+                    session
+                        .set_actor_execution(
+                            tidepool_runtime::session::SessionRunContext {
+                                resource_scope: placement.resource_scope,
+                                lexical_scope: placement.lexical_scope,
+                                ..tidepool_runtime::session::SessionRunContext::ROOT
+                            },
+                            tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                        )
+                        .map_err(ResidentActorWorkbenchError::Resident)?;
+                    let outcome = session
+                        .run_with_sites(
+                            "forest-root",
+                            &compiled.expr,
+                            &compiled.table,
+                            &compiled.asks,
+                        )
+                        .map_err(ResidentActorWorkbenchError::Resident)?;
+                    Ok::<_, ResidentActorWorkbenchError>(outcome)
+                })();
+                let outcome = match prepared {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        session.close_realm(placement.resource_scope);
+                        session.retire_scope(placement.lexical_scope);
+                        return Err(error);
+                    }
+                };
+                Ok((placement, outcome))
+            })
+            .await
+    }
+
+    pub(crate) async fn retire_root_placement(
+        &self,
+        placement: crate::ActorPlacement,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_host_machine(placement.session, None, move |session, _| {
+                session.close_realm(placement.resource_scope);
+                session.retire_scope(placement.lexical_scope);
+                Ok(())
+            })
+            .await
+    }
+
+    pub(crate) async fn provision_root_scope(
+        &self,
+        session_id: tidepool_repr::SessionId,
+    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
+        self.access
+            .with_host_machine(session_id, None, move |session, _| {
+                Ok(crate::ActorPlacement {
+                    session: session_id,
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: session.mint_isolated_scope(),
+                })
             })
             .await
     }
