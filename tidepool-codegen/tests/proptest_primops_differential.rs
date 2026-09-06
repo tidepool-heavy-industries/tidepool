@@ -1306,3 +1306,58 @@ fn cfg_float() -> Config {
     c.source_file = Some(file!());
     c
 }
+
+#[test]
+#[serial]
+fn classification_backends_ieee_edges() {
+    for magnitude in [
+        0, 1, 0x3f800000, 0x007fffff, 0x00800000, 0x7f7fffff, 0x7f800000, 0x7f800001, 0x7fc00001,
+    ] {
+        for sign in [0, u32::MAX ^ (u32::MAX >> 1)] {
+            let bits = magnitude | sign;
+            let x = f32::from_bits(bits);
+            for (op, expected) in [
+                (PrimOpKind::FfiIsFloatNaN, x.is_nan()),
+                (PrimOpKind::FfiIsFloatInfinite, x.is_infinite()),
+                (
+                    PrimOpKind::FfiIsFloatNegativeZero,
+                    x == 0.0 && x.is_sign_negative(),
+                ),
+            ] {
+                let (ev, jit) = run_one(op, vec![Literal::LitFloat(bits as u64)]);
+                let expected = format!("Ok(Lit(LitInt({})))", i64::from(expected));
+                assert_eq!(ev, expected, "{op:?} {bits:x}");
+                assert_eq!(jit, expected, "{op:?} {bits:x}");
+            }
+        }
+    }
+    for magnitude in [
+        0,
+        1,
+        0x3ff0000000000000,
+        0x000fffffffffffff,
+        0x0010000000000000,
+        0x7fefffffffffffff,
+        0x7ff0000000000000,
+        0x7ff0000000000001,
+        0x7ff8000000000001,
+    ] {
+        for sign in [0, u64::MAX ^ (u64::MAX >> 1)] {
+            let bits = magnitude | sign;
+            let x = f64::from_bits(bits);
+            for (op, expected) in [
+                (PrimOpKind::FfiIsDoubleNaN, x.is_nan()),
+                (PrimOpKind::FfiIsDoubleInfinite, x.is_infinite()),
+                (
+                    PrimOpKind::FfiIsDoubleNegativeZero,
+                    x == 0.0 && x.is_sign_negative(),
+                ),
+            ] {
+                let (ev, jit) = run_one(op, vec![Literal::LitDouble(bits as u64)]);
+                let expected = format!("Ok(Lit(LitInt({})))", i64::from(expected));
+                assert_eq!(ev, expected, "{op:?} {bits:x}");
+                assert_eq!(jit, expected, "{op:?} {bits:x}");
+            }
+        }
+    }
+}
