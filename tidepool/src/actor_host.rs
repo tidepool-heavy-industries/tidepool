@@ -1648,20 +1648,26 @@ async fn run_interactive_applications(
     for (_, pending) in pending_launches.drain() {
         let _ = pending.cancel.send(());
     }
-    let launch_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
-        let mut completed = Vec::new();
-        while let Some(result) = launches.join_next().await {
-            if let Ok((_actor, Ok(Some(launched)))) = result {
-                completed.push(launched.deployment);
-            }
-        }
-        completed
-    })
-    .await;
-    match launch_cleanup {
-        Ok(completed) => deployments.extend(completed),
-        Err(_) => launches.abort_all(),
-    }
+    let launch_cleanup =
+        drain_launches_for_shutdown(&mut launches, APPLICATION_SHUTDOWN_TIMEOUT).await;
+    deployments.extend(
+        launch_cleanup
+            .completed
+            .into_iter()
+            .map(|launched| launched.deployment),
+    );
+    let launch_failure = if launch_cleanup.failures.is_empty() {
+        None
+    } else {
+        Some(
+            launch_cleanup
+                .failures
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    };
     binding_discoveries.abort_all();
     while binding_discoveries.join_next().await.is_some() {}
     for deployment in deployments {
@@ -1703,16 +1709,82 @@ async fn run_interactive_applications(
     })
     .await
     .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
-    let cleanup_failure = match (notification_cleanup, cleanup_failure) {
-        (Some(notification), Some(retirement)) => Some(format!("{notification}; {retirement}")),
-        (Some(error), None) | (None, Some(error)) => Some(error),
-        (None, None) => None,
+    let cleanup_failures = [launch_failure, notification_cleanup, cleanup_failure]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let cleanup_failure = if cleanup_failures.is_empty() {
+        None
+    } else {
+        Some(cleanup_failures.join("; "))
     };
     match (failure, cleanup_failure) {
         (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
         (Some(error), None) | (None, Some(error)) => Err(error),
         (None, None) => Ok(()),
     }
+}
+
+struct LaunchShutdown<T> {
+    completed: Vec<T>,
+    failures: Vec<LaunchShutdownFailure>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LaunchShutdownFailure {
+    #[error("interactive launch cleanup failed: {0}")]
+    Launch(InteractiveApplicationError),
+    #[error("interactive launch join failed; cleanup unconfirmed: {0}")]
+    Join(tokio::task::JoinError),
+    #[error("interactive launch cleanup timed out with {pending} unsettled tasks; abort requested, cleanup unconfirmed")]
+    TimedOut { pending: usize },
+}
+
+impl<T> LaunchShutdown<T> {
+    fn record<A>(
+        &mut self,
+        result: Result<(A, Result<Option<T>, InteractiveApplicationError>), tokio::task::JoinError>,
+    ) {
+        match result {
+            Ok((_, Ok(Some(completed)))) => self.completed.push(completed),
+            Ok((_, Ok(None))) => {}
+            Ok((_, Err(error))) => self.failures.push(LaunchShutdownFailure::Launch(error)),
+            Err(error) => self.failures.push(LaunchShutdownFailure::Join(error)),
+        }
+    }
+}
+
+/// Keep observed completed deployments outside timeout-owned futures so they can
+/// still be retired if a later launch fails or cannot finish. Aborting a task is
+/// not proof that its process, hosted work or resource cleanup completed.
+async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
+    launches: &mut JoinSet<(A, Result<Option<T>, InteractiveApplicationError>)>,
+    grace: Duration,
+) -> LaunchShutdown<T> {
+    let mut outcome = LaunchShutdown {
+        completed: Vec::new(),
+        failures: Vec::new(),
+    };
+    let deadline = tokio::time::Instant::now() + grace;
+    while !launches.is_empty() {
+        match tokio::time::timeout_at(deadline, launches.join_next()).await {
+            Ok(Some(result)) => outcome.record(result),
+            Ok(None) => break,
+            Err(_) => {
+                outcome.failures.push(LaunchShutdownFailure::TimedOut {
+                    pending: launches.len(),
+                });
+                launches.abort_all();
+                // Preserve results already ready at the cutoff. Do not wait
+                // indefinitely for cancellation or label it cleanup success.
+                while let Some(result) = launches.try_join_next() {
+                    outcome.record(result);
+                }
+                break;
+            }
+        }
+    }
+    outcome
 }
 
 async fn launch_interactive_application(
@@ -3945,6 +4017,94 @@ mod tests {
         ) -> InteractiveFuture<'a, ()> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn launch_shutdown_preserves_socket_error_and_completed_results() {
+        let root = tempfile::tempdir().unwrap();
+        let actor = ActorRef::first(tidepool_actor::ActorId(80));
+        let successful_path = root.path().join("successful");
+        let failed_path = root.path().join("failed");
+        let mut successful = SocketDirectory::create(successful_path.clone()).unwrap();
+        successful.work_may_exist();
+        let mut failed = SocketDirectory::create(failed_path.clone()).unwrap();
+        failed.work_may_exist();
+        let error = socket_launch_failure(
+            actor,
+            InteractiveOperation::LaunchProcess,
+            "launch cancelled after hosted work submission",
+            failed,
+        );
+        let mut launches = JoinSet::new();
+        launches.spawn(async move { ((), Ok(Some(successful))) });
+        launches.spawn(async move { ((), Err(error)) });
+        launches.spawn(async { ((), Ok(None)) });
+        let outcome = drain_launches_for_shutdown(&mut launches, Duration::from_secs(1)).await;
+        assert_eq!(outcome.completed.len(), 1);
+        assert_eq!(outcome.completed[0].path(), successful_path);
+        assert!(
+            matches!(outcome.failures.as_slice(), [LaunchShutdownFailure::Launch(error)]
+            if error.actor == actor && error.detail.contains("socket cleanup failed:") && error.detail.contains("unconfirmed"))
+        );
+        assert!(failed_path.exists());
+        assert!(launches.is_empty());
+        // This is the same value the production caller transfers into retirement.
+        assert!(matches!(
+            socket_cleanup_outcome(outcome.completed.into_iter().next().unwrap()),
+            CleanupComponentOutcome::Failed { .. }
+        ));
+        assert!(successful_path.exists());
+    }
+
+    #[tokio::test]
+    async fn launch_shutdown_retains_join_failure_without_a_deployment() {
+        let mut launches: JoinSet<((), Result<Option<()>, InteractiveApplicationError>)> =
+            JoinSet::new();
+        launches.spawn(async { panic!("launch task panicked before result") });
+        let outcome = drain_launches_for_shutdown(&mut launches, Duration::from_secs(1)).await;
+        assert!(outcome.completed.is_empty());
+        assert!(
+            matches!(outcome.failures.as_slice(), [LaunchShutdownFailure::Join(error)] if error.is_panic())
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_shutdown_timeout_preserves_partial_success_and_reports_uncertain_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let ready_path = root.path().join("ready");
+        let pending_path = root.path().join("pending");
+        let mut ready = SocketDirectory::create(ready_path.clone()).unwrap();
+        ready.work_may_exist();
+        let mut pending = SocketDirectory::create(pending_path.clone()).unwrap();
+        pending.work_may_exist();
+        let mut launches = JoinSet::new();
+        launches.spawn(async move { ((), Ok(Some(ready))) });
+        launches.spawn(async move {
+            let _retained = pending;
+            std::future::pending::<(
+                (),
+                Result<Option<SocketDirectory>, InteractiveApplicationError>,
+            )>()
+            .await
+        });
+        let outcome = drain_launches_for_shutdown(&mut launches, Duration::from_millis(100)).await;
+        assert_eq!(outcome.completed.len(), 1);
+        assert_eq!(outcome.completed[0].path(), ready_path);
+        assert!(outcome
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, LaunchShutdownFailure::TimedOut { pending: 1 })));
+        // Confirm the test task stops, without upgrading the recorded uncertainty.
+        while !launches.is_empty() {
+            let result = tokio::time::timeout(Duration::from_secs(1), launches.join_next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.unwrap_err().is_cancelled());
+        }
+        assert!(pending_path.exists());
+        assert!(ready_path.exists());
+        assert!(!outcome.failures.is_empty());
     }
 
     #[tokio::test]
