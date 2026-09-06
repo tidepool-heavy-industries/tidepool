@@ -107,3 +107,46 @@ without rediscovery (reviewer report); root also observed that build/setup laten
 can dominate even when coordination is fluent. Seek small reliable primitives
 and enough guidance to compose them, not a bespoke bulk API or larger default
 prompt for every workflow. Claimed token savings still require measurement.
+
+## Consumer-repair fold: root-side efficiency corrections
+
+Direct root observation: expanding the full repeated-path WaveDelivery followed
+by a multi-file production diff exceeded the available display/context budget.
+The data was retained, so the corrective workflow is projection-first: candidate,
+blockers, outcome/revision/basis summaries, then selected evidence and bounded
+per-owner diffs. This turn used the retained settlement with a small fmap/case
+projection rather than inventing a summary registry. One attempted filtered
+`:bindings durabilityConsumers` was rejected: :bindings has no argument filter.
+The already-known handle was usable without any inventory; the attempted discovery
+was unnecessary. Do not add a startup discovery ritual to compensate.
+
+Attributed consumer lead/reviewer observation: this follow-up needed no Haskell
+API discovery or permission recovery. Tuple admission and mapped evidence kept
+bookkeeping bounded. Early short native-build polling was avoidable; retain a
+session and use longer waits. No token/cost delta was measured.
+
+Service progress has required more than thirty root wake turns. Progress is
+already coalescing, but each published intermediate step can still wake a fast
+root: leads should batch local bookkeeping and publish when integration decisions,
+blockers, review gates or independently useful candidates change. This is a
+prompt/workflow improvement, not justification for another event registry.
+Before the next wave, tighten the owning shared instructions to make projection-
+first folding and decision-bearing progress the default; validate against existing
+prompt tests. Do not expand the permanent guide into a campaign framework.
+
+## Scoped-custody review: bounded acceptance is not product acceptance
+
+Root inspected candidate 5c3f2376 and review92ad42d0 after service progress38.
+The reviewer explicitly approved no-settle staging while documenting that Drop
+forgets the entire allocation and that no production launch consumes the owner.
+Service correctly rejected this as service-ownership acceptance and retained the
+implementer for repair around existing deployment retention. This is not a hidden
+test failure: the local permitted holes were wider than the product's acceptance
+conditions. Passing focused tests cannot close that gap.
+
+Next-wave scaffold improvement: when permitting an incomplete cleanup capability,
+name its production integration/recovery owner and acceptance gate before forking.
+A useful type-level impossibility (uninhabited quiescence proof) must not make an
+unaddressable leak look like completed retention. Fresh review exposed the limit;
+coordinator product judgment prevented premature integration. This demonstrates
+value in the tree, but also rework/critical-path cost to reduce, not a latency win.
