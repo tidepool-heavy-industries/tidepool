@@ -6,13 +6,14 @@ use super::*;
 use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
 fn example(document: &str) -> &str {
+    examples(document).next().unwrap()
+}
+
+fn examples(document: &str) -> impl Iterator<Item = &str> {
     document
-        .split_once("```haskell\n")
-        .unwrap()
-        .1
-        .split_once("```")
-        .unwrap()
-        .0
+        .split("```haskell\n")
+        .skip(1)
+        .map(|block| block.split_once("```").unwrap().0)
 }
 
 /// Check the reference signatures from the published guide itself, without
@@ -144,13 +145,14 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let guide = include_str!("../../../prompts/shoal/api-guide.md");
+    let mut guide_examples = examples(guide);
     let signatures = committed(root.as_ref(), &guide_signature_query(guide)).await;
     // Diagnostic errors do not reject a whole tool block; inspect the unit too.
     assert_eq!(
         signatures["items"][0]["status"], "committed",
         "{signatures}"
     );
-    committed(root.as_ref(), example(guide)).await;
+    committed(root.as_ref(), guide_examples.next().unwrap()).await;
     let mut binding = None;
     let child = tokio::time::timeout(Duration::from_secs(120), async {
         let mut child = None;
@@ -176,11 +178,8 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
-    let success = committed(
-        root.as_ref(),
-        "state <- pollWatch ready\ninspectFull (fmap reportOnly state)",
-    )
-    .await;
+    let success = committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    assert!(guide_examples.next().is_none(), "untested guide example");
     assert_eq!(
         success["items"][1]["output"],
         "WatchReady (Right \"Check the hit targets.\")"
@@ -198,6 +197,12 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     )
     .await;
     assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
+    let outer_unavailable = committed(
+        root.as_ref(),
+        "state <- pollWatch outerFailureReady\ninspectFull (guideIsUnavailable state)",
+    )
+    .await;
+    assert_eq!(outer_unavailable["items"][1]["output"], "True");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
