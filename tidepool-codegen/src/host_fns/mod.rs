@@ -47,7 +47,7 @@ pub use errors::{
 };
 pub(crate) use errors::{MIN_VALID_ADDR, SIGNAL_SAFE_CTX, SIGNAL_SAFE_CTX_LEN};
 
-pub use force::{deep_force, heap_force, trampoline_resolve};
+pub use force::{deep_force, heap_demand, heap_force, trampoline_resolve};
 
 pub use primops::{
     runtime_cas_boxed_array, runtime_clone_boxed_array, runtime_compare_byte_arrays,
@@ -86,6 +86,7 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             runtime_bad_thunk_state_trap as *const u8,
         ),
         ("heap_force", heap_force as *const u8),
+        ("heap_demand", heap_demand as *const u8),
         ("unresolved_var_trap", unresolved_var_trap as *const u8),
         ("runtime_error", runtime_error as *const u8),
         (

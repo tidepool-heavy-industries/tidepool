@@ -3161,9 +3161,9 @@ fn unbox_numeric(
             // continuation — `Double(3.5)`, whose IEEE-754 bits would
             // otherwise load as a garbage i64). Trap cleanly via
             // runtime_shape_trap (kind LitClass) instead; the poison object it
-            // returns is loaded from below, but the pending RuntimeError is
-            // surfaced before the garbage can be observed. Only ill-typed Core
-            // reaches a class mismatch — valid GHC output emits explicit
+            // returns terminates this function before any payload load or
+            // continuation can observe a fabricated numeric value. Only ill-typed
+            // Core reaches a class mismatch — valid GHC output emits explicit
             // Int2Double/Double2Int — so this cannot regress well-typed programs.
             let obj_tag = builder
                 .ins()
@@ -3232,7 +3232,7 @@ fn unbox_numeric(
                 .ins()
                 .call(trap_ref, &[kind, v_final, zero, dummy_addr, zero, zero]);
             let poison = builder.inst_results(call)[0];
-            builder.ins().jump(load_block, &[BlockArg::Value(poison)]);
+            builder.ins().return_(&[poison]);
 
             builder.switch_to_block(load_block);
             builder.seal_block(load_block);
