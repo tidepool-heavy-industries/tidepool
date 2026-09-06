@@ -30,11 +30,15 @@ not prompt bodies. This is lead-executed evidence, not fresh independent review.
 environment) is the representative read-only consumer. It reports actor
 incarnation directories, bounded inbox event metadata and per-actor bindings,
 with JSON stdout and concise stderr. It does not expose assignment messages.
-Missing binding remains Unknown. Actor0's separate root binding is not yet
-linked by this reader; the above reconciliation handles it explicitly.
+Missing binding remains Unknown. Root linkage uses recorded status identity,
+not an actor0 convention. The historical run's status is now Exited and no
+longer retains root identity; its separate root thread is observed, but the
+actor association remains Unknown. The ad-hoc reconciliation above used its
+explicit historical actor selection and is not a reader inference.
 
-This is intentionally partial: optional time windows, root binding linkage,
-provider usage via the existing usage owner, parent/admission/source edges,
+The later increment adds UTC Unix-millisecond windows and root binding linkage
+when typed status retains exact root identity. Still partial: provider usage via
+the existing usage owner, parent/admission/source edges,
 structured review/integration/tested revision links and existing Shoal CLI
 integration remain outstanding. Reader reports usage/acceptance Unknown rather
 than fabricating support. Independent review has now successfully launched and requested local reader

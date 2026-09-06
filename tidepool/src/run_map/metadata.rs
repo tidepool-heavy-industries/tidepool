@@ -264,6 +264,17 @@ mod tests {
             report.actors[0].provider_thread,
             Evidence::Unknown { .. }
         ));
+        fs::write(
+            dir.path().join("root-binding.json"),
+            json!({"version":4,"thread":"status-conflict"}).to_string(),
+        )
+        .unwrap();
+        let report =
+            read_windowed_run(dir.path(), Limits::default(), TimeWindow::default()).unwrap();
+        assert!(matches!(
+            report.root.provider_thread,
+            Evidence::Unknown { .. }
+        ));
         fs::remove_file(dir.path().join("status.json")).unwrap();
         let report =
             read_windowed_run(dir.path(), Limits::default(), TimeWindow::default()).unwrap();

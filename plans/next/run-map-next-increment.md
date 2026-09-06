@@ -24,3 +24,21 @@ not bounded-window per-response records. A retained request to service asks for
 a disjoint extension of that owner, rather than creating a duplicate parser.
 No blind launch retry. Independent reviewer should inspect the exact next
 candidate after these behaviors and focused negative-path tests exist.
+
+## Instrumentation need revealed by actual artifacts
+
+The historical run's `status.json` now has `phase: { state: "exited" }`.
+Existing RunPhase::Exited retains neither root actor nor thread. Its separate
+root-binding.json records a thread but no actor identity. Therefore the reader
+cannot prove the root actor association after exit from these files alone.
+Minimal owner request: retain exact root ActorRef independently of phase in
+existing RunStatus (with explicit serialized-version migration), or an existing
+launch/admission artifact. Do not add a second registry/log. Root-binding lookup
+works when Ready/AwaitingBinding status establishes identity; missing/conflicting
+identity remains Unknown. Parent/admission/source/review/integration artifacts
+are not derivable from free-text assignment narratives without false certainty.
+
+Context-efficiency evidence: reviewer reported 4m29 Cargo build plus extractor
+setup for 0.008s test execution. This is an observed boundary mismatch, not an
+estimated saving. Local repeated focused runs are faster but no controlled
+cache, provider-prefix, serial/tree, or cost comparison was performed.

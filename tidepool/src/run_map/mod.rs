@@ -308,7 +308,27 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
 }
 impl RunMap {
     pub fn concise(&self) -> String {
-        format!("{}: {} observed actor directories, {} recorded events, {} diagnostics; usage and acceptance unknown (not peak concurrency)", self.source, self.actors.len(), self.actors.iter().map(|actor| actor.events.len()).sum::<usize>(), self.diagnostics.len())
+        let mut output = format!("{}: {} observed actor directories, {} recorded events, {} diagnostics; usage and acceptance unknown (not peak concurrency)", self.source, self.actors.len(), self.actors.iter().map(|actor| actor.events.len()).sum::<usize>(), self.diagnostics.len());
+        for actor in &self.actors {
+            let thread = match &actor.provider_thread {
+                Evidence::Observed { value, .. } => value.as_str(),
+                _ => "unknown",
+            };
+            output.push_str(&format!(
+                "\n  {}@{} thread={} events={} parent=unknown source=unknown",
+                actor.actor,
+                actor.incarnation,
+                thread,
+                actor.events.len()
+            ));
+        }
+        if self.window.is_bounded() {
+            output.push_str(&format!(
+                "\n  UTC window {:?}..{:?} ms; untimed events remain unclassified",
+                self.window.from_unix_ms, self.window.until_unix_ms
+            ));
+        }
+        output
     }
 }
 
