@@ -823,3 +823,238 @@ fn element_kept_live_solely_by_array_payload_slot_survives_nursery_gc() {
          this test forced no collection, so it guarded nothing"
     );
 }
+
+#[derive(Clone, Copy)]
+enum OperandDemandProbe {
+    OverwrittenInitializer,
+    SelectedInitializer,
+    UnselectedWrittenBottom,
+    SelectedWrittenBottom,
+    StrictSize,
+    StrictIndex,
+}
+
+#[derive(Clone, Copy)]
+enum OperandBottom {
+    Raise,
+    QuotientZero,
+    ArithmeticBottomVar,
+}
+
+fn build_operand_demand_probe(small: bool, probe: OperandDemandProbe) -> CoreExpr {
+    build_operand_demand_with_bottom(small, probe, OperandBottom::Raise)
+}
+
+fn build_operand_demand_with_bottom(
+    small: bool,
+    probe: OperandDemandProbe,
+    kind: OperandBottom,
+) -> CoreExpr {
+    reset_ctr();
+    let mut b = TreeBuilder::new();
+    let zero = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let one = b.push(CoreFrame::Lit(Literal::LitInt(1)));
+    let two = b.push(CoreFrame::Lit(Literal::LitInt(2)));
+    let message = b.push(CoreFrame::Lit(Literal::LitString(
+        b"operand demand bottom".to_vec(),
+    )));
+    // A computation, not a bare sentinel: eager child traversal must not run it.
+    let bottom = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::Raise,
+        args: vec![message],
+    });
+    let bottom_var = fresh_var();
+    let bottom_ref = b.push(CoreFrame::Var(bottom_var));
+    let raised = bottom;
+    let bottom = match kind {
+        OperandBottom::Raise => raised,
+        OperandBottom::QuotientZero => b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntQuot,
+            args: vec![one, zero],
+        }),
+        OperandBottom::ArithmeticBottomVar => b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![bottom_ref, one],
+        }),
+    };
+    let initial = if matches!(
+        probe,
+        OperandDemandProbe::OverwrittenInitializer | OperandDemandProbe::SelectedInitializer
+    ) {
+        bottom
+    } else {
+        con_int(&mut b, 42)
+    };
+    let size = if matches!(probe, OperandDemandProbe::StrictSize) {
+        bottom
+    } else {
+        two
+    };
+    let new = b.push(CoreFrame::PrimOp {
+        op: if small {
+            PrimOpKind::NewSmallArray
+        } else {
+            PrimOpKind::NewArray
+        },
+        args: vec![size, initial],
+    });
+    let arr = fresh_var();
+    let arr_v = b.push(CoreFrame::Var(arr));
+    let read_index = if matches!(
+        probe,
+        OperandDemandProbe::SelectedWrittenBottom | OperandDemandProbe::SelectedInitializer
+    ) {
+        one
+    } else {
+        zero
+    };
+    let read = b.push(CoreFrame::PrimOp {
+        op: if small {
+            PrimOpKind::IndexSmallArray
+        } else {
+            PrimOpKind::IndexArray
+        },
+        args: vec![arr_v, read_index],
+    });
+    let demanded = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![read, zero],
+    });
+    let after_gc = build_gc_forcing_loop(&mut b, 400, demanded);
+    let twenty = b.push(CoreFrame::Lit(Literal::LitInt(20)));
+    let twenty_two = b.push(CoreFrame::Lit(Literal::LitInt(22)));
+    // A lazy numeric computation must become a heap pointer before storage.
+    let computed = b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntAdd,
+        args: vec![twenty, twenty_two],
+    });
+    let written = if matches!(
+        probe,
+        OperandDemandProbe::UnselectedWrittenBottom | OperandDemandProbe::SelectedWrittenBottom
+    ) {
+        bottom
+    } else {
+        computed
+    };
+    let index = if matches!(probe, OperandDemandProbe::StrictIndex) {
+        bottom
+    } else if matches!(
+        probe,
+        OperandDemandProbe::UnselectedWrittenBottom | OperandDemandProbe::SelectedWrittenBottom
+    ) {
+        one
+    } else {
+        zero
+    };
+    let write = b.push(CoreFrame::PrimOp {
+        op: if small {
+            PrimOpKind::WriteSmallArray
+        } else {
+            PrimOpKind::WriteArray
+        },
+        args: vec![arr_v, index, written],
+    });
+    let sequence = b.push(CoreFrame::Case {
+        scrutinee: write,
+        binder: fresh_var(),
+        alts: vec![Alt {
+            con: AltCon::Default,
+            binders: vec![],
+            body: after_gc,
+        }],
+    });
+    let root = b.push(CoreFrame::LetNonRec {
+        binder: arr,
+        rhs: new,
+        body: sequence,
+    });
+    let root = b.push(CoreFrame::LetNonRec {
+        binder: bottom_var,
+        rhs: raised,
+        body: root,
+    });
+    let mut tree = b.build();
+    fixup_root(&mut tree, root)
+}
+
+#[test]
+fn primitive_operand_demand_preserves_lazy_initializer_and_values() {
+    set_gc_poison(true);
+    set_heap_verify(true);
+    for small in [false, true] {
+        for probe in [
+            OperandDemandProbe::OverwrittenInitializer,
+            OperandDemandProbe::UnselectedWrittenBottom,
+        ] {
+            assert_eq!(
+                expect_int(&build_operand_demand_probe(small, probe), 16 * 1024),
+                42
+            );
+        }
+    }
+}
+
+#[test]
+fn primitive_operand_demand_enters_selected_bottom_and_strict_operands() {
+    for small in [false, true] {
+        for probe in [
+            OperandDemandProbe::SelectedWrittenBottom,
+            OperandDemandProbe::StrictSize,
+            OperandDemandProbe::StrictIndex,
+        ] {
+            let err = compile_and_run(&build_operand_demand_probe(small, probe), 16 * 1024)
+                .expect_err("demanded bottom must fail");
+            assert!(
+                err.to_string().contains("operand demand bottom"),
+                "wrong failure: {err:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn primitive_partial_quotient_stays_lazy() {
+    check_partial_operand(OperandBottom::QuotientZero);
+}
+
+#[test]
+fn primitive_arithmetic_bottom_var_stays_lazy() {
+    check_partial_operand(OperandBottom::ArithmeticBottomVar);
+}
+
+fn check_partial_operand(kind: OperandBottom) {
+    for small in [false, true] {
+        for probe in [
+            OperandDemandProbe::OverwrittenInitializer,
+            OperandDemandProbe::UnselectedWrittenBottom,
+        ] {
+            assert_eq!(
+                expect_int(
+                    &build_operand_demand_with_bottom(small, probe, kind),
+                    16 * 1024
+                ),
+                42
+            );
+        }
+        for probe in [
+            OperandDemandProbe::SelectedInitializer,
+            OperandDemandProbe::SelectedWrittenBottom,
+        ] {
+            let error = compile_and_run(
+                &build_operand_demand_with_bottom(small, probe, kind),
+                16 * 1024,
+            )
+            .expect_err("selected partial computation must fail");
+            let expected = match kind {
+                OperandBottom::QuotientZero => "division by zero",
+                OperandBottom::Raise | OperandBottom::ArithmeticBottomVar => {
+                    "operand demand bottom"
+                }
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "wrong failure: {error:?}"
+            );
+        }
+    }
+}

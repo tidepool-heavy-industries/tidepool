@@ -51,7 +51,7 @@ fn scale_pow2(mut x: f64, e: i64) -> f64 {
 
 /// `decodeDouble_Int64#`: decompose a `Double` into `(mantissa, exponent)`
 /// such that `mantissa * 2^exponent == d`, in GHC's CANONICAL form — for a
-/// normal finite `d`, `2^52 <= |mantissa| < 2^53` (the raw 52-bit fraction
+/// nonzero finite `d`, `2^52 <= |mantissa| < 2^53` (the raw 52-bit fraction
 /// field plus the implicit leading 1 bit, NOT reduced by trailing zeros; GHC's
 /// own `decodeDouble_Int64#` does not perform that reduction). The JIT and the
 /// tree-walker both call this — it is THE numeric policy for that primop, not
@@ -68,8 +68,9 @@ pub fn decode_double_int64(d: f64) -> (i64, i64) {
     let raw_exp = ((bits >> 52) & 0x7ff) as i32;
     let raw_man = (bits & 0x000f_ffff_ffff_ffff) as i64;
     let (man, exp) = if raw_exp == 0 {
-        // subnormal
-        (raw_man, 1 - 1023 - 52)
+        // Normalize subnormals to the same 53-bit significand as normal values.
+        let shift = raw_man.leading_zeros() - 11;
+        (raw_man << shift, 1 - 1023 - 52 - shift as i32)
     } else {
         // normal: implicit leading 1
         (raw_man | (1i64 << 52), raw_exp - 1023 - 52)
@@ -94,8 +95,9 @@ pub fn decode_float_int(f: f32) -> (i64, i64) {
     let raw_exp = ((bits >> 23) & 0xff) as i32;
     let raw_man = (bits & 0x007f_ffff) as i64;
     let (man, exp) = if raw_exp == 0 {
-        // subnormal
-        (raw_man, 1 - 127 - 23)
+        // Normalize subnormals to the same 24-bit significand as normal values.
+        let shift = raw_man.leading_zeros() - 40;
+        (raw_man << shift, 1 - 127 - 23 - shift as i32)
     } else {
         // normal: implicit leading 1
         (raw_man | (1i64 << 23), raw_exp - 127 - 23)
@@ -193,11 +195,23 @@ mod tests {
 
     #[test]
     fn decode_float_int_subnormal() {
-        // Raw bits 0x0000_0002: a denormal with a trailing zero bit, which a
-        // trailing-zero-stripping reduction would collapse to (1, -148) —
-        // GHC's decodeFloat_Int# does not perform that reduction.
-        let f = f32::from_bits(2);
-        assert_eq!(decode_float_int(f), (2, -149));
+        // Native GHC 9.12.2 decodeFloat retains a full-width significand.
+        for (bits, expected) in [
+            (1, (8388608, -172)),
+            (2, (8388608, -171)),
+            (3, (12582912, -171)),
+            (257, (8421376, -164)),
+            (0x00400000, (8388608, -150)),
+            (0x007fffff, (16777214, -150)),
+            (0x00800000, (8388608, -149)),
+        ] {
+            assert_eq!(decode_float_int(f32::from_bits(bits)), expected);
+            assert_eq!(
+                decode_float_int(-f32::from_bits(bits)),
+                (-expected.0, expected.1)
+            );
+        }
+        assert_eq!(decode_float_int(-0.0), (0, 0));
     }
 
     #[test]
@@ -214,10 +228,22 @@ mod tests {
 
     #[test]
     fn decode_double_int64_subnormal() {
-        // Raw bits 0x0000_0000_0000_0002: same trailing-zero-not-stripped
-        // shape as the float case above.
-        let d = f64::from_bits(2);
-        assert_eq!(decode_double_int64(d), (2, -1074));
+        for (bits, expected) in [
+            (1, (4503599627370496, -1126)),
+            (2, (4503599627370496, -1125)),
+            (3, (6755399441055744, -1125)),
+            (257, (4521191813414912, -1118)),
+            (0x0008000000000000, (4503599627370496, -1075)),
+            (0x000fffffffffffff, (9007199254740990, -1075)),
+            (0x0010000000000000, (4503599627370496, -1074)),
+        ] {
+            assert_eq!(decode_double_int64(f64::from_bits(bits)), expected);
+            assert_eq!(
+                decode_double_int64(-f64::from_bits(bits)),
+                (-expected.0, expected.1)
+            );
+        }
+        assert_eq!(decode_double_int64(-0.0), (0, 0));
     }
 
     #[test]

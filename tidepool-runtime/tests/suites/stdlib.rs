@@ -13,3 +13,6 @@ mod validator_reject;
 mod vendor_text_functions;
 #[path = "../numeric_oracle.rs"]
 mod numeric_oracle;
+
+#[path = "../finite_show_array.rs"]
+mod finite_show_array;
