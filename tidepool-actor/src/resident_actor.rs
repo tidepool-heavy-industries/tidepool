@@ -1681,7 +1681,9 @@ where
                         .map_err(|error| error.to_string())?;
                     let budget = self.descriptor.effective_role().descendants();
                     if budget.maximum_depth == 0 {
-                        return Err("cannot unfold context: descendant depth budget is exhausted".into());
+                        return Err(
+                            "cannot unfold context: descendant depth budget is exhausted".into(),
+                        );
                     }
                     let group_path = group.to_string();
                     let (group_id, reservations) = self

@@ -5,7 +5,7 @@ branch from the complete `unfold` call already in your conversation;
 
 Use typed worktree observations and the conservative merge operation for the
 ordinary case. If that operation reports that manual Git is required, use the
-normal Git CLI in `/tmp/tidepool-actor-workspace`; Git remains the language for
+normal Git CLI in your bound checkout; Git remains the language for
 rebases, selective cherry-picks, conflict resolution, and unusual topology.
 Inspect the exact candidate and contract, preserve consequential findings, and
 run the checks required for the integrated revision. Review evidence from an

@@ -228,6 +228,15 @@ The older blocking sub-answerer combinators now live under
 not the persistent-actor fork surface. Shoal context forks are described with
 the applicative `Tidepool.Actors.Unfold` API exported by the default facade.
 
+## shoal-repl development launch
+
+`just shoal-repl -- --session shoal-repl-dev` builds this checkout's Shoal
+binary and launches the harness against `~/dev/shoal-repl` with `gpt-6-astra`
+at medium effort. Initialize it with `shoal new ~/dev/shoal-repl` first;
+the recipe refuses a missing project. This launches
+the development harness, not the eventual TUI executable. Use `just shoal-init`
+for launches with different model or workspace settings.
+
 ## Cache-preserving context unfold
 
 Use `unfold` when several independent branches materially benefit from the
@@ -248,6 +257,13 @@ forks <- unfold (batch campaign wave) $
   (,) <$> child (coding @DomainReport domain projectHead domainTask)
       <*> child (coding @UiReport ui projectHead uiTask)
 ```
+
+Coding actors can scaffold, fork, and integrate within their effective row and
+remaining descendant budget. Scaffolding selects a different prompt emphasis
+with the same capabilities. Each recursive launch consumes one depth level;
+a narrowed row or exhausted budget still prevents recursion. Shared handles do
+not transfer worktree or response ownership. See `:doc tree` and
+`:doc refinement` for selective folds and reviewer-driven typed repair.
 
 `Unfold` is deliberately applicative, not monadic: the runtime can see and
 reserve the complete sibling shape before it publishes any assignment. Statements

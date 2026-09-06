@@ -4,7 +4,8 @@ tuple or record binding to retain several results. Units run in order. Failed
 observations are local; a rejected Haskell/effect unit stops the suffix. Prior
 units and effects remain committed.
 
-Discover with `:browse`, `:type`, `:info`, `:bindings`, and `:doc topics`.
+Start with `:doc topics`, `:bindings`, and targeted `:type` / `:info`.
+Reserve `:browse` for deliberate wider discovery.
 Request activations expose `sessionInput`, `sessionReply`, and `respond`.
 Ending the model response ends the turn; a labeled `watch` reactivates it.
 Typed handles and receipts are authoritative; `:status` reports queues.

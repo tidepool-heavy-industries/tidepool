@@ -93,7 +93,7 @@ shoal-console *args:
 [positional-arguments]
 shoal-repl *args:
     test -e "$HOME/dev/shoal-repl/.git" || { echo "missing $HOME/dev/shoal-repl; run shoal new ~/dev/shoal-repl first" >&2; exit 1; }
-    {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-repl"
+    {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-repl" --model gpt-6-astra --effort medium
 
 # Pre-review gate: checks, suite registration checks, and fixture freshness.
 verify: check suite-check fixtures-check
