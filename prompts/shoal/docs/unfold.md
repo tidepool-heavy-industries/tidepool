@@ -7,11 +7,11 @@ bindings and the conversation through the actual tool result.
 let Right campaign = campaignLabel "my-project"
 let Right wave = forkGroupLabel "first-wave"
 let Right domainLabel = branchLabel "domain"
-let Right reviewLabel = branchLabel "review"
+let Right consumerLabel = branchLabel "consumer-tests"
 :{
 workers <- unfold (batch campaign wave) $
   (,) <$> child (coding @Report domainLabel projectHead domainPlan)
-      <*> child (researching @Review reviewLabel projectHead reviewPlan)
+      <*> child (coding @Report consumerLabel projectHead consumerPlan)
 :}
 let sharedAfterUnfold = ("ready" :: Text)
 ```
@@ -40,7 +40,13 @@ effort. Omission inherits the parent setting. The request alone is not evidence
 of provider application or cache reuse; inspect provider observations before
 claiming either. Changing effort on an already running actor is not supported.
 
-Define your `Report`/`Review` types and `domainPlan`/`reviewPlan` values first.
+Define your `Report` type and `domainPlan`/`consumerPlan` values first. Commit the
+shared interface before dispatch. `domainPlan` owns implementation; `consumerPlan`
+owns independent tests through that interface, including failure behavior. Each
+names owned paths, the contract revision, acceptance, and allowed holes. Return
+exact candidates, check evidence, discoveries, and unresolved decisions. Keep
+shared wiring with the coordinator. Review an implementation candidate after it
+exists; the parallel consumer branch tests the contract from the common scaffold.
 `projectHead` requires a clean source; choose `snapshotDirty projectHead`
 explicitly when the branches should inherit existing uncommitted changes.
 

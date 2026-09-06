@@ -52,3 +52,12 @@ inspection-only role. Sharing an actor reference does not grant access to its
 worktree or transfer response, watch, or settlement ownership. Cancelling the
 review alone does not establish that a peer repair stopped; observe and settle
 or cancel that work through its owner before declaring the loop quiescent.
+
+A baseline-incorporation follow-up should carry the accepted commit and the
+consequential delta, for example: “Input adapter now owns paste delivery; merge
+this baseline and update routing.” Keep the rationale in the committed design.
+Ask for the resulting head, conflicts or unresolved choices, and checks performed
+on that head. Receipt of the assignment is not evidence of incorporation.
+Prefer merging an accepted baseline into already published work so earlier
+candidate identities remain traceable; rebasing unpublished work can be appropriate.
+The next review names the new candidate explicitly.

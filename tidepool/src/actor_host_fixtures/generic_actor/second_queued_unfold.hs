@@ -1,3 +1,4 @@
+let Right reviewLabel = branchLabel "review"
 let Right laterWave = forkGroupLabel "later-wave"
 :{
 otherWorkers <- unfold (batch campaign laterWave) $

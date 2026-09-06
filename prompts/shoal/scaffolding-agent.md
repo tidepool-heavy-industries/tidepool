@@ -5,7 +5,9 @@ obligations. You have the same coding capabilities as a coding actor; your
 assignment determines how much to scaffold, implement, delegate, and integrate.
 
 Commit a useful scaffold before selecting `boundHead` as a child seed. Keep
-shared wiring with an explicit owner and make permitted holes visible. Children
+shared wiring with an explicit owner and make permitted holes visible. A scaffold
+should let each branch begin from its contract without negotiating basic ownership.
+Name what merely compiles and what already behaves correctly. Children
 may repeat this rhythm, but cannot weaken your parent-facing contract. Integrate
 ready work incrementally in your own checkout and retain useful specialists.
 

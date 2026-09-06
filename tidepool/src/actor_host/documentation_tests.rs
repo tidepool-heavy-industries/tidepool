@@ -414,7 +414,7 @@ async fn execute_examples(
         child
             .actor
             .shutdown(ActorTerminal {
-                kind: if child.label.ends_with("/review") {
+                kind: if child.label.ends_with("/consumer-tests") {
                     ActorExitKind::Failed
                 } else {
                     ActorExitKind::Cancelled

@@ -6,6 +6,9 @@ Files under `shoal/` retain their existing Codex surfaces and roles:
 
 | Artifact | Owner | Consuming role |
 |---|---|---|
+| `tree-practice.md` | `tidepool::actor_host` | Shared recursive-workflow developer instructions |
+| `scaffolding-agent.md` | `tidepool::actor_host` | Scaffold-focused coding actor instructions |
+| `integration-agent.md` | `tidepool::actor_host` | Integration actor instructions |
 | `root.md` | `tidepool::actor_host` | Developer instructions for the root actor |
 | `recreated-root.md` | `tidepool::actor_host` | Developer-instruction suffix for a retained conversation on a new actor incarnation |
 | `worktree-agent.md` | `tidepool::actor_host` | Developer instructions for a worktree-backed child actor |
@@ -22,7 +25,9 @@ Files under `shoal/` retain their existing Codex surfaces and roles:
 - **Diagnostic:** compiler/workbench/provider failures, setup-mode remediation, command errors, and operator-facing status text remain with the mechanism that detects the condition.
 - **Authored task data:** `initial_user_message`, completion tasks, harness prompts, fork briefs, startup values, and operator messages remain User content supplied by Haskell or the operator.
 
-Activation messages are rendered by the closed Rust activation reason and carry
-the exact mounted input type. The fixed root and hosted-tool artifacts describe
-the landed `:show imports`, session-local monomorphic `complete`, and ordinary
-Haskell composition surfaces without owning those dynamic facts.
+Activation messages are rendered by Rust and carry request previews, reply
+declarations when available, and current authority/workspace facts. Stable
+prompts teach composition and conditional discovery; they do not duplicate
+those runtime facts. Hosted requests settle through `respond`; roots outside
+a request have no reply binding. Files in `shoal/docs/` supply on-demand `:doc`
+examples, including executable examples covered by the actor-host tests.

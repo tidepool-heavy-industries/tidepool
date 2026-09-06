@@ -70,3 +70,25 @@ Mixed response/progress watches retain each qualifying progress snapshot while
 waiting for their remaining dependencies. `ProgressClosed` ends a wait with
 no qualifying update. Already captured snapshots remain valid after closure.
 Unwatched progress never wakes the coordinator.
+
+For intermediate Git publications, make the progress payload cumulative. With
+`Increment` defined for this task and `interfaceIncrement` / `implementationIncrement`
+containing exact commits, purposes, and consequential discoveries, a worker
+launched with progress type `[Increment]` can publish in separate tool calls:
+
+```haskell
+reportProgress [interfaceIncrement]
+```
+
+Later, while retaining its original delivery request:
+
+```haskell
+reportProgress [interfaceIncrement, implementationIncrement]
+```
+
+A coordinator that misses the first update still sees both publications. Keep
+unacknowledged increments in later snapshots and the final delivery. Publication
+is not parent acceptance. The coordinator inspects and integrates each selected
+commit, then communicates the accepted baseline and decision delta. A normal
+`request` to a busy specialist queues; this example does not provide mid-flight
+steering or a synchronous checkpoint. Never wait circularly for that request.

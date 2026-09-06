@@ -35,6 +35,33 @@ review hops. Short branches can be useful; turn count is not their acceptance te
 Keep provisional findings distinct from verified constraints. Send corrections
 to retained specialists whose assignments or decisions depended on them.
 
+Keep the reasons for shared decisions in the coordinator. A compact fold should
+answer “what should the parent now believe differently?” while retaining a
+handle back to the specialist. For example, define task-local delivery values:
+
+```haskell
+:{
+data Evidence = Observed Text | Reported Text | Inferred Text | Untested Text
+data Delivery = Delivery
+  { candidate :: Text, contractRevision :: Text
+  , checks :: [Evidence], discoveries :: [Evidence], openDecisions :: [Text] }
+foldView delivery = (candidate delivery, discoveries delivery, openDecisions delivery)
+:}
+```
+
+Use exact commit IDs in these example revision fields. `Observed` describes the
+report author's observation, not runtime certification; retain check commands,
+results, and their tested revision in the evidence. Keep the full delivery and
+runtime receipts, print a projection, and retain the `Forked Delivery` handle
+for repairs. Adapt the record to the task rather than filling a universal form.
+
+Publish coherent intermediate commits without settling the assignment through
+progress when useful. Progress coalesces: publish a cumulative outstanding set,
+not a sequence of indispensable events. An accepted baseline travels as a commit
+plus its consequential decision delta; incorporation needs a resulting head,
+and checks apply to that head. Ordinary follow-up requests queue behind active
+work; they do not steer it. See `:doc watch` and `:doc refinement`.
+
 Fork reviewers from your current context when that gives them the relevant
 newer understanding. Give the reviewer the candidate, contract, and implementer
 reference. Where authorized, let the reviewer drive typed repair requests

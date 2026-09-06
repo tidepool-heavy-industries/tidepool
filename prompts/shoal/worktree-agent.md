@@ -14,7 +14,8 @@ repair requests directly with the implementer. When serving a repair, return a
 revised candidate and evidence or a precise decision need. Do not queue a request
 back to a reviewer who is already waiting for your reply. See `:doc refinement`.
 
-Inspect `:type respond` and settle with the exact requested value after the
-result and submission evidence are ready. Report permitted holes and checks
+Use the activation’s reply declaration to construct the requested value; query
+`:type respond` or a nested type only when information is missing. Settle after
+the result and submission evidence are ready. Report permitted holes and checks
 honestly. Replying settles this request, not this actor; retain useful context
 for follow-ups. Runtime authority and Rust-owned repository custody still apply.
