@@ -156,7 +156,14 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                 actor.incarnation.0,
             ))
             .is_none());
-        assert!(!launched.is_finished());
+        while let Ok(event) = campaign.deployments.try_recv() {
+            if let LocalResidentDeployment::PolicyInstalled(child) = event {
+                panic!(
+                    "provider published before custody release: {:?}",
+                    child.actor.identity()
+                );
+            }
+        }
         release.send(()).unwrap();
         let child = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
@@ -217,15 +224,25 @@ async fn custody_install_failure_prevents_provider_publication() {
         .await
         .unwrap()
         .unwrap();
-    assert_ne!(result["status"], "committed", "{result:?}");
-    while let Ok(event) = campaign.deployments.try_recv() {
-        if let LocalResidentDeployment::PolicyInstalled(child) = event {
-            panic!(
-                "provider published despite custody failure: {:?}",
-                child.actor.identity()
-            );
+    // The enclosing tool committed before deferred child bootstrap ran.
+    assert_eq!(result["status"], "committed", "{result:?}");
+    drop(installing);
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::PolicyInstalled(child) => panic!(
+                    "provider published despite custody failure: {:?}",
+                    child.actor.identity()
+                ),
+                LocalResidentDeployment::Retired { actor: retired, .. } if retired == actor => {
+                    break
+                }
+                _ => {}
+            }
         }
-    }
+    })
+    .await
+    .unwrap();
     assert!(campaign
         .bindings
         .lock()
