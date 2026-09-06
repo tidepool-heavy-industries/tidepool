@@ -56,6 +56,19 @@ pub type ResidentToolFuture =
 /// their dispatcher; a concrete host sees only declarations and typed
 /// invocations.
 pub trait ResidentToolEndpoint: Send + Sync {
+    /// Unsupported implementations cannot fabricate an admission barrier.
+    fn seal_hosted_work_boxed(
+        &self,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<crate::HostedWorkSeal, ResidentToolError>> + Send + 'static>,
+    > {
+        Box::pin(async {
+            Err(ResidentToolError::Unavailable(
+                "hosted-work seal is unsupported".into(),
+            ))
+        })
+    }
+
     fn tools(&self) -> &[HostedTool];
     fn instructions(&self) -> Option<&str>;
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture;
