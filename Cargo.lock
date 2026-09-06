@@ -4401,6 +4401,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "thiserror",
+ "tidepool-atomic-write",
  "tidepool-testing",
 ]
 
