@@ -17,6 +17,7 @@ thiserror.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
 tokio = { workspace = true, features = ["process"] }
+rustix = { version = "1", features = ["process", "event", "fs", "pipe"] }
 
 [dev-dependencies]
 tempfile.workspace = true
