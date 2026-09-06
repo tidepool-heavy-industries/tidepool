@@ -15,9 +15,10 @@ Structured recognition is available through idDetails / FCallId (CCall
 (CCallSpec (StaticTarget _ label _ _) convention safety)); label is
 CLabelString. Dynamic targets are unsupported, not substring matches.
 
-This commit intentionally adds only the IR vocabulary; backends still reject
-these operations through their existing unsupported-operation path until the
-runtime worker implements them. No successful behavior is stubbed.
+This commit intentionally adds only the IR vocabulary; the exhaustive evaluator match intentionally remains incomplete until the
+runtime worker implements the new arms. Only the repr library is independently
+compilable at this seed; repr tests depend on tidepool-testing and thus backends.
+No successful behavior is stubbed.
 
 Ownership: numeric TL owns types.rs and integration. Lowering worker owns
 Translate.hs and haskell tests, plus any necessary extractor cache/version
