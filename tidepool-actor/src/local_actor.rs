@@ -1706,5 +1706,15 @@ mod tests {
             .unwrap();
         assert!(!observed.cleanup.is_confirmed());
         assert_eq!(observed.cleanup.actor(), actor.identity());
+        context.directory.insert(actor.clone());
+        assert!(context.forget_terminal_actor(actor.identity()));
+        assert!(context.children.lock().is_empty());
+        assert!(
+            matches!(
+                shutdown_children(&context, Duration::from_millis(1)).await,
+                crate::CleanupComponentOutcome::Unconfirmed(_)
+            ),
+            "forgetting routing must not erase cleanup uncertainty"
+        );
     }
 }

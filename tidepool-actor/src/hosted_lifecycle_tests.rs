@@ -239,3 +239,27 @@ fn invocation(source: &str, id: &str) -> tidepool_tool::ToolInvocation {
         }),
     }
 }
+
+struct UnsupportedEndpoint;
+impl ResidentToolEndpoint for UnsupportedEndpoint {
+    fn tools(&self) -> &[tidepool_tool::HostedTool] {
+        &[]
+    }
+    fn instructions(&self) -> Option<&str> {
+        None
+    }
+    fn dispatch_boxed(&self, _: tidepool_tool::ToolInvocation) -> crate::ResidentToolFuture {
+        Box::pin(async {
+            Err(crate::ResidentToolError::Unavailable(
+                "unsupported test endpoint".into(),
+            ))
+        })
+    }
+}
+#[tokio::test]
+async fn unsupported_endpoint_does_not_fabricate_seal() {
+    assert!(matches!(
+        UnsupportedEndpoint.seal_hosted_work_boxed().await,
+        Err(crate::ResidentToolError::Unavailable(_))
+    ));
+}
