@@ -224,3 +224,153 @@ async fn http_disconnected_client_does_not_authorize_effect_retirement() {
         .unwrap();
     assert_eq!(endpoint.calls.load(Ordering::SeqCst), 1);
 }
+
+struct FailingSealEndpoint {
+    inner: Arc<GatedEndpoint>,
+    seals: AtomicUsize,
+    release_seal: Arc<Semaphore>,
+}
+impl ResidentToolEndpoint for FailingSealEndpoint {
+    fn tools(&self) -> &[HostedTool] {
+        self.inner.tools()
+    }
+    fn instructions(&self) -> Option<&str> {
+        None
+    }
+    fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+        self.inner.dispatch_boxed(invocation)
+    }
+    fn complete_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        self.inner.complete_boxed(boundary)
+    }
+    fn seal_hosted_work_boxed(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<tidepool_actor::HostedWorkSeal, ResidentToolError>,
+                > + Send
+                + 'static,
+        >,
+    > {
+        self.seals.fetch_add(1, Ordering::SeqCst);
+        let release = self.release_seal.clone();
+        Box::pin(async move {
+            release.acquire().await.unwrap().forget();
+            Err(ResidentToolError::Unavailable(
+                "explicit seal failure".into(),
+            ))
+        })
+    }
+}
+
+async fn assert_quiesced_but_completion_available(c: &reqwest::Client) {
+    let denied: serde_json::Value = c
+        .post(format!("{URL}/call"))
+        .json(&call_request())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(denied["success"], false);
+    assert_eq!(
+        c.post(format!("{URL}/session"))
+            .json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(c.post(format!("{URL}/completed"))
+        .json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"context"}))
+        .send().await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn http_seal_unsupported_quiesces_before_poll_without_draining() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("tools.sock");
+    let endpoint = endpoint(); // Uses the real trait's unsupported default.
+    let service =
+        HostDynamicToolService::new(endpoint.clone(), dir.path().join("binding"), None).unwrap();
+    let control = service.control();
+    let mut server = tokio::spawn(service.serve(UnixListener::bind(&socket).unwrap()));
+    let c = client(&socket);
+    attach(&c).await;
+    let seal =
+        control.quiesce_and_seal(tidepool_actor::ActorRef::first(tidepool_actor::ActorId(41)));
+    assert_quiesced_but_completion_available(&c).await; // Future not polled yet.
+    assert!(matches!(
+        seal.await,
+        Err(HostToolSealError::Endpoint(ResidentToolError::Unavailable(
+            _
+        )))
+    ));
+    assert_quiesced_but_completion_available(&client(&socket)).await;
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(endpoint.completions.load(Ordering::SeqCst), 2);
+    assert!(tokio::time::timeout(Duration::from_millis(30), &mut server)
+        .await
+        .is_err());
+    control.drain();
+    tokio::time::timeout(Duration::from_secs(5), &mut server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn http_seal_timeout_retains_single_future_and_failure_keeps_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("tools.sock");
+    let endpoint = Arc::new(FailingSealEndpoint {
+        inner: endpoint(),
+        seals: AtomicUsize::new(0),
+        release_seal: Arc::new(Semaphore::new(0)),
+    });
+    let service =
+        HostDynamicToolService::new(endpoint.clone(), dir.path().join("binding"), None).unwrap();
+    let control = service.control();
+    let mut server = tokio::spawn(service.serve(UnixListener::bind(&socket).unwrap()));
+    let c = client(&socket);
+    attach(&c).await;
+    let mut seal =
+        control.quiesce_and_seal(tidepool_actor::ActorRef::first(tidepool_actor::ActorId(42)));
+    assert_eq!(endpoint.seals.load(Ordering::SeqCst), 0);
+    assert_quiesced_but_completion_available(&c).await;
+    for _ in 0..2 {
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut seal)
+            .await
+            .is_err());
+        assert_eq!(endpoint.seals.load(Ordering::SeqCst), 1);
+    }
+    endpoint.release_seal.add_permits(1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), &mut seal)
+            .await
+            .unwrap(),
+        Err(HostToolSealError::Endpoint(ResidentToolError::Unavailable(
+            _
+        )))
+    ));
+    assert_eq!(endpoint.seals.load(Ordering::SeqCst), 1);
+    assert_quiesced_but_completion_available(&client(&socket)).await;
+    assert_eq!(endpoint.inner.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(endpoint.inner.completions.load(Ordering::SeqCst), 2);
+    assert!(tokio::time::timeout(Duration::from_millis(30), &mut server)
+        .await
+        .is_err());
+    control.drain();
+    tokio::time::timeout(Duration::from_secs(5), &mut server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
