@@ -162,6 +162,34 @@ pub extern "C" fn heap_force(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
     }
 }
 
+/// Demand WHNF at a strict language boundary, without demanding constructor
+/// fields or applying ordinary function closures. Unlike incidental thunk
+/// following, demanding a deferred bottom must raise its original error.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn heap_demand(vmctx: *mut VMContext, obj: *mut u8) -> *mut u8 {
+    if has_runtime_error() {
+        return error_poison_ptr();
+    }
+    if obj.is_null() {
+        super::errors::set_first_cause(RuntimeError::BadPointer);
+        return error_poison_ptr();
+    }
+    let forced = heap_force(vmctx, obj);
+    if has_runtime_error() {
+        return error_poison_ptr();
+    }
+    if forced.is_null() {
+        super::errors::set_first_cause(RuntimeError::BadPointer);
+        return error_poison_ptr();
+    }
+    // SAFETY: heap_force returns a live heap object. Recognition does not
+    // inspect fields of constructors or ordinary function closures.
+    if unsafe { super::errors::is_lazy_poison(forced) } {
+        return unsafe { super::errors::raise_lazy_poison(vmctx, forced) };
+    }
+    forced
+}
+
 /// Pointer stride of a `Con` field slot (one machine word). Matches the
 /// `8 * index` field arithmetic in `effect_machine.rs` / `layout` Con reads.
 const CON_FIELD_PTR_STRIDE: usize = 8;
@@ -425,6 +453,70 @@ mod tests {
     // SAFETY: Test-only mock thunk entry. Returns a pre-set pointer from thread-local storage.
     unsafe extern "C" fn test_thunk_entry(_vmctx: *mut VMContext, _thunk: *mut u8) -> *mut u8 {
         TEST_RESULT.with(|r| r.get())
+    }
+
+    #[test]
+    fn strict_demand_raises_lazy_bottom_without_changing_thunk_following() {
+        crate::machine_state::test_support::with_test_machine(|| {
+            take_runtime_error();
+            let bottom = super::super::errors::error_poison_ptr_lazy_msg(2, b"demand-origin");
+            assert_eq!(heap_force(std::ptr::null_mut(), bottom), bottom);
+            assert!(!has_runtime_error());
+            assert_eq!(
+                heap_demand(std::ptr::null_mut(), bottom),
+                error_poison_ptr()
+            );
+            assert_eq!(
+                take_runtime_error(),
+                Some(RuntimeError::UserErrorMsg("demand-origin".into()))
+            );
+        });
+    }
+
+    #[test]
+    fn strict_demand_preserves_function_whnf_and_lazy_fields() {
+        crate::machine_state::test_support::with_test_machine(|| {
+            take_runtime_error();
+            let bottom = super::super::errors::error_poison_ptr_lazy(3);
+            let mut closure = [0u64; 4];
+            let ptr = closure.as_mut_ptr().cast::<u8>();
+            // SAFETY: aligned buffers have space for complete headers and fields.
+            unsafe {
+                heap_layout::write_header(ptr, layout::TAG_CLOSURE, 32);
+                *ptr.add(heap_layout::CLOSURE_CODE_PTR_OFFSET)
+                    .cast::<usize>() = test_thunk_entry as *const () as usize;
+            }
+            assert_eq!(heap_demand(std::ptr::null_mut(), ptr), ptr);
+            let mut con = [0u64; 4];
+            let ptr = con.as_mut_ptr().cast::<u8>();
+            unsafe {
+                heap_layout::write_header(ptr, layout::TAG_CON, 32);
+                *ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize)
+                    .cast::<u16>() = 1;
+                *ptr.add(layout::CON_FIELDS_OFFSET as usize)
+                    .cast::<*mut u8>() = bottom;
+            }
+            assert_eq!(heap_demand(std::ptr::null_mut(), ptr), ptr);
+            assert!(!has_runtime_error());
+        });
+    }
+
+    #[test]
+    fn strict_demand_preserves_pending_error_and_rejects_null() {
+        crate::machine_state::test_support::with_test_machine(|| {
+            take_runtime_error();
+            super::super::errors::set_first_cause(RuntimeError::Overflow);
+            assert_eq!(
+                heap_demand(std::ptr::null_mut(), std::ptr::null_mut()),
+                error_poison_ptr()
+            );
+            assert_eq!(take_runtime_error(), Some(RuntimeError::Overflow));
+            assert_eq!(
+                heap_demand(std::ptr::null_mut(), std::ptr::null_mut()),
+                error_poison_ptr()
+            );
+            assert_eq!(take_runtime_error(), Some(RuntimeError::BadPointer));
+        });
     }
 
     #[test]

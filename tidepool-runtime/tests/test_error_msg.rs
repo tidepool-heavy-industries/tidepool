@@ -30,3 +30,10 @@ result = f 0
         Ok(_) => panic!("Expected error, got success"),
     }
 }
+
+#[test]
+fn first_class_error_function_is_whnf() {
+    let src = include_str!("fixtures/strict-demand/FirstClassError.hs");
+    let value = EvalHarness::new().with_stdlib().run_pure(src, "result");
+    assert_eq!(value.json(), serde_json::json!(42));
+}
