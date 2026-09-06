@@ -68,3 +68,20 @@ fresh review. No changes to classifiers, force/case machinery, runtime test-suit
 wiring, or shared differential runners. Prove the malformed value distinction
 without making Float NaN equality assertions. Report in-memory noncanonical IR
 construction as a remaining boundary if it cannot be closed inside this lane.
+
+## Finite Prelude Show repair wave
+
+Native/runtime and rebuilt hosted tests at 10b26384 confirm classifiers corrected,
+while ordinary `show (1 :: Double)` and Float still raise `(Array.!): undefined
+array element`; zero and infinity render. Arithmetic controls and backend edge
+matrices pass. Tests are integrated at cdabbb5f without weakening failures.
+The numeric lead now owns tracing and repairing the finite floatToDigits/table
+path, using retained contexts and fresh review. Do not assume the array symptom
+proves a bounds bug: check lowering, initialization, state sequencing and forcing.
+Strict-demand lead retains force/unboxing/case owners; coordinate any overlap.
+
+Old comments in Aeson/Scientific.hs and QQ/Fmt{,/Runtime}.hs claim floatToDigits
+is unsupported through clz#. These are historical claims, not verified current
+constraints. Once substrate acceptance passes, audit these production consumers
+for obsolete workaround paths; preserve intentional JSON formatting contracts.
+No new formatter or special Prelude Show replacement is an acceptable repair.
