@@ -167,11 +167,20 @@ impl HostedRetirement {
                 })));
             }
         }
+        // A failed endpoint barrier is not repaired by the expected actor later
+        // terminating: the endpoint may belong to a different, still-live actor.
+        // Keep the original failure and HTTP owner addressable instead.
+        if matches!(&self.seal, Some(Operation::Finished(Err(_)))) {
+            return;
+        }
         if self.actor.terminal().get().is_some() {
             self.terminal_path = true;
             self.control.quiesce();
         } else if let Some(seal) = &mut self.seal {
             seal.finish().await;
+            if matches!(seal, Operation::Finished(Err(_))) {
+                return;
+            }
         }
         if self.boundary != CompletionBoundary::AbortForShutdown {
             return;
