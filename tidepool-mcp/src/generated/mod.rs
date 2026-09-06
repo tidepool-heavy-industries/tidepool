@@ -17,6 +17,7 @@ pub mod fork;
 pub mod forks;
 pub mod green;
 pub mod journal;
+pub mod notifications;
 pub mod read_state;
 pub mod repo_event;
 pub mod run_l_l_m_turn;
@@ -42,6 +43,7 @@ pub use fork::*;
 pub use forks::*;
 pub use green::*;
 pub use journal::*;
+pub use notifications::*;
 pub use read_state::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
@@ -68,6 +70,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_kernel_decl(),
         actor_local_decl(),
         agent_control_decl(),
+        notifications_decl(),
         agent_inspection_decl(),
         agent_launch_decl(),
         forks_decl(),
@@ -86,6 +89,7 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "ActorKernel",
     "ActorLocal",
     "AgentControl",
+    "Notifications",
     "AgentInspection",
     "AgentLaunch",
     "Forks",
@@ -139,6 +143,15 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "CleanupReceipt",
             "AgentControlStopWith",
             "AgentControlExecuteCleanupWith",
+        ],
+    ),
+    (
+        "Notifications",
+        &[
+            "NotificationError",
+            "NotificationState",
+            "NotifyWith",
+            "PollNotificationWith",
         ],
     ),
     (
