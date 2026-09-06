@@ -115,6 +115,10 @@ pub struct ActorRuntimeObservation {
     pub prompt_fingerprint: Option<String>,
     pub provider_usage: Vec<ProviderUsageSample>,
     pub first_provider_usage: Option<ProviderUsageSample>,
+    /// The retained first sample is the first response in the current aggregate.
+    /// Legacy-to-durable transitions may change source identity; counts alone
+    /// cannot establish membership for subtraction.
+    pub first_usage_in_summary: bool,
     pub provider_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
     pub latest_turn_usage_summary: Option<tidepool_model::ProviderUsageSummary>,
     pub workbench_posture: ActorWorkbenchPosture,
@@ -161,12 +165,21 @@ impl ActorRuntimeObservation {
     }
 
     pub(crate) fn usage_summary_display(&self) -> String {
+        use tidepool_model::ProviderUsageCompleteness;
+        let first_completeness = self
+            .provider_usage_summary
+            .as_ref()
+            .filter(|_| self.first_usage_in_summary)
+            .map_or(ProviderUsageCompleteness::Partial, |summary| {
+                summary.completeness
+            });
         let first = match &self.first_provider_usage {
             Some(sample) => format!(
-                "first_observed_input={}/{}",
-                sample.cached_input_tokens, sample.uncached_input_tokens,
+                "first_observed={first_completeness:?} input={} cached={}",
+                sample.cached_input_tokens + sample.uncached_input_tokens,
+                sample.cached_input_tokens,
             ),
-            None => "first_observed_input=unavailable".into(),
+            None => "first_observed=unavailable".into(),
         };
         let thread = match &self.provider_usage_summary {
             Some(summary) => format!(
@@ -178,7 +191,39 @@ impl ActorRuntimeObservation {
             ),
             None => "thread_usage=unavailable".into(),
         };
-        format!("{first} {thread}")
+        let subsequent = match self.subsequent_input_usage() {
+            Some((completeness, responses, cached, uncached)) => format!(
+                "subsequent_usage={completeness:?} responses={responses} cached={cached} uncached={uncached}"
+            ),
+            None => "subsequent_usage=unavailable".into(),
+        };
+        format!("{first} {subsequent} {thread}")
+    }
+
+    fn subsequent_input_usage(
+        &self,
+    ) -> Option<(tidepool_model::ProviderUsageCompleteness, i64, i64, i64)> {
+        if !self.first_usage_in_summary {
+            return None;
+        }
+        let first = self.first_provider_usage.as_ref()?;
+        let summary = self.provider_usage_summary.as_ref()?;
+        let responses = summary.observations.checked_sub(1)?;
+        let cached = summary
+            .usage
+            .cached_input_tokens
+            .checked_sub(first.cached_input_tokens)?;
+        let uncached = summary
+            .usage
+            .input_tokens
+            .checked_sub(summary.usage.cached_input_tokens)?
+            .checked_sub(first.uncached_input_tokens)?;
+        (responses >= 0 && cached >= 0 && uncached >= 0).then_some((
+            summary.completeness,
+            responses,
+            cached,
+            uncached,
+        ))
     }
 }
 
@@ -313,8 +358,17 @@ impl ActorRuntimeObservationHandle {
         let first = make_sample(usage.first);
         let latest = make_sample(usage.latest);
         if observation.first_provider_usage.is_none() {
-            observation.first_provider_usage = Some(first);
+            observation.first_provider_usage = Some(first.clone());
         }
+        observation.first_usage_in_summary = observation.provider_usage_summary.is_some()
+            && observation
+                .first_provider_usage
+                .as_ref()
+                .is_some_and(|retained| {
+                    retained.observation_id == first.observation_id
+                        && retained.cached_input_tokens == first.cached_input_tokens
+                        && retained.uncached_input_tokens == first.uncached_input_tokens
+                });
         if observation
             .provider_usage
             .last()
@@ -454,12 +508,12 @@ mod tests {
         assert_eq!(observation.snapshot().latest_provider_usage(), None);
         assert_eq!(
             observation.snapshot().usage_summary_display(),
-            "first_observed_input=unavailable thread_usage=unavailable"
+            "first_observed=unavailable subsequent_usage=unavailable thread_usage=unavailable"
         );
         observation.publish_cache_usage(usage("first", 0, 12));
         assert_eq!(
             observation.snapshot().usage_summary_display(),
-            "first_observed_input=0/12 thread_usage=unavailable"
+            "first_observed=Partial input=12 cached=0 subsequent_usage=unavailable thread_usage=unavailable"
         );
         assert_eq!(
             observation
@@ -512,7 +566,7 @@ mod tests {
         assert_eq!(snapshot.latest_turn_usage_summary, None);
         assert_eq!(
             snapshot.usage_summary_display(),
-            "first_observed_input=80/20 thread_usage=Complete responses=100 cached=8000 uncached=2000"
+            "first_observed=Partial input=100 cached=80 subsequent_usage=unavailable thread_usage=Complete responses=100 cached=8000 uncached=2000"
         );
     }
 
@@ -532,8 +586,63 @@ mod tests {
         );
         assert_eq!(
             snapshot.usage_summary_display(),
-            "first_observed_input=0/100 thread_usage=unavailable"
+            "first_observed=Partial input=100 cached=0 subsequent_usage=unavailable thread_usage=unavailable"
         );
+    }
+
+    #[test]
+    fn subsequent_usage_subtracts_only_the_same_identified_first_response() {
+        use tidepool_model::{
+            ProviderUsageCompleteness::*, ProviderUsageScope, ProviderUsageSummary,
+        };
+        let observation = ActorRuntimeObservationHandle::default();
+        let mut snapshot = usage("first", 20, 80);
+        snapshot.thread_summary = Some(ProviderUsageSummary {
+            scope: ProviderUsageScope::Thread("child".into()),
+            completeness: Partial,
+            observations: 1,
+            usage: snapshot.first.usage,
+        });
+        observation.publish_cache_usage(snapshot.clone());
+        assert_eq!(
+            observation.snapshot().subsequent_input_usage(),
+            Some((Partial, 0, 0, 0))
+        );
+
+        snapshot.latest = usage("later", 90, 10).latest;
+        let summary = snapshot.thread_summary.as_mut().unwrap();
+        summary.observations = 2;
+        summary.usage.input_tokens = 200;
+        summary.usage.cached_input_tokens = 110;
+        observation.publish_cache_usage(snapshot.clone());
+        assert_eq!(
+            observation.snapshot().subsequent_input_usage(),
+            Some((Partial, 1, 90, 10))
+        );
+        snapshot.thread_summary.as_mut().unwrap().completeness = Complete;
+        observation.publish_cache_usage(snapshot.clone());
+        assert_eq!(
+            observation.snapshot().usage_summary_display(),
+            "first_observed=Complete input=100 cached=20 subsequent_usage=Complete responses=1 cached=90 uncached=10 thread_usage=Complete responses=2 cached=110 uncached=90"
+        );
+
+        // Equal counts under another source ID do not prove aggregate membership.
+        snapshot.first.id = "different-source".into();
+        observation.publish_cache_usage(snapshot.clone());
+        assert_eq!(observation.snapshot().subsequent_input_usage(), None);
+        assert!(observation
+            .snapshot()
+            .usage_summary_display()
+            .starts_with("first_observed=Partial"));
+        snapshot.first.id = "first".into();
+        snapshot
+            .thread_summary
+            .as_mut()
+            .unwrap()
+            .usage
+            .cached_input_tokens = 10;
+        observation.publish_cache_usage(snapshot);
+        assert_eq!(observation.snapshot().subsequent_input_usage(), None);
     }
 
     #[test]

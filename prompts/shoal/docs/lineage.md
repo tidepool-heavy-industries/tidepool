@@ -19,11 +19,23 @@ unavailable, not zero reuse. Later hits cannot establish first-inference reuse;
 equal counts alone do not identify the same response. Polling time does not
 establish which actor activation produced historical usage.
 
-Compact actor status shows `first_observed_input=cached/uncached` separately
-from `thread_usage`, its completeness, response count, and cumulative input
-counts. These are token counts, not percentages. A fork's first observed sample
-is from the child's provider thread; parent rollout records are excluded.
+Compact actor status separates `first_observed` total/cached input,
+`subsequent_usage` cached/uncached input and response count, and `thread_usage`
+cumulative counts. These are token counts, not percentages. Subsequent totals
+subtract the same identified first response from the provider's thread aggregate;
+they are unavailable when that membership cannot be established (including a
+change from legacy to durable source IDs). They never sum the bounded sample
+history. A fork's observations are from the child's provider thread; parent
+rollout records are excluded.
 `ForkedPrefix` records launch provenance, not a provider-confirmed cache hit.
+
+Each displayed scope is `Complete`, `Partial`, or unavailable. First-response
+coverage is conservatively partial unless the matching aggregate is complete;
+subsequent usage inherits aggregate completeness. Complete covers the observed
+scope through durable completion, not future work on a persistent thread.
+One observed response can give zero subsequent usage without proving the thread
+will do no more work. An actor request or provider turn may contain several
+provider responses; this split measures provider responses.
 
 Use `:lineage` for first/latest source IDs and `:trace` for sample history and
 thread/latest-turn summaries. Typed access is available through
@@ -36,6 +48,13 @@ The first observed sample is the earliest available usage evidence, not proof
 that an earlier inference had no missing record. A reattached thread can expose
 usage from before the current attachment. This telemetry measures provider
 reported input reuse, not causal savings against an unforked alternative.
+
+Inherited context size is unavailable: no current telemetry reports it with a
+counting method. First-response input includes more than the inherited context,
+and cached tokens do not identify which prefix content was reused. Do not use
+either as a substitute context-size measurement or attribute all reuse to the
+fork. Any reuse percentage must name its scope; a thread aggregate ratio does
+not measure first-child-response reuse.
 
 Each actor entry includes a typed workbench posture. `WorkbenchRunningUnit`
 means hosted Haskell is executing; `WorkbenchAwaitingEffect` names the effect
