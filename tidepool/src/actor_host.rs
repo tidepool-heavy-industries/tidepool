@@ -11,6 +11,7 @@ mod documentation_tests;
 mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
+pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
 mod prompt_catalog;
 #[cfg(test)]
 mod research_policy_tests;
@@ -733,9 +734,9 @@ impl RetainedInteractiveFleet {
     pub(crate) async fn recover_hosted(
         &self,
         actor: ActorRef,
-        boundary: hosted_retirement::CompletionBoundary,
+        boundary: CompletionBoundary,
         timeout: Duration,
-    ) -> Result<hosted_retirement::HostedObservation, RetainedHostedError> {
+    ) -> Result<HostedObservation, RetainedHostedError> {
         let owner = {
             let rows = self.owners.lock();
             rows.get(&actor)
