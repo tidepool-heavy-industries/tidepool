@@ -1975,8 +1975,14 @@ async fn launch_prepared_interactive_application(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
             window_name: format!(
-                "actor-{}-{}",
-                actor_identity.id.0, actor_identity.incarnation.0
+                "{} [{}@{}]",
+                installation
+                    .label
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&installation.label),
+                actor_identity.id.0,
+                actor_identity.incarnation.0
             ),
             cwd: workspace.clone(),
             program: command.program,
