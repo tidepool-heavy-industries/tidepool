@@ -1923,11 +1923,9 @@ async fn launch_prepared_interactive_application(
         (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. })).then(|| config.model.clone());
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
-        goal_policy: if actor_identity == root {
-            tidepool_agent::InteractiveGoalPolicy::Configured
-        } else {
-            tidepool_agent::InteractiveGoalPolicy::Disabled
-        },
+        // Shoal owns continuation on every node. Keep the native tool surface
+        // identical across roots and forks, without inheriting native goals.
+        goal_policy: tidepool_agent::InteractiveGoalPolicy::Disabled,
         model,
         effort: Some(effort),
         developer_instructions,

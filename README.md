@@ -172,6 +172,9 @@ remains in the source checkout and writes its orchestration in Haskell rather
 than implementing there directly. Shoal installs no prewritten worker program
 or ledger: its model authors the task's protocols, definitions, and
 composition incrementally in the persistent workbench.
+Shoal disables native Codex goals on every node, including the root: the host
+owns assignments and continuation. This also keeps goal-tool definitions from
+changing the shared provider prefix when a root forks a child.
 The fresh root opens ready and idle without spending an inference turn. Its
 conversation identity binds on the first real prompt, after which Shoal can
 deliver lifecycle wakes through Codex's native queue.
