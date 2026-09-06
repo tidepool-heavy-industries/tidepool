@@ -16,6 +16,11 @@ static int matches(const char *path, const char *kind) {
     return target && mode && arm && !access(arm,F_OK) &&
         !strcmp(path,target) && !strcmp(kind,mode);
 }
+static int skip_open(void) {
+    static unsigned int seen = 0;
+    const char *skip = getenv("INBOX_FAULT_SKIP_OPEN");
+    return seen++ < (skip ? strtoul(skip, NULL, 10) : 0);
+}
 static void hit(void) {
     const char *path=getenv("INBOX_FAULT_LOG");
     int fd=syscall(SYS_openat,AT_FDCWD,path,O_WRONLY|O_CREAT|O_APPEND,0600);
@@ -25,7 +30,7 @@ int open64(const char *path,int flags,...) {
     mode_t mode=0;
     if(flags&O_CREAT){va_list args;va_start(args,flags);mode=va_arg(args,int);va_end(args);}
     int (*real)(const char*,int,...)=dlsym(RTLD_NEXT,"open64");
-    if(matches(path,"open")){hit();errno=EIO;return -1;}
+    if(matches(path,"open") && !skip_open()){hit();errno=EIO;return -1;}
     return real(path,flags,mode);
 }
 int fsync(int fd) {

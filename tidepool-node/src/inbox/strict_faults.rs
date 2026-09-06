@@ -191,6 +191,16 @@ fn strict_inbox_faults_propagate_without_retry() {
                 .env("INBOX_FAULT_LOG", &log)
                 .env("INBOX_FAULT_CASE", case)
                 .env("INBOX_FAULT_KIND", kind)
+                // Initial read succeeds; deny the second open used to stabilize
+                // surviving file contents before returning a live inbox.
+                .env(
+                    "INBOX_FAULT_SKIP_OPEN",
+                    if case.starts_with("reopen-") {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                )
                 .env("INBOX_FAULT_ARM", root.join("armed"))
                 .output()
                 .unwrap();
