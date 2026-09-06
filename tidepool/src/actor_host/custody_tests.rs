@@ -155,6 +155,34 @@ async fn custody_activation(
     .expect("exact request activation")
 }
 
+// Exhaustive diagnostics keep new deployment variants visible to this regression.
+fn custody_event_description(event: &LocalResidentDeployment) -> String {
+    match event {
+        LocalResidentDeployment::PolicyInstalled(child) => {
+            format!("PolicyInstalled {:?}", child.actor.identity())
+        }
+        LocalResidentDeployment::SessionReady { activation } => {
+            format!("SessionReady {activation:?}")
+        }
+        LocalResidentDeployment::RequestUpdate { .. } => "RequestUpdate".into(),
+        LocalResidentDeployment::ChildExited { notice } => format!(
+            "ChildExited owner={:?} child={:?} terminal={:?}",
+            notice.owner,
+            notice.child.identity(),
+            notice.terminal
+        ),
+        LocalResidentDeployment::WatchChanged { notification } => {
+            format!("WatchChanged {notification:?}")
+        }
+        LocalResidentDeployment::RequestCancellation { notification } => {
+            format!("RequestCancellation {notification:?}")
+        }
+        LocalResidentDeployment::Retired { actor, terminal } => {
+            format!("Retired {actor:?} {terminal:?}")
+        }
+    }
+}
+
 async fn custody_assert_request(
     policy: &dyn ResidentToolEndpoint,
     expression: &str,
@@ -357,28 +385,24 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         tests::dispatch_haskell_script(leaf.policy.as_ref(), "respond (sessionInput :: Text)")
             .await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match campaign.deployments.recv().await.unwrap() {
-                LocalResidentDeployment::WatchChanged { notification }
-                    if notification.owner == installed[0].actor.identity()
-                        && notification.label == "custody-leaf-ready" =>
-                {
-                    assert_eq!(
-                        notification.transition,
-                        tidepool_actor::WatchTransition::Ready
-                    );
-                    break;
-                }
-                LocalResidentDeployment::SessionReady { activation } => {
-                    panic!("unexpected additional activation: {activation:?}")
-                }
-                _ => {}
-            }
+    let event = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+        .await
+        .expect("leaf reply watch timeout")
+        .expect("deployment stream");
+    match event {
+        LocalResidentDeployment::WatchChanged { notification } => {
+            assert_eq!(notification.owner, installed[0].actor.identity());
+            assert_eq!(notification.label, "custody-leaf-ready");
+            assert_eq!(
+                notification.transition,
+                tidepool_actor::WatchTransition::Ready
+            );
         }
-    })
-    .await
-    .unwrap();
+        event => panic!(
+            "unexpected event before shutdown: {}",
+            custody_event_description(&event)
+        ),
+    }
     let reply = tests::dispatch_haskell_script(
         installed[0].policy.as_ref(),
         include_str!("custody_nested_reply.hs"),
@@ -401,10 +425,95 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         ids.iter().collect::<std::collections::HashSet<_>>().len(),
         3
     );
+    // No lifecycle event is expected while these three applications are live.
+    if let Ok(event) = campaign.deployments.try_recv() {
+        panic!(
+            "unexpected event before shutdown: {}",
+            custody_event_description(&event)
+        );
+    }
+    let root = campaign.actor.identity();
+    let expected: std::collections::HashMap<_, _> = std::iter::once((
+        root,
+        tidepool_actor::ActorTerminal {
+            kind: tidepool_actor::ActorExitKind::Cancelled,
+            summary: "forest host shutdown".into(),
+        },
+    ))
+    .chain(installed.iter().map(|child| {
+        (
+            child.actor.identity(),
+            tidepool_actor::ActorTerminal {
+                kind: tidepool_actor::ActorExitKind::Cancelled,
+                summary: "owner actor stopped".into(),
+            },
+        )
+    }))
+    .collect();
+    let owners: std::collections::HashMap<_, _> = installed
+        .iter()
+        .map(|child| {
+            (
+                child.actor.identity(),
+                child.supervisor_parent.expect("child supervisor"),
+            )
+        })
+        .collect();
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
+    // Shutdown joins linked cleanup before publishing the root terminal. Collect
+    // by exact identity: neither retirement order nor ChildExited delivery order
+    // is a contract (a shutting-down owner's mailbox may not consume the notice).
+    let mut retired = std::collections::HashMap::new();
+    let mut child_exits = std::collections::HashMap::new();
+    while let Ok(event) = campaign.deployments.try_recv() {
+        match event {
+            LocalResidentDeployment::Retired { actor, terminal } => {
+                assert_eq!(
+                    expected.get(&actor),
+                    Some(&terminal),
+                    "unexpected retirement {actor:?}"
+                );
+                assert!(
+                    retired.insert(actor, terminal).is_none(),
+                    "duplicate retirement {actor:?}"
+                );
+            }
+            LocalResidentDeployment::ChildExited { notice } => {
+                let child = notice.child.identity();
+                assert_eq!(
+                    owners.get(&child),
+                    Some(&notice.owner),
+                    "unexpected child exit owner"
+                );
+                assert_eq!(
+                    expected.get(&child),
+                    Some(&notice.terminal),
+                    "unexpected child exit terminal"
+                );
+                assert!(
+                    child_exits.insert(child, notice.terminal).is_none(),
+                    "duplicate child exit"
+                );
+            }
+            event => panic!(
+                "unexpected event during shutdown: {}",
+                custody_event_description(&event)
+            ),
+        }
+    }
+    assert_eq!(
+        retired, expected,
+        "every exact root/sibling/leaf must retire"
+    );
+    assert_eq!(campaign.actor.terminal().get().as_ref(), retired.get(&root));
+    for child in &installed {
+        assert_eq!(
+            child.actor.terminal().get().as_ref(),
+            retired.get(&child.actor.identity())
+        );
+    }
     drop(installed);
-    while campaign.deployments.try_recv().is_ok() {}
     for id in ids {
         assert!(campaign.bindings.lock().current(&id).is_none());
         assert!(campaign
