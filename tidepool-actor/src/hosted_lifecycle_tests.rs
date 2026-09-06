@@ -39,12 +39,14 @@ async fn authored_seal_survives_lost_waiter_and_rejects_late_work() {
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let preamble = format!(
-        "{}\ntype ActorEffects = '[Notifications]\n",
+        "{}\ntype ActorEffects = '[Notifications, Replies, Watches]\n",
         insert_preamble_imports(
             &tidepool_mcp::build_preamble(&declarations, false),
             "Tidepool.Effects.Core (Notifications(..))"
         )
     );
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Reply (Replies)");
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().unwrap();
@@ -107,12 +109,12 @@ async fn authored_seal_survives_lost_waiter_and_rejects_late_work() {
         "send (NotifyWith ({}, {}) \"hold\")",
         address.id.0, address.incarnation.0
     );
-    let first = tokio::spawn(policy.dispatch_boxed(invocation(&source, "first")));
+    let mut first = tokio::spawn(policy.dispatch_boxed(invocation(&source, "first")));
     let held = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
-            if let LocalResidentDeployment::NotificationSend(command) = events.recv().await.unwrap()
-            {
-                break command;
+            tokio::select! {
+                result = &mut first => panic!("authored invocation completed before controlled handoff: {result:?}"),
+                event = events.recv() => if let LocalResidentDeployment::NotificationSend(command) = event.unwrap() { break command; }
             }
         }
     })
