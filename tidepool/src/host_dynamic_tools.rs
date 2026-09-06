@@ -42,6 +42,12 @@ enum HostToolPhase {
     Draining,
 }
 
+#[derive(Clone, Copy)]
+enum AdmissionKind {
+    NewWork,
+    CompletionOrRead,
+}
+
 /// One service's HTTP admission control, never resident-effect custody.
 #[derive(Clone)]
 pub(crate) struct HostToolControl {
@@ -64,12 +70,12 @@ impl HostToolControl {
         self.phase.send_replace(HostToolPhase::Draining);
     }
 
-    fn admits(&self, completion: bool) -> bool {
+    fn admits(&self, kind: AdmissionKind) -> bool {
         // The watch read lock linearizes admission against phase publication.
         // An admitted handler may finish; this guard never spans endpoint await.
         match *self.phase.borrow() {
             HostToolPhase::Serving => true,
-            HostToolPhase::Quiescing => completion,
+            HostToolPhase::Quiescing => matches!(kind, AdmissionKind::CompletionOrRead),
             HostToolPhase::Draining => false,
         }
     }
@@ -258,7 +264,7 @@ async fn completed(
     State(state): State<HostState>,
     Json(request): Json<CompletionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !state.control.admits(true) {
+    if !state.control.admits(AdmissionKind::CompletionOrRead) {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "tool host is draining".into(),
@@ -291,7 +297,7 @@ async fn completed(
 }
 
 async fn registration(State(state): State<HostState>) -> Result<Json<Registration>, StatusCode> {
-    if !state.control.admits(true) {
+    if !state.control.admits(AdmissionKind::CompletionOrRead) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     Ok(Json((*state.registration).clone()))
@@ -308,7 +314,7 @@ async fn attach_session(
     State(state): State<HostState>,
     Json(request): Json<SessionRequest>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
-    if !state.control.admits(false) {
+    if !state.control.admits(AdmissionKind::NewWork) {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "tool host is quiescing"));
     }
     let thread = parse_thread(request.thread_id)
@@ -514,7 +520,7 @@ async fn call(
     State(state): State<HostState>,
     Json(request): Json<CallRequest>,
 ) -> Json<CallResponse> {
-    if !state.control.admits(false) {
+    if !state.control.admits(AdmissionKind::NewWork) {
         return Json(CallResponse::failure(&HostToolFailure::Quiescing));
     }
     if request.protocol_version != PROTOCOL_VERSION {
