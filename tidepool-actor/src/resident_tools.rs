@@ -138,6 +138,12 @@ fn execution_id(actor: crate::ActorRef, operation: &WorkbenchCallKey) -> Workben
 }
 
 impl ResidentToolClient {
+    pub(crate) async fn seal(&self) -> Result<crate::HostedWorkSeal, ResidentToolError> {
+        self.actor
+            .seal_hosted_work()
+            .await
+            .map_err(ResidentToolError::Invocation)
+    }
     pub(crate) fn local(actor: crate::LocalActorRef) -> Self {
         Self {
             actor,

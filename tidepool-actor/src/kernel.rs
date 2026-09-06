@@ -332,6 +332,25 @@ impl LocalActorRef {
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
     }
 
+    /// Observe the same actor-owned retirement after waiter loss. A legacy or
+    /// forced terminal never becomes confirmed cleanup by observation.
+    pub async fn shutdown_with_cleanup(
+        &self,
+        terminal: ActorTerminal,
+    ) -> Result<crate::ResidentShutdown, KernelInvocationFailure> {
+        let terminal = self.shutdown(terminal).await?;
+        let cleanup = self
+            .terminal
+            .cleanup()
+            .unwrap_or_else(|| crate::ResidentCleanupOutcome {
+                actor: self.identity,
+                hook: crate::CleanupComponentOutcome::Unconfirmed("terminal-only exit".into()),
+                realm: crate::CleanupComponentOutcome::Unconfirmed("terminal-only exit".into()),
+                children: crate::CleanupComponentOutcome::Unconfirmed("terminal-only exit".into()),
+            });
+        Ok(crate::ResidentShutdown { terminal, cleanup })
+    }
+
     pub async fn shutdown(
         &self,
         terminal: ActorTerminal,

@@ -45,6 +45,19 @@ fn haskell_tool_instructions() -> &'static str {
 }
 
 impl ResidentToolEndpoint for ResidentInteractivePolicy {
+    fn seal_hosted_work_boxed(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::HostedWorkSeal, ResidentToolError>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let client = self.client.clone();
+        Box::pin(async move { client.seal().await })
+    }
+
     fn tools(&self) -> &[HostedTool] {
         &self.tools
     }

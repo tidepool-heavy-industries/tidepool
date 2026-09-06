@@ -301,6 +301,33 @@ pub trait KernelBehavior: Send + 'static {
         terminal: &'a ActorTerminal,
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>>;
 
+    /// Explicit component evidence. Generic behavior success cannot attest a
+    /// resident realm it does not own; resident behavior overrides this method.
+    fn shutdown_components<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        terminal: &'a ActorTerminal,
+    ) -> BoxFuture<
+        'a,
+        (
+            crate::CleanupComponentOutcome,
+            crate::CleanupComponentOutcome,
+        ),
+    > {
+        Box::pin(async move {
+            let hook = match self.shutdown(context, terminal).await {
+                Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                Err(error) => crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
+            };
+            (
+                hook,
+                crate::CleanupComponentOutcome::Unconfirmed(
+                    "behavior provides no resident realm evidence".into(),
+                ),
+            )
+        })
+    }
+
     /// Observe the immutable terminal result after cleanup and publication.
     ///
     /// Lifecycle adapters belong here rather than in `shutdown`: consumers
@@ -770,12 +797,34 @@ async fn finish_actor<B>(
 where
     B: KernelBehavior,
 {
+    if let Some(terminal) = state.terminal.get() {
+        return terminal;
+    }
+    // Serialized mailbox execution closes completion admission here: queued
+    // completion cannot run across this snapshot or after stopping the actor.
     state.hosted_admission = HostedAdmission::Sealed;
-    shutdown_children(&state.context, Duration::from_secs(15)).await;
-    let terminal = match state.behavior.shutdown(&state.context, &requested).await {
-        Ok(()) => requested,
-        Err(error) => failed_terminal(format!("actor shutdown failed: {error}")),
+    let children_before = shutdown_children(&state.context, Duration::from_secs(15)).await;
+    let (hook, realm) = state
+        .behavior
+        .shutdown_components(&state.context, &requested)
+        .await;
+    // Include children introduced by shutdown behavior, not only an old snapshot.
+    let children_after = shutdown_children(&state.context, Duration::from_secs(15)).await;
+    let children = combine_cleanup(children_before, children_after);
+    let terminal = match &hook {
+        crate::CleanupComponentOutcome::Confirmed => requested,
+        crate::CleanupComponentOutcome::Unconfirmed(error) => {
+            failed_terminal(format!("actor shutdown failed: {error}"))
+        }
     };
+    state
+        .terminal
+        .retain_cleanup(crate::ResidentCleanupOutcome {
+            actor: state.context.identity,
+            hook,
+            realm,
+            children,
+        });
     publish_terminal(&state.terminal, &terminal);
     state.behavior.stopped(&state.context, &terminal).await;
     myself.stop(Some(terminal.summary.clone()));
@@ -795,28 +844,60 @@ fn failed_terminal(summary: String) -> ActorTerminal {
     }
 }
 
-async fn shutdown_children(context: &KernelContext, timeout: Duration) {
+fn combine_cleanup(
+    left: crate::CleanupComponentOutcome,
+    right: crate::CleanupComponentOutcome,
+) -> crate::CleanupComponentOutcome {
+    use crate::CleanupComponentOutcome::*;
+    match (left, right) {
+        (Confirmed, value) | (value, Confirmed) => value,
+        (Unconfirmed(a), Unconfirmed(b)) => Unconfirmed(format!("{a}; {b}")),
+    }
+}
+
+async fn shutdown_children(
+    context: &KernelContext,
+    timeout: Duration,
+) -> crate::CleanupComponentOutcome {
     let children: Vec<_> = context.children.lock().values().cloned().collect();
     let mut shutdowns = FuturesUnordered::new();
     for child in children {
         shutdowns.push(async move {
-            if child.terminal().get().is_some() {
-                return;
-            }
             let requested = ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "owner actor stopped".into(),
             };
-            let result = tokio::time::timeout(timeout, child.shutdown(requested.clone())).await;
-            if !matches!(result, Ok(Ok(_))) {
-                if child.terminal().get().is_none() {
-                    publish_terminal(child.terminal(), &requested);
+            let result =
+                tokio::time::timeout(timeout, child.shutdown_with_cleanup(requested.clone())).await;
+            match result {
+                Ok(Ok(outcome))
+                    if outcome.cleanup.actor() == child.identity()
+                        && outcome.cleanup.is_confirmed() =>
+                {
+                    crate::CleanupComponentOutcome::Confirmed
                 }
-                child.address().kill();
+                Ok(Ok(_)) => crate::CleanupComponentOutcome::Unconfirmed(format!(
+                    "child {:?} cleanup is unconfirmed",
+                    child.identity()
+                )),
+                _ => {
+                    if child.terminal().get().is_none() {
+                        publish_terminal(child.terminal(), &requested);
+                    }
+                    child.address().kill();
+                    crate::CleanupComponentOutcome::Unconfirmed(format!(
+                        "child {:?} retirement failed or timed out; kill is not cleanup",
+                        child.identity()
+                    ))
+                }
             }
         });
     }
-    while shutdowns.next().await.is_some() {}
+    let mut outcome = crate::CleanupComponentOutcome::Confirmed;
+    while let Some(child) = shutdowns.next().await {
+        outcome = combine_cleanup(outcome, child);
+    }
+    outcome
 }
 
 #[cfg(test)]
