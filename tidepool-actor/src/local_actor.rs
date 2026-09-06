@@ -64,6 +64,7 @@ pub struct KernelContext {
     children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
     directory: LocalActorDirectory,
     forgotten_children: std::sync::Arc<parking_lot::Mutex<crate::CleanupComponentOutcome>>,
+    child_admission_closed: std::sync::Arc<tokio::sync::RwLock<bool>>,
 }
 
 /// Process-local exact-incarnation routing and terminal-observation index.
@@ -200,6 +201,14 @@ impl KernelContext {
     where
         C: KernelBehavior,
     {
+        // Hold admission through registration so retirement cannot miss a
+        // child whose startup is already in flight.
+        let admission = self.child_admission_closed.read().await;
+        if *admission {
+            return Err(ractor::SpawnErr::StartupFailed(
+                std::io::Error::other("actor child admission is closed").into(),
+            ));
+        }
         let terminal = RetainedActorExit::new();
         let spawned = self
             .myself
@@ -425,6 +434,7 @@ where
             myself,
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
             directory: arguments.directory,
+            child_admission_closed: std::sync::Arc::new(tokio::sync::RwLock::new(false)),
             forgotten_children: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::CleanupComponentOutcome::Confirmed,
             )),
@@ -851,14 +861,14 @@ where
     // Serialized mailbox execution closes completion admission here: queued
     // completion cannot run across this snapshot or after stopping the actor.
     state.hosted_admission = HostedAdmission::Closing;
-    let children_before = shutdown_children(&state.context, Duration::from_secs(15)).await;
+    // Wait for admitted startup to register, then permanently reject creation,
+    // including through cloned contexts and shutdown hooks.
+    *state.context.child_admission_closed.write().await = true;
+    let children = shutdown_children(&state.context, Duration::from_secs(15)).await;
     let (hook, realm) = state
         .behavior
         .shutdown_components(&state.context, &requested)
         .await;
-    // Include children introduced by shutdown behavior, not only an old snapshot.
-    let children_after = shutdown_children(&state.context, Duration::from_secs(15)).await;
-    let children = combine_cleanup(children_before, children_after);
     let terminal = match (&hook, &realm) {
         (crate::CleanupComponentOutcome::Unconfirmed(error), _)
         | (_, crate::CleanupComponentOutcome::Unconfirmed(error)) => {
@@ -1699,6 +1709,7 @@ mod tests {
                 actor.clone(),
             )]))),
             directory: LocalActorDirectory::default(),
+            child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
             forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
         };
         let result = shutdown_children(&context, Duration::from_millis(1)).await;
