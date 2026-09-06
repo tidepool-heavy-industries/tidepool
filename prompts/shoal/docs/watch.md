@@ -22,6 +22,31 @@ subscription. `ReplyAvailable` carries a typed result and its evidence;
 dependency must succeed. Polling a settled watch repeatedly returns its state
 without consuming it. Compose dependencies before registration.
 
+Keep full receipts in a binding and project the report for routine reading. For
+the two `Text` reports above, this view preserves pending and failure states:
+
+```haskell
+:{
+reportOnly :: Settlement a -> Either ResponseFailure a
+reportOnly (ReplyAvailable result) = Right (responseValue result)
+reportOnly (ReplyUnavailable failure) = Left failure
+reportPairView :: WatchState (Settlement Text, Settlement Text)
+               -> WatchState (Either ResponseFailure Text, Either ResponseFailure Text)
+reportPairView WatchPending = WatchPending
+reportPairView (WatchUnavailable failure) = WatchUnavailable failure
+reportPairView (WatchReady (left, right)) = WatchReady (reportOnly left, reportOnly right)
+:}
+joinedState <- pollWatch joined
+reportPairView joinedState
+```
+
+Inspect `joinedState` further when deciding integration or checking provenance.
+`responseValue` is the actor's reported conclusion; `responseExecution` and
+`responseWorktree` are runtime evidence. A successful reply does not establish
+review, acceptance, or integration: those remain the responsible coordinator's
+judgments about an exact candidate. Project task-specific report fields when
+even the report is large; no standard worker ledger is required.
+
 A wake notification is a reason to inspect, not a replacement for the handle's
 current state. On a delayed or duplicate notice, poll the watch before acting;
 do not resubmit the original work merely because another notice arrived.

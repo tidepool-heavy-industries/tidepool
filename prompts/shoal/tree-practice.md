@@ -28,6 +28,12 @@ coherent work, check the integrated revision, and revise your understanding.
 Independent branches need no global barrier. Preserve consequential discoveries
 as well as fulfillment; a working implementation may expose a poor interface.
 A worker report is a claim to compare with repository and execution evidence.
+Give a coordinator a delivery responsibility it can carry through local scaffold,
+implementation, checks, and revision. Fold its decision-ready evidence; choose
+additional review for the contract and integration risks, not a fixed number of
+review hops. Short branches can be useful; turn count is not their acceptance test.
+Keep provisional findings distinct from verified constraints. Send corrections
+to retained specialists whose assignments or decisions depended on them.
 
 Fork reviewers from your current context when that gives them the relevant
 newer understanding. Give the reviewer the candidate, contract, and implementer
@@ -43,9 +49,11 @@ acceptance function can take an explicit contract and candidate so it can check
 a later integrated revision. Shared values do not transfer the author's authority.
 Promote proven helper source deliberately; no campaign schema is required.
 
-Orient with `:doc topics`, `:bindings`, `:status`, and targeted `:type` / `:info`.
-Use `:status!` for provider health and `:recovery` after recreation. Reserve
-`:browse` for deliberate wider discovery: its output becomes inherited context.
+Resolve uncertainty with targeted observations: `:doc topics` for unfamiliar
+operations, `:bindings` to locate a binding, `:type` / `:info` for its use,
+`:status!` for lifecycle or provider uncertainty, and `:recovery` after recreation.
+On a watch wake, poll the retained handle; do not repeat an orientation checklist.
+Reserve `:browse` for wider discovery: its output becomes inherited context.
 Keep original evidence and project a compact view before printing. Opaque values
 remain usable through their types and functions. See `:doc workbench` for syntax.
 
