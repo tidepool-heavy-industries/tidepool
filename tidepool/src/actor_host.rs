@@ -3922,9 +3922,11 @@ mod tests {
             };
         assert_eq!(activation.id.actor(), child.actor.identity());
         let directory = tempfile::tempdir().unwrap();
+        // Distinct fresh hierarchies exercise both strict directory owners at
+        // the authored notification/inbox seam; syscall denial is tested by node.
         let inbox = ActorInbox::open(
-            directory.path().join("rows"),
-            directory.path().join("cursor"),
+            directory.path().join("rows-tree/deep/rows"),
+            directory.path().join("checkpoint-tree/deep/cursor"),
         )
         .unwrap();
         let inbox_key = "notification-test-inbox";
@@ -3988,8 +3990,8 @@ mod tests {
         );
         let foreign_directory = tempfile::tempdir().unwrap();
         let foreign = ActorInbox::open(
-            foreign_directory.path().join("rows"),
-            foreign_directory.path().join("cursor"),
+            foreign_directory.path().join("rows-tree/deep/rows"),
+            foreign_directory.path().join("checkpoint-tree/deep/cursor"),
         )
         .unwrap();
         assert_eq!(
@@ -4029,8 +4031,8 @@ mod tests {
         );
         drop(inbox);
         let inbox = ActorInbox::open(
-            directory.path().join("rows"),
-            directory.path().join("cursor"),
+            directory.path().join("rows-tree/deep/rows"),
+            directory.path().join("checkpoint-tree/deep/cursor"),
         )
         .unwrap();
         assert_eq!(
@@ -4117,8 +4119,8 @@ mod tests {
         assert_eq!(command.target(), idle.actor.identity());
         let idle_directory = tempfile::tempdir().unwrap();
         let idle_inbox = ActorInbox::open(
-            idle_directory.path().join("rows"),
-            idle_directory.path().join("cursor"),
+            idle_directory.path().join("rows-tree/deep/rows"),
+            idle_directory.path().join("checkpoint-tree/deep/cursor"),
         )
         .unwrap();
         let row = idle_inbox

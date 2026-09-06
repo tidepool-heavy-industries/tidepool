@@ -522,3 +522,7 @@ fn legacy_pending_cannot_expose_tracked_payload_before_or_after_restart() {
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Unconfirmed);
     assert!(reopened.begin_tracked_delivery(row.sequence).is_err());
 }
+
+#[cfg(target_os = "linux")]
+#[path = "strict_faults.rs"]
+mod strict_faults;
