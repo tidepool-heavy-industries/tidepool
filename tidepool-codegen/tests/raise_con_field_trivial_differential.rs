@@ -1,29 +1,5 @@
-//! Differential fixture for the "trivial constructor field" predicate drift
-//! (duplication survey finding 5): a `Con` field that is `raise#` applied to
-//! a trivial (already-WHNF) argument.
-//!
-//! The JIT's `is_trivial_field` (`tidepool-codegen/src/emit/expr.rs`)
-//! explicitly classifies `PrimOpKind::Raise` as non-trivial regardless of its
-//! arguments, so `Con(tag, [raise# 5])` thunks the field and never raises
-//! just from constructing the value — matching GHC Core's non-strict `let`/
-//! constructor-application semantics (`Just (error "boom")` does not raise
-//! until the `Just` is pattern-matched OPEN, i.e. the field itself is
-//! demanded, not merely the outer tag).
-//!
-//! The oracle's copy of the predicate (`tidepool-eval/src/eval.rs`) instead
-//! classified every `PrimOp` by its arguments alone, so a `Raise` with a
-//! trivial argument was misclassified trivial and evaluated EAGERLY while
-//! merely constructing the `Con` — raising before anything ever forced the
-//! field.
-//!
-//! `case (Con tag [raise# 5]) of { tag y -> 42 }` matches only the outer tag
-//! (WHNF of the scrutinee), never touching the field `y` — so the correct
-//! answer is `42`. A top-level `run_pure`/`eval` return would deep-force the
-//! *whole* result including any unforced field (that's `heap_to_value_forcing`
-//! doing its normal job of crossing the JIT/Rust boundary as concrete data),
-//! which would mask this bug by forcing the field anyway — so the outer
-//! `Case` here is load-bearing: it is what lets a correct implementation
-//! throw the field away unforced.
+//! Both backends preserve partial constructor fields until the field is demanded.
+//! Matching only the outer tag must not enter Raise or division by zero.
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_eval::{env_from_datacon_table, eval, Value, VecHeap};
@@ -33,21 +9,38 @@ use tidepool_testing::proptest::build_table_for_expr;
 
 /// `case (Con tag=0 [raise# 5]) of { DataAlt(tag=0) y -> 42 }`
 fn build_tree() -> CoreExpr {
+    build_partial_tree(PrimOpKind::Raise, false)
+}
+
+fn build_partial_tree(op: PrimOpKind, demand: bool) -> CoreExpr {
     let tag = DataConId(0);
     let field_binder = VarId(1);
     let case_binder = VarId(2);
 
     let mut b = TreeBuilder::new();
     let raise_arg = b.push(CoreFrame::Lit(Literal::LitInt(5)));
+    let zero = b.push(CoreFrame::Lit(Literal::LitInt(0)));
     let raise_field = b.push(CoreFrame::PrimOp {
-        op: PrimOpKind::Raise,
-        args: vec![raise_arg],
+        op,
+        args: if op == PrimOpKind::Raise {
+            vec![raise_arg]
+        } else {
+            vec![raise_arg, zero]
+        },
     });
     let scrutinee = b.push(CoreFrame::Con {
         tag,
         fields: vec![raise_field],
     });
-    let alt_body = b.push(CoreFrame::Lit(Literal::LitInt(42)));
+    let field_ref = b.push(CoreFrame::Var(field_binder));
+    let alt_body = if demand {
+        b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![field_ref, zero],
+        })
+    } else {
+        b.push(CoreFrame::Lit(Literal::LitInt(42)))
+    };
     b.push(CoreFrame::Case {
         scrutinee,
         binder: case_binder,
@@ -85,6 +78,25 @@ fn jit_does_not_raise_when_con_field_is_unforced() {
         Ok(Value::Lit(Literal::LitInt(n))) => assert_eq!(n, 42),
         other => {
             panic!("matching only the outer tag of Con(tag, [raise# 5]) must not raise: {other:?}")
+        }
+    }
+}
+
+#[test]
+fn partial_constructor_field_is_lazy_in_both_backends() {
+    for demand in [false, true] {
+        let expr = build_partial_tree(PrimOpKind::IntQuot, demand);
+        let table = build_table_for_expr(&expr);
+        let env = env_from_datacon_table(&table);
+        let evaluated = eval(&expr, &env, &mut VecHeap::new());
+        let mut machine = JitEffectMachine::compile(&expr, &table, 64 * 1024).expect("JIT compile");
+        let jitted = machine.run_pure();
+        if demand {
+            assert!(evaluated.is_err(), "selected quotient must fail in eval");
+            assert!(jitted.is_err(), "selected quotient must fail in JIT");
+        } else {
+            assert!(matches!(evaluated, Ok(Value::Lit(Literal::LitInt(42)))));
+            assert!(matches!(jitted, Ok(Value::Lit(Literal::LitInt(42)))));
         }
     }
 }

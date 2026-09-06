@@ -1766,8 +1766,7 @@ impl EmitContext {
                                 };
                                 if body_fvs.binary_search(&binder).is_ok() {
                                     if is_trivial_field(rhs, args.sess.tree) {
-                                        // Trivial RHS (already WHNF \u2014 Var/Lit/Lam/Con \u2014 or a
-                                        // strict, terminating PrimOp): evaluate eagerly. This is
+                                        // Trivial RHS (Var/Lit/Lam or safe Con): materialize eagerly. This is
                                         // the fast path; no thunk allocation.
                                         // Push work in LIFO order: cleanup, eval body, bind, eval rhs
                                         // After rhs eval \u2192 bind \u2192 eval body \u2192 cleanup
@@ -2477,7 +2476,7 @@ impl EmitContext {
 
         // Phase 3c: bind deferred simple bindings in TOPOLOGICAL order (deps
         // first). Lazy-default: thunkify the RHS, EXCEPT when it is trivially
-        // resolvable now — a WHNF / strict-primop expr (`is_trivial_field`) all
+        // resolvable now — a safe value expression (`is_trivial_field`) all
         // of whose free vars are already in env — which we evaluate eagerly
         // instead (fast path, no thunk; a Var alias RHS takes this path too).
         // Topo order guarantees each binding's deferred-simple deps are

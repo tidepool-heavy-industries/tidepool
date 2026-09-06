@@ -827,13 +827,29 @@ fn element_kept_live_solely_by_array_payload_slot_survives_nursery_gc() {
 #[derive(Clone, Copy)]
 enum OperandDemandProbe {
     OverwrittenInitializer,
+    SelectedInitializer,
     UnselectedWrittenBottom,
     SelectedWrittenBottom,
     StrictSize,
     StrictIndex,
 }
 
+#[derive(Clone, Copy)]
+enum OperandBottom {
+    Raise,
+    QuotientZero,
+    ArithmeticBottomVar,
+}
+
 fn build_operand_demand_probe(small: bool, probe: OperandDemandProbe) -> CoreExpr {
+    build_operand_demand_with_bottom(small, probe, OperandBottom::Raise)
+}
+
+fn build_operand_demand_with_bottom(
+    small: bool,
+    probe: OperandDemandProbe,
+    kind: OperandBottom,
+) -> CoreExpr {
     reset_ctr();
     let mut b = TreeBuilder::new();
     let zero = b.push(CoreFrame::Lit(Literal::LitInt(0)));
@@ -847,7 +863,24 @@ fn build_operand_demand_probe(small: bool, probe: OperandDemandProbe) -> CoreExp
         op: PrimOpKind::Raise,
         args: vec![message],
     });
-    let initial = if matches!(probe, OperandDemandProbe::OverwrittenInitializer) {
+    let bottom_var = fresh_var();
+    let bottom_ref = b.push(CoreFrame::Var(bottom_var));
+    let raised = bottom;
+    let bottom = match kind {
+        OperandBottom::Raise => raised,
+        OperandBottom::QuotientZero => b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntQuot,
+            args: vec![one, zero],
+        }),
+        OperandBottom::ArithmeticBottomVar => b.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntAdd,
+            args: vec![bottom_ref, one],
+        }),
+    };
+    let initial = if matches!(
+        probe,
+        OperandDemandProbe::OverwrittenInitializer | OperandDemandProbe::SelectedInitializer
+    ) {
         bottom
     } else {
         con_int(&mut b, 42)
@@ -867,7 +900,10 @@ fn build_operand_demand_probe(small: bool, probe: OperandDemandProbe) -> CoreExp
     });
     let arr = fresh_var();
     let arr_v = b.push(CoreFrame::Var(arr));
-    let read_index = if matches!(probe, OperandDemandProbe::SelectedWrittenBottom) {
+    let read_index = if matches!(
+        probe,
+        OperandDemandProbe::SelectedWrittenBottom | OperandDemandProbe::SelectedInitializer
+    ) {
         one
     } else {
         zero
@@ -932,6 +968,11 @@ fn build_operand_demand_probe(small: bool, probe: OperandDemandProbe) -> CoreExp
         rhs: new,
         body: sequence,
     });
+    let root = b.push(CoreFrame::LetNonRec {
+        binder: bottom_var,
+        rhs: raised,
+        body: root,
+    });
     let mut tree = b.build();
     fixup_root(&mut tree, root)
 }
@@ -966,6 +1007,53 @@ fn primitive_operand_demand_enters_selected_bottom_and_strict_operands() {
             assert!(
                 err.to_string().contains("operand demand bottom"),
                 "wrong failure: {err:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn primitive_partial_quotient_stays_lazy() {
+    check_partial_operand(OperandBottom::QuotientZero);
+}
+
+#[test]
+fn primitive_arithmetic_bottom_var_stays_lazy() {
+    check_partial_operand(OperandBottom::ArithmeticBottomVar);
+}
+
+fn check_partial_operand(kind: OperandBottom) {
+    for small in [false, true] {
+        for probe in [
+            OperandDemandProbe::OverwrittenInitializer,
+            OperandDemandProbe::UnselectedWrittenBottom,
+        ] {
+            assert_eq!(
+                expect_int(
+                    &build_operand_demand_with_bottom(small, probe, kind),
+                    16 * 1024
+                ),
+                42
+            );
+        }
+        for probe in [
+            OperandDemandProbe::SelectedInitializer,
+            OperandDemandProbe::SelectedWrittenBottom,
+        ] {
+            let error = compile_and_run(
+                &build_operand_demand_with_bottom(small, probe, kind),
+                16 * 1024,
+            )
+            .expect_err("selected partial computation must fail");
+            let expected = match kind {
+                OperandBottom::QuotientZero => "division by zero",
+                OperandBottom::Raise | OperandBottom::ArithmeticBottomVar => {
+                    "operand demand bottom"
+                }
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "wrong failure: {error:?}"
             );
         }
     }
