@@ -367,12 +367,12 @@ define_primops! {
     FfiStrlen => "FfiStrlen", "ffi_strlen";
     FfiRintDouble => "FfiRintDouble", "ffi_rint_double";
     // GHC classification FFI: one matching Float#/Double# argument, Int# 0 or 1.
-    FfiIsFloatNaN => "FfiIsFloatNaN", "ffi_is_FloatNaN";
-    FfiIsFloatInfinite => "FfiIsFloatInfinite", "ffi_is_FloatInfinite";
-    FfiIsFloatNegativeZero => "FfiIsFloatNegativeZero", "ffi_is_FloatNegativeZero";
-    FfiIsDoubleNaN => "FfiIsDoubleNaN", "ffi_is_DoubleNaN";
-    FfiIsDoubleInfinite => "FfiIsDoubleInfinite", "ffi_is_DoubleInfinite";
-    FfiIsDoubleNegativeZero => "FfiIsDoubleNegativeZero", "ffi_is_DoubleNegativeZero";
+    FfiIsFloatNaN => "FfiIsFloatNaN", "ffi_is_float_nan";
+    FfiIsFloatInfinite => "FfiIsFloatInfinite", "ffi_is_float_infinite";
+    FfiIsFloatNegativeZero => "FfiIsFloatNegativeZero", "ffi_is_float_negative_zero";
+    FfiIsDoubleNaN => "FfiIsDoubleNaN", "ffi_is_double_nan";
+    FfiIsDoubleInfinite => "FfiIsDoubleInfinite", "ffi_is_double_infinite";
+    FfiIsDoubleNegativeZero => "FfiIsDoubleNegativeZero", "ffi_is_double_negative_zero";
     FfiTextMeasureOff => "FfiTextMeasureOff", "ffi_text_measure_off";
     FfiTextMemchr => "FfiTextMemchr", "ffi_text_memchr";
     FfiTextReverse => "FfiTextReverse", "ffi_text_reverse";
