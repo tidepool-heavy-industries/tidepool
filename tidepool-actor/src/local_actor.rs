@@ -329,7 +329,15 @@ pub struct LocalActorArguments<B> {
     pub incarnation: crate::Incarnation,
 }
 
+#[derive(Default)]
+enum HostedAdmission {
+    #[default]
+    Open,
+    Sealed,
+}
+
 pub struct LocalActorState<B> {
+    hosted_admission: HostedAdmission,
     context: KernelContext,
     behavior: B,
     terminal: RetainedActorExit,
@@ -366,6 +374,7 @@ where
             terminal: arguments.terminal,
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
+            hosted_admission: HostedAdmission::Open,
         };
         state
             .context
@@ -419,6 +428,12 @@ where
             message => message,
         };
         match message {
+            KernelMessage::SealHostedWork { reply } => {
+                state.hosted_admission = HostedAdmission::Sealed;
+                let _ = reply.send(crate::HostedWorkSeal {
+                    actor: state.context.identity,
+                });
+            }
             KernelMessage::Cast { sender, request } => {
                 match state.behavior.cast(&state.context, sender, request).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
@@ -458,6 +473,14 @@ where
                 },
             },
             KernelMessage::Tool { invocation, reply } => {
+                if matches!(state.hosted_admission, HostedAdmission::Sealed) {
+                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                    }));
+                    return Ok(());
+                }
+
                 match state.behavior.tool(&state.context, invocation).await {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
@@ -471,6 +494,14 @@ where
                 }
             }
             KernelMessage::AbortPendingForks { reply } => {
+                if matches!(state.hosted_admission, HostedAdmission::Sealed) {
+                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                    }));
+                    return Ok(());
+                }
+
                 let result = state
                     .behavior
                     .abort_pending_forks(&state.context)
@@ -508,6 +539,14 @@ where
                 }
             }
             KernelMessage::Workbench { request, reply } => {
+                if matches!(state.hosted_admission, HostedAdmission::Sealed) {
+                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                    }));
+                    return Ok(());
+                }
+
                 match state.behavior.workbench(&state.context, request).await {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
@@ -731,6 +770,7 @@ async fn finish_actor<B>(
 where
     B: KernelBehavior,
 {
+    state.hosted_admission = HostedAdmission::Sealed;
     shutdown_children(&state.context, Duration::from_secs(15)).await;
     let terminal = match state.behavior.shutdown(&state.context, &requested).await {
         Ok(()) => requested,

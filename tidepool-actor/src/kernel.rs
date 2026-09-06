@@ -145,6 +145,9 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    SealHostedWork {
+        reply: RpcReplyPort<crate::HostedWorkSeal>,
+    },
     Cast {
         sender: ActorRef,
         request: MailboxValue,
@@ -191,6 +194,7 @@ pub enum KernelMessage {
 impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SealHostedWork { .. } => formatter.write_str("SealHostedWork"),
             Self::Cast { sender, request } => formatter
                 .debug_struct("Cast")
                 .field("sender", sender)
@@ -308,6 +312,18 @@ impl LocalActorRef {
         self.address
             .send_message(KernelMessage::ExternalApplicationFailed {
                 failure,
+                reply: reply.into(),
+            })
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+        receive
+            .await
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+    }
+
+    pub async fn seal_hosted_work(&self) -> Result<crate::HostedWorkSeal, KernelInvocationFailure> {
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::SealHostedWork {
                 reply: reply.into(),
             })
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
