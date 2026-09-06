@@ -135,7 +135,10 @@ effort = "low"
 
 Shoal never inherits the interactive client's globally last-used model.
 `--model` and `--effort` override the project defaults for one run; the
-resolved pair is recorded in the run status and printed at launch. The config
+resolved pair is recorded in the run status and printed at launch. An omitted
+project-config effort defaults to Low. Context forks also default to Low rather
+than inheriting parent effort; use `withEffort Medium` or `withEffort High` for
+an explicit branch override. The config
 is runtime-local and covered by Shoal's `.git/info/exclude` entry.
 
 The reproducible path is `nix run github:inanna-malick/tidepool#shoal -- init`

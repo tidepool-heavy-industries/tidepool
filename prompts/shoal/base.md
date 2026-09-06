@@ -192,7 +192,8 @@ through a concise handoff and a fresh fork when that is the better starting poin
 keep the old context available for consultation while it remains valuable.
 Existing specialists share their fork prefix, not the parent's later reasoning.
 
-Match reasoning effort to uncertainty and consequence. Once the scaffold resolves
+Unspecified fork effort defaults to Low. Select Medium or High explicitly when
+uncertainty and consequence justify it. Once the scaffold resolves
 important choices, `withEffort Low` can give a precise implementation or test
 obligation the same inherited context at lower initial effort. Keep more effort
 for shared architecture, uncertain event routing, difficult diagnosis, or proving

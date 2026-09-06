@@ -161,15 +161,15 @@ fn launch_effort(
     mode: &InteractiveLaunchMode,
     default: ReasoningEffort,
     requested: Option<tidepool_actor::ForkEffort>,
-) -> Option<ReasoningEffort> {
+) -> ReasoningEffort {
     if matches!(mode, InteractiveLaunchMode::Fork { .. }) {
-        requested.map(|effort| match effort {
+        match requested.unwrap_or(tidepool_actor::ForkEffort::Low) {
             tidepool_actor::ForkEffort::Low => ReasoningEffort::Low,
             tidepool_actor::ForkEffort::Medium => ReasoningEffort::Medium,
             tidepool_actor::ForkEffort::High => ReasoningEffort::High,
-        })
+        }
     } else {
-        Some(default)
+        default
     }
 }
 
@@ -1929,7 +1929,7 @@ async fn launch_prepared_interactive_application(
             tidepool_agent::InteractiveGoalPolicy::Disabled
         },
         model,
-        effort,
+        effort: Some(effort),
         developer_instructions,
         base_instructions_file: base_prompt.file().to_path_buf(),
         initial_prompt: installation.initial_user_message.clone(),
@@ -3149,7 +3149,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_effort_is_optional_and_never_replaced_by_the_root_default() {
+    fn fork_effort_defaults_low_and_preserves_explicit_overrides() {
         use tidepool_actor::ForkEffort;
         use tidepool_agent::{BackendThreadId, InteractiveLaunchMode, ReasoningEffort};
         let fork = InteractiveLaunchMode::Fork {
@@ -3161,7 +3161,10 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningEffort::High,
         ] {
-            assert_eq!(super::launch_effort(&fork, default, None), None);
+            assert_eq!(
+                super::launch_effort(&fork, default, None),
+                ReasoningEffort::Low
+            );
             for (requested, selected) in [
                 (ForkEffort::Low, ReasoningEffort::Low),
                 (ForkEffort::Medium, ReasoningEffort::Medium),
@@ -3169,12 +3172,20 @@ mod tests {
             ] {
                 assert_eq!(
                     super::launch_effort(&fork, default, Some(requested)),
-                    Some(selected)
+                    selected
                 );
             }
             assert_eq!(
                 super::launch_effort(&InteractiveLaunchMode::Fresh, default, None),
-                Some(default)
+                default
+            );
+            assert_eq!(
+                super::launch_effort(
+                    &InteractiveLaunchMode::Resume(BackendThreadId("retained".into())),
+                    default,
+                    None
+                ),
+                default
             );
         }
     }

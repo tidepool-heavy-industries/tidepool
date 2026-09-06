@@ -76,12 +76,14 @@ pub struct HostOptions {
 #[serde(deny_unknown_fields)]
 pub struct ShoalAgentDefaults {
     pub model: String,
+    #[serde(default)]
     pub effort: ShoalEffort,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShoalEffort {
+    #[default]
     Low,
     Medium,
     High,
@@ -1178,6 +1180,23 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn config_effort_defaults_low_and_preserves_explicit_values() {
+        let absent: ShoalConfig = toml::from_str("[defaults]\nmodel = \"test\"\n").unwrap();
+        assert_eq!(absent.defaults.effort, ShoalEffort::Low);
+        for effort in [ShoalEffort::Low, ShoalEffort::Medium, ShoalEffort::High] {
+            let config: ShoalConfig = toml::from_str(&format!(
+                "[defaults]\nmodel = \"test\"\neffort = \"{effort}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(config.defaults.effort, effort);
+        }
+        assert!(toml::from_str::<ShoalConfig>(
+            "[defaults]\nmodel = \"test\"\neffort = \"invalid\"\n"
+        )
+        .is_err());
     }
 
     #[tokio::test]
