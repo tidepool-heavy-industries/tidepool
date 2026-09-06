@@ -26,6 +26,7 @@ mod descriptor;
 mod external_application;
 mod fork_workspace;
 mod generated;
+mod hosted_lifecycle;
 mod identity;
 mod interactive_session;
 mod kernel;
@@ -46,6 +47,9 @@ mod role;
 mod runtime_observation;
 mod start;
 mod termination;
+pub use hosted_lifecycle::{
+    CleanupComponentOutcome, HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown,
+};
 mod typed_request;
 mod wait;
 mod workbench_display;
