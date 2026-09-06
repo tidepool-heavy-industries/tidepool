@@ -328,7 +328,23 @@ impl DurableActorEvent {
         })
     }
 
-    fn render(&self, inbox_sequence: u64, inbox_watermark: u64) -> String {
+    fn render(
+        &self,
+        inbox_sequence: u64,
+        inbox_watermark: u64,
+        launched_at: Option<i64>,
+    ) -> String {
+        let elapsed = |occurred: u64| match launched_at
+            .and_then(|start| i64::try_from(occurred).ok()?.checked_sub(start))
+            .filter(|elapsed| *elapsed >= 0)
+        {
+            Some(ms) => format!(
+                "+{}m{:02}s since actor launch",
+                ms / 60_000,
+                (ms / 1000) % 60
+            ),
+            None => "elapsed time unavailable".to_owned(),
+        };
         let delivery = if inbox_sequence < inbox_watermark {
             format!("delayed inbox event {inbox_sequence}/{inbox_watermark}; ")
         } else {
@@ -343,23 +359,19 @@ impl DurableActorEvent {
                 format!("{delivery}request activation {sequence} (request {}).\n\n{message}", request.0),
             Self::Legacy(message) => message.clone(),
             Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
-                "{delivery}typed watch {} {:?} changed from {:?} to {:?} at {} (actor event {}/{}). Inspect it with `pollWatch`; the handle is authoritative.",
+                "{delivery}watch {} {:?}: {:?} → {:?} ({}). Poll its retained handle with `pollWatch`.",
                 notification.watch.0,
                 notification.label,
                 notification.previous,
                 notification.current,
-                notification.occurred_at_unix_ms,
-                notification.sequence.0,
-                notification.watermark.0,
+                elapsed(notification.occurred_at_unix_ms),
             ),
             Self::Typed(TypedActorEvent::RequestCancellation { notification }) => format!(
-                "{delivery}typed request {} {:?} has cancellation pending ({:?}) at {} (actor event {}/{}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
+                "{delivery}request {} {:?} has cancellation pending ({:?}; {}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
                 notification.request.0,
                 notification.label,
                 notification.reason,
-                notification.occurred_at_unix_ms,
-                notification.sequence.0,
-                notification.watermark.0,
+                elapsed(notification.occurred_at_unix_ms),
             ),
             Self::Typed(TypedActorEvent::CleanupFinished { receipt }) => receipt.render(),
             Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
@@ -1885,7 +1897,7 @@ async fn launch_prepared_interactive_application(
             .map(|tree| tree.branch().as_str().to_owned()),
     };
     runtime_observation.publish_workspace(workspace_observation);
-    runtime_observation.publish_launch_role(installation.effective_role.clone());
+    runtime_observation.publish_launch_role(installation.effective_role.clone(), current_time_ms());
     let mut developer_instructions =
         developer_instructions(&installation.effective_role, &launch_mode);
     developer_instructions.push_str(
@@ -2197,10 +2209,20 @@ async fn deliver_pending(
         .collect::<Vec<_>>();
     let rendered = pending
         .iter()
-        .map(|message| message.payload.render(message.sequence, inbox_watermark))
+        .map(|message| {
+            message.payload.render(
+                message.sequence,
+                inbox_watermark,
+                runtime_observation.snapshot().launched_at_unix_ms,
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let rendered = orient_activation(&rendered, &runtime_observation.snapshot());
+    let rendered = if activation.is_some() {
+        orient_activation(&rendered, &runtime_observation.snapshot())
+    } else {
+        rendered
+    };
     backend
         .push(&cwd, thread, &rendered)
         .await
@@ -2807,9 +2829,9 @@ mod tests {
             serde_json::from_str::<super::DurableActorEvent>(&encoded).unwrap(),
             notice
         );
-        assert!(notice.render(1, 1).contains("7@3"));
+        assert!(notice.render(1, 1, None).contains("7@3"));
         let legacy = serde_json::from_str::<super::DurableActorEvent>("\"old event\"").unwrap();
-        assert_eq!(legacy.render(1, 1), "old event");
+        assert_eq!(legacy.render(1, 1, None), "old event");
     }
 
     #[tokio::test]
@@ -3311,7 +3333,7 @@ mod tests {
         assert_eq!(encoded["type"], "sessionReady");
         assert_eq!(encoded["request"], 7);
         assert_eq!(
-            request.render(2, 5),
+            request.render(2, 5, None),
             "delayed inbox event 2/5; request activation 4 (request 7).\n\nReview it."
         );
 
@@ -3326,11 +3348,20 @@ mod tests {
                 previous: tidepool_actor::WatchStateProjection::Pending,
                 current: tidepool_actor::WatchStateProjection::Ready,
                 transition: tidepool_actor::WatchTransition::Ready,
-                occurred_at_unix_ms: 42,
+                occurred_at_unix_ms: 754_000,
                 sequence: tidepool_actor::ActorEventSequence(3),
                 watermark: tidepool_actor::ActorEventSequence(3),
             },
         });
+        assert!(watch
+            .render(2, 2, Some(0))
+            .contains("+12m34s since actor launch"));
+        assert!(watch
+            .render(2, 2, None)
+            .contains("elapsed time unavailable"));
+        assert!(watch
+            .render(2, 2, Some(800_000))
+            .contains("elapsed time unavailable"));
         let encoded = serde_json::to_value(&watch).expect("serialize typed watch event");
         assert_eq!(encoded["type"], "watchChanged");
         assert_eq!(encoded["watch"], 9);
@@ -3414,7 +3445,7 @@ mod tests {
         let actor = ActorRef::first(tidepool_actor::ActorId(7));
         let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
         assert_eq!(orient_activation("event", &observation.snapshot()), "event");
-        observation.publish_launch_role(tidepool_actor::EffectiveRole::research());
+        observation.publish_launch_role(tidepool_actor::EffectiveRole::research(), 0);
         observation.publish_workspace(tidepool_actor::ActorWorkspaceObservation {
             workspace_path: "/tmp/visible".into(),
             host_storage_path: "/host/research".into(),
@@ -3454,8 +3485,8 @@ mod tests {
         assert_eq!(
             *backend.messages.lock().unwrap(),
             [
-                format!("child completed\n\n{orientation}"),
-                format!("child completed\n\nsecond event\n\n{orientation}"),
+                "child completed".to_owned(),
+                "child completed\n\nsecond event".to_owned(),
             ]
         );
         assert_eq!(

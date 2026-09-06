@@ -129,6 +129,7 @@ pub struct ActorRuntimeObservation {
     pub workbench_posture: ActorWorkbenchPosture,
     pub workspace: Option<ActorWorkspaceObservation>,
     pub launch_role: Option<crate::EffectiveRole>,
+    pub launched_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,13 +158,22 @@ impl ActorRuntimeObservation {
         let role = self.launch_role.as_ref()?;
         let budget = role.descendants();
         let mut text = format!(
-            "Actor authority: role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; max_active_children={}.",
-            role.role(), role.haskell_effects_type(), role.native_tools(), role.workspace(),
+            "Actor authority: role={:?}; native_tools={:?}; workspace={:?}; descendant_depth={}; max_active_children={}.",
+            role.role(), role.native_tools(), role.workspace(),
             budget.maximum_depth, budget.maximum_active_children,
         );
         if let Some(workspace) = &self.workspace {
             text.push_str("\nWorkspace binding: ");
-            text.push_str(&workspace.summary());
+            text.push_str(&format!(
+                "workspace_path={:?} (native tools); expected_branch={:?}; seed={}",
+                workspace.workspace_path,
+                workspace.expected_branch,
+                if workspace.worktree_id.is_some() {
+                    "boundHead"
+                } else {
+                    "projectHead"
+                }
+            ));
             if role.role() == crate::ActorRole::Root && workspace.worktree_id.is_none() {
                 text.push_str("\nRoot checkout: writable project repository, no allocated worktree handle. Use projectHead to seed children; boundHead requires an allocated bound worktree. WritableBound describes write access, not the presence of that handle.");
             }
@@ -259,8 +269,10 @@ pub struct ActorRuntimeObservationHandle {
 }
 
 impl ActorRuntimeObservationHandle {
-    pub fn publish_launch_role(&self, role: crate::EffectiveRole) {
-        self.inner.write().launch_role = Some(role);
+    pub fn publish_launch_role(&self, role: crate::EffectiveRole, launched_at_unix_ms: i64) {
+        let mut observation = self.inner.write();
+        observation.launch_role = Some(role);
+        observation.launched_at_unix_ms = Some(launched_at_unix_ms);
     }
 
     pub fn publish_workspace(&self, workspace: ActorWorkspaceObservation) {

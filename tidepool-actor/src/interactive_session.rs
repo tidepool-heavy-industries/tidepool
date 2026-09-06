@@ -68,7 +68,7 @@ impl ActivationContract {
             .map_or(String::new(), |ty| {
                 format!("\nreportProgress :: ({ty}) -> Eff {} ()", self.effects)
             });
-        format!("{}\n\nTyped request {} mounted:\n```haskell\nsessionInput :: {}\nsessionReply :: Reply ({})\n{}\n```\nUse `:info` on the input or reply type to inspect its constructors.",
+        format!("{}\n\nTyped request {} mounted:\n```haskell\nsessionInput :: {}\nsessionReply :: Reply ({})\n{}\n```\nRead `sessionInput` when its value is needed; use `:info` only for unfamiliar types.",
             guidance.unwrap_or("A new typed request is ready."), request.0, self.input_type, self.response.expected_type(),
             format!("{}{progress}", self.response.respond_signature(&self.effects)))
     }
@@ -198,7 +198,7 @@ mod tests {
         );
         assert_eq!(
             activation.message,
-            "Review this candidate.\n\nTyped request 11 mounted:\n```haskell\nsessionInput :: Candidate\nsessionReply :: Reply (Review)\nrespond :: (Review) -> Eff ActorEffects TidepoolVoid.Void\n```\nUse `:info` on the input or reply type to inspect its constructors."
+            "Review this candidate.\n\nTyped request 11 mounted:\n```haskell\nsessionInput :: Candidate\nsessionReply :: Reply (Review)\nrespond :: (Review) -> Eff ActorEffects TidepoolVoid.Void\n```\nRead `sessionInput` when its value is needed; use `:info` only for unfamiliar types."
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }
