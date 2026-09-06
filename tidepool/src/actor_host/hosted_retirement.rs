@@ -173,8 +173,10 @@ impl HostedRetirement {
         if matches!(&self.seal, Some(Operation::Finished(Err(_)))) {
             return;
         }
-        if self.actor.terminal().get().is_some() {
-            self.terminal_path = true;
+        // Only an actor already terminal before a barrier was created uses the
+        // direct terminal path. A previously started barrier must keep its exact
+        // outcome, even if the actor terminates while the waiter is absent.
+        if self.terminal_path {
             self.control.quiesce();
         } else if let Some(seal) = &mut self.seal {
             seal.finish().await;
