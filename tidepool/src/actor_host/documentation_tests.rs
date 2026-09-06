@@ -794,3 +794,64 @@ async fn execute_examples(
         .unwrap();
     campaign.hosted.await.unwrap();
 }
+
+#[tokio::test]
+async fn floating_point_resident_display_matches_prelude() {
+    let campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let setup =
+        dispatch_haskell_script(root.as_ref(), include_str!("numeric_display_fixture.hs")).await;
+    let mut mismatches = Vec::new();
+    let setup_committed = setup["status"] == "committed";
+    if !setup_committed {
+        mismatches.push(format!("fixture setup rejected: {setup}"));
+    }
+    // Keep observations separate so failures name the actual public display path.
+    let probes = [
+        ("d", "1.0"),
+        ("f", "1.0"),
+        ("inspectFull d", "1.0"),
+        ("inspectFull f", "1.0"),
+        ("(d, f)", "(1.0,1.0)"),
+        ("[d, d]", "[1.0,1.0]"),
+        ("[f, f]", "[1.0,1.0]"),
+        ("NumericRecord d f", "NumericRecord 1.0 1.0"),
+        ("inspectFull (NumericRecord d f)", "NumericRecord 1.0 1.0"),
+        ("P.show (d, f)", "\"(1.0,1.0)\""),
+        ("P.show [d, d]", "\"[1.0,1.0]\""),
+        ("P.show [f, f]", "\"[1.0,1.0]\""),
+        ("P.show (NumericRecord d f)", "\"NumericRecord 1.0 1.0\""),
+        // The default Render path is separate and cannot stand in for Show.
+        ("show d", "\"1.0\""),
+        ("show f", "\"1.0\""),
+        (
+            "(P.isNaN d, P.isInfinite d, P.isNegativeZero d)",
+            "(False,False,False)",
+        ),
+        (
+            "(P.isNaN f, P.isInfinite f, P.isNegativeZero f)",
+            "(False,False,False)",
+        ),
+    ];
+    for (source, expected) in probes.into_iter().filter(|_| setup_committed) {
+        let result = dispatch_haskell_script(root.as_ref(), source).await;
+        if result["status"] != "committed" {
+            mismatches.push(format!("{source}: rejected observation: {result}"));
+            continue;
+        }
+        let Some(actual) = result["items"][0]["output"].as_str() else {
+            mismatches.push(format!(
+                "{source}: malformed committed observation: {result}"
+            ));
+            continue;
+        };
+        if actual != expected {
+            mismatches.push(format!("{source}: expected {expected:?}, got {actual:?}"));
+        }
+    }
+    campaign.forest.shutdown().await;
+    if let Err(error) = campaign.hosted.await {
+        mismatches.push(format!("hosted campaign join failed: {error}"));
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
