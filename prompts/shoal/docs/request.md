@@ -23,3 +23,14 @@ should state the choice and what can continue. Avoid circular request waits.
 Send revised contracts with their commit and decision delta; confirm which
 revision a returned candidate satisfies. Do not treat cancellation as an
 acknowledged contract update or a successful pause of the whole subtree.
+
+Request activations show a rendered `sessionInput` preview and the reply type's
+GHC declaration captured at its typed request site when available. Input previews are capped at 16 KiB and reply
+definitions at 4 KiB, with explicit truncation. The mounted value remains
+authoritative. Opaque inputs remain valid; inspect their types and project useful
+fields. Reply-type dependencies are not expanded automatically. No second type lookup is performed at activation. Older artifacts without a
+captured declaration still show the exact reply type. Previewing does not settle the request.
+
+Preview limits bound message size, not the cost of a custom `Show` implementation.
+Rendering uses the ordinary workbench execution path; there is no separate
+preview timeout. A missing rendering instance produces an opaque-value marker.

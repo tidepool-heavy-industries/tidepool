@@ -1311,6 +1311,38 @@ where
             .await
     }
 
+    pub(crate) async fn activation_preview(
+        &self,
+        context: crate::ActorSessionContext,
+        reply_type: String,
+        reply_declaration: Option<String>,
+    ) -> (String, String) {
+        let input = match self
+            .begin_item(
+                context.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    // Explicit lifting displays an effect-valued input as a value;
+                    // it must never run the action carried by the assignment.
+                    source: "pure sessionInput".into(),
+                },
+                GhciInputKind::Code,
+            )
+            .await
+        {
+            Ok(ResidentWorkbenchStep::Committed { output, .. }) => output,
+            _ => "<input rendering unavailable; inspect sessionInput>".into(),
+        };
+        let reply = reply_declaration.unwrap_or_else(|| {
+            format!("{reply_type} (no declaration captured at the request site)")
+        });
+        (
+            bounded_activation_text(input, 16 * 1024, "sessionInput"),
+            bounded_activation_text(reply, 4 * 1024, &format!(":info {reply_type}")),
+        )
+    }
+
     pub(crate) async fn resume_request(
         &self,
         context: crate::ActorSessionContext,
@@ -1683,6 +1715,36 @@ where
             })
         }
     }
+}
+
+#[cfg(test)]
+mod activation_preview_tests {
+    use super::bounded_activation_text;
+
+    #[test]
+    fn preview_bounds_preserve_unicode_and_mark_omission() {
+        assert_eq!(bounded_activation_text("".into(), 4, "sessionInput"), "");
+        assert_eq!(
+            bounded_activation_text("a\nλ".into(), 4, "sessionInput"),
+            "a\nλ"
+        );
+        assert_eq!(
+            bounded_activation_text("aλz".into(), 2, "sessionInput"),
+            "a\n<preview truncated; inspect sessionInput>"
+        );
+    }
+}
+
+fn bounded_activation_text(mut text: String, maximum: usize, inspect: &str) -> String {
+    if text.len() > maximum {
+        let mut end = maximum;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(&format!("\n<preview truncated; inspect {inspect}>"));
+    }
+    text
 }
 
 fn haskell_display(result: &tidepool_runtime::EvalResult) -> Option<String> {

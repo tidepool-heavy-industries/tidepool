@@ -28,6 +28,8 @@ data YieldSite = YieldSite
   , ysOrdinal :: Word64
   , ysAnswer :: SiteType
   , ysInputs :: [SiteType]
+  -- Presentation captured from the concrete answer TyCon; no downstream lookup.
+  , ysReplyDeclaration :: Maybe Text
   }
   deriving (Eq, Show)
 

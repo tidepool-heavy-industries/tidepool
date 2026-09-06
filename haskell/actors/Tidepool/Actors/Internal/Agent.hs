@@ -395,9 +395,9 @@ requestConfiguredSited site target targetWorktree label@(RequestLabel renderedLa
 
 activationGuidance :: Text -> Maybe Text -> Text
 activationGuidance label Nothing =
-  "Continue request `" <> label <> "` using the shared context and mounted sessionInput."
+  label
 activationGuidance label (Just guidance) =
-  "Continue request `" <> label <> "` using the shared context and mounted sessionInput. Additional guidance: " <> guidance
+  label <> "\n" <> guidance
 
 -- | Observable result of asking one exact actor incarnation to retire.
 --

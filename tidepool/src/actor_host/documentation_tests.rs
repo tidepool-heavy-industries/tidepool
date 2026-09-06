@@ -179,6 +179,7 @@ async fn execute_examples(
     let mut children = Vec::new();
     let mut bindings = Vec::new();
     let mut fork_boundary = None;
+    let mut activation_messages = Vec::new();
     while children.len() < 2 {
         let event = tokio::time::timeout(Duration::from_secs(120), async {
             campaign
@@ -233,7 +234,47 @@ async fn execute_examples(
             LocalResidentDeployment::Retired { actor, terminal } => {
                 panic!("{actor:?} retired: {terminal:?}")
             }
+            LocalResidentDeployment::SessionReady { activation } => {
+                activation_messages.push(activation)
+            }
             _ => {}
+        }
+    }
+    let mut presented = std::collections::HashSet::new();
+    while presented.len() < children.len() {
+        let event = if let Some(activation) = activation_messages.pop() {
+            LocalResidentDeployment::SessionReady { activation }
+        } else {
+            tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+                .await
+                .expect("request activation timed out")
+                .expect("deployment channel closed")
+        };
+        if let LocalResidentDeployment::SessionReady { activation } = event {
+            let Some(child) = children
+                .iter()
+                .find(|child| child.actor.identity() == activation.id.actor())
+            else {
+                continue;
+            };
+            assert!(
+                !activation.message.contains("rendering unavailable"),
+                "{}",
+                activation.message
+            );
+            if !rich_response && child.label.ends_with("/domain") {
+                assert!(
+                    activation.message.contains("sessionInput :: Int\n7"),
+                    "{}",
+                    activation.message
+                );
+                assert!(
+                    activation.message.contains("data Report"),
+                    "{}",
+                    activation.message
+                );
+            }
+            presented.insert(activation.id.actor());
         }
     }
     committed(
@@ -308,6 +349,66 @@ async fn execute_examples(
             .as_str()
             .unwrap()
             .contains("Report 9"));
+    }
+    if !rich_response {
+        committed(
+            root.as_ref(),
+            include_str!("../actor_host_fixtures/generic_actor/activation_preview_setup.hs"),
+        )
+        .await;
+        for (label, input, expected, reply) in [
+            (
+                "preview-text",
+                "textPreview",
+                "first line\nλ second line",
+                "respond (Report 1)",
+            ),
+            (
+                "preview-opaque",
+                "opaquePreview",
+                "<opaque value>",
+                "respond (Report (sessionInput 16))",
+            ),
+            (
+                "preview-effect",
+                "effectPreview",
+                "<opaque value>",
+                "respond (Report 1)",
+            ),
+            (
+                "preview-failure",
+                "brokenPreview",
+                "rendering unavailable",
+                "case sessionInput of BrokenPreview n -> respond (Report n)",
+            ),
+        ] {
+            committed(root.as_ref(), &format!("let Right previewLabel = requestLabel \"{label}\"\npreviewResponse <- request @Report worker previewLabel {input}")).await;
+            let activation = tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    if let Some(LocalResidentDeployment::SessionReady { activation }) =
+                        campaign.deployments.recv().await
+                    {
+                        if activation.message.contains(label) {
+                            break activation;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("preview activation");
+            assert!(
+                activation.message.contains(expected),
+                "{}",
+                activation.message
+            );
+            assert!(
+                activation.message.contains("data Report"),
+                "{}",
+                activation.message
+            );
+            let result = dispatch_haskell_script(domain.policy.as_ref(), reply).await;
+            assert_eq!(result["status"], "replied", "{result:?}");
+        }
     }
     for child in children {
         child

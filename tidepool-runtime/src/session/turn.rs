@@ -1141,7 +1141,17 @@ fn decode_bound_binders(v: &CborValue) -> Result<Vec<BoundBinder>, CompileError>
 }
 
 fn decode_ask(v: &CborValue) -> Result<YieldSite, CompileError> {
-    let arr = cbor_expect_array_len(v, 7, "typed suspension site")?;
+    let arr = cbor_expect_array(v, "typed suspension site")?;
+    if arr.len() != 7 && arr.len() != 8 {
+        return Err(CompileError::ExtractFailed(format!(
+            "TurnOut CBOR: expected typed suspension site with 7 or 8 fields, got {}",
+            arr.len()
+        )));
+    }
+    let reply_declaration = match arr.get(7) {
+        None | Some(CborValue::Null) => None,
+        Some(value) => Some(cbor_expect_text(value, "reply declaration")?.to_owned()),
+    };
     let site = cbor_as_u64(&arr[0], "Ask site")?;
     let origin = cbor_expect_text(&arr[1], "Ask origin")?.to_string();
     let ordinal = cbor_as_u64(&arr[2], "Ask ordinal")?;
@@ -1160,6 +1170,7 @@ fn decode_ask(v: &CborValue) -> Result<YieldSite, CompileError> {
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
     Ok(YieldSite {
+        reply_declaration,
         site,
         origin,
         ordinal,
@@ -2005,6 +2016,7 @@ mod tests {
                 assert_eq!(
                     asks,
                     vec![YieldSite {
+                        reply_declaration: None,
                         site: 7,
                         origin: "M.result".into(),
                         ordinal: 0,
@@ -2018,6 +2030,35 @@ mod tests {
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn yield_site_preserves_captured_reply_declaration_and_reads_legacy_sites() {
+        let mut fields = vec![
+            CborValue::Integer(7.into()),
+            CborValue::Text("M.request".into()),
+            CborValue::Integer(0.into()),
+            CborValue::Text("Report".into()),
+            CborValue::Array(vec![]),
+            CborValue::Array(vec![]),
+            CborValue::Array(vec![]),
+        ];
+        assert_eq!(
+            decode_ask(&CborValue::Array(fields.clone()))
+                .unwrap()
+                .reply_declaration,
+            None
+        );
+        fields.push(CborValue::Text("data Report = Report Int".into()));
+        assert_eq!(
+            decode_ask(&CborValue::Array(fields.clone()))
+                .unwrap()
+                .reply_declaration
+                .as_deref(),
+            Some("data Report = Report Int")
+        );
+        *fields.last_mut().unwrap() = CborValue::Integer(1.into());
+        assert!(decode_ask(&CborValue::Array(fields)).is_err());
     }
 
     #[test]

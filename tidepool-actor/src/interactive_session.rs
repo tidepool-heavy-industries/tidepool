@@ -56,7 +56,8 @@ impl ResidentActivation {
 pub(crate) struct ActivationContract {
     pub input_type: String,
     pub response: ResponseExpectation,
-    pub effects: String,
+    pub input_preview: String,
+    pub reply_preview: String,
 }
 
 impl ActivationContract {
@@ -66,11 +67,11 @@ impl ActivationContract {
             .progress_type
             .as_ref()
             .map_or(String::new(), |ty| {
-                format!("\nreportProgress :: ({ty}) -> Eff {} ()", self.effects)
+                format!("\nProgress updates: `reportProgress` accepts {ty}.")
             });
-        format!("{}\n\nTyped request {} mounted:\n```haskell\nsessionInput :: {}\nsessionReply :: Reply ({})\n{}\n```\nRead `sessionInput` when its value is needed; use `:info` only for unfamiliar types.",
-            guidance.unwrap_or("A new typed request is ready."), request.0, self.input_type, self.response.expected_type(),
-            format!("{}{progress}", self.response.respond_signature(&self.effects)))
+        format!("Request {}{}\n\nsessionInput :: {}\n{}\n\nReturn with `respond` (reply type {}):\n{}{}",
+            request.0, guidance.map(|text| format!(": {text}")).unwrap_or_default(),
+            self.input_type, self.input_preview, self.response.expected_type(), self.reply_preview, progress)
     }
 }
 
@@ -192,13 +193,14 @@ mod tests {
             ActivationContract {
                 input_type: "Candidate".into(),
                 response: ResponseExpectation::new("Review"),
-                effects: "ActorEffects".into(),
+                input_preview: "candidate".into(),
+                reply_preview: "data Review = Accepted | Rejected".into(),
             },
             Some("Review this candidate."),
         );
         assert_eq!(
             activation.message,
-            "Review this candidate.\n\nTyped request 11 mounted:\n```haskell\nsessionInput :: Candidate\nsessionReply :: Reply (Review)\nrespond :: (Review) -> Eff ActorEffects TidepoolVoid.Void\n```\nRead `sessionInput` when its value is needed; use `:info` only for unfamiliar types."
+            "Request 11: Review this candidate.\n\nsessionInput :: Candidate\ncandidate\n\nReturn with `respond` (reply type Review):\ndata Review = Accepted | Rejected"
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }

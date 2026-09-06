@@ -2283,13 +2283,6 @@ where
             drop(input);
             return Ok(InteractivePark::Cancelled(request.request));
         }
-        let contract = crate::interactive_session::ActivationContract {
-            input_type: request.input_type.clone(),
-            response: request.response.clone(),
-            effects: context.haskell_effects_alias.clone(),
-        };
-        let request_message =
-            contract.message(request.request, request.initial_user_message.as_deref());
         let already_installed = self.policy_installed;
         let workbench = self.environment.runner.workbench(
             request.response.clone(),
@@ -2304,6 +2297,21 @@ where
                 input,
             )
             .await?;
+        let (input_preview, reply_preview) = workbench
+            .activation_preview(
+                context.clone(),
+                request.response.expected_type().to_owned(),
+                request.response.declaration.clone(),
+            )
+            .await;
+        let contract = crate::interactive_session::ActivationContract {
+            input_type: request.input_type.clone(),
+            response: request.response.clone(),
+            input_preview,
+            reply_preview,
+        };
+        let request_message =
+            contract.message(request.request, request.initial_user_message.as_deref());
         self.install_interactive_policy(kernel, context, Some(request_message.clone()))?;
         self.standing =
             ResidentStanding::Interactive(crate::interactive_session::ResidentInteractiveAwait {

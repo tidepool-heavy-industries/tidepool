@@ -6,6 +6,7 @@ use tidepool_runtime::YieldSite;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseExpectation {
     expected_type: String,
+    pub(crate) declaration: Option<String>,
     pub(crate) progress_type: Option<String>,
 }
 
@@ -22,6 +23,7 @@ impl ResponseExpectation {
         Self {
             expected_type: expected_type.into(),
             progress_type: None,
+            declaration: None,
         }
     }
 
@@ -69,6 +71,7 @@ pub(crate) fn decode_typed_request_site(
         });
     };
     let mut response = ResponseExpectation::new(metadata.ty.clone());
+    response.declaration = metadata.reply_declaration.clone();
     let mut output_modules = metadata.modules.clone();
     if let Some(progress) = metadata.inputs.get(1) {
         response.progress_type = Some(progress.ty.clone());

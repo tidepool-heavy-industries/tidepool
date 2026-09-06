@@ -249,8 +249,8 @@ encodeAsks :: [YieldSite] -> Encoding
 encodeAsks xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeAsk xs
 
 encodeAsk :: YieldSite -> Encoding
-encodeAsk (YieldSite site origin ordinal (SiteType ty modules heads) inputs) =
-  encodeListLen 7
+encodeAsk (YieldSite site origin ordinal (SiteType ty modules heads) inputs declaration) =
+  encodeListLen 8
   <> encodeWord64 site
   <> encodeString origin
   <> encodeWord64 ordinal
@@ -259,6 +259,7 @@ encodeAsk (YieldSite site origin ordinal (SiteType ty modules heads) inputs) =
   <> encodeHeads heads
   <> encodeListLen (fromIntegral (length inputs))
   <> foldMap encodeSiteType inputs
+  <> maybe encodeNull encodeString declaration
 
 encodeSiteType :: SiteType -> Encoding
 encodeSiteType (SiteType ty modules heads) =

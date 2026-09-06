@@ -2813,6 +2813,7 @@ mod tests {
 
     fn typed_site(site: u64, ty: &str) -> YieldSite {
         YieldSite {
+            reply_declaration: None,
             site,
             origin: "M.program".into(),
             ordinal: 0,

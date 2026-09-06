@@ -63,6 +63,8 @@ pub struct YieldSite {
     pub modules: Vec<String>,
     pub heads: Vec<NominalHead>,
     pub inputs: Vec<SiteType>,
+    #[serde(default)]
+    pub reply_declaration: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -107,6 +109,7 @@ impl YieldSites {
                     (
                         site,
                         YieldSite {
+                            reply_declaration: None,
                             site,
                             origin: "<test>".into(),
                             ordinal: site,
@@ -131,6 +134,7 @@ impl YieldSites {
                     (
                         site,
                         YieldSite {
+                            reply_declaration: None,
                             site,
                             origin: "<test>".into(),
                             ordinal: site,
@@ -933,6 +937,7 @@ mod typed_site_tests {
 
     fn site(id: u64, ty: &str) -> YieldSite {
         YieldSite {
+            reply_declaration: None,
             site: id,
             origin: "M.program".into(),
             ordinal: 0,

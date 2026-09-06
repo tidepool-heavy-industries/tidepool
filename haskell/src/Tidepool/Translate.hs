@@ -43,6 +43,8 @@ import GHC.Types.Name (nameOccName, isSystemName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Data.FastString (unpackFS)
 import GHC.Core.TyCon
+import GHC.Types.TyThing.Ppr (pprTyThingInContext)
+import GHC.Iface.Type (ShowForAllFlag(..), ShowHowMuch(..), ShowSub(..))
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..))
@@ -1967,7 +1969,7 @@ translate expr =
             -- Modules are resolved from the per-child element type `ty`
             -- itself (never the `[]`-wrapped 'typeStr') — a fanout site's
             -- shim needs T's own defining module(s), not '[]''s.
-            recordYieldSite (YieldSite siteId siteOrigin siteOrdinal answerSiteType inputSiteTypes)
+            recordYieldSite (YieldSite siteId siteOrigin siteOrdinal answerSiteType inputSiteTypes (replyDeclaration stableTy))
             sitedRef <- emitNode $ NVar sitedVarId
             -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
             -- their original order, before the injected site-id literal —
@@ -2838,6 +2840,12 @@ checkSiteInputType spec tys index =
       pure (stabilizeEffectRows ty)
     [] -> error $ "sited verb " ++ vsName spec
       ++ " declares missing input type argument " ++ show index
+
+replyDeclaration :: Type -> Maybe T.Text
+replyDeclaration ty = case splitTyConApp_maybe ty of
+  Nothing -> Nothing
+  Just (tc, _) -> Just $ T.pack $ renderWithContext defaultSDocContext
+    (pprTyThingInContext (ShowSub ShowIface ShowForAllWhen) (ATyCon tc))
 
 siteTypeOf :: Type -> SiteType
 siteTypeOf ty = SiteType

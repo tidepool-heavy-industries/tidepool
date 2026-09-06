@@ -472,14 +472,15 @@ data TurnOut
 -- now carries the general answer-plus-live-input contract; ordinary ask/fork
 -- sites simply have an empty @inputs@ list.
 renderAskJson :: YieldSite -> String
-renderAskJson (YieldSite site origin ordinal answer inputs) =
+renderAskJson (YieldSite site origin ordinal answer inputs declaration) =
   "{\"site\":" ++ show site
     ++ ",\"origin\":" ++ jsonString (T.unpack origin)
     ++ ",\"ordinal\":" ++ show ordinal
     ++ ",\"type\":" ++ jsonString (T.unpack (stType answer))
     ++ ",\"modules\":" ++ renderModules (stModules answer)
     ++ ",\"heads\":" ++ renderHeads (stHeads answer)
-    ++ ",\"inputs\":[" ++ intercalate "," (map renderSiteType inputs) ++ "]}"
+    ++ ",\"inputs\":[" ++ intercalate "," (map renderSiteType inputs) ++ "]"
+    ++ ",\"reply_declaration\":" ++ maybe "null" (jsonString . T.unpack) declaration ++ "}"
   where
     renderSiteType (SiteType ty modules heads) =
       "{\"type\":" ++ jsonString (T.unpack ty)
