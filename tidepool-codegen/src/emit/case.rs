@@ -1,4 +1,4 @@
-use crate::emit::expr::{ensure_heap_ptr, force_thunk_ssaval};
+use crate::emit::expr::{demand_whnf_ssaval, ensure_heap_ptr};
 use crate::emit::*;
 use cranelift_codegen::ir::{
     self, condcodes::IntCC, types, BlockArg, InstBuilder, MemFlags, Value,
@@ -14,7 +14,7 @@ pub fn emit_case(
     binder: &VarId,
     alts: &[Alt<usize>],
 ) -> Result<SsaVal, EmitError> {
-    let scrut_ptr = scrut.value();
+    let scrut = demand_whnf_ssaval(args.sess.pipeline, args.builder, args.sess.vmctx, scrut)?;
 
     // Bind the case binder, saving the old value for restore below. EnvGuard
     // can't be used here because it would borrow ctx.env mutably, preventing
@@ -35,6 +35,15 @@ pub fn emit_case(
     args.builder.append_block_param(merge_block, types::I64);
 
     if !data_alts.is_empty() {
+        // Data dispatch reads heap headers, including its bare-literal wrapper
+        // tolerance. Raw SSA numerics are values, never heap addresses.
+        let scrut_ptr = ensure_heap_ptr(
+            args.builder,
+            args.sess.vmctx,
+            args.sess.gc_sig,
+            args.sess.oom_func,
+            scrut,
+        );
         emit_data_dispatch(
             EmitArgs {
                 ctx: args.ctx,
@@ -113,58 +122,7 @@ fn emit_data_dispatch(
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
-    // Force if needed (tag < 2: Closure or Thunk).
-    let tag = args
-        .builder
-        .ins()
-        .load(types::I8, MemFlags::trusted(), initial_scrut_ptr, 0);
-    let needs_force = args.builder.ins().icmp_imm(IntCC::UnsignedLessThan, tag, 2);
-
-    let force_block = args.builder.create_block();
-    let dispatch_block = args.builder.create_block();
-    args.builder.append_block_param(dispatch_block, types::I64);
-
-    args.builder.ins().brif(
-        needs_force,
-        force_block,
-        &[],
-        dispatch_block,
-        &[BlockArg::Value(initial_scrut_ptr)],
-    );
-
-    args.builder.switch_to_block(force_block);
-    args.builder.seal_block(force_block);
-
-    let force_fn = args
-        .sess
-        .pipeline
-        .module
-        .declare_function(
-            "heap_force",
-            Linkage::Import,
-            &crate::emit::heap_force_sig(args.sess.pipeline.isa.default_call_conv()),
-        )
-        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-    let force_ref = args
-        .sess
-        .pipeline
-        .module
-        .declare_func_in_func(force_fn, args.builder.func);
-
-    let call = args
-        .builder
-        .ins()
-        .call(force_ref, &[args.sess.vmctx, initial_scrut_ptr]);
-    let force_result = args.builder.inst_results(call)[0];
-    args.builder.declare_value_needs_stack_map(force_result);
-    args.builder
-        .ins()
-        .jump(dispatch_block, &[BlockArg::Value(force_result)]);
-
-    args.builder.switch_to_block(dispatch_block);
-    args.builder.seal_block(dispatch_block);
-    let scrut_ptr = args.builder.block_params(dispatch_block)[0];
-    args.builder.declare_value_needs_stack_map(scrut_ptr);
+    let scrut_ptr = initial_scrut_ptr;
 
     let con_tag =
         args.builder
@@ -270,14 +228,8 @@ fn emit_data_dispatch(
         // primop args, etc.). Forcing here causes infinite loops for
         // self-referencing structures like `xs = 1 : map (+1) xs`.
         //
-        // INVARIANT: All strict consumers must force thunked values before
-        // reading heap layout. The forcing points are:
-        //   - emit_lit_dispatch: force_thunk_ssaval on scrutinee
-        //   - emit_data_dispatch: tag < 2 check \u2192 heap_force on scrutinee
-        //   - PrimOp collapse: force_thunk_ssaval on all args
-        //   - App collapse: tag check \u2192 heap_force on fun position
-        //   - unbox_int/unbox_double/unbox_float: defensive trap on TAG_THUNK
-        // See force_thunk_ssaval in expr.rs.
+        // Strict consumers demand these fields at their owning boundary;
+        // matching a constructor must not demand its unselected fields.
         let mut scope = EnvScope::new();
         // NOTE: EnvGuard cannot be used here because it would borrow ctx.env
         // mutably, preventing the use of ctx in emit_node.
@@ -452,34 +404,23 @@ fn emit_lit_dispatch(
     default_alt: Option<&Alt<usize>>,
     merge_block: ir::Block,
 ) -> Result<(), EmitError> {
-    // Force thunked scrutinees: literal case dispatch is strict \u2014
-    // ThunkCon fields extracted by data alt matching may still be thunks.
-    let scrut = force_thunk_ssaval(args.sess.pipeline, args.builder, args.sess.vmctx, scrut)?;
-
-    let scrut_value = match scrut {
-        SsaVal::Raw(v, _) => v,
-        SsaVal::HeapPtr(ptr) => {
-            // Runtime tolerance mirroring emit_data_dispatch's bare-Lit
-            // fallback above, in the opposite direction: a Word/Int computed
-            // by un-inlined cross-module generic code (e.g. a Member
-            // dictionary's elemNo — see Data.OpenUnion.decomp's
-            // "Union 0 a" pattern, the freer-simple row-changing
-            // "reinterpret" gap) can reach a literal-case scrutinee as a
-            // BOXED wrapper Con (I#/W#/...), not the "ideal" unboxed Lit
-            // this dispatch otherwise assumes. CompiledEffectMachine::
-            // parse_result already has an equivalent fallback for the
-            // identical representation ambiguity at the suspend boundary
-            // (reading a Union's own tag field generically, from outside the
-            // JIT); a compiled case on a numeric literal needs the same
-            // tolerance for its own scrutinee. unwrap_boxing_chain walks any
-            // such wrapper chain down to the real TAG_LIT (arity-guarded,
-            // traps BoxingArity on a malformed wrapper); a genuine bare Lit
-            // is unaffected (the chain is zero-length for it).
-            let real_lit =
-                crate::emit::primop::unwrap_boxing_chain(args.sess.pipeline, args.builder, ptr);
-            args.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), real_lit, LIT_VALUE_OFFSET)
+    // Unboxing is the owning literal-class check, including boxed wrappers
+    // and deferred fields. Never interpret a closure payload as an integer.
+    let scrut_value = match &lit_alts[0].con {
+        AltCon::LitAlt(Literal::LitFloat(_)) => crate::emit::primop::unbox_float(
+            args.sess.pipeline,
+            args.builder,
+            args.sess.vmctx,
+            scrut,
+        ),
+        AltCon::LitAlt(Literal::LitDouble(_)) => crate::emit::primop::unbox_double(
+            args.sess.pipeline,
+            args.builder,
+            args.sess.vmctx,
+            scrut,
+        ),
+        _ => {
+            crate::emit::primop::unbox_int(args.sess.pipeline, args.builder, args.sess.vmctx, scrut)
         }
     };
 
@@ -511,31 +452,23 @@ fn emit_lit_dispatch(
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitFloat(bits) => {
-                    let scrut_f64 = args.builder.ins().bitcast(
-                        types::F64,
-                        MemFlags::new().with_endianness(ir::Endianness::Little),
+                    let lit_val = args.builder.ins().f32const(f32::from_bits(*bits as u32));
+                    let eq = args.builder.ins().fcmp(
+                        ir::condcodes::FloatCC::Equal,
                         scrut_value,
+                        lit_val,
                     );
-                    let lit_val = args.builder.ins().f64const(f64::from_bits(*bits));
-                    let eq =
-                        args.builder
-                            .ins()
-                            .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
                     args.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitDouble(bits) => {
-                    let scrut_f64 = args.builder.ins().bitcast(
-                        types::F64,
-                        MemFlags::new().with_endianness(ir::Endianness::Little),
-                        scrut_value,
-                    );
                     let lit_val = args.builder.ins().f64const(f64::from_bits(*bits));
-                    let eq =
-                        args.builder
-                            .ins()
-                            .fcmp(ir::condcodes::FloatCC::Equal, scrut_f64, lit_val);
+                    let eq = args.builder.ins().fcmp(
+                        ir::condcodes::FloatCC::Equal,
+                        scrut_value,
+                        lit_val,
+                    );
                     args.builder
                         .ins()
                         .brif(eq, alt_block, &[], next_check_block, &[]);
@@ -608,4 +541,121 @@ fn emit_lit_dispatch(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::jit_machine::JitEffectMachine;
+    use tidepool_repr::{Alt, AltCon, CoreFrame, DataConTable, Literal, TreeBuilder, VarId};
+
+    #[test]
+    fn strict_demand_data_dispatch_boxes_raw_numeric_scrutinee() {
+        let mut table = DataConTable::new();
+        let wrapper = tidepool_repr::DataConId(1);
+        table.insert(tidepool_repr::datacon::DataCon {
+            id: wrapper,
+            name: "I#".into(),
+            tag: 1,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: String::new(),
+        });
+        let mut b = TreeBuilder::new();
+        let value = b.push(CoreFrame::Lit(Literal::LitInt(42)));
+        let field = b.push(CoreFrame::Var(VarId(2)));
+        b.push(CoreFrame::Case {
+            scrutinee: value,
+            binder: VarId(1),
+            alts: vec![Alt {
+                con: AltCon::DataAlt(wrapper),
+                binders: vec![VarId(2)],
+                body: field,
+            }],
+        });
+        let mut machine = JitEffectMachine::compile(&b.build(), &table, 65536).unwrap();
+        assert!(matches!(
+            machine.run_pure().unwrap(),
+            tidepool_eval::Value::Lit(Literal::LitInt(42))
+        ));
+    }
+
+    #[test]
+    fn strict_demand_case_bottom_never_executes_default() {
+        for literal_arm in [false, true] {
+            let mut b = TreeBuilder::new();
+            let bottom = b.push(CoreFrame::Var(VarId(0x4500_0000_0000_0003)));
+            let value = b.push(CoreFrame::Lit(Literal::LitInt(42)));
+            let mut alts = vec![Alt {
+                con: AltCon::Default,
+                binders: vec![],
+                body: value,
+            }];
+            if literal_arm {
+                alts.push(Alt {
+                    con: AltCon::LitAlt(Literal::LitInt(0)),
+                    binders: vec![],
+                    body: value,
+                });
+            }
+            b.push(CoreFrame::Case {
+                scrutinee: bottom,
+                binder: VarId(1),
+                alts,
+            });
+            let mut machine =
+                JitEffectMachine::compile(&b.build(), &DataConTable::new(), 65536).unwrap();
+            let result = machine.run_pure();
+            assert!(result.is_err(), "bottom escaped through case: {result:?}");
+            assert!(matches!(
+                result,
+                Err(crate::jit_machine::JitError::Yield(
+                    crate::yield_type::YieldError::Runtime(
+                        crate::host_fns::RuntimeError::Undefined
+                    )
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn strict_demand_literal_dispatch_uses_float_width() {
+        for (scrutinee, matching) in [
+            (
+                Literal::LitFloat(1.5f32.to_bits() as u64),
+                Literal::LitFloat(1.5f32.to_bits() as u64),
+            ),
+            (
+                Literal::LitDouble(1.5f64.to_bits()),
+                Literal::LitDouble(1.5f64.to_bits()),
+            ),
+        ] {
+            let mut b = TreeBuilder::new();
+            let scrutinee = b.push(CoreFrame::Lit(scrutinee));
+            let yes = b.push(CoreFrame::Lit(Literal::LitInt(42)));
+            let no = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+            b.push(CoreFrame::Case {
+                scrutinee,
+                binder: VarId(1),
+                alts: vec![
+                    Alt {
+                        con: AltCon::LitAlt(matching),
+                        binders: vec![],
+                        body: yes,
+                    },
+                    Alt {
+                        con: AltCon::Default,
+                        binders: vec![],
+                        body: no,
+                    },
+                ],
+            });
+            let mut machine =
+                JitEffectMachine::compile(&b.build(), &DataConTable::new(), 65536).unwrap();
+            assert!(matches!(
+                machine.run_pure().unwrap(),
+                tidepool_eval::Value::Lit(Literal::LitInt(42))
+            ));
+        }
+    }
 }
