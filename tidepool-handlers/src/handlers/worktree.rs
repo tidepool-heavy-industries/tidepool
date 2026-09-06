@@ -137,10 +137,15 @@ impl ActorWorktreeAuthority {
             principal.identity,
             principal.incarnation,
         );
-        self.bindings
-            .lock()
-            .current(tree)
-            .is_some_and(|binding| binding.agent() == &expected)
+        let bindings = self.bindings.lock();
+        let current = bindings.current(tree);
+        let owned = current.is_some_and(|binding| binding.agent() == &expected);
+        if !owned {
+            tracing::warn!(worktree = %tree, expected_principal = %expected,
+                actual_principal = ?current.map(|binding| binding.agent()),
+                binding_ready = current.is_some(), "worktree custody denied");
+        }
+        owned
     }
 
     fn grant(&self, principal: tidepool_repr::PrincipalId) -> ActorWorktreeGrant {
@@ -492,6 +497,14 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             if self.authority.owns(principal, &id) {
                 return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
             }
+            let operation = match &req {
+                WorktreeReq::WorktreeLookup(_) => "worktreeLookup",
+                WorktreeReq::WorktreeBranchOf(_) => "worktreeBranchOf",
+                WorktreeReq::WorktreeHeadOf(_) => "worktreeHeadOf",
+                WorktreeReq::WorktreeObserveSubmission(_) => "worktreeObserveSubmission",
+                _ => "worktreeAccess",
+            };
+            tracing::warn!(operation, principal = ?principal, worktree = %id, "worktree operation denied");
             return cx.respond(Err::<(), _>(WorktreeError::WorktreeUnauthorized(
                 wire_id.clone(),
             )));

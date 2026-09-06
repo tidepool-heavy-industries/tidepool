@@ -65,6 +65,7 @@ pub struct LocalResidentInstallation {
     pub policy: Arc<dyn ResidentToolEndpoint>,
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
+    pub worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     pub effective_role: crate::EffectiveRole,
     pub fork_effort: Option<crate::ForkEffort>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -334,6 +335,7 @@ pub struct ResidentKernelBehavior<H, O> {
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
     launch_worktrees: Vec<String>,
+    worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     policy_installed: bool,
     forest_control: bool,
     pending_program: Option<ResidentOutcome>,
@@ -437,6 +439,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             launch_worktrees,
+            worktree_custody: None,
             policy_installed: false,
             forest_control: false,
             pending_program: None,
@@ -2269,6 +2272,7 @@ where
                             policy,
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
+                            worktree_custody: self.worktree_custody.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
                             fork_effort: self.descriptor.fork_effort(),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
@@ -2441,6 +2445,7 @@ where
             policy,
             initial_user_message,
             launch_worktrees: self.launch_worktrees.clone(),
+            worktree_custody: self.worktree_custody.clone(),
             effective_role: self.descriptor.effective_role().clone(),
             fork_effort: self.descriptor.fork_effort(),
             fork_boundary: self.descriptor.fork_boundary().cloned(),
@@ -2466,6 +2471,48 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
+        if self.worktree_custody.is_none() {
+            match self.launch_worktrees.as_slice() {
+                [] => {}
+                [worktree] => {
+                    let admission = self.environment.fork_workspaces.as_ref().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "pre-bootstrap worktree custody is unavailable".into(),
+                        )
+                    })?;
+                    let admission = admission.clone();
+                    let actor = context.actor;
+                    let worktree = worktree.clone();
+                    self.worktree_custody = Some(
+                        tokio::task::spawn_blocking(move || {
+                            admission.install_custody(actor, &worktree)
+                        })
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Join)?
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?,
+                    );
+                }
+                _ => {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "actor bootstrap requires at most one worktree".into(),
+                    ))
+                }
+            }
+        }
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
         let outcome = match boot {
             ResidentBoot::Workbench => {
                 self.standing = ResidentStanding::Workbench;
@@ -2480,7 +2527,7 @@ where
                     .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
                     .await?;
                 loop {
-                    match self
+                    let startup_step = self
                         .environment
                         .runner
                         .capture_startup_step(
@@ -2488,8 +2535,14 @@ where
                             outcome,
                             context.placement.resource_scope,
                         )
-                        .await?
-                    {
+                        .await?;
+                    if let Some(terminal) = kernel.requested_shutdown() {
+                        return Ok(KernelStep::Stop {
+                            output: (),
+                            terminal,
+                        });
+                    }
+                    match startup_step {
                         ResidentActorStartupStep::InstallShutdown(shutdown) => {
                             if self.shutdown_hook.is_some() {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -4180,6 +4233,9 @@ where
         terminal: &'a ActorTerminal,
     ) -> futures_util::future::BoxFuture<'a, ()> {
         Box::pin(async move {
+            if let Some(custody) = &self.worktree_custody {
+                custody.actor_stopped(terminal);
+            }
             let notifications = self
                 .environment
                 .requests

@@ -5,6 +5,8 @@
 //! tmux is process ownership and observability, never message transport.
 
 #[cfg(test)]
+mod custody_tests;
+#[cfg(test)]
 mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
@@ -55,8 +57,8 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_worktree::{
-    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, BindingTerminal, GitCli,
-    WorktreeHandle, WorktreeId, WorktreeManager, WorktreeRegistry,
+    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, GitCli, WorktreeHandle, WorktreeId,
+    WorktreeManager, WorktreeRegistry,
 };
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -105,9 +107,102 @@ type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 
 struct ActorForkWorkspaceAdmission {
     worktrees: Mutex<ActorWorktreeHandler>,
+    manager: WorktreeManager,
+    bindings: Arc<Mutex<BindingTable>>,
+    runtime: String,
+}
+
+struct ActorWorkspaceCustody {
+    bindings: Arc<Mutex<BindingTable>>,
+    binding: Option<ActiveBinding>,
+    actor: ActorRef,
+    process_may_exist: std::sync::atomic::AtomicBool,
+    actor_completed: std::sync::atomic::AtomicBool,
+}
+
+impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
+    fn actor_stopped(&self, terminal: &tidepool_actor::ActorTerminal) {
+        self.actor_completed.store(
+            terminal.kind == ActorExitKind::Completed,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+    fn process_may_exist(&self) {
+        self.process_may_exist
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for ActorWorkspaceCustody {
+    fn drop(&mut self) {
+        if self
+            .process_may_exist
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            tracing::error!(actor = ?self.actor, "retaining worktree custody: process cleanup is unconfirmed");
+            return;
+        }
+        if let Some(binding) = self.binding.take() {
+            let result = if self
+                .actor_completed
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                binding.complete(&mut self.bindings.lock())
+            } else {
+                binding.release(&mut self.bindings.lock())
+            };
+            if let Err(error) = result {
+                tracing::error!(actor = ?self.actor, %error, "worktree custody release failed");
+            }
+        }
+    }
 }
 
 impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
+    fn install_custody(
+        &self,
+        actor: ActorRef,
+        worktree: &str,
+    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        if !WorktreeId::is_path_safe(worktree) {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "invalid custody worktree id".into(),
+            });
+        }
+        if self
+            .manager
+            .lookup(&WorktreeId::from_raw(worktree))
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?
+            .is_none()
+        {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "custody worktree is not registered".into(),
+            });
+        }
+        let principal =
+            WorktreePrincipal::exact_actor(&self.runtime, actor.id.0, actor.incarnation.0);
+        let binding = self
+            .bindings
+            .lock()
+            .bind(
+                &WorktreeId::from_raw(worktree),
+                &principal,
+                current_time_ms(),
+            )
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?;
+        Ok(Arc::new(ActorWorkspaceCustody {
+            bindings: self.bindings.clone(),
+            binding: Some(binding),
+            actor,
+            process_may_exist: std::sync::atomic::AtomicBool::new(false),
+            actor_completed: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
     fn admit(
         &self,
         owner: ActorRef,
@@ -133,8 +228,13 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
 fn fork_workspace_admission(
     worktrees: WorktreeManager,
     authority: ActorWorktreeAuthority,
+    bindings: Arc<Mutex<BindingTable>>,
+    runtime: String,
 ) -> Arc<dyn ForkWorkspaceAdmission> {
     Arc::new(ActorForkWorkspaceAdmission {
+        bindings,
+        runtime,
+        manager: worktrees.clone(),
         worktrees: Mutex::new(ActorWorktreeHandler::new(
             WorktreeHandler::from_manager(worktrees),
             authority,
@@ -197,7 +297,7 @@ struct InteractiveDeployment {
     connection: InteractiveConnection,
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: PathBuf,
-    worktree_binding: Option<ActiveBinding>,
+    worktree_custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     failure_reported: bool,
     last_activation_sequence: u64,
     thread: Option<QueueReadyThread>,
@@ -627,6 +727,8 @@ pub async fn run(
         Some(fork_workspace_admission(
             worktrees.clone(),
             worktree_authority.clone(),
+            bindings.clone(),
+            runtime_namespace(&run_root),
         )),
         host_incarnation.incarnation(),
     );
@@ -1208,7 +1310,7 @@ async fn run_interactive_applications(
                             application.last_activation_sequence = sequence;
                         }
                     }
-                    LocalResidentDeployment::Retired { actor, terminal } => {
+                    LocalResidentDeployment::Retired { actor, terminal: _ } => {
                         worktree_authority.remove_grant(actor.into());
                         let pending = pending_launches.remove(&actor);
                         if let Some(pending) = pending {
@@ -1220,18 +1322,10 @@ async fn run_interactive_applications(
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
                             let tmux = tmux.clone();
-                            let bindings = Arc::clone(&bindings);
-                            let binding_terminal = if terminal.kind == ActorExitKind::Completed {
-                                BindingTerminal::Completed
-                            } else {
-                                BindingTerminal::Released
-                            };
                             retirements.spawn(async move {
                                 retire_interactive_application_guarded(
                                     deployment,
                                     &tmux,
-                                    &bindings,
-                                    binding_terminal,
                                 ).await
                             });
                         }
@@ -1527,16 +1621,8 @@ async fn run_interactive_applications(
     while binding_discoveries.join_next().await.is_some() {}
     for deployment in deployments {
         let tmux = tmux.clone();
-        let bindings = Arc::clone(&bindings);
-        retirements.spawn(async move {
-            retire_interactive_application_guarded(
-                deployment,
-                &tmux,
-                &bindings,
-                BindingTerminal::Released,
-            )
-            .await
-        });
+        retirements
+            .spawn(async move { retire_interactive_application_guarded(deployment, &tmux).await });
     }
     let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
@@ -1590,46 +1676,21 @@ async fn launch_interactive_application(
     cancelled: oneshot::Receiver<()>,
     fork_parent_thread: Option<BackendThreadId>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
-    let actor = installation.actor.identity();
-    let prepared = prepare_actor_worktree(&installation, &context)?;
-    let worktree = prepared.as_ref().map(|(handle, _)| handle.clone());
-    let result = launch_prepared_interactive_application(
+    let worktree = prepare_actor_worktree(&installation, &context)?;
+    launch_prepared_interactive_application(
         installation,
-        context.clone(),
+        context,
         worktree,
         cancelled,
         fork_parent_thread,
     )
-    .await;
-    match (result, prepared) {
-        (Ok(Some(mut launched)), Some((_handle, binding))) => {
-            launched.deployment.worktree_binding = Some(binding);
-            Ok(Some(launched))
-        }
-        (Ok(Some(deployment)), None) => Ok(Some(deployment)),
-        (Ok(None), Some((_handle, binding))) => {
-            release_worktree_binding(&context.bindings, binding).map_err(|error| {
-                application_error(actor, InteractiveOperation::BindWorktree, error)
-            })?;
-            Ok(None)
-        }
-        (Ok(None), None) => Ok(None),
-        (Err(mut error), Some((_handle, binding))) => {
-            if let Err(rollback) = release_worktree_binding(&context.bindings, binding) {
-                error
-                    .detail
-                    .push_str(&format!("; binding rollback failed: {rollback}"));
-            }
-            Err(error)
-        }
-        (Err(error), None) => Err(error),
-    }
+    .await
 }
 
 fn prepare_actor_worktree(
     installation: &LocalResidentInstallation,
     context: &InteractiveLaunchContext,
-) -> Result<Option<(WorktreeHandle, ActiveBinding)>, InteractiveApplicationError> {
+) -> Result<Option<WorktreeHandle>, InteractiveApplicationError> {
     let actor = installation.actor.identity();
     let raw_id =
         match actor_workspace_request(actor == context.root, &installation.launch_worktrees)
@@ -1663,12 +1724,20 @@ fn prepare_actor_worktree(
         actor.id.0,
         actor.incarnation.0,
     );
-    let binding = context
-        .bindings
-        .lock()
-        .bind(handle.id(), &principal, current_time_ms())
-        .map_err(|error| application_error(actor, InteractiveOperation::BindWorktree, error))?;
-    Ok(Some((handle, binding)))
+    if installation.worktree_custody.is_none()
+        || !context
+            .bindings
+            .lock()
+            .current(handle.id())
+            .is_some_and(|binding| binding.agent() == &principal)
+    {
+        return Err(application_error(
+            actor,
+            InteractiveOperation::BindWorktree,
+            "exact pre-bootstrap worktree custody is absent",
+        ));
+    }
+    Ok(Some(handle))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1694,13 +1763,6 @@ fn actor_workspace_request<'a>(
             worktrees.len()
         )),
     }
-}
-
-fn release_worktree_binding(
-    bindings: &Arc<Mutex<BindingTable>>,
-    binding: ActiveBinding,
-) -> Result<(), tidepool_worktree::WorktreeError> {
-    binding.release(&mut bindings.lock())
 }
 
 fn current_time_ms() -> i64 {
@@ -1986,6 +2048,9 @@ async fn launch_prepared_interactive_application(
             .to_string_lossy()
             .into_owned(),
     );
+    if let Some(custody) = &installation.worktree_custody {
+        custody.process_may_exist();
+    }
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
@@ -2075,7 +2140,7 @@ async fn launch_prepared_interactive_application(
             connection: InteractiveConnection::AwaitingBinding,
             service,
             socket_root,
-            worktree_binding: None,
+            worktree_custody: installation.worktree_custody.clone(),
             failure_reported: false,
             last_activation_sequence: 0,
             thread: None,
@@ -2363,18 +2428,11 @@ async fn publish_inbox_event(
 async fn retire_interactive_application_guarded(
     deployment: InteractiveDeployment,
     tmux: &TmuxSession,
-    bindings: &Arc<Mutex<BindingTable>>,
-    binding_terminal: BindingTerminal,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
-    match AssertUnwindSafe(retire_interactive_application(
-        deployment,
-        tmux,
-        bindings,
-        binding_terminal,
-    ))
-    .catch_unwind()
-    .await
+    match AssertUnwindSafe(retire_interactive_application(deployment, tmux))
+        .catch_unwind()
+        .await
     {
         Ok(receipt) => receipt,
         Err(_) => InteractiveCleanupReceipt {
@@ -2392,8 +2450,6 @@ async fn retire_interactive_application_guarded(
 async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
-    bindings: &Arc<Mutex<BindingTable>>,
-    binding_terminal: BindingTerminal,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
     let mut components = Vec::with_capacity(6);
@@ -2411,7 +2467,10 @@ async fn retire_interactive_application(
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Process,
         outcome: match tmux.kill_pane(&deployment.pane).await {
-            Ok(()) => CleanupComponentOutcome::Completed,
+            Ok(()) => CleanupComponentOutcome::Failed {
+                detail: "pane cleanup requested; exact process termination remains unconfirmed"
+                    .into(),
+            },
             Err(error) => CleanupComponentOutcome::Failed {
                 detail: error.to_string(),
             },
@@ -2464,16 +2523,10 @@ async fn retire_interactive_application(
         component: CleanupComponent::BuildResource,
         outcome: build_outcome,
     });
-    let binding_outcome = if let Some(binding) = deployment.worktree_binding.take() {
-        let result = match binding_terminal {
-            BindingTerminal::Completed => binding.complete(&mut bindings.lock()),
-            BindingTerminal::Released => binding.release(&mut bindings.lock()),
-        };
-        match result {
-            Ok(()) => CleanupComponentOutcome::Completed,
-            Err(error) => CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            },
+    let binding_outcome = if deployment.worktree_custody.take().is_some() {
+        // Pane removal (including an absent/non-owned pane) is not a process reap.
+        CleanupComponentOutcome::Failed {
+            detail: "custody retained: tmux cannot prove exact process termination".into(),
         }
     } else {
         CleanupComponentOutcome::Completed
@@ -4078,7 +4131,6 @@ mod tests {
             .find(|installation| installation.label.ends_with("/scaffold"))
             .expect("scaffold installation")
             .clone();
-        let mut test_bindings = Vec::new();
         for installation in &child_installations {
             assert_eq!(installation.context_parent, Some(actor.identity()));
             assert_eq!(
@@ -4113,11 +4165,10 @@ mod tests {
                 installation.actor.identity().id.0,
                 installation.actor.identity().incarnation.0,
             );
-            test_bindings.push(
-                bindings
-                    .lock()
-                    .bind(worktree.id(), &principal, current_time_ms())
-                    .expect("bind named worktree to test child"),
+            assert!(installation.worktree_custody.is_some());
+            assert_eq!(
+                bindings.lock().current(worktree.id()).unwrap().agent(),
+                &principal
             );
         }
         worker_installation
@@ -4548,11 +4599,10 @@ mod tests {
                 installation.actor.identity().id.0,
                 installation.actor.identity().incarnation.0,
             );
-            test_bindings.push(
-                bindings
-                    .lock()
-                    .bind(worktree.id(), &principal, current_time_ms())
-                    .expect("bind nested worktree"),
+            assert!(installation.worktree_custody.is_some());
+            assert_eq!(
+                bindings.lock().current(worktree.id()).unwrap().agent(),
+                &principal
             );
             installation
                 .fork_gate

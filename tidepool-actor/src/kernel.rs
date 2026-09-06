@@ -330,16 +330,32 @@ impl LocalActorRef {
         &self,
         terminal: ActorTerminal,
     ) -> Result<ActorTerminal, KernelInvocationFailure> {
+        let terminal = self.terminal.request_shutdown(terminal);
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
+        if self
+            .address
             .send_message(KernelMessage::Shutdown {
                 terminal,
                 reply: reply.into(),
             })
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
-        receive
-            .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+            .is_err()
+        {
+            // A concurrent bootstrap can finish between recording intent and
+            // enqueueing the mailbox operation. Reuse only its published exit.
+            return self
+                .terminal
+                .get()
+                .ok_or(KernelInvocationFailure::ActorExited(self.identity));
+        }
+        match receive.await {
+            Ok(terminal) => Ok(terminal),
+            // Bootstrap may observe the request before draining its mailbox.
+            // Its lifecycle owner still performs and publishes exact cleanup.
+            Err(_) => self
+                .terminal
+                .get()
+                .ok_or(KernelInvocationFailure::ActorExited(self.identity)),
+        }
     }
 
     /// Request retirement and retain which supervisor received its acknowledgement.
