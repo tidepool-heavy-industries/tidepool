@@ -799,7 +799,13 @@ async fn execute_examples(
 async fn floating_point_resident_display_matches_prelude() {
     let campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("numeric_display_fixture.hs")).await;
+    let setup =
+        dispatch_haskell_script(root.as_ref(), include_str!("numeric_display_fixture.hs")).await;
+    let mut mismatches = Vec::new();
+    let setup_committed = setup["status"] == "committed";
+    if !setup_committed {
+        mismatches.push(format!("fixture setup rejected: {setup}"));
+    }
     // Keep observations separate so failures name the actual public display path.
     let probes = [
         ("d", "1.0"),
@@ -827,18 +833,25 @@ async fn floating_point_resident_display_matches_prelude() {
             "(False,False,False)",
         ),
     ];
-    let mut mismatches = Vec::new();
-    for (source, expected) in probes {
+    for (source, expected) in probes.into_iter().filter(|_| setup_committed) {
         let result = dispatch_haskell_script(root.as_ref(), source).await;
         if result["status"] != "committed" {
             mismatches.push(format!("{source}: rejected observation: {result}"));
             continue;
         }
-        let actual = result["items"][0]["output"].as_str().unwrap();
+        let Some(actual) = result["items"][0]["output"].as_str() else {
+            mismatches.push(format!(
+                "{source}: malformed committed observation: {result}"
+            ));
+            continue;
+        };
         if actual != expected {
             mismatches.push(format!("{source}: expected {expected:?}, got {actual:?}"));
         }
     }
     campaign.forest.shutdown().await;
+    if let Err(error) = campaign.hosted.await {
+        mismatches.push(format!("hosted campaign join failed: {error}"));
+    }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
