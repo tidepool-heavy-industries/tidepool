@@ -11,6 +11,7 @@ pub enum Evidence<T> {
 }
 
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
@@ -75,6 +76,15 @@ pub struct RunMap {
 /// Partial artifact inventory. It deliberately does not parse assignment prose
 /// or infer parentage, acceptance, failures or token usage from event labels.
 pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
+    let read_bound = u64::try_from(limits.bytes_per_record)
+        .ok()
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "record byte limit must leave room for overflow detection",
+            )
+        })?;
     let mut report = RunMap {
         source: run.display().to_string(),
         actors: Vec::new(),
@@ -86,8 +96,10 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
             reason: "No structured acceptance evidence consumed".into(),
         },
     };
-    // Bound collection before sorting; a truncated listing is explicitly partial.
-    let mut directories = Vec::new();
+    // Inspect the listing, retaining only the smallest keys. Selection is
+    // independent of filesystem enumeration order and uses O(actor limit) memory.
+    let mut directories = BTreeSet::new();
+    let mut omitted = 0usize;
     for entry in fs::read_dir(run)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -104,22 +116,24 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
         else {
             continue;
         };
-        if directories.len() == limits.actors {
-            report
-                .diagnostics
-                .push("Actor directory limit reached; listing is partial".into());
-            break;
+        directories.insert((actor, incarnation, entry.path()));
+        if directories.len() > limits.actors {
+            directories.pop_last();
+            omitted = omitted.saturating_add(1);
         }
-        directories.push((actor, incarnation, entry.path()));
     }
-    directories.sort_by_key(|(actor, incarnation, _)| (*actor, *incarnation));
+    if omitted != 0 {
+        report.diagnostics.push(format!(
+            "Actor directory limit reached; {omitted} directories omitted"
+        ));
+    }
     for (actor, incarnation, directory) in directories {
         let binding = directory.join("binding.json");
         let thread = (|| -> Option<String> {
             let mut bytes = Vec::new();
             File::open(&binding)
                 .ok()?
-                .take(limits.bytes_per_record as u64 + 1)
+                .take(read_bound)
                 .read_to_end(&mut bytes)
                 .ok()?;
             if bytes.len() > limits.bytes_per_record {
@@ -156,18 +170,33 @@ pub fn read_run(run: &Path, limits: Limits) -> io::Result<RunMap> {
                 let mut reader = BufReader::new(file);
                 for index in 0..=limits.records_per_actor {
                     if index == limits.records_per_actor {
-                        if !reader.fill_buf()?.is_empty() {
-                            report
+                        match reader.fill_buf() {
+                            Ok(bytes) if !bytes.is_empty() => report
                                 .diagnostics
-                                .push(format!("{}: record limit reached", inbox.display()));
+                                .push(format!("{}: record limit reached", inbox.display())),
+                            Ok(_) => (),
+                            Err(error) => report
+                                .diagnostics
+                                .push(format!("{}: inbox read failed: {error}", inbox.display())),
                         }
                         break;
                     }
                     let mut bytes = Vec::new();
-                    let count = reader
+                    let count = match reader
                         .by_ref()
-                        .take(limits.bytes_per_record as u64 + 1)
-                        .read_until(b'\n', &mut bytes)?;
+                        .take(read_bound)
+                        .read_until(b'\n', &mut bytes)
+                    {
+                        Ok(count) => count,
+                        Err(error) => {
+                            report.diagnostics.push(format!(
+                                "{}:{}: inbox read failed: {error}",
+                                inbox.display(),
+                                index + 1
+                            ));
+                            break;
+                        }
+                    };
                     if count == 0 {
                         break;
                     }
@@ -267,5 +296,82 @@ mod tests {
         .unwrap();
         assert!(report.actors.is_empty());
         assert!(!report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn partial_map_keeps_actors_after_local_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("1-1/inbox.jsonl")).unwrap();
+        fs::create_dir_all(dir.path().join("2-1")).unwrap();
+        fs::write(
+            dir.path().join("2-1/inbox.jsonl"),
+            b"{\"sequence\":1,\"payload\":{\"type\":\"childExited\"}}\n",
+        )
+        .unwrap();
+        for records_per_actor in [0, 10] {
+            let report = read_run(
+                dir.path(),
+                Limits {
+                    records_per_actor,
+                    ..Limits::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(report.actors.len(), 2);
+            assert!(report.actors[0].events.is_empty());
+            assert_eq!(
+                report.actors[1].events.len(),
+                usize::from(records_per_actor > 0)
+            );
+            assert!(report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("1-1/inbox.jsonl")));
+        }
+        assert!(read_run(&dir.path().join("missing-root"), Limits::default()).is_err());
+    }
+    #[test]
+    fn partial_map_actor_selection_is_creation_order_independent() {
+        let mut selected = Vec::new();
+        for order in [[9, 1, 5, 2], [2, 5, 1, 9]] {
+            let dir = tempfile::tempdir().unwrap();
+            for actor in order {
+                fs::create_dir(dir.path().join(format!("{actor}-1"))).unwrap();
+            }
+            let report = read_run(
+                dir.path(),
+                Limits {
+                    actors: 2,
+                    ..Limits::default()
+                },
+            )
+            .unwrap();
+            selected.push(
+                report
+                    .actors
+                    .iter()
+                    .map(|a| (a.actor, a.incarnation))
+                    .collect::<Vec<_>>(),
+            );
+            assert!(report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("2 directories omitted")));
+        }
+        assert_eq!(selected[0], vec![(1, 1), (2, 1)]);
+        assert_eq!(selected[0], selected[1]);
+    }
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn partial_map_rejects_overflowing_byte_limit_at_entry() {
+        let error = read_run(
+            Path::new("not-read"),
+            Limits {
+                bytes_per_record: usize::MAX,
+                ..Limits::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }

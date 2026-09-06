@@ -37,8 +37,9 @@ This is intentionally partial: optional time windows, root binding linkage,
 provider usage via the existing usage owner, parent/admission/source edges,
 structured review/integration/tested revision links and existing Shoal CLI
 integration remain outstanding. Reader reports usage/acceptance Unknown rather
-than fabricating support. Independent review is blocked by the recursive
-custody failure; fixing that defect remains required, not waived by local work.
+than fabricating support. Independent review has now successfully launched and requested local reader
+repairs. Historical recursive custody failures remain valid evidence; this
+reviewer launch alone does not establish the production custody repair.
 
 ## Verification of source db5e4fdc220aedeb4af084712c9082dea6e3128f
 
@@ -59,3 +60,18 @@ custody failure; fixing that defect remains required, not waived by local work.
 The Nix stdout prefix caused the first attempt to parse the shell-wrapped
 command's output as JSON to fail; it was not a parser failure in the example.
 Compile and test commands did not replace the running Shoal host.
+
+## Independent-review repair scope
+
+The reader now retains actor-local inbox I/O failures as diagnostics, including
+failure while checking the record limit; root directory enumeration errors still
+return an error. Truncated actor selection retains the smallest ordered
+(actor, incarnation, path) keys in bounded memory, independent of creation order,
+and reports the omission count. Byte limits are validated at entry so the
+one-byte oversized-record probe cannot overflow.
+
+Reviewed `tidepool-repr/src/jsonl.rs`: its durable `read_tail` mechanism returns
+whole-file rows, has no per-record bound, and treats middle corruption as an
+error. This partial inventory needs bounded records and diagnostics while
+retaining readable evidence; no new generic JSONL helper or durable log was
+introduced in these repairs. Existing JSONL ownership is unchanged.
