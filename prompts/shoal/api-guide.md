@@ -1,5 +1,185 @@
 # Shoal core API guide
 
-This shared guide is being scaffolded. Its remaining obligation is to provide
-the core callable signatures, result constructors, and an executable
-fork/watch/fold example before this change is accepted for use.
+This is one shared API superset, not a grant of authority or an inventory of
+this actor's state. Use the assignment and runtime authority already supplied.
+Start useful work from these call shapes; do not begin with `:bindings` or
+re-query the signatures below. Look up only a genuinely missing detail.
+
+## Fork, watch, fold
+
+This small example needs a clean project checkout and authority to fork a
+coding actor. It is a syntax example, not a recommended task size. Replace the
+assignment with a bounded obligation against the actual shared scaffold.
+
+```haskell
+:{
+reportOnly :: Settlement a -> Either ResponseFailure a
+reportOnly (ReplyAvailable result) = Right (responseValue result)
+reportOnly (ReplyUnavailable failure) = Left failure
+:}
+let Right campaign = campaignLabel "api-guide"
+let Right wave = forkGroupLabel "checks"
+let Right checkBranch = branchLabel "hit-targets"
+let task = "Check the hit targets." :: Text
+worker <- unfold (batch campaign wave) (child (withEffort Medium (coding @Text checkBranch projectHead task)))
+let Right readyLabel = watchLabel "hit-targets-ready"
+ready <- watch readyLabel (awaitSettledFork worker)
+```
+
+Return from that tool call so the child can start. End the model turn when
+waiting on the watch. On its wake, use the retained handle in a later call:
+
+```haskell
+result <- pollWatch ready
+inspectFull (fmap reportOnly result)
+```
+
+`fmap` preserves `WatchPending` and `WatchUnavailable`; inside `WatchReady`,
+`reportOnly` preserves a failed child as `Left`, rather than pretending it
+returned a report. A successful report is not review, acceptance, or integration.
+Keep the original result when execution/worktree evidence matters.
+
+`Unfold effects` and `Await` are applicative: combine independent work with
+`(,) <$> child branchA <*> child branchB`, and dependencies with
+`(,) <$> awaitSettledFork workerA <*> awaitSettledFork workerB`.
+Register separate watches when results can be integrated independently.
+
+## Construction and handles
+
+The following are API reference signatures, not declarations to paste into the
+workbench. `result` is the first visible type argument of branch constructors:
+`coding @Report label seed assignment` requests a `Report` reply.
+
+```text
+campaignLabel  :: Text -> Either NameError CampaignLabel
+forkGroupLabel :: Text -> Either NameError ForkGroupLabel
+branchLabel    :: Text -> Either NameError BranchLabel
+watchLabel     :: Text -> Either WatchLabelError WatchLabel
+requestLabel   :: Text -> Either RequestLabelError RequestLabel
+batch          :: CampaignLabel -> ForkGroupLabel -> ForkGroupPath
+
+projectHead   :: WorktreeSeed
+boundHead     :: WorktreeSeed
+snapshotDirty :: WorktreeSeed -> WorktreeSeed
+
+coding          :: BranchLabel -> WorktreeSeed -> input -> Branch CodingEffects input result
+scaffolding     :: BranchLabel -> WorktreeSeed -> input -> Branch ScaffoldEffects input result
+integrating     :: BranchLabel -> WorktreeSeed -> input -> Branch IntegrationEffects input result
+researching     :: BranchLabel -> WorktreeSeed -> input -> Branch ResearchEffects input result
+researchingLeaf :: BranchLabel -> WorktreeSeed -> input -> Branch ResearchLeafEffects input result
+
+data ForkEffort = Low | Medium | High
+withEffort :: ForkEffort -> Branch child input result -> Branch child input result
+
+child :: (KnownEffects child, Subset child effects)
+      => Branch child input result -> Unfold effects (Forked result)
+unfold :: (Member Forks effects, Member Replies effects, Member AgentInspection effects)
+       => ForkGroupPath -> Unfold effects result -> Eff effects result
+
+forkedActor    :: Forked result -> AgentRef
+forkedResponse :: Forked result -> Response result
+forkedLaunch   :: Forked result -> BranchReceipt
+```
+
+Labels use nonempty lowercase letters/digits separated by single hyphens, at
+most 48 characters. The example uses validated literals; handle `Left` for
+externally supplied labels. `projectHead` selects the project repository's
+committed head; `boundHead` requires an allocated bound checkout, not merely
+write access. Both require clean source unless wrapped in `snapshotDirty`.
+
+Coding/scaffolding/integration branches have coding worktrees; research branches
+are inspection-only. `researchingLeaf` omits delegation. Available effects and
+runtime depth/width still limit admission. For recursive budget proposals use
+`:doc unfold` and `previewBranch`; do not infer permission from visible handles.
+`withEffort` requests initial effort, not a change to a running actor or proof
+of provider application.
+
+Children start after the enclosing tool block completes and inherit its final
+committed ambient bindings. Captured assignments/closures keep capture-time
+meanings; later parent calls do not refresh an existing child.
+
+## Read results without another discovery round
+
+```text
+awaitSettledFork :: Forked result -> Await (Settlement result)
+awaitFork        :: Forked result -> Await (ResponseResult result)
+awaitSettled     :: Response result -> Await (Settlement result)
+awaitResponse    :: Response result -> Await (ResponseResult result)
+watch     :: Member Watches effects => WatchLabel -> Await result -> Eff effects (Watch result)
+pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState result)
+
+data WatchState result
+  = WatchPending
+  | WatchReady result
+  | WatchUnavailable WatchFailure
+
+data Settlement result
+  = ReplyAvailable (ResponseResult result)
+  | ReplyUnavailable ResponseFailure
+
+responseValue     :: ResponseResult result -> result
+responseExecution :: ResponseResult result -> ExecutionReceipt
+responseWorktree  :: ResponseResult result -> WorktreeEvidence
+```
+
+`Await` describes dependencies; `watch` registers a wake subscription.
+`awaitSettledFork`/`awaitSettled` retain dependency failures inside `Settlement`;
+`awaitFork`/`awaitResponse` propagate unavailability to the watch instead.
+A terminal watch can be polled again without consuming it. A notice is not the
+result: poll its retained handle, and do not repeat the original work.
+
+Lifecycle observations may print only `WatchReady`; the payload still exists.
+Bind the observation, then apply a projection or `inspectFull` to that saved
+value. Full inspection does not poll again. `:info ResponseFailure` or
+`:info WatchFailure` supplies detailed constructors only when needed.
+
+## Requests and replies
+
+```text
+request :: Member Replies effects
+        => AgentRef -> RequestLabel -> input -> Eff effects (Response result)
+updateRequest :: Member Replies effects
+              => Response result -> Text -> Eff effects (Either ReplyError RequestUpdate)
+pollRequestUpdate :: Member Replies effects
+                  => RequestUpdate -> Eff effects (Either ReplyError RequestUpdateState)
+
+data RequestUpdateState
+  = UpdateQueued | UpdatePresented | UpdateTooLate
+  | UpdateUnconfirmed Text | UpdateNotPresented Text
+```
+
+Use `request @Report actor label assignment` for a new assignment to a retained
+specialist; it queues when busy. `updateRequest` clarifies the exact owned,
+active response without replacing its reply obligation. Handle its `Left` and
+poll a returned `Right` handle. Presentation is not incorporation. Queued work
+is not yet steerable; unconfirmed delivery can fence settlement. See
+`:doc request` for delivery/recovery policy, and `:doc refinement` for review.
+
+For an active request, activation supplies `sessionInput`'s type and the reply
+type/declaration. Select or apply opaque input; use `inspectFull sessionInput`
+only for explicitly omitted prose. `sessionReply` identifies this request's
+reply obligation; `respond value` accepts its specified reply type and settles
+it. It is terminal control transfer, not an ordinary `()` result to sequence
+past. A root outside a request has no `sessionInput`, `sessionReply`, or
+`respond` binding. Ending a model turn does not settle a request.
+
+When progress was requested, activation also supplies `reportProgress`; call
+it with the declared progress type to publish while retaining the reply.
+Progress is cumulative latest-value state, not a lossless message stream.
+To request/watch progress, use `:doc watch` for
+`childWithProgress @Progress @Report`, `requestWithProgress`, and
+`awaitProgressAfter`. Do not guess a progress type or create a duplicate store.
+
+## Targeted discovery and cleanup
+
+Use `:type name` for an omitted signature, `:info Type` for missing constructors,
+and focused `:doc request`, `:doc unfold`, `:doc watch`, `:doc refinement`, or
+`:doc cleanup` for their less-common operations. `:doc topics` lists the rest.
+Use `:bindings` only to locate a needed live value whose name is missing, not
+to collect every inherited name at startup. Visibility does not transfer
+ownership or authority. Use `:status!` for lifecycle/provider uncertainty and
+`:recovery` after recreation; conversation names do not restore lost handles.
+
+`stopAgent :: Member AgentControl effects => AgentRef -> Eff effects StopOutcome`
+retires an actor when authorized. It is separate from accepting its result;
+retain useful specialists and inspect the outcome and cleanup evidence.
