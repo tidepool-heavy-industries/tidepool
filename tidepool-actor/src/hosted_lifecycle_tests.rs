@@ -172,6 +172,57 @@ async fn authored_seal_survives_lost_waiter_and_rejects_late_work() {
         .unwrap()
         .cleanup
         .is_confirmed());
+    let retiring = forest
+        .new_workbench("lost-retirement-waiter".into(), EffectiveRole::coding())
+        .await
+        .unwrap();
+    let retiring_policy = super::ResidentInteractivePolicy::local(retiring.clone());
+    let source = format!(
+        "send (NotifyWith ({}, {}) \"retire-hold\")",
+        retiring.identity().id.0,
+        retiring.identity().incarnation.0
+    );
+    let running = tokio::spawn(retiring_policy.dispatch_boxed(invocation(&source, "retire-first")));
+    let held = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let LocalResidentDeployment::NotificationSend(command) = events.recv().await.unwrap()
+            {
+                break command;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let owner = retiring.clone();
+    let mut waiter = tokio::spawn(async move {
+        owner
+            .shutdown_with_cleanup(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "lost waiter".into(),
+            })
+            .await
+    });
+    assert!(tokio::time::timeout(Duration::from_millis(25), &mut waiter)
+        .await
+        .is_err());
+    waiter.abort();
+    let _ = waiter.await;
+    held.rejected(tidepool_actor::NotificationError::Unavailable);
+    running.await.unwrap().unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(60), retiring.terminal().wait())
+        .await
+        .unwrap();
+    let retained = retiring
+        .terminal()
+        .cleanup()
+        .expect("cleanup survives lost retirement waiter");
+    assert!(retained.is_confirmed(), "{retained:?}");
+    let observed = retiring
+        .shutdown_with_cleanup(terminal.clone())
+        .await
+        .unwrap();
+    assert_eq!(observed.terminal, terminal);
+    assert_eq!(observed.cleanup, retained);
     forest.shutdown().await;
 }
 

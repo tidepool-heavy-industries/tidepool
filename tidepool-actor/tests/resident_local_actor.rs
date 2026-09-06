@@ -182,7 +182,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         ActorDescriptor::new(
             "foreign",
             ActorPlacement {
-                session: support::process_unique_session(178),
+                session: support::process_unique_session(179),
                 ..descriptor.placement()
             },
         ),
