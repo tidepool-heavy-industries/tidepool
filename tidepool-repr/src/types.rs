@@ -458,6 +458,28 @@ define_primops! {
     ParseISO8601 => "ParseISO8601", "parseISO8601#";
 }
 
+/// Evaluation required for a primitive argument before executing the operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimArgDemand {
+    /// Evaluate to WHNF; numeric/address operations subsequently validate shape.
+    Strict,
+    /// Pass a heap value without entering it (for lifted array elements).
+    Lazy,
+}
+
+impl PrimOpKind {
+    /// Argument positions are zero-based in the lowered IR, after State# erasure.
+    /// Demand belongs to the operation, not to an emitter's traversal strategy.
+    pub fn argument_demand(self, position: usize) -> PrimArgDemand {
+        match (self, position) {
+            (Self::NewArray | Self::NewSmallArray, 1)
+            | (Self::WriteArray | Self::WriteSmallArray, 2)
+            | (Self::CasSmallArray, 2 | 3) => PrimArgDemand::Lazy,
+            _ => PrimArgDemand::Strict,
+        }
+    }
+}
+
 /// Case alternative constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AltCon {
