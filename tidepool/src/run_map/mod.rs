@@ -154,23 +154,7 @@ pub fn read_windowed_run(run: &Path, limits: Limits, window: TimeWindow) -> io::
         } = &report.root.actor
         {
             if root_actor.id.0 == actor && root_actor.incarnation.0 == incarnation {
-                if let Evidence::Observed {
-                    value: root_thread,
-                    source,
-                } = &report.root.provider_thread
-                {
-                    provider_thread = match &provider_thread {
-                        Evidence::Observed { value, .. } if value != root_thread => {
-                            Evidence::Unknown {
-                                reason: "Conflicting root and per-actor bindings".into(),
-                            }
-                        }
-                        _ => Evidence::Observed {
-                            value: root_thread.clone(),
-                            source: source.clone(),
-                        },
-                    };
-                }
+                provider_thread = report.root.actor_thread(provider_thread);
             }
         }
         let mut node = ActorNode {

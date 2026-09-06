@@ -11,8 +11,45 @@ use tidepool_actor::ActorRef;
 pub struct RootBinding {
     pub actor: Evidence<ActorRef>,
     pub provider_thread: Evidence<String>,
+    #[serde(skip)]
+    thread_constraint: RootThreadConstraint,
 }
 
+#[derive(Debug)]
+enum RootThreadConstraint {
+    Unrecorded,
+    Expected(String),
+    Conflicting,
+}
+
+impl RootBinding {
+    /// All recorded root claims constrain its node; absent claims do not veto
+    /// independent per-actor evidence, but contradictions cannot be overridden.
+    pub(super) fn actor_thread(&self, per_actor: Evidence<String>) -> Evidence<String> {
+        let conflict = match (&self.thread_constraint, &per_actor) {
+            (RootThreadConstraint::Conflicting, _) => true,
+            (RootThreadConstraint::Expected(expected), Evidence::Observed { value, .. }) => {
+                expected != value
+            }
+            _ => false,
+        };
+        if conflict {
+            return Evidence::Unknown {
+                reason: "Conflicting recorded root thread claims".into(),
+            };
+        }
+        match &self.provider_thread {
+            Evidence::Observed { value, source } => Evidence::Observed {
+                value: value.clone(),
+                source: source.clone(),
+            },
+            _ => per_actor,
+        }
+    }
+}
+
+/// Projects recorded text, not the versioned QueueReadyThread proof returned by
+/// tidepool_agent::read_interactive_binding. Never use this as launch readiness.
 pub(super) fn binding_thread(path: &Path, read_bound: u64) -> Evidence<String> {
     let value = (|| -> Option<String> {
         let mut bytes = Vec::new();
@@ -75,17 +112,23 @@ pub(super) fn read_root(run: &Path, read_bound: u64) -> RootBinding {
         },
     };
     let mut provider_thread = binding_thread(&run.join("root-binding.json"), read_bound);
-    if let (Some(expected), Evidence::Observed { value, .. }) = (expected_thread, &provider_thread)
-    {
-        if expected != *value {
-            provider_thread = Evidence::Unknown {
-                reason: "Conflicting status and root binding threads".into(),
-            };
+    let thread_constraint = match (expected_thread, &provider_thread) {
+        (Some(expected), Evidence::Observed { value, .. }) if expected != *value => {
+            RootThreadConstraint::Conflicting
         }
+        (Some(expected), _) => RootThreadConstraint::Expected(expected),
+        (None, Evidence::Observed { value, .. }) => RootThreadConstraint::Expected(value.clone()),
+        _ => RootThreadConstraint::Unrecorded,
+    };
+    if matches!(thread_constraint, RootThreadConstraint::Conflicting) {
+        provider_thread = Evidence::Unknown {
+            reason: "Conflicting status and root binding threads".into(),
+        };
     }
     RootBinding {
         actor,
         provider_thread,
+        thread_constraint,
     }
 }
 
@@ -315,5 +358,66 @@ mod tests {
                 Evidence::Observed { .. }
             ));
         }
+    }
+    #[test]
+    fn run_map_root_conflict_fences_every_per_actor_thread_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("7-2")).unwrap();
+        fs::write(
+            dir.path().join("status.json"),
+            json!({
+                "version":4,"run_id":"test","workspace":"/sanitized","session":"test",
+                "agent":{"model":"test","effort":"low"},
+                "phase":{"state":"ready","root_actor":{"id":7,"incarnation":2},"root_thread":"A"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("root-binding.json"),
+            json!({"version":4,"thread":"B"}).to_string(),
+        )
+        .unwrap();
+        for thread in ["A", "B", "C"] {
+            fs::write(
+                dir.path().join("7-2/binding.json"),
+                json!({"version":4,"thread":thread}).to_string(),
+            )
+            .unwrap();
+            let report =
+                read_windowed_run(dir.path(), Limits::default(), TimeWindow::default()).unwrap();
+            assert!(matches!(
+                report.root.provider_thread,
+                Evidence::Unknown { .. }
+            ));
+            assert!(matches!(
+                report.actors[0].provider_thread,
+                Evidence::Unknown { .. }
+            ));
+        }
+        fs::remove_file(dir.path().join("root-binding.json")).unwrap();
+        // Missing root binding is not contradictory; status and per-actor A agree.
+        fs::write(
+            dir.path().join("7-2/binding.json"),
+            json!({"version":4,"thread":"A"}).to_string(),
+        )
+        .unwrap();
+        let report =
+            read_windowed_run(dir.path(), Limits::default(), TimeWindow::default()).unwrap();
+        assert!(
+            matches!(&report.actors[0].provider_thread, Evidence::Observed { value, .. } if value == "A")
+        );
+        // A present per-actor claim contradicting status is still ambiguous.
+        fs::write(
+            dir.path().join("7-2/binding.json"),
+            json!({"version":4,"thread":"C"}).to_string(),
+        )
+        .unwrap();
+        let report =
+            read_windowed_run(dir.path(), Limits::default(), TimeWindow::default()).unwrap();
+        assert!(matches!(
+            report.actors[0].provider_thread,
+            Evidence::Unknown { .. }
+        ));
     }
 }
