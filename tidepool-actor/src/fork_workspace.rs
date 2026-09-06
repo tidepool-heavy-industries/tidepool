@@ -23,7 +23,28 @@ pub struct ForkWorkspaceAdmissionError {
     pub detail: String,
 }
 
+/// A lease on exact actor/worktree custody. The implementation releases only
+/// its own binding generation when the last runtime/host owner drops it.
+/// Keeping the lease alive through host cleanup prevents early rebinding while
+/// a provider process can still access the checkout.
+pub trait ForkWorkspaceCustody: Send + Sync + 'static {}
+
 pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
+    /// Install custody before executing the child entry. This is separate from
+    /// provider readiness; implementations must fail closed on stale ownership.
+    ///
+    /// The default explicitly leaves pre-bootstrap custody unsupported while
+    /// composition roots migrate to this contract.
+    fn install_custody(
+        &self,
+        _actor: ActorRef,
+        _worktree: &str,
+    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        Err(ForkWorkspaceAdmissionError {
+            detail: "pre-bootstrap worktree custody is not implemented".into(),
+        })
+    }
+
     fn admit(
         &self,
         owner: ActorRef,
