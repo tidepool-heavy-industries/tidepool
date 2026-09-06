@@ -120,7 +120,7 @@ fn worktree_decl_matches_the_schema_exactly() {
 /// Written to run BEFORE the flip, against the still-hand-written
 /// `event_effect_def!` macro — see the module doc. `RepoEvent` is the second
 /// effect to retire a `Wt*`/`Ev*`-family hand-written wire block, and the
-/// first whose `type_defs` reference ANOTHER effect's own types (`Watch`
+/// first whose `type_defs` reference ANOTHER effect's own types (`EventWatch`
 /// names Worktree's `WorktreeId`) and the first with a genuinely polymorphic
 /// authored type (`Event a`/`Observed a`) that the schema cannot represent at
 /// all — both relocate to `haskell/lib/Tidepool/Event.hs` alongside eighteen

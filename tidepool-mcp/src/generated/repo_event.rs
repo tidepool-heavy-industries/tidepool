@@ -8,7 +8,7 @@ pub fn event_decl() -> crate::EffectDecl {
         description: "Typed repository events. `commit tree` and `headChanged tree` are event DESCRIPTIONS — values you can build, `fmap`, and merge with `<|>` before anything is registered. `withHandler event handler body` makes one live for exactly the extent of its lexical body: it registers without blocking, never replays events older than the registration, invokes the handler in the SAME effect row as the surrounding code (so it may send a typed message, spawn a reviewer, or ask the operator — and may itself suspend), runs one handler at a time per subscription with later observations queued in observation order, and on exit closes intake, drains, then unregisters. Handler failure fails the enclosing scope. Queue overflow fails loudly — commits are never silently dropped. `nextEvent event` blocks until the FIRST matching observation (or forever): subscribe, block-await, unsubscribe — the one-shot sibling of `withHandler`, no caller-supplied timeout. `after ms` is a one-shot deadline event, `ms` milliseconds from the moment it is SUBSCRIBED (not from the `after` call itself), that fires exactly one `Tick`, so `nextEvent (someEvent <|> after ms)` reads as an ordinary select with a timeout branch.",
         prompt_card: None,
         constructors: &[
-            "RepoEventSubscribe :: [Watch] -> RepoEvent (Either EventError SubscriptionId)",
+            "RepoEventSubscribe :: [EventWatch] -> RepoEvent (Either EventError SubscriptionId)",
             "RepoEventDrain :: SubscriptionId -> RepoEvent (Either EventError [RepositoryEvent])",
             "RepoEventAwait :: SubscriptionId -> Int -> RepoEvent (Either EventError [RepositoryEvent])",
             "RepoEventUnsubscribe :: SubscriptionId -> RepoEvent (Either EventError ())",
@@ -19,7 +19,7 @@ pub fn event_decl() -> crate::EffectDecl {
         type_defs: &[
             "data EventId = EventId Int deriving (Show, Eq)",
             "data SubscriptionId = SubscriptionId Int deriving (Show, Eq)",
-            "data Watch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int | WatchAsync Int | WatchMailbox Int deriving (Show, Eq)",
+            "data EventWatch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int | WatchAsync Int | WatchMailbox Int deriving (Show, Eq)",
             "data HeadChangeKind = Advanced [GitOid] | Amended GitOid GitOid | Rewritten [(GitOid, GitOid)] | Rewound | Switched | UnknownChange deriving (Show, Eq)",
             "data HeadChangeReceipt = HeadChangeReceipt { headWorktree :: WorktreeId, oldHead :: Maybe GitOid, newHead :: GitOid, kind :: HeadChangeKind, headBranch :: Maybe BranchName, observedAtMs :: Int } deriving (Show, Eq)",
             "data CommitReceipt = CommitReceipt { commitWorktree :: WorktreeId, oid :: GitOid, parents :: [GitOid], subject :: Text, author :: Text, committedAtMs :: Int, files :: [Text] } deriving (Show, Eq)",

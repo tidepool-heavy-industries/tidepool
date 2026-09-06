@@ -332,7 +332,11 @@ mod tests {
                 "[FileMeta]",
                 "[FileMeta]",
             ),
-            (HsType::list(HsType::Named("Watch")), "[Watch]", "[Watch]"),
+            (
+                HsType::list(HsType::Named("EventWatch")),
+                "[EventWatch]",
+                "[EventWatch]",
+            ),
             (
                 HsType::list(HsType::Named("RepositoryEvent")),
                 "[RepositoryEvent]",

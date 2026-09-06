@@ -84,7 +84,7 @@ pub struct Effect {
     pub type_defs: Vec<TypeDef>,
     /// `(Haskell name, Rust wire name)` pairs for a NAMED type this effect's own
     /// `type_defs` reference but which is declared by ANOTHER, already-migrated
-    /// effect (Event's `Watch` names Worktree's `WorktreeId`). All Haskell
+    /// effect (Event's `EventWatch` names Worktree's `WorktreeId`). All Haskell
     /// declarations still land in the ONE generated `Tidepool.Effects` module
     /// regardless of which effect owns them, so the Haskell side needs no
     /// change — this table exists only so [`Effect::wire_rust_of`] (and

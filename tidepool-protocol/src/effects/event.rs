@@ -13,7 +13,7 @@
 //! unknown constructor loudly) if its class is forgotten.
 //!
 //! **Two things Event needed that Worktree did not, both because
-//! `Watch`/`HeadChangeKind`/`HeadChangeReceipt`/`CommitReceipt` name Worktree's
+//! `EventWatch`/`HeadChangeKind`/`HeadChangeReceipt`/`CommitReceipt` name Worktree's
 //! OWN types (`WorktreeId`, `GitOid`, `BranchName`) rather than only their own
 //! effect's:**
 //!
@@ -225,7 +225,7 @@ fn type_defs() -> Vec<TypeDef> {
             &["Haskell `SubscriptionId` — one live `withHandler` registration."],
         ),
         TypeDef {
-            name: "Watch",
+            name: "EventWatch",
             wire_rust: Some("EvWatch"),
             shape: TypeShape::Sum {
                 variants: vec![
@@ -260,7 +260,7 @@ fn type_defs() -> Vec<TypeDef> {
             derives: WIRE,
             domain: None,
             doc: &[
-                "Haskell `Watch` — one (worktree, kind) pair a subscription observes, or a",
+                "Haskell `EventWatch` — one (worktree, kind) pair a subscription observes, or a",
                 "one-shot deadline. `<|>` concatenates watches, so a merged `Event` is ONE",
                 "subscription over several watches rather than several subscriptions.",
                 "`WatchDeadline` carries a RELATIVE millisecond duration: the runtime fixes",
@@ -579,7 +579,7 @@ fn verbs() -> Vec<Verb> {
             method: "repo_event_subscribe",
             args: vec![Arg {
                 name: "watches",
-                ty: HsType::list(HsType::Named("Watch")),
+                ty: HsType::list(HsType::Named("EventWatch")),
                 rust: RustBinding::Path("Vec<tidepool_bridge_effects::EvWatch>"),
             }],
             ret: HsType::Named("SubscriptionId"),

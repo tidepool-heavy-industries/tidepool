@@ -126,7 +126,7 @@ module Tidepool.Event
   , Tick (..)
   , EventId
   , SubscriptionId
-  , Watch (..)
+  , EventWatch (..)
   , RepositoryEvent (..)
   , eventIdOf
   , firstMatch
@@ -174,7 +174,7 @@ import Tidepool.Effects
   , RepositoryEvent (..)
   , SubscriptionId
   , Tick (..)
-  , Watch (..)
+  , EventWatch (..)
   , WorktreeHandle
   , WorktreeId
   , awaitSubscriptionRaw
@@ -203,7 +203,7 @@ data Observed a = Observed { eventId :: EventId, value :: a } deriving (Show, Eq
 -- observation into the author's type. Keeping the projection in the value is
 -- what makes Event a lawful Functor and lets '<|>' merge two sources into ONE
 -- subscription.
-data Event a = Event { eventWatches :: [Watch], eventProject :: RepositoryEvent -> Maybe a }
+data Event a = Event { eventWatches :: [EventWatch], eventProject :: RepositoryEvent -> Maybe a }
 
 instance Functor Event where
   fmap f e = Event e.eventWatches (\r -> fmap f (e.eventProject r))

@@ -29,7 +29,7 @@ fn event_type_def_texts_are_pinned() {
         vec![
             "data EventId = EventId Int deriving (Show, Eq)".to_string(),
             "data SubscriptionId = SubscriptionId Int deriving (Show, Eq)".to_string(),
-            "data Watch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int | \
+            "data EventWatch = WatchCommit WorktreeId | WatchHead WorktreeId | WatchDeadline Int | \
              WatchAsync Int | WatchMailbox Int deriving (Show, Eq)"
                 .to_string(),
             "data HeadChangeKind = Advanced [GitOid] | Amended GitOid GitOid | Rewritten \
@@ -78,7 +78,7 @@ fn event_constructor_signatures_are_pinned() {
     assert_eq!(
         ev.constructor_signatures(),
         vec![
-            "RepoEventSubscribe :: [Watch] -> RepoEvent (Either EventError SubscriptionId)",
+            "RepoEventSubscribe :: [EventWatch] -> RepoEvent (Either EventError SubscriptionId)",
             "RepoEventDrain :: SubscriptionId -> RepoEvent (Either EventError [RepositoryEvent])",
             "RepoEventAwait :: SubscriptionId -> Int -> RepoEvent (Either EventError \
              [RepositoryEvent])",
