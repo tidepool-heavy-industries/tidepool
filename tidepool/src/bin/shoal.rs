@@ -12,6 +12,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Inspect recorded run artifacts without launching or attaching to a host.
+    RunMap {
+        run_dir: PathBuf,
+        /// Inclusive UTC Unix-millisecond lower bound; untimed events remain unknown.
+        #[arg(long)]
+        from_unix_ms: Option<u64>,
+        /// Exclusive UTC Unix-millisecond upper bound.
+        #[arg(long)]
+        until_unix_ms: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Provision, inspect, or retire operator workbenches in a running host.
     Operator {
         /// The running host's protected operator socket.
@@ -97,6 +109,27 @@ impl From<Effort> for ShoalEffort {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::RunMap {
+            run_dir,
+            from_unix_ms,
+            until_unix_ms,
+            json,
+        } => {
+            let report = tidepool::run_map::read_windowed_run(
+                &run_dir,
+                tidepool::run_map::Limits::default(),
+                tidepool::run_map::TimeWindow {
+                    from_unix_ms,
+                    until_unix_ms,
+                },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", report.concise());
+            }
+            Ok(())
+        }
         Command::Operator { socket, action } => {
             let action = match action {
                 OperatorCommand::New => tidepool::operator::OperatorAction::New,
@@ -168,6 +201,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_map_cli_preserves_explicit_directory_and_window() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "shoal", "run-map", "/sanitized/run", "--from-unix-ms", "10",
+                "--until-unix-ms", "20", "--json"
+            ]).unwrap().command,
+            Command::RunMap { run_dir, from_unix_ms: Some(10), until_unix_ms: Some(20), json: true }
+                if run_dir == std::path::Path::new("/sanitized/run")
+        ));
+        assert!(Cli::try_parse_from(["shoal", "run-map"]).is_err());
+        assert!(Cli::try_parse_from([
+            "shoal",
+            "run-map",
+            "/sanitized/run",
+            "--from-unix-ms",
+            "invalid"
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn clap_exposes_the_user_commands_and_process_boundaries() {
         assert!(matches!(
             Cli::try_parse_from(["shoal", "new", "/tmp/project"])
@@ -194,7 +248,7 @@ mod tests {
         ));
         let help = Cli::try_parse_from(["shoal", "--help"]).unwrap_err();
         let rendered = help.to_string();
-        for command in ["new", "init", "host"] {
+        for command in ["new", "init", "host", "run-map"] {
             assert!(rendered.contains(command), "{rendered}");
         }
         assert!(!rendered.contains("proxy"), "{rendered}");

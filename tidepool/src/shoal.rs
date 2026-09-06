@@ -968,7 +968,7 @@ async fn wait_until_interactive(
     })?
 }
 
-fn decode_run_status(bytes: &[u8]) -> Result<RunStatus, Box<dyn std::error::Error>> {
+pub(crate) fn decode_run_status(bytes: &[u8]) -> Result<RunStatus, Box<dyn std::error::Error>> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
     let version = value
         .get("version")

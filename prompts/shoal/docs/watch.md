@@ -69,6 +69,29 @@ unfold. The target receives `reportProgress :: Progress -> Eff effects ()`.
 Payloads can contain session-defined ADTs and closures; no `Show` or encoding
 instance is required.
 
+For a retained `lead :: AgentRef`, construct options with exported
+`requestOptions`, not the private `RequestOptions` data constructor. This complete
+setup requests cumulative nonterminal findings (`[Text]`) and a final `Text` reply:
+
+```haskell
+let Right progressRequestLabel = requestLabel "lead-findings"
+let progressOptions = requestOptions progressRequestLabel ("Publish cumulative findings; then return your final report." :: Text)
+(leadResponse, leadProgress) <- requestWithProgress @[Text] @Text lead progressOptions
+let Right findingsLabel = watchLabel "lead-findings-ready"
+findingsReady <- watch findingsLabel (awaitProgressAfter leadProgress (ProgressCursor 0))
+let Right reportLabel = watchLabel "lead-report-ready"
+reportReady <- watch reportLabel (awaitSettled leadResponse)
+```
+
+Choose progress at assignment creation when a lead's intermediate findings matter.
+It does not change or amend an already active assignment. The lead can publish
+`reportProgress ["finding"]` while keeping its final reply pending. End the turn
+when waiting; on wake, bind and inspect `pollWatch findingsReady`, then rearm with
+the returned update cursor. Inspect the separate final-report watch on its wake.
+Progress is one-way observation, not a return steering channel: it does not repair
+failed amendments or provide a root handle. A queued follow-up still cannot
+unblock a lead waiting synchronously for it; avoid circular waits.
+
 `pollProgress updates` observes the latest update. Register
 `watch label (awaitProgressAfter updates (ProgressCursor 0))` to wait for the
 first update or closure, and rearm with the revision from `ProgressUpdate`.

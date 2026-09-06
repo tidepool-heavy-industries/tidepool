@@ -77,3 +77,44 @@ outcome separately from whether it matches the baseline expectation.
   path.
 - Confirm the worktree is clean after committing and report the commit hash,
   exact commands, and exact results.
+
+## Focused recipes and retained evidence
+
+Select the owning target and exact nextest test name, not only a substring:
+
+```sh
+just test-lib tidepool-agent 'test(=backend::codex::active_update::tests::only_the_exact_persisted_user_message_confirms_presentation)'
+# For an integration test, substitute the actual package, file target and full name:
+just test-target PACKAGE TARGET 'test(=FULL_TEST_NAME)'
+```
+
+These recipes enter the repository Nix environment and call `scripts/battery.sh`.
+Even a Rust-only selection resolves extractor infrastructure and may start a
+compile daemon; do not count total wall time as test-body time. The wrapper owns
+signal handling and daemon teardown. Do not introduce an alternative launcher.
+For the shell helper's mocked process boundary alone, a single existing test is:
+
+```sh
+nix develop --command python3 scripts/tests/test_lib_extract.py ExtractHelpers.test_owned_daemon_keeps_endpoint_through_worker_rotation -v
+```
+
+This executes a fixture frontend, not real GHC extraction or mounted service
+acceptance. Within an already active repository Nix shell, omit `nix develop
+--command`. A missing inherited extractor variable is not proof that the real
+extractor is unavailable: the owning resolver discovers/builds it.
+
+Retain the command, source revision, resolved executable paths (prefer hashes),
+selected/executed/skipped counts, and observed result independently of expected
+result. Check nonzero execution; compilation, a listing, unknown counts or a
+zero-selection exit cannot close a behavior obligation. `battery.sh` retains
+failure artifacts under `target/tidepool-test-runs` (override with
+`TIDEPOOL_TEST_ARTIFACT_ROOT`) but deletes its artifacts after success. Capture
+successful output separately if it is delivery evidence; when piping through
+`tee`, enable `pipefail` so capture cannot mask failure.
+
+For timing, name measured boundaries: environment/build/daemon startup, test
+execution (including fixtures if inseparable), and cleanup. Record unknown
+portions instead of subtracting an unrelated command. State process reuse and
+cache conditions; a second invocation does not establish a controlled warm-cache
+benchmark. Do not clear shared caches to manufacture a cold run. No inference
+about serial-versus-tree cost follows from a focused recipe measurement.

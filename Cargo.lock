@@ -4329,6 +4329,7 @@ version = "0.1.0"
 name = "tidepool-node"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -4400,6 +4401,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "thiserror",
+ "tidepool-atomic-write",
  "tidepool-testing",
 ]
 

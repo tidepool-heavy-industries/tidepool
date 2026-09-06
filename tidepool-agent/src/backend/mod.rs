@@ -88,8 +88,8 @@ pub trait AgentBackend {
         Ok(())
     }
 
-    /// A handle that reaps this backend FROM ANOTHER THREAD, making an
-    /// in-flight seam call return.
+    /// A handle that interrupts this backend from another thread, allowing an
+    /// in-flight seam call to return. Cleanup remains the owning backend's duty.
     ///
     /// Take it BEFORE the cycle starts running. Once a cycle thread is inside
     /// [`start_turn`](AgentBackend::start_turn) it holds `&mut` on the backend
@@ -106,17 +106,13 @@ pub trait AgentBackend {
     }
 }
 
-/// Reaps a backend's underlying process/session FROM ANOTHER THREAD, making
-/// its in-flight seam call return.
+/// Requests interruption of the backend's underlying process/session from
+/// another thread while the cycle owns the mutable backend.
 ///
-/// `Send + Sync`, because the whole point is that it is held by someone other
-/// than the cycle thread — a supervisor that decided to cancel while the cycle
-/// thread is blocked inside the seam.
-///
-/// `cancel` is total and idempotent: cancelling twice, or cancelling a backend
-/// that already finished, does nothing and reports nothing. There is no
-/// "cancel failed" a caller could act on differently — a process that is
-/// already gone is the outcome cancellation wanted.
+/// `cancel` is idempotent and returns no completion evidence. Its return must
+/// not be treated as proof of process exit, reaping or executor cleanup. The
+/// supervisor must observe the cycle/backend shutdown result separately; a
+/// blocked operation may remain unconfirmed after a best-effort interrupt.
 pub trait BackendCanceller: Send + Sync {
     fn cancel(&self);
 }
@@ -125,9 +121,8 @@ pub trait BackendCanceller: Send + Sync {
 /// it has nothing to reap, and saying so honestly is better than pretending.
 ///
 /// This is NOT a stand-in for an unimplemented canceller on a backend that
-/// DOES own a process — a canceller that returns without reaping anything is
-/// worse than no canceller, because a supervisor would then join a thread that
-/// never returns.
+/// DOES own a process: that backend must attempt an identity-safe interrupt
+/// rather than silently leave its cycle blocked.
 struct NoopCanceller;
 
 impl BackendCanceller for NoopCanceller {

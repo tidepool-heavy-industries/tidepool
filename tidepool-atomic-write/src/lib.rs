@@ -1,41 +1,19 @@
-//! The one same-directory atomic write-then-rename helper.
+//! Same-directory atomic replacement, with strict and best-effort durability tiers.
 //!
-//! Six durable on-disk stores across the workspace (the worktree registry,
-//! the agent binding table, the self-harness checkpoint, the run lease, the
-//! toolchain stamp, and a session's compiled-module cache) each wrote the
-//! same way by hand: a temp file in the SAME directory as the target (so the
-//! final rename stays on one filesystem and is atomic), then a rename over
-//! the target — so a reader (this process's own next boot, or a concurrent
-//! one) can never observe a torn write. This crate is that one mechanism,
-//! in two durability tiers:
-//!
-//! - [`write_durable`] — file fsync + best-effort parent-directory fsync, so
-//!   the rename itself survives a crash. Use for state a restart must be
-//!   able to trust: registry rows, leases, checkpoints, toolchain stamps.
-//! - [`write_best_effort`] — no fsync at all; only the rename's atomicity
-//!   (never a torn read) is kept. Use for regenerable caches, where a lost
-//!   write on a crash is just a future cache miss, not data loss.
-//!
-//! Both use [`tempfile::NamedTempFile`] for the temp file itself, which
-//! picks a unique name per call — no caller needs to invent its own, and no
-//! caller can collide with a sibling writer racing on the same target path.
-//!
-//! Deliberately NOT here: [`std::fs::hard_link`]-based exclusive-claim
-//! writes (an ordinary rename overwrites; a hard link fails loud when the
-//! target already exists) — that is a different primitive for a different
-//! job and stays with its one caller.
+//! [`write_durable`] syncs the file and containing directory and reports every
+//! failure. An error after rename can leave the new contents visible: callers
+//! must treat the result as uncertain, not proof that publication did not occur.
+//! [`write_best_effort`] preserves atomic replacement without requiring storage sync.
+//! Neither writer creates its parent directory. Owners creating persistent storage
+//! use [`create_dir_all_durable`] before publishing entries beneath new directories.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// An atomic-write failure, naming the path the failing step actually
-/// touched — the target's own DIRECTORY when the temp file itself could not
-/// be created there (e.g. the directory is read-only or missing), the
-/// target path itself for every later step (write, fsync, rename). Callers
-/// that report "the write failed" want the site of the failure, not always
-/// the final target — a directory-creation failure naming a file inside it
-/// that was never reached is a worse diagnostic, not a better one.
+/// An atomic-write failure naming the path touched by the failing operation.
+/// Directory creation/open/sync failures name that directory. A failed sync
+/// after publication does not imply that the file or directories are absent.
 #[derive(Debug)]
 pub struct WriteError {
     pub path: PathBuf,
@@ -60,15 +38,10 @@ impl From<WriteError> for std::io::Error {
     }
 }
 
-/// Write `bytes` to `path` atomically and durably: a uniquely-named temp
-/// file in `path`'s own directory, fsynced, renamed over `path`, then the
-/// directory itself is best-effort fsynced so the rename survives a crash
-/// too (not fatal if the platform/filesystem doesn't support fsync on a
-/// directory handle — that only widens the crash window for the rename
-/// itself, not the write's atomicity).
-///
-/// Does not create `path`'s parent directory — callers that need one
-/// created call `std::fs::create_dir_all` themselves first.
+/// Atomically replace a file, syncing its contents and then its parent directory.
+/// Parent-directory open and sync failures are reported, including after rename
+/// has made the new contents visible. An error does not roll back publication.
+/// The parent must already exist; use [`create_dir_all_durable`] when creating it.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     let dir = parent_dir(path);
     let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|source| WriteError {
@@ -87,8 +60,71 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
         path: path.to_path_buf(),
         source: e.error,
     })?;
-    if let Ok(dirf) = std::fs::File::open(dir) {
-        let _ = dirf.sync_all();
+    sync_parent_directory(path)
+}
+
+/// Sync the directory containing a published path. The caller must sync the
+/// file first and durably establish newly created ancestry separately. Errors
+/// can occur after the path becomes visible; they do not authorize blind retry.
+pub fn sync_parent_directory(path: &Path) -> Result<(), WriteError> {
+    sync_directory(parent_dir(path))
+}
+
+/// Sync one existing directory, reporting unsupported operations and I/O failures.
+/// This persists its entries, not file contents or links to this directory from
+/// its own parent. The caller owns concurrent mutation and publication ordering.
+fn sync_directory(path: &Path) -> Result<(), WriteError> {
+    let directory = std::fs::File::open(path).map_err(|source| WriteError {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !directory
+        .metadata()
+        .map_err(|source| WriteError {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .is_dir()
+    {
+        return Err(WriteError {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "directory sync requires a directory",
+            ),
+        });
+    }
+    directory.sync_all().map_err(|source| WriteError {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Create a directory hierarchy and sync it and every ancestor on the supplied
+/// path, deepest first. This also repairs the persistence ordering on a later
+/// invocation after an earlier sync failed with already-visible directories.
+///
+/// The caller must own the hierarchy against concurrent rename/removal. Existing
+/// symlink targets and their ancestry must already be durably established; this
+/// does not create symlinks or resolve a separate external target hierarchy.
+/// Errors may leave directories present but not durably confirmed. No rollback
+/// is attempted. Filesystem/platform directory-sync failures are never ignored.
+pub fn create_dir_all_durable(path: &Path) -> Result<(), WriteError> {
+    let path = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    std::fs::create_dir_all(path).map_err(|source| WriteError {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let absolute = std::path::absolute(path).map_err(|source| WriteError {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    for directory in absolute.ancestors() {
+        sync_directory(directory)?;
     }
     Ok(())
 }
