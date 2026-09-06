@@ -19,6 +19,24 @@ unavailable, not zero reuse. Later hits cannot establish first-inference reuse;
 equal counts alone do not identify the same response. Polling time does not
 establish which actor activation produced historical usage.
 
+Compact actor status shows `first_observed_input=cached/uncached` separately
+from `thread_usage`, its completeness, response count, and cumulative input
+counts. These are token counts, not percentages. A fork's first observed sample
+is from the child's provider thread; parent rollout records are excluded.
+`ForkedPrefix` records launch provenance, not a provider-confirmed cache hit.
+
+Use `:lineage` for first/latest source IDs and `:trace` for sample history and
+thread/latest-turn summaries. Typed access is available through
+`contextFirstUsage`, `contextLatestUsage`, `contextUsageSummary`, and
+`contextLatestTurnUsage` on `actorContext`; inspect their types before composing
+a query. Aggregates deduplicate provider response IDs and can be `UsagePartial`:
+missing usage, unfinished turns, or inconsistent records must not imply zero
+cost. Legacy token-count notifications supply samples but no reliable aggregate.
+The first observed sample is the earliest available usage evidence, not proof
+that an earlier inference had no missing record. A reattached thread can expose
+usage from before the current attachment. This telemetry measures provider
+reported input reuse, not causal savings against an unforked alternative.
+
 Each actor entry includes a typed workbench posture. `WorkbenchRunningUnit`
 means hosted Haskell is executing; `WorkbenchAwaitingEffect` names the effect
 boundary currently suspended in its Rust interpreter. Neither should be

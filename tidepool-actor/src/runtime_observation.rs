@@ -161,16 +161,24 @@ impl ActorRuntimeObservation {
     }
 
     pub(crate) fn usage_summary_display(&self) -> String {
-        match &self.provider_usage_summary {
+        let first = match &self.first_provider_usage {
+            Some(sample) => format!(
+                "first_observed_input={}/{}",
+                sample.cached_input_tokens, sample.uncached_input_tokens,
+            ),
+            None => "first_observed_input=unavailable".into(),
+        };
+        let thread = match &self.provider_usage_summary {
             Some(summary) => format!(
-                "usage={:?} responses={} cached={} uncached={}",
+                "thread_usage={:?} responses={} cached={} uncached={}",
                 summary.completeness,
                 summary.observations,
                 summary.usage.cached_input_tokens,
                 summary.usage.input_tokens - summary.usage.cached_input_tokens,
             ),
-            None => "usage=unavailable".into(),
-        }
+            None => "thread_usage=unavailable".into(),
+        };
+        format!("{first} {thread}")
     }
 }
 
@@ -444,7 +452,15 @@ mod tests {
     fn absent_provider_metrics_remain_distinct_from_measured_zero() {
         let observation = ActorRuntimeObservationHandle::default();
         assert_eq!(observation.snapshot().latest_provider_usage(), None);
+        assert_eq!(
+            observation.snapshot().usage_summary_display(),
+            "first_observed_input=unavailable thread_usage=unavailable"
+        );
         observation.publish_cache_usage(usage("first", 0, 12));
+        assert_eq!(
+            observation.snapshot().usage_summary_display(),
+            "first_observed_input=0/12 thread_usage=unavailable"
+        );
         assert_eq!(
             observation
                 .snapshot()
@@ -496,7 +512,27 @@ mod tests {
         assert_eq!(snapshot.latest_turn_usage_summary, None);
         assert_eq!(
             snapshot.usage_summary_display(),
-            "usage=Complete responses=100 cached=8000 uncached=2000"
+            "first_observed_input=80/20 thread_usage=Complete responses=100 cached=8000 uncached=2000"
+        );
+    }
+
+    #[test]
+    fn later_cache_hits_do_not_replace_first_observed_miss_in_status() {
+        let observation = ActorRuntimeObservationHandle::default();
+        observation.publish_cache_boundary(CacheBoundaryReason::ForkedPrefix);
+        observation.publish_cache_usage(usage("first", 0, 100));
+        observation.publish_cache_usage(usage("later", 90, 10));
+        let snapshot = observation.snapshot();
+        assert_eq!(
+            snapshot
+                .latest_provider_usage()
+                .unwrap()
+                .cached_input_tokens,
+            90
+        );
+        assert_eq!(
+            snapshot.usage_summary_display(),
+            "first_observed_input=0/100 thread_usage=unavailable"
         );
     }
 
