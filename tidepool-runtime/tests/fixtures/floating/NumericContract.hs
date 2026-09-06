@@ -3,6 +3,7 @@
 module NumericContract
   ( Classification(..), classify, Renderings(..), renderings
   , doubleCases, floatCases, observations
+  , doubleResult, floatResult, arithmeticResult
   ) where
 
 import Prelude
@@ -47,3 +48,41 @@ cases = result
 
 observations :: (RealFloat a, Show a) => [(String, a)] -> [(String, Classification, Renderings)]
 observations = map (\(name, x) -> (name, classify x, renderings x))
+
+-- Derived Show must traverse numeric fields rather than only boolean records.
+data NumericRecord a = NumericRecord { numericField :: a } deriving Show
+
+numericSummary :: (RealFloat a, Show a) => [(String, a)] -> String
+numericSummary xs = show (observations xs, map (NumericRecord . snd) xs)
+
+doubleResult :: String
+doubleResult = numericSummary doubleCases
+
+floatResult :: String
+floatResult = numericSummary floatCases
+
+-- Only bounded, finite operands are rounded or converted to integral values.
+-- Arithmetic is observed independently of floating Show/classification.
+{-# NOINLINE arithmetic #-}
+arithmetic :: (RealFloat a) => a -> [Bool]
+arithmetic witness =
+  [ x + y == 5, x - y == -1, x * y == 6, x / y == 2 / 3
+  , x < y, not (x > y), x == x, x /= y
+  , fromIntegral (14592 :: Int) == (14592 `asTypeOf` witness)
+  , truncate (2.75 `asTypeOf` witness) == (2 :: Integer)
+  , floor (-2.75 `asTypeOf` witness) == (-3 :: Integer)
+  , ceiling (-2.75 `asTypeOf` witness) == (-2 :: Integer)
+  , round (2.5 `asTypeOf` witness) == (2 :: Integer)
+  , round (3.5 `asTypeOf` witness) == (4 :: Integer)
+  , let (m,e) = decodeFloat x in encodeFloat m e == x
+  ]
+  where
+    x = witness + 1
+    y = witness + 2
+
+arithmeticResult :: String
+arithmeticResult = show
+  ( arithmetic (1 :: Double), arithmetic (1 :: Float)
+  , (realToFrac (1.25 :: Float) :: Double) == 1.25
+  , (realToFrac (1.25 :: Double) :: Float) == 1.25
+  )
