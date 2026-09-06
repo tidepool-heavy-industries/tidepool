@@ -139,6 +139,10 @@ above that substrate; it does not maintain a second actor scheduler.
 Each contract has one canonical home. Other documents link to it instead of
 restating it unless an acceptance test needs the detail.
 
+Future exploration: [JSON optics in the resident workbench](json-lens.md)
+records schema-aware discovery, retained JSON data, composable investigations,
+fixture generation, and executable acceptance within typed orchestration.
+
 1. [Architecture](architecture.md) records runtime semantics, invariants,
    construction, and persistence; completion-era sections are superseded.
 2. [Live values and authority](live-values-and-authority.md) defines same-
