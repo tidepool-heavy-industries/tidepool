@@ -2474,6 +2474,45 @@ fn dispatch_primop(
         }
 
         // --- FFI intrinsics ---
+        PrimOpKind::FfiIsFloatNaN
+        | PrimOpKind::FfiIsFloatInfinite
+        | PrimOpKind::FfiIsFloatNegativeZero => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_float(&args[0], heap)?;
+            let result = match op {
+                PrimOpKind::FfiIsFloatNaN => a.is_nan(),
+                PrimOpKind::FfiIsFloatInfinite => a.is_infinite(),
+                PrimOpKind::FfiIsFloatNegativeZero => a.to_bits() == (-0.0f32).to_bits(),
+                _ => unreachable!(),
+            };
+            Ok(Value::Lit(Literal::LitInt(i64::from(result))))
+        }
+        PrimOpKind::FfiIsDoubleNaN
+        | PrimOpKind::FfiIsDoubleInfinite
+        | PrimOpKind::FfiIsDoubleNegativeZero => {
+            if args.len() != 1 {
+                return Err(EvalError::ArityMismatch {
+                    context: ArityContext::Arguments,
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let a = expect_double(&args[0], heap)?;
+            let result = match op {
+                PrimOpKind::FfiIsDoubleNaN => a.is_nan(),
+                PrimOpKind::FfiIsDoubleInfinite => a.is_infinite(),
+                PrimOpKind::FfiIsDoubleNegativeZero => a.to_bits() == (-0.0f64).to_bits(),
+                _ => unreachable!(),
+            };
+            Ok(Value::Lit(Literal::LitInt(i64::from(result))))
+        }
+
         PrimOpKind::FfiRintDouble => {
             // ghc-internal:rintDouble (C rint): round to nearest, ties to even.
             if args.len() != 1 {
@@ -2963,6 +3002,57 @@ mod tests {
         Alt, AltCon, CoreFrame, DataConId, JoinId, Literal, PrimOpKind, RecursiveTree, TreeBuilder,
         VarId,
     };
+
+    #[test]
+    fn classification_backends_reject_bad_arguments() {
+        for op in [
+            PrimOpKind::FfiIsFloatNaN,
+            PrimOpKind::FfiIsFloatInfinite,
+            PrimOpKind::FfiIsFloatNegativeZero,
+            PrimOpKind::FfiIsDoubleNaN,
+            PrimOpKind::FfiIsDoubleInfinite,
+            PrimOpKind::FfiIsDoubleNegativeZero,
+        ] {
+            for args in [vec![], vec![0, 0]] {
+                let expr = CoreExpr {
+                    nodes: vec![
+                        CoreFrame::Lit(Literal::LitInt(0)),
+                        CoreFrame::PrimOp { op, args },
+                    ],
+                };
+                let mut heap = crate::heap::VecHeap::new();
+                assert!(matches!(
+                    eval(&expr, &Env::new(), &mut heap),
+                    Err(EvalError::ArityMismatch { .. })
+                ));
+            }
+            for literal in [
+                Literal::LitInt(0),
+                if matches!(
+                    op,
+                    PrimOpKind::FfiIsFloatNaN
+                        | PrimOpKind::FfiIsFloatInfinite
+                        | PrimOpKind::FfiIsFloatNegativeZero
+                ) {
+                    Literal::LitDouble(0)
+                } else {
+                    Literal::LitFloat(0)
+                },
+            ] {
+                let expr = CoreExpr {
+                    nodes: vec![
+                        CoreFrame::Lit(literal),
+                        CoreFrame::PrimOp { op, args: vec![0] },
+                    ],
+                };
+                let mut heap = crate::heap::VecHeap::new();
+                assert!(matches!(
+                    eval(&expr, &Env::new(), &mut heap),
+                    Err(EvalError::TypeMismatch { .. })
+                ));
+            }
+        }
+    }
 
     #[test]
     fn test_letrec_lambda_eager_eval_gap_fix() {

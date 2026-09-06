@@ -394,9 +394,10 @@ fn prog_triple_slots_int(
     finish(b)
 }
 
-// ===========================================================================
+// ====================================================================}
+
 // Int arithmetic / bitwise / shift / compare.
-// ===========================================================================
+// ====================================================================}
 
 #[test]
 #[serial]
@@ -528,9 +529,10 @@ fn prop_int_unary() {
     reach.assert_floor(0.85);
 }
 
-// ===========================================================================
+// ====================================================================}
+
 // Word arithmetic / bitwise / shift / compare + Word multi-output.
-// ===========================================================================
+// ====================================================================}
 
 #[test]
 #[serial]
@@ -671,12 +673,13 @@ fn prop_word8() {
     reach.assert_floor(0.85);
 }
 
-// ===========================================================================
+// ====================================================================}
+
 // MULTI-OUTPUT SLOT-ORDERING (the high-yield class).
 //
 // Probe each tuple's slots TOGETHER inside a Con so a hi/lo (or val/carry)
 // swap surfaces with both slots visible in the failure dump.
-// ===========================================================================
+// ====================================================================}
 
 #[test]
 #[serial]
@@ -801,9 +804,10 @@ fn prop_sub_word_c_slots() {
     reach.assert_floor(0.85);
 }
 
-// ===========================================================================
+// ====================================================================}
+
 // Double / Float arithmetic + compare + conversions + math (libm).
-// ===========================================================================
+// ====================================================================}
 
 #[test]
 #[serial]
@@ -1118,9 +1122,10 @@ fn prop_decode_float_canonical_range() {
         .unwrap();
 }
 
-// ===========================================================================
+// ====================================================================}
+
 // Char comparison + Chr/Ord round-trips.
-// ===========================================================================
+// ====================================================================}
 
 #[test]
 #[serial]
@@ -1189,7 +1194,8 @@ fn prop_chr() {
     reach.assert_floor(0.85);
 }
 
-// ===========================================================================
+// ====================================================================}
+
 // FIXED-BUG REPROS (minimal, hand-built): the tree-walking interpreter's
 // `Int64Negate` / `Int64Shra` / `Word64Shl` handlers used RAW arithmetic where
 // their `IntNegate`/`IntShra`/`WordShl` siblings (and the JIT, via Cranelift
@@ -1280,13 +1286,15 @@ fn jitbug_int64_to_word64_result_tag() {
     assert_eq!(jit, "Ok(Lit(LitWord(9223372036854775808)))");
 }
 
-// ===========================================================================
+// ====================================================================}
+
 // Configs.
 //
 // The int/word lanes loop over MANY ops per case, so 350 cases is thousands
 // of compiled programs; the float lanes are lighter per case, so cases are
 // raised to 400.
-// ===========================================================================
+// ====================================================================}
+
 fn cfg_int() -> Config {
     let mut c = Config::with_cases(350);
     c.max_shrink_iters = 5000;
@@ -1431,4 +1439,59 @@ fn ieee_edge_bits_independent_oracle() {
         LitFloat,
         f32
     );
+}
+
+#[test]
+#[serial]
+fn classification_backends_ieee_edges() {
+    for magnitude in [
+        0, 1, 0x3f800000, 0x007fffff, 0x00800000, 0x7f7fffff, 0x7f800000, 0x7f800001, 0x7fc00001,
+    ] {
+        for sign in [0, u32::MAX ^ (u32::MAX >> 1)] {
+            let bits = magnitude | sign;
+            let x = f32::from_bits(bits);
+            for (op, expected) in [
+                (PrimOpKind::FfiIsFloatNaN, x.is_nan()),
+                (PrimOpKind::FfiIsFloatInfinite, x.is_infinite()),
+                (
+                    PrimOpKind::FfiIsFloatNegativeZero,
+                    x == 0.0 && x.is_sign_negative(),
+                ),
+            ] {
+                let (ev, jit) = run_one(op, vec![Literal::LitFloat(bits as u64)]);
+                let expected = format!("Ok(Lit(LitInt({})))", i64::from(expected));
+                assert_eq!(ev, expected, "{op:?} {bits:x}");
+                assert_eq!(jit, expected, "{op:?} {bits:x}");
+            }
+        }
+    }
+    for magnitude in [
+        0,
+        1,
+        0x3ff0000000000000,
+        0x000fffffffffffff,
+        0x0010000000000000,
+        0x7fefffffffffffff,
+        0x7ff0000000000000,
+        0x7ff0000000000001,
+        0x7ff8000000000001,
+    ] {
+        for sign in [0, u64::MAX ^ (u64::MAX >> 1)] {
+            let bits = magnitude | sign;
+            let x = f64::from_bits(bits);
+            for (op, expected) in [
+                (PrimOpKind::FfiIsDoubleNaN, x.is_nan()),
+                (PrimOpKind::FfiIsDoubleInfinite, x.is_infinite()),
+                (
+                    PrimOpKind::FfiIsDoubleNegativeZero,
+                    x == 0.0 && x.is_sign_negative(),
+                ),
+            ] {
+                let (ev, jit) = run_one(op, vec![Literal::LitDouble(bits as u64)]);
+                let expected = format!("Ok(Lit(LitInt({})))", i64::from(expected));
+                assert_eq!(ev, expected, "{op:?} {bits:x}");
+                assert_eq!(jit, expected, "{op:?} {bits:x}");
+            }
+        }
+    }
 }
