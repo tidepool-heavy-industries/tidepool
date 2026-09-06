@@ -1,23 +1,13 @@
-//! "Trivial constructor field" analysis: is the expression at a node index
-//! already in WHNF, or built entirely from trivial parts, so it is safe for a
-//! backend to evaluate it EAGERLY when constructing a `Con` instead of
-//! allocating a thunk?
+//! Shared conservative safety test for eager materialization in a lazy position.
 //!
-//! Both `tidepool-eval` (the oracle) and `tidepool-codegen` (the JIT) call
-//! this ONE predicate and must get the same answer for every node, or a Con
-//! field is forced by one backend and left lazy by the other — a real
-//! semantic divergence, not just duplicated code (see
-//! `tidepool-codegen/tests/raise_con_field_trivial_differential.rs`, which
-//! pins the case that actually diverged: `PrimOp Raise` with a trivial
-//! argument was classified trivial by an args-only rule, forcing the field —
-//! and raising — merely from constructing the `Con`).
+//! Eval constructor fields and JIT constructor fields, bindings, and lazy
+//! primitive operands use this owner. Primitive applications are computations,
+//! even with literal operands: they may fail, have effects, or demand a bottom
+//! through a variable. Keep them thunked rather than maintaining a second
+//! registry of supposedly total operations.
 //!
-//! Explicit work-stack, not recursion: a chain of nested trivial
-//! `Con`/`PrimOp` wrappers (e.g. deep tree spines built by proptests) walks
-//! this predicate before any evaluator/emitter touches the node, so it must
-//! be stack-safe on its own.
+//! The explicit work stack keeps deeply nested constructor spines stack-safe.
 
-use crate::types::PrimOpKind;
 use crate::{CoreExpr, CoreFrame};
 
 /// Returns true if the expression at `idx` is trivial (safe to evaluate
@@ -40,19 +30,7 @@ pub fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
                         stack.push(Work::Visit(f));
                     }
                 }
-                // A `raise#` must stay lazy even with a trivial arg: `let x =
-                // raise# e in if False then x else 0` must return 0, not raise
-                // eagerly (M2).
-                CoreFrame::PrimOp {
-                    op: PrimOpKind::Raise,
-                    ..
-                } => results.push(false),
-                CoreFrame::PrimOp { args, .. } => {
-                    stack.push(Work::Combine(args.len()));
-                    for &a in args.iter().rev() {
-                        stack.push(Work::Visit(a));
-                    }
-                }
+                CoreFrame::PrimOp { .. } => results.push(false),
                 _ => results.push(false), // App, Case, LetNonRec, LetRec, Join, Jump
             },
             Work::Combine(n) => {
@@ -69,7 +47,7 @@ pub fn is_trivial_field(idx: usize, expr: &CoreExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Literal, VarId};
+    use crate::types::{Literal, PrimOpKind, VarId};
     use crate::RecursiveTree;
 
     fn tree(nodes: Vec<CoreFrame<usize>>) -> CoreExpr {
@@ -110,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn non_raise_primop_is_trivial_iff_args_are() {
+    fn arithmetic_computation_is_not_trivial_even_with_literal_args() {
         let expr = tree(vec![
             CoreFrame::Lit(Literal::LitInt(1)),
             CoreFrame::Lit(Literal::LitInt(2)),
@@ -119,7 +97,7 @@ mod tests {
                 args: vec![0, 1],
             },
         ]);
-        assert!(is_trivial_field(2, &expr));
+        assert!(!is_trivial_field(2, &expr));
     }
 
     #[test]
