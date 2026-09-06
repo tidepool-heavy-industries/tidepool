@@ -1,58 +1,65 @@
-# Pre-bootstrap custody candidate
+# Pre-bootstrap custody candidate after review repair
 
-Production/test revision: `d5fedea7eec82b32744f3b27d4e90e4a316e4892`.
-Base: `f0a408ed` (service custody scaffold). This is an implementation candidate,
-not independent review or mounted-service acceptance.
+Tested production/test revision: `734c30fd2b98b74129cc140f9a86e6c27633551c`.
+Review base: `45360ce1dd2990b1a9b516786645b545b71942ad`.
+This is a repaired implementation candidate, not acceptance or mounted-service
+verification. The initial implementation/evidence remains in Git and the
+implementer's retained `target/custody-evidence/` directory.
 
-The actor kernel now acquires exact BindingTable custody before evaluating its
-entry. Installation is offloaded to a blocking task, not gated on provider
-readiness. The kernel and host share the opaque lease; shutdown records terminal
-kind, and the final owner settles that exact generation. Host launch validates
-existing custody instead of installing it too late. Duplicate/stale claims fail.
-Uncertain process launch or cleanup leaves the binding retained, not reusable.
-Existing handler denials report operation, expected/actual principal and readiness.
+## Contracts
 
-The scaffold's default unsupported implementation was removed: all implementers
-must supply custody installation. The lease interface additionally fences
-possible process existence and distinguishes release from retention by the actor.
-This corrects the scaffold's assumption that unconditional last-owner Drop is
-safe when host launch/cleanup can fail or panic with a surviving process.
+The actor kernel acquires exact BindingTable custody before evaluating its
+entry. Installation runs on a blocking task. Before any process submission,
+the kernel/host's last shared lease settles the exact binding generation.
+The host validates this binding rather than binding after bootstrap.
 
-## Direct checks
+The review correctly rejected treating `kill_pane` success as process reaping:
+absence or a pane outside the owned session also returns success. The repaired
+interface has **no operation to clear the process-existence fence**. Once launch
+may have external effects, the binding is conservatively retained, including
+after successful pane removal. Process and binding cleanup receipts report
+unconfirmed termination instead of completion. The earlier candidate's
+`CustodyRelease` and `custodyRetainedByActor` outcome were removed before
+integration; no new serialized cleanup case remains.
 
-- `NEXTEST_TEST_THREADS=1 just test-lib tidepool 'test(custody)'`: 5 executed,
-  5 passed. Real temporary Git and real hosted Haskell, including two siblings
-  with deterministically delayed installation, install failure before provider
-  publication, exact-incarnation exclusion, last-owner release, missing targets,
-  and retained binding after uncertain cleanup. No native model or TUI involved.
-- `NEXTEST_TEST_THREADS=1 just test-lib tidepool-handlers
-  'test(actor_worktree_authority_is_exact_to_resource_and_incarnation)'`: 1
-  executed, passed, including stale/sibling/resource denial after release.
+Cancellation required an actual lifecycle repair. Exact shutdown intent is
+recorded in the existing retained-exit owner without publishing a terminal.
+Bootstrap checks it before installation, after installation and at startup
+continuation boundaries, before provider publication. Normal lifecycle cleanup
+still publishes the terminal; a sender racing with this cleanup returns only
+that observed terminal, never invented success. Linked-child shutdown uses the
+same owning entry point. No new scheduler, registry or Haskell surface was added.
+
+## Direct verification at the tested revision
+
+- `NEXTEST_TEST_THREADS=1 just test-lib tidepool 'test(custody)'`: **9 executed,
+  9 passed**. Includes real hosted Haskell with deterministic installation gates,
+  two siblings, real `stopAgent` cancellation before/after binding, a real Haskell
+  startup exception after an observed successful bind, and exact release with
+  no provider publication. A private real tmux server proves missing/foreign
+  panes cannot clear custody; the foreign pane remains present. No native model
+  inference was used.
+- `NEXTEST_TEST_THREADS=1 just test-lib tidepool-actor
+  'test(shutdown_intent_does_not_publish_terminal_or_replace_first_request) |
+  test(shutdown_releases_mailbox_custody_deferred_behind_external_work) |
+  test(independent_roots_share_routing_but_not_supervision)'`: **3 executed,
+  3 passed**. Intent is not terminal publication; mailbox/supervision regressions
+  pass.
 - `nix develop --command cargo build -p tidepool --bin shoal`: built, not launched.
-- `cargo fmt --all -- --check` and `git diff --check`: passed.
+- `cargo fmt --all -- --check` and `git diff --check`: passed. No Rust warnings;
+  Nix reports ignored untrusted cache settings, without preventing the build.
 
-Changed host documentation/research test modules compiled in the tidepool lib
-target; those tests were not executed. No broad battery or fixtures update.
-Logs and binary SHA-256 identities are retained in `target/custody-evidence/`
-in the implementer's worktree. Earlier failed build/test logs remain there too.
+Logs and SHA-256 identities: `target/custody-evidence/review-repair/` in the
+implementer's worktree. Changed host documentation/research tests compiled but
+were not individually executed. No broad battery or fixture-corpus update.
 
-## Corrections and limits
+## Integration gate
 
-The enclosing unfold can commit before deferred child bootstrap fails. Tests
-therefore observe provider publication and child retirement, not a fabricated
-synchronous failure of the parent tool call. This is distinct from the historical
-incident: the regression proves the class, not its precise historical cause.
-
-Migration decision for internal cleanup receipts: existing serialized outcomes
-retain their representations; add `custodyRetainedByActor` for a successful
-process reap whose final binding release is not yet observed. It is explicitly
-degraded in rendered cleanup reporting, never completion. Root/run-map consumers
-must incorporate this additive outcome before deployment of the new host.
-
-Real tmux failure, timeout, cancellation and panic paths were source-reviewed,
-not executed. The old tmux boundary can return an ambiguous spawn failure before
-a pane identity is available; custody is conservatively retained in that case.
-This candidate does not add process discovery/recovery or weaken that fence.
-The service owner must verify/reconcile this against its replacing process
-supervisor. Mounted native service/observer acceptance remains externally gated.
-Neither the running host nor the native dependency pin was changed.
+The current tmux boundary cannot establish exact process termination. Consequently
+**even ordinary successful tmux cleanup retains submitted actors' bindings**.
+Worktree reuse after process submission is blocked until the service owner wires
+an authoritative exact-process supervision/reap proof. Do not deploy this as a
+claim of complete process cleanup or bypass its fence using pane absence.
+Mounted native service/observer acceptance remains externally gated. The running
+host and native dependency pin were not changed. The regression demonstrates a
+failure class, not the precise cause of the historical authorization incident.
