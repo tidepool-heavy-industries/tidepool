@@ -106,6 +106,24 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     )
     .expect("coding actors can scaffold, fork, observe, and integrate their children");
 
+    compile_haskell(
+        include_str!("shoal_action_surface/research_can_unfold.hs"),
+        "result",
+        &include_refs,
+    )
+    .expect("research coordinators can fork researchers and explicit leaves");
+
+    let error = compile_haskell(
+        include_str!("shoal_action_surface/research_leaf_cannot_unfold.hs"),
+        "result",
+        &include_refs,
+    )
+    .expect_err("research leaves must not acquire Forks");
+    assert_eq!(
+        tidepool_runtime::classify_compile(&error).class,
+        tidepool_runtime::FailureClass::UserHaskell
+    );
+
     let error = compile_haskell(
         include_str!("shoal_action_surface/narrow_research_cannot_control.hs"),
         "result",

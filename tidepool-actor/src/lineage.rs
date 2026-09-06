@@ -185,7 +185,7 @@ pub enum ForkGroupError {
     #[error("fork group {0} has unfinished descendant admission")]
     CleanupAdmissionPending(u64),
     #[error(
-        "fork group would exceed the lineage's active descendant ceiling ({requested} requested, {active} already active or reserved, maximum {maximum})"
+        "fork group would exceed a coordinator's active descendant ceiling ({requested} requested, {active} already active or reserved, maximum {maximum})"
     )]
     DescendantBudgetExceeded {
         requested: usize,
@@ -244,6 +244,7 @@ struct ForkGroupsState {
     groups: HashMap<ForkGroupId, ForkGroup>,
     cleaned: HashSet<ForkGroupId>,
     parents: HashMap<ActorRef, ActorRef>,
+    descendant_limits: HashMap<ActorRef, usize>,
     active: HashSet<ActorRef>,
     cleaning: HashSet<ActorRef>,
 }
@@ -328,6 +329,7 @@ impl ForkGroupRegistry {
                 groups: HashMap::new(),
                 cleaned: HashSet::new(),
                 parents: HashMap::new(),
+                descendant_limits: HashMap::new(),
                 active: HashSet::new(),
                 cleaning: HashSet::new(),
             })),
@@ -345,14 +347,26 @@ impl ForkGroupRegistry {
         if state.cleaning.contains(&owner) {
             return Err(ForkGroupError::Cleaning(owner));
         }
-        let root = lineage_root(&state.parents, owner);
-        let active = reserved_descendants(&state, root);
-        if active.saturating_add(children.len()) > maximum_active_descendants {
-            return Err(ForkGroupError::DescendantBudgetExceeded {
-                requested: children.len(),
-                active,
-                maximum: maximum_active_descendants,
-            });
+        state
+            .descendant_limits
+            .entry(owner)
+            .and_modify(|limit| *limit = (*limit).min(maximum_active_descendants))
+            .or_insert(maximum_active_descendants);
+        // Each coordinator owns its subtree ceiling. Ancestor ceilings still count
+        // the whole enclosing subtree, including siblings and staged reservations.
+        let mut ancestor = Some(owner);
+        while let Some(actor) = ancestor {
+            if let Some(&maximum) = state.descendant_limits.get(&actor) {
+                let active = reserved_descendants(&state, actor);
+                if active.saturating_add(children.len()) > maximum {
+                    return Err(ForkGroupError::DescendantBudgetExceeded {
+                        requested: children.len(),
+                        active,
+                        maximum,
+                    });
+                }
+            }
+            ancestor = state.parents.get(&actor).copied();
         }
         let reservations = self.lineage.reserve_group_children(&group, &children)?;
         let id = ForkGroupId(state.next);
@@ -767,6 +781,7 @@ impl ForkGroupRegistry {
         };
         for child in group.children {
             state.parents.remove(&child);
+            state.descendant_limits.remove(&child);
         }
         state.cleaned.insert(id);
         Ok(ForkGroupCleanupOutcome::Cleaned)
@@ -874,13 +889,6 @@ fn descendant_depth(
         actor = *parents.get(&actor)?;
         depth = depth.saturating_add(1);
     }
-}
-
-fn lineage_root(parents: &HashMap<ActorRef, ActorRef>, mut actor: ActorRef) -> ActorRef {
-    while let Some(parent) = parents.get(&actor).copied() {
-        actor = parent;
-    }
-    actor
 }
 
 fn is_descendant_of(
@@ -1189,6 +1197,57 @@ mod tests {
                 ActorPath::parse("compiler/inner").unwrap(),
                 vec![segment("leaf")],
                 2,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn narrower_research_limit_counts_its_subtree_not_unrelated_actors() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let root = ActorRef::first(ActorId(1));
+        let research = ActorRef::first(ActorId(2));
+        let sibling = ActorRef::first(ActorId(3));
+        let (outer, reservations) = groups
+            .begin(
+                root,
+                ActorPath::parse("research/outer").unwrap(),
+                vec![segment("research"), segment("sibling")],
+                3,
+            )
+            .unwrap();
+        for (reservation, child) in reservations.iter().zip([research, sibling]) {
+            groups.claim(outer, root, &reservation.allocated).unwrap();
+            groups.attach_child(outer, root, child).unwrap();
+        }
+        let (inner, _) = groups
+            .begin(
+                research,
+                ActorPath::parse("research/inner").unwrap(),
+                vec![segment("leaf")],
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            groups.begin(
+                research,
+                ActorPath::parse("research/extra").unwrap(),
+                vec![segment("leaf")],
+                1
+            ),
+            Err(ForkGroupError::DescendantBudgetExceeded {
+                active: 1,
+                maximum: 1,
+                ..
+            })
+        ));
+        // Rejected admission did not reserve another slot; abort releases the first.
+        groups.abort(inner, research).unwrap();
+        assert!(groups
+            .begin(
+                research,
+                ActorPath::parse("research/retry").unwrap(),
+                vec![segment("leaf")],
+                1
             )
             .is_ok());
     }

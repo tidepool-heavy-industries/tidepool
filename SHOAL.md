@@ -598,3 +598,26 @@ Add a current technique after it succeeds and its boundary is understood. Add
 a sharp edge when it is repeatable and materially affects agent efficacy;
 remove it when the owning fix lands. Prefer deleting obsolete advice over
 preserving historical variants. Git is the history of this guide.
+
+## Research delegation policy
+
+`researching` provides inspection-only recursive collaboration; `researchingLeaf`
+chooses an explicit leaf. Neither grants native editing, builds, or tests.
+Research children cannot acquire coding or integration authority. Configure the
+research subtree ceiling in the target project's `.shoal/config.toml`:
+
+```toml
+[research]
+maximum_depth = 1
+maximum_active_children = 32
+```
+
+These are the defaults when the section is absent. Depth 1 allows a researcher
+to fork research leaves; depth 0 disables research delegation. Larger depths
+allow additional research generations. Width bounds active or reserved descendants
+in the research subtree, across all its groups and generations. Ancestor ceilings
+still bound the enclosing subtrees, including siblings. Both limits are also
+capped by the parent's remaining budget; descendants never reset spent depth.
+Zero width prevents child admission.
+The host reads this policy at startup; changes do not alter running actors.
+Model and effort settings remain under `[defaults]`.

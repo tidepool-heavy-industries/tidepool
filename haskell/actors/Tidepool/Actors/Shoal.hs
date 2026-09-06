@@ -14,6 +14,7 @@ module Tidepool.Actors.Shoal
   , IntegrationActorEffects
   , CoreEffects
   , ResearchEffects
+  , ResearchLeafEffects
   , ResearchCoordinatorEffects
   , CodingEffects
   , ScaffoldEffects
@@ -72,6 +73,7 @@ module Tidepool.Actors.Shoal
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , researching
+  , researchingLeaf
   , coding
   , scaffolding
   , integrating

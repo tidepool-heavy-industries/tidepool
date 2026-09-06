@@ -48,3 +48,15 @@ explicitly when the branches should inherit existing uncommitted changes.
 descendant budget. Use `boundHead` when their children should start from the
 child-owned scaffold. `scaffolding` selects a scaffold emphasis with the same
 capabilities. Use a coding reviewer when review includes running checks.
+
+`researching` admits inspection-only researchers with bounded delegation;
+`researchingLeaf` omits `Forks` and actor control. Research cannot escalate into
+coding, integration, or build/test execution. The host reads `[research]` in
+`.shoal/config.toml`: `maximum_depth` defaults to 1 and
+`maximum_active_children` to 32. Depth counts generations below the first
+researcher; every child also consumes the enclosing parent's depth and obeys
+its width limit. Width counts active or reserved descendants across the subtree;
+ancestor ceilings also apply. Set depth to 0 for research leaves throughout
+a session.
+Configuration is loaded at host startup; it does not change existing actors.
+Runtime policy in activation/status is authoritative, including exhausted budgets.

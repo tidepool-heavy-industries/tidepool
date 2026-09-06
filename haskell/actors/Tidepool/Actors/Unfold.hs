@@ -44,6 +44,7 @@ module Tidepool.Actors.Unfold
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , researching
+  , researchingLeaf
   , coding
   , scaffolding
   , integrating
@@ -106,6 +107,7 @@ import Tidepool.Actors.Role
   , IntegrationEffects
   , KnownEffects
   , ResearchEffects
+  , ResearchLeafEffects
   , ScaffoldEffects
   , Subset
   , effectKeys
@@ -282,6 +284,15 @@ researching
   -> input
   -> Branch ResearchEffects input result
 researching label seed input = Branch label ResearchFork seed knownEffects defaultBranchOptions input
+
+-- | Inspection-only leaf, regardless of the host research recursion allowance.
+researchingLeaf
+  :: forall result input
+   . BranchLabel
+  -> WorktreeSeed
+  -> input
+  -> Branch ResearchLeafEffects input result
+researchingLeaf label seed input = Branch label ResearchFork seed knownEffects defaultBranchOptions input
 
 coding
   :: forall result input

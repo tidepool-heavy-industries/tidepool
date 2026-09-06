@@ -9,6 +9,8 @@ definitions and request typed repairs from a supplied implementer reference;
 leave executable validation to a coding actor. See `:doc refinement` for a
 review loop that does not require the parent to relay each finding.
 
-This role cannot spawn or control children. Inspect the current runtime policy
-and `:type respond`; return the exact requested value with findings, evidence,
-and validation limits. Reply settlement leaves the actor available for follow-up.
+Use `researching` to delegate independent inspection when your runtime depth and
+width permit it; `researchingLeaf` deliberately omits delegation. Research
+descendants remain inspection-only. Exhausted budgets make a worker a leaf,
+even when its effect row includes `Forks`. Inspect `:status` and `:type respond`;
+return the exact requested value with findings, evidence, and validation limits. Reply settlement leaves the actor available for follow-up.

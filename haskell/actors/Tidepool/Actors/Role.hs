@@ -31,6 +31,7 @@ module Tidepool.Actors.Role
   , Subset
   , CoreEffects
   , ResearchEffects
+  , ResearchLeafEffects
   , ResearchCoordinatorEffects
   , CodingEffects
   , ScaffoldEffects
@@ -102,7 +103,8 @@ instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness Eff
 instance KnownEffect Forks where effectWitness = EffectWitness EffectForks
 
 type CoreEffects = '[Replies, Watches, ActorContext]
-type ResearchEffects = '[Replies, Watches, ActorContext, BoundWorktree]
+type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree]
+type ResearchEffects = ResearchCoordinatorEffects
 type ResearchCoordinatorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree

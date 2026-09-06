@@ -32,6 +32,10 @@ const SHOAL_CONFIG: &str = ".shoal/config.toml";
 const DEFAULT_CONFIG: &str = r#"[defaults]
 model = "gpt-5.6-sol"
 effort = "low"
+
+[research]
+maximum_depth = 1
+maximum_active_children = 32
 "#;
 const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
 const ENV_NIX_STORE_BIN: &str = "TIDEPOOL_SHOAL_NIX_STORE_BIN";
@@ -116,6 +120,8 @@ impl std::fmt::Display for ShoalEffort {
 #[serde(deny_unknown_fields)]
 struct ShoalConfig {
     defaults: ShoalAgentDefaults,
+    #[serde(default)]
+    research: tidepool_actor::ResearchPolicy,
 }
 
 /// Initialize the smallest repository that can host a Shoal ensemble.
@@ -172,9 +178,7 @@ pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-fn ensure_project_config(
-    workspace: &Path,
-) -> Result<ShoalAgentDefaults, Box<dyn std::error::Error>> {
+fn ensure_project_config(workspace: &Path) -> Result<ShoalConfig, Box<dyn std::error::Error>> {
     let path = workspace.join(SHOAL_CONFIG);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -192,16 +196,17 @@ fn ensure_project_config(
             )))
         }
     };
-    let config: ShoalConfig = toml::from_str(&text).map_err(|error| {
+    let mut config: ShoalConfig = toml::from_str(&text).map_err(|error| {
         runtime_error(format!(
             "invalid Shoal configuration {}: {error}",
             path.display()
         ))
     })?;
-    validate_agent_defaults(
+    config.defaults = validate_agent_defaults(
         config.defaults,
         &format!("Shoal configuration {}", path.display()),
-    )
+    )?;
+    Ok(config)
 }
 
 fn validate_agent_defaults(
@@ -299,7 +304,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let workspace = std::fs::canonicalize(workspace)?;
     install_local_exclude(&workspace)?;
     let agent = resolve_agent_defaults(
-        ensure_project_config(&workspace)?,
+        ensure_project_config(&workspace)?.defaults,
         options.model,
         options.effort,
     )?;
@@ -729,6 +734,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             tmux_session: options.session.clone(),
             model: options.agent.model.clone(),
             effort: options.agent.effort.into(),
+            research_policy: ensure_project_config(&options.workspace)?.research,
             root_launch_mode,
             pane_environment: pane_environment(),
         },
@@ -1183,7 +1189,7 @@ mod tests {
         assert!(workspace.join(".shoal/logs").is_dir());
         assert!(workspace.join(".shoal/sessions").is_dir());
         assert_eq!(
-            ensure_project_config(&workspace).unwrap(),
+            ensure_project_config(&workspace).unwrap().defaults,
             ShoalAgentDefaults {
                 model: "gpt-5.6-sol".into(),
                 effort: ShoalEffort::Low,
@@ -1240,7 +1246,7 @@ mod tests {
     #[test]
     fn project_agent_defaults_are_explicit_and_cli_overrides_are_per_field() {
         let workspace = tempfile::tempdir().unwrap();
-        let configured = ensure_project_config(workspace.path()).unwrap();
+        let configured = ensure_project_config(workspace.path()).unwrap().defaults;
         assert!(workspace.path().join(SHOAL_CONFIG).is_file());
 
         assert_eq!(
@@ -1259,6 +1265,42 @@ mod tests {
                 effort: ShoalEffort::High,
             }
         );
+    }
+
+    #[test]
+    fn research_policy_is_optional_configured_and_validated_at_load() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(SHOAL_CONFIG);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let base = "[defaults]\nmodel = \"test-model\"\neffort = \"low\"\n";
+        std::fs::write(&path, base).unwrap();
+        assert_eq!(
+            ensure_project_config(workspace.path()).unwrap().research,
+            tidepool_actor::ResearchPolicy::default()
+        );
+        std::fs::write(
+            &path,
+            format!("{base}\n[research]\nmaximum_depth = 3\nmaximum_active_children = 2\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_project_config(workspace.path()).unwrap().research,
+            tidepool_actor::ResearchPolicy {
+                maximum_depth: 3,
+                maximum_active_children: 2
+            }
+        );
+        for invalid in [
+            "maximum_depth = -1",
+            "maximum_active_children = 65536",
+            "depth = 3",
+        ] {
+            std::fs::write(&path, format!("{base}\n[research]\n{invalid}\n")).unwrap();
+            assert!(ensure_project_config(workspace.path())
+                .unwrap_err()
+                .to_string()
+                .contains("invalid Shoal configuration"));
+        }
     }
 
     #[test]

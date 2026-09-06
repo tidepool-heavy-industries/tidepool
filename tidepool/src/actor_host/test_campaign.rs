@@ -37,6 +37,12 @@ impl TestCampaign {
     }
 
     pub async fn start() -> Self {
+        Self::start_with_research_policy(tidepool_actor::ResearchPolicy::default()).await
+    }
+
+    pub async fn start_with_research_policy(
+        research_policy: tidepool_actor::ResearchPolicy,
+    ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
         repository
@@ -57,6 +63,7 @@ impl TestCampaign {
             tmux_session: "unused-in-resident-test".into(),
             model: "test-model".into(),
             effort: ReasoningEffort::Low,
+            research_policy,
             root_launch_mode: InteractiveLaunchMode::Fresh,
             pane_environment: BTreeMap::new(),
         };

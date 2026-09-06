@@ -9,6 +9,8 @@ mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
 #[cfg(test)]
+mod research_policy_tests;
+#[cfg(test)]
 mod test_campaign;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -151,6 +153,7 @@ pub struct ActorHostConfig {
     pub tmux_session: String,
     pub model: String,
     pub effort: ReasoningEffort,
+    pub research_policy: tidepool_actor::ResearchPolicy,
     pub root_launch_mode: InteractiveLaunchMode,
     pub pane_environment: std::collections::BTreeMap<String, String>,
 }
@@ -1000,7 +1003,9 @@ fn compile_root(
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
     // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_profile(ActorEffectProfile::ReadWrite)
-    .with_effective_role(tidepool_actor::EffectiveRole::root());
+    .with_effective_role(
+        tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy),
+    );
     Ok((
         ActorWorkbenchSource::new(preamble, include)
             .with_default_browse_module(WORKBENCH_SURFACE_MODULE)

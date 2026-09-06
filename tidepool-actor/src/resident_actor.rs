@@ -1023,20 +1023,11 @@ where
                 descriptor.effective_role().role()
             )));
         }
-        if descriptor
+        let role = self
+            .descriptor
             .effective_role()
-            .effect_keys()
-            .contains(&crate::ActorEffectKey::Forks)
-        {
-            let parent_budget = self.descriptor.effective_role().descendants();
-            let role = descriptor.effective_role().clone().with_descendant_budget(
-                crate::DescendantBudget {
-                    maximum_depth: parent_budget.maximum_depth.saturating_sub(1),
-                    maximum_active_children: parent_budget.maximum_active_children,
-                },
-            );
-            descriptor = descriptor.with_effective_role(role);
-        }
+            .attenuate_child(descriptor.effective_role().clone());
+        descriptor = descriptor.with_effective_role(role);
         if descriptor.context_parent().is_some()
             && !self
                 .descriptor

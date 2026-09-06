@@ -31,6 +31,23 @@ pub struct DescendantBudget {
     pub maximum_active_children: u16,
 }
 
+/// Host-configured ceiling on research subtrees, additionally bounded by the parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchPolicy {
+    pub maximum_depth: u16,
+    pub maximum_active_children: u16,
+}
+
+impl Default for ResearchPolicy {
+    fn default() -> Self {
+        Self {
+            maximum_depth: 1,
+            maximum_active_children: 32,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActorEffectKey {
     Replies,
@@ -70,6 +87,7 @@ pub struct EffectiveRole {
     native_tools: NativeToolClass,
     workspace: WorkspaceAccess,
     descendants: DescendantBudget,
+    research_policy: ResearchPolicy,
     prompt_profile: &'static str,
     effect_keys: Vec<ActorEffectKey>,
 }
@@ -112,11 +130,14 @@ impl EffectiveRole {
                 maximum_depth: 0,
                 maximum_active_children: 0,
             },
-            "research-v1",
+            "research-v2",
             vec![
                 ActorEffectKey::Replies,
                 ActorEffectKey::Watches,
+                ActorEffectKey::Forks,
                 ActorEffectKey::ActorContext,
+                ActorEffectKey::AgentInspection,
+                ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
             ],
         )
@@ -193,9 +214,44 @@ impl EffectiveRole {
             native_tools,
             workspace,
             descendants,
+            research_policy: ResearchPolicy::default(),
             prompt_profile,
             effect_keys,
         }
+    }
+
+    #[must_use]
+    pub fn with_research_policy(mut self, policy: ResearchPolicy) -> Self {
+        self.research_policy = policy;
+        self
+    }
+
+    /// Inherit the host policy and spend one generation before applying the role cap.
+    /// A descendant cannot refresh an exhausted research allowance by forking again.
+    #[must_use]
+    pub fn attenuate_child(&self, mut child: Self) -> Self {
+        child.research_policy = self.research_policy;
+        child.descendants = DescendantBudget {
+            maximum_depth: 0,
+            maximum_active_children: 0,
+        };
+        if child.effect_keys.contains(&ActorEffectKey::Forks) {
+            child.descendants = DescendantBudget {
+                maximum_depth: self.descendants.maximum_depth.saturating_sub(1),
+                maximum_active_children: self.descendants.maximum_active_children,
+            };
+            if child.role == ActorRole::Research {
+                child.descendants.maximum_depth = child
+                    .descendants
+                    .maximum_depth
+                    .min(self.research_policy.maximum_depth);
+                child.descendants.maximum_active_children = child
+                    .descendants
+                    .maximum_active_children
+                    .min(self.research_policy.maximum_active_children);
+            }
+        }
+        child
     }
 
     #[must_use]
@@ -320,7 +376,7 @@ mod tests {
     fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
             EffectiveRole::research().haskell_effects_type(),
-            "'[Replies, Watches, ActorContext, BoundWorktree]"
+            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree]"
         );
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");
@@ -352,6 +408,90 @@ mod tests {
         assert_eq!(
             coding.effect_keys(),
             EffectiveRole::scaffolding(coding.descendants()).effect_keys()
+        );
+    }
+
+    #[test]
+    fn research_policy_caps_subtrees_and_never_refreshes_spent_depth() {
+        let root = EffectiveRole::root().with_research_policy(ResearchPolicy {
+            maximum_depth: 2,
+            maximum_active_children: 3,
+        });
+        let coding = root.attenuate_child(EffectiveRole::coding());
+        let research = coding.attenuate_child(EffectiveRole::research());
+        assert_eq!(
+            research.descendants(),
+            DescendantBudget {
+                maximum_depth: 2,
+                maximum_active_children: 3
+            }
+        );
+        assert_eq!(research.native_tools(), NativeToolClass::InspectionOnly);
+        assert_eq!(research.workspace(), WorkspaceAccess::InspectOnly);
+        let child = research.attenuate_child(EffectiveRole::research());
+        let leaf = child.attenuate_child(EffectiveRole::research());
+        assert!(research.permits_child(&child));
+        assert!(child.permits_child(&leaf));
+        assert_eq!(leaf.descendants().maximum_depth, 0);
+        assert!(!leaf.permits_child(&leaf.attenuate_child(EffectiveRole::research())));
+        assert!(!research.permits_child(&research.attenuate_child(EffectiveRole::coding())));
+        assert!(!research.permits_child(&research.attenuate_child(EffectiveRole::integration())));
+        assert!(!research
+            .clone()
+            .with_effect_keys(vec![ActorEffectKey::WorktreeIntegration])
+            .respects_role_ceiling());
+    }
+
+    #[test]
+    fn research_defaults_allow_one_generation_and_parent_limits_always_win() {
+        let root = EffectiveRole::root();
+        let research = root.attenuate_child(EffectiveRole::research());
+        assert_eq!(research.descendants().maximum_depth, 1);
+        assert_eq!(
+            research
+                .attenuate_child(EffectiveRole::research())
+                .descendants()
+                .maximum_depth,
+            0
+        );
+        let limited = root.clone().with_descendant_budget(DescendantBudget {
+            maximum_depth: 1,
+            maximum_active_children: 2,
+        });
+        assert_eq!(
+            limited
+                .attenuate_child(EffectiveRole::research())
+                .descendants(),
+            DescendantBudget {
+                maximum_depth: 0,
+                maximum_active_children: 2
+            }
+        );
+        let disabled = root.with_research_policy(ResearchPolicy {
+            maximum_depth: 0,
+            maximum_active_children: 0,
+        });
+        assert_eq!(
+            disabled
+                .attenuate_child(EffectiveRole::research())
+                .descendants(),
+            DescendantBudget {
+                maximum_depth: 0,
+                maximum_active_children: 0
+            }
+        );
+        let explicit_leaf = EffectiveRole::research().with_effect_keys(vec![
+            ActorEffectKey::Replies,
+            ActorEffectKey::Watches,
+            ActorEffectKey::ActorContext,
+            ActorEffectKey::BoundWorktree,
+        ]);
+        assert_eq!(
+            research.attenuate_child(explicit_leaf).descendants(),
+            DescendantBudget {
+                maximum_depth: 0,
+                maximum_active_children: 0
+            }
         );
     }
 

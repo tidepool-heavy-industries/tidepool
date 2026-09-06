@@ -101,7 +101,8 @@ pub use resident_workbench::{
     ResidentActorWorkbenchError,
 };
 pub use role::{
-    ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, WorkspaceAccess,
+    ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, ResearchPolicy,
+    WorkspaceAccess,
 };
 pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
