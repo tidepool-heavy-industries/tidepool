@@ -604,20 +604,41 @@ preserving historical variants. Git is the history of this guide.
 `researching` provides inspection-only recursive collaboration; `researchingLeaf`
 chooses an explicit leaf. Neither grants native editing, builds, or tests.
 Research children cannot acquire coding or integration authority. Configure the
-research subtree ceiling in the target project's `.shoal/config.toml`:
+research subtree policy in the target project's `.shoal/config.toml`:
 
 ```toml
 [research]
-maximum_depth = 1
+default_depth = 1
+maximum_depth = 8
 maximum_active_children = 32
 ```
 
-These are the defaults when the section is absent. Depth 1 allows a researcher
-to fork research leaves; depth 0 disables research delegation. Larger depths
-allow additional research generations. Width bounds active or reserved descendants
-in the research subtree, across all its groups and generations. Ancestor ceilings
-still bound the enclosing subtrees, including siblings. Both limits are also
-capped by the parent's remaining budget; descendants never reset spent depth.
-Zero width prevents child admission.
-The host reads this policy at startup; changes do not alter running actors.
-Model and effort settings remain under `[defaults]`.
+These defaults apply when the section is absent. The first researcher receives
+one generation by default. A launcher can explicitly request a deeper subtree:
+
+```haskell
+let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel boundHead assignment)
+previewBranch proposal
+```
+
+`previewBranch` reports role, workspace access, effect row, requested and effective
+budgets, and whether delegation is omitted or exhausted. It neither allocates a
+worktree nor launches a provider. It previews authority, not available slots or
+source validity; admission still checks current capacity, seeds, and provenance.
+The same runtime policy calculation governs preview and actual admission.
+
+Requested depth and width are capped by configuration and remaining parent
+allowance. Research descendants inherit the remaining depth rather than resetting
+to the default. Depth counts generations below the admitted actor. Width counts
+active or reserved descendants throughout its subtree; every ancestor ceiling
+still applies, including the root's overall limit. Invalid negative or oversized
+integer requests are rejected. `ForkBudget 0 n` requests no further generation;
+`researchingLeaf` additionally omits delegation/control capabilities entirely.
+An actor assigned leaf-sized work can still have fork authority; a zero effective
+budget means it cannot fork, regardless of its assignment or effect row.
+
+Set `maximum_depth = 0` to disable research delegation throughout a session, or
+lower `default_depth` to make deeper delegation opt-in. Defaults are themselves
+clamped to the ceiling. Zero width prevents child admission. Policy is loaded at
+host startup; changes do not alter existing actors. Model and effort remain under
+`[defaults]`.

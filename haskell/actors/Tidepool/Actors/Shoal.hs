@@ -72,6 +72,11 @@ module Tidepool.Actors.Shoal
   , narrowed
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
+  , ForkBudget (..)
+  , BranchPreview (..)
+  , DelegationAuthority (..)
+  , withForkBudget
+  , previewBranch
   , researching
   , researchingLeaf
   , coding

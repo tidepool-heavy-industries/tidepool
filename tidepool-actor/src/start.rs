@@ -33,6 +33,7 @@ pub(crate) struct ActorStartRequest {
     pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
     pub effect_keys: Option<Vec<ActorEffectKeyWire>>,
     pub fork_effort: Option<ForkEffort>,
+    pub fork_budget: Option<(i64, i64)>,
     pub session_id: tidepool_repr::SessionId,
     pub parent_actor: crate::ActorRef,
 }
@@ -177,6 +178,7 @@ impl ResidentActorStart {
                 fork_workspace: None,
                 effect_keys: None,
                 fork_effort: None,
+                fork_budget: None,
                 session_id,
                 parent_actor,
             },
@@ -201,6 +203,7 @@ impl ResidentActorStart {
             fork_workspace,
             effect_keys,
             fork_effort,
+            fork_budget,
             session_id,
             parent_actor,
         } = request;
@@ -221,25 +224,7 @@ impl ResidentActorStart {
         } else {
             session.mint_isolated_scope()
         };
-        let effective_role = match role {
-            ActorLaunchRoleWire::ActorRootRole => crate::EffectiveRole::root(),
-            ActorLaunchRoleWire::ActorResearchRole => crate::EffectiveRole::research(),
-            ActorLaunchRoleWire::ActorCodingRole => crate::EffectiveRole::coding(),
-            ActorLaunchRoleWire::ActorScaffoldingRole => {
-                crate::EffectiveRole::scaffolding(crate::DescendantBudget {
-                    maximum_depth: 0,
-                    maximum_active_children: 0,
-                })
-            }
-            ActorLaunchRoleWire::ActorIntegrationRole => crate::EffectiveRole::integration(),
-            ActorLaunchRoleWire::ActorInheritedRole => {
-                if launch_worktrees.is_empty() {
-                    crate::EffectiveRole::research()
-                } else {
-                    crate::EffectiveRole::coding()
-                }
-            }
-        };
+        let effective_role = role.effective_role(!launch_worktrees.is_empty());
         let effective_role = match effect_keys {
             Some(keys) => {
                 effective_role.with_effect_keys(keys.into_iter().map(Into::into).collect())
@@ -257,6 +242,7 @@ impl ResidentActorStart {
         .with_profile(profile)
         .with_effective_role(effective_role)
         .with_fork_effort(fork_effort)
+        .with_fork_budget(fork_budget)
         .with_supervisor_parent(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
         if context_fork {
@@ -365,6 +351,30 @@ fn facade_heads(provenance: &tidepool_runtime::session::ProgramProvenance) -> BT
         }
     }
     heads
+}
+
+impl ActorLaunchRoleWire {
+    pub(crate) fn effective_role(self, has_worktree: bool) -> crate::EffectiveRole {
+        match self {
+            ActorLaunchRoleWire::ActorRootRole => crate::EffectiveRole::root(),
+            ActorLaunchRoleWire::ActorResearchRole => crate::EffectiveRole::research(),
+            ActorLaunchRoleWire::ActorCodingRole => crate::EffectiveRole::coding(),
+            ActorLaunchRoleWire::ActorScaffoldingRole => {
+                crate::EffectiveRole::scaffolding(crate::DescendantBudget {
+                    maximum_depth: 0,
+                    maximum_active_children: 0,
+                })
+            }
+            ActorLaunchRoleWire::ActorIntegrationRole => crate::EffectiveRole::integration(),
+            ActorLaunchRoleWire::ActorInheritedRole => {
+                if !has_worktree {
+                    crate::EffectiveRole::research()
+                } else {
+                    crate::EffectiveRole::coding()
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

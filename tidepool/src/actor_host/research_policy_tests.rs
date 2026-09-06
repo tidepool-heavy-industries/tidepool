@@ -59,6 +59,7 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
     let mut campaign = TestCampaign::start_with_research_policy(tidepool_actor::ResearchPolicy {
         maximum_depth: 1,
         maximum_active_children: 1,
+        default_depth: 1,
     })
     .await;
     let root = campaign.root_installation.policy.clone();
@@ -126,6 +127,70 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
         .shutdown(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "research policy test complete".into(),
+        })
+        .await
+        .unwrap();
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn preview_and_explicit_research_budget_match_without_spawning_during_preview() {
+    let mut campaign = TestCampaign::start_with_research_policy(tidepool_actor::ResearchPolicy {
+        default_depth: 1,
+        maximum_depth: 3,
+        maximum_active_children: 4,
+    })
+    .await;
+    let root = campaign.root_installation.policy.clone();
+    let preview =
+        dispatch_haskell_script(root.as_ref(), include_str!("research_policy_preview.hs")).await;
+    assert_eq!(preview["status"], "committed", "{preview:?}");
+    assert_eq!(
+        preview["items"].as_array().unwrap().last().unwrap()["output"],
+        "True",
+        "{preview:?}"
+    );
+    while let Ok(event) = campaign.deployments.try_recv() {
+        assert!(
+            !matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
+            "preview spawned a child"
+        );
+    }
+    let launch = tokio::spawn(async move {
+        dispatch_haskell_script(
+            root.as_ref(),
+            "worker <- unfold (batch campaign group) (child proposal)",
+        )
+        .await
+    });
+    let (coordinator, _coordinator_binding) = research_child(&mut campaign).await;
+    assert_eq!(launch.await.unwrap()["status"], "committed");
+    assert_eq!(
+        coordinator.effective_role.descendants(),
+        tidepool_actor::DescendantBudget {
+            maximum_depth: 2,
+            maximum_active_children: 2
+        }
+    );
+    let policy = coordinator.policy.clone();
+    let launch = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), include_str!("research_policy_nested.hs")).await
+    });
+    let (specialist, _specialist_binding) = research_child(&mut campaign).await;
+    assert_eq!(launch.await.unwrap()["status"], "committed");
+    assert_eq!(specialist.effective_role.descendants().maximum_depth, 1);
+    let policy = specialist.policy.clone();
+    let launch = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), include_str!("research_policy_nested.hs")).await
+    });
+    let (leaf, _leaf_binding) = research_child(&mut campaign).await;
+    assert_eq!(launch.await.unwrap()["status"], "committed");
+    assert_eq!(leaf.effective_role.descendants().maximum_depth, 0);
+    campaign
+        .actor
+        .shutdown(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "preview test complete".into(),
         })
         .await
         .unwrap();

@@ -100,18 +100,23 @@ fn usage_summaries_have_provider_scope_completeness_and_shared_inspection_fields
 }
 
 #[test]
-fn fork_effort_is_optional_at_the_existing_launch_boundary() {
+fn fork_options_are_optional_at_the_existing_launch_boundary() {
     let forks = tidepool_protocol::effects::forks::forks();
     let launch = forks
         .verbs
         .iter()
         .find(|verb| verb.ctor == "ForksStartWith")
         .unwrap();
-    assert_eq!(launch.args.len(), 10);
+    assert_eq!(launch.args.len(), 11);
     assert_eq!(launch.args[9].name, "effort");
     assert_eq!(
         launch.args[9].ty,
         HsType::maybe(HsType::Named("ForkEffort"))
+    );
+    assert_eq!(launch.args[10].name, "budget");
+    assert_eq!(
+        launch.args[10].ty,
+        HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int]))
     );
     // Preserve the entry closure's position: the actor capture owner claims
     // its live custody by this field, independently of configuration decoding.

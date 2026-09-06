@@ -1017,29 +1017,25 @@ where
                 descriptor.profile()
             )));
         }
-        if !descriptor.effective_role().respects_role_ceiling() {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                "requested effect row exceeds or duplicates the {:?} role ceiling",
-                descriptor.effective_role().role()
-            )));
-        }
-        let role = self
-            .descriptor
-            .effective_role()
-            .attenuate_child(descriptor.effective_role().clone());
-        descriptor = descriptor.with_effective_role(role);
-        if descriptor.context_parent().is_some()
-            && !self
-                .descriptor
+        let role = if descriptor.context_parent().is_some() {
+            self.descriptor
                 .effective_role()
-                .permits_child(descriptor.effective_role())
-        {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                "actor role {:?} cannot context-fork child role {:?}",
-                self.descriptor.effective_role().role(),
-                descriptor.effective_role().role()
-            )));
-        }
+                .preview_child(
+                    descriptor.effective_role().clone(),
+                    descriptor.fork_budget(),
+                )
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
+        } else {
+            if !descriptor.effective_role().respects_role_ceiling() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "requested effect row exceeds or duplicates the role ceiling".into(),
+                ));
+            }
+            self.descriptor
+                .effective_role()
+                .attenuate_child(descriptor.effective_role().clone())
+        };
+        descriptor = descriptor.with_effective_role(role);
         if let Some(group) = fork_group {
             let requested = crate::ActorPath::parse(descriptor.label())
                 .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
@@ -1657,6 +1653,32 @@ where
                             complete,
                         },
                     )
+                    .await
+            }
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview {
+                continuation,
+                role,
+                effect_keys,
+                budget,
+            }) => {
+                let child = role
+                    .effective_role(true)
+                    .with_effect_keys(effect_keys.into_iter().map(Into::into).collect());
+                let preview = self
+                    .descriptor
+                    .effective_role()
+                    .preview_child(child, budget)
+                    .map(|role| {
+                        let budget = role.descendants();
+                        (
+                            role.haskell_effects_type(),
+                            i64::from(budget.maximum_depth),
+                            i64::from(budget.maximum_active_children),
+                        )
+                    });
+                self.environment
+                    .runner
+                    .resume_fork_preview(context.clone(), continuation, preview)
                     .await
             }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {

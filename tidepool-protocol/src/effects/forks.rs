@@ -165,6 +165,11 @@ pub fn forks() -> Effect {
                     ty: HsType::maybe(HsType::Named("ForkEffort")),
                     rust: RustBinding::Path("Option<crate::ForkEffort>"),
                 });
+                args.push(Arg {
+                    name: "budget",
+                    ty: HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int])),
+                    rust: RustBinding::Path("Option<(i64, i64)>"),
+                });
                 Verb {
                     ctor: "ForksStartWith",
                     method: "forks_start_with",
@@ -177,6 +182,31 @@ pub fn forks() -> Effect {
                     handling: HandlingClass::Actor,
                     extract: None,
                 }
+            },
+            Verb {
+                ctor: "ForksPreviewWith",
+                method: "forks_preview_with",
+                args: vec![
+                    Arg {
+                        name: "role",
+                        ty: HsType::Named("ActorLaunchRole"),
+                        rust: RustBinding::Path("crate::ActorLaunchRoleWire"),
+                    },
+                    Arg {
+                        name: "effectKeys",
+                        ty: HsType::list(HsType::Named("ActorEffectKey")),
+                        rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>"),
+                    },
+                    Arg {
+                        name: "budget",
+                        ty: HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int])),
+                        rust: RustBinding::Path("Option<(i64, i64)>"),
+                    },
+                ],
+                ret: fallible(HsType::Tuple(vec![HsType::Text, HsType::Int, HsType::Int])),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
             },
             group_verb("ForksCommitWith", "forks_commit_with"),
             group_verb("ForksAbortWith", "forks_abort_with"),

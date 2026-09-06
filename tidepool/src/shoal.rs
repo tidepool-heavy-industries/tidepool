@@ -34,7 +34,8 @@ model = "gpt-5.6-sol"
 effort = "low"
 
 [research]
-maximum_depth = 1
+default_depth = 1
+maximum_depth = 8
 maximum_active_children = 32
 "#;
 const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
@@ -1287,7 +1288,8 @@ mod tests {
             ensure_project_config(workspace.path()).unwrap().research,
             tidepool_actor::ResearchPolicy {
                 maximum_depth: 3,
-                maximum_active_children: 2
+                maximum_active_children: 2,
+                default_depth: 1
             }
         );
         for invalid in [

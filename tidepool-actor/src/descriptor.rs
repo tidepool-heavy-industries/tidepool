@@ -20,6 +20,7 @@ pub struct ActorDescriptor {
     actor_path: Option<tidepool_repr::ActorPath>,
     fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
+    fork_budget: Option<(i64, i64)>,
     fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 }
 
@@ -39,6 +40,7 @@ impl ActorDescriptor {
             actor_path: None,
             fork_group: None,
             fork_effort: None,
+            fork_budget: None,
             fork_boundary: None,
         }
     }
@@ -51,6 +53,15 @@ impl ActorDescriptor {
     #[must_use]
     pub fn fork_effort(&self) -> Option<crate::ForkEffort> {
         self.fork_effort
+    }
+
+    pub(crate) fn fork_budget(&self) -> Option<(i64, i64)> {
+        self.fork_budget
+    }
+
+    pub(crate) fn with_fork_budget(mut self, budget: Option<(i64, i64)>) -> Self {
+        self.fork_budget = budget;
+        self
     }
 
     #[must_use]

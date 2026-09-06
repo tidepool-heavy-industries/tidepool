@@ -35,6 +35,7 @@ pub struct DescendantBudget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchPolicy {
+    pub default_depth: u16,
     pub maximum_depth: u16,
     pub maximum_active_children: u16,
 }
@@ -42,7 +43,8 @@ pub struct ResearchPolicy {
 impl Default for ResearchPolicy {
     fn default() -> Self {
         Self {
-            maximum_depth: 1,
+            default_depth: 1,
+            maximum_depth: 8,
             maximum_active_children: 32,
         }
     }
@@ -229,7 +231,38 @@ impl EffectiveRole {
     /// Inherit the host policy and spend one generation before applying the role cap.
     /// A descendant cannot refresh an exhausted research allowance by forking again.
     #[must_use]
-    pub fn attenuate_child(&self, mut child: Self) -> Self {
+    pub fn attenuate_child(&self, child: Self) -> Self {
+        self.child_budget(child, None)
+            .expect("an omitted budget is valid")
+    }
+
+    /// Compute the policy used by context-fork admission without reserving resources.
+    pub fn preview_child(
+        &self,
+        child: Self,
+        requested: Option<(i64, i64)>,
+    ) -> Result<Self, String> {
+        if !child.respects_role_ceiling() {
+            return Err("requested effect row exceeds or duplicates the role ceiling".into());
+        }
+        let child = self.child_budget(child, requested)?;
+        if !self.permits_child(&child) {
+            return Err("child role or descendant budget exceeds parent authority".into());
+        }
+        Ok(child)
+    }
+
+    fn child_budget(&self, mut child: Self, requested: Option<(i64, i64)>) -> Result<Self, String> {
+        let requested = requested
+            .map(|(depth, width)| {
+                Ok::<_, String>(DescendantBudget {
+                    maximum_depth: u16::try_from(depth)
+                        .map_err(|_| "fork depth must be in 0..65535")?,
+                    maximum_active_children: u16::try_from(width)
+                        .map_err(|_| "fork width must be in 0..65535")?,
+                })
+            })
+            .transpose()?;
         child.research_policy = self.research_policy;
         child.descendants = DescendantBudget {
             maximum_depth: 0,
@@ -240,6 +273,19 @@ impl EffectiveRole {
                 maximum_depth: self.descendants.maximum_depth.saturating_sub(1),
                 maximum_active_children: self.descendants.maximum_active_children,
             };
+            if let Some(requested) = requested {
+                child.descendants.maximum_depth =
+                    child.descendants.maximum_depth.min(requested.maximum_depth);
+                child.descendants.maximum_active_children = child
+                    .descendants
+                    .maximum_active_children
+                    .min(requested.maximum_active_children);
+            } else if child.role == ActorRole::Research && self.role != ActorRole::Research {
+                child.descendants.maximum_depth = child
+                    .descendants
+                    .maximum_depth
+                    .min(self.research_policy.default_depth);
+            }
             if child.role == ActorRole::Research {
                 child.descendants.maximum_depth = child
                     .descendants
@@ -251,7 +297,7 @@ impl EffectiveRole {
                     .min(self.research_policy.maximum_active_children);
             }
         }
-        child
+        Ok(child)
     }
 
     #[must_use]
@@ -416,9 +462,12 @@ mod tests {
         let root = EffectiveRole::root().with_research_policy(ResearchPolicy {
             maximum_depth: 2,
             maximum_active_children: 3,
+            ..ResearchPolicy::default()
         });
         let coding = root.attenuate_child(EffectiveRole::coding());
-        let research = coding.attenuate_child(EffectiveRole::research());
+        let research = coding
+            .preview_child(EffectiveRole::research(), Some((2, 3)))
+            .unwrap();
         assert_eq!(
             research.descendants(),
             DescendantBudget {
@@ -470,6 +519,7 @@ mod tests {
         let disabled = root.with_research_policy(ResearchPolicy {
             maximum_depth: 0,
             maximum_active_children: 0,
+            ..ResearchPolicy::default()
         });
         assert_eq!(
             disabled
@@ -493,6 +543,53 @@ mod tests {
                 maximum_active_children: 0
             }
         );
+    }
+
+    #[test]
+    fn requested_research_budget_is_previewed_clamped_and_inherited() {
+        let root = EffectiveRole::root().with_research_policy(ResearchPolicy {
+            default_depth: 1,
+            maximum_depth: 3,
+            maximum_active_children: 4,
+        });
+        assert_eq!(
+            root.preview_child(EffectiveRole::research(), None)
+                .unwrap()
+                .descendants()
+                .maximum_depth,
+            1
+        );
+        let coordinator = root
+            .preview_child(EffectiveRole::research(), Some((9, 9)))
+            .unwrap();
+        assert_eq!(
+            coordinator.descendants(),
+            DescendantBudget {
+                maximum_depth: 3,
+                maximum_active_children: 4
+            }
+        );
+        let specialist = coordinator
+            .preview_child(EffectiveRole::research(), None)
+            .unwrap();
+        assert_eq!(specialist.descendants().maximum_depth, 2);
+        assert_eq!(
+            specialist
+                .preview_child(EffectiveRole::research(), Some((99, 99)))
+                .unwrap()
+                .descendants()
+                .maximum_depth,
+            1
+        );
+        assert!(root
+            .preview_child(EffectiveRole::research(), Some((-1, 4)))
+            .is_err());
+        assert!(root
+            .preview_child(EffectiveRole::research(), Some((1, 65536)))
+            .is_err());
+        assert!(coordinator
+            .preview_child(EffectiveRole::coding(), Some((1, 1)))
+            .is_err());
     }
 
     #[test]

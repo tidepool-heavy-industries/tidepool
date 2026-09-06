@@ -51,12 +51,26 @@ capabilities. Use a coding reviewer when review includes running checks.
 
 `researching` admits inspection-only researchers with bounded delegation;
 `researchingLeaf` omits `Forks` and actor control. Research cannot escalate into
-coding, integration, or build/test execution. The host reads `[research]` in
-`.shoal/config.toml`: `maximum_depth` defaults to 1 and
-`maximum_active_children` to 32. Depth counts generations below the first
-researcher; every child also consumes the enclosing parent's depth and obeys
-its width limit. Width counts active or reserved descendants across the subtree;
-ancestor ceilings also apply. Set depth to 0 for research leaves throughout
-a session.
-Configuration is loaded at host startup; it does not change existing actors.
-Runtime policy in activation/status is authoritative, including exhausted budgets.
+coding, integration, or build/test execution. Host `[research]` configuration in
+`.shoal/config.toml` defaults to `default_depth = 1`, `maximum_depth = 8`, and
+`maximum_active_children = 32`. The first researcher defaults to one generation;
+research descendants inherit remaining depth. Every child consumes a generation.
+
+For a deeper coordinator, select and inspect a proposal before admission:
+
+```haskell
+let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel boundHead assignment)
+previewBranch proposal
+```
+
+Requested depth/width are capped by config and parent allowance. Preview reports
+role, workspace access, effects, requested/effective budgets, and `CanFork`,
+`ForksOmitted`, or `BudgetExhausted`. It uses admission's policy calculation but
+allocates nothing and starts no child. It does not reserve current capacity or
+validate the worktree seed. A leaf-sized assignment and zero fork authority are
+different things. `researchingLeaf` explicitly omits delegation; a researcher
+with an exhausted budget retains `Forks` in its row but cannot admit children.
+
+Width counts active or reserved descendants across the subtree; all ancestor
+ceilings also apply. Setting `maximum_depth = 0` disables research recursion.
+Configuration is loaded at host startup and does not change existing actors.

@@ -25,6 +25,12 @@ pub enum ForksReq {
         tidepool_bridge_effects::WtDirtyPolicy,
         Vec<crate::ActorEffectKeyWire>,
         Option<crate::ForkEffort>,
+        Option<(i64, i64)>,
+    ),
+    ForksPreviewWith(
+        crate::ActorLaunchRoleWire,
+        Vec<crate::ActorEffectKeyWire>,
+        Option<(i64, i64)>,
     ),
     ForksCommitWith(i64),
     ForksAbortWith(i64),

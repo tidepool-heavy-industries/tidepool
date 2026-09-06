@@ -19,7 +19,9 @@ owns its shared wiring and fulfills its own contract after folding its children.
 
 Use `coding` for work that may implement and recurse. `scaffolding` has the same
 capabilities with a scaffold-focused prompt. `researching` is inspection-only
-and may fork research descendants within its runtime budget; `researchingLeaf`
+and may fork research descendants within its runtime budget. `withForkBudget`
+requests a bounded subtree; `previewBranch` shows effective policy before launch.
+`researchingLeaf`
 is an explicit inspection-only leaf. Neither runs builds or tests. Use a coding
 actor for a reviewer who must run tests. Explicitly narrowed rows
 and exhausted descendant budgets can still make an actor a leaf. Role names

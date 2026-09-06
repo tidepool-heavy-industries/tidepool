@@ -20,6 +20,7 @@ module Tidepool.Actors.Internal.Agent
   , integrationAgent
   , startAgent
   , startForkedAgent
+  , roleCode
   , request
   , requestSited
   , RequestOptions
@@ -255,8 +256,9 @@ startForkedAgent
   -> DirtyPolicy
   -> [ActorEffectKey]
   -> Maybe ForkEffort
+  -> Maybe (Int, Int)
   -> Eff effs (Either Text (AgentRef, Text, WorktreeHandle))
-startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys effort = do
+startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys effort budget = do
   launched <- launchForkedActor
     launchRole
     forkGroup
@@ -266,6 +268,7 @@ startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effect
     dirtyPolicy
     effectKeys
     effort
+    budget
   pure $ case launched of
     Left failure -> Left failure
     Right (actor, allocatedPath, tree) ->
@@ -467,6 +470,7 @@ launchForkedActor
   -> DirtyPolicy
   -> [ActorEffectKey]
   -> Maybe ForkEffort
+  -> Maybe (Int, Int)
   -> Eff effs (Either Text (Actor.ActorRef api exit, Text, WorktreeHandle))
 launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   { Actor.label = actorLabel
@@ -474,7 +478,7 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   , Actor.initialization = startupAction
   , Actor.behavior = install
   , Actor.onShutdown = shutdownAction
-  } startup worktreeSpec dirtyPolicy effectKeys effort = do
+  } startup worktreeSpec dirtyPolicy effectKeys effort budget = do
   let cell = newExitCell startup
       shutdownEntry reasonCode =
         raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
@@ -496,7 +500,8 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
       worktreeSpec
       dirtyPolicy
       effectKeys
-      effort)
+      effort
+      budget)
   pure $ case launched of
     Left failure -> Left failure
     Right ((actorId, incarnation, allocatedPath), tree) ->

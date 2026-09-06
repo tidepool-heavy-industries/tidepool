@@ -767,6 +767,12 @@ pub(crate) enum ResidentActorBoundary {
 }
 
 pub(crate) enum ForkGroupBoundary {
+    Preview {
+        continuation: ResidentHole,
+        role: crate::ActorLaunchRoleWire,
+        effect_keys: Vec<crate::ActorEffectKeyWire>,
+        budget: Option<(i64, i64)>,
+    },
     Begin {
         continuation: ResidentHole,
         relative: bool,
@@ -807,6 +813,7 @@ impl ResidentActorBoundary {
         match self {
             Self::Completed => "program completion",
             Self::ActorContext(_) => "actorContext",
+            Self::ForkGroup(ForkGroupBoundary::Preview { .. }) => "preview context-fork policy",
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
@@ -963,6 +970,9 @@ impl ResidentRequest {
                 "begin context-fork group"
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksStartWith(..)) => "context fork",
+            Self::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(..)) => {
+                "preview context-fork policy"
+            }
             Self::Forks(crate::generated::forks::ForksReq::ForksCommitWith(..)) => {
                 "commit context-fork group"
             }
@@ -1768,7 +1778,7 @@ where
                         crate::start::ActorStartRequest {
                             label, role, profile, launch_worktrees: worktrees,
                             fork_group: None, fork_workspace: None, effect_keys: None,
-                            fork_effort: None,
+                            fork_effort: None, fork_budget: None,
                             session_id: context.placement.session, parent_actor: context.actor,
                         },
                     )
@@ -1785,6 +1795,7 @@ where
                         bound_dirty_policy,
                         effect_keys,
                         effort,
+                        budget,
                     )) => {
                         let group = u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -1801,13 +1812,14 @@ where
                                     Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
                                     None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
                                 }),
-                                effect_keys: Some(effect_keys), fork_effort: effort,
+                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget,
                                 session_id: context.placement.session, parent_actor: context.actor,
                             },
                         )
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(role, effect_keys, budget)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview { continuation: hole, role, effect_keys, budget })),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksBeginWith(
                         relative,
                         group,
@@ -2855,6 +2867,22 @@ where
                     "CleanupReceipt",
                     vec![plan, steps, receipt.complete.to_value(table)?],
                 )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_fork_preview(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        preview: Result<(String, i64, i64), String>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = preview.to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

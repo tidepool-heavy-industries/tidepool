@@ -43,6 +43,11 @@ module Tidepool.Actors.Unfold
   , narrowed
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
+  , ForkBudget (..)
+  , BranchPreview (..)
+  , DelegationAuthority (..)
+  , withForkBudget
+  , previewBranch
   , researching
   , researchingLeaf
   , coding
@@ -98,6 +103,7 @@ import Tidepool.Actors.Internal.Agent
   , requestOptions
   , requestWithSited
   , startForkedAgent
+  , roleCode
   , withRequestDeadline
   , withRequestGuidance
   )
@@ -114,7 +120,8 @@ import Tidepool.Actors.Role
   , knownEffects
   )
 import Tidepool.Effects.Core
-  ( AgentControl (..)
+  ( ActorEffectKey (..)
+  , AgentControl (..)
   , CleanupActorPlan (..)
   , CleanupActorState (..)
   , CleanupPlan (..)
@@ -230,10 +237,60 @@ data BranchOptions = BranchOptions
   { branchGuidance :: Maybe Text
   , branchDeadline :: Maybe RequestDeadline
   , branchEffort :: Maybe ForkEffort
+  , branchBudget :: Maybe ForkBudget
   }
 
 defaultBranchOptions :: BranchOptions
-defaultBranchOptions = BranchOptions Nothing Nothing Nothing
+defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing
+
+-- | Requested descendant generations and active descendants across the subtree.
+-- The runtime clamps these to configured ceilings and remaining parent authority.
+data ForkBudget = ForkBudget { forkDepth :: Int, forkWidth :: Int }
+  deriving (Show, Eq)
+
+data DelegationAuthority = ForksOmitted | BudgetExhausted | CanFork
+  deriving (Show, Eq)
+
+data BranchPreview = BranchPreview
+  { previewRole :: ForkRole
+  , previewWorkspace :: ForkWorkspaceAccess
+  , previewRequestedBudget :: Maybe ForkBudget
+  , previewEffectiveBudget :: ForkBudget
+  , previewEffects :: Text
+  , previewDelegation :: DelegationAuthority
+  } deriving (Show, Eq)
+
+withForkBudget :: ForkBudget -> Branch child input result -> Branch child input result
+withForkBudget budget (Branch label role seed effects options input) =
+  Branch label role seed effects (options { branchBudget = Just budget }) input
+
+budgetPair :: ForkBudget -> (Int, Int)
+budgetPair (ForkBudget depth width) = (depth, width)
+
+-- | Read policy without allocating a worktree or starting a provider. Admission
+-- still checks current capacity, worktree seeds, and provider provenance.
+previewBranch
+  :: Member Forks effects
+  => Branch child input result
+  -> Eff effects (Either Text BranchPreview)
+previewBranch (Branch _ role _ effects options _) = do
+  let keys = effectKeys effects
+  answer <- send (ForksPreviewWith (roleCode (launchRoleFor role)) keys (budgetPair <$> branchBudget options))
+  pure $ case answer of
+    Left failure -> Left failure
+    Right (row, depth, width) -> Right BranchPreview
+      { previewRole = role
+      , previewWorkspace = accessFor role
+      , previewRequestedBudget = branchBudget options
+      , previewEffectiveBudget = ForkBudget depth width
+      , previewEffects = row
+      , previewDelegation = if not (includesForks keys) then ForksOmitted
+          else if depth == 0 || width == 0 then BudgetExhausted else CanFork
+      }
+  where
+    includesForks [] = False
+    includesForks (EffectForks : _) = True
+    includesForks (_ : rest) = includesForks rest
 
 withEffort :: ForkEffort -> Branch child input result -> Branch child input result
 withEffort effort (Branch label role seed effects options input) =
@@ -584,6 +641,7 @@ startBranch groupId allocated (Branch _ role seed effects options _) = do
     dirtyPolicy
     (effectKeys effects)
     (branchEffort options)
+    (budgetPair <$> branchBudget options)
   pure $ case launched of
     Left failure -> Left (UnfoldBranchRejected allocated failure)
     Right branch -> Right branch
