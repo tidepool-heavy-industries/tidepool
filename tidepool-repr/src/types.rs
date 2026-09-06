@@ -366,6 +366,13 @@ define_primops! {
     QuotRemWordRem => "QuotRemWordRem", "quotRemWord#_rem";
     FfiStrlen => "FfiStrlen", "ffi_strlen";
     FfiRintDouble => "FfiRintDouble", "ffi_rint_double";
+    // GHC classification FFI: one matching Float#/Double# argument, Int# 0 or 1.
+    FfiIsFloatNaN => "FfiIsFloatNaN", "ffi_is_FloatNaN";
+    FfiIsFloatInfinite => "FfiIsFloatInfinite", "ffi_is_FloatInfinite";
+    FfiIsFloatNegativeZero => "FfiIsFloatNegativeZero", "ffi_is_FloatNegativeZero";
+    FfiIsDoubleNaN => "FfiIsDoubleNaN", "ffi_is_DoubleNaN";
+    FfiIsDoubleInfinite => "FfiIsDoubleInfinite", "ffi_is_DoubleInfinite";
+    FfiIsDoubleNegativeZero => "FfiIsDoubleNegativeZero", "ffi_is_DoubleNegativeZero";
     FfiTextMeasureOff => "FfiTextMeasureOff", "ffi_text_measure_off";
     FfiTextMemchr => "FfiTextMemchr", "ffi_text_memchr";
     FfiTextReverse => "FfiTextReverse", "ffi_text_reverse";
