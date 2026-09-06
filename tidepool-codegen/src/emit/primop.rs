@@ -889,6 +889,62 @@ pub fn emit_primop(
             let a = unbox_double(sess.pipeline, builder, sess.vmctx, args[0]);
             Ok(SsaVal::Raw(builder.ins().fabs(a), LIT_TAG_DOUBLE))
         }
+        PrimOpKind::FfiIsFloatNaN
+        | PrimOpKind::FfiIsFloatInfinite
+        | PrimOpKind::FfiIsFloatNegativeZero => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_float(sess.pipeline, builder, sess.vmctx, args[0]);
+            // Integer IEEE classification avoids floating exceptions for signalling NaNs.
+            let bits = builder.ins().bitcast(types::I32, MemFlags::new(), a);
+            let magnitude = builder.ins().band_imm(bits, 0x7fffffff);
+            let result = match op {
+                PrimOpKind::FfiIsFloatNaN => {
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::UnsignedGreaterThan, magnitude, 0x7f800000)
+                }
+                PrimOpKind::FfiIsFloatInfinite => {
+                    builder.ins().icmp_imm(IntCC::Equal, magnitude, 0x7f800000)
+                }
+                PrimOpKind::FfiIsFloatNegativeZero => {
+                    builder.ins().icmp_imm(IntCC::Equal, bits, 0x80000000)
+                }
+                _ => unreachable!(),
+            };
+            Ok(SsaVal::Raw(
+                builder.ins().uextend(types::I64, result),
+                LIT_TAG_INT,
+            ))
+        }
+        PrimOpKind::FfiIsDoubleNaN
+        | PrimOpKind::FfiIsDoubleInfinite
+        | PrimOpKind::FfiIsDoubleNegativeZero => {
+            check_arity(op, 1, args.len())?;
+            let a = unbox_double(sess.pipeline, builder, sess.vmctx, args[0]);
+            // Integer IEEE classification avoids floating exceptions for signalling NaNs.
+            let bits = builder.ins().bitcast(types::I64, MemFlags::new(), a);
+            let magnitude = builder.ins().band_imm(bits, 0x7fffffffffffffff);
+            let result = match op {
+                PrimOpKind::FfiIsDoubleNaN => builder.ins().icmp_imm(
+                    IntCC::UnsignedGreaterThan,
+                    magnitude,
+                    0x7ff0000000000000,
+                ),
+                PrimOpKind::FfiIsDoubleInfinite => {
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::Equal, magnitude, 0x7ff0000000000000)
+                }
+                PrimOpKind::FfiIsDoubleNegativeZero => {
+                    builder.ins().icmp_imm(IntCC::Equal, bits, i64::MIN)
+                }
+                _ => unreachable!(),
+            };
+            Ok(SsaVal::Raw(
+                builder.ins().uextend(types::I64, result),
+                LIT_TAG_INT,
+            ))
+        }
         PrimOpKind::FfiRintDouble => {
             // ghc-internal:rintDouble (C rint): round to nearest, ties to even.
             // Cranelift's `nearest` has exactly these semantics.
