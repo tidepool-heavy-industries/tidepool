@@ -190,6 +190,8 @@ impl ActiveBinding {
 pub struct BindingTable {
     dir: DurableJsonDir,
     bindings: Vec<Binding>,
+    /// Latched after a possibly visible persistence failure; cleared only by
+    /// dropping this owner and exclusively reopening authoritative storage.
     write_uncertain: bool,
     /// Parallel to `bindings` (same length, same index) — the in-memory
     /// bind-generation of each row, assigned when [`Self::bind`] creates it.
@@ -213,8 +215,12 @@ pub struct BindingTable {
 impl BindingTable {
     /// The exact worktree currently owned by `agent`, if any. Actor admission
     /// uses this to resolve the typed `boundHead` placement without exposing
-    /// filesystem paths or asking Haskell to rediscover custody.
+    /// filesystem paths or asking Haskell to rediscover custody. An uncertain
+    /// table returns no authority, even when it retains Active diagnostic rows.
     pub fn active_for_agent(&self, agent: &AgentRef) -> Option<&WorktreeId> {
+        if self.write_uncertain {
+            return None;
+        }
         self.bindings
             .iter()
             .rev()
@@ -274,6 +280,13 @@ impl BindingTable {
             // Loaded rows carry no generation — see the field docs on
             // `generations`.
             generations.resize(generations.len() + rows.len(), None);
+            // Reopening is the reconciliation boundary: the loaded bytes and
+            // pathname must be durable before these rows can authorize custody.
+            fs::File::open(&path)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| storage_failure(&path, e))?;
+            tidepool_atomic_write::sync_parent_directory(&path)
+                .map_err(|e| storage_failure(&e.path, e.source))?;
             bindings.append(&mut rows);
         }
 
@@ -293,7 +306,8 @@ impl BindingTable {
 
     /// Rewrite the on-disk file for `worktree` from the current in-memory
     /// rows, crash-safely via the shared durable atomic-write helper (temp
-    /// file in the same directory, fsync, rename, best-effort dir fsync).
+    /// file in the same directory, fsync, rename, strict directory fsync).
+    /// Failure may follow visible publication and does not imply rollback.
     fn persist(&self, worktree: &WorktreeId) -> Result<(), WorktreeError> {
         let rows: Vec<&Binding> = self
             .bindings
@@ -317,6 +331,7 @@ impl BindingTable {
         agent: &AgentRef,
         now_ms: i64,
     ) -> Result<ActiveBinding, WorktreeError> {
+        self.ensure_writable()?;
         if let Some(current) = self.current(worktree) {
             return Err(WorktreeError::WorktreeBusy {
                 worktree: worktree.clone(),
@@ -332,16 +347,14 @@ impl BindingTable {
             now_ms,
         ));
         self.generations.push(Some(generation));
-        // ROLL BACK on a failed write. Without this, a persist failure leaves
-        // memory holding a binding that disk does not — and since the isolation
-        // invariant is enforced from THIS table, a restart would read the
-        // unbound disk state and let a SECOND agent bind the same worktree.
-        // Two writers in one tree is the exact failure the coupling exists to
-        // make unconstructible, so memory and disk must not be allowed to
-        // disagree even transiently.
+        // No lease escapes a failed bind. Retain the tentative Active row for
+        // diagnosis, but fence every authority lookup and mutation: the rename
+        // may already be visible and reverting memory cannot undo publication.
         if let Err(e) = self.persist(worktree) {
-            self.bindings.pop();
-            self.generations.pop();
+            self.write_uncertain = true;
+            if let Some(generation) = self.generations.last_mut() {
+                *generation = None;
+            }
             return Err(e);
         }
         Ok(ActiveBinding {
@@ -361,6 +374,7 @@ impl BindingTable {
     /// the type's docs) — reported via the existing `StorageFailure` variant
     /// rather than a new one (`error.rs` is frozen).
     fn settle(&mut self, lease: ActiveBinding, to: BindingTerminal) -> Result<(), WorktreeError> {
+        self.ensure_writable()?;
         let idx = {
             let generations = &self.generations;
             self.bindings.iter().enumerate().rposition(|(i, b)| {
@@ -381,18 +395,33 @@ impl BindingTable {
         };
         let previous = self.bindings[i].state();
         self.bindings[i].state = to.into();
-        // Same rollback discipline as `bind`, mirrored: a failed write here
-        // would leave memory believing the worktree is rebindable while
-        // disk still says Active — the inverse disagreement, reached the
-        // same way.
+        // Retain the previous Active diagnostic snapshot conservatively. This
+        // does NOT roll back disk: publication may have succeeded. The consumed
+        // lease cannot be retried and this handle cannot authorize or mutate.
         if let Err(e) = self.persist(&lease.worktree) {
             self.bindings[i].state = previous;
+            self.write_uncertain = true;
             return Err(e);
         }
         Ok(())
     }
 
+    fn ensure_writable(&self) -> Result<(), WorktreeError> {
+        if self.write_uncertain {
+            return Err(storage_failure(
+                self.dir.dir(),
+                "binding persistence is uncertain; drop and exclusively reopen before using custody",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Confirmed active custody only. An uncertain table grants no authority;
+    /// retained rows are diagnostic until exclusive reopen reconciles disk.
     pub fn current(&self, worktree: &WorktreeId) -> Option<&Binding> {
+        if self.write_uncertain {
+            return None;
+        }
         self.bindings
             .iter()
             .find(|b| b.worktree() == worktree && b.state() == BindingState::Active)
