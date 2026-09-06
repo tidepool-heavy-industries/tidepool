@@ -56,6 +56,18 @@ Use precise result words:
 Never summarize a neighboring target's success as though it covered all files
 you changed.
 
+For diagnostic output from a passing focused test, use the existing nextest
+setting rather than changing the test to panic:
+
+```sh
+NEXTEST_SUCCESS_OUTPUT=immediate just test-target PACKAGE TARGET 'test(NAME)'
+```
+
+This preserves output capture/isolation and the test's actual pass/fail result.
+A baseline regression that executes and fails as expected is **executed, failed
+as expected**, not passed, compiled-only, skipped, or blocked. Report observed
+outcome separately from whether it matches the baseline expectation.
+
 ## Review before delivery
 
 - Read the final diff as a reviewer, not merely as its author.

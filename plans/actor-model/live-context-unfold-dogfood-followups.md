@@ -2194,3 +2194,22 @@ context nor roster size establishes cache efficiency. Final repair acceptance,
 review convergence, actor retirement/resource cleanup, and any obsolete numeric
 formatter removal remain open. Preserve private full logs through their existing
 handles; do not copy provider transcripts into this plan.
+
+### Validation survey fold
+
+Typed survey request 38 sampled idle native implementer (41) and display
+reviewer (43); full replies retained under `validationSurveySettlement` at root
+and `surveySamples` at validation TL. No actors spawned or tests run for survey.
+The implementer found the shared fixture and EvalHarness immediately usable;
+the reviewer found unrelated oracle/differential history less useful than the
+Prelude/Render/inspection boundary. This is qualitative attribution, not a
+measured case for smaller prefixes. Fork acceptance-focused review before
+unrelated coordination history grows where practical.
+
+The survey independently corroborates the coarse-status and shared-file append
+conflict findings above. It also reports a temporary diagnostic panic used to
+expose passing test output. Root verified installed `cargo nextest run --help`
+provides `NEXTEST_SUCCESS_OUTPUT=immediate` and battery.sh preserves that setting;
+this usage is now in scripts/codex-worktree-guidance.md. No new launcher needed.
+The survey names no cache/cost measurements and does not claim active-update
+transport experience from its own subtree. Keep that attribution boundary.
