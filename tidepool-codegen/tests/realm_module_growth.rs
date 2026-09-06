@@ -1,17 +1,7 @@
-//! Throwaway measurement scaffolding for the realm-lifetime spike, COST B
-//! (compiled-function lifetime). The static-analysis half of the finding
-//! this feeds: reading
-//! `cranelift-jit` 0.129.1's own source shows `ArenaMemoryProvider::drop`
-//! deliberately LEAKS its arena once anything has been finalized, and
-//! nothing in this repo calls the escape-hatch `JITModule::free_memory`.
-//!
-//! No Cranelift-side allocated-bytes accessor is reachable from
-//! `JitEffectMachine` (`ArenaMemoryProvider` exposes none publicly, and
-//! `CodegenPipeline::module`/`JITModule` doesn't expose its private
-//! `memory: Box<dyn JITMemoryProvider>` either) — so the memory proxy here is
-//! process RSS read from `/proc/self/status`'s `VmRSS` line. That is a noisy
-//! signal (allocator behavior, other threads, page cache) but it is the only
-//! number reachable without vendoring Cranelift.
+//! Measure compiled-function growth within one machine and across dropped machines.
+//! Cranelift's SystemMemoryProvider retains finalized allocations on drop;
+//! production does not call JITModule::free_memory. RSS is a noisy process-level
+//! proxy because JITModule does not expose allocated-byte counters.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
@@ -125,7 +115,7 @@ fn realm_module_growth_single_machine() {
 ///
 /// A NO-GO finding here (RSS never comes back down) is a successful result
 /// for this test, not a failure — it would corroborate the static finding
-/// that `ArenaMemoryProvider::drop` leaks a finalized arena.
+/// that `SystemMemoryProvider` retains finalized allocations on drop.
 #[test]
 #[serial]
 fn realm_module_growth_create_drop_32_machines() {

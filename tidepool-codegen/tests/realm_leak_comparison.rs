@@ -1,32 +1,7 @@
-//! Controlled two-arm measurement for the realm-spike leak-comparison lane.
-//! Builds on the sibling realm-lifetime finding: dropping a
-//! `JitEffectMachine` does not reclaim its compiled code, because
-//! `cranelift-jit` 0.129.1's `ArenaMemoryProvider::drop` deliberately leaks
-//! once any segment has been finalized (true of every real machine).
-//!
-//! That finding was measured with a fixed machine count (32). This test asks
-//! the question the sibling lane's task explicitly left open: for the SAME
-//! total compiled-function workload (512 fragments), does spreading that
-//! work across ONE machine instead of 32 separate machines change how much
-//! is retained after everything drops? Both arms run back-to-back in one
-//! process from one shared baseline, so the two retained deltas are directly
-//! comparable — no cross-test baseline drift.
-//!
-//! ARM A: 32 session machines, 16 fragments each (today's architecture — one
-//! machine per answerer session), each machine dropped before the next is
-//! created.
-//! ARM B: ONE session machine, 512 fragments (the unified/realm shape),
-//! dropped once at the end.
-//!
-//! Fragment bodies are identical between arms: global fragment index `n` in
-//! {0..512} is `build_value_fragment(n)` in both arms, so the only variable
-//! is how many machines the same 512 compiled bodies are spread across.
-//!
-//! Also reports `VmSize` (virtual) alongside `VmRSS` (resident) in arm A, to
-//! characterize the 256 MiB `ArenaMemoryProvider` reservation
-//! (`ArenaMemoryProvider::new_with_size` in `src/pipeline.rs`) as reserved-virtual vs
-//! committed-physical — see the findings doc for the reading of these
-//! numbers against the vendored `cranelift-jit` source.
+//! Compare retained memory for identical compiled workloads spread across one
+//! machine or 32 machines. Each arm compiles 512 fragments. SystemMemoryProvider
+//! retains finalized allocations on drop; RSS and VSZ deltas measure process
+//! footprint, including allocator effects, rather than exact JIT allocation size.
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;

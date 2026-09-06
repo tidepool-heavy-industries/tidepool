@@ -73,6 +73,19 @@ continuation IDs are typed errors.
 - A resume answer containing bottom is rejected before consuming its
   continuation.
 
+## JIT allocation
+
+`CodegenPipeline` uses Cranelift's on-demand system memory provider. At the
+shared function-definition entry it clears colocation hints for function and
+data references; libcalls also use long-range addressing. Symbol visibility
+does not promise physical proximity. New compilation rounds leave existing
+code and data addresses stable without requiring a fixed contiguous arena.
+
+Compiled code still accumulates, and Cranelift retains finalized allocations
+on module drop. Removing binding roots does not reclaim code. Safe code
+reclamation requires tracking live closures and continuations; machine
+replacement is not transparent recovery for pending typed requests.
+
 ## Diagnostics
 
 Diagnostics are opt-in and must remain off in normal execution. Search the

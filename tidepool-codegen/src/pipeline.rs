@@ -2,7 +2,7 @@ use cranelift_codegen::ir::{self, types, AbiParam};
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
-use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
+use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -114,13 +114,13 @@ impl CodegenPipeline {
         flag_builder
             .set("opt_level", "speed")
             .map_err(|e| PipelineError::Init(format!("set opt_level: {e}")))?;
-        // ArenaMemoryProvider allocates code/GOT/readonly from a single contiguous
-        // reservation, so PIC is not needed — cranelift-jit 0.129+ requires is_pic=false.
+        // cranelift-jit requires non-PIC code. References between independently
+        // allocated functions/data must also be non-colocated (see define_function).
         flag_builder
             .set("is_pic", "false")
             .map_err(|e| PipelineError::Init(format!("set is_pic: {e}")))?;
         flag_builder
-            .set("use_colocated_libcalls", "true")
+            .set("use_colocated_libcalls", "false")
             .map_err(|e| PipelineError::Init(format!("set use_colocated_libcalls: {e}")))?;
 
         let isa_builder = cranelift_native::builder()
@@ -136,13 +136,8 @@ impl CodegenPipeline {
             jit_builder.symbol(*name, *ptr);
         }
 
-        // 256MB virtual reservation — demand-paged (PROT_NONE → committed on write).
-        // All code/GOT/readonly carved from one contiguous range, guaranteeing
-        // <2GB distance for X86GOTPCRel4 relocations.
-        let arena = ArenaMemoryProvider::new_with_size(256 * 1024 * 1024)
-            .map_err(|e| PipelineError::Init(format!("JIT memory arena: {e}")))?;
-        jit_builder.memory_provider(Box::new(arena));
-
+        // The default SystemMemoryProvider grows on demand without a fixed
+        // contiguous reservation. Finalized allocations keep stable addresses.
         let module = JITModule::new(jit_builder);
 
         Ok(Self {
@@ -223,6 +218,18 @@ impl CodegenPipeline {
         func_id: FuncId,
         ctx: &mut Context,
     ) -> Result<(), PipelineError> {
+        // Module linkage describes symbol visibility, not physical proximity.
+        // Cranelift marks local/exported references colocated by default; that
+        // permits short-range relocations which an on-demand allocator cannot
+        // guarantee. Enforce the allocation contract once, for every emitter.
+        for function in ctx.func.dfg.ext_funcs.values_mut() {
+            function.colocated = false;
+        }
+        for value in ctx.func.global_values.values_mut() {
+            if let ir::GlobalValueData::Symbol { colocated, .. } = value {
+                *colocated = false;
+            }
+        }
         // Single compile: define_function internally calls ctx.compile()
         self.module
             .define_function(func_id, ctx)
@@ -287,8 +294,8 @@ impl CodegenPipeline {
     ///
     /// Must be called after `finalize()` so code pointers are available for
     /// the newly-registered entries. Once resolved, a JIT function's code
-    /// pointer never moves (the `ArenaMemoryProvider` reservation is stable
-    /// for the pipeline's lifetime), so entries folded in on an earlier call
+    /// pointer never moves (finalized allocations stay at stable addresses),
+    /// so entries folded in on an earlier call
     /// stay valid forever and never need re-resolving.
     ///
     /// `Rc::make_mut` extends in place (O(new entries)) when this is the only
@@ -318,6 +325,124 @@ mod tests {
     use cranelift_codegen::ir::InstBuilder;
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use std::collections::HashMap;
+
+    #[test]
+    fn incremental_definitions_grow_past_256_mib() {
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
+        let leaf = define_trivial_lambda(&mut pipeline, "retained_leaf", 42);
+        pipeline.finalize().unwrap();
+        let leaf_ptr = pipeline.get_function_ptr(leaf);
+        let mut first_data = None;
+        for _ in 0..9 {
+            let data = pipeline
+                .module
+                .declare_anonymous_data(false, false)
+                .unwrap();
+            let mut description = cranelift_module::DataDescription::new();
+            description.define_zeroinit(32 * 1024 * 1024);
+            pipeline.module.define_data(data, &description).unwrap();
+            pipeline.finalize().unwrap();
+            let (address, size) = pipeline.module.get_finalized_data(data);
+            assert_eq!(size, 32 * 1024 * 1024);
+            let retained = *first_data.get_or_insert(address);
+            // SAFETY: these finalized allocations remain live, and both reads
+            // are within their declared data sizes.
+            unsafe {
+                assert_eq!(address.add(size - 1).read(), 0);
+                assert_eq!(retained.read(), 0);
+                let call: unsafe extern "C" fn(usize) -> i64 = std::mem::transmute(leaf_ptr);
+                assert_eq!(call(0), 42);
+            }
+        }
+        // SAFETY: no compiled function is executing or called after this point.
+        unsafe { pipeline.module.free_memory() };
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    fn distant_code_and_data_remain_callable_across_rounds() {
+        // Disjoint 4 GiB reservations put their small allocations beyond the
+        // signed 32-bit relocation range without touching the unused pages.
+        let make_pipeline = |symbols: &[(&str, *const u8)]| {
+            let mut pipeline = CodegenPipeline::new(&[]).unwrap();
+            let mut jit = JITBuilder::with_isa(
+                pipeline.isa.clone(),
+                cranelift_module::default_libcall_names(),
+            );
+            for (name, address) in symbols {
+                jit.symbol(*name, *address);
+            }
+            jit.memory_provider(Box::new(
+                cranelift_jit::ArenaMemoryProvider::new_with_size(4 << 30).unwrap(),
+            ));
+            pipeline.module = JITModule::new(jit);
+            pipeline
+        };
+        let mut definitions = make_pipeline(&[]);
+        let leaf = define_trivial_lambda(&mut definitions, "distant_leaf", 42);
+        definitions.finalize().unwrap();
+        let leaf_ptr = definitions.get_function_ptr(leaf);
+        let data = definitions
+            .module
+            .declare_anonymous_data(false, false)
+            .unwrap();
+        let mut description = cranelift_module::DataDescription::new();
+        description.define(19_i64.to_ne_bytes().to_vec().into_boxed_slice());
+        definitions.module.define_data(data, &description).unwrap();
+        definitions.finalize().unwrap();
+        let data_ptr = definitions.module.get_finalized_data(data).0;
+
+        let mut pipeline = make_pipeline(&[("distant_leaf", leaf_ptr), ("distant_data", data_ptr)]);
+        // Export linkage asks Cranelift for colocated references by default,
+        // just like emitted local lambdas and anonymous literal data. Resolve
+        // these through the symbol table to exercise distant placement.
+        let leaf = pipeline.declare_function("distant_leaf").unwrap();
+        let data = pipeline
+            .module
+            .declare_data("distant_data", Linkage::Export, false, false)
+            .unwrap();
+        let caller = pipeline.declare_function("distant_caller").unwrap();
+        let mut ctx = pipeline.module.make_context();
+        ctx.func.signature = pipeline.make_func_signature();
+        let mut frontend = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut frontend);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        let vmctx = builder.block_params(block)[0];
+        let callee = pipeline.module.declare_func_in_func(leaf, builder.func);
+        let direct = builder.ins().call(callee, &[vmctx]);
+        let direct = builder.inst_results(direct)[0];
+        let address = builder.ins().func_addr(types::I64, callee);
+        let sig = builder.import_signature(pipeline.make_func_signature());
+        let indirect = builder.ins().call_indirect(sig, address, &[vmctx]);
+        let indirect = builder.inst_results(indirect)[0];
+        let symbol = pipeline.module.declare_data_in_func(data, builder.func);
+        let address = builder.ins().symbol_value(types::I64, symbol);
+        let value = builder
+            .ins()
+            .load(types::I64, ir::MemFlags::trusted(), address, 0);
+        let result = builder.ins().iadd(direct, indirect);
+        let result = builder.ins().iadd(result, value);
+        builder.ins().return_(&[result]);
+        builder.finalize();
+        pipeline.define_function(caller, &mut ctx).unwrap();
+        pipeline.finalize().unwrap();
+        let caller_ptr = pipeline.get_function_ptr(caller);
+        assert!((caller_ptr as usize).abs_diff(leaf_ptr as usize) > i32::MAX as usize);
+        assert!((caller_ptr as usize).abs_diff(data_ptr as usize) > i32::MAX as usize);
+        // SAFETY: both functions are finalized with the declared signature and
+        // their memory remains live until after the last call.
+        unsafe {
+            let call: unsafe extern "C" fn(usize) -> i64 = std::mem::transmute(caller_ptr);
+            assert_eq!(call(0), 103);
+            let call_leaf: unsafe extern "C" fn(usize) -> i64 = std::mem::transmute(leaf_ptr);
+            assert_eq!(call_leaf(0), 42);
+            pipeline.module.free_memory();
+            definitions.module.free_memory();
+        }
+    }
 
     #[test]
     fn test_declare_define_finalize() {

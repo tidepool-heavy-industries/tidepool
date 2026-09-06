@@ -1799,7 +1799,7 @@ impl JitEffectMachine {
     ///
     /// Declare + define the fragment and re-run
     /// `finalize_definitions` (multi-round-safe in cranelift 0.129.1 — a new
-    /// `FuncId` post-finalize carves a fresh arena segment, leaving round-1 code
+    /// `FuncId` post-finalize gets fresh memory, leaving round-1 code
     /// stable). `table` shapes the fragment exactly like the one-shot entry
     /// (`normalize` + datacon-env wrap + lit-wrapper tolerance), so re-entry is
     /// emission-identical to the original compile, only the destination differs.
