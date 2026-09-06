@@ -55,7 +55,7 @@ pub(super) fn read_root(run: &Path, read_bound: u64) -> RootBinding {
         if bytes.len() as u64 == read_bound {
             return None;
         }
-        serde_json::from_slice(&bytes).ok()
+        crate::shoal::decode_run_status(&bytes).ok()
     })();
     let (root_actor, expected_thread) = match status.map(|status| status.phase) {
         Some(RunPhase::Ready {
@@ -283,5 +283,37 @@ mod tests {
             report.root.provider_thread,
             Evidence::Observed { .. }
         ));
+    }
+    #[test]
+    fn run_map_root_rejects_unsupported_status_version_without_serde_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("7-2")).unwrap();
+        fs::write(
+            dir.path().join("root-binding.json"),
+            json!({"version":4,"thread":"thread-root"}).to_string(),
+        )
+        .unwrap();
+        let mut status = json!({
+            "version":4,"run_id":"test","workspace":"/sanitized","session":"test",
+            "agent":{"model":"test","effort":"low"},
+            "phase":{"state":"ready","root_actor":{"id":7,"incarnation":2},"root_thread":"thread-root"}
+        });
+        for version in [0, 5, u32::MAX] {
+            status["version"] = json!(version);
+            // This shape would pass raw serde; only the owning decoder rejects it.
+            assert!(serde_json::from_value::<RunStatus>(status.clone()).is_ok());
+            fs::write(dir.path().join("status.json"), status.to_string()).unwrap();
+            let report =
+                read_windowed_run(dir.path(), Limits::default(), TimeWindow::default()).unwrap();
+            assert!(matches!(report.root.actor, Evidence::Unknown { .. }));
+            assert!(matches!(
+                report.actors[0].provider_thread,
+                Evidence::Unknown { .. }
+            ));
+            assert!(matches!(
+                report.root.provider_thread,
+                Evidence::Observed { .. }
+            ));
+        }
     }
 }
