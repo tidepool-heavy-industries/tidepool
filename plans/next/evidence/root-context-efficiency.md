@@ -51,3 +51,22 @@ Current priorities:
 Preserve user-owned restart and external Codex-session boundaries. A partial run
 that exposes a harness defect is useful evidence; addressing the defect remains
 an outstanding obligation, not a successful product acceptance.
+
+## Firsthand progress-setup discovery friction
+
+Service reported no root escalation handle in its inherited context. Root added a
+watched progress channel to its continuation (decisions in d59126b8). Setup exposed
+another concrete documentation gap: `:doc watch` describes
+`requestWithProgress actor options` but omits construction of `options`.
+`:info RequestOptions` displayed a data constructor that is not exported for term
+use; attempting it failed locally before any request was submitted. Compiler hint
+then led to `:type requestOptions`, and the exported smart constructor worked.
+Retained consumer: queueServiceContinuation, serviceContinuation/serviceProgress,
+serviceProgressReady. Avoidable work was constructor inspection plus one rejected
+input and an extra signature lookup, not a measured token estimate.
+
+Proposed owning fix: show a complete `requestWithProgress` example using
+`requestOptions label input` in the shared guide / focused watch docs, and include
+watched progress as an explicit lead-assignment option when nonterminal findings
+matter. Do not expose the private constructor merely to match misleading discovery.
+Review alongside usage lead guidance changes to avoid overlapping edits.
