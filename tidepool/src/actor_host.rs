@@ -10,8 +10,11 @@ mod custody_tests;
 mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
+// Scaffold: deployment wiring follows in the bounded socket consumer branch.
 #[cfg(test)]
 mod research_policy_tests;
+#[allow(dead_code)]
+mod socket_directory;
 #[cfg(test)]
 mod test_campaign;
 
