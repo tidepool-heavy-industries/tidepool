@@ -433,57 +433,49 @@ fn journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix() {
     );
 }
 
-/// A failed persist must roll back the in-memory binding.
-///
-/// Without rollback, memory holds a binding disk does not. The isolation
-/// invariant is enforced from THIS table, so a restart would read the unbound
-/// disk state and let a SECOND agent bind the same worktree — two writers in one
-/// tree, which is the exact condition the coupling exists to make
-/// unconstructible.
+/// A failed binding write fences the owner even after permissions recover.
 #[test]
-fn binding_failed_bind_persist_rolls_back_in_memory_state() {
+fn binding_failed_bind_persist_requires_reopen() {
     let base = tempfile::TempDir::new().expect("tempdir");
     let root = base.path().join("bindings");
     let mut table = BindingTable::open(&root).expect("open bindings");
 
     make_read_only(&root);
-    let worktree = WorktreeId::from_raw("wt-rollback");
+    let worktree = WorktreeId::from_raw("wt-uncertain");
     let agent = AgentRef::from_raw("agent-a");
     let result = table.bind(&worktree, &agent, 1000);
     make_writable(&root);
 
     match result {
         Err(WorktreeError::StorageFailure { .. }) => {
-            assert!(
-                table.current(&worktree).is_none(),
-                "a failed persist must leave NO in-memory binding — memory and disk \
-                 disagreeing here is how a second agent gets to bind after restart"
-            );
-            // And the table is still usable: the rollback left no wreckage.
+            assert!(table.current(&worktree).is_none());
+            assert!(table.active_for_agent(&agent).is_none());
+            assert!(table.bind(&worktree, &agent, 2000).is_err());
+            drop(table);
+            // Chmod stopped publication before rename; authoritative disk has no row.
+            let mut table = BindingTable::open(&root).expect("reopen after fault clears");
             table
                 .bind(&worktree, &agent, 2000)
-                .expect("bind succeeds once the write can land");
+                .expect("fresh bind after reconciliation");
             assert_eq!(table.current(&worktree).expect("bound").agent(), &agent);
         }
         Ok(_) => eprintln!(
-            "SKIPPED: binding_failed_bind_persist_rolls_back_in_memory_state — the write \
+            "SKIPPED: binding_failed_bind_persist_requires_reopen — the write \
              succeeded despite chmod 0o555, so permission bits are not enforced here \
-             (likely running as root); the rollback path cannot be exercised."
+             (likely running as root); the permission-failure path cannot be exercised."
         ),
         other => panic!("expected StorageFailure, got {other:?}"),
     }
 }
 
-/// The mirror of the above: a failed `settle` persist must restore the previous
-/// state, or memory believes the worktree is rebindable while disk still says
-/// `Active`.
+/// Failed settlement denies custody until reopen confirms retained Active disk state.
 #[test]
-fn binding_failed_settle_persist_rolls_back_in_memory_state() {
+fn binding_failed_settle_persist_requires_reopen() {
     let base = tempfile::TempDir::new().expect("tempdir");
     let root = base.path().join("bindings");
     let mut table = BindingTable::open(&root).expect("open bindings");
 
-    let worktree = WorktreeId::from_raw("wt-settle-rollback");
+    let worktree = WorktreeId::from_raw("wt-settle-uncertain");
     let agent = AgentRef::from_raw("agent-a");
     let lease = table.bind(&worktree, &agent, 1000).expect("initial bind");
 
@@ -493,15 +485,24 @@ fn binding_failed_settle_persist_rolls_back_in_memory_state() {
 
     match result {
         Err(WorktreeError::StorageFailure { .. }) => {
-            let current = table
-                .current(&worktree)
-                .expect("a failed settle must leave the binding ACTIVE in memory");
-            assert_eq!(current.agent(), &agent);
+            assert!(table.current(&worktree).is_none());
+            assert!(table.active_for_agent(&agent).is_none());
+            assert!(table.bind(&worktree, &agent, 2000).is_err());
+            drop(table);
+            let mut table = BindingTable::open(&root).expect("reopen retained disk state");
+            assert_eq!(
+                table.current(&worktree).expect("retained Active").agent(),
+                &agent
+            );
+            assert!(matches!(
+                table.bind(&worktree, &agent, 2000),
+                Err(WorktreeError::WorktreeBusy { .. })
+            ));
         }
         Ok(()) => eprintln!(
-            "SKIPPED: binding_failed_settle_persist_rolls_back_in_memory_state — the write \
+            "SKIPPED: binding_failed_settle_persist_requires_reopen — the write \
              succeeded despite chmod 0o555, so permission bits are not enforced here \
-             (likely running as root); the rollback path cannot be exercised."
+             (likely running as root); the permission-failure path cannot be exercised."
         ),
         other => panic!("expected StorageFailure, got {other:?}"),
     }
