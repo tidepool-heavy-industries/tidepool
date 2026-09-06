@@ -1,6 +1,6 @@
 //! Compare retained memory for identical compiled workloads spread across one
-//! machine or 32 machines. Each arm compiles 512 fragments. SystemMemoryProvider
-//! retains finalized allocations on drop; RSS and VSZ deltas measure process
+//! machine or 32 machines. Each arm compiles 512 fragments. Module destruction
+//! releases finalized allocations; RSS and VSZ deltas measure process
 //! footprint, including allocator effects, rather than exact JIT allocation size.
 
 use tidepool_codegen::emit::ExternalEnv;

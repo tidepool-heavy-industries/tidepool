@@ -99,7 +99,7 @@ pub struct HeapStats {
     pub gc_count: u64,
     /// Number of fragments ever compiled into this machine's JITModule
     /// ([`JitEffectMachine::add_function`]) — MONOTONIC, never reclaimed
-    /// (cranelift leaks finalized code by design), so this is the
+    /// during the live machine; module destruction releases it, so this is the
     /// bounded-lifetime rotation ceiling's primary signal.
     pub fragments: u64,
 }
@@ -399,7 +399,7 @@ pub struct JitEffectMachine {
     /// every quiescent point.
     resources: ResourceLedger,
     /// Monotonic count of fragments compiled into the JITModule (its
-    /// executable memory is never reclaimed) — [`HeapStats::fragments`].
+    /// executable memory is retained until machine destruction) — [`HeapStats::fragments`].
     fragments_added: u64,
 }
 

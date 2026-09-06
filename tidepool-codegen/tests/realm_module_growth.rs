@@ -1,6 +1,5 @@
 //! Measure compiled-function growth within one machine and across dropped machines.
-//! Cranelift's SystemMemoryProvider retains finalized allocations on drop;
-//! production does not call JITModule::free_memory. RSS is a noisy process-level
+//! Module destruction releases finalized allocations. RSS is a noisy process-level
 //! proxy because JITModule does not expose allocated-byte counters.
 
 use tidepool_codegen::emit::ExternalEnv;
@@ -113,9 +112,8 @@ fn realm_module_growth_single_machine() {
 /// Cranelift's code memory back, or does RSS keep climbing / never return
 /// toward baseline?
 ///
-/// A NO-GO finding here (RSS never comes back down) is a successful result
-/// for this test, not a failure — it would corroborate the static finding
-/// that `SystemMemoryProvider` retains finalized allocations on drop.
+/// RSS is report-only: the system allocator can retain freed pages. Module
+/// cleanup is checked directly against executable mappings in pipeline tests.
 #[test]
 #[serial]
 fn realm_module_growth_create_drop_32_machines() {

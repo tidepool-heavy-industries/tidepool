@@ -81,10 +81,15 @@ data references; libcalls also use long-range addressing. Symbol visibility
 does not promise physical proximity. New compilation rounds leave existing
 code and data addresses stable without requiring a fixed contiguous arena.
 
-Compiled code still accumulates, and Cranelift retains finalized allocations
-on module drop. Removing binding roots does not reclaim code. Safe code
-reclamation requires tracking live closures and continuations; machine
-replacement is not transparent recovery for pending typed requests.
+`OwnedJitModule` releases all code/data allocations on destruction, including
+partially compiled modules. Raw pointers may be used only while that owner is
+alive. A machine runs synchronously under its owner and tears down its rooted
+continuations and heap before module destruction. Actor/scope retirement leaves
+the shared machine and its code alive for surviving captures and recipients.
+
+Code still accumulates within a live machine. Removing binding roots does not
+reclaim code. Live code reclamation requires tracking closures and continuations;
+machine replacement is not transparent recovery for pending typed requests.
 
 ## Diagnostics
 

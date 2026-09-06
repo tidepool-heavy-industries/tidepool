@@ -5,11 +5,48 @@ use cranelift_codegen::Context;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashSet;
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::debug::LambdaRegistry;
 use crate::stack_map::{RawStackMap, RawStackMapEntry, StackMapRegistry};
+
+/// Owns executable allocations for exactly the module's lifetime. Raw code and
+/// data pointers obtained through this module must not be used after its drop.
+/// Cranelift otherwise deliberately leaks finalized allocations on drop.
+pub struct OwnedJitModule(ManuallyDrop<JITModule>);
+
+impl OwnedJitModule {
+    fn new(module: JITModule) -> Self {
+        Self(ManuallyDrop::new(module))
+    }
+}
+
+impl Deref for OwnedJitModule {
+    type Target = JITModule;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for OwnedJitModule {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for OwnedJitModule {
+    fn drop(&mut self) {
+        // SAFETY: drop has exclusive ownership, so no safe module borrow or
+        // synchronous JIT invocation remains. Escaped raw pointers carry this
+        // owner's lifetime contract. Taking the module exactly once prevents
+        // its default leaking drop from bypassing allocation cleanup.
+        unsafe { ManuallyDrop::take(&mut self.0).free_memory() };
+    }
+}
 
 /// Errors from the Cranelift compilation pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -42,7 +79,7 @@ pub struct CodegenPipeline {
     /// that need direct access to Cranelift's `JITModule`. Most users should prefer
     /// the safe wrapper methods on `CodegenPipeline` (e.g., `declare_function`)
     /// instead of calling into `module` directly.
-    pub module: JITModule,
+    pub module: OwnedJitModule,
     /// Target ISA (needed for Context::compile).
     pub isa: Arc<dyn TargetIsa>,
     /// Stack map registry populated during compilation.
@@ -138,7 +175,7 @@ impl CodegenPipeline {
 
         // The default SystemMemoryProvider grows on demand without a fixed
         // contiguous reservation. Finalized allocations keep stable addresses.
-        let module = JITModule::new(jit_builder);
+        let module = OwnedJitModule::new(JITModule::new(jit_builder));
 
         Ok(Self {
             module,
@@ -279,7 +316,8 @@ impl CodegenPipeline {
         Ok(())
     }
 
-    /// Get the callable function pointer after finalization.
+    /// Get the callable function pointer after finalization. The pointer remains
+    /// valid only while this pipeline's module owner is alive.
     pub fn get_function_ptr(&self, func_id: FuncId) -> *const u8 {
         self.module.get_finalized_function(func_id)
     }
@@ -326,6 +364,40 @@ mod tests {
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use std::collections::HashMap;
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn address_is_executable(address: usize) -> bool {
+        std::fs::read_to_string("/proc/self/maps")
+            .unwrap()
+            .lines()
+            .any(|line| {
+                let mut fields = line.split_whitespace();
+                let (start, end) = fields.next().unwrap().split_once('-').unwrap();
+                let start = usize::from_str_radix(start, 16).unwrap();
+                let end = usize::from_str_radix(end, 16).unwrap();
+                (start..end).contains(&address) && fields.next().unwrap().contains('x')
+            })
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn module_drop_releases_code_after_success_and_definition_failure() {
+        for fail in [false, true] {
+            let address = {
+                let mut pipeline = CodegenPipeline::new(&[]).unwrap();
+                let function = define_trivial_lambda(&mut pipeline, "owned_code", 42);
+                pipeline.finalize().unwrap();
+                let address = pipeline.get_function_ptr(function) as usize;
+                assert!(address_is_executable(address));
+                if fail {
+                    let mut ctx = pipeline.module.make_context();
+                    assert!(pipeline.define_function(function, &mut ctx).is_err());
+                }
+                address
+            };
+            assert!(!address_is_executable(address));
+        }
+    }
+
     #[test]
     fn incremental_definitions_grow_past_256_mib() {
         let mut pipeline = CodegenPipeline::new(&[]).unwrap();
@@ -354,8 +426,7 @@ mod tests {
                 assert_eq!(call(0), 42);
             }
         }
-        // SAFETY: no compiled function is executing or called after this point.
-        unsafe { pipeline.module.free_memory() };
+        drop(pipeline);
     }
 
     #[test]
@@ -375,7 +446,7 @@ mod tests {
             jit.memory_provider(Box::new(
                 cranelift_jit::ArenaMemoryProvider::new_with_size(4 << 30).unwrap(),
             ));
-            pipeline.module = JITModule::new(jit);
+            pipeline.module = OwnedJitModule::new(JITModule::new(jit));
             pipeline
         };
         let mut definitions = make_pipeline(&[]);
@@ -439,8 +510,6 @@ mod tests {
             assert_eq!(call(0), 103);
             let call_leaf: unsafe extern "C" fn(usize) -> i64 = std::mem::transmute(leaf_ptr);
             assert_eq!(call_leaf(0), 42);
-            pipeline.module.free_memory();
-            definitions.module.free_memory();
         }
     }
 

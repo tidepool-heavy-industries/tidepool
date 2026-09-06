@@ -6,22 +6,17 @@ compilation can grow beyond a fixed arena while existing addresses remain valid.
 Tests exercise 288 MiB of definitions and references spanning more than 2 GiB.
 
 This removes the fixed allocation ceiling, not lifetime memory growth.
-Production still retains compiled functions and literal data; Cranelift also
-retains finalized allocations when its module is dropped. Binding-root expiry
+Production still retains compiled functions and literal data within each live
+machine. The owning module releases its allocations on destruction. Binding-root expiry
 does not reclaim old-space storage or executable code.
 
 ## Owning work
 
-1. Make whole-module destruction release executable memory. Audit every escaping
-   code/data pointer and establish its owner's lifetime before calling
-   `JITModule::free_memory`. Cover partial compilation failures, normal shutdown,
-   and destruction with parked continuations and retained closures. A replacement
-   allocator or independent allocation registry is unnecessary.
-2. Design reclamation within a live machine around the actual reference graph:
+1. Design reclamation within a live machine around the actual reference graph:
    closures, thunks, literal data, compiled references, stack-map/debug metadata,
    and parked continuations. Retiring a lexical scope alone does not prove its
    code is unreachable. Preserve cross-scope captures and immutable fork tips.
-3. Measure repeated compilation through the existing fragment/function/block
+2. Measure repeated compilation through the existing fragment/function/block
    counters. Reuse must respect resolved binding identities and compiler settings;
    identical source text alone is not a sound key. Extend compilation ownership
    rather than introducing a frontend cache.
