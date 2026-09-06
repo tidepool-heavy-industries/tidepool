@@ -2121,3 +2121,76 @@ materially more effective—and happy—to work in for days.
 - a second Haskell cell language or JSON workflow AST;
 - introducing a second lifecycle, cache, log, or resource registry beside its
   existing owner.
+
+## Numeric-substrate tree: live observations (2026-09-06, ongoing)
+
+Campaign contract: [floating-point repair](../floating-point-repair.md).
+This is a partial experience report, not a completed campaign or performance
+benchmark. Root retained `experienceRoster`: 21 roster entries including root,
+idle retained specialists and a failed launch; **not 21 concurrently working
+providers**. Final cleanup and full numeric acceptance have not happened.
+
+### What has earned its cost
+
+- Shared scaffold `8a84c72c` gave three leads a compiled native-GHC observation
+  fixture and explicit per-file/section ownership. They independently forked
+  implementation and fresh-review waves; a fourth ingress lane was added at
+  `729a0646` without touching active numeric or forcing sections.
+- Independent reviewers caught constant-foldable conversion/rounding tests and
+  hosted-test setup/cleanup/task-join gaps (validation delivery `1919b045`).
+  Those are attributed reviewer/implementer reports, not root reruns of each
+  review. Root inspected the delivered diffs.
+- Independent acceptance materially changed the diagnosis: classifiers repaired
+  at `7bf65e4b`, but rebuilt native/resident acceptance at `10b26384` exposed
+  finite Prelude Show failing with `(Array.!): undefined array element`.
+  Arithmetic controls passed. Numeric lead now owns a further repair wave;
+  passing primitive tests did not prematurely close the product obligation.
+- Retention was useful: validation reused three domain workers to incorporate
+  and check the exact merged baseline; numeric lead could start the next repair
+  from accumulated lowering/backend context. No need to retell entire histories.
+- Exact candidate/accepted/integrated/tested distinctions worked: root checked
+  `043c5e97` classifiers (1 passed), ingress lead merged that parent and checked
+  four tests at `f8d04cb9`, then root fast-forwarded to that exact revision.
+
+### Concrete friction and owning follow-ups
+
+- **Active-update transport failed.** Root's updates on original requests 1 and
+  3 returned handles, but polling gave `UpdateNotPresented` with
+  `connecting update proxy: app-server closed the connection before responding
+  to initialize`. Backend numeric worker update similarly failed per TL report.
+  Therefore submission cannot imply delivery. Follow-up work used explicit new
+  queued assignments after original settlement, not a claim of active steering.
+  Owner: `tidepool-agent/src/backend/codex/` update proxy. Reproduce initialize/
+  disconnect lifecycle with an active and a watch-waiting actor; inspect exact
+  failure states before changing transport or retry policy.
+- **One fork failed before provider execution.** Root `:status!` observed the
+  exact-ffi-lowering child terminal with `WorktreeUnauthorized` for its allocated
+  worktree. Numeric TL retained failure evidence and launched a replacement,
+  which delivered. Owner: actor/worktree admission and custody. Trace grant and
+  launch ordering; successful replacement does not explain or fix first failure.
+- **Delivery status schema was too coarse.** Task-local `CheckStatus` has Passed,
+  CompiledOnly, Blocked, NotRun but no Failed or ExpectedFailure. One lead marked
+  a deliberately red baseline assertion Passed; root requested correction and
+  the lead supplied it. Future task-local contracts should separate observed
+  execution outcome from expected outcome, plus tested revision. Do not hide
+  ordinary assertion failures under Blocked. No new runtime effect is needed.
+- **Root check initially rejected a stale inherited extractor.** The owning
+  resolver refused the command; root cleared explicit extractor overrides and
+  let the supported script rebuild its matched worker/frontend, then reran
+  successfully. Keep freshness enforcement. Root rebuild took about three
+  minutes for its focused target; this is not proof of an overall speedup or
+  optimal build-cache use. Avoid mutating source during an in-flight build.
+- **Section ownership reduced but did not eliminate Git conflicts.** Independent
+  tests appended to one differential test file. Validation lead preserved both
+  complete blocks during merge and had the retained worker inspect and execute
+  both. A shared test file needs an integration owner even with disjoint tests.
+
+### Evidence still missing
+
+No controlled serial-versus-tree comparison, complete normalized provider
+request/cache analysis, or total cost accounting was performed. Provider usage
+snapshots observed during lifecycle diagnosis were partial; neither inherited
+context nor roster size establishes cache efficiency. Final repair acceptance,
+review convergence, actor retirement/resource cleanup, and any obsolete numeric
+formatter removal remain open. Preserve private full logs through their existing
+handles; do not copy provider transcripts into this plan.
