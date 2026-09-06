@@ -50,3 +50,21 @@ full tidepool lib test target compiled, private daemon teardown observed.
 Evidence target/http-seal-review/tests.log. These passing tests do not cover the
 already-Draining defect. Formatting and diff checks passed. No production edits,
 running host replacement, or external Codex steering performed by reviewer.
+
+## Repair acceptance
+
+Exact0b5266f6c65f41bf95d1acd236147471ac9ace74 resolves the required source repair.
+The same watch write lock checks phase and changes Serving/Quiescing to Quiescing;
+Draining returns a typed AlreadyDraining future before cloning/calling endpoint.
+This is atomic relative to raw drain publication. Documentation now explicitly
+requires the host to serialize later drain and does not claim a completion-access
+reservation. The counted failing-endpoint regression covers before service startup
+and after real Unix session attachment, rejects without a seal call, leaves
+completion admission closed and awaits successful HTTP drain. No private proof
+constructor or actor implementation is used. Prior review's native/resident and
+production host integration limits remain unchanged.
+Independent repaired-revision check selected only the new regression (one test,
+two startup-order cases); passed. Full lib test target compiled, private daemon
+teardown observed. Evidence target/http-seal-review/repaired-tests.log. Formatting
+and diff checks passed. Earlier two tests were not repeated independently at this
+revision; parent is running the three-test group.
