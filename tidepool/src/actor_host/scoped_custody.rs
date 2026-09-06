@@ -39,6 +39,21 @@ enum ScopedSpawnError {
     PreSpawn(ServiceScopeError),
 }
 
+/// Addressable slot reserved by the existing host launch row before spawn.
+/// Neither slot nor spawn closure owns a back-reference to the retention owner.
+enum ScopedProcessSlot {
+    Reserved,
+    Spawning,
+    NotSpawned(ServiceScopeError),
+    Owned(ServiceScope),
+}
+
+/// The host lifecycle row is the anchor; asynchronous completion is only notice.
+struct ScopedHostRetention {
+    custody: Arc<ActorWorkspaceCustody>,
+    slot: Arc<parking_lot::Mutex<ScopedProcessSlot>>,
+}
+
 struct ScopedResources {
     custody: Arc<ActorWorkspaceCustody>,
     scope: ServiceScope,
