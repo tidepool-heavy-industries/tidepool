@@ -78,6 +78,8 @@ pub struct LocalResidentInstallation {
 
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
+    NotificationSend(Arc<crate::NotificationSend>),
+    NotificationPoll(Arc<crate::NotificationPoll>),
     PolicyInstalled(LocalResidentInstallation),
     /// A resident program opened another typed session in an already-running
     /// interactive application. The message is an ordinary User activation;

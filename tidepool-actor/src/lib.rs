@@ -33,6 +33,7 @@ mod lineage;
 mod local_actor;
 mod mailbox;
 mod mount;
+mod notification;
 mod profile;
 mod prompt_catalog;
 mod request;
@@ -79,6 +80,9 @@ pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports,
+};
+pub use notification::{
+    NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
 };
 pub use profile::ActorEffectProfile;
 pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerprint;

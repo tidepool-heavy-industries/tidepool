@@ -1330,6 +1330,14 @@ async fn run_interactive_applications(
                             });
                         }
                     }
+                    LocalResidentDeployment::NotificationSend(command) => {
+                        // No correlated notification controller is installed yet.
+                        // Reject before publication rather than route through legacy push.
+                        command.rejected(tidepool_actor::NotificationError::Unavailable);
+                    }
+                    LocalResidentDeployment::NotificationPoll(command) => {
+                        command.observed(Err(tidepool_actor::NotificationError::Unavailable));
+                    }
                     LocalResidentDeployment::RequestUpdate { delivery } => {
                         let target = delivery.target();
                         let Some(presentation) = delivery.begin() else { continue; };
