@@ -338,7 +338,7 @@ enum LazyContainer {
     Array,
 }
 
-fn assert_lazy_container(container: LazyContainer) {
+fn lazy_container_expr(container: LazyContainer) -> CoreExpr {
     use tidepool_repr::{Alt, AltCon, DataConId, PrimOpKind};
     let mut b = TreeBuilder::new();
     let poison = b.push(CoreFrame::Var(VarId(SENTINEL_USERERROR)));
@@ -373,7 +373,11 @@ fn assert_lazy_container(container: LazyContainer) {
         rhs: poison,
         body,
     });
-    let expr = b.build();
+    b.build()
+}
+
+fn assert_lazy_container(container: LazyContainer) {
+    let expr = lazy_container_expr(container);
     let table = tidepool_testing::proptest::build_table_for_expr(&expr);
     let env = tidepool_eval::env_from_datacon_table(&table);
     let expected = tidepool_eval::eval(&expr, &env, &mut tidepool_eval::VecHeap::new());
@@ -397,5 +401,53 @@ fn strict_demand_constructor_whnf_preserves_lazy_field() {
 }
 #[test]
 fn strict_demand_array_creation_preserves_lazy_element() {
-    assert_lazy_container(LazyContainer::Array);
+    // Native contract: fixtures/strict_demand/ArrayLaziness.hs. The reference
+    // evaluator intentionally does not implement boxed-array primops; its
+    // blanket argument forcing is not an oracle for this lifted initializer.
+    let expr = lazy_container_expr(LazyContainer::Array);
+    let table = tidepool_testing::proptest::build_table_for_expr(&expr);
+    let got = tidepool_codegen::jit_machine::JitEffectMachine::compile(&expr, &table, 1 << 20)
+        .unwrap()
+        .run_pure();
+    assert!(
+        matches!(got, Ok(tidepool_eval::Value::Lit(Literal::LitInt(42)))),
+        "JIT array creation must not demand its lifted initializer: {got:?}"
+    );
+}
+
+#[test]
+fn strict_demand_selected_array_element_rejects_lazy_poison() {
+    // Companion to the native fixture's selected branch: allocation is lazy,
+    // but selecting and demanding the initializer must preserve its error.
+    use tidepool_codegen::{
+        host_fns::RuntimeError,
+        jit_machine::{JitEffectMachine, JitError},
+        yield_type::YieldError,
+    };
+    let mut b = TreeBuilder::new();
+    let poison = b.push(CoreFrame::Var(VarId(SENTINEL_USERERROR)));
+    let one = b.push(CoreFrame::Lit(Literal::LitInt(1)));
+    let zero = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let array = b.push(CoreFrame::PrimOp {
+        op: tidepool_repr::PrimOpKind::NewSmallArray,
+        args: vec![one, poison],
+    });
+    b.push(CoreFrame::PrimOp {
+        op: tidepool_repr::PrimOpKind::ReadSmallArray,
+        args: vec![array, zero],
+    });
+    let expr = b.build();
+    let table = tidepool_testing::proptest::build_table_for_expr(&expr);
+    let got = JitEffectMachine::compile(&expr, &table, 1 << 20)
+        .unwrap()
+        .run_pure();
+    assert!(
+        matches!(
+            got,
+            Err(JitError::Yield(YieldError::Runtime(
+                RuntimeError::UserError
+            )))
+        ),
+        "demanding selected initializer must preserve UserError: {got:?}"
+    );
 }
