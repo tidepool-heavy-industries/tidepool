@@ -86,7 +86,10 @@ fn fault_child() {
             Err(InboxError::Poisoned)
         ));
         disable();
-        assert!(fs::read_to_string(&cursor).unwrap().contains("InFlight"));
+        assert_eq!(
+            read_cursor::<String>(&cursor).unwrap().0.receipts[&row.sequence].phase,
+            DeliveryPhase::InFlight
+        );
         drop(inbox);
         let reopened = open().unwrap();
         assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Unconfirmed);
