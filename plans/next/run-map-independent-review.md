@@ -65,3 +65,18 @@ while selected test execution took 0.008s. This directly illustrates setup overh
 not proof of a particular optimization's savings. Narrow build/setup reuse merits
 measurement without weakening checkout isolation or matched-toolchain policy.
 The direct retained request/watch repair loop worked without API rediscovery.
+
+## Window/metadata follow-up review
+
+New candidate 78f7b365a76bf0186cee97886b83f0d601ca4fcf incorporated by fast-forward
+on reviewer branch. Reviewed owning status decoder and real TypedActorEvent /
+WatchNotification producers: UTC timestamp is only claimed where recorded;
+request/watch projections omit assignment prose. Status decoder version gate is
+reused, with unsupported-version regression. Declared graph/usage holes remain.
+
+Requested repair: status/root binding conflict became Unknown at report.root but
+could leave the known root actor node with an Observed per-actor thread. Require
+conflict propagation to that node with typed internal evidence, not reason-string
+matching. Distinguish absence from contradiction. Waiting on retained
+windowRepair/windowRepairReady; no acceptance yet. Final focused verification will
+run against the repaired exact revision.
