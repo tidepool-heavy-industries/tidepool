@@ -8,6 +8,8 @@ archive).
 
 ## Active work
 
+- [Small typed agents](small-agents.md): parent-pane, shared-worktree workers
+  with selected typed context and reusable Haskell-defined tool interfaces.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): executable-memory
   reclamation and honest recovery after removing the fixed JIT arena ceiling.
 - [Self-writing Haskell actors](actor-model/README.md): Rust-owned actor
