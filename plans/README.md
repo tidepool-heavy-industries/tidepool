@@ -9,9 +9,6 @@ charter / glossary and the plan file is deleted (git is the archive).
 
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): executable-memory
   reclamation and honest recovery after removing the fixed JIT arena ceiling.
-- [Active requirement updates](actor-model/active-requirement-updates.md): next
-  interaction slice after quiet observations; presentation during an existing
-  assignment, distinct from queued work and task-specific incorporation evidence.
 - [Self-writing Haskell actors](actor-model/README.md): Rust-owned actor
   mechanics around typed Haskell programs with resident model contexts and
   resident GHCi-style environments; live function-valued messages, caller-

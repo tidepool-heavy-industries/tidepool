@@ -162,6 +162,10 @@ module Tidepool.Actors.Shoal
   , RequestLabelError (..)
   , requestLabel
   , Replies
+  , RequestUpdate
+  , RequestUpdateState (..)
+  , updateRequest
+  , pollRequestUpdate
   , ReplyError (..)
   , ResponseFailure (..)
   , ResponseResult (..)

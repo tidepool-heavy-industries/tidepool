@@ -1,3 +1,8 @@
+mod updates;
+pub use updates::{
+    RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation, RequestUpdateState,
+};
+
 use std::collections::HashMap;
 
 use parking_lot::Mutex;
@@ -129,6 +134,7 @@ pub enum ReplyObservation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyError {
+    UpdatePending,
     Stale,
     AlreadySettled,
     Unauthorized,
@@ -212,6 +218,7 @@ enum OwnerState {
 }
 
 struct RequestRecord {
+    updates: Vec<updates::UpdateRecord>,
     owner: ActorRef,
     target: ActorRef,
     label: String,
@@ -696,6 +703,7 @@ impl RequestRegistry {
         state.requests.insert(
             id,
             RequestRecord {
+                updates: Vec::new(),
                 owner,
                 target,
                 label,
@@ -827,6 +835,13 @@ impl RequestRegistry {
         authorize_target(record, target)?;
         match record.target_state {
             TargetState::Presented => {
+                if record
+                    .updates
+                    .iter()
+                    .any(updates::UpdateRecord::fences_settlement)
+                {
+                    return Err(ReplyError::UpdatePending);
+                }
                 record.target_state = TargetState::Settling;
                 record.progress = None;
                 Ok(())
@@ -1031,6 +1046,16 @@ impl RequestRegistry {
             TargetState::Closed => return Err(ReplyError::AlreadySettled),
             _ => return Err(ReplyError::Stale),
         };
+        // Closing this request would allow the same conversation to accept its
+        // next assignment while old input can still arrive. Cancellation may be
+        // requested immediately; acknowledgement waits for presentation custody.
+        if record
+            .updates
+            .iter()
+            .any(updates::UpdateRecord::fences_settlement)
+        {
+            return Err(ReplyError::UpdatePending);
+        }
         record.target_state = TargetState::AcknowledgingCancellation(reason);
         record.progress = None;
         Ok(reason)

@@ -18,6 +18,10 @@ module Tidepool.Agent.Reply.Internal
   , ProgressState (..)
   , reportRequestProgress
   , pollProgress
+  , RequestUpdate
+  , RequestUpdateState (..)
+  , updateRequest
+  , pollRequestUpdate
   , ReplyError (..)
   , ResponseFailure (..)
   , ResponseResult (..)
@@ -116,11 +120,34 @@ data ProgressState progress
   | ProgressRejected ReplyError
   deriving (Show, Eq)
 
+-- | An observation of presentation for one exact request, not a new assignment.
+data RequestUpdate = RequestUpdate RequestId Int
+  deriving (Show, Eq)
+
+data RequestUpdateState
+  = UpdateQueued
+  | UpdatePresented
+  | UpdateTooLate
+  | UpdateUnconfirmed Text
+  | UpdateNotPresented Text
+  deriving (Show, Eq)
+
+updateRequest :: Member Replies effs => Response result -> Text -> Eff effs (Either ReplyError RequestUpdate)
+updateRequest response message = do
+  let request@(RequestId raw) = responseRequestId response
+  result <- send (UpdateRequestWith raw message)
+  pure (RequestUpdate request <$> result)
+
+pollRequestUpdate :: Member Replies effs => RequestUpdate -> Eff effs (Either ReplyError RequestUpdateState)
+pollRequestUpdate (RequestUpdate (RequestId request) sequence) =
+  send (ObserveRequestUpdateWith request sequence)
+
 data ReplyError
   = ReplyStale
   | ReplyAlreadySettled
   | ReplyUnauthorized
   | ReplyWrongIncarnation
+  | ReplyUpdatePending
   | ReplySettlementCancelled
   deriving (Show, Eq)
 
@@ -224,6 +251,8 @@ data Replies a where
   AcknowledgeCancellationWith :: Int -> Replies Void
   PublishProgressWith :: Int -> progress -> Replies (Either ReplyError ())
   ObserveProgressWith :: Int -> Replies (ProgressState progress)
+  UpdateRequestWith :: Int -> Text -> Replies (Either ReplyError Int)
+  ObserveRequestUpdateWith :: Int -> Int -> Replies (Either ReplyError RequestUpdateState)
 
 reportRequestProgress
   :: Member Replies effs

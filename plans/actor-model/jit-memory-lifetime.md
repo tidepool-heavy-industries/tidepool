@@ -35,3 +35,19 @@ failed; their recovery has not been established. Do not replay assignments or
 effects to manufacture settlement, or claim `:recovery` restored live values.
 Recovery must report which exact requests, bindings, and handles survive or are
 lost through the existing owners. A host restart is a separate operational action.
+
+## Structural hardening opportunities
+
+`OwnedJitModule` makes allocation cleanup follow module ownership on success,
+partial compilation failure, and machine teardown. Actor stop cannot trigger
+that cleanup because actors share machine ownership rather than owning code.
+The survivor regression stops a producer and invokes its retained closures and
+watch snapshots from a different actor.
+
+Raw code pointers and mutable module access remain low-level escape hatches.
+A stronger boundary would restrict replacing the underlying module and carry
+module provenance/lifetime with callable entries, checking or borrowing that
+owner at every invocation. Do that at the pipeline/machine entry points, not
+with scattered caller checks. Any live-machine collector must derive reachability
+from the same roots, compiled references, and continuations used for execution;
+a separate actor-liveness heuristic cannot safely decide what code to free.

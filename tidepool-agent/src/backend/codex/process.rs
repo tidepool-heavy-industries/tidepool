@@ -365,6 +365,41 @@ impl Session<RawAsyncClient> {
         let raw = RawAsyncClient::new(child).map_err(SessionError::Spawn)?;
         let mut session = Self::over(raw);
 
+        session.initialize(capabilities).await?;
+        Ok(session)
+    }
+
+    /// Connect to the existing interactive daemon through its native proxy.
+    /// Closing this child closes only the connection, never the daemon/thread.
+    pub(super) async fn connect_proxy(executable: &Path, cwd: &Path) -> Result<Self, SessionError> {
+        let child = tokio::process::Command::new(executable)
+            .args(["app-server", "proxy"])
+            .current_dir(cwd)
+            .env_clear()
+            .envs(child_env_vars())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| SessionError::Spawn(codex_codes::Error::Io(error)))?;
+        let raw = RawAsyncClient::new(child).map_err(SessionError::Spawn)?;
+        let mut session = Self::over(raw);
+        session
+            .initialize(InitializeCapabilities {
+                experimental_api: Some(true),
+                ..Default::default()
+            })
+            .await?;
+        Ok(session)
+    }
+}
+
+impl<T: Transport> Session<T> {
+    async fn initialize(
+        &mut self,
+        capabilities: InitializeCapabilities,
+    ) -> Result<(), SessionError> {
         let init_params = InitializeParams {
             client_info: ClientInfo {
                 name: "tidepool-agent".to_string(),
@@ -373,11 +408,11 @@ impl Session<RawAsyncClient> {
             },
             capabilities: Some(capabilities),
         };
-        let _: InitializeResponse = session
+        let _: InitializeResponse = self
             .request(codex_codes::methods::INITIALIZE, &init_params)
             .await?;
-        session.notify(codex_codes::methods::INITIALIZED).await?;
-        Ok(session)
+        self.notify(codex_codes::methods::INITIALIZED).await?;
+        Ok(())
     }
 }
 

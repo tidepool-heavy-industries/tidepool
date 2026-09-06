@@ -63,6 +63,19 @@ impl InteractiveAgentInstallation {
     }
 }
 
+/// Delivery certainty is control flow: a failure before submission allows the
+/// assignment to continue; uncertainty after submission must keep its fence.
+#[derive(Debug, thiserror::Error)]
+pub enum UpdatePresentationError {
+    #[error("update was not submitted: {0}")]
+    NotSubmitted(AgentBackendError),
+    #[error("update presentation is unconfirmed: {0}")]
+    Unconfirmed(AgentBackendError),
+}
+
+pub type UpdatePresentationFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), UpdatePresentationError>> + Send + 'a>>;
+
 /// A boxed asynchronous operation at the backend-neutral boundary.
 pub type InteractiveFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, AgentBackendError>> + Send + 'a>>;
@@ -171,6 +184,25 @@ pub trait InteractiveAgentBackend: Send + Sync {
         thread: &'a QueueReadyThread,
         message: &'a str,
     ) -> InteractiveFuture<'a, ()>;
+
+    /// Present an update in the existing conversation at a safe model boundary,
+    /// waking it if idle. Success requires observed model-visible insertion with
+    /// the supplied correlation key, not merely acceptance into a queue.
+    fn present_update<'a>(
+        &'a self,
+        _cwd: &'a str,
+        _thread: &'a QueueReadyThread,
+        _key: &'a str,
+        _message: &'a str,
+    ) -> UpdatePresentationFuture<'a> {
+        Box::pin(async {
+            Err(UpdatePresentationError::NotSubmitted(
+                AgentBackendError::BackendUnavailable {
+                    detail: "this backend does not support confirmed active updates".into(),
+                },
+            ))
+        })
+    }
 
     /// Usage and provider turn health from one durable observation.
     /// `None` means unavailable, never measured zero or an idle process.

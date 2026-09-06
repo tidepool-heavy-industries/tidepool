@@ -56,6 +56,8 @@ pub(crate) enum RepliesReq {
     AcknowledgeCancellationWith(i64),
     PublishProgressWith(i64, Value),
     ObserveProgressWith(i64),
+    UpdateRequestWith(i64, String),
+    ObserveRequestUpdateWith(i64, i64),
 }
 
 #[derive(tidepool_bridge_derive::FromCore)]
@@ -183,6 +185,7 @@ pub(crate) fn reply_error_value(
     table: &DataConTable,
 ) -> Result<Value, BridgeError> {
     let name = match error {
+        ReplyError::UpdatePending => "ReplyUpdatePending",
         ReplyError::Stale => "ReplyStale",
         ReplyError::AlreadySettled => "ReplyAlreadySettled",
         ReplyError::Unauthorized => "ReplyUnauthorized",

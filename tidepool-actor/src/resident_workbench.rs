@@ -757,6 +757,15 @@ pub(crate) enum ResidentActorBoundary {
         value: RootCustody,
     },
     ProgressPoll(ResponsePoll),
+    RequestUpdate {
+        continuation: ResidentHole,
+        request: crate::RequestId,
+        message: String,
+    },
+    RequestUpdatePoll {
+        continuation: ResidentHole,
+        update: crate::RequestUpdateId,
+    },
     WatchProgressPoll {
         continuation: ResidentHole,
         watch: crate::WatchId,
@@ -849,6 +858,8 @@ impl ResidentActorBoundary {
             Self::ResponsePoll(_) => "pollResponse",
             Self::ProgressPublication { .. } => "reportProgress",
             Self::ProgressPoll(_) => "pollProgress",
+            Self::RequestUpdate { .. } => "updateRequest",
+            Self::RequestUpdatePoll { .. } => "pollRequestUpdate",
             Self::WatchProgressPoll { .. } => "pollWatch progress",
             Self::RequestCancellation(_) => "cancelRequest",
             Self::ResponseAbandonment(_) => "abandonResponse",
@@ -1034,6 +1045,8 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::AttemptReplyWith(..)) => "attemptReply",
             Self::Replies(RepliesReq::PublishProgressWith(..)) => "reportProgress",
             Self::Replies(RepliesReq::ObserveProgressWith(..)) => "pollProgress",
+            Self::Replies(RepliesReq::UpdateRequestWith(..)) => "updateRequest",
+            Self::Replies(RepliesReq::ObserveRequestUpdateWith(..)) => "pollRequestUpdate",
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
             Self::Replies(RepliesReq::CancelRequestWith(..)) => "cancelRequest",
@@ -2344,6 +2357,15 @@ where
                             continuation: hole, request: crate::request_effect::request_id(request_id)?,
                         }))
                     }
+                    ResidentRequest::Replies(RepliesReq::UpdateRequestWith(request, message)) => {
+                        Ok(ResidentActorBoundary::RequestUpdate { continuation: hole,
+                            request: crate::request_effect::request_id(request)?, message })
+                    }
+                    ResidentRequest::Replies(RepliesReq::ObserveRequestUpdateWith(request, sequence)) => {
+                        Ok(ResidentActorBoundary::RequestUpdatePoll { continuation: hole,
+                            update: crate::RequestUpdateId { request: crate::request_effect::request_id(request)?,
+                                sequence: u64::try_from(sequence).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid update sequence".into()))? } })
+                    }
                     ResidentRequest::Replies(RepliesReq::CancelRequestWith(request_id)) => Ok(
                         ResidentActorBoundary::RequestCancellation(RequestCancellation {
                             continuation: hole,
@@ -3112,6 +3134,32 @@ where
                     observation,
                     session.data_con_table(),
                 )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_request_update<T: ToCore + Send + 'static>(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<T, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let answer = match outcome {
+                    Ok(value) => {
+                        let right =
+                            tidepool_bridge::get_resilient(table, "Right", 1).ok_or_else(|| {
+                                tidepool_bridge::BridgeError::UnknownDataConName("Right".into())
+                            })?;
+                        Value::Con(right, vec![value.to_value(table)?])
+                    }
+                    Err(error) => crate::request_effect::rejected_reply_value(error, table)?,
+                };
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

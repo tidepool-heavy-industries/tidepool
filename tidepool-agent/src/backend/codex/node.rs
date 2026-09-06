@@ -24,6 +24,8 @@ use crate::{
 };
 use tidepool_model::ProviderObservation;
 
+#[path = "active_update.rs"]
+mod active_update;
 #[path = "rollout_usage.rs"]
 mod rollout_usage;
 
@@ -267,6 +269,22 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
             &self.installation,
             Path::new(cwd),
             thread,
+            message,
+        ))
+    }
+
+    fn present_update<'a>(
+        &'a self,
+        cwd: &'a str,
+        thread: &'a QueueReadyThread,
+        key: &'a str,
+        message: &'a str,
+    ) -> crate::UpdatePresentationFuture<'a> {
+        Box::pin(active_update::present(
+            &self.installation,
+            Path::new(cwd),
+            thread,
+            key,
             message,
         ))
     }

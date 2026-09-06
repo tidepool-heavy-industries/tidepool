@@ -26,7 +26,7 @@ pub use interactive::{
     InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentInstallation,
     InteractiveAgentSpec, InteractiveFuture, InteractiveGoalPolicy, InteractiveLaunchMode,
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    QueueReadyThread,
+    QueueReadyThread, UpdatePresentationError, UpdatePresentationFuture,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,

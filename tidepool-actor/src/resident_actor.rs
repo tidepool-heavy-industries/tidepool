@@ -84,6 +84,9 @@ pub enum LocalResidentDeployment {
     SessionReady {
         activation: crate::ResidentActivation,
     },
+    RequestUpdate {
+        delivery: crate::RequestUpdateDelivery,
+    },
     ChildExited {
         notice: ChildExitNotice,
     },
@@ -2047,6 +2050,51 @@ where
                 self.environment
                     .runner
                     .resume_progress_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }
+            ResidentActorBoundary::RequestUpdate {
+                continuation,
+                request,
+                message,
+            } => {
+                let outcome = self
+                    .environment
+                    .requests
+                    .update_request(context.actor, request, message)
+                    .map(|(update, delivery)| {
+                        if let Some(delivery) = delivery {
+                            if let Err(error) = self
+                                .environment
+                                .deployments
+                                .send(LocalResidentDeployment::RequestUpdate { delivery })
+                            {
+                                if let LocalResidentDeployment::RequestUpdate { delivery } = error.0
+                                {
+                                    if let Some(presentation) = delivery.begin() {
+                                        presentation
+                                            .not_presented("deployment owner unavailable".into());
+                                    }
+                                }
+                            }
+                        }
+                        update.sequence as i64
+                    });
+                self.environment
+                    .runner
+                    .resume_request_update(context.clone(), continuation, outcome)
+                    .await
+            }
+            ResidentActorBoundary::RequestUpdatePoll {
+                continuation,
+                update,
+            } => {
+                let outcome = self
+                    .environment
+                    .requests
+                    .observe_update(context.actor, update);
+                self.environment
+                    .runner
+                    .resume_request_update(context.clone(), continuation, outcome)
                     .await
             }
             ResidentActorBoundary::RequestCancellation(cancellation) => {

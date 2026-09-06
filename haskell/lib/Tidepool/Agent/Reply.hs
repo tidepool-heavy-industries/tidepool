@@ -13,6 +13,10 @@ module Tidepool.Agent.Reply
   , ProgressCursor (..)
   , ProgressState (..)
   , pollProgress
+  , RequestUpdate
+  , RequestUpdateState (..)
+  , updateRequest
+  , pollRequestUpdate
   , ReplyError (..)
   , ResponseFailure (..)
   , ResponseResult (..)
@@ -43,6 +47,10 @@ import Tidepool.Agent.Reply.Internal
   , ProgressState (..)
   , pollProgress
   , Replies
+  , RequestUpdate
+  , RequestUpdateState (..)
+  , updateRequest
+  , pollRequestUpdate
   , ReplyError (..)
   , RequestId
   , RequestLabel

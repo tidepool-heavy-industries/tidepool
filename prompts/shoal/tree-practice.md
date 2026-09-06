@@ -117,3 +117,9 @@ separate from acceptance. Cancelling one request does not prove peer work stoppe
 More steering cannot fix provider-rejected history; inspect provider health.
 Use the Shoal surface for actor communication. Native collaboration is disabled
 for hosted agents. Runtime authority and descendant limits remain authoritative.
+
+Retain specialists while their context is useful. Once you have kept the evidence
+you need and know an actor has no remaining obligation or useful follow-up, stop
+it with `stopAgent`; use `:doc cleanup` for a finished fork group. A reply settles
+a request but leaves its actor alive. Do not stop an actor that still owns work
+you need, or treat retirement as acceptance of its result.

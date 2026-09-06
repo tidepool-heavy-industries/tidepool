@@ -83,7 +83,8 @@ pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerp
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
     DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, ReplyError, ReplyObservation,
-    RequestCancellationNotification, RequestDeadline, RequestId, ResponseFailure,
+    RequestCancellationNotification, RequestDeadline, RequestId, RequestUpdateDelivery,
+    RequestUpdateId, RequestUpdatePresentation, RequestUpdateState, ResponseFailure,
     ResponseObservation, WatchId, WatchNotification, WatchObservation, WatchStateProjection,
     WatchTransition,
 };

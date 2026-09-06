@@ -1232,6 +1232,28 @@ async fn run_interactive_applications(
                             });
                         }
                     }
+                    LocalResidentDeployment::RequestUpdate { delivery } => {
+                        let target = delivery.target();
+                        let Some(presentation) = delivery.begin() else { continue; };
+                        let Some(application) = deployments.iter().find(|app| app.actor == target) else {
+                            presentation.not_presented("target application unavailable".into());
+                            continue;
+                        };
+                        let Some(thread) = application.thread.clone() else {
+                            presentation.not_presented("target conversation is not bound".into());
+                            continue;
+                        };
+                        let workspace = application.workspace.clone();
+                        let backend = Arc::clone(&backend);
+                        notifications.spawn(async move {
+                            match backend.present_update(&workspace.to_string_lossy(), &thread, presentation.key(), presentation.message()).await {
+                                Ok(()) => presentation.presented(),
+                                Err(tidepool_agent::UpdatePresentationError::NotSubmitted(error)) => presentation.not_presented(error.to_string()),
+                                Err(tidepool_agent::UpdatePresentationError::Unconfirmed(error)) => presentation.unconfirmed(error.to_string()),
+                            }
+                            (target, Ok(()))
+                        });
+                    }
                     LocalResidentDeployment::ChildExited { notice } => {
                         if let Some(notification) = prepare_owner_notification(&notice, &deployments) {
                             notifications.spawn(publish_owner_notification(notification));
@@ -2897,6 +2919,104 @@ mod tests {
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
                 summary: "progress test complete".into(),
+            })
+            .await
+            .unwrap();
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_update_keeps_original_request_and_fences_terminal_delivery() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/active_update_setup.hs"),
+        )
+        .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let child = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut child = None;
+            loop {
+                match campaign.deployments.recv().await {
+                    Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                        child = Some(installation)
+                    }
+                    Some(LocalResidentDeployment::SessionReady { .. }) => return child.unwrap(),
+                    Some(_) => {}
+                    None => panic!("deployment channel closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let sent = dispatch_haskell_script(
+            root.as_ref(),
+            "Right clarification <- updateRequest answer \"Tabs must be clickable\"",
+        )
+        .await;
+        assert_eq!(sent["status"], "committed", "{sent:?}");
+        let queued =
+            dispatch_haskell_script(root.as_ref(), "pollRequestUpdate clarification").await;
+        assert!(
+            queued.to_string().contains("Right UpdateQueued"),
+            "{queued:?}"
+        );
+        let delivery = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match campaign.deployments.recv().await {
+                    Some(LocalResidentDeployment::RequestUpdate { delivery }) => return delivery,
+                    Some(LocalResidentDeployment::SessionReady { .. }) => {
+                        panic!("update queued another assignment")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let presentation = delivery.begin().unwrap();
+        assert!(presentation.message().contains("Tabs must be clickable"));
+        let rejected = dispatch_haskell_script(
+            child.policy.as_ref(),
+            "attemptReply sessionReply (sessionInput + 32)",
+        )
+        .await;
+        assert!(
+            rejected.to_string().contains("ReplyUpdatePending"),
+            "{rejected:?}"
+        );
+        let pending = dispatch_haskell_script(root.as_ref(), "pollResponse answer").await;
+        assert!(
+            pending.to_string().contains("ResponsePending"),
+            "{pending:?}"
+        );
+        // The backend seam owns the proof of input insertion. This test drives
+        // that boundary explicitly, without sending input to a live model.
+        presentation.presented();
+        let observed =
+            dispatch_haskell_script(root.as_ref(), "pollRequestUpdate clarification").await;
+        assert!(
+            observed.to_string().contains("Right UpdatePresented"),
+            "{observed:?}"
+        );
+        let reply =
+            dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput + 32)").await;
+        assert_eq!(reply["status"], "replied", "{reply:?}");
+        let ready = dispatch_haskell_script(root.as_ref(), "pollResponse answer >>= \\s -> pure (case s of { ResponseReady result -> responseValue result == 42; _ -> False })").await;
+        assert_eq!(ready["items"][0]["output"], "True", "{ready:?}");
+        let late = dispatch_haskell_script(
+            root.as_ref(),
+            "Right late <- updateRequest answer \"too late\"\npollRequestUpdate late",
+        )
+        .await;
+        assert!(late.to_string().contains("Right UpdateTooLate"), "{late:?}");
+        campaign
+            .actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "active update test complete".into(),
             })
             .await
             .unwrap();
