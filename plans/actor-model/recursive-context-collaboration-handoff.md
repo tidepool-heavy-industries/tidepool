@@ -33,7 +33,7 @@ review continue on that scaffold; final evidence is recorded below.
 
 | Area | Current draft | Remaining acceptance |
 |---|---|---|
-| Shared and role prompts | Reworked `prompts/shoal/tree-practice.md`, root and child prompts; shared decision guidance plus focused role deltas | Review composed prompts against actual roles, verify catalog/composition, retain concise wording |
+| Shared and role prompts | Reworked `prompts/shoal/base.md`, root and child prompts; shared decision guidance plus focused role deltas | Review composed prompts against actual roles, verify catalog/composition, retain concise wording |
 | Mounted help | Concrete four-branch/recursive example in `docs/tree.md`; direct peer repair in `docs/refinement.md`; independent watches, inherited effort, declaration-group syntax | Execute changed examples through the real workbench; keep fixtures synchronized with the published text |
 | Coding effect row | `haskell/actors/Tidepool/Actors/Role.hs` expands `CodingEffects`; `ScaffoldEffects` shares it | Compile facade consumers and retain rejection of explicitly narrowed operations |
 | Runtime role policy | `tidepool-actor/src/role.rs` shares recursive coding capabilities; `resident_actor.rs` attenuates descendant budgets for children exposing `Forks` | Verify launch, budgets, narrowing, and fresh/context-fork paths at this owner |

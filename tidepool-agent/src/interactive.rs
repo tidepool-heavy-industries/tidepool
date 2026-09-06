@@ -146,6 +146,9 @@ pub struct InteractiveAgentSpec {
     pub goal_policy: InteractiveGoalPolicy,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
+    /// Host-owned, immutable base instructions shared across this run.
+    /// Must be an absolute path readable in the launched process.
+    pub base_instructions_file: PathBuf,
     pub developer_instructions: String,
     /// Optional first user message. Hosted agents do not need a synthetic
     /// message because their session handshake publishes only queue-ready

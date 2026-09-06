@@ -1,6 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptId {
-    TreePractice,
+    ShoalBase,
     ShoalRoot,
     RecreatedRoot,
     WorktreeAgent,
@@ -10,11 +10,11 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 10;
+    pub(super) const CATALOG_VERSION: u32 = 11;
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
-        Self::TreePractice,
+        Self::ShoalBase,
         Self::ShoalRoot,
         Self::RecreatedRoot,
         Self::WorktreeAgent,
@@ -25,7 +25,7 @@ impl PromptId {
 
     pub(super) fn artifact(self) -> PromptArtifact {
         let body = match self {
-            Self::TreePractice => include_str!("../../../prompts/shoal/tree-practice.md"),
+            Self::ShoalBase => include_str!("../../../prompts/shoal/base.md"),
             Self::ShoalRoot => include_str!("../../../prompts/shoal/root.md"),
             Self::RecreatedRoot => include_str!("../../../prompts/shoal/recreated-root.md"),
             Self::WorktreeAgent => include_str!("../../../prompts/shoal/worktree-agent.md"),
@@ -39,7 +39,11 @@ impl PromptId {
         };
         PromptArtifact {
             id: self,
-            role: PromptRole::Developer,
+            role: if self == Self::ShoalBase {
+                PromptRole::BaseInstructions
+            } else {
+                PromptRole::Developer
+            },
             catalog_version: Self::CATALOG_VERSION,
             body,
         }
@@ -49,9 +53,13 @@ impl PromptId {
         self.artifact().body
     }
 
-    pub(super) fn composed_fingerprint(body: &str, hosted_tool_fingerprint: &str) -> String {
+    pub(super) fn composed_fingerprint(
+        base: &str,
+        body: &str,
+        hosted_tool_fingerprint: &str,
+    ) -> String {
         let mut hasher = blake3::Hasher::new();
-        for part in [body, hosted_tool_fingerprint] {
+        for part in [base, body, hosted_tool_fingerprint] {
             hasher.update(&(part.len() as u64).to_le_bytes());
             hasher.update(part.as_bytes());
         }
@@ -61,6 +69,7 @@ impl PromptId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptRole {
+    BaseInstructions,
     Developer,
 }
 
@@ -72,26 +81,110 @@ pub(super) struct PromptArtifact {
     pub(super) body: &'static str,
 }
 
+/// One compiled base, materialized once by the host and shared by every launch.
+/// The file is content-addressed and checked on reuse. Actors receive a read-only
+/// mount of its directory; launch never rereads mutable prompt source files.
+#[derive(Clone)]
+pub(super) struct FrozenBasePrompt {
+    directory: std::path::PathBuf,
+    file: std::path::PathBuf,
+}
+
+impl FrozenBasePrompt {
+    pub(super) fn materialize(run_root: &std::path::Path) -> std::io::Result<Self> {
+        let body = PromptId::ShoalBase.body();
+        let directory = run_root.join("prompts");
+        std::fs::create_dir_all(&directory)?;
+        let directory = directory.canonicalize()?;
+        let file = directory.join(format!("{}.md", blake3::hash(body.as_bytes()).to_hex()));
+        match std::fs::read(&file) {
+            Ok(existing) if existing == body.as_bytes() => {}
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "saved Shoal base prompt does not match its content identity",
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tidepool_atomic_write::write_durable(&file, body.as_bytes())?;
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(Self { directory, file })
+    }
+
+    pub(super) fn directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+    pub(super) fn file(&self) -> &std::path::Path {
+        &self.file
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn catalog_is_complete_nonempty_and_developer_role() {
+    fn frozen_base_reuses_exact_bytes_and_rejects_changed_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let first = FrozenBasePrompt::materialize(root.path()).unwrap();
+        let second = FrozenBasePrompt::materialize(root.path()).unwrap();
+        assert_eq!(first.file(), second.file());
+        assert_eq!(
+            std::fs::read_to_string(first.file()).unwrap(),
+            PromptId::ShoalBase.body()
+        );
+        std::fs::write(first.file(), "unexpected instructions").unwrap();
+        assert!(
+            matches!(FrozenBasePrompt::materialize(root.path()), Err(error) if error.kind() == std::io::ErrorKind::InvalidData)
+        );
+        let blocked = tempfile::NamedTempFile::new().unwrap();
+        assert!(FrozenBasePrompt::materialize(blocked.path()).is_err());
+    }
+
+    #[test]
+    fn composed_identity_covers_base_role_and_tools_separately() {
+        let original = PromptId::composed_fingerprint("base", "role", "tools");
+        for parts in [
+            ("changed", "role", "tools"),
+            ("base", "changed", "tools"),
+            ("base", "role", "changed"),
+        ] {
+            assert_ne!(
+                original,
+                PromptId::composed_fingerprint(parts.0, parts.1, parts.2)
+            );
+        }
+        assert_ne!(
+            PromptId::composed_fingerprint("ab", "c", "d"),
+            PromptId::composed_fingerprint("a", "bc", "d")
+        );
+    }
+
+    #[test]
+    fn catalog_separates_base_from_role_instructions() {
         let artifacts = PromptId::ALL.map(PromptId::artifact);
         assert_eq!(artifacts.map(|artifact| artifact.id), PromptId::ALL);
         assert!(artifacts
             .iter()
             .all(|artifact| !artifact.body.trim().is_empty()));
-        assert!(artifacts
-            .iter()
-            .all(|artifact| artifact.role == PromptRole::Developer));
+        assert!(artifacts.iter().all(|artifact| artifact.role
+            == if artifact.id == PromptId::ShoalBase {
+                PromptRole::BaseInstructions
+            } else {
+                PromptRole::Developer
+            }));
         assert!(artifacts
             .iter()
             .all(|artifact| artifact.catalog_version == PromptId::CATALOG_VERSION));
         assert_eq!(
-            PromptId::composed_fingerprint(PromptId::ShoalRoot.body(), "hosted-tool-fingerprint")
-                .len(),
+            PromptId::composed_fingerprint(
+                PromptId::ShoalBase.body(),
+                PromptId::ShoalRoot.body(),
+                "hosted-tool-fingerprint"
+            )
+            .len(),
             64
         );
     }

@@ -63,7 +63,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use self::host_incarnation::HostIncarnationLease;
-use self::prompt_catalog::PromptId;
+use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 
 /// Every interactive actor sees its own repository at this path. Bubblewrap
 /// mount namespaces make the shared name safe across concurrent actors, while
@@ -581,6 +581,7 @@ struct InteractiveFleet {
 
 #[derive(Clone)]
 struct InteractiveLaunchContext {
+    base_prompt: FrozenBasePrompt,
     root: ActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
@@ -1036,8 +1037,11 @@ async fn run_interactive_applications(
         readiness,
         worktree_authority,
     } = fleet;
+    let base_prompt = FrozenBasePrompt::materialize(&run_root)
+        .map_err(|error| format!("cannot prepare Shoal base prompt: {error}"))?;
     let mut root_identity = root.identity();
     let mut launch_context = InteractiveLaunchContext {
+        base_prompt,
         root: root_identity,
         config,
         run_root,
@@ -1715,6 +1719,7 @@ async fn launch_prepared_interactive_application(
     fork_parent_thread: Option<BackendThreadId>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let InteractiveLaunchContext {
+        base_prompt,
         root,
         config,
         run_root,
@@ -1773,6 +1778,9 @@ async fn launch_prepared_interactive_application(
         writable_roots,
     )
     .and_then(|boundary| boundary.with_project_root(&agent_workspace))
+    .and_then(|boundary| {
+        boundary.with_read_only_overlay(base_prompt.directory(), base_prompt.directory())
+    })
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
@@ -1905,6 +1913,7 @@ async fn launch_prepared_interactive_application(
         installation.effective_role.prompt_profile(),
         PromptId::CATALOG_VERSION,
         PromptId::composed_fingerprint(
+            PromptId::ShoalBase.body(),
             &developer_instructions,
             &tidepool_actor::shoal_hosted_prompt_fingerprint(),
         ),
@@ -1922,6 +1931,7 @@ async fn launch_prepared_interactive_application(
         model,
         effort,
         developer_instructions,
+        base_instructions_file: base_prompt.file().to_path_buf(),
         initial_prompt: installation.initial_user_message.clone(),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
         host_tools_socket: endpoint,
@@ -2647,8 +2657,6 @@ fn developer_instructions(
 
 fn append_effective_role(mut instructions: String, role: &tidepool_actor::EffectiveRole) -> String {
     let descendants = role.descendants();
-    instructions.push_str("\n\n");
-    instructions.push_str(PromptId::TreePractice.body());
     instructions.push_str(&format!(
         "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
         role.prompt_profile(),
@@ -3244,8 +3252,8 @@ mod tests {
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
         );
         assert!(fresh.starts_with(PromptId::ShoalRoot.body()));
-        assert_eq!(fresh.matches(PromptId::TreePractice.body()).count(), 1);
-        assert_eq!(resumed.matches(PromptId::TreePractice.body()).count(), 1);
+        assert!(!fresh.contains(PromptId::ShoalBase.body()));
+        assert!(!resumed.contains(PromptId::ShoalBase.body()));
         assert!(!fresh.contains(PromptId::RecreatedRoot.body()));
         assert!(resumed.starts_with(PromptId::ShoalRoot.body()));
         assert_eq!(resumed.matches(PromptId::RecreatedRoot.body()).count(), 1);

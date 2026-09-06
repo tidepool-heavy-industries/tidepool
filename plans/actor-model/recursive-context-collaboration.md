@@ -329,7 +329,7 @@ scaffolding emphasizes interface preparation. Review is an assignment that can
 include direct typed repair, not a new universal runtime role. Inspection-only
 actors remain honest about their inability to execute checks.
 
-The edited artifacts are `prompts/shoal/tree-practice.md`, the existing role
+The edited artifacts are `prompts/shoal/base.md`, the existing role
 prompts, and `prompts/shoal/docs/{tree,unfold,refinement,watch,workbench}.md`.
 `tidepool/src/actor_host/prompt_catalog.rs` owns role/shared artifacts and their
 catalog version; `tidepool-actor/src/prompt_catalog.rs` owns mounted help and

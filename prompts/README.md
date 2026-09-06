@@ -2,11 +2,11 @@
 
 This tree contains stable, Tidepool-authored model instructions that are compiled into their owning Rust targets with `include_str!`. It is not a runtime configuration directory: there is no prompt loader, template syntax, environment override, or fallback copy.
 
-Files under `shoal/` retain their existing Codex surfaces and roles:
+Files under `shoal/` define the hosted base and focused instruction layers:
 
 | Artifact | Owner | Consuming role |
 |---|---|---|
-| `tree-practice.md` | `tidepool::actor_host` | Shared recursive-workflow developer instructions |
+| `base.md` | `tidepool::actor_host` | Shared Shoal base instructions, replacing the backend default |
 | `scaffolding-agent.md` | `tidepool::actor_host` | Scaffold-focused coding actor instructions |
 | `integration-agent.md` | `tidepool::actor_host` | Integration actor instructions |
 | `root.md` | `tidepool::actor_host` | Developer instructions for the root actor |
@@ -32,3 +32,26 @@ prompts teach composition and conditional discovery; they do not duplicate
 those runtime facts. Hosted requests settle through `respond`; roots outside
 a request have no reply binding. Files in `shoal/docs/` supply on-demand `:doc`
 examples, including executable examples covered by the actor-host tests.
+
+## Shoal base selection
+
+The host compiles `shoal/base.md` into its prompt catalog. At startup it
+materializes the exact bytes once beneath the run's `prompts/` directory, using
+the content hash as the filename and rejecting mismatched existing artifacts.
+Every fresh, resumed, or forked launch receives the same absolute file path with
+a read-only directory overlay. The Codex adapter supplies `model_instructions_file`
+explicitly, which takes precedence over operator/project defaults and inherited
+base instructions. Role instructions and runtime facts remain a separate
+`developer_instructions` layer; native multi-agent tooling remains disabled.
+
+The composed prompt fingerprint covers base instructions, role instructions,
+and the hosted-tool fingerprint. Source edits take effect after rebuilding and
+starting a new host; they do not change the base used by descendants of the
+current host. Reattaching an old conversation under a newly built host selects
+the new base explicitly and can change its provider prefix. Fingerprints record
+what Shoal selected; they do not certify provider application or cache reuse.
+
+The base adapts the bundled Astra prompt's autonomy, collaboration, and engineering
+guidance to Shoal's scaffold/fork/fold mode. API reference details and executable
+examples stay in the on-demand documents. Base-prompt wording is a design choice
+to exercise through real project work, not a validated efficacy result.

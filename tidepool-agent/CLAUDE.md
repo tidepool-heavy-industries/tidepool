@@ -287,3 +287,10 @@ would avoid depending on rollout persistence and reading unrelated large
 records. Capability negotiation should establish safe steering semantics
 explicitly; CLI discovery alone cannot prove them. Keep those obligations at
 this boundary, rather than adding checks to each actor caller.
+
+Hosted launches require an absolute `base_instructions_file` supplied by the
+host's prompt catalog. The Codex command owner passes it as a
+`model_instructions_file` CLI override in fresh, resume, and fork modes, so an
+ambient base prompt cannot silently win selection. The host owns materialization,
+run lifetime, read-only mounting, and prompt identity; the adapter owns only the
+backend setting and argument encoding.

@@ -418,6 +418,16 @@ fn command_for(
             ),
         });
     }
+    if !spec.base_instructions_file.is_absolute() {
+        return Err(AgentBackendError::ProtocolRejected {
+            detail: "base instructions file must be absolute".into(),
+        });
+    }
+    let base_instructions_file = spec.base_instructions_file.to_str().ok_or_else(|| {
+        AgentBackendError::ProtocolRejected {
+            detail: "base instructions path is not UTF-8".into(),
+        }
+    })?;
     let program = installation
         .executable()
         .to_str()
@@ -475,6 +485,13 @@ fn command_for(
             },
         )?;
     }
+    // The file override takes precedence over operator/project model prompts
+    // and inherited base instructions. Every mode gets the same frozen bytes.
+    push_config_string(
+        &mut command,
+        "model_instructions_file",
+        base_instructions_file,
+    )?;
     push_config_string(
         &mut command,
         "developer_instructions",
@@ -770,6 +787,7 @@ mod tests {
             goal_policy: crate::InteractiveGoalPolicy::Configured,
             model: Some("gpt-test".to_string()),
             effort: Some(ReasoningEffort::Medium),
+            base_instructions_file: "/tmp/tidepool/prompts/shared base.md".into(),
             developer_instructions: "actor charter".to_string(),
             initial_prompt: Some("initialize through typed tools".to_string()),
             native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
@@ -910,6 +928,51 @@ mod tests {
                 effort.is_some()
             );
         }
+    }
+
+    #[test]
+    fn all_launch_modes_select_the_frozen_base_and_disable_native_collaboration() {
+        for mode in [
+            InteractiveLaunchMode::Fresh,
+            InteractiveLaunchMode::Resume(BackendThreadId(THREAD.into())),
+            InteractiveLaunchMode::Fork {
+                parent: BackendThreadId(THREAD.into()),
+                after_call: "call".into(),
+            },
+        ] {
+            let requested = spec(mode);
+            let command = command_for(&installation(), &requested).unwrap();
+            let overrides = command
+                .args
+                .windows(2)
+                .filter(|args| args[0] == "-c")
+                .map(|args| args[1].parse::<toml_edit::DocumentMut>().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                overrides
+                    .iter()
+                    .filter_map(|doc| doc.get("model_instructions_file"))
+                    .map(|item| item.as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![requested.base_instructions_file.to_str().unwrap()]
+            );
+            assert!(overrides.iter().any(|doc| doc
+                .get("developer_instructions")
+                .and_then(|value| value.as_str())
+                == Some("actor charter")));
+            for feature in ["multi_agent", "multi_agent_v2"] {
+                assert!(command
+                    .args
+                    .windows(2)
+                    .any(|args| args == ["--disable", feature]));
+            }
+        }
+        let mut requested = spec(InteractiveLaunchMode::Fresh);
+        requested.base_instructions_file = "relative.md".into();
+        assert!(matches!(
+            command_for(&installation(), &requested),
+            Err(AgentBackendError::ProtocolRejected { .. })
+        ));
     }
 
     #[test]
