@@ -68,8 +68,10 @@ No blind retries after ambiguous send, no fallback amendment -> new assignment.
 2. Existing supervisor launches pinned service inside actor mount, private explicit
    socket bound to existing incarnation identity. No second endpoint registry.
 3. Persistent WebSocket-over-UDS controller initializes and routes JSON-RPC responses,
-   server requests and notifications separately. Delegate native ownership contract
-   to [native-control.md](native-control.md), then consume the reviewed protocol.
+   server requests and notifications separately. Assess existing native ownership
+   capabilities first. If changes are required, use [native-control.md](native-control.md)
+   as an external handoff, not a Shoal worker assignment. Consume the externally
+   reviewed protocol/revision after delivery.
 4. Fork on destination child service using source thread + `afterCallId` only after
    the enclosing Haskell call's actual result is durably closed. Use full prefix,
    deferred continuation, `requireClientReadiness`, expected dynamic tools. Preserve
@@ -90,15 +92,20 @@ from “process exists” or “TCP/Unix connection opened”.
 ## Recursive waves and deliverable
 
 First commit local interface/ownership scaffold compatible with root contract.
-Fork native-control and custody obligations immediately. In parallel inspect and
+Fork custody and bounded native-capability assessment obligations immediately. In parallel inspect and
 prepare controller/bridge consumer against explicit unsupported holes. Avoid two
 writers to actor_host; worker returns a scoped candidate, TL integrates it.
-Native source requires a correctly seeded native checkout: do not seed a Tidepool
-worktree and write the user's `/home/inanna/dev/codex` checkout incidentally. Inspect
-available repository/worktree authority; have root establish allocation if needed.
+Prefer completing the architecture using existing native capabilities. Required
+Codex tweaks remain in scope but must be implemented/reviewed **outside Shoal, in a
+separate session in the Codex repository**. No native implementation Shoal fork,
+including one with a separately allocated worktree. Prepare the smallest justified
+contract/test handoff for that session; continue independent Tidepool work while
+blocked. Root integrates the externally delivered revision/pin. Do not weaken
+controller ownership merely to avoid acknowledging a necessary native dependency.
 
 Next wave: backend client/bridge implementation plus focused protocol fixtures;
-fresh native/custody reviewers trace failure paths and request repairs directly.
+fresh Tidepool/custody reviewers trace failure paths and request repairs directly;
+Codex implementation/review stays in the external session.
 After incorporating reviewed native contract, run mounted integration and retain
 an implementer for failures found by root's fresh acceptance branch.
 

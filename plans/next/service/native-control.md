@@ -1,10 +1,19 @@
-# Native control worker — exclusive controller, harmless observers
+# External Codex handoff — exclusive controller, harmless observers
 
-## Bounded assignment
+## Execution boundary
+
+**This is not a Shoal fork assignment.** User requires any Codex edits to happen
+outside Shoal, in a separate session in the Codex repository. First assess whether
+existing native capabilities can satisfy the contract without edits. Only hand this
+to the external session if a concrete missing capability makes changes necessary.
+Shoal may inspect and specify the dependency, then integrate the delivered revision;
+it must not implement native changes even through an allocated Codex worktree.
+
+## Bounded external assignment
 
 Implement/review the native Codex portion of the accepted Shoal architecture:
 one mounted app-server per actor, one persistent Shoal controller, optional observer
-TUI. Parent service TL owns Tidepool integration; return native commit and protocol
+TUI. Shoal service TL owns Tidepool integration; return native commit and protocol
 contract. No global daemon migration, new mailbox, dashboard or multi-actor service.
 Read native contributor guidance. Use an explicitly allocated native worktree;
 never modify another checkout just because its path is visible.
@@ -32,7 +41,7 @@ Under `codex-rs/`:
 - `tui/src/app_server_session/cli_fork.rs`, CLI Unix remote resume/listen paths:
   existing transport/history infrastructure, not yet a harmless observer contract.
 
-## Contract to settle with parent before wiring
+## Contract to settle with Shoal coordinator before wiring
 
 Add explicit controller/observer attachment with server-enforced mutator/responder
 custody. Observer receives history/notifications, never tool or approval requests;

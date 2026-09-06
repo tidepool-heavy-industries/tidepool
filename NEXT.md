@@ -22,6 +22,11 @@ repair loops and incremental integration. No fixed headcount target.
   service per actor, in that actor's managed execution mount. Shoal controls
   execution; TUI is an attachable observer. Reuse native components, not a new
   daemon framework or a patch to the accidental embedded-TUI endpoint.
+- **Codex changes are an external dependency, not a Shoal fork.** Prefer existing
+  native capabilities. If tweaks prove necessary, prepare a precise handoff for a
+  separate, out-of-Shoal session in the Codex repository. Do not launch native
+  implementation/review workers within this Shoal tree or edit Codex from it.
+  Integrate the externally delivered revision/pin and verify the resulting pair.
 - One control connection carries distinct operations: typed assignment, exact
   assignment amendment, one-way text notification, dependency wake and cancellation.
   A notification neither creates a reply obligation nor changes `sessionInput` or
@@ -61,7 +66,7 @@ These findings constrain the architecture below.
 ```text
 root: shared contract, manifests/pin integration, final product acceptance
 ├── service TL                         [first parallel wave]
-│   ├── native controller/observer protocol + independent review
+│   ├── native capability assessment → external Codex handoff only if needed
 │   ├── custody-before-bootstrap + independent review
 │   └── persistent client/host bridge; then mounted integration & repair
 ├── run-map TL                         [first parallel wave]
@@ -78,7 +83,7 @@ root: shared contract, manifests/pin integration, final product acceptance
 
 | Dispatch | Exact assignment document | Exclusive lead ownership |
 |---|---|---|
-| Service TL | [service/ROOT.md](plans/next/service/ROOT.md) | backend control, actor lifecycle/notification semantics, host wiring; delegates native fork and custody |
+| Service TL | [service/ROOT.md](plans/next/service/ROOT.md) | backend control, actor lifecycle/notification semantics, host wiring; delegates custody; hands required native changes outside Shoal |
 | Run-map TL | [run-map.md](plans/next/run-map.md) | derived artifact reader/report and its tests; requests instrumentation from service owner |
 | Usage TL | [usage-evidence.md](plans/next/usage-evidence.md) | reusable Haskell evidence helpers, examples and usage guidance |
 | Fresh acceptance | [acceptance.md](plans/next/acceptance.md) | independent integrated checks; no competing production edits |
@@ -103,8 +108,8 @@ append conflicts last time.
    actor/incarnation-bound control identity; separate notification/amendment intent;
    submission-versus-presentation evidence; revision/check delivery. Mark unsupported
    behavior explicitly, not mock success. Rust owns mechanics; Haskell stays small.
-   The service TL may refine native wire shape locally; cross-lead semantics are
-   root-owned. Do not build a general campaign framework.
+   The service TL assesses native capabilities and proposes any missing wire contract;
+   required Codex changes go to an external session. Cross-lead semantics are root-owned. Do not build a general campaign framework.
 3. Admit the first three TLs against that exact clean `projectHead`. Assign one
    integration owner per shared file. End the admitting tool block promptly.
 4. Leads scaffold their narrower interfaces, fork implementation/test obligations,
