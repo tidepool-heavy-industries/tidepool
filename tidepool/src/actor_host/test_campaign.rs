@@ -45,6 +45,13 @@ impl TestCampaign {
     pub async fn start_with_research_policy(
         research_policy: tidepool_actor::ResearchPolicy,
     ) -> Self {
+        Self::start_with_admission(research_policy, |admission| admission).await
+    }
+
+    pub async fn start_with_admission(
+        research_policy: tidepool_actor::ResearchPolicy,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+    ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
         repository
@@ -90,10 +97,12 @@ impl TestCampaign {
             source,
             descriptor.placement().session,
             machine,
-            Some(fork_workspace_admission(
+            Some(transform(fork_workspace_admission(
                 worktrees.clone(),
                 authority.clone(),
-            )),
+                bindings.clone(),
+                runtime_namespace(session_root.path()),
+            ))),
             tidepool_actor::Incarnation::FIRST,
         );
         let forest = Arc::new(forest);

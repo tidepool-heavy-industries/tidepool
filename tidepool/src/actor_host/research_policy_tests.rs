@@ -5,7 +5,10 @@ use super::*;
 
 async fn research_child(
     campaign: &mut TestCampaign,
-) -> (tidepool_actor::LocalResidentInstallation, ActiveBinding) {
+) -> (
+    tidepool_actor::LocalResidentInstallation,
+    Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
+) {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             match campaign.deployments.recv().await.unwrap() {
@@ -35,11 +38,19 @@ async fn research_child(
                         child.actor.identity().id.0,
                         child.actor.identity().incarnation.0,
                     );
-                    let binding = campaign
-                        .bindings
-                        .lock()
-                        .bind(worktree.id(), &principal, current_time_ms())
-                        .unwrap();
+                    assert_eq!(
+                        campaign
+                            .bindings
+                            .lock()
+                            .current(worktree.id())
+                            .unwrap()
+                            .agent(),
+                        &principal
+                    );
+                    let binding = child
+                        .worktree_custody
+                        .clone()
+                        .expect("bootstrap installed custody");
                     child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
                     return (child, binding);
                 }

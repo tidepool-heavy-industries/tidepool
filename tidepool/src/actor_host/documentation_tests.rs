@@ -54,7 +54,7 @@ async fn committed(
 fn open_test_fork(
     campaign: &TestCampaign,
     child: &tidepool_actor::LocalResidentInstallation,
-) -> tidepool_worktree::ActiveBinding {
+) -> Arc<dyn tidepool_actor::ForkWorkspaceCustody> {
     campaign.authority.install_grant(
         child.actor.identity().into(),
         worktree_grant(child.effective_role.role()),
@@ -72,11 +72,19 @@ fn open_test_fork(
         child.actor.identity().id.0,
         child.actor.identity().incarnation.0,
     );
-    let binding = campaign
-        .bindings
-        .lock()
-        .bind(worktree.id(), &principal, current_time_ms())
-        .unwrap();
+    assert_eq!(
+        campaign
+            .bindings
+            .lock()
+            .current(worktree.id())
+            .unwrap()
+            .agent(),
+        &principal
+    );
+    let binding = child
+        .worktree_custody
+        .clone()
+        .expect("bootstrap installed custody");
     child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     binding
 }

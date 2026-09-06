@@ -23,27 +23,36 @@ pub struct ForkWorkspaceAdmissionError {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustodyRelease {
+    Released,
+    RetainedByActor,
+}
+
 /// A lease on exact actor/worktree custody. The implementation releases only
 /// its own binding generation when the last runtime/host owner drops it.
 /// Keeping the lease alive through host cleanup prevents early rebinding while
 /// a provider process can still access the checkout.
-pub trait ForkWorkspaceCustody: Send + Sync + 'static {}
+pub trait ForkWorkspaceCustody: Send + Sync + 'static {
+    fn actor_stopped(&self, terminal: &crate::ActorTerminal);
+    /// Fence release before a process launch may have external effects.
+    fn process_may_exist(&self);
+    /// Permit release only after the exact process has been reaped.
+    fn process_reaped(&self);
+    fn release_after_process(
+        self: Arc<Self>,
+    ) -> Result<CustodyRelease, ForkWorkspaceAdmissionError>;
+}
 
 pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
     /// Install custody before executing the child entry. This is separate from
     /// provider readiness; implementations must fail closed on stale ownership.
-    ///
-    /// The default explicitly leaves pre-bootstrap custody unsupported while
-    /// composition roots migrate to this contract.
+
     fn install_custody(
         &self,
-        _actor: ActorRef,
-        _worktree: &str,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        Err(ForkWorkspaceAdmissionError {
-            detail: "pre-bootstrap worktree custody is not implemented".into(),
-        })
-    }
+        actor: ActorRef,
+        worktree: &str,
+    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>;
 
     fn admit(
         &self,
