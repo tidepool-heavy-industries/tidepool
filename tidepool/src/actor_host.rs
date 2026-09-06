@@ -3971,6 +3971,15 @@ mod tests {
             foreign_directory.path().join("cursor"),
         )
         .unwrap();
+        assert_eq!(
+            observe_notification_receipt(
+                &poll_command,
+                child.actor.identity(),
+                inbox_key,
+                &foreign
+            ),
+            Err(tidepool_actor::NotificationError::Unavailable)
+        );
         foreign
             .publish_tracked(
                 DurableActorEvent::Text("another sender".into()),
@@ -4052,6 +4061,68 @@ mod tests {
                 .to_lowercase()
                 .contains("not in scope"),
             "{root_reply:?}"
+        );
+        let idle_setup = dispatch_haskell_script(
+            root.as_ref(),
+            "idle <- startAgent (readonlyAgent \"idle-notification-recipient\")",
+        )
+        .await;
+        assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
+        let idle = match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            LocalResidentDeployment::PolicyInstalled(child) => child,
+            _ => panic!("expected never-assigned recipient policy"),
+        };
+        let policy = root.clone();
+        let idle_send = tokio::spawn(async move {
+            dispatch_haskell_script(
+                policy.as_ref(),
+                "Right idleReceipt <- notify idle \"idle notice\"",
+            )
+            .await
+        });
+        let command =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::NotificationSend(command) => command,
+                _ => panic!("idle notification fabricated request activation"),
+            };
+        assert_eq!(command.target(), idle.actor.identity());
+        let idle_directory = tempfile::tempdir().unwrap();
+        let idle_inbox = ActorInbox::open(
+            idle_directory.path().join("rows"),
+            idle_directory.path().join("cursor"),
+        )
+        .unwrap();
+        let row = idle_inbox
+            .publish_tracked(
+                DurableActorEvent::Text(command.message().into()),
+                NotificationProvenance {
+                    sender: command.owner(),
+                    target: command.target(),
+                },
+            )
+            .unwrap();
+        command.admitted("idle-inbox".into(), row.sequence);
+        let admitted = idle_send.await.unwrap();
+        assert_eq!(admitted["status"], "committed", "{admitted:?}");
+        for name in ["respond", "sessionReply", "sessionInput"] {
+            let absent =
+                dispatch_haskell_script(idle.policy.as_ref(), &format!(":type {name}")).await;
+            assert!(
+                absent.to_string().to_lowercase().contains("not in scope"),
+                "idle recipient gained {name}: {absent:?}"
+            );
+        }
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "idle admission fabricated an activation"
         );
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
