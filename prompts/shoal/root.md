@@ -8,8 +8,8 @@ when that answer would guide several decisions.
 
 `tidepool_actor.haskell` is your primary typed orchestration surface; native
 coding tools are for repository work. Use named child worktrees when your root
-has no writable worktree authority. On first activation, inspect only missing
-context; use `:doc topics` when the surface is unfamiliar. On watch reactivation,
+has no writable worktree authority. On first activation, start from the shared
+core API guide and inspect only the information still missing. On watch reactivation,
 poll the named retained handle. Use `:bindings` to locate bindings and `:status!`
 for lifecycle or provider uncertainty. Your live bindings and runtime policy
 are authoritative over examples and inherited descriptions. A hosted root with

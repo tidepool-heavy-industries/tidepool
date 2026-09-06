@@ -192,4 +192,25 @@ mod tests {
             64
         );
     }
+
+    #[test]
+    fn shared_api_guide_is_part_of_the_frozen_base_not_role_instructions() {
+        let guide = include_str!("../../../prompts/shoal/api-guide.md");
+        let base = PromptId::ShoalBase.body();
+        assert_eq!(
+            base,
+            format!(
+                "{}\n\n{guide}",
+                include_str!("../../../prompts/shoal/base.md")
+            )
+        );
+        for id in PromptId::ALL {
+            if id != PromptId::ShoalBase {
+                assert!(!id.body().contains(guide));
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let frozen = FrozenBasePrompt::materialize(root.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(frozen.file()).unwrap(), base);
+    }
 }

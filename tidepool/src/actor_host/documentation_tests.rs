@@ -114,6 +114,66 @@ async fn base_prompt_coordination_example_executes() {
 }
 
 #[tokio::test]
+async fn shared_api_guide_example_handles_success_and_unavailable() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        example(include_str!("../../../prompts/shoal/api-guide.md")),
+    )
+    .await;
+    let mut binding = None;
+    let child = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut child = None;
+        loop {
+            match campaign.deployments.recv().await {
+                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                    binding = Some(open_test_fork(&campaign, &installation));
+                    child = Some(installation);
+                }
+                Some(LocalResidentDeployment::SessionReady { activation }) => {
+                    assert!(activation.message.contains("Check the hit targets."));
+                    return child.unwrap();
+                }
+                Some(_) => {}
+                None => panic!("deployment stream closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let pending = committed(root.as_ref(), "state <- pollWatch ready\ninspectFull state").await;
+    assert_eq!(pending["items"][1]["output"], "WatchPending");
+    let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    campaign.await_watch_ready().await;
+    let success = committed(
+        root.as_ref(),
+        "state <- pollWatch ready\ninspectFull (fmap reportOnly state)",
+    )
+    .await;
+    assert_eq!(
+        success["items"][1]["output"],
+        "WatchReady (Right \"Check the hit targets.\")"
+    );
+
+    committed(
+        root.as_ref(),
+        include_str!("shared_api_guide_unavailable.hs"),
+    )
+    .await;
+    campaign.await_watch_ready().await;
+    let unavailable = committed(
+        root.as_ref(),
+        "state <- pollWatch failureReady\ninspectFull (fmap (either (const True) (const False) . reportOnly) state)",
+    )
+    .await;
+    assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn activation_presents_prose_and_preserves_exact_inputs() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
