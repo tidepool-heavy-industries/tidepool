@@ -109,3 +109,32 @@ reported 12.44s Cargo test build and 0.007s selected test execution, versus the
 previous cold checkout 4m29s build: different source/cache conditions, not a
 controlled causal speedup claim. The retained reviewer/implementer repair loop
 again worked without rediscovering Haskell orchestration APIs.
+
+## Owning Shoal CLI integration review
+
+Accept exact CLI candidate 9374fbe80aaa02402744771fa32f3c24464aac38. Reviewer
+fast-forwarded to that revision and inspected its sole changed file,
+tidepool/src/bin/shoal.rs. The RunMap branch directly calls the accepted reader;
+no host initialization, tracing, native installation or attach path is invoked.
+Clap owns directory/window parsing and help; the reader validates bound ordering.
+JSON and concise outputs remain separate. No unchanged reader re-review needed.
+
+Independent checks at 9374fbe80aaa02402744771fa32f3c24464aac38:
+- `nix develop --command cargo test -p tidepool --bin shoal`: 2 executed/passed,
+  no ignored/filtered tests; /tmp/run-map-review/cli/tests.log.
+- `nix develop --command cargo build -p tidepool --bin shoal`: compiled;
+  /tmp/run-map-review/cli/build.log.
+- Inspected root's /tmp/root-run-map-cli/check.py then independently reran it
+  against reviewer-built binary: 8 invocations passed (5 JSON windows, 2 rejection
+  paths, concise output), temporary HOME unchanged and empty PATH required no
+  external tools; /tmp/run-map-review/cli/check.log. This is independent execution
+  of the inspected root harness, not independently authored test logic.
+- cargo fmt -p tidepool --check and git diff --check passed.
+Reviewer binary SHA256 b823337616b8c71fe14df71aec4b00da83ba9c00e9b1b21851c34fd00d42f413.
+This differs from root's reported binary hash; both identities remain separate.
+No identical-artifact/reproducible-build claim is made. Runtime host was not launched
+or replaced. Reader tests remain root-attributed for this CLI-only review; they
+were independently checked in the preceding window increment review.
+
+No actionable CLI defect found within scope. Usage parsing and service/custody
+remain separate outstanding obligations.
