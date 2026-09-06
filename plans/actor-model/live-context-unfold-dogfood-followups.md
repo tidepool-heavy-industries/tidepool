@@ -2124,7 +2124,7 @@ materially more effective—and happy—to work in for days.
 
 ## Numeric-substrate tree: live observations (2026-09-06, ongoing)
 
-Campaign contract: [floating-point repair](../floating-point-repair.md).
+Campaign outcome: [floating-point repair](../../FLOATING_POINT_BUG_REPORT.md).
 This is a partial experience report, not a completed campaign or performance
 benchmark. Root retained `experienceRoster`: 21 roster entries including root,
 idle retained specialists and a failed launch; **not 21 concurrently working
@@ -2250,3 +2250,24 @@ use records the combined native suite at 5ac5be7d as ExecutedFailed/RequirePassi
 (1 passed, 2 failed), without calling the failures blocked or passed. Existing
 in-flight NumericDelivery contracts keep their captured types; no attempt was
 made to redefine them under active actors.
+
+
+### Final numeric acceptance fold
+
+Product acceptance supersedes the earlier open-status snapshots: all lanes are
+integrated and verified at 95e5eed6. Root ran 67 focused tests plus 217 fixtures;
+the retained independent display specialist ran all 17 hosted probes at that
+exact revision. Formatting and diff checks passed. The already-running root host
+was not replaced. Temporary numeric lane plans were removed after their standing
+invariants reached owning source/tests; FLOATING_POINT_BUG_REPORT.md records the
+outcome and remaining scope limits.
+
+A further review wave proved the value of fresh adversarial context: its first
+primitive-laziness candidate still classified partial primitive arithmetic as
+trivial and evaluated it in lazy positions. Review reproduced that hole and drove
+a conservative correction in the shared trivial-field owner, protecting multiple
+consumers rather than adding a special array guard. Subnormal decoding then
+required a separate shared-owner correction; old tests had pinned wrong values.
+Native GHC comparisons, not evaluator/JIT agreement alone, resolved that contract.
+No timing/cost benchmark or complete actor-retirement exercise was performed;
+useful specialist contexts remain retained for follow-up.

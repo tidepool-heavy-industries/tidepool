@@ -1,171 +1,87 @@
-# Floating-point correctness: repair-wave starting contract
+# Floating-point correctness: repaired substrate and verification
 
-## Status and objective
+## Outcome
 
-Reproduced on 2026-09-06 in the live Shoal workbench. Source baseline:
-`e818b22d` (numeric implementation unchanged by the prompt/cache work).
-No floating-point repair has been integrated. Prior investigation actors are
-retired; any retained candidate branches require inspection before reuse.
+Repaired and integrated on 2026-09-06. Exact verified source baseline:
+`95e5eed6cd04f850d135b5d0ba640767310d52c4`. Subsequent report/scaffold cleanup is
+documentation-only. The original report and wave contracts remain in Git.
 
-Repair the numeric substrate, not just its display. Use this as the first
-substantial dogfooding wave for typed, recursive Haskell orchestration: shared
-contracts, independently owned implementation and testing, fresh-context review,
-then checked integration. Start with the failures below and expand according to
-evidence into the surrounding floating-point and unsupported-operation paths.
-Do not assume every neighboring primitive is broken.
+The original Float/Double classification and Prelude Show reproductions now pass
+through native-GHC comparisons, real extraction/JIT, and a freshly rebuilt hosted
+workbench test. **The already-running interactive Shoal host was not replaced**;
+start a rebuilt host to use the repaired runtime interactively.
 
-## Minimal reproductions
+## Causes and owning repairs
 
-Run in `tidepool_actor.haskell`, without substituting the default `show` for the
-qualified Prelude operation:
-
-```haskell
-import qualified Prelude as P
-let d = 1.0 :: Double
-let f = 1.0 :: Float
-(P.isNaN d, P.isInfinite d, P.isNegativeZero d, P.show d)
-(P.isNaN f, P.isInfinite f, P.isNegativeZero f, P.show f)
-(d == d, d > 0, d + d)
-show d
-```
-
-Observed in the resident runtime:
-
-```text
-(True,True,True,"-NaN")
-(True,True,True,"-NaN")
-(True,True,-NaN)
-"1.0"
-```
-
-Native GHC, checked independently with `ghc -e` for both Float and Double,
-returns `(False,False,False,"1.0")` for the classification/Show tuple.
-The arithmetic tuple should display `(True,True,2.0)`.
-
-Earlier probes also rendered `(fromIntegral (14592 :: Int) :: Double)` as
-`-NaN`. This is a rendering observation, not proof that conversion itself
-produces NaN. Likewise the displayed `d + d` does not establish its underlying
-bit pattern. Test arithmetic and conversion through independent observations.
-
-## Verified distinctions and unresolved mechanism
-
-- This is not solely a presentation defect: classification predicates themselves
-  return incorrect Bool values for ordinary finite inputs.
-- The resident default `show` uses `Tidepool.Render`. Its Double instance routes
-  through `Tidepool.Double.renderDoublePrec`, an extractor intrinsic, and masks
-  this particular failure. It is not an independent oracle for the substrate.
-- Generic `WorkbenchDisplay` and `FullDisplay` in `Tidepool.Inspection` use
-  ordinary Prelude `Show`. Derived/nested Show consumers must be covered too;
-  a special instance for bare Double would not repair those consumers.
-- `mapFfiCall` in the extractor recognizes selected foreign calls, including
-  `rintDouble`, but has no floating-classification mappings. Unsupported calls
-  become lazy poison nodes via `emitFfiPoison`.
-- Prior investigation of GHC's Float interface identified foreign classification
-  calls such as `isDoubleNaN`, `isDoubleInfinite`, `isDoubleNegativeZero`, and
-  their Float counterparts. Reconfirm the exact Core names and result types
-  against the active GHC/toolchain when implementing.
-
-**Leading hypothesis:** missing classification support contributes to the bad
-Prelude predicates/Show, and a poison/forcing or representation boundary lets an
-unsupported computation become an ordinary truthy value instead of an honest
-failure. The exact path from emitted poison to `True` is NOT yet established.
-Trace it; adding mappings alone must not conceal a general error-propagation bug.
-
-Unsupported FFI can occur in dead branches of over-collected closures. Preserve
-laziness: unused unsupported code need not prevent compilation, but forcing it
-must fail honestly. Do not replace lazy poison with fabricated values or reject
-all dead unsupported bindings eagerly as a shortcut.
-
-## Owning code and existing test seams
-
-Read root and nearest nested `AGENTS.md`; stale `CLAUDE.md` is not authority.
-
-| Area | Source / existing tests to inspect |
+| Proven defect | Structural repair / owner |
 |---|---|
-| Core/FFI lowering and poison creation | `haskell/src/Tidepool/Translate.hs`: `isFCallId`, `mapFfiCall`, `emitFfiPoison` |
-| Primitive vocabulary / serialization | `tidepool-repr/src/types.rs`: `PrimOpKind`, including `FfiRintDouble` |
-| Reference evaluation | `tidepool-eval/src/eval.rs` |
-| JIT lowering, boxing and comparisons | `tidepool-codegen/src/emit/primop.rs`; follow actual unboxing/forcing consumers |
-| Heap/value decoding | `tidepool-codegen/src/heap_bridge.rs` |
-| Display paths | `haskell/lib/Tidepool/{Prelude,Render,Double,Inspection}.hs` |
-| Primitive differential tests | `tidepool-codegen/tests/proptest_primops_differential.rs` |
-| Extractor/runtime regressions | `tidepool-runtime/tests/stdlib_regressions_02.rs`, `gc_and_errors.rs`, `suites/stdlib.rs` |
-| Existing floating display regressions | `tidepool-runtime/tests/show_double_lens_sigill.rs`, `effect_stack/show_double_10effect.rs`, `repro/repro_lit_double_case.rs` |
-| Public resident display | `tidepool-actor/src/workbench_display_tests.rs`; host documentation/workbench test harnesses |
+| Missing classification FFI mappings; rendered substring recognition | Six Float/Double classifier primitives; exact static foreign-symbol recognition in `haskell/src/Tidepool/Translate.hs` |
+| Lazy error closure read as a literal payload and accepted by case DEFAULT | Semantic WHNF demand at case entry, checked numeric unboxing and immediate error return in `tidepool-codegen/src/emit/{case,expr,primop}.rs` and `host_fns/force.rs` |
+| Float literal case interpreted binary32 bits as binary64 | Width-correct Float comparison in case dispatch |
+| Every primitive argument evaluated eagerly, including lifted array values | Typed `PrimOpKind::argument_demand` in `tidepool-repr/src/types.rs`; lazy argument subtrees retained until thunk materialization in JIT traversal |
+| Supposedly trivial primitive computations evaluated in lazy positions | Conservative shared `is_trivial_field`: primitive applications remain computations, not eagerly materialized values; constructor, binding and array consumers share the rule |
+| Nonzero subnormal decode returned an unnormalized significand | Shared `tidepool-bignum` decoding normalizes to GHC's 24/53-bit significand with compensating exponent |
+| Serialized Float accepted ignored upper 32 bits | Shared literal decoder rejects noncanonical Float bits; valid Float/Double bits roundtrip exactly |
 
-Existing tests are leads, not evidence that the affected behavior currently
-passes. GHC source may be available through the Nix closure; use `ghc-pkg field
-ghc-internal import-dirs --simple-output` and `ghc --show-iface` to inspect the
-active interface rather than assuming symbols from a different GHC release.
+No special Prelude Show instance, replacement formatter, duplicate array backend,
+or eager rejection of all unsupported dead code was introduced. Unused bottom
+remains lazy; demanded unsupported/error values fail explicitly.
 
-## Acceptance criteria
+## Final evidence
 
-1. The minimal Float and Double repros agree with native GHC through the real
-   extractor/runtime and resident display paths.
-2. Test classification for finite positives/negatives, both signed zeros,
-   subnormals, finite extrema, infinities, and NaNs. Generate bit-pattern cases
-   where useful; compare NaNs and signed zero by appropriate predicates/bits,
-   not ordinary equality. State platform and NaN-payload assumptions.
-3. Cover standard Prelude Show inside tuples, lists, and user-derived records,
-   plus bare workbench display and full inspection. Test the separate Render
-   path without letting it substitute for standard Show coverage.
-4. Check relevant arithmetic, comparisons, Float/Double and integral conversions,
-   encoding/decoding, and rounding against native semantics. Expand into adjacent
-   operations when tracing or differential testing finds evidence; avoid imposing
-   invented expectations on operations with unspecified or exceptional behavior.
-5. Run cases through both reference evaluation and JIT. Agreement between them
-   is not sufficient: both may share bad lowering. Retain a native-GHC oracle
-   and end-to-end tests that include extraction.
-6. Demonstrate forced unsupported operations fail explicitly and dead unsupported
-   branches remain unevaluated. Exercise boxed/unboxed and case-analysis seams
-   implicated by the diagnosis; no poison-as-value or silent-success fallback.
-7. Keep one owner per primitive/formatter/error mechanism, clean up obsolete
-   paths when superseded, and compile all changed consumers. No display-only
-   workaround or duplicate formatter as the repair.
-8. Use focused Nix-backed tests (`just test-lib` / `just test-target`). Run
-   `just fixtures-check` after extractor translation or serialization changes;
-   update fixtures only for intentional changes. Put substantial Haskell test
-   programs in adjacent fixtures. Run formatting and `git diff --check`.
+Root executed these focused checks at the verified baseline, all passing:
 
-## Proposed wave: build instruments, not just patches
+| Selection | Passed |
+|---|---:|
+| Runtime native numeric/array oracle and extracted error-message controls | 17 |
+| Classifier and IEEE arithmetic backend matrices | 2 |
+| Primitive demand and constructor differential regressions | 7 |
+| Resident error guards | 15 |
+| Strict demand/heap force unit tests | 12 |
+| Repr ingress, bit roundtrips and trivial-field safety | 10 |
+| Shared Float/Double decode unit tests | 4 |
+| `just fixtures-check` | 217 |
 
-The coordinator first verifies the lowering/poison path and commits enough shared
-primitive semantics and test interfaces to unblock independent consumers. Then
-fork coherent leads for lowering/representation, evaluator/JIT behavior, and
-adversarial differential/end-to-end testing. Each may recurse when its own
-contracts support independent work. Assign shared enums, manifests and wiring to
-one owner; do not start conflicting edits under a large arbitrary headcount.
+All selected targets compiled and executed. Workspace-edition formatting and
+`git diff --check` passed. Full root command log:
+`/tmp/numeric-final-root-checks.log` (local session evidence, not a shipped file).
 
-Use the resident language as working machinery:
+Independent retained validation specialist executed
+`just test-lib tidepool 'test(floating_point_resident_display_matches_prelude)'`
+at the **same exact baseline**: one test containing all 17 probes passed
+(nextest `1733f7bf-986c-4e72-b630-82de44281c75`). It covers bare/full inspection,
+tuples, lists, derived numeric records, qualified Prelude Show, separate Render,
+and classification. Hosted forest/task join and extractor daemon cleanup passed.
+Evidence is specialist-attributed, not claimed as a second root execution.
 
-- Define typed numeric cases, observations, discrepancies, and acceptance results.
-- Retain generators, oracle adapters, classifiers and minimizers as callable
-  values where supported; compose them with `map`, `traverse`, folds and `Await`.
-- Give small workers narrowly scoped typed tasks and, where supported, a
-  task-specific Haskell interface rather than a repeated long manifesto.
-- Fork exact-context specialists for semantic decisions and repair ownership.
-  Small-context workers are an explicit different dispatch choice, not a lossy
-  replacement for shared-context inheritance.
-- Do not assume new custom-tool or effect capabilities already exist. Build on
-  live APIs; genuinely new effects require a real Rust interpreter and authority
-  boundary, not a stub reporting success.
-- Fork reviewers against exact candidates. Keep reviewer/implementer repair
-  dialogue local; return commits, decisive evidence, uncertainty and reusable
-  testing machinery to the coordinator. Verify the merged revision.
+Native oracle: repository Nix GHC 9.12.2, x86_64 Linux. Numeric tests include both
+signed zeros, finite values/extrema, subnormals, infinities and NaNs. Arithmetic
+NaN sign/payload preservation is not assumed; serialization compares exact bits.
+See fixtures under `tidepool-runtime/tests/fixtures/floating/` and corresponding
+`numeric_oracle.rs`, `finite_show_array.rs` tests for repeatable native comparisons.
 
-Use Low by default for bounded obligations and choose higher effort deliberately
-for the uncertain semantic seams. Source baselines, delivery, incorporation and
-checked revisions remain separate facts. Every assignment must end with its typed
-result or a registered concrete dependency—not an unowned “implementation next.”
+## Explicit limits and follow-ups
 
-## Launch conditions
+- Reference evaluation still lacks boxed-array primitives; those controls use
+  native GHC versus JIT, not fabricated evaluator parity.
+- Conservative thunking may allocate more; no performance benchmark was run.
+- Direct Rust `Literal::LitFloat(u64)` construction and the writer remain
+  permissive; the ingress fix is not a universal in-memory invariant.
+- No dedicated CAS regression or exhaustive/random decode sweep; special-value
+  decode behavior outside finite numbers was not changed.
+- Aeson Scientific and QQ/Fmt contain old floatToDigits/clz workaround rationale.
+  `clz#` support exists and finite Show now works. Audit those paths separately,
+  preserving intentional JSON formatting and Float/Double decimal distinctions;
+  they were not rewritten or claimed equivalent in this repair.
+- No workspace-wide release battery or live-host replacement was performed.
 
-Goals-off policy and shared prompt changes are integrated; restart with the
-rebuilt Shoal host before launching this wave. Native Codex goals stay disabled
-on all nodes. The separate cache control preserved all eight parent input items
-and reused 15,488 / 16,010 child-first-response tokens (96.7%); this is evidence
-from one controlled pair, not a universal cache guarantee or a numeric test.
+## Tree-of-workers experience
 
-This document is the handoff, not authorization to launch workers before the
-user's restart. Once repaired, move standing invariants into owning source/tests
-and contributor guidance; Git retains this investigation history.
+The campaign used committed shared contracts, independent implementation and
+oracle leads, recursive worker/reviewer waves, local repair loops, exact-candidate
+integration and typed surveys. Fresh review caught both defective tests and an
+additional lazy-evaluation bug. The experience and unresolved orchestration
+issues are recorded in
+[the live dogfood notes](plans/actor-model/live-context-unfold-dogfood-followups.md#numeric-substrate-tree-live-observations-2026-09-06-ongoing).
+Full typed deliveries and useful specialists remain retained in the root session;
+no complete actor-retirement or cache/cost-efficiency claim is made.
