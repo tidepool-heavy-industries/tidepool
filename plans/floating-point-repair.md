@@ -48,3 +48,23 @@ through root. Return exact candidate, checks, evidence limits and remaining
 choices with retained worker handles. Root merges reviewed lanes, runs relevant
 integration tests and fixtures-check, then probes a rebuilt resident runtime
 (or explicitly reports that the running host has not incorporated repairs).
+
+## Independent IR-ingress hardening lane
+
+Additional user-authorized parallel lane: serialized floating literal validity.
+Own `tidepool-repr/src/serial/read.rs` and local decoder tests; extend writer/mod
+only if required for a coherent invariant, without changing PrimOpKind or the
+Literal enum (numeric lead owns types.rs). Current decoder accepts any u64 as
+LitFloat although the extractor emits zero-extended u32 bits and execution and
+display truncate to u32. Reject high-bit Float payloads at decode rather than
+normalize them silently. Preserve every valid low-32-bit Float pattern and all
+64-bit Double patterns exactly, including signed zero and NaN payloads. This is
+validation of the existing representation, not a new wire shape: no version
+bump or fixture update expected; fixtures-check still required at integration.
+
+Production ingress consumers include toolchain/artifacts.rs and session/turn.rs.
+Delegate independent malformed-input proof and valid-bit roundtrip tests, then
+fresh review. No changes to classifiers, force/case machinery, runtime test-suite
+wiring, or shared differential runners. Prove the malformed value distinction
+without making Float NaN equality assertions. Report in-memory noncanonical IR
+construction as a remaining boundary if it cannot be closed inside this lane.
