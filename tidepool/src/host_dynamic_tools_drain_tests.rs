@@ -185,3 +185,42 @@ async fn http_idle_keepalive_connection_does_not_prevent_drain() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn http_disconnected_client_does_not_authorize_effect_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("tools.sock");
+    let endpoint = endpoint();
+    let service =
+        HostDynamicToolService::new(endpoint.clone(), dir.path().join("binding"), None).unwrap();
+    let control = service.control();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut server = tokio::spawn(service.serve(listener));
+    let c = client(&socket);
+    attach(&c).await;
+    let active = tokio::spawn(async move {
+        c.post(format!("{URL}/call"))
+            .json(&call_request())
+            .send()
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), endpoint.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    active.abort();
+    assert!(active.await.unwrap_err().is_cancelled());
+    control.quiesce();
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 1);
+    // Release the endpoint explicitly; client cancellation is never used as an
+    // endpoint completion signal. This fixture is not a resident-effect proof.
+    endpoint.release.add_permits(1);
+    control.drain();
+    tokio::time::timeout(Duration::from_secs(5), &mut server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(endpoint.calls.load(Ordering::SeqCst), 1);
+}
