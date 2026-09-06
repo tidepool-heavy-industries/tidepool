@@ -190,6 +190,7 @@ impl ActiveBinding {
 pub struct BindingTable {
     dir: DurableJsonDir,
     bindings: Vec<Binding>,
+    write_uncertain: bool,
     /// Parallel to `bindings` (same length, same index) — the in-memory
     /// bind-generation of each row, assigned when [`Self::bind`] creates it.
     /// NEVER persisted: an [`ActiveBinding`] receipt's identity is a fact
@@ -279,6 +280,7 @@ impl BindingTable {
         Ok(Self {
             dir,
             bindings,
+            write_uncertain: false,
             generations,
             next_generation: 0,
             _owner_lock: owner_lock,

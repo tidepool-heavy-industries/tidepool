@@ -37,6 +37,7 @@ pub enum WriteError {
 pub struct LogWriter {
     file: File,
     next_seq: u64,
+    write_uncertain: bool,
 }
 
 impl LogWriter {
@@ -45,7 +46,11 @@ impl LogWriter {
     /// as the first line.
     pub fn create(path: impl AsRef<Path>, header: &LogHeader) -> Result<Self, WriteError> {
         let file = OpenOptions::new().create_new(true).write(true).open(path)?;
-        let mut writer = LogWriter { file, next_seq: 0 };
+        let mut writer = LogWriter {
+            file,
+            next_seq: 0,
+            write_uncertain: false,
+        };
         writer.write_line(&StampedHeader {
             version: LOG_VERSION_CURRENT,
             header,

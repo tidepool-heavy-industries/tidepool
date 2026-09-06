@@ -56,6 +56,7 @@ pub struct ObservationBatch {
 pub struct EventJournal {
     path: PathBuf,
     entries: Vec<ObservationBatch>,
+    write_uncertain: bool,
     /// Exclusive for this handle's lifetime. Cursor and EventId allocation
     /// are derived from the in-memory rows, so a second writer would be stale.
     _owner_lock: fs::File,
@@ -232,6 +233,7 @@ impl EventJournal {
         Ok(Self {
             path,
             entries,
+            write_uncertain: false,
             _owner_lock: owner_lock,
         })
     }
