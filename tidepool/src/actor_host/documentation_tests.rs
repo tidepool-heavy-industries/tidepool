@@ -215,6 +215,65 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
 }
 
 #[tokio::test]
+async fn watch_documentation_request_options_reports_progress_then_settles() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        "lead <- startAgent (readonlyAgent \"documented-progress-lead\")",
+    )
+    .await;
+    let snippets: Vec<_> = examples(include_str!("../../../prompts/shoal/docs/watch.md"))
+        .filter(|snippet| snippet.contains("let progressOptions = requestOptions"))
+        .collect();
+    assert_eq!(snippets.len(), 1, "one complete documented progress setup");
+    committed(root.as_ref(), snippets[0]).await;
+    let child = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut child = None;
+        loop {
+            match campaign.deployments.recv().await {
+                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                    child = Some(installation)
+                }
+                Some(LocalResidentDeployment::SessionReady { activation }) => {
+                    assert!(activation
+                        .message
+                        .contains("Publish cumulative findings; then return your final report."));
+                    return child.expect("policy installed before request activation");
+                }
+                Some(_) => {}
+                None => panic!("deployment channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("documented progress request activation");
+    // Exercise the real resident actor path, without a model/provider execution claim.
+    committed(child.policy.as_ref(), "reportProgress [\"finding\"]").await;
+    campaign.await_watch_ready().await;
+    let progress = committed(
+        root.as_ref(),
+        include_str!("watch_documentation_progress.hs"),
+    )
+    .await;
+    assert_eq!(progress["items"][2]["output"], "True", "{progress}");
+    assert_eq!(progress["items"][3]["output"], "True", "{progress}");
+    let reply =
+        dispatch_haskell_script(child.policy.as_ref(), "respond (\"final report\" :: Text)").await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    campaign.await_watch_ready().await;
+    let settled = committed(
+        root.as_ref(),
+        include_str!("watch_documentation_settled.hs"),
+    )
+    .await;
+    assert_eq!(settled["items"][2]["output"], "True", "{settled}");
+    assert_eq!(settled["items"][3]["output"], "True", "{settled}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn activation_presents_prose_and_preserves_exact_inputs() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
