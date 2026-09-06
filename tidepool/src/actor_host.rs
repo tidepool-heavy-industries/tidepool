@@ -2861,7 +2861,7 @@ mod tests {
             while children.len() < 2 {
                 match campaign.deployments.recv().await {
                     Some(LocalResidentDeployment::PolicyInstalled(child)) => children.push(child),
-                    Some(LocalResidentDeployment::Retired { actor, terminal: _ }) => {
+                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
                         panic!("{actor:?}: {terminal:?}")
                     }
                     Some(_) => {}
