@@ -9,7 +9,7 @@ mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
 mod host_incarnation;
-#[allow(dead_code)] // Lifecycle consumer scaffold; implementation follows.
+#[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
 mod prompt_catalog;
 #[cfg(test)]
@@ -673,6 +673,12 @@ impl std::error::Error for RetainedInteractiveFleet {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RetainedHostedError {
+    #[error("exact actor has no retained hosted service")]
+    NoHostedActor,
+}
+
 /// Host-only operations. These never select a launch mode, release the command
 /// gate, establish host-work quiescence, or settle workspace custody.
 #[allow(dead_code)] // Available to the crate's host error consumer; not a model API.
@@ -720,6 +726,23 @@ impl RetainedInteractiveFleet {
         error: &'a mut (dyn std::error::Error + 'static),
     ) -> Option<&'a mut Self> {
         error.downcast_mut::<Self>()
+    }
+
+    /// Continue the exact stored seal/shutdown/service operations after waiter
+    /// loss. Abort is an explicit host decision; no native-success branch exists.
+    pub(crate) async fn recover_hosted(
+        &self,
+        actor: ActorRef,
+        boundary: hosted_retirement::CompletionBoundary,
+        timeout: Duration,
+    ) -> Result<hosted_retirement::HostedObservation, RetainedHostedError> {
+        let owner = {
+            let rows = self.owners.lock();
+            rows.get(&actor)
+                .and_then(|row| row.hosted.lock().clone())
+                .ok_or(RetainedHostedError::NoHostedActor)?
+        };
+        Ok(hosted_retirement::observe(&owner, boundary, timeout).await)
     }
 
     /// Blocking, deadline-bounded host operation: call outside an actor turn.
@@ -1394,6 +1417,46 @@ fn render_root_compile_failure(
     ))
 }
 
+fn spawn_undeployed_hosted_retirement(
+    retirements: &mut JoinSet<InteractiveCleanupReceipt>,
+    actor: ActorRef,
+    owners: &InteractiveOwners,
+) {
+    let retained = {
+        let rows = owners.lock();
+        rows.get(&actor).and_then(|row| {
+            row.hosted
+                .lock()
+                .clone()
+                .map(|service| (service, row.retirement.clone()))
+        })
+    };
+    let Some((mut service, receipt_slot)) = retained else {
+        return;
+    };
+    retirements.spawn(async move {
+        let http = stop_retired_tool_service(actor, &mut service).await;
+        let receipt = InteractiveCleanupReceipt {
+            actor,
+            components: vec![
+                CleanupComponentReceipt {
+                    component: CleanupComponent::ToolService,
+                    outcome: http,
+                },
+                CleanupComponentReceipt {
+                    component: CleanupComponent::Process,
+                    outcome: CleanupComponentOutcome::Failed {
+                        detail: "hosted retirement does not establish native/external cleanup"
+                            .into(),
+                    },
+                },
+            ],
+        };
+        receipt_slot.lock().get_or_insert_with(|| receipt.clone());
+        receipt
+    });
+}
+
 fn spawn_owned_retirement(
     retirements: &mut JoinSet<InteractiveCleanupReceipt>,
     deployment: InteractiveDeployment,
@@ -1509,6 +1572,7 @@ async fn run_interactive_applications(
                 }
                 if let Some(index) = deployments.iter().position(|deployment| {
                     !deployment.failure_reported
+                        && deployment.local_actor.terminal().get().is_none()
                         && (hosted_retirement::service_finished(&deployment.service)
                             || matches!(
                                 &deployment.connection,
@@ -1638,6 +1702,8 @@ async fn run_interactive_applications(
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
+                        } else {
+                            spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners);
                         }
                     }
                     LocalResidentDeployment::NotificationSend(command) => {
@@ -1960,6 +2026,19 @@ async fn run_interactive_applications(
     };
     binding_discoveries.abort_all();
     while binding_discoveries.join_next().await.is_some() {}
+    let undeployed = application_owners
+        .lock()
+        .keys()
+        .copied()
+        .filter(|actor| {
+            !deployments
+                .iter()
+                .any(|deployment| deployment.actor == *actor)
+        })
+        .collect::<Vec<_>>();
+    for actor in undeployed {
+        spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners);
+    }
     for deployment in deployments {
         spawn_owned_retirement(
             &mut retirements,

@@ -5,7 +5,7 @@ use futures_util::future::BoxFuture;
 use tidepool_actor::{HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CompletionBoundary {
+pub(crate) enum CompletionBoundary {
     AwaitingNativeDecision,
     AbortForShutdown,
 }
@@ -26,14 +26,14 @@ impl<T> Operation<T> {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum SealObservation {
+pub(crate) enum SealObservation {
     Pending,
     TerminalPath,
     Confirmed(HostedWorkSeal),
     Failed(String),
 }
 #[derive(Debug, Clone)]
-pub(super) enum ResidentObservation {
+pub(crate) enum ResidentObservation {
     Pending,
     Absent,
     Foreign(ActorRef),
@@ -41,13 +41,13 @@ pub(super) enum ResidentObservation {
     Failed(String),
 }
 #[derive(Debug, Clone)]
-pub(super) enum HttpObservation {
+pub(crate) enum HttpObservation {
     Pending,
     Drained,
     Failed(String),
 }
 #[derive(Debug, Clone)]
-pub(super) enum HostedObservation {
+pub(crate) enum HostedObservation {
     Pending,
     Observed {
         seal: SealObservation,
