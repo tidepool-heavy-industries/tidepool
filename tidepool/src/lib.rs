@@ -16,6 +16,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod actor_host;
 pub mod compile_report;
+pub mod run_map;
 pub mod haskell_sources;
 mod host_dynamic_tools;
 pub mod shoal;
