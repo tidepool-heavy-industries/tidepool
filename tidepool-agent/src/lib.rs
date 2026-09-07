@@ -20,6 +20,11 @@ pub mod seam;
 pub mod spawn;
 
 pub use backend::codex::node::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
+pub use backend::codex::node::{
+    read_bounded_usage as read_native_usage, BoundedUsageRecord, BoundedUsageReport,
+    UsageDiagnostic, UsageIssue, UsageLimit, UsageProvenance, UsageReadLimits, UsageSelection,
+    UsageSourceCoverage, UsageSourceState,
+};
 pub use backend::codex::trust_interactive_project;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{

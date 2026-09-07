@@ -4018,6 +4018,7 @@ name = "tidepool-agent"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "chrono",
  "codex-codes",
  "parking_lot",
  "rustix",

@@ -11,6 +11,7 @@ rust-version.workspace = true
 description = "Typed headless-subagent backend adapters (PRD 18). Backend vocabulary is contained here."
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 tidepool-model.workspace = true
 codex-codes = "=0.146.4"
 # The shared readable-executable-file check (std-only zero-dep leaf) — see

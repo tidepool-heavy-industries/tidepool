@@ -953,6 +953,9 @@ mod tests {
         assert_eq!(snapshot.latest_turn_summary, None);
         let mut huge = record("child", "one", "a");
         huge["payload"]["usage"]["input_tokens"] = json!(i64::MAX);
+        huge["payload"]["usage"]["output_tokens"] = json!(0);
+        huge["payload"]["usage"]["reasoning_output_tokens"] = json!(0);
+        huge["payload"]["usage"]["total_tokens"] = json!(i64::MAX);
         let mut huge2 = huge.clone();
         huge2["payload"]["response_id"] = json!("b");
         assert_eq!(read_values(&[own(), huge, huge2]).thread_summary, None);

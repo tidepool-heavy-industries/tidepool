@@ -29,6 +29,12 @@ mod active_update;
 #[path = "rollout_usage.rs"]
 mod rollout_usage;
 
+pub use rollout_usage::{
+    read_bounded_usage, BoundedUsageRecord, BoundedUsageReport, UsageDiagnostic, UsageIssue,
+    UsageLimit, UsageProvenance, UsageReadLimits, UsageSelection, UsageSourceCoverage,
+    UsageSourceState,
+};
+
 const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const CLI_DEADLINE: Duration = Duration::from_secs(30);
