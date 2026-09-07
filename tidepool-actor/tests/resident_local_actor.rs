@@ -317,6 +317,17 @@ async fn resident_cleanup_case(fail_hook: bool) {
         Some(LocalResidentDeployment::Retired { actor: retired, .. })
             if retired == actor.identity()
     ));
+    // External host composition can construct the canonical projection, but a
+    // terminal actor cannot silently retarget its independently live sibling.
+    let canonical = tidepool_actor::ResidentInteractivePolicy::local(actor.clone());
+    let error = tidepool_actor::ResidentToolEndpoint::seal_hosted_work_boxed(&canonical)
+        .await
+        .expect_err("terminal canonical projection remains terminal");
+    assert!(matches!(error,
+        tidepool_actor::ResidentToolError::Invocation(
+            tidepool_actor::KernelInvocationFailure::ActorExited(identity))
+                if identity == actor.identity()));
+
     // The first tree's retirement must preserve the sibling's live closures.
     let retained = sibling_server
         .dispatch_tool("current_value", serde_json::Map::new())

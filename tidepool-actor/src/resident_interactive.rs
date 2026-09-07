@@ -21,7 +21,15 @@ pub struct ResidentInteractivePolicy {
 }
 
 impl ResidentInteractivePolicy {
-    pub(crate) fn local(actor: crate::LocalActorRef) -> Self {
+    /// Project the persistent Haskell workbench of this exact actor incarnation.
+    /// All dispatch, completion, reattachment and sealing target this same actor;
+    /// construction neither creates a session nor grants additional authority.
+    ///
+    /// Host composition should construct this projection from its owned actor
+    /// rather than accept an independently supplied endpoint/actor pair. Each
+    /// projection has a client serialization gate; the actor mailbox remains
+    /// the shared admission and execution owner across multiple projections.
+    pub fn local(actor: crate::LocalActorRef) -> Self {
         Self::with_client(ResidentToolClient::local(actor))
     }
 
