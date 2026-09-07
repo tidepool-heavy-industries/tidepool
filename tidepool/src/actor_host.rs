@@ -9,6 +9,9 @@ mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
 mod host_incarnation;
+#[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
+mod hosted_retirement;
+pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
 mod prompt_catalog;
 #[cfg(test)]
 mod research_policy_tests;
@@ -301,7 +304,7 @@ struct InteractiveDeployment {
     inbox: Arc<ActorInbox>,
     notification_inbox_key: String,
     connection: InteractiveConnection,
-    service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
+    service: hosted_retirement::HostedOwner,
     socket_directory: SocketDirectory,
     worktree_custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     failure_reported: bool,
@@ -581,6 +584,7 @@ struct InteractiveApplicationOwner {
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
     custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
+    hosted: hosted_retirement::HostedSlot,
     launch: HostLaunchState,
     terminal: Option<ActorTerminal>,
     retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
@@ -670,6 +674,12 @@ impl std::error::Error for RetainedInteractiveFleet {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RetainedHostedError {
+    #[error("exact actor has no retained hosted service")]
+    NoHostedActor,
+}
+
 /// Host-only operations. These never select a launch mode, release the command
 /// gate, establish host-work quiescence, or settle workspace custody.
 #[allow(dead_code)] // Available to the crate's host error consumer; not a model API.
@@ -717,6 +727,23 @@ impl RetainedInteractiveFleet {
         error: &'a mut (dyn std::error::Error + 'static),
     ) -> Option<&'a mut Self> {
         error.downcast_mut::<Self>()
+    }
+
+    /// Continue the exact stored seal/shutdown/service operations after waiter
+    /// loss. Abort is an explicit host decision; no native-success branch exists.
+    pub(crate) async fn recover_hosted(
+        &self,
+        actor: ActorRef,
+        boundary: CompletionBoundary,
+        timeout: Duration,
+    ) -> Result<HostedObservation, RetainedHostedError> {
+        let owner = {
+            let rows = self.owners.lock();
+            rows.get(&actor)
+                .and_then(|row| row.hosted.lock().clone())
+                .ok_or(RetainedHostedError::NoHostedActor)?
+        };
+        Ok(hosted_retirement::observe(&owner, boundary, timeout).await)
     }
 
     /// Blocking, deadline-bounded host operation: call outside an actor turn.
@@ -782,10 +809,9 @@ fn handoff_application_owners(
     cleanup: Result<(), Box<dyn std::error::Error>>,
     run_result: Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let retained = owners
-        .lock()
-        .values()
-        .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
+    let retained = owners.lock().values().any(|owner| {
+        owner.scoped_retention.is_some() || owner.custody.is_some() || owner.hosted.lock().is_some()
+    });
     let unfinished = !task.is_finished();
     if retained || unfinished {
         return Err(Box::new(RetainedInteractiveFleet {
@@ -811,7 +837,6 @@ enum InteractiveOperation {
     PrepareRuntime,
     BindToolHost,
     BuildCommand,
-    BuildPolicy,
     ServeToolHost,
     LaunchProcess,
     DiscoverBinding,
@@ -824,7 +849,6 @@ impl fmt::Display for InteractiveOperation {
             Self::PrepareRuntime => "prepare runtime",
             Self::BindToolHost => "bind tool host",
             Self::BuildCommand => "build agent command",
-            Self::BuildPolicy => "build resident tool policy",
             Self::ServeToolHost => "serve host dynamic tools",
             Self::LaunchProcess => "launch agent process",
             Self::DiscoverBinding => "discover conversation binding",
@@ -837,9 +861,7 @@ impl InteractiveOperation {
     fn failure_class(self) -> ExternalApplicationFailureClass {
         match self {
             Self::BindWorktree => ExternalApplicationFailureClass::WorktreeBinding,
-            Self::BuildCommand | Self::BuildPolicy => {
-                ExternalApplicationFailureClass::CommandConstruction
-            }
+            Self::BuildCommand => ExternalApplicationFailureClass::CommandConstruction,
             Self::LaunchProcess => ExternalApplicationFailureClass::ProcessLaunch,
             Self::BindToolHost
             | Self::ServeToolHost
@@ -1392,6 +1414,46 @@ fn render_root_compile_failure(
     ))
 }
 
+fn spawn_undeployed_hosted_retirement(
+    retirements: &mut JoinSet<InteractiveCleanupReceipt>,
+    actor: ActorRef,
+    owners: &InteractiveOwners,
+) {
+    let retained = {
+        let rows = owners.lock();
+        rows.get(&actor).and_then(|row| {
+            row.hosted
+                .lock()
+                .clone()
+                .map(|service| (service, row.retirement.clone()))
+        })
+    };
+    let Some((mut service, receipt_slot)) = retained else {
+        return;
+    };
+    retirements.spawn(async move {
+        let http = stop_retired_tool_service(actor, &mut service).await;
+        let receipt = InteractiveCleanupReceipt {
+            actor,
+            components: vec![
+                CleanupComponentReceipt {
+                    component: CleanupComponent::ToolService,
+                    outcome: http,
+                },
+                CleanupComponentReceipt {
+                    component: CleanupComponent::Process,
+                    outcome: CleanupComponentOutcome::Failed {
+                        detail: "hosted retirement does not establish native/external cleanup"
+                            .into(),
+                    },
+                },
+            ],
+        };
+        receipt_slot.lock().get_or_insert_with(|| receipt.clone());
+        receipt
+    });
+}
+
 fn spawn_owned_retirement(
     retirements: &mut JoinSet<InteractiveCleanupReceipt>,
     deployment: InteractiveDeployment,
@@ -1507,7 +1569,8 @@ async fn run_interactive_applications(
                 }
                 if let Some(index) = deployments.iter().position(|deployment| {
                     !deployment.failure_reported
-                        && (deployment.service.is_finished()
+                        && deployment.local_actor.terminal().get().is_none()
+                        && (hosted_retirement::service_finished(&deployment.service)
                             || matches!(
                                 &deployment.connection,
                                 InteractiveConnection::Bound { delivery, .. }
@@ -1561,11 +1624,13 @@ async fn run_interactive_applications(
                         if owners.contains_key(&actor) {
                             break Some(format!("duplicate application owner for {actor:?}"));
                         }
+                        let hosted_slot = Arc::new(Mutex::new(None));
                         owners.insert(actor, InteractiveApplicationOwner {
                             cancel: Some(cancel),
                             fork_gate: installation.fork_gate.clone(),
                             custody: installation.worktree_custody.clone(),
                             scoped_retention: None, // No scope launch selection before native pin.
+                            hosted: hosted_slot.clone(),
                             launch: HostLaunchState::Pending,
                             terminal: None,
                             retirement: Arc::new(Mutex::new(None)),
@@ -1578,6 +1643,7 @@ async fn run_interactive_applications(
                                 context,
                                 cancelled,
                                 fork_parent_thread,
+                                hosted_slot,
                             ))
                             .catch_unwind()
                             .await
@@ -1633,6 +1699,8 @@ async fn run_interactive_applications(
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
+                        } else {
+                            spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners);
                         }
                     }
                     LocalResidentDeployment::NotificationSend(command) => {
@@ -1955,6 +2023,19 @@ async fn run_interactive_applications(
     };
     binding_discoveries.abort_all();
     while binding_discoveries.join_next().await.is_some() {}
+    let undeployed = application_owners
+        .lock()
+        .keys()
+        .copied()
+        .filter(|actor| {
+            !deployments
+                .iter()
+                .any(|deployment| deployment.actor == *actor)
+        })
+        .collect::<Vec<_>>();
+    for actor in undeployed {
+        spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners);
+    }
     for deployment in deployments {
         spawn_owned_retirement(
             &mut retirements,
@@ -2085,6 +2166,7 @@ async fn launch_interactive_application(
     context: InteractiveLaunchContext,
     cancelled: oneshot::Receiver<()>,
     fork_parent_thread: Option<BackendThreadId>,
+    hosted_slot: hosted_retirement::HostedSlot,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let worktree = prepare_actor_worktree(&installation, &context)?;
     launch_prepared_interactive_application(
@@ -2093,6 +2175,7 @@ async fn launch_interactive_application(
         worktree,
         cancelled,
         fork_parent_thread,
+        hosted_slot,
     )
     .await
 }
@@ -2189,6 +2272,7 @@ async fn launch_prepared_interactive_application(
     worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<()>,
     fork_parent_thread: Option<BackendThreadId>,
+    hosted_slot: hosted_retirement::HostedSlot,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let InteractiveLaunchContext {
         base_prompt,
@@ -2410,23 +2494,26 @@ async fn launch_prepared_interactive_application(
             args: command.args,
         },
     );
-    let server = crate::host_dynamic_tools::HostDynamicToolService::new(
-        installation.policy,
-        binding_path.clone(),
-        expected_resume.clone(),
-    )
-    .map_err(|error| application_error(actor_identity, InteractiveOperation::BuildPolicy, error))?;
     // Accepted hosted work may outlive listener cancellation. Retention starts
     // before either hosted submission or native process submission can occur.
     socket_directory.work_may_exist();
-    let service = tokio::spawn(async move {
-        server.serve(listener).await.map_err(|error| {
-            application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
-        })
-    });
+    let service = hosted_retirement::start(
+        &hosted_slot,
+        actor.clone(),
+        binding_path.clone(),
+        expected_resume.clone(),
+        listener,
+    )
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
+    })?;
     if cancelled.try_recv().is_ok() {
-        service.abort();
-        let _ = service.await;
+        let _ = hosted_retirement::observe(
+            &service,
+            hosted_retirement::CompletionBoundary::AbortForShutdown,
+            APPLICATION_TASK_GRACE_TIMEOUT,
+        )
+        .await;
         return Err(socket_launch_failure(
             actor_identity,
             InteractiveOperation::LaunchProcess,
@@ -2479,8 +2566,12 @@ async fn launch_prepared_interactive_application(
     {
         Ok(Ok(pane)) => pane,
         Ok(Err(error)) => {
-            service.abort();
-            let _ = service.await;
+            let _ = hosted_retirement::observe(
+                &service,
+                hosted_retirement::CompletionBoundary::AbortForShutdown,
+                APPLICATION_TASK_GRACE_TIMEOUT,
+            )
+            .await;
             return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
@@ -2489,8 +2580,12 @@ async fn launch_prepared_interactive_application(
             ));
         }
         Err(_) => {
-            service.abort();
-            let _ = service.await;
+            let _ = hosted_retirement::observe(
+                &service,
+                hosted_retirement::CompletionBoundary::AbortForShutdown,
+                APPLICATION_TASK_GRACE_TIMEOUT,
+            )
+            .await;
             return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
@@ -3047,23 +3142,20 @@ async fn retire_interactive_application(
     InteractiveCleanupReceipt { actor, components }
 }
 
-/// Stop the actor-lifetime host-tools listener after its application pane is gone.
+/// Account for exact resident cleanup before draining the original HTTP task.
+/// Namespace/native and external-handler domains remain independently unknown.
 async fn stop_retired_tool_service(
-    actor: ActorRef,
-    service: &mut tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
+    _actor: ActorRef,
+    service: &mut hosted_retirement::HostedOwner,
 ) -> CleanupComponentOutcome {
-    service.abort();
-    match service.await {
-        Err(error) if error.is_cancelled() => CleanupComponentOutcome::Forced,
-        Err(error) => {
-            tracing::warn!(actor = ?actor, %error, "retired actor tool service task failed");
-            CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            }
-        }
-        Ok(Ok(())) => CleanupComponentOutcome::Completed,
-        Ok(Err(error)) => CleanupComponentOutcome::Failed {
-            detail: error.to_string(),
+    match hosted_retirement::observe(service,
+        hosted_retirement::CompletionBoundary::AbortForShutdown,
+        APPLICATION_TASK_GRACE_TIMEOUT).await {
+        hosted_retirement::HostedObservation::Observed {
+            http: hosted_retirement::HttpObservation::Drained, ..
+        } => CleanupComponentOutcome::Completed,
+        observation => CleanupComponentOutcome::Failed {
+            detail: format!("resident/HTTP cleanup retained: {observation:?}; native/external cleanup is not established"),
         },
     }
 }
@@ -3093,14 +3185,21 @@ async fn stop_retired_delivery(
 async fn abandon_interactive_application(
     tmux: &TmuxSession,
     pane: &TmuxPaneId,
-    service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
+    service: hosted_retirement::HostedOwner,
     socket_root: &Path,
 ) {
+    abandon_interactive_pane(tmux, pane, socket_root).await;
+    let _ = hosted_retirement::observe(
+        &service,
+        hosted_retirement::CompletionBoundary::AbortForShutdown,
+        APPLICATION_TASK_GRACE_TIMEOUT,
+    )
+    .await;
+}
+
+async fn abandon_interactive_pane(tmux: &TmuxSession, pane: &TmuxPaneId, socket_root: &Path) {
     let _ = tmux.kill_pane(pane).await;
-    service.abort();
-    let _ = service.await;
-    // The path is diagnostic, not deletion authority. The caller's custody guard
-    // remains retained and reports a failed cleanup alongside the launch error.
+    // Diagnostic path, never deletion authority or process termination proof.
     tracing::warn!(path = %socket_root.display(), "abandoned socket directory retained: exact process and accepted hosted work cleanup unconfirmed");
 }
 
@@ -4941,23 +5040,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retired_actor_tasks_are_forced_closed_without_becoming_actor_failures() {
+    async fn retired_delivery_is_forced_without_claiming_tool_service_cleanup() {
         let actor = ActorRef::first(tidepool_actor::ActorId(7));
-        let mut service = tokio::spawn(async {
-            std::future::pending::<()>().await;
-            Ok::<(), InteractiveApplicationError>(())
-        });
         let mut delivery = tokio::spawn(std::future::pending::<()>());
-
-        let (service_outcome, delivery_outcome) = tokio::join!(
-            stop_retired_tool_service(actor, &mut service),
-            stop_retired_delivery(actor, &mut delivery, Duration::ZERO),
-        );
-
-        assert!(service.is_finished());
+        let outcome = stop_retired_delivery(actor, &mut delivery, Duration::ZERO).await;
         assert!(delivery.is_finished());
-        assert_eq!(service_outcome, CleanupComponentOutcome::Forced);
-        assert_eq!(delivery_outcome, CleanupComponentOutcome::Forced);
+        assert_eq!(outcome, CleanupComponentOutcome::Forced);
     }
 
     #[test]
