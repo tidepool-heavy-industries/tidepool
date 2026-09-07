@@ -10,9 +10,11 @@ module Project.Work
   , reviewCandidate
   , requestRepair
   , integrateReviewed
+  , deliverLane
   ) where
 
 import Control.Monad.Freer (Eff, Member)
+import Control.Monad (void)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Shoal
@@ -104,3 +106,29 @@ integrateReviewed group label seed candidate =
       <> "; rationale: " <> reviewRationale value
       <> "; remaining product gates: "
       <> Text.intercalate ", " (remainingGates (reviewedCandidate value))
+
+-- Install the declared chain and return promptly. Only exceptional local
+-- decisions need a lead's model turn; the final result settles its owned reply.
+deliverLane
+  :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects, Subset IntegrationEffects effects)
+  => DeliveryLane -> Reply Delivery -> Eff effects Route
+deliverLane lane destination = do
+  candidate <- implement (implementationGroup lane) (implementationLabel lane)
+    (implementationSeed lane) (laneTask lane)
+  onResult destination (awaitSettledFork candidate) $ \value -> do
+    reviewed <- reviewCandidate (reviewGroup lane) (reviewLabel lane)
+      (laneTask lane) (forkedActor candidate) value
+    void $ onResult destination (awaitSettledFork reviewed) $ \decision -> case decision of
+      Accepted exact -> do
+        integrated <- integrateReviewed (integrationGroup lane) (integrationLabel lane)
+          (integrationSeed lane) exact
+        void $ onResult destination (awaitSettledFork integrated) (void . reply destination)
+      Repair exact finding -> void $ reply destination (ReviewBlocked exact finding)
+      NeedsDesign question -> void $ reply destination (DesignBlocked question)
+
+onResult
+  :: (Member Watches effects, Member Replies effects)
+  => Reply Delivery -> Await (Settlement result) -> (result -> Eff effects ()) -> Eff effects Route
+onResult destination awaiting continuation = route awaiting $ \settled -> case settled of
+  ReplyAvailable answer -> continuation (responseValue answer)
+  ReplyUnavailable failure -> void $ reply destination (ExecutionUnavailable failure)

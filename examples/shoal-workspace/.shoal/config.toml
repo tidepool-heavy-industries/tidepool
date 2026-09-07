@@ -10,6 +10,7 @@ modules = ["Project.Types", "Project.Work"]
 core = "prompts/core.md"
 
 [prompts.files]
+lead = "prompts/lead.md"
 task = "prompts/task.md"
 review = "prompts/review.md"
 repair = "prompts/repair.md"

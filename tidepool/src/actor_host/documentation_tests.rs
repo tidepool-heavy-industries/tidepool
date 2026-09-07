@@ -1115,6 +1115,10 @@ async fn workspace_campaign() -> TestCampaign {
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/task.md"),
                 ),
                 (
+                    "prompts/lead.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/lead.md"),
+                ),
+                (
                     "prompts/review.md",
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/review.md"),
                 ),
@@ -1175,8 +1179,22 @@ async fn next_project_worker(
                     let binding = open_test_fork(campaign, &child);
                     worker = Some((child, binding));
                 }
-                LocalResidentDeployment::SessionReady { .. } if worker.is_some() => {
+                LocalResidentDeployment::SessionReady { activation }
+                    if worker.as_ref().is_some_and(|(child, _)| {
+                        child.actor.identity() == activation.id.actor()
+                    }) =>
+                {
                     return worker.unwrap();
+                }
+                LocalResidentDeployment::WatchChanged { notification } => {
+                    if let tidepool_actor::WatchTransition::RouteFailed { detail } =
+                        notification.transition
+                    {
+                        panic!("route failed while awaiting worker admission: {detail}");
+                    }
+                }
+                LocalResidentDeployment::Retired { actor, terminal } => {
+                    panic!("actor {actor:?} retired while awaiting worker admission: {terminal:?}");
                 }
                 _ => {}
             }
@@ -1327,6 +1345,227 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             .contains(revised.as_str()),
         "repair changed the original response: {original}"
     );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn route_finishes_owned_request_without_a_model_relay() {
+    route_reply_case(false).await;
+}
+
+#[tokio::test]
+async fn route_reply_preserves_request_cancellation() {
+    route_reply_case(true).await;
+}
+
+async fn route_reply_case(cancel: bool) {
+    let mut campaign = workspace_campaign().await;
+    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign
+        ._repository
+        .writer()
+        .commit_empty("workspace program")
+        .unwrap();
+    let root = campaign.root_installation.policy.clone();
+    committed(root.as_ref(), include_str!("fixtures/route_reply_setup.hs")).await;
+    let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
+    committed(
+        lead.policy.as_ref(),
+        include_str!("fixtures/route_reply_worker.hs"),
+    )
+    .await;
+    let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
+    if cancel {
+        let result = committed(root.as_ref(), "cancelRequest (forkedResponse lead)").await;
+        assert!(
+            result.to_string().contains("CancellationRequested"),
+            "{result}"
+        );
+    }
+    let replied = dispatch_haskell_script(
+        worker.policy.as_ref(),
+        "respond (Candidate \"exact-candidate\" [\"checked\"] [\"open gate\"])",
+    )
+    .await;
+    assert_eq!(replied["status"], "replied", "{replied}");
+    // Observe the requester on success: the lead never needs a relay turn.
+    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let result = if cancel {
+                committed(lead.policy.as_ref(), "pollRoute forwarding").await
+            } else {
+                committed(
+                    root.as_ref(),
+                    "answer <- pollResponse (forkedResponse lead)\ninspectFull answer",
+                )
+                .await
+            };
+            let output = result.to_string();
+            if output.contains("exact-candidate") || output.contains("RouteFailed") {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    if cancel {
+        assert!(
+            outcome.to_string().contains("CancellationRequested"),
+            "{outcome}"
+        );
+        let pending = committed(lead.policy.as_ref(), "pollReply destination").await;
+        assert!(
+            pending.to_string().contains("ReplyCancellationRequested"),
+            "{pending}"
+        );
+    } else {
+        let response = outcome;
+        let route = committed(lead.policy.as_ref(), "pollRoute forwarding").await;
+        assert!(route.to_string().contains("RouteCompleted"), "{route}");
+        assert!(
+            response.to_string().contains("exact-candidate"),
+            "{response}"
+        );
+        assert!(response.to_string().contains("open gate"), "{response}");
+    }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
+    let mut campaign = workspace_campaign().await;
+    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign
+        ._repository
+        .writer()
+        .commit_empty("workspace program")
+        .unwrap();
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/delivery_lane_setup.hs"),
+    )
+    .await;
+    let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
+    committed(
+        lead.policy.as_ref(),
+        include_str!("fixtures/delivery_lane_worker.hs"),
+    )
+    .await;
+    let (implementer, _implementation_binding) = next_project_worker(&mut campaign).await;
+    let implementation_tree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+            &implementer.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    let candidate = campaign
+        ._repository
+        .writer_at(implementation_tree.cwd())
+        .commit_file("feature.txt", "prepared feature\n", "prepare feature")
+        .unwrap();
+    let result = dispatch_haskell_script(
+        implementer.policy.as_ref(),
+        &format!(
+            "respond (Candidate \"{}\" [\"implementation check\"] [\"open product gate\"])",
+            candidate.as_str(),
+        ),
+    )
+    .await;
+    assert_eq!(result["status"], "replied", "{result}");
+    let (reviewer, _review_binding) = next_project_worker(&mut campaign).await;
+    let review_tree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+            &reviewer.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    let reviewed_head = campaign
+        ._repository
+        .writer_at(review_tree.cwd())
+        .head()
+        .unwrap();
+    assert_eq!(reviewed_head, candidate);
+    assert_eq!(
+        std::fs::read_to_string(review_tree.cwd().join("feature.txt")).unwrap(),
+        "prepared feature\n"
+    );
+    let result = dispatch_haskell_script(reviewer.policy.as_ref(), &format!(
+        "respond (Accepted (ReviewedCandidate (reviewInput sessionInput) \"{}\" [\"review check\"] \"coherent preparation\"))", reviewed_head.as_str(),
+    )).await;
+    assert_eq!(result["status"], "replied", "{result}");
+    let (integrator, _integration_binding) = next_project_worker(&mut campaign).await;
+    let evidence = committed(integrator.policy.as_ref(), "inspectFull sessionInput").await;
+    for expected in [
+        candidate.as_str(),
+        "implementation check",
+        "review check",
+        "coherent preparation",
+        "open product gate",
+    ] {
+        assert!(
+            evidence.to_string().contains(expected),
+            "missing {expected}: {evidence}"
+        );
+    }
+    let integration_tree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+            &integrator.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    tidepool_worktree::GitCli::new()
+        .try_run(
+            integration_tree.cwd(),
+            &["merge", "--ff-only", candidate.as_str()],
+        )
+        .unwrap();
+    let integrated_head = campaign
+        ._repository
+        .writer_at(integration_tree.cwd())
+        .head()
+        .unwrap();
+    assert_eq!(integrated_head, candidate);
+    assert_eq!(
+        std::fs::read_to_string(integration_tree.cwd().join("feature.txt")).unwrap(),
+        "prepared feature\n"
+    );
+    let result = dispatch_haskell_script(integrator.policy.as_ref(), &format!(
+        "respond (Preparation (Candidate \"{}\" [\"integration content check\"] (remainingGates (reviewedCandidate sessionInput))))", integrated_head.as_str(),
+    )).await;
+    assert_eq!(result["status"], "replied", "{result}");
+    let delivery = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let result = committed(
+                root.as_ref(),
+                "delivered <- pollResponse (forkedResponse lead)\ninspectFull delivered",
+            )
+            .await;
+            if result.to_string().contains("ResponseReady") {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    for expected in [
+        "Preparation",
+        integrated_head.as_str(),
+        "integration content check",
+        "open product gate",
+    ] {
+        assert!(
+            delivery.to_string().contains(expected),
+            "missing {expected}: {delivery}"
+        );
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

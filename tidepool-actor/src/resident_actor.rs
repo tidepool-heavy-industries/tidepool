@@ -1224,6 +1224,70 @@ where
         }
     }
 
+    /// Both authored tool replies and route callbacks resume the one active
+    /// request continuation, then hand it back to the ordinary actor scheduler.
+    async fn stage_request_reply(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        request: crate::RequestId,
+        result: RootCustody,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let settled = async {
+            if self.environment.fork_groups.has_incomplete(context.actor) {
+                self.abort_incomplete_groups(
+                    kernel,
+                    context.actor,
+                    "request reply interrupted unfold admission",
+                )
+                .await;
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "an actor cannot reply while an unfold group is unpublished".into(),
+                ));
+            }
+            if self.pending_program.is_some() || self.pending_reply.is_some() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "actor settled a second reply before resuming the first".into(),
+                ));
+            }
+            let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
+                ResidentStanding::Interactive(awaiting) if awaiting.request.request == request => {
+                    awaiting
+                }
+                standing => {
+                    self.standing = standing;
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "reply did not match an active request continuation".into(),
+                    ));
+                }
+            };
+            let outcome = match self
+                .environment
+                .runner
+                .resume_live(context.clone(), awaiting.hole.clone(), result)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    self.standing = ResidentStanding::Interactive(awaiting);
+                    return Err(error);
+                }
+            };
+            self.pending_program = Some(outcome);
+            self.pending_reply = Some(request);
+            Ok(())
+        }
+        .await;
+        if let Err(error) = &settled {
+            let notifications = self
+                .environment
+                .requests
+                .fail_reply_settlement(request, error.to_string());
+            self.publish_watch_notifications(notifications);
+        }
+        settled
+    }
+
     async fn resolve_effect(
         &mut self,
         kernel: &KernelContext,
@@ -3490,106 +3554,17 @@ where
                     request: request_id,
                     result,
                 } => {
-                    if self.environment.fork_groups.has_incomplete(context.actor) {
-                        self.abort_incomplete_groups(
-                            kernel,
-                            context.actor,
-                            "request reply interrupted unfold admission",
-                        )
-                        .await;
-                        return Err(workbench_failure_after_operations(
-                            &receipts,
-                            index,
-                            request.items.len(),
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "an actor cannot reply while an unfold group is unpublished".into(),
-                            ),
-                            unit_operations,
-                        ));
-                    }
-                    let awaiting =
-                        match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
-                            ResidentStanding::Interactive(awaiting)
-                                if awaiting.request.request == request_id =>
-                            {
-                                awaiting
-                            }
-                            ResidentStanding::Interactive(awaiting) => {
-                                self.standing = ResidentStanding::Interactive(awaiting);
-                                let notifications =
-                                    self.environment.requests.fail_reply_settlement(
-                                        request_id,
-                                        "reply did not match the active request",
-                                    );
-                                self.publish_watch_notifications(notifications);
-                                return Err(workbench_failure_after_operations(
-                                    &receipts,
-                                    index,
-                                    request.items.len(),
-                                    ResidentActorWorkbenchError::ActorProtocol(
-                                        "reply did not match the active request".into(),
-                                    ),
-                                    unit_operations,
-                                ));
-                            }
-                            standing => {
-                                self.standing = standing;
-                                let notifications =
-                                    self.environment.requests.fail_reply_settlement(
-                                        request_id,
-                                        "reply lost its request continuation",
-                                    );
-                                self.publish_watch_notifications(notifications);
-                                return Err(workbench_failure_after_operations(
-                                    &receipts,
-                                    index,
-                                    request.items.len(),
-                                    ResidentActorWorkbenchError::ActorProtocol(
-                                        "reply lost its request continuation".into(),
-                                    ),
-                                    unit_operations,
-                                ));
-                            }
-                        };
-                    let outcome = match workbench
-                        .resume_request(context.clone(), awaiting.hole.clone(), result)
+                    self.stage_request_reply(kernel, context, request_id, result)
                         .await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            self.standing = ResidentStanding::Interactive(awaiting);
-                            let notifications = self.environment.requests.fail_reply_settlement(
-                                request_id,
-                                format!("request continuation failed: {error}"),
-                            );
-                            self.publish_watch_notifications(notifications);
-                            return Err(workbench_failure_after_operations(
+                        .map_err(|error| {
+                            workbench_failure_after_operations(
                                 &receipts,
                                 index,
                                 request.items.len(),
                                 error,
-                                unit_operations,
-                            ));
-                        }
-                    };
-                    if self.pending_program.is_some() || self.pending_reply.is_some() {
-                        let notifications = self.environment.requests.fail_reply_settlement(
-                            request_id,
-                            "actor settled a second reply before resuming the first",
-                        );
-                        self.publish_watch_notifications(notifications);
-                        return Err(workbench_failure_after_operations(
-                            &receipts,
-                            index,
-                            request.items.len(),
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "actor settled a second reply before resuming the first".into(),
-                            ),
-                            unit_operations,
-                        ));
-                    }
-                    self.pending_program = Some(outcome);
-                    self.pending_reply = Some(request_id);
+                                unit_operations.clone(),
+                            )
+                        })?;
                     receipts.push(WorkbenchItemReceipt {
                         index,
                         status: WorkbenchItemStatus::Committed,
@@ -4251,11 +4226,11 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
         watch: crate::WatchId,
-    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
             let Some(entry) = self.environment.requests.take_route(context.actor, watch) else {
-                return Ok(());
+                return Ok(KernelStep::Continue(()));
             };
             self.active_route = Some((watch, Vec::new()));
             // This internal completion identity gates only selected-context children.
@@ -4284,8 +4259,47 @@ where
                             context.placement.resource_scope,
                         )
                         .await?;
-                    if matches!(boundary, ResidentActorBoundary::Completed) {
-                        return Ok::<_, ResidentActorWorkbenchError>(());
+                    match boundary {
+                        ResidentActorBoundary::Completed => {
+                            return Ok::<_, ResidentActorWorkbenchError>(false)
+                        }
+                        ResidentActorBoundary::ReplyAttempt(attempt) => {
+                            match self
+                                .environment
+                                .requests
+                                .begin_reply(context.actor, attempt.request)
+                            {
+                                Ok(()) => {
+                                    self.stage_request_reply(
+                                        kernel,
+                                        &context,
+                                        attempt.request,
+                                        attempt.result,
+                                    )
+                                    .await?;
+                                    return Ok(true);
+                                }
+                                Err(error) if attempt.recoverable => {
+                                    drop(attempt.result);
+                                    outcome = self
+                                        .environment
+                                        .runner
+                                        .resume_reply_rejection(
+                                            context.clone(),
+                                            attempt.continuation,
+                                            error,
+                                        )
+                                        .await?;
+                                    continue;
+                                }
+                                Err(error) => {
+                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                        format!("reply rejected: {error:?}"),
+                                    ))
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                     outcome = self
                         .resolve_effect(
@@ -4298,7 +4312,8 @@ where
                 }
             }
             .await;
-            let mut result = result.map_err(|error| error.to_string());
+            let resume_reply = matches!(result, Ok(true));
+            let mut result = result.map(|_| ()).map_err(|error| error.to_string());
             if result.is_ok() {
                 result = self
                     .tool_completed(kernel, completion)
@@ -4334,7 +4349,11 @@ where
                 .requests
                 .finish_route(context.actor, watch, result);
             self.publish_watch_notifications(notification);
-            Ok(())
+            Ok(if resume_reply {
+                KernelStep::ContinueLater(())
+            } else {
+                KernelStep::Continue(())
+            })
         })
     }
 

@@ -1438,21 +1438,6 @@ where
         )
     }
 
-    pub(crate) async fn resume_request(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        answer: RootCustody,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _context, _source| {
-                session
-                    .resume_handle(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await
-    }
-
     /// Compile and begin one actor-local workbench item. Declarations commit
     /// immediately; executable items retain their fragment realm so the host
     /// can route any actor effects through the ordinary actor driver.

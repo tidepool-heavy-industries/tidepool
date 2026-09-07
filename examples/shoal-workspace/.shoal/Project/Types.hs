@@ -1,7 +1,7 @@
 module Project.Types where
 
 import Data.Text (Text)
-import Tidepool.Actors.Shoal (AgentRef)
+import Tidepool.Actors.Shoal (AgentRef, BranchLabel, ForkGroupPath, WorktreeSeed, ResponseFailure)
 
 -- Project language is ordinary source, independent of runtime authority.
 data Task = Task
@@ -55,5 +55,24 @@ data DesignAnswer
 data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate Text | NeedsDesign DesignQuestion
   deriving (Show, Eq)
 
-data Delivery = Integrated Text [Text] | Preparation Candidate | Blocked Text
+data Delivery
+  = Integrated Text [Text]
+  | Preparation Candidate
+  | Blocked Text
+  | ReviewBlocked Candidate Text
+  | DesignBlocked DesignQuestion
+  | ExecutionUnavailable ResponseFailure
   deriving (Show, Eq)
+
+-- The planner supplies each branch's decomposition and source choices once.
+data DeliveryLane = DeliveryLane
+  { laneTask :: Task
+  , implementationGroup :: ForkGroupPath
+  , implementationLabel :: BranchLabel
+  , implementationSeed :: WorktreeSeed
+  , reviewGroup :: ForkGroupPath
+  , reviewLabel :: BranchLabel
+  , integrationGroup :: ForkGroupPath
+  , integrationLabel :: BranchLabel
+  , integrationSeed :: WorktreeSeed
+  }

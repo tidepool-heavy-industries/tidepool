@@ -207,7 +207,30 @@ impl ActorWorktreeHandler {
                                 tree,
                             )));
                         }
-                        WorktreeSource::CurrentRepository | WorktreeSource::Ref(_) => {
+                        WorktreeSource::Ref(_) => {
+                            // Linked worktrees intentionally share committed objects
+                            // and refs. A bound worker can review a child's commit
+                            // without changing its own checkout or reading root dirt.
+                            let bound =
+                                self.authority.bound_worktree(principal).ok_or_else(|| {
+                                    WorktreeError::WorktreeAuthorityDenied(
+                                        "committed-ref forks require an active bound worktree"
+                                            .into(),
+                                    )
+                                })?;
+                            if self
+                                .inner
+                                .manager
+                                .lookup(&bound)
+                                .map_err(error_to_wire)?
+                                .is_none()
+                            {
+                                return Err(WorktreeError::WorktreeUnauthorized(
+                                    worktree_id_to_wire(&bound),
+                                ));
+                            }
+                        }
+                        WorktreeSource::CurrentRepository => {
                             return Err(WorktreeError::WorktreeAuthorityDenied(
                                 "non-root context forks must derive worktrees from their bound checkout"
                                     .into(),
@@ -1047,7 +1070,7 @@ mod tests {
         let bindings = Arc::new(Mutex::new(
             BindingTable::open(storage.path().join("bindings")).unwrap(),
         ));
-        let authority = ActorWorktreeAuthority::new("run-1", bindings);
+        let authority = ActorWorktreeAuthority::new("run-1", Arc::clone(&bindings));
         let root = tidepool_repr::PrincipalId::new(1, 1);
         authority.install_root(root);
         let mut handler =
@@ -1070,6 +1093,79 @@ mod tests {
             admitted.handle_receipt.branch.raw,
             "shoal/campaign/group/branches/leaf"
         );
+
+        let worker = tidepool_repr::PrincipalId::new(2, 1);
+        let tree = worktree_id_from_wire(&admitted.handle_receipt.tree_id).unwrap();
+        let binding = bindings
+            .lock()
+            .bind(&tree, &WorktreePrincipal::exact_actor("run-1", 2, 1), 1)
+            .unwrap();
+        let committed = repository.writer().head().unwrap();
+        repository
+            .writer()
+            .write_file("README.md", "uncommitted root content\n")
+            .unwrap();
+        let ref_spec = WtWorktreeSpec {
+            spec_source: WtWorktreeSource::SourceRef(WtGitRef {
+                raw: committed.as_str().into(),
+            }),
+            spec_label: "review".into(),
+            spec_dirty_policy: WtDirtyPolicy::RequireClean,
+        };
+        for principal in [
+            tidepool_repr::PrincipalId::new(2, 2),
+            tidepool_repr::PrincipalId::new(3, 1),
+        ] {
+            assert!(handler
+                .admit_fork_workspace(
+                    principal,
+                    "campaign/review/denied".into(),
+                    Some(ref_spec.clone()),
+                    WtDirtyPolicy::RequireClean
+                )
+                .is_err());
+        }
+        assert!(handler
+            .admit_fork_workspace(
+                worker,
+                "campaign/review/root-dirt".into(),
+                Some(WtWorktreeSpec {
+                    spec_source: WtWorktreeSource::SourceCurrentRepository,
+                    spec_label: "root-dirt".into(),
+                    spec_dirty_policy: WtDirtyPolicy::AllowDirtySnapshot,
+                }),
+                WtDirtyPolicy::RequireClean
+            )
+            .is_err());
+        let reviewed = handler
+            .admit_fork_workspace(
+                worker,
+                "campaign/review/exact".into(),
+                Some(ref_spec.clone()),
+                WtDirtyPolicy::RequireClean,
+            )
+            .unwrap();
+        assert_eq!(reviewed.handle_receipt.source_head.raw, committed.as_str());
+        assert_eq!(
+            std::fs::read_to_string(
+                std::path::Path::new(&reviewed.handle_receipt.cwd).join("README.md")
+            )
+            .unwrap(),
+            "seed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("README.md")).unwrap(),
+            "uncommitted root content\n"
+        );
+        binding.release(&mut bindings.lock()).unwrap();
+        assert!(handler
+            .admit_fork_workspace(
+                worker,
+                "campaign/review/released".into(),
+                Some(ref_spec),
+                WtDirtyPolicy::RequireClean
+            )
+            .is_err());
     }
 
     #[test]

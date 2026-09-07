@@ -259,7 +259,7 @@ pub trait KernelBehavior: Send + 'static {
         &'a mut self,
         _context: &'a KernelContext,
         _watch: crate::WatchId,
-    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async {
             Err(KernelBehaviorError {
                 detail: "actor does not support watch continuations".into(),
@@ -664,8 +664,9 @@ where
                 unreachable!("mailbox drain messages are normalized before dispatch")
             }
             KernelMessage::RouteReady { watch } => {
-                if let Err(error) = state.behavior.route(&state.context, watch).await {
-                    tracing::error!(?watch, %error, "watch continuation rejected");
+                match state.behavior.route(&state.context, watch).await {
+                    Ok(step) => finish_after_step(&myself, state, step).await,
+                    Err(error) => tracing::error!(?watch, %error, "watch continuation rejected"),
                 }
             }
             KernelMessage::Resume => match state.behavior.resume(&state.context).await {

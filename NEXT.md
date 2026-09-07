@@ -105,7 +105,9 @@ both general capability and a complete authored orchestration package:
   review now retains candidate checks/gates and the exact implementer, and local
   repair uses a distinct request without closing the review or replacing the
   original candidate response. Integration accepts a distinct reviewed input;
-  the complete routed integration/specialist chain remains to be exercised.
+  the routed implementation/review/integration chain now executes under a Sol
+  lead and settles its original request automatically. Specialist consultation,
+  amendments and the complete plan package remain outstanding.
 - Project observations connecting the plan, actual work, usage and RSI. Complete
   delivery/failure examples must execute, not merely typecheck recipe signatures.
 
@@ -153,7 +155,12 @@ application runs; this handoff does not itself start a paid swarm.
 
 Current focused checks: frozen selection and resident recipe checks passed,
 including selected Markdown instructions, preserved authority, direct retained
-repair and original response identity. `just fixtures-check` passed all 217
+repair and original response identity. Callback replies share the ordinary
+settlement path and preserve cancellation. The delivery-lane test integrates an
+actual commit in an integration checkout and preserves a partial product gate
+without waking the lead to relay results. Non-root committed-ref admission
+requires exact active custody; stale/unbound/released principals and root dirty
+snapshots are rejected by the owning worktree handler. `just fixtures-check` passed all 217
 semantic tests after the instruction protocol extension. The complete package
 and host failure containment remain outstanding.
 

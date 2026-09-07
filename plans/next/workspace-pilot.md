@@ -17,8 +17,8 @@ default, override the pieces that matter here, and gradually grow ordinary
 Haskell functions that express how this project works. Edit the Markdown and
 Haskell files normally. A swarm uses one fixed configuration; changes take
 effect at an explicit swarm teardown/restart boundary. TOML selection, frozen
-modules/core prompts and model/context selectors are implemented. Per-worker
-behavioral composition and resolved launch previews remain incomplete. Examples
+modules/Markdown prompts, model/context selectors and per-worker behavioral
+instructions are implemented. Resolved launch previews remain incomplete. Examples
 here are design sketches; use the [shipped guide](../../prompts/shoal/api-guide.md)
 for exact implemented exports and [NEXT.md](../../NEXT.md) for current gaps.
 

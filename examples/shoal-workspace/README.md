@@ -25,41 +25,37 @@ Sol executes the branch with short task-focused contexts. Haskell recipes bind
 repeated choices; they are machine coordination code, so use concise ordinary
 functions rather than narrative boilerplate or a workflow framework.
 
-A typical chain is:
+A Sol lead installs its declared lane with:
 
 ```haskell
-candidate <- implement implementationGroup implementationLabel projectHead task
-reviewRoute <- route (awaitSettledFork candidate) $ \settled ->
-  case settled of
-    ReplyUnavailable failure -> handleUnavailable failure
-    ReplyAvailable answer -> do
-      reviewed <- reviewCandidate reviewGroup reviewLabel task (forkedActor candidate) (responseValue answer)
-      _ <- route (awaitSettledFork reviewed) $ \decision ->
-        case decision of
-          ReplyUnavailable failure -> handleUnavailable failure
-          ReplyAvailable result -> case responseValue result of
-            Accepted exact -> do
-              integrated <- integrateReviewed integrationGroup integrationLabel projectHead exact
-              _ <- route (awaitSettledFork integrated) deliverToOwner
-              pure ()
-            Repair exact defect -> repairExactCandidate exact defect
-            NeedsDesign question -> askTaggedSpecialist question
-      pure ()
+flow <- deliverLane lane sessionReply
 ```
 
-The group/label/task bindings and handling functions above are project choices,
-not platform exports. Bind them once using the typed labels and request primitives.
-A repair is another bounded task against the exact candidate, followed by review;
-architectural questions go to the tagged specialist and their result is routed
-back to the waiting obligation. Keep callback bodies to scheduling and forwarding.
-Do not synchronously wait inside a callback. Retain route handles and inspect
-`pollRoute` after failures rather than replaying uncertain effects.
+`lane :: DeliveryLane` carries the assignment, branch/group labels and source
+seeds chosen by the planner. The lead's request returns `Delivery`. The recipe
+starts implementation, routes its candidate to independent review, starts
+integration only after `Accepted`, and replies to the lead's requester with the
+integration result. The lead can end its turn after installing the flow; it does
+not wake just to relay routine success. Independent leads settle independently.
 
-The shipped recipe modules are compiled through the real resident workbench in
-`workspace_recipe_modules_and_snapshot_helpers_compile`. Runtime acceptance also
-covers typed forwarding, selected-worker launch from a callback, and retained
-callback failure. This example does not claim that a model has performed a live
-repository integration; reviewers must check candidate and integration evidence.
+Reviewers use `requestRepair` with their retained implementer and watch the
+returned response while keeping their review request pending. They inspect the
+revised candidate before accepting. `ReviewBlocked`, `DesignBlocked`, and
+`ExecutionUnavailable` preserve exceptional outcomes for the recipient. A tagged
+specialist/question workflow and a complete authored plan tree are still required
+before treating this example as the finished planned-Sol package.
+
+Callback failures emit exceptional attention to their owner. Inspect `pollRoute`
+and the retained effects before acting; replaying the whole chain could duplicate
+already-started work. A callback may reply only to its owner's active request;
+cancellation and update fences still apply. Such a reply ends the callback and
+resumes the request through the ordinary actor scheduler.
+
+The recipe modules and their selected Markdown prompts are checked through the
+real resident workbench. Focused execution covers candidate/review evidence,
+retained repair, direct callback replies and cancellation. The delivery-lane check
+uses real commits and an integration checkout; it does not claim live model or
+fresh-context application acceptance.
 
 For an ordinary human-started Astra RSI session:
 

@@ -227,6 +227,11 @@ automatically because earlier effects may have happened. Callback failure sends
 one exceptional notification to its owner; ordinary successful routing does not
 wake the model. Inspect the failed route before deciding how to continue.
 
+A callback can `reply` through a captured `Reply` owned by this same actor to
+finish its active obligation. This is a terminal transfer: later callback code
+does not run. Exact request ownership, cancellation and update fences still
+apply. Use this to deliver a completed chain directly to its original requester.
+
 Snapshots read existing observations without asking models to report. They include
 supervision and context ancestry, actual/requested model, current requests, received
 request and coordination-event counts, compactions when known, and provider usage.
