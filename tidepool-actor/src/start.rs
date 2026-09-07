@@ -24,6 +24,12 @@ pub enum ForkEffort {
     High,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+pub enum ForkContext {
+    InheritedContext,
+    SelectedContext,
+}
+
 pub(crate) struct ActorStartRequest {
     pub label: String,
     pub role: ActorLaunchRoleWire,
@@ -33,6 +39,8 @@ pub(crate) struct ActorStartRequest {
     pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
     pub effect_keys: Option<Vec<ActorEffectKeyWire>>,
     pub fork_effort: Option<ForkEffort>,
+    pub model: Option<String>,
+    pub context: ForkContext,
     pub fork_budget: Option<(i64, i64)>,
     pub session_id: tidepool_repr::SessionId,
     pub parent_actor: crate::ActorRef,
@@ -131,6 +139,8 @@ pub enum ActorStartCaptureError {
     ParentScopeRetired,
     #[error("context fork carried invalid group id {0}")]
     InvalidForkGroup(i64),
+    #[error("requested model must be a nonempty model identifier")]
+    InvalidModel,
 }
 
 impl ResidentActorStart {
@@ -180,6 +190,8 @@ impl ResidentActorStart {
                 fork_workspace: None,
                 effect_keys: None,
                 fork_effort: None,
+                model: None,
+                context: ForkContext::SelectedContext,
                 fork_budget: None,
                 session_id,
                 parent_actor,
@@ -205,11 +217,19 @@ impl ResidentActorStart {
             fork_workspace,
             effect_keys,
             fork_effort,
+            model,
+            context,
             fork_budget,
             session_id,
             parent_actor,
         } = request;
-        let context_fork = fork_group.is_some();
+        if model
+            .as_ref()
+            .is_some_and(|model| model.is_empty() || model.chars().any(char::is_whitespace))
+        {
+            return Err(ActorStartCaptureError::InvalidModel);
+        }
+        let context_fork = fork_group.is_some() && context == ForkContext::InheritedContext;
         let child_realm = RealmId::fresh();
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)
@@ -244,6 +264,7 @@ impl ResidentActorStart {
         .with_profile(profile)
         .with_effective_role(effective_role)
         .with_fork_effort(fork_effort)
+        .with_model(model)
         .with_fork_budget(fork_budget)
         .with_supervisor_parent(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));

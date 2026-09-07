@@ -8,7 +8,14 @@ archive).
 
 ## Active work
 
-- [Next Shoal wave](../NEXT.md): restart entry point and fork-shaped handoffs for per-actor execution/control, launch custody, artifact-first run mapping, usage/evidence, and gated small workers.
+- [Shoal implementation handoff](../NEXT.md): one linear Astra Medium run building
+  TOML-configured project Haskell and prompt customization on the existing
+  interactive Codex TUIs. The [vision](next/planned-swarm.md) explains planned
+  Astra/Sol collaboration; the [workspace design](next/workspace-pilot.md) covers
+  fixed-per-swarm inputs and context packaging; the
+  [Haskell reference](next/sol-worker-routing.md) provides interface sketches.
+  RSI uses ordinary human-started Astra sessions, and steering uses existing
+  TUI/Haskell primitives.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers

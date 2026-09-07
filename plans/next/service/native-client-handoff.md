@@ -1,5 +1,9 @@
 # Delivered native client consumer contract
 
+> Historical previous-wave reference. The current [implementation handoff](../../../NEXT.md)
+> retains interactive Codex TUIs and excludes the controller/observer migration.
+> Old dispatch instructions and migration gates below are not current requirements.
+
 Source assessment: retained control designer inspected immutable Codex
 600be9df39096121f76745f7d7f73a96bae8c82e in /home/inanna/dev/codex,
 against Tidepool2db8f2c6 and root delivery97c6722a. This is attributed source

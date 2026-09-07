@@ -922,3 +922,209 @@ async fn floating_point_resident_display_matches_prelude() {
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+#[tokio::test]
+async fn model_selection_is_independent_of_inherited_and_selected_context() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(root.as_ref(), include_str!("fixtures/model_context.hs")).await;
+    let mut children = Vec::new();
+    let mut bindings = Vec::new();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let mut ready = 0;
+        while ready != 2 {
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::PolicyInstalled(child) => {
+                    bindings.push(open_test_fork(&campaign, &child));
+                    children.push(child);
+                }
+                LocalResidentDeployment::SessionReady { .. } => ready += 1,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    for child in &children {
+        assert_eq!(child.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
+        if child.label.ends_with("/exact") {
+            assert_eq!(child.context_parent, Some(campaign.actor.identity()));
+            let inherited = committed(child.policy.as_ref(), "inspectFull parentOnly").await;
+            assert_eq!(inherited["items"][0]["output"], "41");
+        } else {
+            assert_eq!(child.context_parent, None);
+            assert_eq!(child.fork_effort, Some(tidepool_actor::ForkEffort::Medium));
+            let missing = dispatch_haskell_script(child.policy.as_ref(), ":type parentOnly").await;
+            assert!(missing.to_string().contains("not in scope"), "{missing}");
+        }
+        let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
+        assert_eq!(reply["status"], "replied", "{reply}");
+    }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn routes_forward_without_model_relay_and_retain_callback_failure() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(root.as_ref(), include_str!("fixtures/route.hs")).await;
+    let mut children = Vec::new();
+    let mut bindings = Vec::new();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let mut ready = 0;
+        while ready != 2 {
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::PolicyInstalled(child) => {
+                    bindings.push(open_test_fork(&campaign, &child));
+                    children.push(child);
+                }
+                LocalResidentDeployment::SessionReady { .. } => ready += 1,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let consumer = children
+        .iter()
+        .find(|child| child.label.ends_with("/consumer"))
+        .unwrap();
+    let producer = children
+        .iter()
+        .find(|child| child.label.ends_with("/producer"))
+        .unwrap();
+    dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
+    dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput").await;
+    let reviewer = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut reviewer = None;
+        let mut forwarded = false;
+        let mut review_ready = false;
+        loop {
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::PolicyInstalled(child) => {
+                    assert_eq!(child.context_parent, None);
+                    assert_eq!(child.model.as_deref(), Some("gpt-5.6-sol"));
+                    bindings.push(open_test_fork(&campaign, &child));
+                    reviewer = Some(child);
+                }
+                LocalResidentDeployment::SessionReady { activation } => {
+                    if activation.message.contains("review-candidate") {
+                        forwarded = true;
+                    } else {
+                        review_ready = true;
+                    }
+                }
+                LocalResidentDeployment::WatchChanged { notification }
+                    if notification.owner == campaign.actor.identity() =>
+                {
+                    panic!("route woke a model: {notification:?}")
+                }
+                _ => {}
+            }
+            if forwarded && review_ready && reviewer.is_some() {
+                break reviewer.unwrap();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let review = dispatch_haskell_script(reviewer.policy.as_ref(), "respond sessionInput").await;
+    assert_eq!(review["status"], "replied", "{review}");
+    let state = committed(root.as_ref(), "pollRoute forwarding\npollRoute broken").await;
+    assert_eq!(state["items"][0]["output"], "RouteCompleted");
+    assert!(
+        state["items"][1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("deliberate route failure"),
+        "{state}"
+    );
+    let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    committed(root.as_ref(), "stopAgent (forkedActor producer)").await;
+    committed(root.as_ref(), "unavailable <- requestWith @Text (forkedActor producer) (requestOptions forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
+    let handled = committed(
+        root.as_ref(),
+        "pollRoute handled\nforgetRoute forwarding\nforgetRoute broken",
+    )
+    .await;
+    assert_eq!(handled["items"][0]["output"], "RouteCompleted", "{handled}");
+    assert_eq!(handled["items"][1]["output"], "WatchForgotten", "{handled}");
+    assert_eq!(handled["items"][2]["output"], "WatchForgotten", "{handled}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn configured_modules_are_available_to_resident_declarations_from_frozen_sources() {
+    let campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(), |admission| admission, |config| {
+            let authored = config.workspace.join(".shoal");
+            std::fs::create_dir_all(authored.join("Project")).unwrap();
+            std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Types', 'Project.Work']\n").unwrap();
+            std::fs::write(authored.join("Project/Types.hs"), include_str!("fixtures/project/Types.hs")).unwrap();
+            std::fs::write(authored.join("Project/Work.hs"), include_str!("fixtures/project/Work.hs")).unwrap();
+            config.workspace_inputs = Some(crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
+            std::fs::write(authored.join("Project/Work.hs"), "invalid edited source").unwrap();
+        },
+    ).await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let result = committed(policy, "saved <- pure candidate\ninspectFull saved").await;
+    assert_eq!(result["items"][1]["output"], "Preparation 7");
+    let declaration = committed(policy, ":{\nreadDelivery :: Delivery -> Int\nreadDelivery (Preparation n) = n\nreadDelivery (Complete n) = n\n:}\ninspectFull (readDelivery candidate)").await;
+    assert_eq!(declaration["items"][1]["output"], "7");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
+    let campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            let authored = config.workspace.join(".shoal");
+            for (path, content) in [
+                (
+                    "config.toml",
+                    include_str!("../../../examples/shoal-workspace/.shoal/config.toml"),
+                ),
+                (
+                    "Project/Types.hs",
+                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Types.hs"),
+                ),
+                (
+                    "Project/Work.hs",
+                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Work.hs"),
+                ),
+                (
+                    "prompts/core.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/core.md"),
+                ),
+            ] {
+                let target = authored.join(path);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(target, content).unwrap();
+            }
+            config.workspace_inputs = Some(
+                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                    .unwrap(),
+            );
+        },
+    )
+    .await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let result = committed(policy, "observed <- snapshot\ninspectFull (swarmUsage observed)\n:type (implement, reviewCandidate, integrateReviewed)").await;
+    assert!(
+        result["items"][1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("unknownActors = [("),
+        "{result}"
+    );
+    assert_eq!(result["items"][2]["status"], "committed", "{result}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}

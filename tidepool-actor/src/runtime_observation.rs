@@ -102,6 +102,7 @@ pub struct ProviderUsageSample {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActorRuntimeObservation {
+    pub compactions: Option<u64>,
     pub backend_executable: Option<String>,
     pub backend_version: Option<String>,
     pub requested_model: Option<String>,
@@ -297,6 +298,7 @@ impl ActorRuntimeObservationHandle {
             }
             state.provider_observation_stale = false;
             state.provider_failures = observation.failures;
+            state.compactions = observation.compactions;
             state.confirmed_model = observation.confirmed_model;
             state.confirmed_effort = observation.confirmed_effort;
             if let Some(turn) = observation.turn {

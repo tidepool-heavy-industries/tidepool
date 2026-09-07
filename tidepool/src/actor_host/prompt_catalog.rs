@@ -10,7 +10,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 14;
+    pub(super) const CATALOG_VERSION: u32 = 15;
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
@@ -85,18 +85,33 @@ pub(super) struct PromptArtifact {
     pub(super) body: &'static str,
 }
 
-/// One compiled base, materialized once by the host and shared by every launch.
+/// One run-selected base, materialized once and shared by every launch.
 /// The file is content-addressed and checked on reuse. Actors receive a read-only
 /// mount of its directory; launch never rereads mutable prompt source files.
 #[derive(Clone)]
 pub(super) struct FrozenBasePrompt {
     directory: std::path::PathBuf,
     file: std::path::PathBuf,
+    body: String,
 }
 
 impl FrozenBasePrompt {
+    #[cfg(test)]
     pub(super) fn materialize(run_root: &std::path::Path) -> std::io::Result<Self> {
-        let body = PromptId::ShoalBase.body();
+        Self::materialize_selected(run_root, None)
+    }
+
+    pub(super) fn materialize_selected(
+        run_root: &std::path::Path,
+        core: Option<&str>,
+    ) -> std::io::Result<Self> {
+        let body = match core {
+            Some(core) => format!(
+                "{core}\n\n{}",
+                include_str!("../../../prompts/shoal/api-guide.md")
+            ),
+            None => PromptId::ShoalBase.body().to_owned(),
+        };
         let directory = run_root.join("prompts");
         std::fs::create_dir_all(&directory)?;
         let directory = directory.canonicalize()?;
@@ -114,7 +129,15 @@ impl FrozenBasePrompt {
             }
             Err(error) => return Err(error),
         }
-        Ok(Self { directory, file })
+        Ok(Self {
+            directory,
+            file,
+            body,
+        })
+    }
+
+    pub(super) fn body(&self) -> &str {
+        &self.body
     }
 
     pub(super) fn directory(&self) -> &std::path::Path {

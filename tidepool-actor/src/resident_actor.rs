@@ -68,6 +68,7 @@ pub struct LocalResidentInstallation {
     pub worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     pub effective_role: crate::EffectiveRole,
     pub fork_effort: Option<crate::ForkEffort>,
+    pub model: Option<String>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
@@ -349,6 +350,7 @@ pub struct ResidentKernelBehavior<H, O> {
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
     completed_workbenches: CompletedWorkbenchExecutions,
+    active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 }
 
@@ -453,6 +455,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
             completed_workbenches: CompletedWorkbenchExecutions::default(),
+            active_route: None,
             active_fork_boundary: None,
         }
     }
@@ -1014,7 +1017,10 @@ where
             fork_workspace,
         } = child;
         let fork_group = descriptor.fork_group();
-        if descriptor.context_parent().is_some() {
+        if self.active_route.is_some() && descriptor.context_parent().is_some() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol("automatic routes have no provider transcript boundary; select a task context for spawned workers".into()));
+        }
+        if descriptor.fork_group().is_some() {
             if self.policy_installed
                 && self.active_fork_boundary.as_ref().is_none_or(|boundary| {
                     boundary.thread_id.is_empty() || boundary.call_id.is_empty()
@@ -1037,7 +1043,7 @@ where
                 descriptor.profile()
             )));
         }
-        let role = if descriptor.context_parent().is_some() {
+        let role = if descriptor.fork_group().is_some() {
             self.descriptor
                 .effective_role()
                 .preview_child(
@@ -1242,6 +1248,7 @@ where
                 let observation = records.get(&inspection.target).and_then(|record| {
                     actor_can_access(context.actor, inspection.target, &records).then(|| {
                         crate::resident_workbench::AgentRosterProjection {
+                            received: self.environment.requests.received_counts(inspection.target),
                             requests: self.environment.requests.work_for_target(inspection.target),
                             actor: inspection.target,
                             descriptor: record.descriptor.clone(),
@@ -1267,6 +1274,7 @@ where
                     .filter(|(actor, _)| actor_can_access(context.actor, **actor, &records))
                     .map(
                         |(actor, record)| crate::resident_workbench::AgentRosterProjection {
+                            received: self.environment.requests.received_counts(*actor),
                             requests: self.environment.requests.work_for_target(*actor),
                             actor: *actor,
                             descriptor: record.descriptor.clone(),
@@ -1305,6 +1313,7 @@ where
                         .map(|actor| {
                             let record = records.get(&actor)?;
                             Some(crate::resident_workbench::AgentRosterProjection {
+                                received: self.environment.requests.received_counts(actor),
                                 requests: self.environment.requests.work_for_target(actor),
                                 actor,
                                 descriptor: record.descriptor.clone(),
@@ -1742,6 +1751,9 @@ where
                 })();
                 match admitted {
                     Ok((group_id, group_path, reservations)) => {
+                        if let Some((_, groups)) = &mut self.active_route {
+                            groups.push(group_id);
+                        }
                         self.environment
                             .runner
                             .resume_fork_group(
@@ -2228,6 +2240,43 @@ where
                     .resume_reply_observation(context.clone(), poll.continuation, observation)
                     .await
             }
+            ResidentActorBoundary::RouteRegistration {
+                registration,
+                entry,
+            } => {
+                let owner = kernel.resolve(context.actor).ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol("route owner is unavailable".into())
+                })?;
+                let (watch, notifications) = self
+                    .environment
+                    .requests
+                    .register_watch_with_route(
+                        context.actor,
+                        registration.label,
+                        registration.dependencies,
+                        Some(crate::request::routes::WatchRoute::new(owner, entry)),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "route registration rejected: {error:?}"
+                        ))
+                    })?;
+                self.publish_watch_notifications(notifications);
+                self.environment
+                    .runner
+                    .resume_int(context.clone(), registration.continuation, watch.0)
+                    .await
+            }
+            ResidentActorBoundary::RoutePoll(poll) => {
+                let state = self
+                    .environment
+                    .requests
+                    .observe_route(context.actor, poll.watch);
+                self.environment
+                    .runner
+                    .resume_route_state(context.clone(), poll.continuation, state)
+                    .await
+            }
             ResidentActorBoundary::WatchRegistration(registration) => {
                 crate::ActorPathSegment::new(&registration.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -2351,6 +2400,7 @@ where
                             worktree_custody: self.worktree_custody.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
                             fork_effort: self.descriptor.fork_effort(),
+                            model: self.descriptor.model().map(str::to_owned),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
@@ -2524,6 +2574,7 @@ where
             worktree_custody: self.worktree_custody.clone(),
             effective_role: self.descriptor.effective_role().clone(),
             fork_effort: self.descriptor.fork_effort(),
+            model: self.descriptor.model().map(str::to_owned),
             fork_boundary: self.descriptor.fork_boundary().cloned(),
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
@@ -3730,7 +3781,15 @@ where
         owner: ActorRef,
         summary: &str,
     ) {
-        for child in self.environment.fork_groups.abort_incomplete(owner) {
+        let selected = self
+            .active_route
+            .as_ref()
+            .map(|(_, groups)| groups.as_slice());
+        for child in self
+            .environment
+            .fork_groups
+            .abort_incomplete(owner, selected)
+        {
             if let Some(child) = kernel.resolve(child) {
                 let _ = child
                     .shutdown(ActorTerminal {
@@ -3856,7 +3915,16 @@ where
                 let actors = self.environment.actors.lock();
                 children
                     .iter()
-                    .map(|child| actors[child].descriptor.placement().lexical_scope)
+                    .map(|child| {
+                        (
+                            actors[child].descriptor.placement().lexical_scope,
+                            if actors[child].descriptor.context_parent().is_some() {
+                                crate::ForkContext::InheritedContext
+                            } else {
+                                crate::ForkContext::SelectedContext
+                            },
+                        )
+                    })
                     .collect()
             };
             let scopes = self
@@ -4173,6 +4241,95 @@ where
                 self.completed_workbenches.record(execution, request, reply);
             }
             result
+        })
+    }
+
+    fn route<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        watch: crate::WatchId,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async move {
+            let context = self.context(kernel.identity());
+            let Some(entry) = self.environment.requests.take_route(context.actor, watch) else {
+                return Ok(());
+            };
+            self.active_route = Some((watch, Vec::new()));
+            // This internal completion identity gates only selected-context children.
+            // It never authorizes or describes a provider-context fork.
+            let completion = tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: format!(
+                    "route-owner:{}@{}",
+                    context.actor.id.0, context.actor.incarnation.0
+                ),
+                call_id: format!("route:{}", watch.0),
+            };
+            self.active_fork_boundary = Some(completion.clone());
+            let result = async {
+                let mut outcome = self
+                    .environment
+                    .runner
+                    .run_route_entry(context.clone(), entry, watch)
+                    .await?;
+                loop {
+                    let boundary = self
+                        .environment
+                        .runner
+                        .capture_boundary(
+                            context.clone(),
+                            outcome,
+                            context.placement.resource_scope,
+                        )
+                        .await?;
+                    if matches!(boundary, ResidentActorBoundary::Completed) {
+                        return Ok::<_, ResidentActorWorkbenchError>(());
+                    }
+                    outcome = self
+                        .resolve_effect(
+                            kernel,
+                            &context,
+                            &crate::CallAncestry::begin(context.actor),
+                            boundary,
+                        )
+                        .await?;
+                }
+            }
+            .await;
+            let mut result = result.map_err(|error| error.to_string());
+            if result.is_ok() {
+                result = self
+                    .tool_completed(kernel, completion)
+                    .await
+                    .map_err(|error| error.to_string());
+            }
+            if result.is_err() {
+                let groups = self
+                    .active_route
+                    .as_ref()
+                    .map(|(_, groups)| groups.as_slice())
+                    .unwrap_or_default();
+                for child in self
+                    .environment
+                    .fork_groups
+                    .abort_selected_unpublished(context.actor, groups)
+                {
+                    if let Some(child) = kernel.resolve(child) {
+                        let _ = child
+                            .shutdown(ActorTerminal {
+                                kind: ActorExitKind::Cancelled,
+                                summary: "route callback failed before publication".into(),
+                            })
+                            .await;
+                    }
+                }
+            }
+            self.environment.requests.abort_unsubmitted(context.actor);
+            self.active_route = None;
+            self.active_fork_boundary = None;
+            self.environment
+                .requests
+                .finish_route(context.actor, watch, result);
+            Ok(())
         })
     }
 

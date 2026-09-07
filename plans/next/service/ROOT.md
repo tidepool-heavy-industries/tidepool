@@ -1,124 +1,29 @@
-# Service TL — execution/control ownership
+# Previous-wave service migration reference
 
-## Assignment and fixed decisions
+This directory retains source contracts and review evidence from the earlier
+controller-service/observer effort. It is **not an active implementation assignment**.
+The current decision is to keep existing interactive Codex TUI execution and
+steering. [NEXT.md](../../../NEXT.md) owns the implementation plan.
 
-Deliver one actor-owned native app-server service plus one persistent Shoal
-controller; a separately attachable TUI observes it. This is the user-selected B
-architecture. It is not a global daemon, shared multi-actor service, or patch to
-embedded TUI steering. Operate in the existing per-actor managed mount; preserve
-cwd, permission, environment and native-goals-disabled policy. Default forks are
-exact full-prefix. This document is self-contained; no old actor handles are live.
+Do not redispatch the former service team, treat its acceptance matrix as a gate
+for Haskell workers, move hosted forwarding into a new controller merely to
+finish this plan, or replace worker TUIs with `codex observe`.
 
-Own `tidepool-agent/src/backend/codex/`, actor request/notification and lifecycle
-mechanisms in `tidepool-actor`, relevant `tidepool-node` process boundary, and
-`tidepool/src/{shoal.rs,actor_host.rs}` host integration. Root owns manifests and
-final native dependency pin integration. Read nearest AGENTS and production callers.
-Do not create a second launcher, mailbox, pending-request registry or scheduler.
+The delivered native controller and read-only observer components are real source,
+but they do not establish an integrated migration with the same interactive TUI
+UX. Preserve useful source and evidence without making their adoption a goal.
 
-## Diagnosis to preserve, not repeatedly rediscover
+Historical entry points:
 
-Pinned native source inspected: `/home/inanna/dev/codex`, revision
-`c8460ffd7c859da2a1467f4384020cf9a19bcc69`. Pinned executable was
-`/nix/store/jan5kb6zi1af7gb4ajpl0wban9b72nzk-codex-rs-0.0.0-dev+c8460ff/bin/codex`.
-PATH Codex differed; record actual executable, not just version text.
-Tidepool inspected baseline `e5a1842dd4d3302d6eb8c0519a678937599d9c7e`.
+- [Native client handoff](native-client-handoff.md): the former proposed adapter
+  and its native dependencies.
+- [Preparation acceptance](root-preparation-acceptance.md): exact reviewed source
+  and limited acceptance evidence.
+- [Canonical pairing review](canonical-host-pairing-review.md): retained owning
+  boundary findings and checks.
+- [Wave closeout](../evidence/wave-closeout.md): what was integrated and what was
+  unverified at closeout.
 
-`active_update.rs` calls `Session::connect_proxy` in `process.rs`: raw JSONL
-initialize through native `app-server proxy`. Pinned proxy copies bytes to Unix
-socket; server calls WebSocket `accept_async`. Meanwhile `--destination-local`
-selects embedded server, not the global daemon the proxy assumes. Eleven retained
-update warnings support failed presentation; these do NOT imply request/respond,
-launch or watches were all broken. Missing XDG environment was not established.
-
-Native already supports `app-server --listen unix://ABSOLUTE_PATH`, remote Unix
-TUI resume, after-call fork boundaries and readiness/declaration validation.
-Native dynamic-tool HTTP-over-UDS bridge lives in TUI today: move/reuse forwarding
-under Shoal controller, leave actual tool execution/receipts in actor host.
-
-## Semantic contract (commit actual types before worker implementation)
-
-Use distinct typed intents, not a string-tagged generic “message”:
-
-| Intent | Owner/invariant |
-|---|---|
-| New assignment | existing typed `request`, queued; unique response obligation |
-| Response | settles exact active request, never “latest arbitrary input” |
-| Amendment | requester owns exact active response; safe-boundary delivery, settlement fencing |
-| Notification | one-way text, no response obligation, no replacement of assignment input; may wake idle actor |
-| Dependency wake | existing watch continuation; does not fabricate an assignment |
-| Cancel/retire | exact actor/incarnation/request ownership; completed effects survive |
-
-Common transport is not a merged semantic stack. Specify idle notification
-activation with no `respond` binding and active notification presentation without
-replacing current typed bindings. Keep notification data out of assignment matching.
-Choose exact small Haskell surface with root before publishing it; do not assume a
-notification API already exists. Cancellation remains its own state transition.
-
-Retain service incarnation, thread, controller generation, request and call identity
-at owning entries. Distinguish before-send `NotSubmitted`, accepted submission,
-correlated presentation, and post-send `Unconfirmed`. Names here describe semantics,
-not an already shipped enum. Persisted matching input proves presentation, not model
-understanding; ask worker for intended change/incorporation evidence separately.
-No blind retries after ambiguous send, no fallback amendment -> new assignment.
-
-## Launch sequence and ownership
-
-1. Install legitimate worktree custody **before first bootstrap worktree use**.
-   Delegate [custody.md](custody.md); keep actor_host integration exclusively here.
-2. Existing supervisor launches pinned service inside actor mount, private explicit
-   socket bound to existing incarnation identity. No second endpoint registry.
-3. Persistent WebSocket-over-UDS controller initializes and routes JSON-RPC responses,
-   server requests and notifications separately. Assess existing native ownership
-   capabilities first. If changes are required, use [native-control.md](native-control.md)
-   as an external handoff, not a Shoal worker assignment. Consume the externally
-   reviewed protocol/revision after delivery.
-4. Fork on destination child service using source thread + `afterCallId` only after
-   the enclosing Haskell call's actual result is durably closed. Use full prefix,
-   deferred continuation, `requireClientReadiness`, expected dynamic tools. Preserve
-   inherited settings except explicit override. Verify source history is accessible
-   across real mounts; do not reconstruct summaries if it isn't.
-5. Establish controller and destination host/session tool bridge, then release
-   readiness and submit assignment once. TUI never does these steps.
-6. Attach observer to explicit service/thread without initial prompt. Controller
-   disconnect fences continuation at safe boundary and reconciles pending work;
-   observer disconnect has no execution effect. Retirement reaps service/executors.
-
-Retained host receipts support effect replay without reexecution. Correlation is
-not deduplication. Existing `turn/start` uses atomic start-or-steer; `turn/steer`
-supports expectedTurnId. Select the right operation only after verifying assignment
-fencing for both idle and active states. Readiness and client custody are different
-from “process exists” or “TCP/Unix connection opened”.
-
-## Recursive waves and deliverable
-
-First commit local interface/ownership scaffold compatible with root contract.
-Fork custody immediately. The pre-wave native assessment established a missing
-controller/observer ownership contract; root/human manages the external handoff
-in `native-control.md`. Verify its returned revision rather than rediscovering the
-need halfway through implementation. In parallel inspect and
-prepare controller/bridge consumer against explicit unsupported holes. Avoid two
-writers to actor_host; worker returns a scoped candidate, TL integrates it.
-Prefer completing the architecture using existing native capabilities. Required
-Codex tweaks remain in scope but must be implemented/reviewed **outside Shoal, in a
-separate session in the Codex repository**. No native implementation Shoal fork,
-including one with a separately allocated worktree. The human manages the Codex-repository LLM handoff; provide the bounded
-contract/test document and consume the artifacts the human returns; continue independent Tidepool work while
-blocked. Root integrates the externally delivered revision/pin. Do not weaken
-controller ownership merely to avoid acknowledging a necessary native dependency.
-
-Next wave: backend client/bridge implementation plus focused protocol fixtures;
-fresh Tidepool/custody reviewers trace failure paths and request repairs directly;
-Codex implementation/review stays in the external session.
-After incorporating reviewed native contract, run mounted integration and retain
-an implementer for failures found by root's fresh acceptance branch.
-
-Deliver exact native and Tidepool commits, pin/build requirements, changed API,
-focused checks, supported reconnect semantics, known limits and cleanup evidence.
-Delete obsolete proxy/embedded assumptions when replacement covers consumers;
-do not leave duplicate production control paths. If controller loss cannot safely
-resume, expose a truthful terminal/recovery state rather than fake recovery.
-
-Acceptance includes no-TUI hosted tools, observer noninterference, two siblings'
-closed prefix, stale controllers, no effect duplication, amendment/notification
-separation, first-bootstrap custody and exact retirement. Use the full matrix in
-`../acceptance.md` for integration; mock success is not the final gate.
+Production behavior and invariants belong to current owning source and
+contributor guidance. Prior instructions about a service TL, root dispatch,
+migration gates, or an observer-only TUI are historical, not current authority.

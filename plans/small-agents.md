@@ -1,8 +1,24 @@
 # Small agents as typed, programmable components
 
-Implementation entry: [next-wave root](../NEXT.md) and the gated
-[read-only small-worker tranche](next/small-workers.md). The service/control
-acceptance gate comes first; this document retains the broader design intent.
+Implementation entry: [current next-run priority](../NEXT.md) and
+[the Shoal pilot vision](next/sol-worker-routing.md). The latter
+supersedes the older default-full-prefix and numeric-first sequencing in this
+document. This document retains broader typed-worker and authority requirements;
+the numeric [read-only tranche](next/small-workers.md) is a later application.
+Build for practical efficacy and improve recursively through real work; a
+comparative evaluation campaign is not the implementation method.
+
+The current operating model is an Astra-authored plan tree, Sol execution, and
+explicitly tagged specialist subtasks. A separate Astra RSI sidecar is invoked
+when the human requests it. Project terminology, core types, composition rules,
+examples, and context builders are also prompting artifacts. The pilot vision
+owns that operating plan; this document supplies the complementary small-worker
+interface and authority requirements.
+
+Use the same core primitives and ordinary interactive Codex TUIs across worker
+roles. A small worker differs in its model, context, typed obligation, and granted
+operations; it does not require a bespoke UI or lifecycle subsystem. TOML selects
+shared modules/prompts, and project Haskell composes their behavior.
 
 ## Intent
 
@@ -18,8 +34,8 @@ Inspect current owners before deciding what actually needs to be added.
 
 ## User preferences to preserve
 
-- Small-context, Low-effort workers for bounded tasks; Sol Low is an initial
-  model choice to evaluate, not a claim about measured cost or quality.
+- Small-context Sol workers for bounded tasks, with Low effort for routine work
+  and deliberate adjustment when the obligation warrants more reasoning.
 - Display them in the **same tmux pane as the parent**, with clear subordinate
   activity, not another top-level pane/window for every tiny task. This is a
   presentation preference, not a request to merge their identities or histories.
@@ -103,10 +119,13 @@ Support the path from experimental live definition to reusable source:
 - Compile/typecheck definitions against their real production consumer. A mock
   implementation must not advertise unavailable runtime behavior as working.
 - Capture the module/source revision and compiled definition used for a worker.
-  Editing a file must not silently change the meaning of an existing closure or
-  an already admitted assignment. Apply revised definitions to subsequent work.
-- Provide legible compile diagnostics and an explicit reload/redefinition path;
-  do not invent a second compiler daemon or file watcher.
+  The swarm's shared `.shoal` modules and prompts are fixed at startup, including
+  for later workers and fresh task contexts. Edit and check the source normally;
+  activate revisions only at an explicit swarm teardown/restart boundary.
+- Provide legible compile diagnostics and candidate checks without installing
+  edited core definitions into a running swarm. Task-local bindings and ordinary
+  composition remain available over the fixed interface. Reuse the existing
+  compiler/workbench owners; no live reload path or file watcher is required.
 - Let results include usable functions/strategies where the resident value and
   custody model supports it. Do not require everything to collapse into a text
   report, or pretend arbitrary live closures survive restart/serialization.
@@ -143,13 +162,14 @@ explicit tradeoff, not a free specialization. Prefer stable interfaces reused
 across a family of small tasks, with varying typed input in the suffix. Do not
 silently give every tiny worker a uniquely rewritten tool-description prefix.
 
-Measure first-response and subsequent cache reuse separately. Include output
-and tool costs, latency and acceptance quality; short context is not sufficient
-proof of a better workload. Reuse existing opt-in request tracing and bound
-private captures. Do not create a competing log or assume saved context metadata
-proves final provider-input equality.
+Use available usage evidence to investigate friction observed during useful work,
+including repeated orientation, unnecessary wakes, and expensive review loops.
+Reuse existing opt-in request tracing when a specific cache question warrants it;
+keep private captures bounded. Saved context metadata does not establish final
+provider-input equality. Build the effective design directly and improve it
+through use, without making a comparative evaluation campaign a prerequisite.
 
-## First vertical slice: numeric repair wave
+## Later application: numeric repair work
 
 See [the floating-point bug report](../FLOATING_POINT_BUG_REPORT.md).
 
@@ -166,9 +186,9 @@ See [the floating-point bug report](../FLOATING_POINT_BUG_REPORT.md).
 
 Acceptance should cover typed input/result errors, capability rejection,
 parent-pane attribution, same-worktree write policy, cancellation and partial
-failure, definition-version stability, and actual cache/usage observations.
-Compare the small-worker path with deterministic execution and a full-context
-specialist where relevant; do not add model calls to tasks that code solves well.
+failure, and definition-version stability. Use actual cache/usage observations to
+diagnose issues when useful. Keep deterministic operations in code and improve
+the worker interface through real numeric work.
 
 ## Implementation boundaries / decisions still needed
 

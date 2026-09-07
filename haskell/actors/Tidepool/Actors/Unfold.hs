@@ -35,6 +35,11 @@ module Tidepool.Actors.Unfold
   , withBranchDeadline
   , ForkEffort (..)
   , withEffort
+  , withModel
+  , WorkerContext
+  , inherited
+  , selected
+  , withContext
   , RolePolicy
   , inspectionPolicy
   , codingPolicy
@@ -134,6 +139,7 @@ import Tidepool.Effects.Core
   , WorktreeReceipt
   , WorktreeSource (..)
   , Forks (..)
+  , ForkContext (..)
   , ForkEffort (..)
   , AgentInspection (..)
   , WorktreeSpec (..)
@@ -237,11 +243,13 @@ data BranchOptions = BranchOptions
   { branchGuidance :: Maybe Text
   , branchDeadline :: Maybe RequestDeadline
   , branchEffort :: Maybe ForkEffort
+  , branchModel :: Maybe Text
+  , branchContext :: ForkContext
   , branchBudget :: Maybe ForkBudget
   }
 
 defaultBranchOptions :: BranchOptions
-defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing
+defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing InheritedContext Nothing
 
 -- | Requested descendant generations and active descendants across the subtree.
 -- The runtime clamps these to configured ceilings and remaining parent authority.
@@ -295,6 +303,29 @@ previewBranch (Branch _ role _ effects options _) = do
 withEffort :: ForkEffort -> Branch child input result -> Branch child input result
 withEffort effort (Branch label role seed effects options input) =
   Branch label role seed effects (options { branchEffort = Just effort }) input
+
+-- | Provider model selection is independent of transcript ancestry.
+withModel :: Text -> Branch child input result -> Branch child input result
+withModel model (Branch label role seed effects options input) =
+  Branch label role seed effects (options { branchModel = Just model }) input
+
+data WorkerContext input = Inherited | Selected (input -> Text)
+
+inherited :: WorkerContext input
+inherited = Inherited
+
+selected :: (input -> Text) -> WorkerContext input
+selected = Selected
+
+-- | Selected contexts receive the typed input and authored guidance in an
+-- isolated Haskell scope and fresh TUI conversation. Imported project modules
+-- remain available from the swarm's fixed source selection.
+withContext :: WorkerContext input -> Branch child input result -> Branch child input result
+withContext context (Branch label role seed effects options input) =
+  let updated = case context of
+        Inherited -> options { branchContext = InheritedContext }
+        Selected render -> options { branchContext = SelectedContext, branchGuidance = Just (render input) }
+  in Branch label role seed effects updated input
 
 withBranchGuidance
   :: Text
@@ -642,6 +673,8 @@ startBranch groupId allocated (Branch _ role seed effects options _) = do
     (effectKeys effects)
     (branchEffort options)
     (budgetPair <$> branchBudget options)
+    (branchModel options)
+    (branchContext options)
   pure $ case launched of
     Left failure -> Left (UnfoldBranchRejected allocated failure)
     Right branch -> Right branch

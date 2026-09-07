@@ -70,6 +70,10 @@ researchingLeaf :: BranchLabel -> WorktreeSeed -> input -> Branch ResearchLeafEf
 
 data ForkEffort = Low | Medium | High
 withEffort :: ForkEffort -> Branch child input result -> Branch child input result
+withModel :: Text -> Branch child input result -> Branch child input result
+selected :: (input -> Text) -> WorkerContext input
+inherited :: WorkerContext input
+withContext :: WorkerContext input -> Branch child input result -> Branch child input result
 
 child :: (KnownEffects child, Subset child effects)
       => Branch child input result -> Unfold effects (Forked result)
@@ -95,9 +99,18 @@ Unspecified fork effort defaults to Low, not the parent setting.
 `withEffort` requests initial effort, not a change to a running actor or proof
 of provider application.
 
-Children start after the enclosing tool block completes and inherit its final
-committed ambient bindings. Captured assignments/closures keep capture-time
-meanings; later parent calls do not refresh an existing child.
+Children start after the enclosing tool block completes. Default inherited
+context includes its final committed ambient bindings. `withContext (selected
+renderer)` starts a fresh conversation and isolated local binding scope; the
+renderer supplies task guidance and the typed input remains available. Frozen
+project modules are available in both modes. Captured assignments/closures keep
+capture-time meanings; later parent calls do not refresh an existing child.
+
+Set `withModel "gpt-5.6-sol"` explicitly in reusable worker recipes; model selection
+is independent of context inheritance. Prefer selected contexts for independent
+plan branches, and inherit when the actual shared reasoning is useful. Route
+callbacks can launch selected-context workers; they have no provider transcript
+to inherit. Specialist tasks use the model tagged by the plan.
 
 ## Read results without another discovery round
 
@@ -184,3 +197,40 @@ ownership or authority. Use `:status!` for lifecycle/provider uncertainty and
 
 `stopAgent` retires an actor when authorized. It is separate from accepting its result;
 retain useful specialists and inspect the outcome and cleanup evidence.
+
+## Automatic routing and inexpensive observation
+
+```text
+route :: Member Watches effects
+      => Await (Settlement result) -> (Settlement result -> Eff effects ()) -> Eff effects Route
+pollRoute :: Member Watches effects => Route -> Eff effects RouteState
+snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
+subtree :: (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
+swarmUsage :: SwarmSnapshot -> UsageTotal
+```
+
+A route installs one callback, returns promptly, and runs it on its owning actor
+when the typed settlement is ready. Known forwarding needs no model relay. Handle
+both `ReplyAvailable` and `ReplyUnavailable`. Callback effects have the owner's
+permissions; captured handles never confer someone else's authority. Keep callbacks
+short: submit work or install the next route, then return. `pollRoute` reports
+waiting, running, completed, or retained failure. A failed callback is not retried
+automatically because earlier effects may have happened.
+
+Snapshots read existing observations without asking models to report. They include
+supervision and context ancestry, actual/requested model, current requests, received
+request and coordination-event counts, compactions when known, and provider usage.
+Received coordination events count watch/cancellation notifications issued by the
+request owner; they do not claim to count all provider/TUI events or presentation.
+Usage totals deduplicate provider threads and expose unknown actors and partial
+coverage. Token counts are observations, not a kill budget. Use ordinary TUI
+conversations to steer workers and request high-leverage decisions.
+
+The original workspace root has the swarm’s one authoritative `.shoal`. Copies
+in managed checkouts are candidate source, not per-worker configuration. Integrate
+customization changes into that authoritative directory for the next swarm.
+Project prompt/module edits activate at the next explicit swarm restart. The
+selected workspace inputs are recorded under the run's `workspace/selection.json`.
+Define local task data and functions normally during a wave; do not expect edits
+to imported module files or core prompts to reload mid-wave. The example at
+`examples/shoal-workspace` shows a small TOML-selected project vocabulary and recipes.

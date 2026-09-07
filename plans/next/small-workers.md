@@ -1,59 +1,51 @@
-# Small-worker TL — gated read-only vertical slice
+# Small typed workers: optional read-only application
 
-## Gate and user intent
+This is a later application of the [current implementation plan](../../NEXT.md),
+not a service-migration gate or a task tree for the builder. Use the existing
+interactive Codex TUI path and the shared Haskell worker primitives.
 
-Do not launch this tranche until root accepts the per-actor service/controller
-lifecycle and notification contract. This is complementary to default exact-prefix
-specialists, not a replacement. The user wants typed, programmable small workers,
-same parent pane, shared parent worktree, reusable .hs tools/specifications and
-explicitly selected context. Existing `plans/small-agents.md` is the broader design;
-this document supplies the bounded implementation handoff without old conversation.
-No small-agent API described here is assumed implemented.
+## Intended outcome
 
-## First outcome
+A lead supplies a typed numeric discrepancy to a small read-only Sol worker.
+The worker classifies or minimizes it and returns a typed result; the owning
+consumer independently checks that result. Reuse existing numeric fixtures and
+deterministic computations. This application is not a required model comparison
+or evaluation campaign.
 
-A parent supplies a typed numeric discrepancy to a read-only small worker with a
-stable narrow tool vocabulary. Worker classifies/minimizes; parent independently
-validates result. Deterministic numeric execution remains ordinary code. Larger
-semantic ambiguity goes to an exact-prefix specialist. Use existing accepted numeric
-fixtures/oracles, not a second engine. Sol Low is an initial option to evaluate,
-not a universal cost/quality claim; respect available runtime model/effort controls.
+The worker receives selected context, a useful Haskell vocabulary, an expected
+result, and actual read-only authority. This complements exact-context
+specialists. Use Sol Low for routine bounded work and explicit effort/model
+selection when the obligation requires it.
 
-## Structural contract
+## Contracts
 
-- Typed input/result, explicit `input -> Text` renderer, bounded execution policy,
-  stable tool interface, explicit read-only workspace/capability policy.
-- Same worktree does not grant ambient parent access; Rust authorizes child principal.
-  Exported closures cannot smuggle parent authority. First slice has no shared writes.
-- Separate actor/request/provider identities and attribution. Same pane means one
-  presentation owner, not multiple TUIs writing the same terminal. No dashboard
-  project here; coordinate presentation hook with shoal-repl, expose minimal events.
-- Existing actor scheduling, requests, watches, cancellation and service connection;
-  no second agent manager/mailbox/provider loop or Haskell subprocess launcher.
-- Use on-disk .hs specs through existing compiler/workbench; capture definition and
-  source version. Later edits do not mutate admitted work. No promise that arbitrary
-  closures survive restart. Host-tool calls must not deadlock against busy parent.
-- Explicit context mode; small input does not mean weak authorization. Keep common
-  tool/base prefix stable across a task family rather than bespoke schema per case.
+- Reuse actor admission, requests, watches, and live-value ownership. No second
+  worker manager, mailbox, or provider loop.
+- Shared worktree access is explicitly read-only here. Captured functions or
+  inherited text do not grant the parent's authority.
+- Preserve separate actor/request identities, usage attribution, and reply
+  obligations even when a worker is presented in the same pane.
+- Load project modules and prompts from the swarm's frozen TOML-selected inputs.
+  Local task functions compose over that interface; source changes take effect
+  at the next explicit swarm boundary.
+- Parent/child calls must not deadlock through an occupied admitting tool block
+  or a non-reentrant workbench. Failures remain explicit; do not fabricate results.
+- Keep the common tool/prompt vocabulary stable across the task family. Supply
+  varying typed input through context rather than rebuilding tool schemas per case.
 
-Owners: `tidepool-actor`, `tidepool-agent`, `tidepool-runtime`, `tidepool-node`,
-`tidepool-worktree`, actor_host/host_dynamic_tools and Haskell library. Read current
-AGENTS and newly accepted service contract. Root owns manifests and shared API;
-service implementer retained for integration questions. Choose exact admission API
-with root after inspecting existing role/authority and context-rendering owners.
+## Implementation and acceptance
 
-## Recursive waves / acceptance
+The single implementing Astra uses existing owners in `tidepool-actor`,
+`tidepool-agent`, `tidepool-runtime`, and the host/compiler boundaries. Read the
+nearest contributor guidance and actual consumers. No independent service
+controller or observer is required.
 
-Scaffold one real read-only consumer and explicit unsupported holes. Split authorized
-context/tool export from scheduling/presentation adaptation only after signatures
-and ownership are stable. Fresh reviewer traces capability rejection, cancellation,
-partial failure, exactly-once settlement, definition capture, parent tool reentrancy
-and attribution. No unconstrained writer surface to make the demo convenient.
+Verify a real bounded read-only consumer, authority rejection, cancellation,
+partial failure, response settlement, definition capture, and attribution with
+focused owning checks. Compile the reusable specification and its consumer.
+Retain exact checked source and remaining limits. Broader write access is a
+separate product change, not a prerequisite for this example.
 
-Bound the case set; compare independently accepted quality, latency and recorded
-usage against deterministic execution and an exact-prefix specialist where useful.
-Actual normalized input/cache evidence, not fork metadata, supports cache claims;
-keep tracing opt-in/private/bounded. Report overhead or negative results honestly.
-Deliver candidate, reusable .hs specification, real typed result, verified rejection
-and cleanup paths, tested revisions and remaining limits. Expand writes/model variety
-only in a later explicit decision, not as a prerequisite for this slice.
+The [small-agent reference](../small-agents.md) supplies the broader interface
+requirements; [workspace customization](workspace-pilot.md) owns configuration
+and context packaging.

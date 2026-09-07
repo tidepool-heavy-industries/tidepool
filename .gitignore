@@ -1,5 +1,8 @@
 .tidepool/*
-.shoal/
+.shoal/logs/
+.shoal/sessions/
+.shoal/runtime/
+.shoal/build/
 # API keys dropbox — must NEVER be allowlisted back in
 .tidepool/secrets/
 !.tidepool/lib/

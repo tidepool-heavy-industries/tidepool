@@ -26,6 +26,8 @@ pub enum ForksReq {
         Vec<crate::ActorEffectKeyWire>,
         Option<crate::ForkEffort>,
         Option<(i64, i64)>,
+        Option<String>,
+        crate::ForkContext,
     ),
     ForksPreviewWith(
         crate::ActorLaunchRoleWire,

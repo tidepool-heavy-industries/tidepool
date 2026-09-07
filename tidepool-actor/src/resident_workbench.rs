@@ -253,6 +253,7 @@ pub(crate) struct ResidentAgentAttachment {
 }
 
 pub(crate) struct AgentRosterProjection {
+    pub(crate) received: (u64, u64),
     pub(crate) requests: (Vec<crate::RequestId>, Vec<crate::RequestId>),
     pub(crate) actor: crate::ActorRef,
     pub(crate) descriptor: crate::ActorDescriptor,
@@ -378,6 +379,9 @@ fn usage_summary_value(
                     summary.usage.cached_input_tokens.to_value(table)?,
                     (summary.usage.input_tokens - summary.usage.cached_input_tokens)
                         .to_value(table)?,
+                    summary.usage.output_tokens.to_value(table)?,
+                    summary.usage.reasoning_output_tokens.to_value(table)?,
+                    summary.usage.total_tokens.to_value(table)?,
                 ],
             )
         })
@@ -517,6 +521,22 @@ fn agent_roster_value(
             actor_int(entry.actor.id.0)?.to_value(table)?,
             actor_int(entry.actor.incarnation.0)?.to_value(table)?,
             entry.descriptor.label().to_owned().to_value(table)?,
+            entry
+                .runtime
+                .requested_model
+                .as_deref()
+                .or(entry.descriptor.model())
+                .map(str::to_owned)
+                .to_value(table)?,
+            entry.runtime.confirmed_model.to_value(table)?,
+            actor_int(entry.received.0)?.to_value(table)?,
+            actor_int(entry.received.1)?.to_value(table)?,
+            entry
+                .runtime
+                .compactions
+                .map(actor_int)
+                .transpose()?
+                .to_value(table)?,
             supervisor
                 .map(|actor| actor_int(actor.id.0))
                 .transpose()?
@@ -787,6 +807,11 @@ pub(crate) enum ResidentActorBoundary {
     ReplyPoll(ReplyPoll),
     CancellationAcknowledgement(CancellationAcknowledgement),
     WatchRegistration(WatchRegistration),
+    RouteRegistration {
+        registration: WatchRegistration,
+        entry: RootCustody,
+    },
+    RoutePoll(WatchPoll),
     WatchPoll(WatchPoll),
     WatchForget(WatchForget),
 }
@@ -878,6 +903,8 @@ impl ResidentActorBoundary {
             Self::ReplyPoll(_) => "pollReply",
             Self::CancellationAcknowledgement(_) => "acknowledgeCancellation",
             Self::WatchRegistration(_) => "watch",
+            Self::RouteRegistration { .. } => "route",
+            Self::RoutePoll(_) => "pollRoute",
             Self::WatchPoll(_) => "pollWatch",
             Self::WatchForget(_) => "forgetWatch",
         }
@@ -1080,6 +1107,8 @@ impl ResidentRequest {
             }
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
+            Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
+            Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
             Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
@@ -1966,12 +1995,16 @@ where
     pub(crate) async fn finalize_fork_scopes(
         &self,
         context: crate::ActorSessionContext,
-        previous: Vec<tidepool_codegen::scope::ScopeId>,
+        previous: Vec<(tidepool_codegen::scope::ScopeId, crate::ForkContext)>,
     ) -> Result<Vec<tidepool_codegen::scope::ScopeId>, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, context, _| {
                 let mut scopes = Vec::with_capacity(previous.len());
-                for old in previous {
+                for (old, ancestry) in previous {
+                    if ancestry == crate::ForkContext::SelectedContext {
+                        scopes.push(old);
+                        continue;
+                    }
                     let scope = session
                         .mint_scope(context.placement.lexical_scope)
                         .ok_or_else(|| {
@@ -2021,7 +2054,7 @@ where
                         crate::start::ActorStartRequest {
                             label, role, profile, launch_worktrees: worktrees,
                             fork_group: None, fork_workspace: None, effect_keys: None,
-                            fork_effort: None, fork_budget: None,
+                            fork_effort: None, fork_budget: None, model: None, context: crate::ForkContext::SelectedContext,
                             session_id: context.placement.session, parent_actor: context.actor,
                         },
                     )
@@ -2039,6 +2072,7 @@ where
                         effect_keys,
                         effort,
                         budget,
+                        model, fork_context,
                     )) => {
                         let group = u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -2055,7 +2089,7 @@ where
                                     Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
                                     None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
                                 }),
-                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget,
+                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, context: fork_context,
                                 session_id: context.placement.session, parent_actor: context.actor,
                             },
                         )
@@ -2475,6 +2509,18 @@ where
                             recoverable: false,
                         },
                     )),
+                    ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, dependencies)) => {
+                        drop(callback); // Custody is claimed from the suspension, not the decoded value.
+                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
+                        let dependencies = dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect::<Result<Vec<_>, _>>()?;
+                        Ok(ResidentActorBoundary::RouteRegistration {
+                            registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
+                        })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveRouteWith(id)) => Ok(ResidentActorBoundary::RoutePoll(WatchPoll {
+                        continuation: hole, watch: crate::request_effect::watch_id(id)?,
+                    })),
                     ResidentRequest::Watches(WatchesReq::RegisterWatchWith(
                         label,
                         dependencies,
@@ -3432,6 +3478,68 @@ where
                 )?;
                 session
                     .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_route_state(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Result<crate::request::routes::RouteState, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                use crate::request::routes::RouteState;
+                let (name, detail) = match observation {
+                    Ok(RouteState::Waiting) => ("RouteWaiting", None),
+                    Ok(RouteState::Running) => ("RouteRunning", None),
+                    Ok(RouteState::Completed) => ("RouteCompleted", None),
+                    Ok(RouteState::Failed(error)) => ("RouteFailed", Some(error)),
+                    Err(error) => (
+                        "RouteFailed",
+                        Some(format!("route observation rejected: {error:?}")),
+                    ),
+                };
+                let fields = detail
+                    .into_iter()
+                    .map(|text| text.to_value(session.data_con_table()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let answer = crate::request_effect::constructor(
+                    session.data_con_table(),
+                    "Tidepool.Agent.Watch.Internal",
+                    name,
+                    fields,
+                )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn run_route_entry(
+        &self,
+        context: crate::ActorSessionContext,
+        entry: RootCustody,
+        watch: crate::WatchId,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let argument = i64::try_from(watch.0).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "route ID exceeds Haskell Int".into(),
+                    )
+                })?;
+                session
+                    .run_rooted_entry(
+                        "watch_route",
+                        entry,
+                        argument,
+                        context.placement.resource_scope,
+                        None,
+                    )
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await

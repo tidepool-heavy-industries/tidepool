@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
+    // Shared target directories must not reuse another checkout's source paths.
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR")]
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     #[allow(
@@ -52,11 +54,11 @@ fn emit_bundle(root: &Path, prefix: &str, symbol: &str, output: &str) {
     );
     for (rel, abs) in &entries {
         println!("cargo:rerun-if-changed={}", abs.display());
+        #[allow(clippy::expect_used, reason = "read an embedded Haskell source")]
+        let source = std::fs::read_to_string(abs).expect("read embedded source");
         out.push_str(&format!(
-            "    (\"{}{}\", include_str!(r\"{}\")),\n",
-            prefix,
-            rel,
-            abs.display()
+            "    ({:?}, {source:?}),\n",
+            format!("{prefix}{rel}")
         ));
     }
     out.push_str("];\n");

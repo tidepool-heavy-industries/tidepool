@@ -252,6 +252,7 @@ fn fork_workspace_admission(
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
+    pub workspace_inputs: Option<crate::shoal::workspace::FrozenWorkspace>,
     pub workspace: PathBuf,
     pub haskell_root: PathBuf,
     pub run_root: PathBuf,
@@ -270,14 +271,12 @@ fn launch_effort(
     default: ReasoningEffort,
     requested: Option<tidepool_actor::ForkEffort>,
 ) -> ReasoningEffort {
-    if matches!(mode, InteractiveLaunchMode::Fork { .. }) {
-        match requested.unwrap_or(tidepool_actor::ForkEffort::Low) {
-            tidepool_actor::ForkEffort::Low => ReasoningEffort::Low,
-            tidepool_actor::ForkEffort::Medium => ReasoningEffort::Medium,
-            tidepool_actor::ForkEffort::High => ReasoningEffort::High,
-        }
-    } else {
-        default
+    match requested {
+        Some(tidepool_actor::ForkEffort::Low) => ReasoningEffort::Low,
+        Some(tidepool_actor::ForkEffort::Medium) => ReasoningEffort::Medium,
+        Some(tidepool_actor::ForkEffort::High) => ReasoningEffort::High,
+        None if matches!(mode, InteractiveLaunchMode::Fork { .. }) => ReasoningEffort::Low,
+        None => default,
     }
 }
 
@@ -1263,7 +1262,7 @@ fn compile_root(
     let mut include = effects.include_paths().to_vec();
     include.push(config.haskell_root.clone());
     include.push(crate::haskell_sources::ensure_stdlib()?);
-    let preamble = insert_preamble_imports(
+    let mut preamble = insert_preamble_imports(
         &tidepool_mcp::build_preamble_with_companions_hiding(
             &declarations,
             false,
@@ -1272,6 +1271,12 @@ fn compile_root(
         ),
         DRIVER_MODULE,
     );
+    if let Some(inputs) = &config.workspace_inputs {
+        include.extend(inputs.include.iter().cloned());
+        for module in &inputs.modules {
+            preamble = insert_preamble_imports(&preamble, module);
+        }
+    }
     let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, "");
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let session_root = run_root.join("haskell-session");
@@ -1297,17 +1302,17 @@ fn compile_root(
     };
 
     let session = fresh_session_id();
-    let mut library = SessionLib::open(
-        session,
-        &session_root,
-        tidepool_mcp::session_decl_module_env_hiding(
-            &declarations,
-            false,
-            tidepool_mcp::CompanionImports::Omit,
-            SHOAL_REPLACED_EFFECT_NAMES,
-        ),
-    )?
-    .with_validation_include(include.clone());
+    let mut module_env = tidepool_mcp::session_decl_module_env_hiding(
+        &declarations,
+        false,
+        tidepool_mcp::CompanionImports::Omit,
+        SHOAL_REPLACED_EFFECT_NAMES,
+    );
+    if let Some(inputs) = &config.workspace_inputs {
+        module_env.imports.extend(inputs.imports());
+    }
+    let mut library = SessionLib::open(session, &session_root, module_env)?
+        .with_validation_include(include.clone());
     let recovery_report =
         library.attach_recovery_manifest(config.run_root.join("root-declarations.json"))?;
     tracing::info!(
@@ -1511,8 +1516,15 @@ async fn run_interactive_applications(
         readiness,
         worktree_authority,
     } = fleet;
-    let base_prompt = FrozenBasePrompt::materialize(&run_root)
-        .map_err(|error| format!("cannot prepare Shoal base prompt: {error}"))?;
+    let base_prompt = FrozenBasePrompt::materialize_selected(
+        &run_root,
+        config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|inputs| inputs.prompts.get("core"))
+            .map(String::as_str),
+    )
+    .map_err(|error| format!("cannot prepare Shoal base prompt: {error}"))?;
     let mut root_identity = root.identity();
     let mut launch_context = InteractiveLaunchContext {
         base_prompt,
@@ -2442,8 +2454,11 @@ async fn launch_prepared_interactive_application(
     };
     runtime_observation.publish_workspace(workspace_observation);
     runtime_observation.publish_launch_role(installation.effective_role.clone(), current_time_ms());
-    let mut developer_instructions =
-        developer_instructions(&installation.effective_role, &launch_mode);
+    let mut developer_instructions = developer_instructions_selected(
+        &installation.effective_role,
+        &launch_mode,
+        config.workspace_inputs.as_ref(),
+    );
     developer_instructions.push_str(
         "\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n",
     );
@@ -2453,14 +2468,23 @@ async fn launch_prepared_interactive_application(
         installation.effective_role.prompt_profile(),
         PromptId::CATALOG_VERSION,
         PromptId::composed_fingerprint(
-            PromptId::ShoalBase.body(),
+            base_prompt.body(),
             &developer_instructions,
             &tidepool_actor::shoal_hosted_prompt_fingerprint(),
         ),
     );
-    let effort = launch_effort(&launch_mode, config.effort, installation.fork_effort);
-    let model =
-        (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. })).then(|| config.model.clone());
+    let effort = launch_effort(
+        &launch_mode,
+        if installation.supervisor_parent.is_some() {
+            ReasoningEffort::Low
+        } else {
+            config.effort
+        },
+        installation.fork_effort,
+    );
+    let model = installation.model.clone().or_else(|| {
+        (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. })).then(|| config.model.clone())
+    });
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         // Shoal owns continuation on every node. Keep the native tool surface
@@ -3291,11 +3315,36 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
     }
 }
 
+#[cfg(test)]
 fn developer_instructions(
     effective_role: &tidepool_actor::EffectiveRole,
     mode: &InteractiveLaunchMode,
 ) -> String {
+    developer_instructions_selected(effective_role, mode, None)
+}
+
+fn developer_instructions_selected(
+    effective_role: &tidepool_actor::EffectiveRole,
+    mode: &InteractiveLaunchMode,
+    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+) -> String {
     let role = effective_role.role();
+    let key = match role {
+        tidepool_actor::ActorRole::Root => "root",
+        tidepool_actor::ActorRole::Research => "research",
+        tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Inherited => "coding",
+        tidepool_actor::ActorRole::Scaffolding => "scaffolding",
+        tidepool_actor::ActorRole::Integration => "integration",
+    };
+    if let Some(body) = inputs.and_then(|inputs| inputs.prompts.get(key)) {
+        let mut body = body.clone();
+        if role == tidepool_actor::ActorRole::Root
+            && matches!(mode, InteractiveLaunchMode::Resume(_))
+        {
+            body.push_str(PromptId::RecreatedRoot.body());
+        }
+        return append_effective_role(body, effective_role);
+    }
     if role == tidepool_actor::ActorRole::Root {
         let mut instructions = PromptId::ShoalRoot.body().to_string();
         if matches!(mode, InteractiveLaunchMode::Resume(_)) {

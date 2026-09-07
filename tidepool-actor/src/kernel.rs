@@ -145,6 +145,9 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    RouteReady {
+        watch: crate::WatchId,
+    },
     SealHostedWork {
         reply: RpcReplyPort<crate::HostedWorkSeal>,
     },
@@ -194,6 +197,7 @@ pub enum KernelMessage {
 impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RouteReady { watch } => formatter.debug_tuple("RouteReady").field(watch).finish(),
             Self::SealHostedWork { .. } => formatter.write_str("SealHostedWork"),
             Self::Cast { sender, request } => formatter
                 .debug_struct("Cast")

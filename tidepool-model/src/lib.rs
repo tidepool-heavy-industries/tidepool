@@ -241,6 +241,8 @@ pub struct ProviderTurnObservation {
 /// A single durable read; absent fields are unknown, not measured zero or idle.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderObservation {
+    /// Count from this thread’s readable durable history; unknown for incomplete sources.
+    pub compactions: Option<u64>,
     pub usage: Option<ProviderUsageSnapshot>,
     /// Failed turns in durable source order, including failures before the latest turn.
     pub failures: Vec<ProviderTurnObservation>,

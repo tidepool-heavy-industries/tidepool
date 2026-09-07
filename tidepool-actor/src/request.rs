@@ -1,3 +1,4 @@
+pub(crate) mod routes;
 mod updates;
 pub use updates::{
     RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation, RequestUpdateState,
@@ -292,6 +293,7 @@ enum WatchState {
 }
 
 struct WatchRecord {
+    route: Option<routes::WatchRoute>,
     owner: ActorRef,
     label: String,
     dependencies: Vec<WatchDependency>,
@@ -320,6 +322,7 @@ struct WatchDependency {
 #[derive(Default)]
 struct RequestStateTable {
     next_request: u64,
+    received_requests: HashMap<ActorRef, u64>,
     next_watch: u64,
     next_event_by_actor: HashMap<ActorRef, u64>,
     cleanup_revision: HashMap<ActorRef, u64>,
@@ -380,7 +383,11 @@ fn cleanup_blockers(
         .iter()
         .filter_map(|(watch, record)| {
             (owners.contains(&record.owner)
-                && record.state == WatchState::Pending
+                && (record.state == WatchState::Pending
+                    || record
+                        .route
+                        .as_ref()
+                        .is_some_and(routes::WatchRoute::is_active))
                 && (targets.contains(&record.owner)
                     || record
                         .dependencies
@@ -542,7 +549,12 @@ impl RequestRegistry {
             let Some(record) = state.watches.get(&watch) else {
                 continue;
             };
-            if record.state == WatchState::Pending {
+            if record.state == WatchState::Pending
+                || record
+                    .route
+                    .as_ref()
+                    .is_some_and(routes::WatchRoute::is_active)
+            {
                 outcome.pending_watches.push(watch);
             } else {
                 state.watches.remove(&watch);
@@ -691,6 +703,14 @@ impl RequestRegistry {
         self.reserve_labeled(owner, target, "request".into())
     }
 
+    pub(crate) fn received_counts(&self, actor: ActorRef) -> (u64, u64) {
+        let state = self.state.lock();
+        (
+            state.received_requests.get(&actor).copied().unwrap_or(0),
+            state.next_event_by_actor.get(&actor).copied().unwrap_or(0),
+        )
+    }
+
     pub(crate) fn reserve_labeled(
         &self,
         owner: ActorRef,
@@ -783,6 +803,8 @@ impl RequestRegistry {
             TargetState::Reserved => {
                 record.target_state = TargetState::Queued;
                 record.deadline = deadline;
+                let received = state.received_requests.entry(target).or_default();
+                *received = received.saturating_add(1);
                 *state.cleanup_revision.entry(target).or_default() += 1;
                 *state.cleanup_revision.entry(owner).or_default() += 1;
                 Ok(())
@@ -1190,6 +1212,16 @@ impl RequestRegistry {
         label: String,
         dependencies: Vec<(RequestId, WatchRequirement)>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        self.register_watch_with_route(owner, label, dependencies, None)
+    }
+
+    pub(crate) fn register_watch_with_route(
+        &self,
+        owner: ActorRef,
+        label: String,
+        dependencies: Vec<(RequestId, WatchRequirement)>,
+        route: Option<routes::WatchRoute>,
+    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
         if state.cleaning.contains(&owner) {
             return Err(ReplyError::CancellationRequested);
@@ -1211,6 +1243,7 @@ impl RequestRegistry {
         state.watches.insert(
             id,
             WatchRecord {
+                route,
                 owner,
                 label,
                 dependencies: dependencies
@@ -1300,7 +1333,12 @@ impl RequestRegistry {
         if record.owner != owner {
             return Err(identity_error(record.owner, owner));
         }
-        if record.state == WatchState::Pending {
+        if record.state == WatchState::Pending
+            || record
+                .route
+                .as_ref()
+                .is_some_and(routes::WatchRoute::is_active)
+        {
             return Ok(ForgetWatchOutcome::StillPending);
         }
         state.watches.remove(&watch);
@@ -1324,7 +1362,14 @@ impl RequestRegistry {
         let mut watches = state
             .watches
             .iter()
-            .filter(|(_, record)| record.owner == actor && record.state == WatchState::Pending)
+            .filter(|(_, record)| {
+                record.owner == actor
+                    && (record.state == WatchState::Pending
+                        || record
+                            .route
+                            .as_ref()
+                            .is_some_and(routes::WatchRoute::is_active))
+            })
             .map(|(watch, _)| *watch)
             .collect::<Vec<_>>();
         requests.sort_unstable();
@@ -1343,6 +1388,15 @@ impl RequestRegistry {
         terminal: &ActorTerminal,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
+        for watch in state
+            .watches
+            .values_mut()
+            .filter(|watch| watch.owner == actor)
+        {
+            if let Some(route) = &mut watch.route {
+                route.retire();
+            }
+        }
         for record in state.requests.values_mut() {
             if record.target == actor {
                 if record.target_state != TargetState::Closed {
@@ -1551,6 +1605,10 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                 }
             }
         };
+        if let Some(route) = &mut watch.route {
+            route.schedule(*watch_id);
+            continue;
+        }
         let current = match &transition {
             WatchTransition::Ready => WatchStateProjection::Ready,
             WatchTransition::Unavailable { request, failure } => {
@@ -1591,6 +1649,21 @@ mod tests {
 
     fn actor(id: u64) -> ActorRef {
         ActorRef::first(ActorId(id))
+    }
+
+    #[test]
+    fn received_counts_measure_admission_once_not_reservation_or_presentation() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        assert_eq!(registry.received_counts(target), (0, 0));
+        registry.mark_queued(owner, target, request).unwrap();
+        assert_eq!(registry.received_counts(target), (1, 0));
+        assert!(registry.mark_queued(owner, target, request).is_err());
+        registry.present(target, request).unwrap();
+        assert_eq!(registry.received_counts(target), (1, 0));
+        assert_eq!(registry.received_counts(owner), (0, 0));
     }
 
     #[test]

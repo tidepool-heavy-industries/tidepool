@@ -177,6 +177,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     (
         "Forks",
         &[
+            "ForkContext",
             "ForkEffort",
             "ActorEffectKey",
             "ForkGroupCleanupOutcome",

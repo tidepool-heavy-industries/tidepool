@@ -20,6 +20,7 @@ pub struct ActorDescriptor {
     actor_path: Option<tidepool_repr::ActorPath>,
     fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
+    model: Option<String>,
     fork_budget: Option<(i64, i64)>,
     fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 }
@@ -40,6 +41,7 @@ impl ActorDescriptor {
             actor_path: None,
             fork_group: None,
             fork_effort: None,
+            model: None,
             fork_budget: None,
             fork_boundary: None,
         }
@@ -48,6 +50,17 @@ impl ActorDescriptor {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
     }
 
     #[must_use]

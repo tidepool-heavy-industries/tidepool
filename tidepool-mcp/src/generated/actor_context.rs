@@ -14,7 +14,7 @@ pub fn actor_context_decl() -> crate::EffectDecl {
             "data ProviderUsageObservation = ProviderUsageObservation { usageObservationId :: Text, usageTimestamp :: Maybe Text, usageCachedInputTokens :: Int, usageUncachedInputTokens :: Int } deriving (Show, Eq)",
             "data ProviderUsageScope = UsageThread Text | UsageTurn Text Text deriving (Show, Eq)",
             "data ProviderUsageCompleteness = UsagePartial | UsageComplete deriving (Show, Eq)",
-            "data ProviderUsageSummary = ProviderUsageSummary { usageSummaryScope :: ProviderUsageScope, usageSummaryCompleteness :: ProviderUsageCompleteness, usageSummaryObservations :: Int, usageSummaryCachedInputTokens :: Int, usageSummaryUncachedInputTokens :: Int } deriving (Show, Eq)",
+            "data ProviderUsageSummary = ProviderUsageSummary { usageSummaryScope :: ProviderUsageScope, usageSummaryCompleteness :: ProviderUsageCompleteness, usageSummaryObservations :: Int, usageSummaryCachedInputTokens :: Int, usageSummaryUncachedInputTokens :: Int, usageSummaryOutputTokens :: Int, usageSummaryReasoningTokens :: Int, usageSummaryTotalTokens :: Int } deriving (Show, Eq)",
             "data ActorContextRole = ContextRoot | ContextResearch | ContextCoding | ContextScaffolding | ContextIntegration | ContextInherited deriving (Show, Eq)",
             "data ActorNativeTools = NativeInspectionOnly | NativeCoding | NativeIntegration | NativeInherited deriving (Show, Eq)",
             "data ActorWorkspaceAccess = WorkspaceNone | WorkspaceInspectOnly | WorkspaceWritableBound deriving (Show, Eq)",

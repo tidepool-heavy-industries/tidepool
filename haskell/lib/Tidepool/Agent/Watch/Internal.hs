@@ -22,6 +22,11 @@ module Tidepool.Agent.Watch.Internal
   , awaitSettled
   , awaitProgressAfter
   , watch
+  , Route
+  , RouteState (..)
+  , route
+  , pollRoute
+  , forgetRoute
   , pollWatch
   , ForgetWatchOutcome (..)
   , forgetWatch
@@ -113,6 +118,8 @@ data RawWatchObservation
 
 data Watches a where
   RegisterWatchWith :: Text -> [AwaitDependency] -> Watches Int
+  RegisterRouteWith :: Text -> (Int -> Eff effs ()) -> [AwaitDependency] -> Watches Int
+  ObserveRouteWith :: Int -> Watches RouteState
   ObserveWatchProgressWith :: Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
   ForgetWatchWith :: Int -> Watches ForgetWatchOutcome
@@ -180,3 +187,28 @@ deduplicate = foldr add []
     add dependency rest
       | dependency `elem` rest = rest
       | otherwise = dependency : rest
+
+-- | One watch-owned continuation, executed by the owning actor without inference.
+newtype Route = Route Int deriving (Show, Eq)
+data RouteState = RouteWaiting | RouteRunning | RouteCompleted | RouteFailed Text
+  deriving (Show, Eq)
+
+route
+  :: Member Watches effs
+  => Await (Settlement result)
+  -> (Settlement result -> Eff effs ())
+  -> Eff effs Route
+route awaiting@(Await dependencies _) callback = do
+  let entry watchId = do
+        observed <- pollWatch (Watch (WatchId watchId) awaiting)
+        case observed of
+          WatchReady result -> callback result
+          WatchUnavailable failure -> error (show failure)
+          WatchPending -> error "route ran before settlement"
+  Route <$> send (RegisterRouteWith "route" entry dependencies)
+
+pollRoute :: Member Watches effs => Route -> Eff effs RouteState
+pollRoute (Route watchId) = send (ObserveRouteWith watchId)
+
+forgetRoute :: Member Watches effs => Route -> Eff effs ForgetWatchOutcome
+forgetRoute (Route watchId) = send (ForgetWatchWith watchId)

@@ -1,0 +1,10 @@
+[defaults]
+model = "gpt-5.6-sol"
+effort = "low"
+
+[haskell]
+source_roots = ["."]
+modules = ["Project.Types", "Project.Work"]
+
+[prompts]
+core = "prompts/core.md"

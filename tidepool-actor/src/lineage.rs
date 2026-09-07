@@ -687,11 +687,15 @@ impl ForkGroupRegistry {
     }
 
     pub fn abort_unpublished(&self, owner: ActorRef) -> Vec<ActorRef> {
-        self.abort_pending(owner, true)
+        self.abort_pending(owner, true, None)
     }
 
-    pub(crate) fn abort_incomplete(&self, owner: ActorRef) -> Vec<ActorRef> {
-        self.abort_pending(owner, false)
+    pub(crate) fn abort_incomplete(
+        &self,
+        owner: ActorRef,
+        selected: Option<&[ForkGroupId]>,
+    ) -> Vec<ActorRef> {
+        self.abort_pending(owner, false, selected)
     }
 
     pub(crate) fn has_incomplete(&self, owner: ActorRef) -> bool {
@@ -704,13 +708,27 @@ impl ForkGroupRegistry {
         })
     }
 
-    fn abort_pending(&self, owner: ActorRef, include_ready: bool) -> Vec<ActorRef> {
+    pub(crate) fn abort_selected_unpublished(
+        &self,
+        owner: ActorRef,
+        groups: &[ForkGroupId],
+    ) -> Vec<ActorRef> {
+        self.abort_pending(owner, true, Some(groups))
+    }
+
+    fn abort_pending(
+        &self,
+        owner: ActorRef,
+        include_ready: bool,
+        selected: Option<&[ForkGroupId]>,
+    ) -> Vec<ActorRef> {
         let mut state = self.state.lock();
         let ids: Vec<_> = state
             .groups
             .iter()
             .filter_map(|(id, group)| {
                 (group.owner == owner
+                    && selected.is_none_or(|groups| groups.contains(id))
                     && *group.phase.borrow() != ForkGroupPhase::Committed
                     && (include_ready || *group.phase.borrow() != ForkGroupPhase::Ready))
                     .then_some(*id)
@@ -1054,6 +1072,44 @@ mod tests {
         groups.mark_ready(group, child).unwrap();
         groups.mark_failed(group, child).unwrap();
         assert_eq!(*phase.borrow(), ForkGroupPhase::Committed);
+        assert!(groups.abort_unpublished(owner).is_empty());
+    }
+
+    #[test]
+    fn selected_abort_preserves_other_pending_and_published_groups() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(ActorId(1));
+        let mut ids = Vec::new();
+        for (index, name) in ["failed", "pending", "published"].into_iter().enumerate() {
+            let child = ActorRef::first(ActorId(index as u64 + 2));
+            let (group, reservations) = groups
+                .begin(
+                    owner,
+                    ActorPath::parse(&format!("root/{name}")).unwrap(),
+                    vec![segment("child")],
+                    8,
+                )
+                .unwrap();
+            groups
+                .claim(group, owner, &reservations[0].allocated)
+                .unwrap();
+            groups.attach_child(group, owner, child).unwrap();
+            groups.request_commit(group, owner).unwrap();
+            if name == "published" {
+                groups.mark_ready(group, child).unwrap();
+                groups.publish_group(group, owner).unwrap();
+            }
+            ids.push(group);
+        }
+        assert!(groups.abort_incomplete(owner, Some(&[ids[2]])).is_empty());
+        assert_eq!(
+            groups.abort_selected_unpublished(owner, &[ids[0], ids[2]]),
+            vec![ActorRef::first(ActorId(2))]
+        );
+        assert_eq!(
+            groups.abort_unpublished(owner),
+            vec![ActorRef::first(ActorId(3))]
+        );
         assert!(groups.abort_unpublished(owner).is_empty());
     }
 

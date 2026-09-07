@@ -254,6 +254,19 @@ impl KernelContext {
 /// owns Haskell/provider/tool execution and returns domain results without
 /// gaining access to Ractor's scheduler internals.
 pub trait KernelBehavior: Send + 'static {
+    /// Execute one ready watch continuation on this actor's ordinary turn queue.
+    fn route<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _watch: crate::WatchId,
+    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor does not support watch continuations".into(),
+            })
+        })
+    }
+
     /// Whether the installed behavior is currently parked on its authored
     /// mailbox receiver. The wrapper retains cast/call custody while an
     /// external interaction temporarily occupies that continuation.
@@ -649,6 +662,11 @@ where
             }
             KernelMessage::DrainMailbox => {
                 unreachable!("mailbox drain messages are normalized before dispatch")
+            }
+            KernelMessage::RouteReady { watch } => {
+                if let Err(error) = state.behavior.route(&state.context, watch).await {
+                    tracing::error!(?watch, %error, "watch continuation rejected");
+                }
             }
             KernelMessage::Resume => match state.behavior.resume(&state.context).await {
                 Ok(step) => finish_after_step(&myself, state, step).await,

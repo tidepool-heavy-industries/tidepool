@@ -4,7 +4,8 @@ This file guides contributors; it is not part of the shipped model prompt.
 
 - `../../tidepool/src/actor_host/prompt_catalog.rs` owns prompt composition and
   catalog identity. `base.md` plus `api-guide.md` form one frozen shared superset
-  across roles. Never vary this cached prefix by role, workspace or live bindings.
+  across roles. Workspace core overrides are selected once at swarm startup;
+  never vary the selected prefix by role or live bindings.
 - Keep core callable signatures and representative examples in `api-guide.md`.
   Avoid ritual startup inventories; recommend targeted discovery only for missing
   information. Check against live/public types rather than inventing API shapes.

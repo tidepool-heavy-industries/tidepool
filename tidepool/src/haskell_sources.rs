@@ -22,6 +22,16 @@ fn content_hash(entries: &[(&str, &str)]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// Identity of the library interfaces embedded in this build. Workspace
+/// selections must not silently resume against a different imported surface.
+pub(crate) fn source_identity() -> String {
+    format!(
+        "{}:{}",
+        content_hash(EMBEDDED_STDLIB),
+        content_hash(EMBEDDED_SHOAL_HASKELL)
+    )
+}
+
 /// Materialize one complete embedded source tree. A content-addressed path and
 /// completion sentinel make concurrent or repeated startup idempotent; a
 /// partial tree is never selected as complete.

@@ -68,6 +68,8 @@ pub(crate) enum RepliesReq {
 pub(crate) enum WatchesReq {
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, Vec<AwaitDependency>),
+    RegisterRouteWith(String, tidepool_eval::Value, Vec<AwaitDependency>),
+    ObserveRouteWith(i64),
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     ObserveWatchWith(i64),
     ForgetWatchWith(i64),

@@ -25,6 +25,24 @@ pub fn forks() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
+                name: "ForkContext",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: ["InheritedContext", "SelectedContext"]
+                        .into_iter()
+                        .map(|ctor| SumVariant {
+                            ctor,
+                            fields: VariantFields::Positional(Vec::new()),
+                            doc: &[],
+                        })
+                        .collect(),
+                },
+                json: JsonInstance::None,
+                derives: WireDerives(&[]),
+                domain: None,
+                doc: &["Whether a child inherits the completed provider and Haskell context."],
+            },
+            TypeDef {
                 name: "ForkEffort",
                 wire_rust: None,
                 shape: TypeShape::Sum {
@@ -170,6 +188,16 @@ pub fn forks() -> Effect {
                     name: "budget",
                     ty: HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int])),
                     rust: RustBinding::Path("Option<(i64, i64)>"),
+                });
+                args.push(Arg {
+                    name: "model",
+                    ty: HsType::maybe(HsType::Text),
+                    rust: RustBinding::Path("Option<String>"),
+                });
+                args.push(Arg {
+                    name: "context",
+                    ty: HsType::Named("ForkContext"),
+                    rust: RustBinding::Path("crate::ForkContext"),
                 });
                 Verb {
                     ctor: "ForksStartWith",

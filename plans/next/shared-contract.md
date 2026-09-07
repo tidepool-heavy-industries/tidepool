@@ -1,5 +1,9 @@
 # First-wave integration contract
 
+> Historical previous-wave reference. The current [implementation handoff](../../NEXT.md)
+> retains interactive Codex TUIs and excludes the controller/observer migration.
+> Old dispatch instructions and migration gates below are not current requirements.
+
 Seed parent: acb3bc11a0d3c5053f22e63a95b112b2208f8f4a. External Codex
 implementation is in flight in the human-managed session. No delivered revision
 is accepted yet. The native pin remains c8460ffd7c859da2a1467f4384020cf9a19bcc69.

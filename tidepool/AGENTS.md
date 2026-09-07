@@ -12,7 +12,9 @@
 - `launch_effort` defaults omitted fork effort to Low, not the root's effort.
   Preserve explicit fork overrides and configured fresh/resumed root effort.
 - `src/actor_host/prompt_catalog.rs` freezes one shared superset base composed
-  from `prompts/shoal/base.md` and `api-guide.md`. Do not specialize that prefix
+  from the run-selected core prose (default `prompts/shoal/base.md`) and
+  the shipped `api-guide.md`. TOML workspace overrides freeze at startup;
+  never reread them per actor. Do not specialize that prefix
   by role or append dynamic binding inventories. Role and authority observations
   are separate context, not permission granted by inherited text or bindings.
 - Fork exact parent context at the specified tool boundary. A published candidate,

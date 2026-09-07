@@ -1,5 +1,9 @@
 # Fresh acceptance branch — integrated execution/control proof
 
+> Historical previous-wave reference. The current [implementation handoff](../../NEXT.md)
+> retains interactive Codex TUIs and excludes the controller/observer migration.
+> Old dispatch instructions and migration gates below are not current requirements.
+
 ## Assignment and entry gate
 
 Independent review and execution against exact integrated Tidepool AND native Codex

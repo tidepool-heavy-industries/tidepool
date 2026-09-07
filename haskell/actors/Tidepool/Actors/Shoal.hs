@@ -72,6 +72,11 @@ module Tidepool.Actors.Shoal
   , withBranchDeadline
   , ForkEffort (..)
   , withEffort
+  , withModel
+  , WorkerContext
+  , inherited
+  , selected
+  , withContext
   , RolePolicy
   , inspectionPolicy
   , codingPolicy
@@ -137,6 +142,11 @@ module Tidepool.Actors.Shoal
   , ProviderUsageSummary (..)
   , CacheBoundaryReason (..)
   , listAgents
+  , SwarmSnapshot (..)
+  , UsageTotal (..)
+  , snapshot
+  , subtree
+  , swarmUsage
   , AgentForgetOutcome (..)
   , forgetAgent
   , Response
@@ -209,6 +219,11 @@ module Tidepool.Actors.Shoal
   , awaitProgressAfter
   , watch
   , pollWatch
+  , Route
+  , RouteState (..)
+  , route
+  , pollRoute
+  , forgetRoute
   , ForgetWatchOutcome (..)
   , forgetWatch
   , WorktreeSpec
@@ -303,6 +318,7 @@ import Tidepool.Actors.Internal.Agent
   , withRequestGuidance
   )
 import Tidepool.Actors.Role
+import Tidepool.Actors.Observe
 import Tidepool.Actors.Unfold
 import Tidepool.Actors.Worktree hiding (queryWorktrees)
 import qualified Tidepool.Actors.Worktree as WorktreeActor

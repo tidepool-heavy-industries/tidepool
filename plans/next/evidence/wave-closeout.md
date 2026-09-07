@@ -1,8 +1,9 @@
 # Wave closeout and comparison with NEXT.md
 
 Source checkpoint: Tidepool main `5ba83eb2bef9ba32d9303b08d7d7a779e2de0323`.
-The original NEXT.md plan is preserved below its status notice; its claims that
-implementation has not started and native controller ownership is missing are stale.
+The original wave plan remains in Git history. [NEXT.md](../../../NEXT.md) is
+now the current implementation handoff; the goal comparison below records the
+previous wave's objectives and must not be read as current dispatch instructions.
 The user explicitly accepts partial integration. The next phase is one dedicated
 implementation session, not another Shoal dogfood tree.
 
@@ -18,11 +19,11 @@ implementation session, not another Shoal dogfood tree.
 | Fresh acceptance of the integrated native/Tidepool pair | Independent preparation and host-pairing acceptance completed; closeout reran focused integrated host checks. | The decisive mounted no-TUI/observer/sibling-prefix/amendment/notification/reconnect/retirement matrix has not run. |
 | Selected-context small workers | Not started in this wave, consistent with its explicit service-acceptance gate. | Leave gated until the service product passes acceptance. |
 
-The central product outcome remains incomplete despite substantial prerequisite
-work. There is no production RemoteAppServerClient/controller consumer in the
-Tidepool adapter. See [the exact native client handoff](../service/native-client-handoff.md)
-and [the acceptance matrix](../acceptance.md); these are the useful next inputs,
-not the old worker dispatch instructions.
+The former service-migration outcome was incomplete at this checkpoint. The
+[native client handoff](../service/native-client-handoff.md) and
+[acceptance matrix](../acceptance.md) retain its historical design and evidence.
+That migration is not a current requirement: the selected implementation keeps
+the existing interactive Codex TUI path and fixes concrete failure behavior.
 
 ## Integration and preservation audit
 
@@ -42,10 +43,13 @@ visible before shutdown; it found the late service receipt and merged it.
 This establishes no omitted committed branch work in that audited set, not an
 archive of arbitrary resident values or every scratch/build artifact.
 
-The separate Codex repository contains committed fallback fix `72d1628c76` on
+The separate Codex repository contains fallback fix `72d1628c76` on
 controlled-execution-observer: 60-second settlement attempts and disabling hosted
-tools instead of fatal TUI exit. Tidepool still pins `600be9df`, so the fallback
-fix is not in its pinned binary. These closeout changes have not been pushed.
+tools instead of fatal TUI exit. After this checkpoint, the user authorized its
+pin: that exact commit was pushed to the fork and Tidepool's flake source/lock
+updated. Lock resolution and contract derivation evaluation passed. The earlier
+native build evidence remains specific to `600be9df`; the new pinned Nix binary
+has not been built or deployed. Tidepool's closeout commits remain local.
 
 ## Verification
 
@@ -82,9 +86,21 @@ Bounded terminal handoffs and a worker revision census are private under
 `~/.cache/tidepool/shoal/runs/b1b6bd40-db07-4862-9f73-34bcd77af7fd/wrapup/`.
 Process shutdown/restart requires a separate explicit user decision going forward.
 
-Next work should compile a real native controller client against the chosen exact
-pin, establish one no-TUI hosted call and durable completion, then attach the
-observer. Finish intent routing and the mounted failure/retirement matrix before
-opening small-worker scope. Publish/build/pin the separate fallback fix deliberately;
-do not assume the existing native pin includes it. Run-map usage wiring can follow
-the existing exported reader without another parser or provider-home scanner.
+## Current implementation decision
+
+[NEXT.md](../../../NEXT.md) is the active handoff. One Astra Medium implements
+linearly, without delegation. Preserve existing interactive Codex TUIs as the
+human steering/review interface; do not adopt the former controller/observer
+migration or invent a new operator route.
+
+TOML remains core configuration. Project Haskell modules and Markdown prompts
+are ordinary repository source selected at startup and fixed for the swarm,
+including later actors. Changes activate at an explicit swarm boundary.
+Sol pilots Markdown plans through reusable Haskell primitives and project
+recipes. The human starts an ordinary Astra session for RSI. Keep the requested
+typed observations and existing steering primitives; no dedicated RSI lifecycle,
+budget governor, specialist-admission controller, or service gate is required.
+
+The existing `72d1628c…` TUI fallback fix is relevant to this path. Verify the
+selected binary and delayed-completion responsiveness at the owning code boundary;
+do not mistake this historical evidence for current build/deployment acceptance.

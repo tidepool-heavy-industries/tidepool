@@ -70,6 +70,9 @@ fn usage_summaries_have_provider_scope_completeness_and_shared_inspection_fields
             "usageSummaryObservations",
             "usageSummaryCachedInputTokens",
             "usageSummaryUncachedInputTokens",
+            "usageSummaryOutputTokens",
+            "usageSummaryReasoningTokens",
+            "usageSummaryTotalTokens",
         ]
     );
     for (effect, name, expected) in [
@@ -107,7 +110,7 @@ fn fork_options_are_optional_at_the_existing_launch_boundary() {
         .iter()
         .find(|verb| verb.ctor == "ForksStartWith")
         .unwrap();
-    assert_eq!(launch.args.len(), 11);
+    assert_eq!(launch.args.len(), 13);
     assert_eq!(launch.args[9].name, "effort");
     assert_eq!(
         launch.args[9].ty,

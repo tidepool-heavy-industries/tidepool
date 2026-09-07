@@ -27,7 +27,14 @@ use crate::actor_host::ACTOR_PROJECT_ROOT;
 
 const STATUS_VERSION: u32 = 4;
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
-const SHOAL_EXCLUDE: &str = "/.shoal/";
+pub mod workspace;
+
+const SHOAL_EXCLUDES: &[&str] = &[
+    "/.shoal/logs/",
+    "/.shoal/sessions/",
+    "/.shoal/runtime/",
+    "/.shoal/build/",
+];
 const SHOAL_CONFIG: &str = ".shoal/config.toml";
 const DEFAULT_CONFIG: &str = r#"[defaults]
 model = "gpt-5.6-sol"
@@ -125,13 +132,16 @@ struct ShoalConfig {
     defaults: ShoalAgentDefaults,
     #[serde(default)]
     research: tidepool_actor::ResearchPolicy,
+    #[serde(default)]
+    haskell: workspace::HaskellConfig,
+    #[serde(default)]
+    prompts: workspace::PromptConfig,
 }
 
 /// Initialize the smallest repository that can host a Shoal ensemble.
 ///
-/// The command creates no product scaffold. `.shoal/` is runtime-owned and
-/// excluded locally through Git metadata, so using Shoal cannot dirty the
-/// repository or impose an ignore rule on collaborators.
+/// Authored configuration is committed normally; only runtime artifacts are
+/// excluded locally through Git metadata.
 pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = match options.path {
         Some(path) => path,
@@ -155,6 +165,8 @@ pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> 
     std::fs::create_dir_all(state.join("sessions"))?;
     ensure_project_config(&workspace)?;
     install_local_exclude(&workspace)?;
+
+    run_git(&workspace, &["add", "--", SHOAL_CONFIG]).await?;
 
     run_git(
         &workspace,
@@ -182,6 +194,12 @@ pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn ensure_project_config(workspace: &Path) -> Result<ShoalConfig, Box<dyn std::error::Error>> {
+    Ok(read_project_config(workspace)?.0)
+}
+
+fn read_project_config(
+    workspace: &Path,
+) -> Result<(ShoalConfig, String), Box<dyn std::error::Error>> {
     let path = workspace.join(SHOAL_CONFIG);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -209,7 +227,7 @@ fn ensure_project_config(workspace: &Path) -> Result<ShoalConfig, Box<dyn std::e
         config.defaults,
         &format!("Shoal configuration {}", path.display()),
     )?;
-    Ok(config)
+    Ok((config, text))
 }
 
 fn validate_agent_defaults(
@@ -239,15 +257,20 @@ fn resolve_agent_defaults(
 fn install_local_exclude(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let exclude = workspace.join(".git/info/exclude");
     let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == SHOAL_EXCLUDE) {
-        return Ok(());
-    }
-    let mut updated = existing;
+    let mut updated = existing
+        .lines()
+        .filter(|line| line.trim() != "/.shoal/")
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
     if !updated.is_empty() && !updated.ends_with('\n') {
         updated.push('\n');
     }
-    updated.push_str(SHOAL_EXCLUDE);
-    updated.push('\n');
+    for exclusion in SHOAL_EXCLUDES {
+        if !updated.lines().any(|line| line.trim() == *exclusion) {
+            updated.push_str(exclusion);
+            updated.push('\n');
+        }
+    }
     tidepool_atomic_write::write_best_effort(&exclude, updated.as_bytes())?;
     Ok(())
 }
@@ -328,6 +351,15 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     std::fs::create_dir_all(&session_root)?;
     let root_binding_path = session_root.join("root-binding.json");
     let interactive_agent = preflight(&workspace).await?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let log_path = shoal_log_path(&workspace, &run_id);
+    let compiler_log_path = shoal_compiler_log_path(&workspace, &run_id);
+    let run_root = tidepool_runtime::paths::cache_dir()
+        .join("shoal")
+        .join("runs")
+        .join(&run_id);
+    std::fs::create_dir_all(&run_root)?;
+    workspace::FrozenWorkspace::load(&workspace, &run_root)?;
     if options.recreate {
         // Validate continuity before stopping a currently healthy session.
         // The host repeats this check at launch so a later disappearance also
@@ -338,14 +370,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         clear_fresh_root_binding(&root_binding_path)?;
     }
 
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let log_path = shoal_log_path(&workspace, &run_id);
-    let compiler_log_path = shoal_compiler_log_path(&workspace, &run_id);
-    let run_root = tidepool_runtime::paths::cache_dir()
-        .join("shoal")
-        .join("runs")
-        .join(&run_id);
-    std::fs::create_dir_all(&run_root)?;
     let status_path = run_root.join("status.json");
     write_status(
         &status_path,
@@ -730,6 +754,8 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
         resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?;
 
     let haskell_root = crate::haskell_sources::ensure_shoal_haskell()?;
+    let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
+    let research_policy = workspace_inputs.config()?.research;
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
@@ -741,7 +767,8 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             tmux_session: options.session.clone(),
             model: options.agent.model.clone(),
             effort: options.agent.effort.into(),
-            research_policy: ensure_project_config(&options.workspace)?.research,
+            research_policy,
+            workspace_inputs: Some(workspace_inputs),
             root_launch_mode,
             pane_environment: pane_environment(),
         },
@@ -1222,7 +1249,7 @@ mod tests {
         assert!(std::fs::read_to_string(workspace.join(".git/info/exclude"))
             .unwrap()
             .lines()
-            .any(|line| line == SHOAL_EXCLUDE));
+            .any(|line| line == SHOAL_EXCLUDES[0]));
         assert_eq!(git_stdout(&workspace, &["status", "--short"]).await, "");
         assert_eq!(
             git_stdout(&workspace, &["show", "--format=%s", "--no-patch", "HEAD"])
@@ -1232,7 +1259,7 @@ mod tests {
         );
         assert_eq!(
             git_stdout(&workspace, &["ls-tree", "--name-only", "HEAD"]).await,
-            ""
+            ".shoal\n"
         );
     }
 

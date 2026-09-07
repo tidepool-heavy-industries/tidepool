@@ -404,6 +404,8 @@ pub(super) fn observe(reader: impl BufRead, thread: &str) -> io::Result<Provider
     let mut started_turns = BTreeSet::new();
     let mut failed_turns = BTreeSet::new();
     let mut own_thread = false;
+    let mut saw_own_thread = false;
+    let mut compactions = 0u64;
     let mut legacy_first = None;
     let mut legacy_latest = None;
     let mut records = BTreeMap::<String, (String, ProviderUsageObservation)>::new();
@@ -423,6 +425,7 @@ pub(super) fn observe(reader: impl BufRead, thread: &str) -> io::Result<Provider
         let payload = &value["payload"];
         if kind == Some("session_meta") {
             own_thread = payload.get("id").and_then(Value::as_str) == Some(thread);
+            saw_own_thread |= own_thread;
             continue;
         }
         if kind == Some("token_usage_record") {
@@ -470,6 +473,9 @@ pub(super) fn observe(reader: impl BufRead, thread: &str) -> io::Result<Provider
         }
         if !own_thread || kind != Some("event_msg") {
             continue;
+        }
+        if payload.get("type").and_then(Value::as_str) == Some("context_compacted") {
+            compactions = compactions.saturating_add(1);
         }
         if let Some(turn) = payload.get("turn_id").and_then(Value::as_str) {
             let event = payload.get("type").and_then(Value::as_str);
@@ -576,6 +582,7 @@ pub(super) fn observe(reader: impl BufRead, thread: &str) -> io::Result<Provider
             _ => {}
         }
     }
+    observation.compactions = (saw_own_thread && !incomplete).then_some(compactions);
     if ordered.is_empty() {
         observation.usage =
             legacy_first
@@ -1004,3 +1011,28 @@ mod tests {
 #[cfg(test)]
 #[path = "rollout_usage_bounded_tests.rs"]
 mod bounded_tests;
+
+#[cfg(test)]
+#[test]
+fn compaction_count_excludes_inherited_history_and_rejects_torn_coverage() {
+    let source = concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"parent\"}}\n",
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compacted\"}}\n",
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\"}}\n",
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compacted\"}}\n",
+    );
+    assert_eq!(
+        observe(source.as_bytes(), "child").unwrap().compactions,
+        Some(1)
+    );
+    assert_eq!(
+        observe(format!("{source}torn").as_bytes(), "child")
+            .unwrap()
+            .compactions,
+        None
+    );
+    assert_eq!(
+        observe(source.as_bytes(), "unknown").unwrap().compactions,
+        None
+    );
+}
