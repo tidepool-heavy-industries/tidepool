@@ -1623,6 +1623,8 @@ fn render_object_value(v: &ObjectValue, site_param: &str) -> String {
 /// path this schema exists to close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandlingClass {
+    /// Model-free recipe driver, outside ordinary actor capability rows.
+    RecipeCheck,
     /// Suspends to the model, answered in the same context.
     RunLlmTurn,
     /// Suspends to the model as a fan-out with a join.

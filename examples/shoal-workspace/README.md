@@ -52,9 +52,16 @@ Validate a candidate selection without providers or a swarm restart:
 shoal check --workspace /path/to/project
 ```
 
-This compiles configuration and selected modules. The package-curation pass is
-adding a portable behavioral recipe check before first-run readiness. Existing
-resident regressions exercise direct/reused review, delegated repair, expert plan
-incorporation, callback ownership, progress routing and next-freeze customization.
-Those checks do not establish live model usability or measured savings. The actual
-application wave and requested RSI supply that subsequent evidence.
+This compiles configuration and selected worker modules. Add `--recipes` to run
+the `[haskell].checks` entry points against the candidate's own code and fixtures.
+The model-free driver uses the same resident admission, workbench, request and
+worktree owners as normal execution. Ordinary Haskell in the package chooses the
+workflow; Rust knows neither its project roles nor its stage sequence.
+
+The prepared checks cover direct/reused review, delegated repair, expert plan
+incorporation, cumulative questions and owning steering, independent progress,
+callback success/cancellation/unavailability, and explicit next-swarm customization.
+They use temporary repositories seeded with authored .shoal files and their own
+source fixtures. These are executable coordination examples, not application tests
+or evidence of live model usability and savings. Run the application's own checks
+for its product changes; the subsequent application wave supplies live-use evidence.

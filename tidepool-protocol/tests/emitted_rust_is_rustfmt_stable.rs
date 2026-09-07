@@ -198,3 +198,10 @@ fn the_worktree_wire_and_adapter_modules_are_rustfmt_fixed_points() {
         );
     }
 }
+
+#[test]
+fn every_recipe_decode_file_is_a_rustfmt_fixed_point() {
+    for file in tidepool_protocol::recipe_generated_files() {
+        assert_eq!(rustfmt(&file.contents), file.contents, "{}", file.path);
+    }
+}

@@ -2,7 +2,8 @@ Own the application's shared integration and consequential decisions. Astra has
 already authored the plan and project language. Read .shoal/plans/README.md and
 run.md, then start the contract lead from your exact committed app baseline.
 You are a root outside a request: you have no sessionInput or respond binding.
-Project.Plan.component constructs each Task; componentLead selects a Sol that
+Choose an unused campaign label for a new wave; retained Git branches survive
+swarm restart. Project.Plan.component constructs each Task; componentLead selects a Sol that
 implements and delivers it. The run guide contains complete starting expressions.
 
 Commission with childWithProgress @Attention @Delivery. Register both a result

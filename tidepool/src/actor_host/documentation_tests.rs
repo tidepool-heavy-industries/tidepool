@@ -1129,24 +1129,28 @@ async fn routes_forward_cumulative_progress_and_rearm_without_model_relay() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        include_str!("fixtures/progress_route_producer.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/progress-route-producer.hs"),
     )
     .await;
     let (producer, _producer_binding) = next_project_worker(&mut campaign).await;
     committed(
         root.as_ref(),
-        include_str!("fixtures/progress_route_consumer.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/progress-route-consumer.hs"),
     )
     .await;
     let (consumer, _consumer_binding) = next_project_worker(&mut campaign).await;
     let result =
         dispatch_haskell_script(consumer.policy.as_ref(), "respond (\"ready\" :: Text)").await;
     assert_eq!(result["status"], "replied", "{result}");
-    committed(root.as_ref(), include_str!("fixtures/progress_route.hs")).await;
+    committed(
+        root.as_ref(),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/progress-route.hs"),
+    )
+    .await;
 
     committed(
         producer.policy.as_ref(),
-        include_str!("fixtures/progress_route_questions.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/progress-route-questions.hs"),
     )
     .await;
     for (questions, expected) in [
@@ -1240,104 +1244,11 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".shoal");
-            for (path, content) in [
-                (
-                    "config.toml",
-                    include_str!("../../../examples/shoal-workspace/.shoal/config.toml"),
-                ),
-                (
-                    "Project/Types.hs",
-                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Types.hs"),
-                ),
-                (
-                    "Project/Work.hs",
-                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Work.hs"),
-                ),
-                (
-                    "Project/Plan.hs",
-                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Plan.hs"),
-                ),
-                (
-                    "Project/Observe.hs",
-                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Observe.hs"),
-                ),
-                (
-                    "prompts/owner.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/owner.md"),
-                ),
-                (
-                    "prompts/rsi.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/rsi.md"),
-                ),
-                (
-                    "prompts/task.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/task.md"),
-                ),
-                (
-                    "prompts/lead.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/lead.md"),
-                ),
-                (
-                    "prompts/specialist.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/specialist.md"),
-                ),
-                (
-                    "prompts/review.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/review.md"),
-                ),
-                (
-                    "prompts/repair.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/repair.md"),
-                ),
-                (
-                    "prompts/incorporate.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/incorporate.md"),
-                ),
-                (
-                    "plans/README.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/plans/README.md"),
-                ),
-                (
-                    "plans/language.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/plans/language.md"),
-                ),
-                (
-                    "plans/run.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/plans/run.md"),
-                ),
-                (
-                    "plans/graph/contract/README.md",
-                    include_str!(
-                        "../../../examples/shoal-workspace/.shoal/plans/graph/contract/README.md"
-                    ),
-                ),
-                (
-                    "plans/graph/contract/design.md",
-                    include_str!(
-                        "../../../examples/shoal-workspace/.shoal/plans/graph/contract/design.md"
-                    ),
-                ),
-                (
-                    "plans/graph/projection/README.md",
-                    include_str!(
-                        "../../../examples/shoal-workspace/.shoal/plans/graph/projection/README.md"
-                    ),
-                ),
-                (
-                    "plans/graph/controls/README.md",
-                    include_str!(
-                        "../../../examples/shoal-workspace/.shoal/plans/graph/controls/README.md"
-                    ),
-                ),
-                (
-                    "prompts/core.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/core.md"),
-                ),
-            ] {
-                let target = authored.join(path);
-                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-                std::fs::write(target, content).unwrap();
-            }
+            crate::shoal::workspace::copy_authored(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/shoal-workspace"),
+                &config.workspace,
+            )
+            .unwrap();
             configure(&authored);
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
@@ -1669,7 +1580,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     committed(
         root.as_ref(),
-        include_str!("fixtures/project_delivery_setup.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/project_delivery_setup.hs"),
     )
     .await;
     let (implementer, _implementer_binding) = next_project_worker(&mut campaign).await;
@@ -1702,7 +1613,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(replied["status"], "replied", "{replied}");
     committed(
         root.as_ref(),
-        include_str!("fixtures/project_review_start.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/project_review_start.hs"),
     )
     .await;
     let (reviewer, _reviewer_binding) = next_project_worker(&mut campaign).await;
@@ -1742,7 +1653,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     committed(
         reviewer.policy.as_ref(),
-        include_str!("fixtures/project_review_repair.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/project_review_repair.hs"),
     )
     .await;
     let pending = committed(reviewer.policy.as_ref(), "pollReply sessionReply").await;
@@ -1800,7 +1711,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
     committed(
         reviewer.policy.as_ref(),
-        include_str!("fixtures/project_design_question.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/project_design_question.hs"),
     )
     .await;
     let (expert, _expert_binding) = next_project_worker(&mut campaign).await;
@@ -1852,7 +1763,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(decision["items"][2]["output"], "ReplyOpen", "{decision}");
     committed(
         reviewer.policy.as_ref(),
-        include_str!("fixtures/project_plan_incorporation.hs"),
+        include_str!(
+            "../../../examples/shoal-workspace/.shoal/checks/project_plan_incorporation.hs"
+        ),
     )
     .await;
     tokio::time::timeout(Duration::from_secs(120), async {
@@ -1905,7 +1818,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(checked["items"][2]["output"], "ReplyOpen", "{checked}");
     let questions = committed(
         reviewer.policy.as_ref(),
-        include_str!("fixtures/project_review_questions.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/project_review_questions.hs"),
     )
     .await;
     assert_eq!(
@@ -1923,7 +1836,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     let pending = committed(
         root.as_ref(),
-        include_str!("fixtures/project_decision_return.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/project_decision_return.hs"),
     )
     .await;
     assert!(pending.to_string().contains("ResponsePending"), "{pending}");
@@ -1970,7 +1883,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     let propagated = committed(
         reviewer.policy.as_ref(),
-        include_str!("fixtures/project_decision_consumer.hs"),
+        include_str!(
+            "../../../examples/shoal-workspace/.shoal/checks/project_decision_consumer.hs"
+        ),
     )
     .await;
     assert!(
@@ -2079,11 +1994,16 @@ async fn route_reply_case(cancel: bool) {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("fixtures/route_reply_setup.hs")).await;
+    committed(root.as_ref(), "let routeCampaign = \"route-reply\" :: Text").await;
+    committed(
+        root.as_ref(),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/route-reply-setup.hs"),
+    )
+    .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
     committed(
         lead.policy.as_ref(),
-        include_str!("fixtures/route_reply_worker.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/route-reply-worker.hs"),
     )
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
@@ -2162,7 +2082,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     .await;
     committed(
         root.as_ref(),
-        include_str!("fixtures/component_review_setup.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/component-setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
@@ -2185,7 +2105,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )).await;
     committed(
         lead.policy.as_ref(),
-        include_str!("fixtures/component_review_begin.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/component-review.hs"),
     )
     .await;
     let (reviewer, _review_binding) = next_project_worker(&mut campaign).await;
@@ -2206,7 +2126,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     let verdict = dispatch_haskell_script(
         reviewer.policy.as_ref(),
-        include_str!("fixtures/owner_repair_review.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/owner-repair.hs"),
     )
     .await;
     assert_eq!(verdict["status"], "replied", "{verdict}");
@@ -2228,7 +2148,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     .await;
     let again = committed(
         lead.policy.as_ref(),
-        include_str!("fixtures/owner_review_again.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/review-again.hs"),
     )
     .await;
     assert!(again.to_string().contains("Repair"), "{again}");
@@ -2281,7 +2201,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     let delivered = dispatch_haskell_script(
         lead.policy.as_ref(),
-        include_str!("fixtures/owner_review_delivered.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/deliver.hs"),
     )
     .await;
     assert_eq!(delivered["status"], "replied", "{delivered}");
@@ -2308,7 +2228,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     );
     committed(
         root.as_ref(),
-        include_str!("fixtures/component_review_rsi.hs"),
+        include_str!("../../../examples/shoal-workspace/.shoal/checks/rsi.hs"),
     )
     .await;
     let (rsi, _rsi_binding) = next_project_worker(&mut campaign).await;
@@ -2484,4 +2404,77 @@ async fn worker_preview_resolves_frozen_host_selection_and_checks_lifetime() {
     );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
+}
+
+fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
+    let repository = tempfile::tempdir().unwrap();
+    crate::shoal::workspace::copy_authored(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/shoal-workspace"),
+        repository.path(),
+    )
+    .unwrap();
+    if let Some(checks) = checks {
+        let path = repository.path().join(".shoal/config.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["haskell"]["checks"] = toml::Value::Array(
+            checks
+                .iter()
+                .map(|entry| toml::Value::String((*entry).into()))
+                .collect(),
+        );
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+    }
+    repository
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn candidate_workspace_runs_its_own_model_free_recipes() {
+    let repository = recipe_workspace(None);
+    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
+    let repository = recipe_workspace(Some(&["Project.Checks.context"]));
+    let work = repository.path().join(".shoal/Project/Plan.hs");
+    let original = std::fs::read_to_string(&work).unwrap();
+    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+    std::fs::write(
+        &work,
+        original.replace(
+            "Display edges must not fabricate authority or lose actors.",
+            "The architectural rationale was dropped.",
+        ),
+    )
+    .unwrap();
+    // This candidate still compiles; the running selected worker must expose its defect.
+    crate::shoal::check(Some(repository.path().to_path_buf()), false)
+        .await
+        .unwrap();
+    let error = crate::shoal::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("fresh Sol lead receives the engineering rationale"),
+        "{error}"
+    );
+    std::fs::write(&work, original).unwrap();
+    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn candidate_routing_recipes_exercise_failure_and_attention() {
+    let repository = recipe_workspace(Some(&["Project.RoutingChecks.routing"]));
+    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
 }

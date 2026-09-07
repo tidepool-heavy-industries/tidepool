@@ -26,8 +26,9 @@ and question watches. Do not replay the original worker launch.
 
 If implementation was delegated, use RetainedImplementer with that worker's exact
 AgentRef after it returned its candidate. The reviewer can then own direct local
-repair. Project.Work.reviewFrom can connect a returned candidate to that reviewer;
-supply its actual result/attention consumer so the new handles remain useful.
+repair. Begin review with bound handles so you can inspect progress and return
+an owning decision directly. Use route for forwarding whose destination and
+continuation you already own; a callback-local handle is not a new GHCi binding.
 
 Handle a reviewer's question within your discretion or publish it in your own
 cumulative Attention for the application owner. Keep unrelated work moving.

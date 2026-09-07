@@ -128,10 +128,10 @@ impl std::fmt::Display for ShoalEffort {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShoalConfig {
-    defaults: ShoalAgentDefaults,
+pub(crate) struct ShoalConfig {
+    pub(crate) defaults: ShoalAgentDefaults,
     #[serde(default)]
-    research: tidepool_actor::ResearchPolicy,
+    pub(crate) research: tidepool_actor::ResearchPolicy,
     #[serde(default)]
     haskell: workspace::HaskellConfig,
     #[serde(default)]
@@ -321,7 +321,10 @@ pub enum RunPhase {
 
 /// Check the authored next-swarm selection without touching native execution.
 /// The capture is temporary; compilation uses the normal toolchain cache.
-pub fn check(workspace: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn check(
+    workspace: Option<PathBuf>,
+    recipes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = resolve_workspace(workspace)?;
     let scratch = tempfile::tempdir()?;
     let selected = workspace::FrozenWorkspace::load(&workspace, scratch.path())?;
@@ -331,7 +334,12 @@ pub fn check(workspace: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error
         "Modules: {}",
         selected.import_modules().collect::<Vec<_>>().join(", ")
     );
-    println!("No actors or providers launched; edits activate at the next swarm boundary.");
+    if recipes {
+        crate::actor_host::recipe_checks::run(&workspace, &selected).await?;
+        println!("Recipe checks finished in isolated resident sessions; no native workers or providers launched.");
+    } else {
+        println!("No actors or providers launched; edits activate at the next swarm boundary.");
+    }
     Ok(())
 }
 

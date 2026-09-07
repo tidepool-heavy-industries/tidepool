@@ -254,3 +254,11 @@ fn journal_contract_text_is_pinned() {
     assert!(journal.default_row_args.is_empty());
     assert!(journal.helpers_row_polymorphic);
 }
+
+#[test]
+fn recipe_generated_files_are_current() {
+    assert_current(
+        tidepool_protocol::recipe_generated_files(),
+        "recipe check decode",
+    );
+}

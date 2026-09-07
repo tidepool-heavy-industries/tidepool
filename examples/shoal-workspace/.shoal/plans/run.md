@@ -2,9 +2,10 @@
 
 Use a fixed checked Shoal executable. In the application checkout, first run
 `shoal check --workspace .` to compile the authored selection without models.
-Behavioral recipe checks are being added in the package-curation pass; compilation
-alone does not establish their behavior. Starting the paid wave is a subsequent
-operator action:
+Run `shoal check --workspace . --recipes` to execute the configured package checks
+against that candidate. They drive real resident sessions and temporary Git
+checkouts without native workers or providers. Compilation alone does not establish
+recipe behavior. Starting the paid wave is a subsequent operator action:
 
 ```sh
 shoal init --workspace /home/inanna/dev/shoal-repl --session shoal-repl-relations
@@ -16,6 +17,10 @@ root's .shoal is authoritative. Candidate files in managed checkouts activate on
 after checked incorporation there and an explicit next-swarm selection.
 
 ## Start useful owners and retain both result and question handles
+
+Choose an unused campaign label for each new wave; Git branches from earlier
+waves are retained. The label below is a first-run example, not a name to replay
+on every restart. Use subgroup for work scoped under an existing actor.
 
 In native tools resolve `git rev-parse HEAD`, then bind `baseline :: GitRef` to that
 exact app commit. These expressions run in the Sol root's resident environment:
@@ -114,12 +119,21 @@ that worker returns, reviewCandidate part (RetainedImplementer (forkedActor work
 latest lets the reviewer request repairs directly. The worker is then available;
 queuing repairs behind a lead's pending delivery would deadlock it.
 
-The constituent operations remain available for Haskell composition. For a real
-routed delegation, reviewFrom takes a consumer of explicit unavailable/blocked
-results or the new review/result-progress handles. Bind/register those handles in
-the consumer; do not discard the next obligation. Successful routing needs no
-model relay. Watch/route callbacks run after their dependencies become ready;
-never wait for a new child inside the tool block that is still admitting it.
+The constituent operations remain available for Haskell composition. For example,
+an owner with an existing reply obligation and candidate worker can route that
+candidate directly, without a model relay:
+
+```haskell
+let destination = sessionReply
+forwarding <- route (awaitSettledFork worker) (\settled -> case settled of { ReplyAvailable answer -> reply destination (responseValue answer) >> pure (); ReplyUnavailable failure -> error (T.pack (show failure)) })
+```
+
+The destination must have the worker's actual result type. This forwards the
+candidate; the recipient still owns independent review and integration. Do not
+claim it is a checked delivery. Failed routing retains exceptional attention and
+effects for its owner. Callback-local handles are not new resident GHCi bindings:
+begin review with bound handles when its questions need your model's judgment.
+Never await a new child inside the tool block that is still admitting it.
 
 ## Questions stay open until the owning decision arrives
 
@@ -219,3 +233,35 @@ it in the original root .shoal and activate explicitly after unfinished work end
 or is deliberately handed off. Confirm the next selected identity/preview consumes
 the edit while the old wave remains frozen. Live usability and savings are evidence
 from the subsequent application run, not from deterministic recipe checks.
+
+## Checking a customization from its own checkout
+
+`[haskell].checks` in config.toml names ordinary Haskell entry points. Keep these
+separate from `[haskell].modules`, which are imported into working actors. The
+prepared checks live in Project.Checks, Project.CollaborationChecks and
+Project.RoutingChecks; their GHCi expressions are adjacent in .shoal/checks.
+Edit a helper, its guidance and its checks together, then run:
+
+```sh
+shoal check --workspace . --recipes
+```
+
+The output names the selected definition identity, entry points and assertions
+actually executed. These check coordination recipes in a temporary repository
+seeded with authored .shoal files. They create their own source fixtures; they do
+not run the application's product tests or prove a live model followed its prompt.
+Runtime/log directories are excluded. The candidate source and live swarm stay intact.
+
+Use Tidepool.Check only in those check entry points: root/activation identify exact
+resident actors; turn evaluates ordinary GHCi source at its completed tool boundary;
+git/readFile/writeFile operate in a check actor's temporary checkout. check asserts
+a named fact. present/notPresented/unconfirmed exercise the existing native update
+presentation seam. restart deliberately closes the model-free swarm and captures
+the changed package; old CheckActor values cannot address the new swarm.
+
+`script actor name` in Project.Checks runs the corresponding .shoal/checks/name.hs
+expression file. Most checks are ordinary function calls, Haskell assertions and
+small turns over retained values. awaitOutput polls a retained observation while
+an automatic callback finishes; it never launches replacement work. No project
+role names or stage sequence are encoded in the Rust driver. A new composition
+needs a check of its continuation and failure path, not another worker stage.

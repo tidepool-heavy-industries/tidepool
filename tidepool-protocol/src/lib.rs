@@ -162,3 +162,15 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
     ));
     out
 }
+
+/// Decode-only recipe operations are consumed by the Shoal composition root.
+#[must_use]
+pub fn recipe_generated_files() -> Vec<GeneratedFile> {
+    let effects = vec![effects::recipe_check::recipe_check()];
+    let mut files = effects
+        .iter()
+        .map(|effect| gen::suspension_req_rs::file(effect, "tidepool"))
+        .collect::<Vec<_>>();
+    files.push(gen::suspension_req_rs::module_index(&effects, "tidepool"));
+    files
+}

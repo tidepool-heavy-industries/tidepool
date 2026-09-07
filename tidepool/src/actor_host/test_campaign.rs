@@ -86,47 +86,20 @@ impl TestCampaign {
             pane_environment: BTreeMap::new(),
         };
         configure(&mut config);
-        let session_root = tempfile::tempdir().expect("session root");
-        let (worktrees, bindings) =
-            actor_worktree_resources_at(&runtime.path().join("worktrees"), repository.path())
-                .expect("worktree resources");
-        let bindings = Arc::new(Mutex::new(bindings));
-        let authority = ActorWorktreeAuthority::new(
-            runtime_namespace(session_root.path()),
-            Arc::clone(&bindings),
-        );
-        let (source, root, program) = compile_root(
-            &config,
-            session_root.path(),
-            worktrees.clone(),
-            authority.clone(),
-        )
-        .expect("compile permanent root");
-        let (descriptor, machine, outcome) = root.into_parts();
-        let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(
-            source,
-            descriptor.placement().session,
-            machine,
-            Some(transform(fork_workspace_admission(
-                worktrees.clone(),
-                authority.clone(),
-                bindings.clone(),
-                runtime_namespace(session_root.path()),
-            ))),
-            tidepool_actor::Incarnation::FIRST,
-            Some(worker_launch_resolver(&config)),
-        );
-        let forest = Arc::new(forest);
-        let (actor, hosted) = forest
-            .admit_root(descriptor, outcome)
+        let super::model_free::ModelFreeSession {
+            session_root,
+            worktrees,
+            bindings,
+            authority,
+            actor,
+            forest,
+            _program: program,
+            hosted,
+            deployments,
+            root_installation,
+        } = super::model_free::ModelFreeSession::start(&config, transform)
             .await
-            .expect("spawn permanent root");
-        authority.install_grant(actor.identity().into(), ActorWorktreeGrant::Repository);
-        let Some(LocalResidentDeployment::PolicyInstalled(root_installation)) =
-            deployments.recv().await
-        else {
-            panic!("root retired before installing its application")
-        };
+            .unwrap();
         Self {
             _repository: repository,
             _runtime: runtime,

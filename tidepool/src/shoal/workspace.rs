@@ -12,6 +12,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub(super) struct HaskellConfig {
     pub source_roots: Vec<PathBuf>,
     pub modules: Vec<String>,
+    pub checks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -36,6 +37,8 @@ pub struct FrozenWorkspace {
     identity: String,
     pub(crate) include: Vec<PathBuf>,
     pub(crate) modules: Vec<String>,
+    #[serde(default)]
+    pub(crate) checks: Vec<String>,
     pub(crate) prompts: BTreeMap<String, String>,
     files: BTreeMap<PathBuf, String>,
     config: String,
@@ -79,6 +82,19 @@ impl FrozenWorkspace {
             let relative = PathBuf::from(format!("sources/{capture}/{index}"));
             capture_sources(&source, &relative, &directory, &mut files)?;
             include.push(directory.join(relative));
+        }
+        for entry in &config.haskell.checks {
+            let Some((module, function)) = entry.rsplit_once('.') else {
+                return Err(format!("check entry must be Module.function: {entry}").into());
+            };
+            if !valid_module(module)
+                || !function.starts_with(|c: char| c.is_ascii_lowercase())
+                || !function
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
+            {
+                return Err(format!("invalid Haskell check entry: {entry}").into());
+            }
         }
         for module in &config.haskell.modules {
             if !valid_module(module) {
@@ -163,6 +179,7 @@ impl FrozenWorkspace {
             identity,
             include,
             modules: config.haskell.modules,
+            checks: config.haskell.checks,
             prompts,
             files,
             config: config_text,
@@ -186,7 +203,7 @@ impl FrozenWorkspace {
         std::iter::once("Shoal.Workspace").chain(self.modules.iter().map(String::as_str))
     }
 
-    pub(super) fn config(&self) -> Result<super::ShoalConfig> {
+    pub(crate) fn config(&self) -> Result<super::ShoalConfig> {
         Ok(toml::from_str(&self.config)?)
     }
 }
@@ -230,11 +247,32 @@ fn valid_module(module: &str) -> bool {
         })
 }
 
+/// Copy the authored package into an isolated check repository, excluding runtime trees.
+pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> {
+    capture_tree(
+        &workspace.join(".shoal"),
+        Path::new(".shoal"),
+        destination,
+        &mut BTreeMap::new(),
+        true,
+    )
+}
+
 fn capture_sources(
     source: &Path,
     relative: &Path,
     destination: &Path,
     files: &mut BTreeMap<PathBuf, String>,
+) -> Result<()> {
+    capture_tree(source, relative, destination, files, false)
+}
+
+fn capture_tree(
+    source: &Path,
+    relative: &Path,
+    destination: &Path,
+    files: &mut BTreeMap<PathBuf, String>,
+    all_authored: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(destination.join(relative))?;
     for entry in std::fs::read_dir(source)? {
@@ -257,11 +295,13 @@ fn capture_sources(
         }
         let path = relative.join(&name);
         if kind.is_dir() {
-            capture_sources(&entry.path(), &path, destination, files)?;
-        } else if matches!(
-            entry.path().extension().and_then(|x| x.to_str()),
-            Some("hs" | "lhs" | "hs-boot" | "h")
-        ) {
+            capture_tree(&entry.path(), &path, destination, files, all_authored)?;
+        } else if all_authored
+            || matches!(
+                entry.path().extension().and_then(|x| x.to_str()),
+                Some("hs" | "lhs" | "hs-boot" | "h")
+            )
+        {
             let bytes = std::fs::read(entry.path())?;
             tidepool_atomic_write::write_durable(&destination.join(&path), &bytes)?;
             files.insert(path, blake3::hash(&bytes).to_hex().to_string());

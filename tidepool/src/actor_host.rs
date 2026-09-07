@@ -12,7 +12,9 @@ mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
 pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
+mod model_free;
 mod prompt_catalog;
+pub(crate) mod recipe_checks;
 #[cfg(test)]
 mod research_policy_tests;
 #[allow(dead_code)] // Staged owner; no launch switch before native/quiescence integration.

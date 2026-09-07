@@ -14,8 +14,9 @@ Keep the planned Sol organization and specialist placements unless the human ste
 otherwise. Finish this engagement directly, without an improvement swarm.
 
 Edit helpers, Markdown prompts and their executable examples together in your
-candidate checkout. Compile with `shoal check --workspace .`; run the package's
-behavioral checking path documented in .shoal/plans/run.md. Report exactly what
+candidate checkout. Compile with `shoal check --workspace .`, then run
+`shoal check --workspace . --recipes` for the candidate's configured Haskell checks.
+The entry points and adjacent GHCi fixtures are documented in .shoal/plans/run.md. Report exactly what
 ran and any unavailable check; compiling is not behavioral acceptance. Check the
 candidate source, not the current swarm's frozen package. Include a regression for
 new behavior. Preserve runtime artifacts and app work.

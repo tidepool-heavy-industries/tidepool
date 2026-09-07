@@ -5,6 +5,7 @@ effort = "low"
 [haskell]
 source_roots = ["."]
 modules = ["Project.Types", "Project.Work", "Project.Plan", "Project.Observe"]
+checks = ["Project.Checks.workbench", "Project.CollaborationChecks.collaboration", "Project.RoutingChecks.routing"]
 
 [prompts]
 root = "prompts/owner.md"

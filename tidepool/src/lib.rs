@@ -39,3 +39,5 @@ pub use tidepool_repr::{CoreExpr, DataConTable};
 pub use tidepool_runtime::{compile_and_run, compile_haskell, EvalResult, RuntimeError};
 
 pub mod operator;
+
+mod generated;

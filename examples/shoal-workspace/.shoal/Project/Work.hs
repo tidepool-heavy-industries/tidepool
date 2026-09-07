@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -9,7 +10,7 @@ module Project.Work
   , withDecision, raiseQuestion, resolveQuestion
   , solTask, implement, reviewCandidate, reviewAgain, repair
   , requestIncorporation, consultDesign, followAttention
-  , reviewFrom, settledValue
+  , settledValue
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -153,18 +154,6 @@ followAttention updates cursor sink = follow cursor []
       ProgressClosed -> pure ()
       ProgressRejected failure -> error (show failure)
       ProgressPending -> error "attention dependency became ready without an observation"
-
--- Optional delegated-work composition. The caller supplies its actual consumer
--- of the review handles, so no new obligation is hidden or silently discarded.
-reviewFrom
-  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Task -> Forked (Outcome Candidate)
-  -> (Either ResponseFailure (Outcome (Forked (Outcome ReviewDecision), Progress Attention)) -> Eff effects ())
-  -> Settlement (Outcome Candidate) -> Eff effects ()
-reviewFrom task worker consume settled = case settledValue settled of
-  Left failure -> consume (Left failure)
-  Right (Blocked reason evidence) -> consume (Right (Blocked reason evidence))
-  Right (Produced candidate) -> reviewCandidate task (RetainedImplementer (forkedActor worker)) candidate >>= consume . Right . Produced
 
 consultDesign
   :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)

@@ -19,6 +19,7 @@ pub mod green;
 pub mod journal;
 pub mod notifications;
 pub mod read_state;
+pub mod recipe_check;
 pub mod repo_event;
 pub mod run_l_l_m_turn;
 pub mod worktree;
@@ -45,6 +46,7 @@ pub use green::*;
 pub use journal::*;
 pub use notifications::*;
 pub use read_state::*;
+pub use recipe_check::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
 pub use worktree::*;
@@ -61,6 +63,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         event_decl(),
         askuser_decl(),
         readstate_decl(),
+        recipe_check_decl(),
         runllmturn_decl(),
         fork_decl(),
         finalize_decl(),
@@ -85,6 +88,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
 
 /// Effects with an explicitly curated authored vocabulary.
 pub(crate) const CURATED_EFFECTS: &[&str] = &[
+    "RecipeCheck",
     "Actor",
     "ActorKernel",
     "ActorLocal",
@@ -103,6 +107,22 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
 
 /// Hidden names grouped by their owning effect.
 pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
+    (
+        "RecipeCheck",
+        &[
+            "RecipeRoot",
+            "RecipeTurn",
+            "RecipeActivation",
+            "RecipeGit",
+            "RecipeWrite",
+            "RecipeRead",
+            "RecipePresent",
+            "RecipeNotPresented",
+            "RecipeUnconfirmed",
+            "RecipeAssert",
+            "RecipeRestart",
+        ],
+    ),
     (
         "Actor",
         &[

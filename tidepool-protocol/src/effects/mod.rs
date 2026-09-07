@@ -37,6 +37,7 @@ pub mod green;
 pub mod journal;
 pub mod notifications;
 pub mod read_state;
+pub mod recipe_check;
 pub mod run_llm_turn;
 pub mod subagent;
 pub mod worktree;
@@ -66,6 +67,7 @@ pub fn all() -> Vec<Effect> {
         event::event(),
         ask_user::ask_user(),
         read_state::read_state(),
+        recipe_check::recipe_check(),
         run_llm_turn::run_llm_turn(),
         fork::fork(),
         finalize::finalize(),
