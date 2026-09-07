@@ -27,7 +27,8 @@ projection; view state/control behavior belongs to controls. Document signatures
 source owners and semantics in this plan's committed contract notes before both
 lanes fork. Do not freeze a speculative API solely to maximize parallelism.
 
-Use normal independent review and local retained repair. Relevant starting checks:
+Implement directly and use independent OwnerRepairs review; repair locally and
+reuse that reviewer. Delegate only a useful independent implementation frontier. Relevant starting checks:
 `cargo test --test graph_protocol`, affected `agents`/wire unit tests, and
 `cargo test --all-targets --no-run`. Distinguish old-field decoding, explicit null,
 known creator, absent referenced parent and distinct incarnations. A buildable

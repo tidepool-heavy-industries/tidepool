@@ -1117,6 +1117,119 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
     campaign.hosted.await.unwrap();
 }
 
+#[tokio::test]
+async fn routes_forward_cumulative_progress_and_rearm_without_model_relay() {
+    let mut campaign = workspace_campaign().await;
+    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign
+        ._repository
+        .writer()
+        .commit_empty("workspace program")
+        .unwrap();
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/progress_route_producer.hs"),
+    )
+    .await;
+    let (producer, _producer_binding) = next_project_worker(&mut campaign).await;
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/progress_route_consumer.hs"),
+    )
+    .await;
+    let (consumer, _consumer_binding) = next_project_worker(&mut campaign).await;
+    let result =
+        dispatch_haskell_script(consumer.policy.as_ref(), "respond (\"ready\" :: Text)").await;
+    assert_eq!(result["status"], "replied", "{result}");
+    committed(root.as_ref(), include_str!("fixtures/progress_route.hs")).await;
+
+    committed(
+        producer.policy.as_ref(),
+        include_str!("fixtures/progress_route_questions.hs"),
+    )
+    .await;
+    for (questions, expected) in [
+        ("[first]", "[\"question-a\"]"),
+        ("[first,second]", "[\"question-a\",\"question-b\"]"),
+    ] {
+        committed(
+            producer.policy.as_ref(),
+            &format!("reportProgress {questions}\npollReply sessionReply"),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match campaign.deployments.recv().await.unwrap() {
+                    LocalResidentDeployment::SessionReady { activation }
+                        if activation.id.actor() == consumer.actor.identity() =>
+                    {
+                        break
+                    }
+                    LocalResidentDeployment::WatchChanged { notification }
+                        if notification.owner == campaign.actor.identity() =>
+                    {
+                        panic!("automatic progress route woke its model owner: {notification:?}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let observed = committed(
+            consumer.policy.as_ref(),
+            "inspectFull (map questionKey sessionInput)",
+        )
+        .await;
+        assert_eq!(observed["items"][0]["output"], expected, "{observed}");
+        let replied =
+            dispatch_haskell_script(consumer.policy.as_ref(), "respond (\"received\" :: Text)")
+                .await;
+        assert_eq!(replied["status"], "replied", "{replied}");
+        if questions == "[first]" {
+            committed(producer.policy.as_ref(), "reportProgress [first]").await;
+            tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    let observation = committed(
+                        root.as_ref(),
+                        "routes <- listRoutes\ninspectFull (length routes)",
+                    )
+                    .await;
+                    if observation["items"][1]["output"] == "3" {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let observation = committed(root.as_ref(), "current <- snapshot\ninspectFull [rosterReceivedRequests actor | actor <- snapshotActors current, (rosterActorId actor, rosterActorIncarnation actor) == agentIdentity (forkedActor consumer)]").await;
+            assert_eq!(
+                observation["items"][1]["output"], "[2]",
+                "duplicate attention queued a request: {observation}"
+            );
+        }
+    }
+    let pending = committed(producer.policy.as_ref(), "pollReply sessionReply").await;
+    assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
+    let replied =
+        dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
+    assert_eq!(replied["status"], "replied", "{replied}");
+    let routes = committed(
+        root.as_ref(),
+        "ownedRoutes <- listRoutes\nstates <- traverse pollRoute ownedRoutes\ninspectFull states",
+    )
+    .await;
+    assert_eq!(
+        routes["items"][2]["output"],
+        "[RouteCompleted,RouteCompleted,RouteCompleted,RouteCompleted]",
+        "{routes}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 async fn workspace_campaign() -> TestCampaign {
     workspace_campaign_with(|_| {}).await
 }
@@ -1175,10 +1288,6 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
                 (
                     "prompts/repair.md",
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/repair.md"),
-                ),
-                (
-                    "prompts/integrate.md",
-                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/integrate.md"),
                 ),
                 (
                     "prompts/incorporate.md",
@@ -1259,7 +1368,7 @@ async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() 
 async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     let campaign = workspace_campaign().await;
     let policy = campaign.root_installation.policy.as_ref();
-    let result = committed(policy, "observed <- snapshot\ninspectFull (swarmUsage observed)\n:type (implement, reviewCandidate, integrateReviewed)").await;
+    let result = committed(policy, "observed <- snapshot\ninspectFull (swarmUsage observed)\n:type (implement, reviewCandidate, reviewAgain, repair, withDecision, followAttention)").await;
     assert!(
         result["items"][1]["output"]
             .as_str()
@@ -1278,6 +1387,17 @@ async fn next_project_worker(
     tidepool_actor::LocalResidentInstallation,
     Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
 ) {
+    let (installation, custody, _) = next_project_activation(campaign).await;
+    (installation, custody)
+}
+
+async fn next_project_activation(
+    campaign: &mut TestCampaign,
+) -> (
+    tidepool_actor::LocalResidentInstallation,
+    Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
+    tidepool_actor::ResidentActivation,
+) {
     tokio::time::timeout(Duration::from_secs(120), async {
         let mut worker = None;
         loop {
@@ -1291,7 +1411,8 @@ async fn next_project_worker(
                         child.actor.identity() == activation.id.actor()
                     }) =>
                 {
-                    return worker.unwrap();
+                    let (installation, custody) = worker.unwrap();
+                    return (installation, custody, activation);
                 }
                 LocalResidentDeployment::WatchChanged { notification } => {
                     if let tidepool_actor::WatchTransition::RouteFailed { detail } =
@@ -1535,12 +1656,17 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
 async fn project_review_retains_evidence_and_owns_direct_repair() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".shoal").unwrap();
-    campaign
+    let source = campaign
         ._repository
         .writer()
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        &format!("let sourceHead = \"{}\" :: Text", source.as_str()),
+    )
+    .await;
     committed(
         root.as_ref(),
         include_str!("fixtures/project_delivery_setup.hs"),
@@ -1568,12 +1694,17 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let replied = dispatch_haskell_script(
         implementer.policy.as_ref(),
         &format!(
-            "respond (Candidate \"{}\" [\"focused candidate check\"] [\"open product gate\"])",
+            "respond (Produced (Candidate \"{}\" [\"focused candidate check\"] [\"open product gate\"]))",
             candidate.as_str()
         ),
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/project_review_start.hs"),
+    )
+    .await;
     let (reviewer, _reviewer_binding) = next_project_worker(&mut campaign).await;
     let review_instructions =
         include_str!("../../../examples/shoal-workspace/.shoal/prompts/review.md");
@@ -1586,7 +1717,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     assert!(launched.starts_with(review_instructions));
     assert!(launched.contains("Runtime policy ("));
-    let evidence = committed(reviewer.policy.as_ref(), "inspectFull (reviewInput sessionInput)\ninspectFull (agentIdentity (reviewImplementer sessionInput))").await;
+    let evidence = committed(reviewer.policy.as_ref(), "inspectFull (reviewInput sessionInput)\nlet RetainedImplementer repairTarget = repairOwner sessionInput\ninspectFull (agentIdentity repairTarget)").await;
     assert!(
         evidence["items"][0]["output"]
             .as_str()
@@ -1602,7 +1733,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "{evidence}"
     );
     assert_eq!(
-        evidence["items"][1]["output"],
+        evidence["items"][2]["output"],
         format!(
             "({},{})",
             implementer.actor.identity().id.0,
@@ -1616,19 +1747,33 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     let pending = committed(reviewer.policy.as_ref(), "pollReply sessionReply").await;
     assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
-    tokio::time::timeout(Duration::from_secs(120), async {
+    let repair_activation = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if let Some(LocalResidentDeployment::SessionReady { activation }) =
                 campaign.deployments.recv().await
             {
                 if activation.id.actor() == implementer.actor.identity() {
-                    break;
+                    break activation;
                 }
             }
         }
     })
     .await
     .unwrap();
+    for expected in [
+        source.as_str(),
+        candidate.as_str(),
+        "Why:",
+        "Findings:",
+        "Preserved gates:",
+        "open product gate",
+    ] {
+        assert!(
+            repair_activation.message.contains(expected),
+            "missing {expected} from repair activation: {}",
+            repair_activation.message
+        );
+    }
     let repair = committed(implementer.policy.as_ref(), "inspectFull sessionInput").await;
     assert!(
         repair["items"][0]["output"]
@@ -1645,13 +1790,13 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let replied = dispatch_haskell_script(
         implementer.policy.as_ref(),
         &format!(
-            "respond (Candidate \"{}\" [\"focused repair check\"] [\"open product gate\"])",
+            "respond (Produced (Candidate \"{}\" [\"focused repair check\"] [\"open product gate\"]))",
             revised.as_str()
         ),
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let result = committed(reviewer.policy.as_ref(), "state <- pollWatch repaired\ninspectFull (fmap (either (const False) (const True) . repairValue) state)").await;
+    let result = committed(reviewer.policy.as_ref(), "state <- pollWatch repaired\ninspectFull (fmap (either (const False) (const True) . settledValue) state)").await;
     assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
     committed(
         reviewer.policy.as_ref(),
@@ -1758,6 +1903,140 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         );
     }
     assert_eq!(checked["items"][2]["output"], "ReplyOpen", "{checked}");
+    let questions = committed(
+        reviewer.policy.as_ref(),
+        include_str!("fixtures/project_review_questions.hs"),
+    )
+    .await;
+    assert_eq!(
+        questions["items"].as_array().unwrap().last().unwrap()["output"],
+        "ReplyOpen",
+        "{questions}"
+    );
+    committed(
+        root.as_ref(),
+        &format!(
+            "let incorporatedHead = \"{}\" :: Text",
+            incorporated_head.trimmed()
+        ),
+    )
+    .await;
+    let pending = committed(
+        root.as_ref(),
+        include_str!("fixtures/project_decision_return.hs"),
+    )
+    .await;
+    assert!(pending.to_string().contains("ResponsePending"), "{pending}");
+    let delivery = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::RequestUpdate { delivery } => break delivery,
+                LocalResidentDeployment::SessionReady { activation } => {
+                    panic!("decision queued a new obligation: {:?}", activation.id)
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let presentation = delivery.begin().unwrap();
+    assert!(presentation
+        .message()
+        .contains("Preparation retains the boundary"));
+    assert!(presentation.message().contains(incorporated_head.trimmed()));
+    presentation.presented();
+    let status = committed(root.as_ref(), "pollRequestUpdate clarification").await;
+    assert_eq!(
+        status["items"][0]["output"], "Right UpdatePresented",
+        "{status}"
+    );
+    // Source incorporation remains distinct from presenting the accepted decision.
+    let review_tree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+            &reviewer.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    git.run(
+        review_tree.cwd(),
+        &["merge", "--ff-only", incorporated_head.trimmed()],
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(review_tree.cwd().join("plans/feature.md")).unwrap(),
+        "Preparation retains the open product gate.\n"
+    );
+    let propagated = committed(
+        reviewer.policy.as_ref(),
+        include_str!("fixtures/project_decision_consumer.hs"),
+    )
+    .await;
+    assert!(
+        propagated.to_string().contains("(True,True,True,True)"),
+        "{propagated}"
+    );
+    assert_eq!(
+        propagated["items"].as_array().unwrap().last().unwrap()["output"],
+        "ReplyOpen",
+        "{propagated}"
+    );
+    let (consumer, _consumer_binding, activation) = next_project_activation(&mut campaign).await;
+    assert_eq!(consumer.context_parent, None);
+    let selected = &activation.message;
+    for expected in [
+        incorporated_head.trimmed(),
+        "Preparation retains the boundary",
+        "read exact plan at resulting head",
+        "Why:",
+        "Preserve the product gate",
+    ] {
+        assert!(
+            selected.contains(expected),
+            "missing {expected} from fresh context: {selected}"
+        );
+    }
+    let consumer_context = committed(
+        consumer.policy.as_ref(),
+        "inspectFull (taskContext sessionInput)",
+    )
+    .await;
+    assert!(
+        consumer_context
+            .to_string()
+            .contains(incorporated_head.trimmed()),
+        "{consumer_context}"
+    );
+    let consumer_tree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+            &consumer.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        git.run(consumer_tree.cwd(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .trimmed(),
+        incorporated_head.trimmed()
+    );
+    let attention = committed(
+        root.as_ref(),
+        "remaining <- pollProgress reviewQuestions\ninspectFull remaining",
+    )
+    .await;
+    assert!(
+        attention.to_string().contains("product-gate"),
+        "{attention}"
+    );
+    assert!(
+        !attention["items"][1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("questionKey = \"semantics\""),
+        "answered question survived: {attention}"
+    );
     let original = committed(
         root.as_ref(),
         "original <- pollResponse (forkedResponse worker)\ninspectFull original",
@@ -1867,7 +2146,7 @@ async fn route_reply_case(cancel: bool) {
 }
 
 #[tokio::test]
-async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
+async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_selection() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".shoal").unwrap();
     let baseline = campaign
@@ -1883,37 +2162,32 @@ async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
     .await;
     committed(
         root.as_ref(),
-        include_str!("fixtures/delivery_lane_setup.hs"),
+        include_str!("fixtures/component_review_setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
-    committed(
-        lead.policy.as_ref(),
-        include_str!("fixtures/delivery_lane_worker.hs"),
-    )
-    .await;
-    let (implementer, _implementation_binding) = next_project_worker(&mut campaign).await;
-    let implementation_tree = campaign
+    assert_eq!(lead.model.as_deref(), Some("gpt-5.6-sol"));
+    assert!(lead.supervisor_parent.is_none());
+    let lead_tree = campaign
         .worktrees
         .lookup(&tidepool_worktree::WorktreeId::from_raw(
-            &implementer.launch_worktrees[0],
+            &lead.launch_worktrees[0],
         ))
         .unwrap()
         .unwrap();
     let candidate = campaign
         ._repository
-        .writer_at(implementation_tree.cwd())
-        .commit_file("feature.txt", "prepared feature\n", "prepare feature")
+        .writer_at(lead_tree.cwd())
+        .commit_file("feature.txt", "candidate feature\n", "implement feature")
         .unwrap();
-    let result = dispatch_haskell_script(
-        implementer.policy.as_ref(),
-        &format!(
-            "respond (Candidate \"{}\" [\"implementation check\"] [\"open product gate\"])",
-            candidate.as_str(),
-        ),
+    committed(lead.policy.as_ref(), &format!(
+        "let candidate = Candidate \"{}\" [\"implementation content check\"] [\"open product gate\"]", candidate.as_str()
+    )).await;
+    committed(
+        lead.policy.as_ref(),
+        include_str!("fixtures/component_review_begin.hs"),
     )
     .await;
-    assert_eq!(result["status"], "replied", "{result}");
     let (reviewer, _review_binding) = next_project_worker(&mut campaign).await;
     let review_tree = campaign
         .worktrees
@@ -1922,88 +2196,121 @@ async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
         ))
         .unwrap()
         .unwrap();
-    let reviewed_head = campaign
-        ._repository
-        .writer_at(review_tree.cwd())
-        .head()
-        .unwrap();
-    assert_eq!(reviewed_head, candidate);
     assert_eq!(
-        std::fs::read_to_string(review_tree.cwd().join("feature.txt")).unwrap(),
-        "prepared feature\n"
+        campaign
+            ._repository
+            .writer_at(review_tree.cwd())
+            .head()
+            .unwrap(),
+        candidate
     );
-    let result = dispatch_haskell_script(reviewer.policy.as_ref(), &format!(
-        "respond (Accepted (ReviewedCandidate (reviewInput sessionInput) \"{}\" [\"review check\"] \"coherent preparation\"))", reviewed_head.as_str(),
-    )).await;
-    assert_eq!(result["status"], "replied", "{result}");
-    let (integrator, _integration_binding) = next_project_worker(&mut campaign).await;
-    let evidence = committed(integrator.policy.as_ref(), "inspectFull sessionInput").await;
-    for expected in [
-        candidate.as_str(),
-        "implementation check",
-        "review check",
-        "coherent preparation",
-        "open product gate",
-    ] {
-        assert!(
-            evidence.to_string().contains(expected),
-            "missing {expected}: {evidence}"
-        );
-    }
-    let integration_tree = campaign
-        .worktrees
-        .lookup(&tidepool_worktree::WorktreeId::from_raw(
-            &integrator.launch_worktrees[0],
-        ))
-        .unwrap()
-        .unwrap();
-    tidepool_worktree::GitCli::new()
-        .try_run(
-            integration_tree.cwd(),
-            &["merge", "--ff-only", candidate.as_str()],
-        )
-        .unwrap();
-    let integrated_head = campaign
+    let verdict = dispatch_haskell_script(
+        reviewer.policy.as_ref(),
+        include_str!("fixtures/owner_repair_review.hs"),
+    )
+    .await;
+    assert_eq!(verdict["status"], "replied", "{verdict}");
+    let pending = committed(lead.policy.as_ref(), "pollReply sessionReply").await;
+    assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
+    // Repair is performed by this already-active lead, not queued behind it.
+    let revised = campaign
         ._repository
-        .writer_at(integration_tree.cwd())
-        .head()
+        .writer_at(lead_tree.cwd())
+        .commit_file("feature.txt", "repaired feature\n", "repair feature")
         .unwrap();
-    assert_eq!(integrated_head, candidate);
-    assert_eq!(
-        std::fs::read_to_string(integration_tree.cwd().join("feature.txt")).unwrap(),
-        "prepared feature\n"
-    );
-    let result = dispatch_haskell_script(integrator.policy.as_ref(), &format!(
-        "respond (Preparation (Candidate \"{}\" [\"integration content check\"] (remainingGates (reviewedCandidate sessionInput))))", integrated_head.as_str(),
-    )).await;
-    assert_eq!(result["status"], "replied", "{result}");
-    let delivery = tokio::time::timeout(Duration::from_secs(30), async {
+    committed(
+        lead.policy.as_ref(),
+        &format!(
+            "let revised = Candidate \"{}\" [\"repair content check\"] [\"open product gate\"]",
+            revised.as_str()
+        ),
+    )
+    .await;
+    let again = committed(
+        lead.policy.as_ref(),
+        include_str!("fixtures/owner_review_again.hs"),
+    )
+    .await;
+    assert!(again.to_string().contains("Repair"), "{again}");
+    tokio::time::timeout(Duration::from_secs(120), async {
         loop {
-            let result = committed(
-                root.as_ref(),
-                "delivered <- pollResponse (forkedResponse lead)\ninspectFull delivered",
-            )
-            .await;
-            if result.to_string().contains("ResponseReady") {
-                break result;
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == reviewer.actor.identity() =>
+                {
+                    break
+                }
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == lead.actor.identity() =>
+                {
+                    panic!("repair was queued behind the lead's pending delivery: {activation:?}");
+                }
+                LocalResidentDeployment::PolicyInstalled(child) => {
+                    panic!(
+                        "a fresh stage replaced the retained reviewer: {}",
+                        child.label
+                    );
+                }
+                _ => {}
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
     .unwrap();
+    tidepool_worktree::GitCli::new()
+        .run(review_tree.cwd(), &["merge", "--ff-only", revised.as_str()])
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(review_tree.cwd().join("feature.txt")).unwrap(),
+        "repaired feature\n"
+    );
+    let accepted = dispatch_haskell_script(reviewer.policy.as_ref(),
+        "respond (Produced (Accepted (ReviewedCandidate (reviewAssignment sessionInput) (reviewInput sessionInput) [\"review repair content check\"] \"coherent preparation\")))").await;
+    assert_eq!(accepted["status"], "replied", "{accepted}");
+    assert_eq!(
+        campaign
+            ._repository
+            .writer_at(lead_tree.cwd())
+            .head()
+            .unwrap(),
+        revised
+    );
+    assert_eq!(
+        std::fs::read_to_string(lead_tree.cwd().join("feature.txt")).unwrap(),
+        "repaired feature\n"
+    );
+    let delivered = dispatch_haskell_script(
+        lead.policy.as_ref(),
+        include_str!("fixtures/owner_review_delivered.hs"),
+    )
+    .await;
+    assert_eq!(delivered["status"], "replied", "{delivered}");
+    let delivery = committed(
+        root.as_ref(),
+        "delivered <- pollResponse (forkedResponse lead)\ninspectFull delivered",
+    )
+    .await;
     for expected in [
-        "Preparation",
-        integrated_head.as_str(),
+        "Delivered",
+        revised.as_str(),
         "integration content check",
         "open product gate",
+        "projection/README.md",
     ] {
         assert!(
             delivery.to_string().contains(expected),
             "missing {expected}: {delivery}"
         );
     }
-    committed(root.as_ref(), include_str!("fixtures/delivery_lane_rsi.hs")).await;
+    assert!(
+        !delivery.to_string().contains(candidate.as_str()),
+        "stale candidate reached delivery: {delivery}"
+    );
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/component_review_rsi.hs"),
+    )
+    .await;
     let (rsi, _rsi_binding) = next_project_worker(&mut campaign).await;
     assert_eq!(rsi.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(rsi.context_parent, None);
@@ -2012,7 +2319,7 @@ async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
         "projection/README.md",
         "Owner:",
         "visible: True",
-        "Preparation",
+        "Checked resulting head:",
         "open product gate",
         "integration content check",
         "Current definitions:",
@@ -2043,7 +2350,7 @@ async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
         )
         .unwrap();
     let result = dispatch_haskell_script(rsi.policy.as_ref(), &format!(
-        "respond (Candidate \"{}\" [\"reviewed authored task guidance\"] [\"activate at next swarm boundary\"])", improvement_commit.as_str())).await;
+        "respond (Produced (Candidate \"{}\" [\"reviewed authored task guidance\"] [\"activate at next swarm boundary\"]))", improvement_commit.as_str())).await;
     assert_eq!(result["status"], "replied", "{result}");
     let receipt = committed(root.as_ref(), "improvementReceipt <- pollResponse (forkedResponse improvement)\ninspectFull improvementReceipt").await;
     assert!(

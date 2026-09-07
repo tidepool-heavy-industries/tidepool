@@ -1,13 +1,27 @@
 module Project.Types where
 
 import Data.Text (Text)
-import Tidepool.Actors.Shoal (AgentRef, BranchLabel, ForkGroupPath, ForkEffort, WatchLabel, WorktreeSeed, ResponseFailure)
+import Tidepool.Actors.Shoal (AgentRef, BranchLabel, ForkGroupPath, ForkEffort, WatchLabel)
 
--- Project language is ordinary source, independent of runtime authority.
+-- A task is the understanding handed to a fresh context, not a workflow stage.
 data Task = Task
-  { planPath :: Text
+  { taskGroup :: ForkGroupPath
+  , planPath :: Text
+  , taskSource :: Text
   , obligation :: Text
+  , rationale :: Text
+  , ownedPaths :: [Text]
   , acceptance :: Text
+  , acceptedDecisions :: [AcceptedDecision]
+  } deriving (Show, Eq)
+
+-- The owner records its supported choice at the incorporated source revision.
+-- This is evidence-bearing task data; the record grants no runtime authority.
+data AcceptedDecision = AcceptedDecision
+  { decisionQuestion :: Question
+  , decisionSource :: Text
+  , decisionSummary :: Text
+  , decisionEvidence :: [Text]
   } deriving (Show, Eq)
 
 data Candidate = Candidate
@@ -16,26 +30,43 @@ data Candidate = Candidate
   , remainingGates :: [Text]
   } deriving (Show, Eq)
 
--- Review owns the next repair request; an implementer reference does not grant
--- access to the original requester's response or worktree authority.
+-- Queuing a repair to the owner of a pending delivery would deadlock it.
+-- A separate implementer is available for repair after returning its candidate.
+data RepairOwner = OwnerRepairs | RetainedImplementer AgentRef
+
 data ReviewTask = ReviewTask
   { reviewAssignment :: Task
   , reviewInput :: Candidate
-  , reviewImplementer :: AgentRef
+  , repairOwner :: RepairOwner
   }
 
 data ReviewedCandidate = ReviewedCandidate
-  { reviewedCandidate :: Candidate
-  , reviewHead :: Text
+  { acceptedAssignment :: Task
+  , reviewedCandidate :: Candidate
   , reviewChecks :: [Text]
   , reviewRationale :: Text
   } deriving (Show, Eq)
+
+data ReviewDecision
+  = Accepted ReviewedCandidate
+  | Repair Candidate [Text]
+  deriving (Show, Eq)
 
 data RepairTask = RepairTask
   { repairAssignment :: Task
   , repairInput :: Candidate
   , repairFindings :: [Text]
   } deriving (Show, Eq)
+
+-- Reviewed source and the resulting integration head are different facts.
+-- The remaining product gates stay attached to the exact reviewed candidate.
+data Outcome value = Produced value | Blocked Text [Text]
+  deriving (Show, Eq)
+
+data CheckedDelivery = Delivered ReviewedCandidate Text [Text]
+  deriving (Show, Eq)
+
+type Delivery = Outcome CheckedDelivery
 
 data DesignQuestion = DesignQuestion
   { questionPlan :: Text
@@ -52,8 +83,6 @@ data DesignAnswer
   | NeedEvidence [Text]
   deriving (Show, Eq)
 
--- A proposed source change is not evidence that any recipient incorporated it.
--- These are project contracts; runtime permissions still come from actor grants.
 data PlanAmendment = PlanAmendment
   { amendmentBase :: Text
   , amendmentCommit :: Text
@@ -73,7 +102,6 @@ data Incorporation
   | IncorporationBlocked PlanAmendment Text [Text]
   deriving (Show, Eq)
 
--- A declared specialist placement; the runtime still enforces launch authority.
 data DesignSlot = DesignSlot
   { specialistPlan :: Text
   , specialistGroup :: ForkGroupPath
@@ -83,27 +111,11 @@ data DesignSlot = DesignSlot
   , specialistEffort :: ForkEffort
   }
 
-data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate Text | NeedsDesign DesignQuestion
-  deriving (Show, Eq)
+-- Cumulative unresolved questions, not a log of every tool step. Keep each
+-- question in later publications until its owner records a supported resolution.
+data Question = Question
+  { questionKey :: Text
+  , questionDetails :: DesignQuestion
+  } deriving (Show, Eq)
 
-data Delivery
-  = Integrated Text [Text]
-  | Preparation Candidate
-  | Blocked Text
-  | ReviewBlocked Candidate Text
-  | DesignBlocked DesignQuestion
-  | ExecutionUnavailable ResponseFailure
-  deriving (Show, Eq)
-
--- The planner supplies each branch's decomposition and source choices once.
-data DeliveryLane = DeliveryLane
-  { laneTask :: Task
-  , implementationGroup :: ForkGroupPath
-  , implementationLabel :: BranchLabel
-  , implementationSeed :: WorktreeSeed
-  , reviewGroup :: ForkGroupPath
-  , reviewLabel :: BranchLabel
-  , integrationGroup :: ForkGroupPath
-  , integrationLabel :: BranchLabel
-  , integrationSeed :: WorktreeSeed
-  }
+type Attention = [Question]

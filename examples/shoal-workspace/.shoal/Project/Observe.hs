@@ -2,11 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Project.Observe
-  ( LaneObservation (..)
-  , observeLane
-  , RsiInput (..)
-  , rsiContext
-  , rsiBranch
+  ( WorkObservation (..), observeWork, workSummary, deliverySummary
+  , RsiInput (..), rsiContext, rsiBranch
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -14,37 +11,76 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Shoal
 import Tidepool.Effects.Core (AgentInspection)
-import Shoal.Workspace (workspaceIdentity, workspacePrompt)
+import Shoal.Workspace (workspaceIdentity)
 import Project.Types
+import Project.Work (projectPrompt)
 
--- A projection of existing handles and observations, never another task registry.
-data LaneObservation = LaneObservation
+-- Existing owned handles and observations are the evidence. This value is a
+-- snapshot to inspect or pass on, not another registry or mutable task record.
+data WorkObservation = WorkObservation
   { observedAssignment :: Task
   , observedDefinition :: Text
   , observedOwner :: (Int, Int)
   , observedOwnerVisible :: Bool
   , observedTree :: SwarmSnapshot
   , observedResult :: ResponseState Delivery
+  , observedAttention :: ProgressState Attention
   } deriving (Show)
 
-observeLane
+observeWork
   :: (Member AgentInspection effects, Member Replies effects)
-  => Task -> Forked Delivery -> Eff effects LaneObservation
-observeLane task worker = do
+  => Task -> (Forked Delivery, Progress Attention) -> Eff effects WorkObservation
+observeWork task (worker, questions) = do
   current <- snapshot
   result <- pollResponse (forkedResponse worker)
+  attention <- pollProgress questions
   let owner = agentIdentity (forkedActor worker)
   let scope = creationTree owner current
-  pure $ LaneObservation task workspaceIdentity owner
+  pure $ WorkObservation task workspaceIdentity owner
     (any (\actor -> (rosterActorId actor, rosterActorIncarnation actor) == owner) (snapshotActors scope))
-    scope result
+    scope result attention
 
--- An ordinary typed input for a human-requested expert engagement. The sender
--- selects evidence once; the expert can request a precise missing observation.
+shown :: Show value => value -> Text
+shown = Text.pack . show
+
+deliverySummary :: Delivery -> Text
+deliverySummary (Blocked reason evidence) = "Blocked: " <> reason <> "; evidence: " <> Text.intercalate "; " evidence
+deliverySummary (Produced (Delivered accepted head checks)) = Text.unlines
+  [ "Reviewed: " <> candidateCommit (reviewedCandidate accepted)
+  , "Checked resulting head: " <> head
+  , "Checks: " <> Text.intercalate "; " checks
+  , "Remaining gates: " <> shown (remainingGates (reviewedCandidate accepted))
+  ]
+
+workSummary :: WorkObservation -> Text
+workSummary observed = Text.unlines
+  [ "Plan: " <> planPath (observedAssignment observed) <> "; source: " <> taskSource (observedAssignment observed)
+  , "Definitions: " <> observedDefinition observed
+  , "Owner: " <> shown (observedOwner observed) <> "; visible: " <> shown (observedOwnerVisible observed)
+  , "Outcome: " <> case observedResult observed of
+      ResponsePending -> "pending"
+      ResponseCancellationPending reason -> "cancellation pending: " <> shown reason
+      ResponseUnavailable failure -> "unavailable: " <> shown failure
+      ResponseReady result -> deliverySummary (responseValue result)
+  , "Questions: " <> case observedAttention observed of
+      ProgressPending -> "no publication observed"
+      ProgressUpdate _ questions -> shown [(questionKey q, questionPlan (questionDetails q), questionSource (questionDetails q), questionFinding (questionDetails q)) | q <- questions]
+      ProgressClosed -> "progress closed; retained outcomes/watches carry earlier evidence"
+      ProgressRejected failure -> "unavailable: " <> shown failure
+  , "Requested-model usage (coverage retained): " <> shown (usageByRequestedModel (observedTree observed))
+  , "Actors (label, identity, model, lifecycle/provider state/staleness, current/queued requests, received requests/events, compactions): "
+      <> shown [(rosterLabel actor, (rosterActorId actor, rosterActorIncarnation actor), rosterRequestedModel actor,
+           (rosterState actor, rosterProviderHealth actor, rosterProviderObservationStale actor),
+           rosterCurrentRequests actor, rosterQueuedRequests actor,
+           rosterReceivedRequests actor, rosterReceivedCoordinationEvents actor, rosterCompactions actor)
+         | actor <- snapshotActors (observedTree observed)]
+  ]
+
+-- The human's question selects a useful view, not a permanent monitoring actor.
 data RsiInput = RsiInput
   { rsiSource :: Text
   , rsiQuestion :: Text
-  , rsiLanes :: [LaneObservation]
+  , rsiWork :: [WorkObservation]
   , rsiBefore :: SwarmSnapshot
   , rsiAfter :: SwarmSnapshot
   , rsiEvidence :: [Text]
@@ -56,27 +92,9 @@ rsiContext input = Text.unlines $
   , "Source: " <> rsiSource input
   , "Current definitions: " <> workspaceIdentity
   , "Usage interval (newly visible history is separate): " <> shown (usageDelta (rsiBefore input) (rsiAfter input))
-  , "Requested model groups (not billing attribution): " <> shown (usageByRequestedModel (rsiAfter input))
-  ] ++ concatMap laneSummary (rsiLanes input) ++ rsiEvidence input
-  where
-    shown :: Show value => value -> Text
-    shown = Text.pack . show
-    laneSummary lane =
-      [ "Plan: " <> planPath (observedAssignment lane) <> "; definitions: " <> observedDefinition lane
-      , "Owner: " <> shown (observedOwner lane) <> "; visible: " <> shown (observedOwnerVisible lane)
-      , "Result: " <> shown (observedResult lane)
-      , "Actors (label, exact identity, current requests, queued requests, received requests/events, compactions): "
-          <> shown [(rosterLabel actor, (rosterActorId actor, rosterActorIncarnation actor),
-               rosterCurrentRequests actor, rosterQueuedRequests actor,
-               rosterReceivedRequests actor, rosterReceivedCoordinationEvents actor, rosterCompactions actor)
-             | actor <- snapshotActors (observedTree lane)]
-      ]
+  ] ++ map workSummary (rsiWork input) ++ rsiEvidence input
 
-rsiBranch :: BranchLabel -> WorktreeSeed -> RsiInput -> Branch CodingEffects RsiInput Candidate
-rsiBranch label seed input =
-  withInstructions instructions $ withContext (selected rsiContext) $
-  withModel "gpt-6-astra" $ withEffort Medium $ coding label seed input
-  where
-    instructions = case workspacePrompt "rsi" of
-      Just body -> body
-      Nothing -> error "Missing configured project prompt: rsi"
+rsiBranch :: BranchLabel -> WorktreeSeed -> RsiInput -> Branch CodingEffects RsiInput (Outcome Candidate)
+rsiBranch label seed input = withInstructions (projectPrompt "rsi") $
+  withContext (selected rsiContext) $ withModel "gpt-6-astra" $ withEffort Medium $
+  coding label seed input

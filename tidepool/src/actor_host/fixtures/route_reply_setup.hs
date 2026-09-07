@@ -1,5 +1,5 @@
-let task = Task "plans/current/feature.md" "Deliver the feature" "Retain the exact evidence"
 let Right campaign = campaignLabel "route-reply"
 let Right leadWave = forkGroupLabel "lead"
 let Right leadLabel = branchLabel "delivery-lead"
-lead <- implement (batch campaign leadWave) leadLabel projectHead task
+let task = Task (batch campaign leadWave) "plans/current/feature.md" "HEAD" "Deliver the feature" "Retain request ownership through automatic forwarding." ["feature.txt"] "Retain the exact evidence" []
+lead <- unfold (taskGroup task) (child @Candidate (solTask leadLabel task))

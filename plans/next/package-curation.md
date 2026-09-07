@@ -1,7 +1,10 @@
 # Curate a useful Shoal workbench before the first application wave
 
-Status: implementation plan. The substrate and installed package compile, but
-the package review found context, handoff and workflow gaps. Complete this pass
+Status: implementation in progress. The workbench operations, task/decision
+handoffs and responsibility prompts have been revised. Focused resident checks
+cover direct/reused review, retained repair and a checked decision reaching a fresh
+consumer while review remains open. Portable candidate recipe checking, the complete
+combined rehearsal, application installation and fixed-build refresh remain. Complete this pass
 before describing the prepared Sol run as ready. Keep the existing fixed-build
 checks as evidence of their exercised boundaries, not a signoff on this revision.
 
@@ -246,36 +249,23 @@ Done when the first standalone run has a coherent plan, a useful workbench,
 executable examples and an RSI checking command. Starting the paid run remains
 the subsequent operator action.
 
-## Surface sketches for the curation pass
+## Current invocation surface
 
-These are proposed invocation shapes, not current exports. Final names/signatures
-must come from compiled helpers and their executable examples together. Project
-constructors supply ordinary labels and source choices; omit repeated setup here.
+The checked operations now live in Project.Work; the package's
+[run guide](../../examples/shoal-workspace/.shoal/plans/run.md) owns complete
+first-turn and continuation examples. component constructs a source-bearing Task;
+componentLead does substantive engineering. reviewCandidate returns a fork and
+its question progress; reviewAgain reuses an available reviewer. implement returns
+a candidate fork with question progress when delegation is useful.
 
-```haskell
-let part = component RelationProjection acceptedContract
-inspectFull (taskContext part)
+withDecision carries a checked accepted choice into the next Task. followAttention
+routes changes in cumulative questions; it does not choose the owning answer.
+observeWork takes the existing Task and work/progress pair, retaining detailed
+observations behind workSummary. The ordinary rsiBranch returns Outcome Candidate.
 
--- The lead has implemented a candidate in its owned checkout.
-assessment <- review part OwnerRepairs candidate
-ready <- watch reviewReady (awaitSettledFork assessment)
--- End the turn. On wake, inspect the retained result and act on its verdict.
-
--- When independent implementation is useful, keep direct repair local.
-worker <- implement part
-reviewRoute <- route (awaitSettledFork worker) (reviewFrom part worker)
-
--- Reuse values and functions; deeper investigation is deliberate.
-current <- snapshot
-inspectFull (componentSummary part current)
-inspectFull (usageDelta before current)
-```
-
-`reviewFrom` must preserve unavailable work, retain the review handle and connect
-its useful outcome/attention; it cannot just discard the new request. Likewise,
-none of the proposed operations may synchronously wait for a child inside its
-admitting tool block. The examples demonstrate fluent interactive composition,
-not a hidden promise of an automatic universal pipeline.
+The operations preserve the existing owned handles and explicit execution failures.
+No helper may synchronously await a child inside its admitting tool block or discard
+an obligation it just created. Keep examples and their executable fixtures together.
 
 ## Boundaries and sequencing
 

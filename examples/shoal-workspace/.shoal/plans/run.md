@@ -1,145 +1,221 @@
 # Run and improve this application wave
 
-This package is prepared for `shoal-repl`. Copy/adapt it as ordinary source,
-commit it in the app repository, and inspect the exact source commit. Preserve
-existing user changes. Runtime artifacts are separate from authored .shoal files.
-Use a fixed checked Shoal executable for this application run. First run
-`shoal check --workspace /home/inanna/dev/shoal-repl` to compile the authored
-selection without models. The same command checks proposed RSI source before
-returning its candidate. Starting the application wave is an
-explicit operator action, not part of package compilation:
+Use a fixed checked Shoal executable. In the application checkout, first run
+`shoal check --workspace .` to compile the authored selection without models.
+Behavioral recipe checks are being added in the package-curation pass; compilation
+alone does not establish their behavior. Starting the paid wave is a subsequent
+operator action:
 
 ```sh
 shoal init --workspace /home/inanna/dev/shoal-repl --session shoal-repl-relations
 ```
 
-Do not use `--recreate` against an unrelated or unfinished session. Startup
-compiles frozen selected modules before replacing a selected existing swarm,
-but that does not authorize discarding useful in-flight work. All workers retain
-normal Codex TUIs. Talk to the owner, lead or specialist directly for steering.
+Do not recreate an unfinished or unrelated session. All workers use normal Codex
+TUIs; talk directly to the owner, lead or specialist for steering. The original
+root's .shoal is authoritative. Candidate files in managed checkouts activate only
+after checked incorporation there and an explicit next-swarm selection.
 
-## Start the contract lane
+## Start useful owners and retain both result and question handles
 
-In the Sol owner's native tools, run `git rev-parse HEAD` at the app integration
-checkout. Bind `baseline :: GitRef` to that exact commit using ordinary Haskell.
-The following starts the planned contract lead. Watch handles preserve the owned
-result; the lead's independent lifetime permits the initial planner to retire.
+In native tools resolve `git rev-parse HEAD`, then bind `baseline :: GitRef` to that
+exact app commit. These expressions run in the Sol root's resident environment:
 
 ```haskell
-let Right planCampaign = campaignLabel "graph-relations"
+let Right campaign = campaignLabel "graph-relations"
 let Right leads = forkGroupLabel "leads"
 let Right contractLabel = branchLabel "contract"
-let Right contractLane = componentLane planCampaign RelationContract baseline
+let Right contractTask = component campaign RelationContract baseline
 before <- snapshot
-contract <- unfold (batch planCampaign leads) (child (withLifetime SwarmOwned (componentLead contractLabel baseline contractLane)))
-let Right contractWatch = watchLabel "contract-ready"
-contractReady <- watch contractWatch (awaitSettledFork contract)
+contractWork <- unfold (batch campaign leads) (childWithProgress @Attention @Delivery (withLifetime SwarmOwned (componentLead contractLabel contractTask)))
+let (contract, contractQuestions) = contractWork
+let Right contractReadyLabel = watchLabel "contract-ready"
+contractReady <- watch contractReadyLabel (awaitSettledFork contract)
+let Right contractQuestionLabel = watchLabel "contract-questions"
+contractQuestionReady <- watch contractQuestionLabel (awaitProgressAfter contractQuestions (ProgressCursor 0))
 ```
 
-End the turn while waiting. A wake means inspect `pollWatch contractReady` and the
-retained settlement. `ReplyUnavailable` is a real unavailable result. A typed
-Preparation preserves its holes; a committed candidate still needs integration
-and checks before it becomes the next lanes' baseline.
+The owner can now end its turn. SwarmOwned selected leads have independent
+lifetimes; only a root can admit that lifetime. Their descendants normally remain
+supervised. Neither a parent waiting nor a model turn ending settles its request.
+On wake, bind `state <- pollWatch contractReady` and inspect `inspectFull state`.
+Handle unavailable execution separately from the typed `Blocked reason evidence`
+or `Produced (Delivered reviewed head checks)`. No notification proves success.
 
-The contract lead reads its assigned Markdown and invokes the declared expert
-before the implementation lane. Construct `question :: DesignQuestion` from the
-current source and the narrow uncertainty, then:
+## Resolve the declared design and transmit its meaning
+
+The contract lead reads its plan and the supplied source. Bind `question ::
+DesignQuestion` with the concrete uncertainty, evidence, alternatives and consumers:
 
 ```haskell
 let Right designCampaign = campaignLabel "graph-contract"
-let Right designSlot = relationDesign designCampaign
-(expert, designReady) <- consultDesign designSlot question
+let Right slot = relationDesign designCampaign
+(expert, designReady) <- consultDesign slot question
 ```
 
-Keep the original lead request open. Inspect the answer on the watch wake. A
-supported Decision can settle the design choice. AmendPlan is a proposed commit;
-after the owning decision accepts it, incorporate and verify that plan change.
-If the accepted baseline changes, use it in `implementationSeed` and
-`integrationSeed` of the lane you pass to `deliverLane`. Do not reload modules.
+End the turn while retaining the component obligation. On wake inspect the answer.
+A Decision is supported reasoning; AmendPlan is a proposed commit; NeedEvidence
+identifies a missing fact. Accept within-plan choices locally and take consequential
+scope/acceptance changes to the human. Incorporate/check shared semantics and
+record them in the committed contract before dependent branches start.
 
-A normal lead with satisfied prerequisites installs its whole delivery chain:
+Bind `resolved :: Question`, `head :: Text`, `summary :: Text`, and `checks ::
+[Text]` to the accepted question, actual incorporated revision, decision and evidence:
 
 ```haskell
-flow <- deliverLane sessionInput sessionReply
+let decision = AcceptedDecision resolved head summary checks
+let task = withDecision decision sessionInput
 ```
 
-A reviewer keeps its review pending while `requestRepair` or
-`requestIncorporation` owns a separate request to the retained implementer. End
-the turn on a watch, inspect the settled response, review the exact revision,
-then return Accepted. A blocking contract question stays with its current owner
-until answered or returned as an explicit blocked result. Never synchronously
-queue back to a lead already waiting on that review.
+Use task for implementation and review. It carries the rationale into a fresh
+context, as well as the source that now embodies it. withDecision is a pure packet
+transformation; it does not run Git or establish acceptance. Never construct a
+receipt from a proposed commit you have not incorporated.
 
-## Parallel product lanes
+## Implement, review, repair in the context that owns the code
 
-The owner incorporates the accepted contract, runs its focused checks and binds
-`acceptedContract :: GitRef` to the resulting exact commit. Both independent
-lanes start there. This is an application dependency, not a global wave barrier.
+A lead normally implements itself. Bind its checked commit as candidate:
 
 ```haskell
-let Right productWave = forkGroupLabel "product-leads"
+(reviewer, questions) <- reviewCandidate task OwnerRepairs candidate
+let Right reviewReadyLabel = watchLabel "review-ready"
+ready <- watch reviewReadyLabel (awaitSettledFork reviewer)
+let Right reviewQuestionsLabel = watchLabel "review-questions"
+questionReady <- watch reviewQuestionsLabel (awaitProgressAfter questions (ProgressCursor 0))
+```
+
+The reviewer returns Produced (Repair latest findings) for defects the lead must
+repair. Its attempt settles; the lead's delivery stays open. After local repair and
+checks, bind `revised :: Candidate` and reuse the retained reviewer:
+
+```haskell
+let Right retryLabel = requestLabel "review-repaired"
+(attempt, retryQuestions) <- reviewAgain (forkedActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
+let Right retryReadyLabel = watchLabel "review-repaired-ready"
+retryReady <- watch retryReadyLabel (awaitSettled attempt)
+let Right retryQuestionsLabel = watchLabel "review-repaired-questions"
+retryQuestionReady <- watch retryQuestionsLabel (awaitProgressAfter retryQuestions (ProgressCursor 0))
+```
+
+The reviewer incorporates that revision before checking it. Keep its latest
+accepted Task/Candidate intact. A reviewed head and the lead's resulting checked
+head are different facts. Once the lead has checked its resulting checkout:
+
+```haskell
+respond (Produced (Delivered accepted head checks))
+```
+
+Here accepted is the actual ReviewedCandidate, and head/checks describe resulting
+source. Keep gates in its nested candidate. Review semantic integration changes.
+Blocked is an honest terminal product result when the obligation cannot continue.
+
+Delegate implementation only when it creates useful independent work. `implement
+part` returns `(Forked (Outcome Candidate), Progress Attention)`. Watch both. After
+that worker returns, reviewCandidate part (RetainedImplementer (forkedActor worker))
+latest lets the reviewer request repairs directly. The worker is then available;
+queuing repairs behind a lead's pending delivery would deadlock it.
+
+The constituent operations remain available for Haskell composition. For a real
+routed delegation, reviewFrom takes a consumer of explicit unavailable/blocked
+results or the new review/result-progress handles. Bind/register those handles in
+the consumer; do not discard the next obligation. Successful routing needs no
+model relay. Watch/route callbacks run after their dependencies become ready;
+never wait for a new child inside the tool block that is still admitting it.
+
+## Questions stay open until the owning decision arrives
+
+When activation supplies reportProgress, bind `open :: Attention` to cumulative
+unresolved questions and `question :: Question` to the concrete finding:
+
+```haskell
+let updatedQuestions = raiseQuestion question open
+reportProgress updatedQuestions
+```
+
+A stable questionKey is local to its plan; source and finding distinguish revisions
+of that question. Publish the whole unresolved set so coalescing loses no unanswered
+question. Publish on meaningful changes, not every tool step. Keep this request
+pending and continue unrelated useful work. The owner inspects the question watch
+and rearms `awaitProgressAfter questions cursor` at the returned ProgressCursor.
+The ordinary watch alerts the owning model; followAttention can instead connect
+that source directly to a Haskell consumer when a relay would add no judgment.
+Its sink receives changes to one cumulative source. Combining sources requires
+preserving their union, not overwriting all attention with whichever source changed.
+
+After an owning decision, bind `decision :: AcceptedDecision` as above. On the
+request owner's retained response, for example the initial review:
+
+```haskell
+delivery <- updateRequest (forkedResponse reviewer) (decisionContext decision)
+```
+
+Handle Left explicitly; on Right bind and poll the RequestUpdate handle.
+UpdatePresented means the steering was presented, not that code was incorporated.
+UpdateUnconfirmed/UpdateNotPresented/UpdateTooLate require examining that receipt
+and current work before intervention; do not silently enqueue a replacement request.
+For the retained attempt use attempt itself instead of forkedResponse reviewer.
+Forward through each response owner where an intermediate lead owns the review.
+
+The recipient reads that supported steering, verifies incorporation and records
+the typed decision in its current Task. It can then publish `resolveQuestion
+decision open`; an answer to an older version cannot clear a newer finding. Review
+with the updated assignment, not the original sessionInput after its contract changed.
+
+## Incorporate the contract, then work on independent consumers
+
+The owner incorporates the reviewed contract and checks the resulting revision.
+Bind `acceptedContract :: GitRef` there and the relevant checked decision(s) from
+acceptedAssignment. Include them in both new Tasks using withDecision after updating
+decisionSource to the actual incorporated baseline. Read the committed contract too.
+
+```haskell
+let Right projectionBase = component campaign RelationProjection acceptedContract
+let Right controlsBase = component campaign RelationControls acceptedContract
+let projectionTask = withDecision contractDecision projectionBase
+let controlsTask = withDecision contractDecision controlsBase
+let Right products = forkGroupLabel "product"
 let Right projectionLabel = branchLabel "projection"
 let Right controlsLabel = branchLabel "controls"
-let Right projectionLane = componentLane planCampaign RelationProjection acceptedContract
-let Right controlsLane = componentLane planCampaign RelationControls acceptedContract
-(projection, controls) <- unfold (batch planCampaign productWave) ((,) <$> child (withLifetime SwarmOwned (componentLead projectionLabel acceptedContract projectionLane)) <*> child (withLifetime SwarmOwned (componentLead controlsLabel acceptedContract controlsLane)))
-let Right projectionWatch = watchLabel "projection-ready"
-let Right controlsWatch = watchLabel "controls-ready"
-projectionReady <- watch projectionWatch (awaitSettledFork projection)
-controlsReady <- watch controlsWatch (awaitSettledFork controls)
+(projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @Attention @Delivery (withLifetime SwarmOwned (componentLead projectionLabel projectionTask)) <*> childWithProgress @Attention @Delivery (withLifetime SwarmOwned (componentLead controlsLabel controlsTask)))
 ```
 
-Each checked lane may integrate independently. Before the final product claim,
-verify the combined commit: all-target build/tests, focused new graph/controls
-regressions, formatting, and isolated terminal proof using the app's existing
-scenario/fake-server tools. Preserve composer state and prove no graph-triggered
-POST. Record exact commits, commands, remaining gates and uncertainty.
+Register independent result and question watches as for contractWork; either
+component can progress or deliver while the other awaits a decision. Integrate
+coherent deliveries independently. The owner runs combined all-target checks,
+graph/control regressions, formatting and isolated terminal proof before claiming
+the product gate closed. Preserve composer state and prove no graph-triggered POST.
+Inspect listRoutes/pollRoute and retained effects after coordination failure before
+retrying; launched work and normal TUIs may still be useful.
 
-When a route fails, inspect `listRoutes`, `pollRoute` and retained operations
-before intervening. The earlier implementation/review/integration may already
-exist. Do not replay the chain blindly or interpret unavailable coordination as
-native process death. Keep useful native TUIs available for diagnosis and work.
-
-## Ordinary RSI engagement
-
-When the human requests RSI, the owner takes a fresh snapshot and selected
-lane observations. This invokes no summarizing model for routine bookkeeping.
+## Requested RSI from selected evidence
 
 ```haskell
-projectionEvidence <- observeLane (componentTask RelationProjection) projection
-controlsEvidence <- observeLane (componentTask RelationControls) controls
+projectionEvidence <- observeWork projectionTask projectionWork
+controlsEvidence <- observeWork controlsTask controlsWork
 later <- snapshot
+inspectFull (workSummary projectionEvidence)
 inspectFull (usageDelta before later)
-inspectFull (usageByRequestedModel later)
 ```
 
-Bind `source :: Text` to the exact integrated app commit and `question :: Text`
-to the human's requested improvement. Point `evidence :: [Text]` at decisive
-outcomes/friction artifacts rather than pasting transcripts. For a new sidecar:
+Bind source to the exact integrated app commit, question to the human's improvement
+request and evidence to precise friction/artifact references, all as Text/[Text].
 
 ```haskell
 let packet = RsiInput source question [projectionEvidence, controlsEvidence] before later evidence
-let Right improvementWave = forkGroupLabel "requested-improvement"
+let Right improvements = forkGroupLabel "requested-improvement"
 let Right improvementLabel = branchLabel "workspace-style"
-improvement <- unfold (batch planCampaign improvementWave) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef source)) packet)))
-let Right improvementWatch = watchLabel "improvement-ready"
-improvementReady <- watch improvementWatch (awaitSettledFork improvement)
+improvement <- unfold (batch campaign improvements) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef source)) packet)))
+let Right improvementReadyLabel = watchLabel "improvement-ready"
+improvementReady <- watch improvementReadyLabel (awaitSettledFork improvement)
 ```
 
-The packet correlates plan paths, exact actor identities, definition identities,
-owned delivery state and creation-tree observations. An invisible owner is marked
-explicitly. Usage deltas separate comparable spend, newly observed history and
-counter/source discontinuities. Requested model groups are not billing totals.
-If the sidecar needs live high-level observation, `shareObservation (forkedActor
-improvement) (forkedActor projection)` grants that scope without stop authority.
+Snapshots preserve unknown usage coverage, exact identities and provider staleness.
+Zero queued requests alone does not prove a useful worker is available. Requested
+model counts are not billing totals or proof of work quality. Expand observations
+only for the decision at hand. shareObservation can grant this ordinary RSI worker
+read-only scope over a selected component without transferring stop authority.
 
-RSI returns a normal Candidate for .shoal changes. Review/check and incorporate
-it into the authoritative original-root .shoal. Finish or deliberately hand off
-in-flight work, then explicitly start the next swarm to use those definitions.
-Check the next worker's `previewLaunch`/workspace identity and selected behavior.
-Editing candidate source during a wave does not change its frozen core.
-
-The first run should leave useful app changes and a checked customization
-improvement, plus honest evidence about guidance gaps. Deterministic package
-checks establish wiring; fresh-model usability and real usage savings require
-this actual application run. No comparative scientific evaluation is required.
+RSI returns Outcome Candidate for a checked next-wave customization. Incorporate
+it in the original root .shoal and activate explicitly after unfinished work ends
+or is deliberately handed off. Confirm the next selected identity/preview consumes
+the edit while the old wave remains frozen. Live usability and savings are evidence
+from the subsequent application run, not from deterministic recipe checks.

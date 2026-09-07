@@ -14,8 +14,16 @@
   missing parent or cycle break does not turn the actor into a runtime root.
 - **Candidate**: a committed source revision with checks and remaining gates.
   **ReviewedCandidate** retains exact reviewed head and review evidence.
-- **Integrated**: the exact resulting commit checked by the integration worker.
-  It is not automatically incorporated into the integration owner's app branch.
+- **Delivered**: a reviewed candidate and the exact resulting commit checked by
+  its owner. That head may differ after integration. The application owner still
+  incorporates and checks the result in the shared app branch.
+- **Task**: source, obligation, rationale, owning scope, acceptance and relevant
+  accepted decisions supplied to a fresh context. A plan path alone is insufficient.
+- **Attention**: the cumulative unresolved Question set published by an active
+  request. An AcceptedDecision records the exact answered question, checked source,
+  reasoning and evidence; it grants no authority and cannot erase a newer question.
+- **Outcome**: Produced value or Blocked reason evidence. This product conclusion
+  is separate from a Settlement reporting whether execution supplied any reply.
 - **PlanAmendment**: proposed plan-source commit, exact base, affected paths and
   obligations, rationale and evidence. **Incorporated** is a separate recipient
   receipt with resulting head and checks. Receiving a proposal is not adoption.

@@ -1,117 +1,60 @@
-# A project-specific Shoal workspace
+# A project-specific Shoal workbench
 
-The authored `.shoal` directory contains a complete planned-Sol package and a
-concrete `shoal-repl` application plan: selectable creation, supervision and
-context relationship views. Start with [.shoal/plans/README.md](.shoal/plans/README.md)
-and [the run/RSI guide](.shoal/plans/run.md). Copy it into that app or adapt the
-terminology, plan paths, acceptance and helpers for another project. TOML is the configuration entry point. Paths
-are relative to `.shoal/config.toml`. The normal Codex TUI remains the interface
-for every worker. A swarm captures selected inputs once; restart explicitly to
-activate edits. No import launches work.
+This authored .shoal package prepares a concrete shoal-repl wave: selectable
+creation, supervision and context relationship views. Start with the
+[plan tree](.shoal/plans/README.md) and [invocation guide](.shoal/plans/run.md).
+Astra supplies architecture, shared language and selected expert placements. Sol
+owners do substantive engineering, use independent review and delegate useful
+implementation frontiers. An ordinary human-requested Astra engagement improves
+the next wave. No worker is created merely because a pipeline names a stage.
 
-Worker instructions live in `prompts/*.md`, selected by `[prompts.files]` in
-TOML. The captured `Shoal.Workspace` module exposes `workspacePrompt`, returning
-`Maybe Text`, plus the selection identity and configured module names.
-`Project.Work` chooses instructions and combines them with typed task evidence;
-missing required project prompts fail explicitly. Editing a prompt affects the
-next swarm, including when an existing swarm launches a worker later.
+The Haskell modules are tools for resident GHCi use. Bind a Task, apply an operation,
+keep its real handles, inspect a useful projection and compose the next action.
+No import starts work and no Markdown parser schedules a plan. The constituent
+unfold/request/watch/route operations remain available; a helper need not own an
+entire workflow to be useful.
 
-The original workspace root has the swarm’s one authoritative `.shoal`. Every
-actor uses its frozen selection, even when a managed checkout contains a copy.
-Treat edits in those checkouts as candidates to integrate into the authoritative
-directory for the next swarm. Keep these files in the main repository for now;
-a nested Git repository is not required.
+- Project.Types carries source, scope, rationale, accepted decisions and evidence.
+  Reviewed source has one authority; resulting integrated source is a separate fact.
+- Project.Work supplies selected workers, independent/reused review, local or
+  retained repair, declared design consultations, context and cumulative attention.
+  OwnerRepairs avoids queuing work behind the owner's pending delivery. A separate
+  retained implementer can receive direct repairs after its original reply.
+- Project.Plan declares the concrete components, source constructors and Astra slot.
+  Leads normally implement directly. Each delivery retains its remaining gates.
+- Project.Observe connects existing handles to outcomes, unresolved questions,
+  identities, lifecycle/provider observations and usage with explicit coverage.
+  RSI receives selected evidence, not a routinely summarized raw event stream.
 
-Astra writes a Markdown plan tree. Each branch identifies its source baseline,
-result type, acceptance, recipients and any tagged Astra specialist obligation.
-Sol executes the branch with short task-focused contexts. Haskell recipes bind
-repeated choices; they are machine coordination code, so use concise ordinary
-functions rather than narrative boilerplate or a workflow framework.
+TOML is the configuration entry point; Haskell expresses behavior and Markdown
+supplies guidance. Paths are relative to .shoal/config.toml. Prompt resources are
+ordinary authored names selected by Project.Work, not Rust workflow roles.
+Shoal.Workspace exposes the captured prompts, module names and definition identity.
+Every worker has the normal Codex TUI for engineering and direct human steering.
 
-The planner can launch cooperating roots with
-`withLifetime SwarmOwned (solTask label seed task)` through ordinary `unfold`.
-These workers keep their selected context and normal TUI after the planner exits.
-Use `shareObservation rsi scope` to let a later RSI worker inspect a declared
-creation tree; this shares observations without giving it stop authority.
-Default workers remain supervised by their creator. Swarm shutdown still owns
-all independent roots, and configuration remains frozen across their lifetimes.
+The original repository root has one authoritative .shoal. A swarm captures it
+once. All later workers use that frozen selection even when a managed checkout
+contains newer source. Edit helpers/prompts/checks normally in a candidate checkout,
+incorporate checked changes into the original root and activate at an explicit
+next-swarm boundary. Preserve unfinished work and runtime artifacts. A nested Git
+repository is unnecessary; commit authored source with the application for now.
 
-A Sol component lead receives a `DeliveryLane` as `sessionInput` and, after its
-declared prerequisites are satisfied, installs it with:
+The run guide shows first-turn and continuation expressions: commission a lead,
+transmit an accepted design, review/repair without a queue cycle, return a decision
+to pending work, incorporate independent deliveries and commission requested RSI.
+Typed results distinguish product blockers from execution unavailability. Progress
+is cumulative unresolved state. Callback failures retain evidence; inspect routes
+and effects before replaying a launch that may already have admitted useful work.
 
-```haskell
-flow <- deliverLane sessionInput sessionReply
-```
-
-`DeliveryLane` carries the assignment, branch/group labels and source
-seeds chosen by the planner. The lead's request returns `Delivery`. The recipe
-starts implementation, routes its candidate to independent review, starts
-integration only after `Accepted`, and replies to the lead's requester with the
-integration result. The lead can end its turn after installing the flow; it does
-not wake just to relay routine success. Independent leads settle independently.
-
-Reviewers use `requestRepair` with their retained implementer and watch the
-returned response while keeping their review request pending. They inspect the
-revised candidate before accepting. `ReviewBlocked`, `DesignBlocked`, and
-`ExecutionUnavailable` preserve exceptional outcomes for the recipient. For a
-tagged design obligation, `consultDesign slot question` starts the declared
-specialist and returns its retained handle and answer watch. The requesting
-review stays open while the specialist answers against the exact revised source.
-An `AmendPlan` answer carries a `PlanAmendment`: exact base and proposed commit,
-changed paths, affected obligations, rationale and evidence. After the owning
-decision accepts it, `requestIncorporation` sends a separate request to the
-retained implementer. Watch that response while keeping the review pending.
-`Incorporated` records the original amendment, resulting head and checks;
-`IncorporationBlocked` preserves a failed premise or check. Inspect the resulting
-revision before accepting it. No receipt silently changes another worker's plan
-or the swarm's frozen modules. Do not queue back to a lead waiting on this review.
-`Project.Plan` declares the contract, projection and controls components, their
-seeds and the tagged expert slot. Its Markdown tree supplies dependencies,
-ownership, discretion and acceptance. `Project.Observe` relates each existing
-lane handle to its plan, definition identity, response state and creation tree;
-`rsiBranch` uses a selected high-level packet for an ordinary requested expert.
-
-Callback failures emit exceptional attention to their owner. Recover handles with
-`listRoutes` when they were created inside a recipe, then inspect `pollRoute`
-and the retained effects before acting; replaying the whole chain could duplicate
-already-started work. A callback may reply only to its owner's active request;
-cancellation and update fences still apply. Such a reply ends the callback and
-resumes the request through the ordinary actor scheduler.
-
-The recipe modules and their selected Markdown prompts are checked through the
-real resident workbench. Focused execution covers candidate/review evidence,
-retained repair, planned specialist answers, exact plan incorporation, direct callback replies and cancellation. The delivery-lane check
-uses real commits and an integration checkout; it does not claim live model or
-fresh-context application acceptance.
-
-For an ordinary human-started Astra RSI session:
-
-```haskell
-observed <- snapshot
-inspectFull observed
-inspectFull (swarmUsage observed)
-inspectFull (usageByRequestedModel observed)
-```
-
-Keep a snapshot before a wave segment, bind `later <- snapshot` afterwards, and
-inspect `usageDelta observed later`. Its comparable totals exclude newly visible
-thread histories and discontinuities, which remain explicit in the same result.
-
-Read selected plan branches and outcomes, identify repetitive context or routing
-work, then edit prompts/helpers for the next swarm. Keep raw event streams out of
-Astra's context unless diagnosing a specific failure. There is no special RSI
-lifecycle or budget-enforcement service.
-
-Validate an authored selection before starting a run or proposing an RSI change:
+Validate a candidate selection without providers or a swarm restart:
 
 ```sh
 shoal check --workspace /path/to/project
 ```
 
-This uses startup's frozen-module compiler without creating actors, contacting
-providers or replacing a live swarm. It reports the definition identity and
-imports. It checks source/configuration; it does not prove provider readiness.
-The deterministic delivery test now drives the planned component constructor,
-local implementation/review/integration, an RSI packet and customization commit,
-and compilation of the next frozen selection while the old prompt stays fixed.
-Fresh-model application usability and measured savings remain live-run evidence.
+This compiles configuration and selected modules. The package-curation pass is
+adding a portable behavioral recipe check before first-run readiness. Existing
+resident regressions exercise direct/reused review, delegated repair, expert plan
+incorporation, callback ownership, progress routing and next-freeze customization.
+Those checks do not establish live model usability or measured savings. The actual
+application wave and requested RSI supply that subsequent evidence.

@@ -19,18 +19,21 @@ context packaging; the [Haskell reference](plans/next/sol-worker-routing.md)
 contains broader interface sketches. Exact implemented signatures belong in the
 [shipped API guide](prompts/shoal/api-guide.md) and checked source.
 The [workspace package](examples/shoal-workspace/README.md) now contains the
-executable recipes and a concrete application plan tree. It is installed
-in `/home/inanna/dev/shoal-repl/.shoal`. Before live acceptance, complete the
+executable recipes and a concrete application plan tree. The previous package is
+installed in `/home/inanna/dev/shoal-repl/.shoal`; replace it after this curation
+revision is checked. Before live acceptance, complete the
 [workbench curation plan](plans/next/package-curation.md): useful lead ownership,
 independently callable Haskell operations, complete task/decision handoffs,
 pending-question attention, stronger prompts and candidate-package checks.
 
-The readiness review found that compilation and the existing deterministic
-checks do not establish a sufficiently curated first-run package. In particular,
-the fixed worker procession adds unnecessary stages, repaired/accepted revision
-fields can disagree, and selected contexts do not explicitly carry accepted
-expert decisions into downstream work. The curation plan is the current next
-implementation task; the foundation/check inventory below records what landed.
+Curation has replaced the fixed worker procession with independent workbench
+operations, one reviewed revision, source-bearing tasks and explicit accepted
+decisions. Responsibility prompts now teach starting work and continuing after
+review/repair/questions. Focused resident checks exercise both repair relationships,
+cumulative attention and decision propagation into a fresh consumer. Portable
+candidate-package behavioral checking, a complete combined rehearsal, installation
+and fixed-build refresh remain. The curation plan tracks that unfinished work;
+the foundation/check inventory below records the earlier accepted substrate.
 
 ## Architecture and settled boundaries
 

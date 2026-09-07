@@ -161,6 +161,7 @@ newtype ActorPath = ActorPath Text
 newtype GitBranchPrefix = GitBranchPrefix Text
   deriving (Show, Eq, Ord)
 data ForkGroupPath = ForkGroupPath Bool Text
+  deriving (Show, Eq)
 
 renderActorPath :: ActorPath -> Text
 renderActorPath (ActorPath path) = path

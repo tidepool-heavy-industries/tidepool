@@ -2,22 +2,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
+-- Tools for resident sessions. Bind their handles and compose the next operation
+-- when it is useful; importing this module prescribes no worker tree.
 module Project.Work
-  ( taskContext
-  , solTask
-  , specialistTask
-  , implement
-  , reviewCandidate
-  , requestRepair
-  , requestIncorporation
-  , integrateReviewed
-  , deliverLane
-  , consultDesign
-  , settledValue
+  ( projectPrompt, taskContext, reviewContext, decisionContext
+  , withDecision, raiseQuestion, resolveQuestion
+  , solTask, implement, reviewCandidate, reviewAgain, repair
+  , requestIncorporation, consultDesign, followAttention
+  , reviewFrom, settledValue
   ) where
 
 import Control.Monad.Freer (Eff, Member)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Shoal
@@ -25,139 +21,157 @@ import Tidepool.Effects.Core (AgentInspection, Forks, GitRef (..))
 import Project.Types
 import Shoal.Workspace (workspacePrompt)
 
--- Missing project configuration is an error, never an instruction-free worker.
-data Instructions = TaskInstructions | ReviewInstructions | RepairInstructions | IntegrationInstructions | DesignInstructions | IncorporationInstructions
-
-instructions :: Instructions -> Text
-instructions kind = case workspacePrompt name of
+-- Keys are the workspace's authored resource names; selecting prose grants no
+-- permission and does not create a runtime role.
+projectPrompt :: Text -> Text
+projectPrompt name = case workspacePrompt name of
   Just body -> body
   Nothing -> error ("Missing configured project prompt: " <> Text.unpack name)
-  where
-    name = case kind of
-      TaskInstructions -> "task"
-      ReviewInstructions -> "review"
-      RepairInstructions -> "repair"
-      IntegrationInstructions -> "integrate"
-      DesignInstructions -> "specialist"
-      IncorporationInstructions -> "incorporate"
 
--- Keep stable project vocabulary in modules; send the branch's relevant plan,
--- rationale and acceptance rather than a transcript or repeated status digest.
+named :: Text -> BranchLabel
+named = either (error . show) id . branchLabel
+
+shown :: Show value => value -> Text
+shown = Text.pack . show
+
 taskContext :: Task -> Text
-taskContext task = Text.unlines
+taskContext task = Text.unlines $
   [ "Plan: " <> planPath task
+  , "Source: " <> taskSource task
   , "Obligation: " <> obligation task
+  , "Why: " <> rationale task
+  , "Owned source: " <> Text.intercalate ", " (ownedPaths task)
   , "Acceptance: " <> acceptance task
+  , "Read this branch's contract and .shoal/plans/language.md. Relevant operations live in Project.Work; use their supplied examples and focused :type/:info when needed."
+  ] ++ map decisionContext (acceptedDecisions task)
+
+-- Only call after the owning decision and source incorporation have been checked.
+-- Replace this question's old decision; keep unrelated accepted choices intact.
+withDecision :: AcceptedDecision -> Task -> Task
+withDecision decision task = task
+  { taskSource = decisionSource decision
+  , acceptedDecisions = filter (not . sameQuestion (decisionQuestion decision) . decisionQuestion)
+      (acceptedDecisions task) ++ [decision]
+  }
+
+sameQuestion :: Question -> Question -> Bool
+sameQuestion left right = questionKey left == questionKey right
+  && questionPlan (questionDetails left) == questionPlan (questionDetails right)
+
+raiseQuestion :: Question -> Attention -> Attention
+raiseQuestion question current = filter (not . sameQuestion question) current ++ [question]
+
+-- An answer for an older revision of a question cannot clear its newer finding.
+resolveQuestion :: AcceptedDecision -> Attention -> Attention
+resolveQuestion decision = filter (/= decisionQuestion decision)
+
+decisionContext :: AcceptedDecision -> Text
+decisionContext decision = Text.unlines
+  [ "Accepted decision for " <> questionKey (decisionQuestion decision)
+      <> " at " <> questionSource (questionDetails (decisionQuestion decision))
+  , "Question: " <> shown (decisionQuestion decision)
+  , decisionSummary decision
+  , "Incorporated source: " <> decisionSource decision
+  , "Evidence: " <> Text.intercalate "; " (decisionEvidence decision)
   ]
 
-solTask :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task result
-solTask label seed task =
-  withInstructions (instructions TaskInstructions) $
-  withContext (selected taskContext) $
-  withModel "gpt-5.6-sol" $ withEffort Low $ coding label seed task
-
--- Use only at the specialist obligations tagged in the authored plan. Keep the
--- expert alive to finish; surface cost/architecture choices through ordinary talk.
-specialistTask :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task result
-specialistTask label seed task =
-  withInstructions (instructions TaskInstructions) $
-  withContext (selected taskContext) $
-  withModel "gpt-6-astra" $ withEffort Medium $ coding label seed task
+solTask :: BranchLabel -> Task -> Branch CodingEffects Task result
+solTask label task = withInstructions (projectPrompt "task") $
+  withContext (selected taskContext) $ withModel "gpt-5.6-sol" $ withEffort Low $
+  coding label (atRef (GitRef (taskSource task))) task
 
 implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => ForkGroupPath -> BranchLabel -> WorktreeSeed -> Task -> Eff effects (Forked Candidate)
-implement group label seed task = unfold group (child (solTask label seed task))
+  => Task -> Eff effects (Forked (Outcome Candidate), Progress Attention)
+implement task = unfold (taskGroup task) $
+  childWithProgress @Attention @(Outcome Candidate) (solTask (named "implement") task)
 
--- A route callback can invoke these recipes directly. It runs as the route
--- owner's actor, so its handles/permissions still belong to that owner.
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
   [ taskContext (reviewAssignment task)
   , "Candidate: " <> candidateCommit (reviewInput task)
   , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput task))
   , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput task))
-  , "Retained implementer: " <> Text.pack (show (agentIdentity (reviewImplementer task)))
+  , case repairOwner task of
+      OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and reuse you. Do not queue work behind its pending delivery."
+      RetainedImplementer actor -> "Repair owner: retained implementer " <> shown (agentIdentity actor)
+        <> ". Use repair for direct follow-up; keep your review pending while its separate request runs."
   ]
 
 reviewCandidate
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => ForkGroupPath -> BranchLabel -> Task -> AgentRef -> Candidate -> Eff effects (Forked ReviewDecision)
-reviewCandidate group label task implementer candidate =
-  unfold group $ child $ withInstructions (instructions ReviewInstructions) $
-    withContext (selected reviewContext) $
-    withModel "gpt-5.6-sol" $ withEffort Low $
-    coding label (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate implementer)
+  => Task -> RepairOwner -> Candidate -> Eff effects (Forked (Outcome ReviewDecision), Progress Attention)
+reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @Attention @(Outcome ReviewDecision) $
+  withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
+  withModel "gpt-5.6-sol" $ withEffort Low $
+  coding (named "review") (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
 
-requestRepair
+-- A completed review attempt leaves its actor available for the revised candidate.
+reviewAgain
   :: Member Replies effects
-  => RequestLabel -> ReviewTask -> Candidate -> [Text] -> Eff effects (Response Candidate)
-requestRepair label review candidate findings =
-  requestWith (reviewImplementer review) $
-    withRequestGuidance (instructions RepairInstructions) $
-    requestOptions label (RepairTask (reviewAssignment review) candidate findings)
+  => AgentRef -> RequestLabel -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress Attention)
+reviewAgain actor label task = requestWithProgress @Attention @(Outcome ReviewDecision) actor $
+  withRequestGuidance (projectPrompt "review" <> "\n" <> reviewContext task) $
+  requestOptions label task
 
--- Invoke after the owning decision accepts the amendment. Never queue this back
--- to a lead already waiting on this request. The retained implementer is free
--- after its candidate reply; the review retains its own original reply handle.
+-- Left is the useful verdict to return to the implementing owner; Right is a
+-- separate request to an available implementer. No queue is created for Left.
+repair
+  :: Member Replies effects
+  => RequestLabel -> ReviewTask -> Candidate -> [Text]
+  -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))
+repair label task candidate findings = case repairOwner task of
+  OwnerRepairs -> pure (Left (Repair candidate findings))
+  RetainedImplementer actor -> Right <$> requestWith actor
+    (withRequestGuidance (Text.unlines
+      [ projectPrompt "repair", taskContext (reviewAssignment task)
+      , "Repair candidate: " <> candidateCommit candidate
+      , "Findings: " <> Text.intercalate "; " findings
+      , "Preserved gates: " <> Text.intercalate "; " (remainingGates candidate)
+      ]) $
+      requestOptions label (RepairTask (reviewAssignment task) candidate findings))
+
 requestIncorporation
   :: Member Replies effects
   => AgentRef -> RequestLabel -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
-requestIncorporation recipient label assignment amendment =
-  requestWith recipient $
-    withRequestGuidance (instructions IncorporationInstructions) $
-    requestOptions label (IncorporationTask assignment amendment)
+requestIncorporation recipient label assignment amendment = requestWith recipient $
+  withRequestGuidance (projectPrompt "incorporate" <> "\n" <> taskContext assignment) $
+  requestOptions label (IncorporationTask assignment amendment)
 
-integrateReviewed
-  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset IntegrationEffects effects)
-  => ForkGroupPath -> BranchLabel -> WorktreeSeed -> ReviewedCandidate -> Eff effects (Forked Delivery)
-integrateReviewed group label seed candidate =
-  unfold group $ child $ withInstructions (instructions IntegrationInstructions) $
-    withContext (selected integrationContext) $
-    withModel "gpt-5.6-sol" $ withEffort Low $ integrating label seed candidate
+-- Observe one cumulative question source, forwarding meaningful changes only.
+-- The sink owns its scope: combining several sources needs their cumulative union,
+-- not publication of each source as if it were the entire component's attention.
+followAttention
+  :: Member Watches effects
+  => Progress Attention -> ProgressCursor -> (Attention -> Eff effects ()) -> Eff effects Route
+followAttention updates cursor sink = follow cursor []
   where
-    integrationContext value = "Accepted commit: " <> candidateCommit (reviewedCandidate value)
-      <> "; reviewed head: " <> reviewHead value
-      <> "; review checks: " <> Text.intercalate ", " (reviewChecks value)
-      <> "; rationale: " <> reviewRationale value
-      <> "; remaining product gates: "
-      <> Text.intercalate ", " (remainingGates (reviewedCandidate value))
+    follow after previous = route (awaitProgressAfter updates after) $ \state -> case state of
+      ProgressUpdate next current -> do
+        when (current /= previous) (sink current)
+        void (follow next current)
+      ProgressClosed -> pure ()
+      ProgressRejected failure -> error (show failure)
+      ProgressPending -> error "attention dependency became ready without an observation"
 
--- Install the declared chain and return promptly. Only exceptional local
--- decisions need a lead's model turn; the final result settles its owned reply.
-deliverLane
-  :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects, Subset IntegrationEffects effects)
-  => DeliveryLane -> Reply Delivery -> Eff effects Route
-deliverLane lane destination = do
-  candidate <- implement (implementationGroup lane) (implementationLabel lane)
-    (implementationSeed lane) (laneTask lane)
-  onResult destination (awaitSettledFork candidate) $ \value -> do
-    reviewed <- reviewCandidate (reviewGroup lane) (reviewLabel lane)
-      (laneTask lane) (forkedActor candidate) value
-    void $ onResult destination (awaitSettledFork reviewed) $ \decision -> case decision of
-      Accepted exact -> do
-        integrated <- integrateReviewed (integrationGroup lane) (integrationLabel lane)
-          (integrationSeed lane) exact
-        void $ onResult destination (awaitSettledFork integrated) (void . reply destination)
-      Repair exact finding -> void $ reply destination (ReviewBlocked exact finding)
-      NeedsDesign question -> void $ reply destination (DesignBlocked question)
+-- Optional delegated-work composition. The caller supplies its actual consumer
+-- of the review handles, so no new obligation is hidden or silently discarded.
+reviewFrom
+  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
+  => Task -> Forked (Outcome Candidate)
+  -> (Either ResponseFailure (Outcome (Forked (Outcome ReviewDecision), Progress Attention)) -> Eff effects ())
+  -> Settlement (Outcome Candidate) -> Eff effects ()
+reviewFrom task worker consume settled = case settledValue settled of
+  Left failure -> consume (Left failure)
+  Right (Blocked reason evidence) -> consume (Right (Blocked reason evidence))
+  Right (Produced candidate) -> reviewCandidate task (RetainedImplementer (forkedActor worker)) candidate >>= consume . Right . Produced
 
-onResult
-  :: (Member Watches effects, Member Replies effects)
-  => Reply Delivery -> Await (Settlement result) -> (result -> Eff effects ()) -> Eff effects Route
-onResult destination awaiting continuation = route awaiting $ \settled -> case settled of
-  ReplyAvailable answer -> continuation (responseValue answer)
-  ReplyUnavailable failure -> void $ reply destination (ExecutionUnavailable failure)
-
--- The waiting actor keeps its original obligation while a declared specialist
--- answers the narrow question. Only that useful answer wakes this owner.
 consultDesign
   :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)
   => DesignSlot -> DesignQuestion -> Eff effects (Forked DesignAnswer, Watch (Settlement DesignAnswer))
 consultDesign slot question = do
   expert <- unfold (specialistGroup slot) $ child $
-    withInstructions (instructions DesignInstructions) $
-    withContext (selected (designContext slot)) $
+    withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
     withModel (specialistModel slot) $ withEffort (specialistEffort slot) $
     coding (specialistLabel slot) (atRef (GitRef (questionSource question))) question
   ready <- watch (specialistWatch slot) (awaitSettledFork expert)

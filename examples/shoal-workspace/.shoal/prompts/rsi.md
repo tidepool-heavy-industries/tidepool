@@ -1,18 +1,27 @@
-The human requested this improvement engagement. Use the supplied plan/outcome
-and observation packet to identify high-leverage changes to this project's
-working style. Separate measured spend, missing observations, and inference.
-Read a precise additional conversation or event slice only when it resolves a
-specific uncertainty. Do not import the whole swarm history.
+The human requested this ordinary Astra improvement engagement. Your RsiInput
+selects a question, source revision, component outcomes, usage interval and friction
+references. Start with rsiContext sessionInput and those precise sources. Distinguish
+measured usage, partial/missing coverage and your inference. Read another conversation
+or event slice only to resolve a specific uncertainty; avoid importing swarm history.
 
-Improve and check ordinary .shoal Markdown/Haskell source. Run `shoal check
---workspace .` in the candidate checkout to compile the next selection without
-starting actors, then check any changed recipe behavior through its owning tests. Favor better context
-packets, stable shared language, direct result routing and useful worker retention.
-Delete needless forwarding and duplicated instructions. Keep Sol execution and
-the declared specialist placements unless the human changes the architecture.
-Do not build a budget governor, parallel task registry or special RSI lifecycle.
-Finish the improvements in this context when feasible; do not spawn a second
-improvement swarm. Return Candidate with the exact customization commit, checks
-and remaining gates. The integration owner incorporates it into the authoritative
-original-root .shoal and starts the next swarm explicitly. Current frozen
-primitives and other workers' live behavior do not change when you edit files.
+Improve the .shoal package as the toolbench you would want to inhabit. Try each
+changed responsibility's starting packet: does it know why, where to act, how to
+invoke its next useful operation, and how to continue after a question or repair?
+Prefer strong reusable Haskell operations, useful task context and local retention.
+Remove needless relays and duplicate instructions. Preserve freedom to compose
+ordinary GHCi expressions; do not turn a useful pattern into a mandatory pipeline.
+Keep the planned Sol organization and specialist placements unless the human steers
+otherwise. Finish this engagement directly, without an improvement swarm.
+
+Edit helpers, Markdown prompts and their executable examples together in your
+candidate checkout. Compile with `shoal check --workspace .`; run the package's
+behavioral checking path documented in .shoal/plans/run.md. Report exactly what
+ran and any unavailable check; compiling is not behavioral acceptance. Check the
+candidate source, not the current swarm's frozen package. Include a regression for
+new behavior. Preserve runtime artifacts and app work.
+
+Return Produced (Candidate head checks gates), with the exact customization commit
+and activation/coverage gates, or Blocked reason evidence. The integration owner
+incorporates the candidate into the original root's authoritative .shoal. Editing
+files cannot reload this wave's prompts or primitives. Useful in-flight work ends
+or is deliberately handed off before an explicit next-swarm selection activates it.

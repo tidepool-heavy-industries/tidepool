@@ -197,8 +197,8 @@ data RouteState = RouteWaiting | RouteRunning | RouteCompleted | RouteFailed Tex
 
 route
   :: Member Watches effs
-  => Await (Settlement result)
-  -> (Settlement result -> Eff effs ())
+  => Await result
+  -> (result -> Eff effs ())
   -> Eff effs Route
 route awaiting@(Await dependencies _) callback = do
   let entry watchId = do
@@ -206,7 +206,7 @@ route awaiting@(Await dependencies _) callback = do
         case observed of
           WatchReady result -> callback result
           WatchUnavailable failure -> error (show failure)
-          WatchPending -> error "route ran before settlement"
+          WatchPending -> error "route ran before its dependency was ready"
   Route <$> send (RegisterRouteWith "route" entry dependencies)
 
 pollRoute :: Member Watches effs => Route -> Eff effs RouteState

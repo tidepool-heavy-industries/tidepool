@@ -19,7 +19,8 @@ owner if the scaffold is insufficient; do not queue on the parallel controls
 worker or add adapters around an unresolved ownership defect. The controls owner
 owns UI event bindings, canvas wiring and inspector presentation.
 
-Review exact owning consumers and retain the implementer for repairs. Check
+Commission independent review of exact owning consumers. Repair locally and reuse
+the reviewer; with delegated implementation, retain its worker for direct repairs. Check
 reorder/insert/remove, self and multi-node cycles, orphans, multiple independent
 roots and same-id/different-incarnation fixtures. Run the owning unit tests and
 compile all changed targets. This partial result may integrate before controls;

@@ -12,7 +12,7 @@ a consequential need surfaced to the human. Do not stop an active expert at a
 token target. The human steers any worker through its normal Codex TUI.
 
 Read the relevant component below with [the shared language](language.md).
-`Project.Plan` supplies `componentTask`, `componentLane`, `componentLead` and the
+`Project.Plan` supplies `component`, `componentLead` and the
 one `relationDesign` slot. These are ordinary editable functions. No import runs
 work, Markdown is not parsed into a scheduler, and the plan tree is not required
 to mirror supervision or context ancestry.
@@ -21,15 +21,17 @@ to mirror supervision or context ancestry.
 
 1. Sol contract lead owns [the shared contract](graph/contract/README.md).
    It first consults the [tagged Astra design leaf](graph/contract/design.md),
-   incorporates the supported decision, then installs its implementation/review/
-   integration lane. The result is a buildable, reviewed contract commit.
+   incorporates the supported decision, then implements and commissions independent
+   review, repairing locally when needed. The result is a buildable, reviewed contract commit.
 2. The Sol integration owner incorporates that exact result into its integration
    checkout and verifies it. Only then launch independent Sol leads for
    [projection](graph/projection/README.md) and [controls](graph/controls/README.md)
    from that accepted commit. Both implement against the same contract. They do
    not queue requests to each other to compensate for an incomplete scaffold.
-3. Each lead's local reviewer owns direct repair with its retained implementer.
-   Each lane returns its checked integration commit independently. The integration
+3. Each lead owns implementation by default. Its reviewer returns findings for
+   local repair and can be reused for the revised candidate. With useful delegated
+   implementation, the reviewer can request repairs directly from that retained
+   implementer. Each component returns its checked delivery independently. The integration
    owner incorporates each coherent result while the other lane continues, then
    runs the final combined checks. Keep partial product gates visible.
 4. On the human's “RSI time”, provide the outcome/snapshot packet to an ordinary
@@ -37,10 +39,11 @@ to mirror supervision or context ancestry.
    swarm restart. See [the run and improvement guide](run.md).
 
 The initial source is the app checkout after this .shoal package is committed.
-Resolve and record the exact commit before launch. `componentLane campaign part
-(GitRef exactCommit)` fixes both implementation and local integration seeds.
-The integration owner owns the final app branch; lane integration checkouts
-publish evidence-bearing commits, they do not silently update that branch.
+Resolve and record the exact commit before launch. `component campaign part
+(GitRef exactCommit)` constructs a Task with source, scope, rationale and acceptance.
+Attach relevant checked decisions with withDecision before selecting fresh workers.
+The integration owner owns the final app branch; a component delivery publishes
+evidence-bearing commits and does not silently update that branch.
 
 ## Authority and discretion
 

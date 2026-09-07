@@ -234,7 +234,7 @@ retain useful specialists and inspect the outcome and cleanup evidence.
 
 ```text
 route :: Member Watches effects
-      => Await (Settlement result) -> (Settlement result -> Eff effects ()) -> Eff effects Route
+      => Await result -> (result -> Eff effects ()) -> Eff effects Route
 pollRoute :: Member Watches effects => Route -> Eff effects RouteState
 listRoutes :: Member Watches effects => Eff effects [Route]
 snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
@@ -248,8 +248,13 @@ usageDelta :: SwarmSnapshot -> SwarmSnapshot -> UsageDelta
 ```
 
 A route installs one callback, returns promptly, and runs it on its owning actor
-when the typed settlement is ready. Known forwarding needs no model relay. Handle
-both `ReplyAvailable` and `ReplyUnavailable`. Callback effects have the owner's
+when the typed dependency is ready. It accepts ordinary applicative `Await`
+values, including settlements and `awaitProgressAfter` observations. Known
+forwarding needs no model relay. For settlements handle both `ReplyAvailable`
+and `ReplyUnavailable`; for progress preserve its cursor, cumulative unresolved
+facts, closure and rejection. Rearming from the captured cursor waits for a newer
+observation; it does not turn progress into a lossless event stream.
+Callback effects have the owner's
 permissions; captured handles never confer someone else's authority. Keep callbacks
 short: submit work or install the next route, then return. `pollRoute` reports
 waiting, running, completed, or retained failure. A failed callback is not retried
