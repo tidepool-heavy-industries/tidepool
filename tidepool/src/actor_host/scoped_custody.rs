@@ -167,8 +167,5 @@ pub(super) enum ScopedCleanupObservation {
     },
 }
 
-/// Uninhabited until HTTP tasks AND resident effects have an owning contract.
-enum HostWorkQuiescence {}
-
 #[cfg(test)]
 mod tests;

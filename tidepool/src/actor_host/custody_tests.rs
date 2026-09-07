@@ -823,10 +823,7 @@ async fn custody_missing_or_foreign_pane_never_clears_process_fence() {
         // Both return Ok from kill_pane without owning/reaping this process.
         owned.kill_pane(&pane).await.unwrap();
         let socket_root = tempfile::tempdir().unwrap();
-        let service = tokio::spawn(async {
-            std::future::pending::<Result<(), InteractiveApplicationError>>().await
-        });
-        abandon_interactive_application(&owned, &pane, service, socket_root.path()).await;
+        abandon_interactive_pane(&owned, &pane, socket_root.path()).await;
         drop(custody);
         assert!(bindings.lock().current(tree.id()).is_some());
         assert!(foreign.list_panes().await.unwrap().contains(&foreign_pane));
