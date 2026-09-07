@@ -3,8 +3,9 @@
 ## The vision
 
 Build challenging systems through a deliberately designed collaboration.
-Astra turns the human's intent into an architectural plan, a recursive tree of
-focused assignments, and a shared project language. Sol technical leads execute
+Astra interviews and collaborates with the supervising human to turn their intent
+into an architectural plan, a recursive tree of focused assignments, and a shared
+project language. Sol technical leads execute
 their branches, coordinate implementation and review, and activate Astra specialists
 at explicitly tagged subtasks. When the human asks for RSI, a separate Astra
 session studies the wave and directly improves the way the next work is done.
@@ -24,8 +25,12 @@ that many workers can reuse: good boundaries, meaningful types, clear assignment
 and powerful Haskell definitions. Give Sols enough understanding and responsibility
 to finish real work within that architecture.
 
-The plan is the main delivery from planning to execution. It should let a fresh
-lead begin its component without asking the planner to reconstruct the project.
+The plan is the main delivery from planning to execution. It owns the path to the
+finished, integrated feature across as many execution waves and generations of
+context as the work needs. A scaffold, reviewed contract or completed wave is an
+intermediate result unless it satisfies the human's agreed product outcome.
+The plan should let a fresh lead begin its component without asking the planner
+to reconstruct the project.
 The working Haskell environment carries the resulting relationships: typed
 requests, shared definitions, dependencies, review/repair flows, and retained
 evidence. Known coordination executes as code.
@@ -139,8 +144,26 @@ frozen interfaces; shared prompt/helper changes activate at the next swarm bound
 
 ## Astra delivers a plan that can be executed
 
-The planner begins with the intended behavior, relevant owning source, and the
-human's architectural preferences. It resolves the shared decisions that make
+The planner begins by interviewing the supervising human about the intended
+experience, architectural preferences and meaningful definition of done. Use
+existing answers; do not make the human repeat settled decisions. Ask focused
+questions where different answers would change the product, including concrete
+examples, interaction details, desired depth, tradeoffs and acceptable partial
+outcomes. Present considered options and recommendations so the human can steer
+with taste and judgment. Do not silently convert the planner's guesses into
+accepted product requirements. An explicit request to skip or shorten the
+interview is honored; record consequential assumptions for later correction.
+
+Before broad execution, describe a concrete finished user flow and the integrated
+evidence that will establish it. Work backward from that endpoint through the
+consumers, wiring and runtime capabilities it needs. When a capability is missing,
+give it an owning obligation or bring the resulting product change to the human.
+An honest partial deliverable does not silently reduce the overall definition of
+done. Revisit the human when readbacks or implementation reveal consequential new
+choices; routine implementation stays with Sol.
+
+Ground the resulting design in relevant owning source and actual public
+capabilities. Resolve the shared decisions that make
 parallel work possible: interface ownership, invariants, source boundaries,
 dependencies, acceptance, and useful partial deliveries.
 
@@ -200,6 +223,42 @@ The unknown is then visible work with an owner and a result.
 Dependencies determine admission. Independent branches progress together; a
 conditional specialist starts when its declared condition occurs. A useful
 candidate can reach its consumer while unrelated work continues.
+
+## One product plan can span multiple waves of context and work
+
+Keep the overall feature obligation alive across wave completion, pauses,
+context turnover and explicit swarm restarts. A wave is a useful execution and
+learning boundary, not necessarily the product's endpoint. Plan enough of the
+later work to show how current foundations become functioning consumers and an
+integrated feature; refine dependent detail when earlier discoveries make it
+concrete. Do not require the whole future tree to be known in advance.
+
+The plan may contain `waves/` directories with scoped plans and compact closeouts.
+Each closeout records accepted source, what actually works, remaining product
+gates and their next owners, important discoveries and corrected assumptions,
+unresolved human choices, and references to useful retained context/trace evidence.
+The next wave begins from that understanding and the accepted source. Mark
+superseded assumptions explicitly so older notes do not compete with the current
+contract. Git and existing run artifacts retain detailed history; do not copy
+every transcript into a new log or every worker's starting prompt.
+
+For example, a recipe feature can establish recipient semantics and source
+generation in one wave, implement the real palette and composer interaction in
+another, and complete live execution and integration in a later wave if needed.
+The agreed user flow is the acceptance target throughout. These are possible
+milestones, not a mandatory number of waves or worker-stage pipeline; one wave
+may complete the feature when its dependencies permit it.
+
+An approved post-planning context is a useful future `checkpointContext` fork
+point, and later accepted contracts may establish additional ones. This capability
+is proposed, not currently promised by the package. Preserve exact transcript
+boundaries and definition identities through the existing runtime owners when
+implemented; a retained checkpoint does not guarantee provider cache residency.
+
+Fresh contexts or a new task wave can use the current frozen swarm definitions.
+Adopting changed shared prompts/modules still requires an explicit swarm boundary.
+Respect an operator hold: a completed checkpoint or incoming notification does
+not authorize restarting a paused wave.
 
 ## Each component is an actionable responsibility
 
