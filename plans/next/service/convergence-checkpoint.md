@@ -68,3 +68,28 @@ canary. Freeze unrelated cleanup expansion and escalate genuinely new architectu
 Most service effort so far went to cleanup/custody prerequisites and repair loops,
 not controller implementation. No measured per-phase timing or ETA is claimed.
 Retained leads/experts and pending typed watches remain live across this checkpoint.
+
+## Canonical host repair integrated
+
+The pairing blocker above is superseded by reviewed candidate02a2fe316b166460c5e485c4c2cccfd01723664a,
+merged as da78e0be0e318811cc543d3f1e3070487cf0cc57. Production constructs the
+canonical endpoint from the exact retained actor inside the hosting entry point;
+independently supplied endpoints exist only as an untrusted negative-test seam.
+Stored seal/shutdown/HTTP operations survive waiter loss. Confirmed exact resident
+cleanup permits HTTP drain, not native/external cleanup or final custody release.
+
+Direct integrated check at da78e0be:
+`NEXTEST_TEST_THREADS=1 just test-lib tidepool 'test(actor_host::hosted_retirement::tests::)'`
+ran9 tests:9 passed,146 skipped,62.345s; run62af53ce-4de7-4e44-945d-66b46be4e83e.
+This includes the final repaired foreign initially-terminal endpoint fixture,
+live/trusted-terminal paths, lost seal/HTTP/shutdown waiters, unsupported/foreign
+seals and failed-child uncertainty. Library test target compiled; repository
+Nix/extractor wrapper observed private daemon940778 torn down. Evidence:
+service worktree target/service-retirement-evidence/canonical-host-integrated.log.
+`cargo fmt --all -- --check` and `git diff --check` passed at integration.
+No Shoal executable at this integrated revision was launched.
+
+Native client source handoff is now retained in native-client-handoff.md at2dc3daf1.
+Persistent controller/bridge implementation, root matching pin/build, mounted
+acceptance and final native/custody settlement remain open. This is still a
+preparation delivery, not completion of the service product.
