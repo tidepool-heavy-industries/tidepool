@@ -76,7 +76,7 @@ branches, without inheriting the builder's transcript or learning orchestration
 from the Shoal implementation. This document does not itself launch a swarm.
 The [wave closeout](evidence/wave-closeout.md) records historical source and checks;
 NEXT.md owns current scope and acceptance.
-The [workbench curation plan](package-curation.md) is the next implementation pass:
+The [workbench curation plan](package-curation.md) applies this design to the package:
 independently callable GHCi tools, substantive lead ownership, complete decision
 handoffs and useful task contexts. The worked stage diagrams below express
 responsibilities and possible compositions, not a required actor for each stage.

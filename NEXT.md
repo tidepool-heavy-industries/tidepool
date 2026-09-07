@@ -18,22 +18,22 @@ the [workspace design](plans/next/workspace-pilot.md) owns customization and
 context packaging; the [Haskell reference](plans/next/sol-worker-routing.md)
 contains broader interface sketches. Exact implemented signatures belong in the
 [shipped API guide](prompts/shoal/api-guide.md) and checked source.
-The [workspace package](examples/shoal-workspace/README.md) now contains the
-executable recipes and a concrete application plan tree. The previous package is
-installed in `/home/inanna/dev/shoal-repl/.shoal`; replace it after this curation
-revision is checked. Before live acceptance, complete the
-[workbench curation plan](plans/next/package-curation.md): useful lead ownership,
-independently callable Haskell operations, complete task/decision handoffs,
-pending-question attention, stronger prompts and candidate-package checks.
+The [workspace package](examples/shoal-workspace/README.md) contains executable
+GHCi examples and a concrete application plan tree, installed in
+`/home/inanna/dev/shoal-repl/.shoal`. The [curation review](plans/next/evidence/workbench-curation.md)
+records the responsibility audit and checks for the [workbench curation plan](plans/next/package-curation.md).
 
-Curation has replaced the fixed worker procession with independent workbench
+Curation replaced the fixed worker procession with independent workbench
 operations, one reviewed revision, source-bearing tasks and explicit accepted
-decisions. Responsibility prompts now teach starting work and continuing after
-review/repair/questions. Focused resident checks exercise both repair relationships,
-cumulative attention and decision propagation into a fresh consumer. Portable
-candidate-package behavioral checking, a complete combined rehearsal, installation
-and fixed-build refresh remain. The curation plan tracks that unfinished work;
-the foundation/check inventory below records the earlier accepted substrate.
+decisions. Prompts teach starting and continuing implementation, review, repair,
+questions and requested RSI. Portable candidate checks execute both repair
+relationships, cumulative attention, decision propagation to a fresh consumer,
+failed routing/steering and checked customization through an explicit new swarm.
+All seven curation steps are complete. The fixed build and installed package
+passed 43 recipe assertions using the packaged compiler daemon; the application
+readiness record pins the executable, source and definition identity. Cold standalone
+checking has substantial startup overhead, recorded in the review. Fresh-model
+application acceptance remains the subsequent operator action.
 
 ## Architecture and settled boundaries
 
@@ -144,8 +144,13 @@ The authored operating package composes this foundation:
   evidence and selected RSI context. The deterministic delivery cycle exercises
   local integration, an ordinary RSI worker, its customization commit, current
   prompt retention and compilation of the next frozen selection.
-- `shoal check --workspace PATH` validates authored customization through the same
-  frozen-source compiler as startup, without starting actors or providers.
+- `shoal check --workspace PATH` compiles authored customization through the same
+  frozen-source compiler as startup, without actors or providers. `--recipes`
+  additionally executes the candidate's `[haskell].checks` entry points through
+  the existing resident driver in isolated Git repositories. The check-only
+  Tidepool.Check effect supplies turns, activations, source operations and native
+  presentation seams; package Haskell chooses the workflow. Native actors do not
+  receive that effect. The recipes check their own source fixtures, not app behavior.
 
 ## Acceptance on a separate application
 
@@ -170,7 +175,7 @@ Product acceptance requires a useful multi-lane application change: Sol leads
 execute an Astra-authored plan, a tagged Astra specialist contributes hard work,
 review and repair retain exact evidence, and partial results integrate while
 independent work continues. Questions and failed routes reach the right owner
-without polling or routine Astra relay. An ordinary requested RSI engagement
+without model polling loops or routine Astra relay. An ordinary requested RSI engagement
 then prepares a checked workspace improvement consumed by the next swarm.
 
 ## Verification and checkpoint discipline
@@ -189,19 +194,13 @@ do not prove that fresh Sols can use the supplied guidance. Keep unperformed
 acceptance visible. Follow the user's goal scope for implementation and later
 application runs; this handoff does not itself start a paid swarm.
 
-Current focused checks: frozen selection and resident recipe checks passed,
-including selected Markdown instructions, preserved authority, direct retained
-repair and original response identity. Callback replies share the ordinary
-settlement path and preserve cancellation. The delivery-lane test integrates an
-actual commit in an integration checkout and preserves a partial product gate
-without waking the lead to relay results. Non-root committed-ref admission
-requires exact active custody; stale/unbound/released principals and root dirty
-snapshots are rejected by the owning worktree handler. `just fixtures-check` passed all 217
-semantic tests after the instruction protocol extension. Further checks cover
-frozen-source compilation, exact prompt-byte round trips, owned route recovery,
-planned specialist consultation, failed-owner lifecycle propagation, and a mounted
-process surviving failure cleanup in a real tmux pane. The planned package's
-resident delivery/RSI cycle and the actual `shoal-repl` workspace compilation pass.
+Current curation evidence is recorded in the [review](plans/next/evidence/workbench-curation.md):
+14 focused integration tests, the portable package recipes, a candidate-only
+context defect/repair proof, schema-generation checks and the fixed build.
+The installed application readiness record owns exact executable and definition
+identities. Earlier foundation checks cover committed-ref custody, independent
+lifetimes, native failure preservation and the frozen interface; their detailed
+historical reports do not substitute for current package acceptance.
 Fresh-model application acceptance remains deliberately unperformed.
 
 Snapshot comparison checks execute resumed-thread deduplication, model-selection

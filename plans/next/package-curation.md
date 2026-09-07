@@ -1,12 +1,11 @@
 # Curate a useful Shoal workbench before the first application wave
 
-Status: implementation in progress. The workbench operations, task/decision
-handoffs and responsibility prompts have been revised. Focused resident checks
-cover direct/reused review, retained repair and a checked decision reaching a fresh
-consumer while review remains open. Portable candidate recipe checking, the complete
-combined rehearsal, application installation and fixed-build refresh remain. Complete this pass
-before describing the prepared Sol run as ready. Keep the existing fixed-build
-checks as evidence of their exercised boundaries, not a signoff on this revision.
+Status: all seven implementation steps complete. The curated package is installed
+in shoal-repl, the fixed build passed, and its installed executable passed all 43
+recipe assertions using the packaged compiler daemon. The
+[curation review](evidence/workbench-curation.md) records the responsibility audit,
+exact evidence and cold-check performance finding. Live application acceptance
+is the subsequent operator run.
 
 The [vision](planned-swarm.md) still owns the operating model: Astra prepares
 the architecture and project language, Sol executes substantial components,
