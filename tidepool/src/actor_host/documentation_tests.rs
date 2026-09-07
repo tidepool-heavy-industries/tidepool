@@ -1053,6 +1053,21 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
             .contains("deliberate route failure"),
         "{state}"
     );
+    let recovered = committed(root.as_ref(), "recovered <- listRoutes\ninspectFull (length recovered)\nstates <- traverse pollRoute recovered\ninspectFull states").await;
+    assert_eq!(recovered["items"][1]["output"], "3", "{recovered}");
+    assert!(
+        recovered["items"][3]["output"]
+            .as_str()
+            .unwrap()
+            .contains("deliberate route failure"),
+        "{recovered}"
+    );
+    let foreign = committed(
+        consumer.policy.as_ref(),
+        "owned <- listRoutes\ninspectFull (length owned)",
+    )
+    .await;
+    assert_eq!(foreign["items"][1]["output"], "0", "{foreign}");
     let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
     committed(root.as_ref(), "stopAgent (forkedActor producer)").await;
@@ -1065,6 +1080,17 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     assert_eq!(handled["items"][0]["output"], "RouteCompleted", "{handled}");
     assert_eq!(handled["items"][1]["output"], "WatchForgotten", "{handled}");
     assert_eq!(handled["items"][2]["output"], "WatchForgotten", "{handled}");
+    let forgotten = committed(root.as_ref(), "pollRoute broken").await;
+    assert_eq!(
+        forgotten["items"][0]["output"], "RouteRejected ReplyStale",
+        "{forgotten}"
+    );
+    let retained = committed(
+        root.as_ref(),
+        "retained <- listRoutes\ninspectFull (length retained)",
+    )
+    .await;
+    assert_eq!(retained["items"][1]["output"], "2", "{retained}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1092,6 +1118,10 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
 }
 
 async fn workspace_campaign() -> TestCampaign {
+    workspace_campaign_with(|_| {}).await
+}
+
+async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign {
     TestCampaign::start_with_config(
         tidepool_actor::ResearchPolicy::default(),
         |admission| admission,
@@ -1119,6 +1149,10 @@ async fn workspace_campaign() -> TestCampaign {
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/lead.md"),
                 ),
                 (
+                    "prompts/specialist.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/specialist.md"),
+                ),
+                (
                     "prompts/review.md",
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/review.md"),
                 ),
@@ -1139,6 +1173,7 @@ async fn workspace_campaign() -> TestCampaign {
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
                 std::fs::write(target, content).unwrap();
             }
+            configure(&authored);
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),
@@ -1326,6 +1361,43 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     assert_eq!(replied["status"], "replied", "{replied}");
     let result = committed(reviewer.policy.as_ref(), "state <- pollWatch repaired\ninspectFull (fmap (either (const False) (const True) . repairValue) state)").await;
     assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
+    committed(
+        reviewer.policy.as_ref(),
+        include_str!("fixtures/project_design_question.hs"),
+    )
+    .await;
+    let (expert, _expert_binding) = next_project_worker(&mut campaign).await;
+    assert_eq!(expert.model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(expert.fork_effort, Some(tidepool_actor::ForkEffort::Medium));
+    assert_eq!(expert.supervisor_parent, Some(reviewer.actor.identity()));
+    assert_eq!(expert.context_parent, None);
+    let question = committed(expert.policy.as_ref(), "inspectFull sessionInput").await;
+    for expected in [
+        revised.as_str(),
+        "focused repair check",
+        "feature review",
+        "retain the gate",
+    ] {
+        assert!(
+            question.to_string().contains(expected),
+            "missing {expected}: {question}"
+        );
+    }
+    let answered = dispatch_haskell_script(
+        expert.policy.as_ref(),
+        "respond (Decision \"retain the preparation gate\" [\"boundary evidence\"])",
+    )
+    .await;
+    assert_eq!(answered["status"], "replied", "{answered}");
+    let decision = committed(reviewer.policy.as_ref(), "design <- pollWatch designReady\ninspectFull (fmap settledValue design)\npollReply sessionReply").await;
+    assert!(
+        decision["items"][1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("retain the preparation gate"),
+        "{decision}"
+    );
+    assert_eq!(decision["items"][2]["output"], "ReplyOpen", "{decision}");
     let original = committed(
         root.as_ref(),
         "original <- pollResponse (forkedResponse worker)\ninspectFull original",
@@ -1566,6 +1638,33 @@ async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
             "missing {expected}: {delivery}"
         );
     }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn frozen_prompt_bytes_round_trip_through_haskell() {
+    let campaign = workspace_campaign_with(|authored| {
+        let config = authored.join("config.toml");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("literal = \"prompts/literal.md\"\n");
+        std::fs::write(config, text).unwrap();
+        std::fs::write(
+            authored.join("prompts/literal.md"),
+            "\u{1}f\0".to_owned() + "9\n\"\\\tλ\u{7f}",
+        )
+        .unwrap();
+    })
+    .await;
+    let result = committed(
+        campaign.root_installation.policy.as_ref(),
+        "inspectFull (fmap (map fromEnum . T.unpack) (workspacePrompt \"literal\"))",
+    )
+    .await;
+    assert_eq!(
+        result["items"][0]["output"], "Just [1,102,0,57,10,34,92,9,955,127]",
+        "{result}"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

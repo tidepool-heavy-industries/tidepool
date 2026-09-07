@@ -886,7 +886,7 @@ where
     // Wait for admitted startup to register, then permanently reject creation,
     // including through cloned contexts and shutdown hooks.
     *state.context.child_admission_closed.write().await = true;
-    let children = shutdown_children(&state.context, Duration::from_secs(15)).await;
+    let children = shutdown_children(&state.context, requested.kind, Duration::from_secs(15)).await;
     let (hook, realm) = state
         .behavior
         .shutdown_components(&state.context, &requested)
@@ -962,6 +962,7 @@ impl Drop for StartupCustody {
 
 async fn shutdown_children(
     context: &KernelContext,
+    owner_exit: ActorExitKind,
     timeout: Duration,
 ) -> crate::CleanupComponentOutcome {
     let (children, mut outcome) = {
@@ -975,7 +976,10 @@ async fn shutdown_children(
     for child in children {
         shutdowns.push(async move {
             let requested = ActorTerminal {
-                kind: ActorExitKind::Cancelled,
+                kind: match owner_exit {
+                    ActorExitKind::Failed => ActorExitKind::Failed,
+                    ActorExitKind::Completed | ActorExitKind::Cancelled => ActorExitKind::Cancelled,
+                },
                 summary: "owner actor stopped".into(),
             };
             let result =
@@ -1739,6 +1743,33 @@ mod tests {
         owner_task.await.expect("owner task");
     }
     #[tokio::test]
+    async fn owner_failure_propagates_failure_instead_of_intentional_cancellation() {
+        for kind in [ActorExitKind::Failed, ActorExitKind::Cancelled] {
+            let fixture = behavior(false);
+            let (owner, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+            let (reply, received) = oneshot::channel();
+            owner
+                .address()
+                .send_message(KernelMessage::Tool {
+                    invocation: tool_invocation("spawn"),
+                    reply: reply.into(),
+                })
+                .unwrap();
+            received.await.unwrap().unwrap();
+            let child = fixture.spawned_child.lock().clone().unwrap();
+            owner
+                .shutdown(ActorTerminal {
+                    kind,
+                    summary: "stop owner".into(),
+                })
+                .await
+                .unwrap();
+            task.await.unwrap();
+            assert_eq!(child.terminal().wait().await.kind, kind);
+        }
+    }
+
+    #[tokio::test]
     async fn cleanup_child_force_and_terminal_only_never_confirm() {
         let fixture = behavior(false);
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
@@ -1768,7 +1799,8 @@ mod tests {
             child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
             forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
         };
-        let result = shutdown_children(&context, Duration::from_millis(1)).await;
+        let result =
+            shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_millis(1)).await;
         assert!(matches!(
             result,
             crate::CleanupComponentOutcome::Unconfirmed(_)
@@ -1793,7 +1825,8 @@ mod tests {
         assert!(context.children.lock().is_empty());
         assert!(
             matches!(
-                shutdown_children(&context, Duration::from_millis(1)).await,
+                shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_millis(1))
+                    .await,
                 crate::CleanupComponentOutcome::Unconfirmed(_)
             ),
             "forgetting routing must not erase cleanup uncertainty"
@@ -1839,7 +1872,8 @@ mod tests {
                     crate::CleanupComponentOutcome::Unconfirmed(_)
                 ));
             }
-            let outcome = shutdown_children(&context, Duration::from_secs(1)).await;
+            let outcome =
+                shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_secs(1)).await;
             // Probe behavior cannot prove realm cleanup even on successful startup.
             assert!(!matches!(
                 outcome,

@@ -495,7 +495,7 @@ impl DurableActorEvent {
             Self::Text(message) => message.clone(),
             Self::Typed(TypedActorEvent::WatchChanged { notification })
                 if matches!(notification.transition, tidepool_actor::WatchTransition::RouteFailed { .. }) => format!(
-                "route {} failed: {:?} ({}). Inspect its retained handle with `pollRoute`. Earlier effects may have completed; do not replay the callback blindly.",
+                "route {} failed: {:?} ({}). Recover owned handles with `listRoutes`, then inspect with `pollRoute`. Earlier effects may have completed; do not replay the callback blindly.",
                 notification.watch.0,
                 notification.current,
                 elapsed(notification.occurred_at_unix_ms),
@@ -586,7 +586,9 @@ impl InteractiveCleanupReceipt {
 }
 
 struct InteractiveApplicationOwner {
-    cancel: Option<oneshot::Sender<()>>,
+    cancel: Option<oneshot::Sender<NativeRetirement>>,
+    native_retirement: NativeRetirement,
+    pane: Arc<Mutex<Option<TmuxPaneId>>>,
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
     custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
@@ -594,6 +596,14 @@ struct InteractiveApplicationOwner {
     launch: HostLaunchState,
     terminal: Option<ActorTerminal>,
     retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
+}
+
+/// Coordination failure does not authorize terminating the native conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum NativeRetirement {
+    #[default]
+    Preserve,
+    Terminate,
 }
 
 #[derive(Clone, Copy)]
@@ -636,11 +646,15 @@ impl InteractiveApplicationOwner {
             let _ = gate.mark_failed();
         }
         if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
+            let _ = cancel.send(self.native_retirement);
         }
     }
 
     fn retired(&mut self, terminal: ActorTerminal) {
+        self.native_retirement = match terminal.kind {
+            ActorExitKind::Failed => NativeRetirement::Preserve,
+            ActorExitKind::Completed | ActorExitKind::Cancelled => NativeRetirement::Terminate,
+        };
         if let Some(custody) = &self.custody {
             custody.actor_stopped(&terminal);
         }
@@ -885,64 +899,21 @@ struct InteractiveApplicationError {
     detail: String,
 }
 
-#[derive(Debug)]
-enum InteractiveFailureDomain {
-    ActorDegraded {
-        actor: ActorRef,
-        failure: ExternalApplicationFailure,
-    },
-    RootRestartRequired {
-        detail: String,
-    },
-}
-
-fn classify_application_failure(
-    root: ActorRef,
-    actor: ActorRef,
-    failure: ExternalApplicationFailure,
-) -> InteractiveFailureDomain {
-    if actor == root {
-        InteractiveFailureDomain::RootRestartRequired {
-            detail: format!("root {root:?}: {}", failure.detail),
-        }
-    } else {
-        InteractiveFailureDomain::ActorDegraded { actor, failure }
-    }
-}
-
 async fn apply_application_failure(
-    root: ActorRef,
     actor: LocalActorRef,
     failure: ExternalApplicationFailure,
 ) -> Result<(), String> {
     let identity = actor.identity();
-    match classify_application_failure(root, identity, failure) {
-        InteractiveFailureDomain::RootRestartRequired { detail } => actor
-            .shutdown(ActorTerminal {
-                kind: ActorExitKind::Failed,
-                summary: detail,
-            })
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-        InteractiveFailureDomain::ActorDegraded {
-            actor: classified,
-            failure,
-        } => {
-            debug_assert_eq!(classified, identity);
-            match actor.report_external_failure(failure).await {
-                Ok(
-                    ExternalFailureDisposition::Applied
-                    | ExternalFailureDisposition::AlreadyTerminal,
-                ) => Ok(()),
-                Ok(ExternalFailureDisposition::UnknownOrStale) => Err(format!(
-                    "actor registry rejected exact deployed actor {identity:?} as unknown or stale"
-                )),
-                Err(error) => Err(format!(
-                    "actor registry could not record application failure for {identity:?}: {error}"
-                )),
-            }
+    match actor.report_external_failure(failure).await {
+        Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {
+            Ok(())
         }
+        Ok(ExternalFailureDisposition::UnknownOrStale) => Err(format!(
+            "actor registry rejected exact deployed actor {identity:?} as unknown or stale"
+        )),
+        Err(error) => Err(format!(
+            "actor registry could not record application failure for {identity:?}: {error}"
+        )),
     }
 }
 
@@ -1062,7 +1033,7 @@ pub async fn run(
         }
     };
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
-    let (shutdown, shutdown_rx) = watch::channel(false);
+    let (shutdown, shutdown_rx) = watch::channel(None);
     let (root_config, root_config_rx) = watch::channel(config.clone());
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let mut applications_task = tokio::spawn(run_interactive_applications(
@@ -1072,7 +1043,7 @@ pub async fn run(
             root: root_actor.clone(),
             config: config.clone(),
             run_root: run_root.clone(),
-            tmux,
+            tmux: tmux.clone(),
             backend,
             worktrees,
             bindings,
@@ -1096,6 +1067,15 @@ pub async fn run(
                 result = &mut root_task, if root_active => {
                     result.map_err(join_error)?;
                     let terminal = root_actor.terminal().get().ok_or_else(|| runtime_error("root stopped without terminal"))?;
+                    if terminal.kind == ActorExitKind::Failed {
+                        let pane = application_owners.lock().get(&root_actor.identity())
+                            .and_then(|owner| owner.pane.lock().clone());
+                        if let Err(error) = confirm_native_exit(&tmux, pane.as_ref()).await {
+                            tracing::error!(%error, "root coordination stopped; retaining original TUI without automatic conversation resume");
+                            root_active = false;
+                            continue;
+                        }
+                    }
                     match prepare_root_recovery(&mut config, root_actor.identity(), terminal, &mut recovery).await {
                         Ok(RootRunDisposition::Recover) => {}
                         Ok(RootRunDisposition::Complete) => {
@@ -1117,15 +1097,28 @@ pub async fn run(
             }
         }
     }.await;
+    shutdown.send_replace(Some(if result.is_ok() {
+        NativeRetirement::Terminate
+    } else {
+        NativeRetirement::Preserve
+    }));
     operator.shutdown().await;
     forest.shutdown().await;
-    shutdown.send_replace(true);
     let cleanup = if !applications_finished {
         await_applications(&mut applications_task, APPLICATION_SHUTDOWN_TIMEOUT).await
     } else {
         Ok(())
     };
     handoff_application_owners(application_owners, applications_task, cleanup, result)
+}
+
+async fn confirm_native_exit(tmux: &TmuxSession, pane: Option<&TmuxPaneId>) -> Result<(), String> {
+    let pane = pane.ok_or("native launch outcome is unknown")?;
+    match tmux.pane_status(pane).await {
+        Ok(Some(status)) if status.dead => Ok(()),
+        Ok(_) => Err("native pane is live or its exit is unconfirmed".into()),
+        Err(error) => Err(format!("cannot confirm native pane exit: {error}")),
+    }
 }
 
 /// Classify an intentional completion or prepare an abnormal root for a fresh
@@ -1158,7 +1151,7 @@ async fn root_recovery_launch_mode(
     binding_path: &Path,
     terminal: &ActorTerminal,
 ) -> Result<Option<(InteractiveLaunchMode, QueueReadyThread)>, Box<dyn std::error::Error>> {
-    if terminal.kind == ActorExitKind::Completed {
+    if terminal.kind != ActorExitKind::Failed {
         return Ok(None);
     }
     let thread = read_interactive_binding(binding_path)
@@ -1251,23 +1244,36 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
     ]
 }
 
-fn compile_root(
-    config: &ActorHostConfig,
+struct CompiledShoalDriver {
+    preamble: String,
+    include: Vec<PathBuf>,
+    compiled: tidepool_runtime::session::CompiledTurn,
+}
+
+/// Compile the exact selected driver and imports without launching an actor.
+/// Initialization uses this before replacing a live swarm; admission uses the
+/// same compiler path and the toolchain owner's content-addressed cache.
+pub(crate) fn validate_workspace_program(
+    inputs: &crate::shoal::workspace::FrozenWorkspace,
     run_root: &Path,
-    worktrees: WorktreeManager,
-    worktree_authority: ActorWorktreeAuthority,
-) -> Result<
-    (
-        ActorWorkbenchSource,
-        ShoalRoot,
-        Arc<tidepool_runtime::session::CompiledTurn>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<(), Box<dyn std::error::Error>> {
+    compile_driver(
+        &crate::haskell_sources::ensure_shoal_haskell()?,
+        Some(inputs),
+        run_root,
+    )?;
+    Ok(())
+}
+
+fn compile_driver(
+    haskell_root: &Path,
+    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+    run_root: &Path,
+) -> Result<CompiledShoalDriver, Box<dyn std::error::Error>> {
     let declarations = shoal_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
-    include.push(config.haskell_root.clone());
+    include.push(haskell_root.to_path_buf());
     include.push(crate::haskell_sources::ensure_stdlib()?);
     let mut preamble = insert_preamble_imports(
         &tidepool_mcp::build_preamble_with_companions_hiding(
@@ -1278,7 +1284,7 @@ fn compile_root(
         ),
         DRIVER_MODULE,
     );
-    if let Some(inputs) = &config.workspace_inputs {
+    if let Some(inputs) = inputs {
         include.extend(inputs.include.iter().cloned());
         for module in inputs.import_modules() {
             preamble = insert_preamble_imports(&preamble, module);
@@ -1308,6 +1314,37 @@ fn compile_root(
         }
     };
 
+    Ok(CompiledShoalDriver {
+        preamble,
+        include,
+        compiled,
+    })
+}
+
+fn compile_root(
+    config: &ActorHostConfig,
+    run_root: &Path,
+    worktrees: WorktreeManager,
+    worktree_authority: ActorWorktreeAuthority,
+) -> Result<
+    (
+        ActorWorkbenchSource,
+        ShoalRoot,
+        Arc<tidepool_runtime::session::CompiledTurn>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let CompiledShoalDriver {
+        preamble,
+        include,
+        compiled,
+    } = compile_driver(
+        &config.haskell_root,
+        config.workspace_inputs.as_ref(),
+        run_root,
+    )?;
+    let declarations = shoal_effect_declarations();
+    let session_root = run_root.join("haskell-session");
     let session = fresh_session_id();
     let mut module_env = tidepool_mcp::session_decl_module_env_hiding(
         &declarations,
@@ -1472,7 +1509,7 @@ fn spawn_owned_retirement(
     tmux: TmuxSession,
     owners: &InteractiveOwners,
 ) {
-    let (scope, receipt_slot) = {
+    let (scope, receipt_slot, native_retirement) = {
         let rows = owners.lock();
         let row = rows
             .get(&deployment.actor)
@@ -1482,12 +1519,13 @@ fn spawn_owned_retirement(
                 .as_ref()
                 .map(|retention| retention.slot.clone()),
             row.retirement.clone(),
+            row.native_retirement,
         )
     };
     // Only slots cross the task boundary; neither owns a back-reference to its
     // map row. Namespace cleanup is status only and does not discharge host work.
     retirements.spawn(async move {
-        if let Some(scope) = scope {
+        if let Some(scope) = scope.filter(|_| native_retirement == NativeRetirement::Terminate) {
             let stopped = tokio::task::spawn_blocking(move || {
                 scoped_custody::stop_slot(
                     &scope,
@@ -1499,7 +1537,8 @@ fn spawn_owned_retirement(
                 tracing::warn!("scoped process cleanup remains unconfirmed in retained owner");
             }
         }
-        let receipt = retire_interactive_application_guarded(deployment, &tmux).await;
+        let receipt =
+            retire_interactive_application_guarded(deployment, &tmux, native_retirement).await;
         receipt_slot.lock().get_or_insert_with(|| receipt.clone());
         receipt
     });
@@ -1509,7 +1548,7 @@ async fn run_interactive_applications(
     mut lifecycle: mpsc::UnboundedReceiver<LocalResidentDeployment>,
     application_owners: InteractiveOwners,
     fleet: InteractiveFleet,
-    shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<Option<NativeRetirement>>,
     mut root_config: watch::Receiver<ActorHostConfig>,
 ) -> Result<(), String> {
     let InteractiveFleet {
@@ -1600,7 +1639,6 @@ async fn run_interactive_applications(
                     deployments[index].failure_reported = true;
                     let detail = "interactive application exited before actor settlement".to_string();
                     if let Err(error) = apply_application_failure(
-                        root_identity,
                         local_actor,
                         ExternalApplicationFailure {
                             class: ExternalApplicationFailureClass::UnexpectedExit,
@@ -1644,8 +1682,11 @@ async fn run_interactive_applications(
                             break Some(format!("duplicate application owner for {actor:?}"));
                         }
                         let hosted_slot = Arc::new(Mutex::new(None));
+                        let pane_slot = Arc::new(Mutex::new(None));
                         owners.insert(actor, InteractiveApplicationOwner {
                             cancel: Some(cancel),
+                            native_retirement: NativeRetirement::Preserve,
+                            pane: pane_slot.clone(),
                             fork_gate: installation.fork_gate.clone(),
                             custody: installation.worktree_custody.clone(),
                             scoped_retention: None, // No scope launch selection before native pin.
@@ -1663,6 +1704,7 @@ async fn run_interactive_applications(
                                 cancelled,
                                 fork_parent_thread,
                                 hosted_slot,
+                                pane_slot,
                             ))
                             .catch_unwind()
                             .await
@@ -1691,7 +1733,6 @@ async fn run_interactive_applications(
                                 let local_actor = application.local_actor.clone();
                                 tracing::warn!(?actor, %error, "actor activation delivery degraded");
                                 if let Err(error) = apply_application_failure(
-                                    root_identity,
                                     local_actor,
                                     ExternalApplicationFailure {
                                         class: ExternalApplicationFailureClass::ToolHostStartup,
@@ -1880,7 +1921,6 @@ async fn run_interactive_applications(
                             owner.cancel();
                         }
                         if let Err(error) = apply_application_failure(
-                            root_identity,
                             local_actor,
                             ExternalApplicationFailure {
                                 class: error.operation.failure_class(),
@@ -1941,7 +1981,6 @@ async fn run_interactive_applications(
                             break Some(format!("lost exact local actor for failed application {actor:?}"));
                         };
                         if let Err(error) = apply_application_failure(
-                            root_identity,
                             local_actor,
                             ExternalApplicationFailure {
                                 class: error.operation.failure_class(),
@@ -1996,7 +2035,6 @@ async fn run_interactive_applications(
                             continue;
                         };
                         if let Err(error) = apply_application_failure(
-                            root_identity,
                             local_actor,
                             ExternalApplicationFailure {
                                 class: ExternalApplicationFailureClass::ToolHostStartup,
@@ -2017,7 +2055,13 @@ async fn run_interactive_applications(
         }
     };
 
+    let native_retirement = if failure.is_some() {
+        NativeRetirement::Preserve
+    } else {
+        shutdown.borrow().unwrap_or_default()
+    };
     for owner in application_owners.lock().values_mut() {
+        owner.native_retirement = native_retirement;
         owner.cancel();
     }
     let launch_cleanup =
@@ -2183,9 +2227,10 @@ async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
 async fn launch_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
-    cancelled: oneshot::Receiver<()>,
+    cancelled: oneshot::Receiver<NativeRetirement>,
     fork_parent_thread: Option<BackendThreadId>,
     hosted_slot: hosted_retirement::HostedSlot,
+    pane_slot: Arc<Mutex<Option<TmuxPaneId>>>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let worktree = prepare_actor_worktree(&installation, &context)?;
     launch_prepared_interactive_application(
@@ -2195,6 +2240,7 @@ async fn launch_interactive_application(
         cancelled,
         fork_parent_thread,
         hosted_slot,
+        pane_slot,
     )
     .await
 }
@@ -2289,9 +2335,10 @@ async fn launch_prepared_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
     worktree: Option<WorktreeHandle>,
-    mut cancelled: oneshot::Receiver<()>,
+    mut cancelled: oneshot::Receiver<NativeRetirement>,
     fork_parent_thread: Option<BackendThreadId>,
     hosted_slot: hosted_retirement::HostedSlot,
+    pane_slot: Arc<Mutex<Option<TmuxPaneId>>>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let InteractiveLaunchContext {
         base_prompt,
@@ -2627,29 +2674,25 @@ async fn launch_prepared_interactive_application(
         }
     };
 
+    *pane_slot.lock() = Some(pane.clone());
     if let Err(error) = tmux.retain_pane_on_exit(&pane).await {
-        abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
-        return Err(socket_launch_failure(
-            actor_identity,
-            InteractiveOperation::LaunchProcess,
-            format!("cannot retain actor pane for exit diagnosis: {error}"),
-            socket_directory,
-        ));
+        tracing::warn!(actor = ?actor_identity, %error, "cannot retain actor pane for exit diagnosis; application remains active");
     }
 
     if actor_identity == root {
         if let Err(error) = tmux.select_window_for_pane(&pane).await {
-            abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
-            return Err(socket_launch_failure(
-                actor_identity,
-                InteractiveOperation::LaunchProcess,
-                error,
-                socket_directory,
-            ));
+            tracing::warn!(actor = ?actor_identity, %error, "cannot select root window; application remains active");
         }
     }
-    if cancelled.try_recv().is_ok() {
-        abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
+    if let Ok(native_retirement) = cancelled.try_recv() {
+        abandon_interactive_application(
+            &tmux,
+            &pane,
+            service,
+            socket_directory.path(),
+            native_retirement,
+        )
+        .await;
         return Err(socket_launch_failure(
             actor_identity,
             InteractiveOperation::LaunchProcess,
@@ -3072,11 +3115,16 @@ async fn publish_inbox_event(
 async fn retire_interactive_application_guarded(
     deployment: InteractiveDeployment,
     tmux: &TmuxSession,
+    native_retirement: NativeRetirement,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
-    match AssertUnwindSafe(retire_interactive_application(deployment, tmux))
-        .catch_unwind()
-        .await
+    match AssertUnwindSafe(retire_interactive_application(
+        deployment,
+        tmux,
+        native_retirement,
+    ))
+    .catch_unwind()
+    .await
     {
         Ok(receipt) => receipt,
         Err(_) => InteractiveCleanupReceipt {
@@ -3094,6 +3142,7 @@ async fn retire_interactive_application_guarded(
 async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
+    native_retirement: NativeRetirement,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
     let mut components = Vec::with_capacity(6);
@@ -3110,15 +3159,7 @@ async fn retire_interactive_application(
     };
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Process,
-        outcome: match tmux.kill_pane(&deployment.pane).await {
-            Ok(()) => CleanupComponentOutcome::Failed {
-                detail: "pane cleanup requested; exact process termination remains unconfirmed"
-                    .into(),
-            },
-            Err(error) => CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            },
-        },
+        outcome: retire_native_pane(tmux, &deployment.pane, native_retirement).await,
     });
     let (service_outcome, delivery_outcome) = tokio::join!(
         stop_retired_tool_service(deployment.actor, &mut deployment.service),
@@ -3219,8 +3260,10 @@ async fn abandon_interactive_application(
     pane: &TmuxPaneId,
     service: hosted_retirement::HostedOwner,
     socket_root: &Path,
+    native_retirement: NativeRetirement,
 ) {
-    abandon_interactive_pane(tmux, pane, socket_root).await;
+    let outcome = retire_native_pane(tmux, pane, native_retirement).await;
+    tracing::warn!(path = %socket_root.display(), ?outcome, "abandoned socket directory retained: exact process and accepted hosted work cleanup unconfirmed");
     let _ = hosted_retirement::observe(
         &service,
         hosted_retirement::CompletionBoundary::AbortForShutdown,
@@ -3229,10 +3272,23 @@ async fn abandon_interactive_application(
     .await;
 }
 
-async fn abandon_interactive_pane(tmux: &TmuxSession, pane: &TmuxPaneId, socket_root: &Path) {
-    let _ = tmux.kill_pane(pane).await;
-    // Diagnostic path, never deletion authority or process termination proof.
-    tracing::warn!(path = %socket_root.display(), "abandoned socket directory retained: exact process and accepted hosted work cleanup unconfirmed");
+async fn retire_native_pane(
+    tmux: &TmuxSession,
+    pane: &TmuxPaneId,
+    disposition: NativeRetirement,
+) -> CleanupComponentOutcome {
+    let detail = match disposition {
+        NativeRetirement::Preserve => {
+            "native TUI preserved; hosted coordination unavailable; process custody retained".into()
+        }
+        NativeRetirement::Terminate => match tmux.kill_pane(pane).await {
+            Ok(()) => {
+                "pane cleanup requested; exact process termination remains unconfirmed".into()
+            }
+            Err(error) => error.to_string(),
+        },
+    };
+    CleanupComponentOutcome::Failed { detail }
 }
 
 async fn discover_interactive_binding(
@@ -3293,12 +3349,12 @@ async fn discover_interactive_binding(
     }
 }
 
-async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
-    if *shutdown.borrow() {
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<Option<NativeRetirement>>) {
+    if shutdown.borrow().is_some() {
         return;
     }
     while shutdown.changed().await.is_ok() {
-        if *shutdown.borrow() {
+        if shutdown.borrow().is_some() {
             return;
         }
     }
@@ -4129,6 +4185,16 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert!(root_recovery_launch_mode(
+            &binding,
+            &ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "operator cancelled".into(),
+            }
+        )
+        .await
+        .unwrap()
+        .is_none());
 
         let failed = ActorTerminal {
             kind: ActorExitKind::Failed,
@@ -5135,25 +5201,6 @@ mod tests {
         assert!(rendered.contains("Process: pane already unavailable"));
         assert!(rendered.contains("WorktreeBinding: binding journal unavailable"));
         assert!(rendered.contains("permanent host and sibling actors remain available"));
-    }
-
-    #[test]
-    fn application_failure_domain_separates_child_degradation_from_root_failure() {
-        let root = ActorRef::first(tidepool_actor::ActorId(1));
-        let child = ActorRef::first(tidepool_actor::ActorId(2));
-        let failure = || ExternalApplicationFailure {
-            class: ExternalApplicationFailureClass::UnexpectedExit,
-            detail: "pane exited".into(),
-        };
-
-        assert!(matches!(
-            classify_application_failure(root, child, failure()),
-            InteractiveFailureDomain::ActorDegraded { actor, .. } if actor == child
-        ));
-        assert!(matches!(
-            classify_application_failure(root, root, failure()),
-            InteractiveFailureDomain::RootRestartRequired { .. }
-        ));
     }
 
     #[test]

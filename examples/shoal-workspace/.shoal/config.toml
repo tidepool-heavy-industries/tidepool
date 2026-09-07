@@ -11,6 +11,7 @@ core = "prompts/core.md"
 
 [prompts.files]
 lead = "prompts/lead.md"
+specialist = "prompts/specialist.md"
 task = "prompts/task.md"
 review = "prompts/review.md"
 repair = "prompts/repair.md"

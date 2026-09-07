@@ -338,4 +338,38 @@ mod tests {
             assert!(FrozenWorkspace::load(project.path(), run.path()).is_err());
         }
     }
+
+    #[test]
+    fn workspace_program_validation_uses_frozen_sources_and_rejects_bad_revisions() {
+        let project = tempfile::tempdir().unwrap();
+        let old_run = tempfile::tempdir().unwrap();
+        let new_run = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".shoal");
+        std::fs::create_dir_all(authored.join("Project")).unwrap();
+        std::fs::write(
+            authored.join("config.toml"),
+            "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Check']\n",
+        )
+        .unwrap();
+        let source = authored.join("Project/Check.hs");
+        std::fs::write(
+            &source,
+            "module Project.Check where\ncheck :: Bool\ncheck = True\n",
+        )
+        .unwrap();
+        let old = FrozenWorkspace::load(project.path(), old_run.path()).unwrap();
+        std::fs::write(
+            &source,
+            "module Project.Check where\ncheck :: Bool\ncheck = undefinedWorkspaceFunction\n",
+        )
+        .unwrap();
+        crate::actor_host::validate_workspace_program(&old, old_run.path()).unwrap();
+        let new = FrozenWorkspace::load(project.path(), new_run.path()).unwrap();
+        let error =
+            crate::actor_host::validate_workspace_program(&new, new_run.path()).unwrap_err();
+        assert!(
+            error.to_string().contains("undefinedWorkspaceFunction"),
+            "{error}"
+        );
+    }
 }

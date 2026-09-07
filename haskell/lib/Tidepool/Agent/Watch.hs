@@ -21,6 +21,7 @@ module Tidepool.Agent.Watch
   , RouteState (..)
   , route
   , pollRoute
+  , listRoutes
   , forgetRoute
   , pollWatch
   , ForgetWatchOutcome (..)
@@ -49,6 +50,7 @@ import Tidepool.Agent.Watch.Internal
   , RouteState (..)
   , route
   , pollRoute
+  , listRoutes
   , forgetRoute
   , watchLabel
   )

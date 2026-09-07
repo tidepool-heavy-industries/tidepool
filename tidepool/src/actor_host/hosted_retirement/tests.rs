@@ -89,6 +89,8 @@ impl HttpFixture {
             exact,
             InteractiveApplicationOwner {
                 cancel: None,
+                native_retirement: Default::default(),
+                pane: Arc::new(Mutex::new(None)),
                 fork_gate: None,
                 custody: None,
                 scoped_retention: None,

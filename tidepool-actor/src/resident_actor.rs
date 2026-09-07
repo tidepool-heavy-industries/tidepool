@@ -1770,7 +1770,7 @@ where
                     });
                 self.environment
                     .runner
-                    .resume_fork_preview(context.clone(), continuation, preview)
+                    .resume_value(context.clone(), continuation, preview)
                     .await
             }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
@@ -2039,7 +2039,7 @@ where
                 };
                 self.environment
                     .runner
-                    .resume_notification(context.clone(), continuation, outcome)
+                    .resume_value(context.clone(), continuation, outcome)
                     .await
             }
             ResidentActorBoundary::NotificationPoll {
@@ -2074,7 +2074,7 @@ where
                 };
                 self.environment
                     .runner
-                    .resume_notification(context.clone(), continuation, outcome)
+                    .resume_value(context.clone(), continuation, outcome)
                     .await
             }
             ResidentActorBoundary::RequestReservation(reservation) => {
@@ -2330,6 +2330,25 @@ where
                 self.environment
                     .runner
                     .resume_int(context.clone(), registration.continuation, watch.0)
+                    .await
+            }
+            ResidentActorBoundary::RouteList(continuation) => {
+                let routes = self
+                    .environment
+                    .requests
+                    .list_routes(context.actor)
+                    .into_iter()
+                    .map(|id| {
+                        i64::try_from(id.0).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "runtime route identity exceeds Haskell Int".into(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, routes)
                     .await
             }
             ResidentActorBoundary::RoutePoll(poll) => {

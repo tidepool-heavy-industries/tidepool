@@ -1,7 +1,7 @@
 module Project.Types where
 
 import Data.Text (Text)
-import Tidepool.Actors.Shoal (AgentRef, BranchLabel, ForkGroupPath, WorktreeSeed, ResponseFailure)
+import Tidepool.Actors.Shoal (AgentRef, BranchLabel, ForkGroupPath, ForkEffort, WatchLabel, WorktreeSeed, ResponseFailure)
 
 -- Project language is ordinary source, independent of runtime authority.
 data Task = Task
@@ -51,6 +51,16 @@ data DesignAnswer
   | AmendPlan Text [Text]
   | NeedEvidence [Text]
   deriving (Show, Eq)
+
+-- A declared specialist placement; the runtime still enforces launch authority.
+data DesignSlot = DesignSlot
+  { specialistPlan :: Text
+  , specialistGroup :: ForkGroupPath
+  , specialistLabel :: BranchLabel
+  , specialistWatch :: WatchLabel
+  , specialistModel :: Text
+  , specialistEffort :: ForkEffort
+  }
 
 data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate Text | NeedsDesign DesignQuestion
   deriving (Show, Eq)

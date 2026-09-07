@@ -212,6 +212,7 @@ retain useful specialists and inspect the outcome and cleanup evidence.
 route :: Member Watches effects
       => Await (Settlement result) -> (Settlement result -> Eff effects ()) -> Eff effects Route
 pollRoute :: Member Watches effects => Route -> Eff effects RouteState
+listRoutes :: Member Watches effects => Eff effects [Route]
 snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
 subtree :: (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
 swarmUsage :: SwarmSnapshot -> UsageTotal
@@ -226,6 +227,9 @@ waiting, running, completed, or retained failure. A failed callback is not retri
 automatically because earlier effects may have happened. Callback failure sends
 one exceptional notification to its owner; ordinary successful routing does not
 wake the model. Inspect the failed route before deciding how to continue.
+`listRoutes` recovers this actor's retained handles, including routes created
+inside callbacks. It excludes other actors' routes and forgotten routes. Bind
+the list, then use `traverse pollRoute` to inspect the current states.
 
 A callback can `reply` through a captured `Reply` owned by this same actor to
 finish its active obligation. This is a terminal transfer: later callback code

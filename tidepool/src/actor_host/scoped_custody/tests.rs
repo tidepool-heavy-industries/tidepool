@@ -67,6 +67,8 @@ impl Fixture {
             self.custody.actor,
             InteractiveApplicationOwner {
                 cancel: None,
+                native_retirement: Default::default(),
+                pane: Arc::new(Mutex::new(None)),
                 fork_gate: None,
                 custody: Some(self.custody.clone()),
                 scoped_retention: None,

@@ -11,6 +11,8 @@ module Project.Work
   , requestRepair
   , integrateReviewed
   , deliverLane
+  , consultDesign
+  , settledValue
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -23,7 +25,7 @@ import Project.Types
 import Shoal.Workspace (workspacePrompt)
 
 -- Missing project configuration is an error, never an instruction-free worker.
-data Instructions = TaskInstructions | ReviewInstructions | RepairInstructions | IntegrationInstructions
+data Instructions = TaskInstructions | ReviewInstructions | RepairInstructions | IntegrationInstructions | DesignInstructions
 
 instructions :: Instructions -> Text
 instructions kind = case workspacePrompt name of
@@ -35,6 +37,7 @@ instructions kind = case workspacePrompt name of
       ReviewInstructions -> "review"
       RepairInstructions -> "repair"
       IntegrationInstructions -> "integrate"
+      DesignInstructions -> "specialist"
 
 -- Keep stable project vocabulary in modules; send the branch's relevant plan,
 -- rationale and acceptance rather than a transcript or repeated status digest.
@@ -132,3 +135,32 @@ onResult
 onResult destination awaiting continuation = route awaiting $ \settled -> case settled of
   ReplyAvailable answer -> continuation (responseValue answer)
   ReplyUnavailable failure -> void $ reply destination (ExecutionUnavailable failure)
+
+-- The waiting actor keeps its original obligation while a declared specialist
+-- answers the narrow question. Only that useful answer wakes this owner.
+consultDesign
+  :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)
+  => DesignSlot -> DesignQuestion -> Eff effects (Forked DesignAnswer, Watch (Settlement DesignAnswer))
+consultDesign slot question = do
+  expert <- unfold (specialistGroup slot) $ child $
+    withInstructions (instructions DesignInstructions) $
+    withContext (selected (designContext slot)) $
+    withModel (specialistModel slot) $ withEffort (specialistEffort slot) $
+    coding (specialistLabel slot) (atRef (GitRef (questionSource question))) question
+  ready <- watch (specialistWatch slot) (awaitSettledFork expert)
+  pure (expert, ready)
+
+designContext :: DesignSlot -> DesignQuestion -> Text
+designContext slot question = Text.unlines
+  [ "Declared specialist plan: " <> specialistPlan slot
+  , "Waiting component: " <> questionPlan question
+  , "Source: " <> questionSource question
+  , "Finding: " <> questionFinding question
+  , "Evidence: " <> Text.intercalate "; " (questionEvidence question)
+  , "Alternatives: " <> Text.intercalate "; " (questionAlternatives question)
+  , "Unblocks: " <> Text.intercalate "; " (questionUnblocks question)
+  ]
+
+settledValue :: Settlement result -> Either ResponseFailure result
+settledValue (ReplyAvailable answer) = Right (responseValue answer)
+settledValue (ReplyUnavailable failure) = Left failure

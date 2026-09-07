@@ -41,11 +41,15 @@ not wake just to relay routine success. Independent leads settle independently.
 Reviewers use `requestRepair` with their retained implementer and watch the
 returned response while keeping their review request pending. They inspect the
 revised candidate before accepting. `ReviewBlocked`, `DesignBlocked`, and
-`ExecutionUnavailable` preserve exceptional outcomes for the recipient. A tagged
-specialist/question workflow and a complete authored plan tree are still required
+`ExecutionUnavailable` preserve exceptional outcomes for the recipient. For a
+tagged design obligation, `consultDesign slot question` starts the declared
+specialist and returns its retained handle and answer watch. The requesting
+review stays open while the specialist answers against the exact revised source.
+The complete authored plan tree and amendment incorporation are still required
 before treating this example as the finished planned-Sol package.
 
-Callback failures emit exceptional attention to their owner. Inspect `pollRoute`
+Callback failures emit exceptional attention to their owner. Recover handles with
+`listRoutes` when they were created inside a recipe, then inspect `pollRoute`
 and the retained effects before acting; replaying the whole chain could duplicate
 already-started work. A callback may reply only to its owner's active request;
 cancellation and update fences still apply. Such a reply ends the callback and
@@ -53,7 +57,7 @@ resumes the request through the ordinary actor scheduler.
 
 The recipe modules and their selected Markdown prompts are checked through the
 real resident workbench. Focused execution covers candidate/review evidence,
-retained repair, direct callback replies and cancellation. The delivery-lane check
+retained repair, planned specialist answers, direct callback replies and cancellation. The delivery-lane check
 uses real commits and an integration checkout; it does not claim live model or
 fresh-context application acceptance.
 

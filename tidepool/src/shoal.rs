@@ -359,7 +359,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join("runs")
         .join(&run_id);
     std::fs::create_dir_all(&run_root)?;
-    workspace::FrozenWorkspace::load(&workspace, &run_root)?;
+    let selected = workspace::FrozenWorkspace::load(&workspace, &run_root)?;
+    crate::actor_host::validate_workspace_program(&selected, &run_root)?;
     if options.recreate {
         // Validate continuity before stopping a currently healthy session.
         // The host repeats this check at launch so a later disappearance also
@@ -735,9 +736,6 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
     let settled = settle_host_result(result, &options);
     if let Err(error) = &settled {
         tracing::error!(run_id = %options.run_id, error = %error, "Shoal actor host failed");
-        if let Ok(tmux) = TmuxSession::new(options.session.clone()) {
-            let _ = tmux.kill().await;
-        }
     } else {
         tracing::info!(run_id = %options.run_id, "Shoal actor host stopped");
     }
@@ -791,7 +789,9 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                         options.agent.clone(),
                         RunPhase::AwaitingBinding { root_actor: root },
                     );
-                    write_status(&options.status_path, &status)?;
+                    if let Err(error) = write_status(&options.status_path, &status) {
+                        tracing::error!(%error, "could not publish pending root status; host remains active");
+                    }
                     tracing::info!(
                         run_id = %options.run_id,
                         actor = ?root,
@@ -800,7 +800,9 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                 }
                 Some(crate::actor_host::ActorHostReadiness::Ready { root, thread }) => {
                     let thread_id = thread.id().0.clone();
-                    copy_interactive_binding(&options.root_binding_path, &thread).await?;
+                    if let Err(error) = copy_interactive_binding(&options.root_binding_path, &thread).await {
+                        tracing::error!(%error, "could not publish root binding; host remains active");
+                    }
                     let status = RunStatus::new(
                         &options.run_id,
                         &options.workspace,
@@ -811,7 +813,9 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                             root_thread: thread.id().clone(),
                         },
                     );
-                    write_status(&options.status_path, &status)?;
+                    if let Err(error) = write_status(&options.status_path, &status) {
+                        tracing::error!(%error, "could not publish ready root status; host remains active");
+                    }
                     tracing::info!(
                         run_id = %options.run_id,
                         actor = ?root,

@@ -77,7 +77,7 @@ The implemented foundation includes:
 - Independent `withModel` and `withContext` selection through TUI launch.
   Selected contexts have fresh transcripts and isolated local bindings; inherited
   contexts preserve the completed-call boundary. Both load the frozen modules.
-- Watch-owned `route`, `pollRoute` and `forgetRoute`, with automatic callbacks,
+- Watch-owned `route`, `listRoutes`, `pollRoute` and `forgetRoute`, with automatic callbacks,
   selected-worker admission, retained failures and scoped callback child cleanup.
   Failed callbacks emit one exceptional owner notification; successful callbacks
   do not wake the model merely to relay success.
@@ -87,6 +87,12 @@ The implemented foundation includes:
 - Codex `4372d1a1cf9952178aff25bafdb7e3a6de49b491`: completion acknowledgments run on
   an ordered background queue with 60-second attempts. Exhausted failures disable
   hosted tools while preserving the TUI conversation and other tools.
+- Workspace startup compiles the selected frozen modules before replacing a
+  healthy swarm. Status-publication errors leave the running host active.
+- Host/actor coordination failures preserve native panes and retained resource
+  custody. Intentional retirement remains separate. Root recovery requires an
+  observed dead pane before resuming the retained conversation; unknown or live
+  native execution never triggers a competing resume.
 
 This does **not** complete the planned Sol operating mode. The remaining work is
 both general capability and a complete authored orchestration package:
@@ -98,16 +104,15 @@ both general capability and a complete authored orchestration package:
   the waiting obligation, exact evidence and useful retained workers.
 - A normal control path for cooperating independent roots and scoped observation.
   Rust forest support exists; a complete model-facing usage has not been established.
-- Host-level failure containment. Codex ACK degradation does not cover Shoal's
-  current whole-tmux cleanup on host error in `tidepool/src/shoal.rs`.
 - A usable plan-tree package and aligned prompts. Existing defaults still teach
-  inherited recursive work. The example leaves repair/question handlers undefined;
+  inherited recursive work. The example now supplies repair and question recipes;
   review now retains candidate checks/gates and the exact implementer, and local
   repair uses a distinct request without closing the review or replacing the
   original candidate response. Integration accepts a distinct reviewed input;
   the routed implementation/review/integration chain now executes under a Sol
-  lead and settles its original request automatically. Specialist consultation,
-  amendments and the complete plan package remain outstanding.
+  lead and settles its original request automatically. A tagged specialist answers
+  against the revised source while the owning review stays open. Amendment
+  incorporation and the complete plan package remain outstanding.
 - Project observations connecting the plan, actual work, usage and RSI. Complete
   delivery/failure examples must execute, not merely typecheck recipe signatures.
 
@@ -161,8 +166,11 @@ actual commit in an integration checkout and preserves a partial product gate
 without waking the lead to relay results. Non-root committed-ref admission
 requires exact active custody; stale/unbound/released principals and root dirty
 snapshots are rejected by the owning worktree handler. `just fixtures-check` passed all 217
-semantic tests after the instruction protocol extension. The complete package
-and host failure containment remain outstanding.
+semantic tests after the instruction protocol extension. Further checks cover
+frozen-source compilation, exact prompt-byte round trips, owned route recovery,
+planned specialist consultation, failed-owner lifecycle propagation, and a mounted
+process surviving failure cleanup in a real tmux pane. The complete package and
+its integration acceptance remain outstanding.
 
 Evidence recorded for `42e27421`: focused resident acceptance, ownership,
 configuration, protocol and usage checks passed; production compilation and all

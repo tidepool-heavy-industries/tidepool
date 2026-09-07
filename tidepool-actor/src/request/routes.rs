@@ -113,6 +113,18 @@ impl RequestRegistry {
         })
     }
 
+    pub(crate) fn list_routes(&self, owner: ActorRef) -> Vec<WatchId> {
+        let state = self.state.lock();
+        let mut routes = state
+            .watches
+            .iter()
+            .filter(|(_, record)| record.owner == owner && record.route.is_some())
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        routes.sort_by_key(|id| id.0);
+        routes
+    }
+
     pub(crate) fn observe_route(
         &self,
         owner: ActorRef,

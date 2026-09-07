@@ -228,8 +228,8 @@ pub fn escape_workbench_haskell_string(value: &str) -> String {
             '\n' => output.push_str("\\n"),
             '\t' => output.push_str("\\t"),
             '\r' => output.push_str("\\r"),
-            character if (character as u32) < 0x20 => {
-                output.push_str(&format!("\\x{:x};", character as u32));
+            character if character.is_control() => {
+                output.push_str(&format!("\\x{:x}\\&", character as u32));
             }
             character => output.push(character),
         }

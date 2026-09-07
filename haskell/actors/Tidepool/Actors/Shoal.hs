@@ -224,6 +224,7 @@ module Tidepool.Actors.Shoal
   , RouteState (..)
   , route
   , pollRoute
+  , listRoutes
   , forgetRoute
   , ForgetWatchOutcome (..)
   , forgetWatch

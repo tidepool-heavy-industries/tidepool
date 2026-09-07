@@ -785,6 +785,70 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
 }
 
 #[tokio::test]
+async fn failed_coordination_preserves_native_pane_and_recovery_requires_observed_exit() {
+    struct ServerCleanup(String);
+    impl Drop for ServerCleanup {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["-L", &self.0, "kill-server"])
+                .output();
+        }
+    }
+    let socket = format!("shoal-containment-{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = ServerCleanup(socket.clone());
+    let tmux = TmuxSession::with_socket("containment", &socket).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let boundary = ProcessMountBoundary::new(
+        root.path(),
+        [root.path().to_path_buf()],
+        [root.path().to_path_buf()],
+    )
+    .unwrap();
+    let command = boundary.wrap(
+        BUBBLEWRAP_PROGRAM,
+        ProcessInvocation {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "while [ ! -f exit ]; do sleep 0.05; done; printf survived > survived".into(),
+            ],
+        },
+    );
+    let pane = tmux
+        .create(&TmuxLaunch {
+            window_name: "native".into(),
+            cwd: root.path().into(),
+            program: command.program,
+            args: command.args,
+            environment: Default::default(),
+            unset_environment: Default::default(),
+        })
+        .await
+        .unwrap();
+    tmux.retain_pane_on_exit(&pane).await.unwrap();
+    assert!(confirm_native_exit(&tmux, Some(&pane)).await.is_err());
+    let outcome = retire_native_pane(&tmux, &pane, NativeRetirement::Preserve).await;
+    assert!(matches!(outcome, CleanupComponentOutcome::Failed { .. }));
+    assert!(!tmux.pane_status(&pane).await.unwrap().unwrap().dead);
+    assert!(confirm_native_exit(&tmux, None).await.is_err());
+    std::fs::write(root.path().join("exit"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while confirm_native_exit(&tmux, Some(&pane)).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("survived")).unwrap(),
+        "survived"
+    );
+    let _ = retire_native_pane(&tmux, &pane, NativeRetirement::Terminate).await;
+    assert!(tmux.pane_status(&pane).await.unwrap().is_none());
+    assert!(confirm_native_exit(&tmux, Some(&pane)).await.is_err());
+}
+
+#[tokio::test]
 async fn custody_missing_or_foreign_pane_never_clears_process_fence() {
     struct ServerCleanup(String);
     impl Drop for ServerCleanup {
@@ -822,8 +886,7 @@ async fn custody_missing_or_foreign_pane_never_clears_process_fence() {
         custody.process_may_exist();
         // Both return Ok from kill_pane without owning/reaping this process.
         owned.kill_pane(&pane).await.unwrap();
-        let socket_root = tempfile::tempdir().unwrap();
-        abandon_interactive_pane(&owned, &pane, socket_root.path()).await;
+        let _ = retire_native_pane(&owned, &pane, NativeRetirement::Terminate).await;
         drop(custody);
         assert!(bindings.lock().current(tree.id()).is_some());
         assert!(foreign.list_panes().await.unwrap().contains(&foreign_pane));

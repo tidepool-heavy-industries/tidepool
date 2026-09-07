@@ -812,6 +812,7 @@ pub(crate) enum ResidentActorBoundary {
         entry: RootCustody,
     },
     RoutePoll(WatchPoll),
+    RouteList(ResidentHole),
     WatchPoll(WatchPoll),
     WatchForget(WatchForget),
 }
@@ -905,6 +906,7 @@ impl ResidentActorBoundary {
             Self::WatchRegistration(_) => "watch",
             Self::RouteRegistration { .. } => "route",
             Self::RoutePoll(_) => "pollRoute",
+            Self::RouteList(_) => "listRoutes",
             Self::WatchPoll(_) => "pollWatch",
             Self::WatchForget(_) => "forgetWatch",
         }
@@ -1109,6 +1111,7 @@ impl ResidentRequest {
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
             Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
+            Self::Watches(WatchesReq::ListRoutesWith) => "listRoutes",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
             Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
@@ -2503,6 +2506,7 @@ where
                             registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
                         })
                     }
+                    ResidentRequest::Watches(WatchesReq::ListRoutesWith) => Ok(ResidentActorBoundary::RouteList(hole)),
                     ResidentRequest::Watches(WatchesReq::ObserveRouteWith(id)) => Ok(ResidentActorBoundary::RoutePoll(WatchPoll {
                         continuation: hole, watch: crate::request_effect::watch_id(id)?,
                     })),
@@ -3102,11 +3106,11 @@ where
             .await
     }
 
-    pub(crate) async fn resume_notification<T: ToCore + Send + 'static>(
+    pub(crate) async fn resume_value<T: ToCore + Send + 'static>(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
-        outcome: Result<T, crate::NotificationError>,
+        outcome: T,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
@@ -3172,22 +3176,6 @@ where
                     "CleanupReceipt",
                     vec![plan, steps, receipt.complete.to_value(table)?],
                 )?;
-                session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_fork_preview(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        preview: Result<(String, i64, i64), String>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let answer = preview.to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -3477,20 +3465,17 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 use crate::request::routes::RouteState;
-                let (name, detail) = match observation {
-                    Ok(RouteState::Waiting) => ("RouteWaiting", None),
-                    Ok(RouteState::Running) => ("RouteRunning", None),
-                    Ok(RouteState::Completed) => ("RouteCompleted", None),
-                    Ok(RouteState::Failed(error)) => ("RouteFailed", Some(error)),
+                let table = session.data_con_table();
+                let (name, fields) = match observation {
+                    Ok(RouteState::Waiting) => ("RouteWaiting", vec![]),
+                    Ok(RouteState::Running) => ("RouteRunning", vec![]),
+                    Ok(RouteState::Completed) => ("RouteCompleted", vec![]),
+                    Ok(RouteState::Failed(error)) => ("RouteFailed", vec![error.to_value(table)?]),
                     Err(error) => (
-                        "RouteFailed",
-                        Some(format!("route observation rejected: {error:?}")),
+                        "RouteRejected",
+                        vec![crate::request_effect::reply_error_value(error, table)?],
                     ),
                 };
-                let fields = detail
-                    .into_iter()
-                    .map(|text| text.to_value(session.data_con_table()))
-                    .collect::<Result<Vec<_>, _>>()?;
                 let answer = crate::request_effect::constructor(
                     session.data_con_table(),
                     "Tidepool.Agent.Watch.Internal",

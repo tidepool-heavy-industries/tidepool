@@ -26,6 +26,7 @@ module Tidepool.Agent.Watch.Internal
   , RouteState (..)
   , route
   , pollRoute
+  , listRoutes
   , forgetRoute
   , pollWatch
   , ForgetWatchOutcome (..)
@@ -120,6 +121,7 @@ data Watches a where
   RegisterWatchWith :: Text -> [AwaitDependency] -> Watches Int
   RegisterRouteWith :: Text -> (Int -> Eff effs ()) -> [AwaitDependency] -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
+  ListRoutesWith :: Watches [Int]
   ObserveWatchProgressWith :: Int -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchWith :: Int -> Watches RawWatchObservation
   ForgetWatchWith :: Int -> Watches ForgetWatchOutcome
@@ -190,7 +192,7 @@ deduplicate = foldr add []
 
 -- | One watch-owned continuation, executed by the owning actor without inference.
 newtype Route = Route Int deriving (Show, Eq)
-data RouteState = RouteWaiting | RouteRunning | RouteCompleted | RouteFailed Text
+data RouteState = RouteWaiting | RouteRunning | RouteCompleted | RouteFailed Text | RouteRejected ReplyError
   deriving (Show, Eq)
 
 route
@@ -212,3 +214,7 @@ pollRoute (Route watchId) = send (ObserveRouteWith watchId)
 
 forgetRoute :: Member Watches effs => Route -> Eff effs ForgetWatchOutcome
 forgetRoute (Route watchId) = send (ForgetWatchWith watchId)
+
+-- | Recover this actor's retained routes, including routes installed by callbacks.
+listRoutes :: Member Watches effs => Eff effs [Route]
+listRoutes = map Route <$> send ListRoutesWith
