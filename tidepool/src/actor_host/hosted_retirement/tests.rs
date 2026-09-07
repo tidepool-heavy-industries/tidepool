@@ -121,13 +121,18 @@ impl HttpFixture {
     async fn dispose_http(&self) {
         let mut owner = self.owner.lock().await;
         owner.control.drain();
-        let service = owner.service.take().unwrap();
+        let service = owner.service.take();
         drop(owner);
-        tokio::time::timeout(limit(), service)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        // A failing negative assertion may follow an unexpected production
+        // drain that already consumed the task. Otherwise join the original,
+        // including a task that finished but has not yet been consumed.
+        if let Some(service) = service {
+            tokio::time::timeout(limit(), service)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
     }
     async fn finish(&self) -> HostedObservation {
         assert_eq!(self.owners.lock().len(), 1);
@@ -914,7 +919,7 @@ async fn hosted_initially_terminal_actor_cannot_drain_foreign_endpoint() {
         }
     );
     let sibling_live = sibling.actor.terminal().get().is_none();
-    assert!(!service_finished(&fixture.owner));
+    let service_was_finished = service_finished(&fixture.owner);
     sibling
         .actor
         .shutdown_with_cleanup(cancelled())
@@ -925,6 +930,10 @@ async fn hosted_initially_terminal_actor_cannot_drain_foreign_endpoint() {
     campaign.hosted.await.unwrap();
     sibling.forest.shutdown().await;
     sibling.hosted.await.unwrap();
+    assert!(
+        !service_was_finished,
+        "foreign service finished before cleanup"
+    );
     assert!(sibling_live);
     assert!(
         rejected,
