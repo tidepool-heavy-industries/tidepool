@@ -909,8 +909,6 @@ fn settle_host_result(
 async fn preflight(
     workspace: &Path,
 ) -> Result<InteractiveAgentInstallation, Box<dyn std::error::Error>> {
-    crate::haskell_sources::ensure_stdlib()?;
-    crate::haskell_sources::ensure_shoal_haskell()?;
     tidepool_runtime::toolchain::bind_extract_endpoint().map_err(|error| {
         runtime_error(format!(
             "{error}. Launch through `just shoal-console` or `just shoal-init` for the matched local toolchain."
