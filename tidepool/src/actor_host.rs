@@ -837,7 +837,6 @@ enum InteractiveOperation {
     PrepareRuntime,
     BindToolHost,
     BuildCommand,
-    BuildPolicy,
     ServeToolHost,
     LaunchProcess,
     DiscoverBinding,
@@ -850,7 +849,6 @@ impl fmt::Display for InteractiveOperation {
             Self::PrepareRuntime => "prepare runtime",
             Self::BindToolHost => "bind tool host",
             Self::BuildCommand => "build agent command",
-            Self::BuildPolicy => "build resident tool policy",
             Self::ServeToolHost => "serve host dynamic tools",
             Self::LaunchProcess => "launch agent process",
             Self::DiscoverBinding => "discover conversation binding",
@@ -863,9 +861,7 @@ impl InteractiveOperation {
     fn failure_class(self) -> ExternalApplicationFailureClass {
         match self {
             Self::BindWorktree => ExternalApplicationFailureClass::WorktreeBinding,
-            Self::BuildCommand | Self::BuildPolicy => {
-                ExternalApplicationFailureClass::CommandConstruction
-            }
+            Self::BuildCommand => ExternalApplicationFailureClass::CommandConstruction,
             Self::LaunchProcess => ExternalApplicationFailureClass::ProcessLaunch,
             Self::BindToolHost
             | Self::ServeToolHost
