@@ -19,7 +19,8 @@ Haskell files normally. A swarm uses one fixed configuration; changes take
 effect at an explicit swarm teardown/restart boundary. TOML selection, frozen
 modules/Markdown prompts, model/context selectors and per-worker behavioral
 instructions, independent lifetimes and scoped observation sharing are implemented.
-Resolved launch previews remain incomplete. Examples
+Static launch previews now share the native host selector. Admission-time paths
+and request orientation are later facts, not previewed allocations. Examples
 here are design sketches; use the [shipped guide](../../prompts/shoal/api-guide.md)
 for exact implemented exports and [NEXT.md](../../NEXT.md) for current gaps.
 

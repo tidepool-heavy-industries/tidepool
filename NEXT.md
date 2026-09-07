@@ -121,8 +121,10 @@ both general capability and a complete authored orchestration package:
   original candidate response. Integration accepts a distinct reviewed input;
   the routed implementation/review/integration chain now executes under a Sol
   lead and settles its original request automatically. A tagged specialist answers
-  against the revised source while the owning review stays open. Amendment
-  incorporation and the complete plan package remain outstanding.
+  against the revised source while the owning review stays open. Typed plan
+  proposals now retain exact commits and affected obligations; a separate direct
+  incorporation request returns the resulting head and checks without closing
+  the original review. The complete plan package remains outstanding.
 - Project observations connecting the plan, actual work, usage and RSI. Complete
   delivery/failure examples must execute, not merely typecheck recipe signatures.
 

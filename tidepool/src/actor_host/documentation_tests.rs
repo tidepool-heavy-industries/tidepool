@@ -1165,6 +1165,10 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/integrate.md"),
                 ),
                 (
+                    "prompts/incorporate.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/incorporate.md"),
+                ),
+                (
                     "prompts/core.md",
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/core.md"),
                 ),
@@ -1619,11 +1623,26 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
             "missing {expected}: {question}"
         );
     }
+    let expert_tree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+            &expert.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    let amendment = campaign
+        ._repository
+        .writer_at(expert_tree.cwd())
+        .commit_file(
+            "plans/feature.md",
+            "Preparation retains the open product gate.\n",
+            "clarify acceptance",
+        )
+        .unwrap();
     let answered = dispatch_haskell_script(
         expert.policy.as_ref(),
-        "respond (Decision \"retain the preparation gate\" [\"boundary evidence\"])",
-    )
-    .await;
+        &format!("respond (AmendPlan (PlanAmendment \"{}\" \"{}\" [\"plans/feature.md\"] \"retain the preparation gate\" [\"feature review\"] [\"boundary evidence\"]))", revised.as_str(), amendment.as_str()),
+    ).await;
     assert_eq!(answered["status"], "replied", "{answered}");
     let decision = committed(reviewer.policy.as_ref(), "design <- pollWatch designReady\ninspectFull (fmap settledValue design)\npollReply sessionReply").await;
     assert!(
@@ -1634,6 +1653,59 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "{decision}"
     );
     assert_eq!(decision["items"][2]["output"], "ReplyOpen", "{decision}");
+    committed(
+        reviewer.policy.as_ref(),
+        include_str!("fixtures/project_plan_incorporation.hs"),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if let Some(LocalResidentDeployment::SessionReady { activation }) =
+                campaign.deployments.recv().await
+            {
+                if activation.id.actor() == implementer.actor.identity() {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let offered = committed(
+        implementer.policy.as_ref(),
+        "inspectFull (incorporationAmendment sessionInput)",
+    )
+    .await;
+    assert!(
+        offered.to_string().contains(amendment.as_str()),
+        "{offered}"
+    );
+    let git = tidepool_worktree::git::GitCli::new();
+    git.run(tree.cwd(), &["merge", "--ff-only", amendment.as_str()])
+        .unwrap();
+    let incorporated_head = git.run(tree.cwd(), &["rev-parse", "HEAD"]).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tree.cwd().join("plans/feature.md")).unwrap(),
+        "Preparation retains the open product gate.\n"
+    );
+    let incorporated = dispatch_haskell_script(implementer.policy.as_ref(),
+        &format!("respond (Incorporated (incorporationAmendment sessionInput) \"{}\" [\"read exact plan at resulting head\"])", incorporated_head.trimmed())).await;
+    assert_eq!(incorporated["status"], "replied", "{incorporated}");
+    let checked = committed(reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\ninspectFull (fmap settledValue incorporation)\npollReply sessionReply").await;
+    for expected in [
+        "Incorporated",
+        incorporated_head.trimmed(),
+        "read exact plan at resulting head",
+    ] {
+        assert!(
+            checked["items"][1]["output"]
+                .as_str()
+                .unwrap()
+                .contains(expected),
+            "{checked}"
+        );
+    }
+    assert_eq!(checked["items"][2]["output"], "ReplyOpen", "{checked}");
     let original = committed(
         root.as_ref(),
         "original <- pollResponse (forkedResponse worker)\ninspectFull original",

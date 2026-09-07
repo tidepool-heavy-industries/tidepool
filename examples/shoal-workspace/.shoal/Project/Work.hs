@@ -9,6 +9,7 @@ module Project.Work
   , implement
   , reviewCandidate
   , requestRepair
+  , requestIncorporation
   , integrateReviewed
   , deliverLane
   , consultDesign
@@ -25,7 +26,7 @@ import Project.Types
 import Shoal.Workspace (workspacePrompt)
 
 -- Missing project configuration is an error, never an instruction-free worker.
-data Instructions = TaskInstructions | ReviewInstructions | RepairInstructions | IntegrationInstructions | DesignInstructions
+data Instructions = TaskInstructions | ReviewInstructions | RepairInstructions | IntegrationInstructions | DesignInstructions | IncorporationInstructions
 
 instructions :: Instructions -> Text
 instructions kind = case workspacePrompt name of
@@ -38,6 +39,7 @@ instructions kind = case workspacePrompt name of
       RepairInstructions -> "repair"
       IntegrationInstructions -> "integrate"
       DesignInstructions -> "specialist"
+      IncorporationInstructions -> "incorporate"
 
 -- Keep stable project vocabulary in modules; send the branch's relevant plan,
 -- rationale and acceptance rather than a transcript or repeated status digest.
@@ -94,6 +96,17 @@ requestRepair label review candidate findings =
   requestWith (reviewImplementer review) $
     withRequestGuidance (instructions RepairInstructions) $
     requestOptions label (RepairTask (reviewAssignment review) candidate findings)
+
+-- Invoke after the owning decision accepts the amendment. Never queue this back
+-- to a lead already waiting on this request. The retained implementer is free
+-- after its candidate reply; the review retains its own original reply handle.
+requestIncorporation
+  :: Member Replies effects
+  => AgentRef -> RequestLabel -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
+requestIncorporation recipient label assignment amendment =
+  requestWith recipient $
+    withRequestGuidance (instructions IncorporationInstructions) $
+    requestOptions label (IncorporationTask assignment amendment)
 
 integrateReviewed
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset IntegrationEffects effects)

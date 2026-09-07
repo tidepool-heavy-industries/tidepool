@@ -48,8 +48,29 @@ data DesignQuestion = DesignQuestion
 
 data DesignAnswer
   = Decision Text [Text]
-  | AmendPlan Text [Text]
+  | AmendPlan PlanAmendment
   | NeedEvidence [Text]
+  deriving (Show, Eq)
+
+-- A proposed source change is not evidence that any recipient incorporated it.
+-- These are project contracts; runtime permissions still come from actor grants.
+data PlanAmendment = PlanAmendment
+  { amendmentBase :: Text
+  , amendmentCommit :: Text
+  , amendmentPaths :: [Text]
+  , amendmentReason :: Text
+  , amendmentObligations :: [Text]
+  , amendmentEvidence :: [Text]
+  } deriving (Show, Eq)
+
+data IncorporationTask = IncorporationTask
+  { incorporationAssignment :: Task
+  , incorporationAmendment :: PlanAmendment
+  } deriving (Show, Eq)
+
+data Incorporation
+  = Incorporated PlanAmendment Text [Text]
+  | IncorporationBlocked PlanAmendment Text [Text]
   deriving (Show, Eq)
 
 -- A declared specialist placement; the runtime still enforces launch authority.

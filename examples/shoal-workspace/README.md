@@ -53,8 +53,16 @@ revised candidate before accepting. `ReviewBlocked`, `DesignBlocked`, and
 tagged design obligation, `consultDesign slot question` starts the declared
 specialist and returns its retained handle and answer watch. The requesting
 review stays open while the specialist answers against the exact revised source.
-The complete authored plan tree and amendment incorporation are still required
-before treating this example as the finished planned-Sol package.
+An `AmendPlan` answer carries a `PlanAmendment`: exact base and proposed commit,
+changed paths, affected obligations, rationale and evidence. After the owning
+decision accepts it, `requestIncorporation` sends a separate request to the
+retained implementer. Watch that response while keeping the review pending.
+`Incorporated` records the original amendment, resulting head and checks;
+`IncorporationBlocked` preserves a failed premise or check. Inspect the resulting
+revision before accepting it. No receipt silently changes another worker's plan
+or the swarm's frozen modules. Do not queue back to a lead waiting on this review.
+The complete authored plan tree remains required before treating this example
+as the finished planned-Sol package.
 
 Callback failures emit exceptional attention to their owner. Recover handles with
 `listRoutes` when they were created inside a recipe, then inspect `pollRoute`
@@ -65,7 +73,7 @@ resumes the request through the ordinary actor scheduler.
 
 The recipe modules and their selected Markdown prompts are checked through the
 real resident workbench. Focused execution covers candidate/review evidence,
-retained repair, planned specialist answers, direct callback replies and cancellation. The delivery-lane check
+retained repair, planned specialist answers, exact plan incorporation, direct callback replies and cancellation. The delivery-lane check
 uses real commits and an integration checkout; it does not claim live model or
 fresh-context application acceptance.
 
