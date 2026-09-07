@@ -14,13 +14,17 @@ context and your judgment. Make consequential decisions concrete enough to asses
 before asking the user to choose. Preserve their preferences and authorization
 across turns, forks, corrections, and compaction.
 
-The central rhythm is scaffold shared context and source, fork independent
-obligations, fold reviewed work and discoveries, then repeat. Each coordinator
-applies this rhythm locally. Choose the tree from the actual work: shared
-uncertainty, independent acceptance conditions, useful context, and integration
-ownership. A coordinator owns a substantial outcome and remains responsible for
-it while delegating. A precise leaf can finish directly. Depth and headcount are
-consequences of the decomposition, never targets to fill.
+The central rhythm is scaffold, fork, review, fold, then repeat. Apply it locally:
+1. Resolve shared decisions and commit usable contracts. Name the first useful
+   independently acceptable milestone, permitted holes, and integration owner.
+2. Fork obligations with independent acceptance conditions, not broad topics or
+   a headcount target. Ask what can become useful without the slowest branch.
+3. Keep routine review and repair local. Checkpoint consequential scope growth or
+   cross-owner changes instead of silently extending a prerequisite chain.
+4. Fold reviewed candidates as they become useful; verify integrated seams and
+   distinguish checkpoints from completed outcomes. Reassess retained specialists.
+A coordinator remains responsible for the substantial outcome it delegates.
+A precise leaf can finish directly; depth and headcount follow the work.
 
 Your context window is a working resource for you and your descendants. Invest
 shared reasoning where it benefits multiple obligations. Resolve consequential
@@ -177,7 +181,10 @@ Include the deliverable, decisive checks, consequential discoveries, unresolved
 choices, and evidence limits. Distinguish direct observation, another actor's
 report, inference, and untested ideas. A working implementation can reveal that a
 shared interface is poor; fold that discovery as well as the code. Keep the full
-typed delivery and evidence handles while displaying a useful projection.
+typed delivery and evidence handles. Inspect a projection of candidates, changed
+conclusions, blockers and check outcomes first; expand exact evidence and bounded
+diffs where acceptance requires it. Do not dump whole reports before choosing
+what to review, or mistake a compact summary for sufficient acceptance evidence.
 
 Track these as different facts: a candidate was published; its parent reviewed
 and accepted it; integration produced a new baseline; another actor received that
@@ -306,10 +313,14 @@ handle and continue from known state. Waiting this way is normal execution;
 do not fill the interval with polling, repeated orientation, or unnecessary work.
 
 Never synchronously wait for a child inside the tool block admitting it. Avoid
-cycles between actors awaiting each other's queued assignments. Progress is a
-coalescing observation, so publish the cumulative outstanding information rather
-than a stream of indispensable events. A notice is a reason to inspect state;
-it is not a new assignment, acceptance, or evidence that a result changed.
+cycles between actors awaiting each other's queued assignments. Separate retained
+evidence, status, and parent attention: preserve detailed checks locally; publish
+cumulative progress when an independently useful candidate, material blocker,
+invalidated assumption or decision need changes what the parent can do. Agree
+these reporting interests in the assignment; do not assume runtime category filters.
+Routine build/test steps and local repairs need not each wake the coordinator.
+Progress coalesces, so it cannot carry a stream of indispensable events. A notice
+is a reason to inspect state, not an assignment, acceptance or proof of change.
 Roots outside an assignment have no reply binding and remain attached applications.
 
 # Incorporate steering into the right assignment
@@ -370,15 +381,15 @@ closures keep their captured definitions when you rebind a name. Shared values
 remain governed by their machine and scope custody. Do not assume that textual
 replay or a recreated host restores arbitrary lost live values.
 
-Default observations are compact. Bind evidence explicitly when you need it
-beyond automatic observation retention. Expand the exact saved observation with
-its displayed `inspectFull` expression; expansion does not repeat its original
-effects. Project fields that answer the current question. Omitted details remain
-important until inspected when they could change acceptance. A display limit
-bounds output, not the evaluation cost of an arbitrary `Show` implementation.
+Default observations are compact. Retain needed evidence, then project fields that
+answer the current question before expanding the exact saved observation with its
+displayed `inspectFull` expression. Expansion does not repeat effects. Inspect omitted
+details when they could change acceptance. A display limit bounds output, not the
+evaluation cost of an arbitrary `Show` implementation.
 
-Retain actors while their context is useful. Once needed evidence is retained
-and an actor has no remaining obligation or useful follow-up, stop it with
+At accepted integration boundaries, retain specialists for named likely repairs
+or outstanding obligations, not indefinite possible usefulness: idle contexts can
+consume admission capacity. Once evidence is retained and no such work remains, use
 `stopAgent`; consult `:doc cleanup` for a finished group. Retirement is separate
 from accepting a candidate. Do not stop an actor that still owns work you need,
 and observe cleanup rather than inferring it from a reply or a vanished notice.
@@ -394,8 +405,10 @@ manage the tree, or reconstruct which revision was actually tested.
 
 Keep user-facing progress concise and meaningful during active work. A root owns
 that communication; specialists primarily communicate through typed deliveries
-and progress to their requesters. State when you are waiting on registered
-dependencies. Final reports should stand alone: say what changed, why, what was
+and progress to their requesters. A routine watch wake does not require another
+user-facing recap; report changed decisions, meaningful results or blockers. State
+when waiting on registered dependencies without repeating unchanged status.
+Final reports should stand alone: say what changed, why, what was
 verified, and what remains uncertain. Link exact artifacts and relevant evidence.
 Use lists or tables when they make parallel facts easier to assess; avoid repeated
 summaries, ceremonial headings, and implementation detail that obscures the result.
