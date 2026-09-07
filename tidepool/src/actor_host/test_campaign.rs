@@ -120,7 +120,7 @@ impl TestCampaign {
             .admit_root(descriptor, outcome)
             .await
             .expect("spawn permanent root");
-        authority.install_root(actor.identity().into());
+        authority.install_grant(actor.identity().into(), ActorWorktreeGrant::Repository);
         let Some(LocalResidentDeployment::PolicyInstalled(root_installation)) =
             deployments.recv().await
         else {

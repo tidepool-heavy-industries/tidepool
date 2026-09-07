@@ -1025,7 +1025,7 @@ pub async fn run(
     );
     let forest = Arc::new(forest);
     let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
-    worktree_authority.install_root(root_actor.identity().into());
+    worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
     let operator_role =
@@ -1112,7 +1112,7 @@ pub async fn run(
                     (root_actor, root_task) = forest.new_program_root("shoal-root".into(),
                         tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy), program.clone())
                         .await.map_err(|e| runtime_error(e.to_string()))?;
-                    worktree_authority.install_root(root_actor.identity().into());
+                    worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
                 }
             }
         }
@@ -3394,19 +3394,15 @@ fn append_effective_role(mut instructions: String, role: &tidepool_actor::Effect
 
 fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
     match role {
-        tidepool_actor::ActorRole::Root => ActorWorktreeGrant {
-            enumerate: true,
-            allocate: true,
-            integrate: true,
-        },
+        tidepool_actor::ActorRole::Root => ActorWorktreeGrant::Repository,
         tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Scaffolding => {
-            ActorWorktreeGrant {
+            ActorWorktreeGrant::Bound {
                 enumerate: false,
                 allocate: true,
                 integrate: true,
             }
         }
-        tidepool_actor::ActorRole::Integration => ActorWorktreeGrant {
+        tidepool_actor::ActorRole::Integration => ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: false,
             integrate: true,

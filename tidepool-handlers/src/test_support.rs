@@ -119,6 +119,9 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
     }
 
     let response_extras: &[(&str, u32)] = &[
+        ("WorktreeAuthorityDenied", 1),
+        ("WorktreeUnauthorized", 1),
+        ("WorktreeId", 1),
         ("Object", 1),
         ("Array", 1),
         ("String", 1),

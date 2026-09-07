@@ -81,22 +81,33 @@ impl WorktreeHandler {
 }
 
 /// Concrete-resource authority shared by the actor composition root and its
-/// Worktree interpreter. Root identity is installed after unpublished-root
-/// allocation; child authorization is derived from the existing durable
-/// binding table and exact run/id/incarnation principal.
+/// Worktree interpreter. Host-issued grants and durable checkout bindings
+/// authorize exact run/id/incarnation principals independently of model roles.
 #[derive(Clone)]
 pub struct ActorWorktreeAuthority {
     runtime: Arc<str>,
     bindings: Arc<Mutex<BindingTable>>,
-    root: Arc<RwLock<Option<tidepool_repr::PrincipalId>>>,
     grants: Arc<RwLock<HashMap<tidepool_repr::PrincipalId, ActorWorktreeGrant>>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ActorWorktreeGrant {
-    pub enumerate: bool,
-    pub allocate: bool,
-    pub integrate: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorWorktreeGrant {
+    Repository,
+    Bound {
+        enumerate: bool,
+        allocate: bool,
+        integrate: bool,
+    },
+}
+
+impl Default for ActorWorktreeGrant {
+    fn default() -> Self {
+        Self::Bound {
+            enumerate: false,
+            allocate: false,
+            integrate: false,
+        }
+    }
 }
 
 impl ActorWorktreeAuthority {
@@ -105,13 +116,8 @@ impl ActorWorktreeAuthority {
         Self {
             runtime: runtime.into(),
             bindings,
-            root: Arc::new(RwLock::new(None)),
             grants: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    pub fn install_root(&self, principal: tidepool_repr::PrincipalId) {
-        *self.root.write() = Some(principal);
     }
 
     pub fn install_grant(&self, principal: tidepool_repr::PrincipalId, grant: ActorWorktreeGrant) {
@@ -122,13 +128,8 @@ impl ActorWorktreeAuthority {
         self.grants.write().remove(&principal);
     }
 
-    fn is_root(&self, principal: tidepool_repr::PrincipalId) -> bool {
-        // The bootstrap expression is evaluated before its unpublished root
-        // receives an ActorRef, so its already-suspended continuation carries
-        // the kernel's explicit SYSTEM principal. Later actor-authored turns
-        // carry the installed exact root principal.
-        principal == tidepool_repr::PrincipalId::SYSTEM
-            || self.root.read().as_ref() == Some(&principal)
+    fn has_repository_access(&self, principal: tidepool_repr::PrincipalId) -> bool {
+        self.grant(principal) == ActorWorktreeGrant::Repository
     }
 
     fn owns(&self, principal: tidepool_repr::PrincipalId, tree: &WorktreeId) -> bool {
@@ -149,6 +150,11 @@ impl ActorWorktreeAuthority {
     }
 
     fn grant(&self, principal: tidepool_repr::PrincipalId) -> ActorWorktreeGrant {
+        // Bootstrap runs before actor identity is allocated. Authored turns
+        // carry their exact actor principal and use only its installed grant.
+        if principal == tidepool_repr::PrincipalId::SYSTEM {
+            return ActorWorktreeGrant::Repository;
+        }
         self.grants
             .read()
             .get(&principal)
@@ -183,6 +189,51 @@ impl ActorWorktreeHandler {
 }
 
 impl ActorWorktreeHandler {
+    fn authorize_source(
+        &self,
+        principal: tidepool_repr::PrincipalId,
+        source: &WorktreeSource,
+    ) -> Result<(), WorktreeError> {
+        if !self.authority.has_repository_access(principal) {
+            match source {
+                WorktreeSource::Worktree(tree) if self.authority.owns(principal, tree) => {}
+                WorktreeSource::Worktree(tree) => {
+                    return Err(WorktreeError::WorktreeUnauthorized(worktree_id_to_wire(
+                        tree,
+                    )));
+                }
+                WorktreeSource::Ref(_) => {
+                    // Linked worktrees intentionally share committed objects
+                    // and refs. A bound worker can review a child's commit
+                    // without changing its own checkout or reading root dirt.
+                    let bound = self.authority.bound_worktree(principal).ok_or_else(|| {
+                        WorktreeError::WorktreeAuthorityDenied(
+                            "committed-ref seeds require an active bound worktree".into(),
+                        )
+                    })?;
+                    if self
+                        .inner
+                        .manager
+                        .lookup(&bound)
+                        .map_err(error_to_wire)?
+                        .is_none()
+                    {
+                        return Err(WorktreeError::WorktreeUnauthorized(worktree_id_to_wire(
+                            &bound,
+                        )));
+                    }
+                }
+                WorktreeSource::CurrentRepository => {
+                    return Err(WorktreeError::WorktreeAuthorityDenied(
+                                "repository working-tree seeds require repository authority; use a bound checkout or committed ref"
+                                    .into(),
+                            ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Reserve exactly one named child workspace as part of an actor-owned
     /// fork admission transaction. This does not consult or confer the
     /// caller's general allocation grant.
@@ -199,45 +250,7 @@ impl ActorWorktreeHandler {
         let spec = match spec {
             Some(spec) => {
                 let spec = spec_from_wire(spec)?;
-                if !self.authority.is_root(principal) {
-                    match &spec.source {
-                        WorktreeSource::Worktree(tree) if self.authority.owns(principal, tree) => {}
-                        WorktreeSource::Worktree(tree) => {
-                            return Err(WorktreeError::WorktreeUnauthorized(worktree_id_to_wire(
-                                tree,
-                            )));
-                        }
-                        WorktreeSource::Ref(_) => {
-                            // Linked worktrees intentionally share committed objects
-                            // and refs. A bound worker can review a child's commit
-                            // without changing its own checkout or reading root dirt.
-                            let bound =
-                                self.authority.bound_worktree(principal).ok_or_else(|| {
-                                    WorktreeError::WorktreeAuthorityDenied(
-                                        "committed-ref forks require an active bound worktree"
-                                            .into(),
-                                    )
-                                })?;
-                            if self
-                                .inner
-                                .manager
-                                .lookup(&bound)
-                                .map_err(error_to_wire)?
-                                .is_none()
-                            {
-                                return Err(WorktreeError::WorktreeUnauthorized(
-                                    worktree_id_to_wire(&bound),
-                                ));
-                            }
-                        }
-                        WorktreeSource::CurrentRepository => {
-                            return Err(WorktreeError::WorktreeAuthorityDenied(
-                                "non-root context forks must derive worktrees from their bound checkout"
-                                    .into(),
-                            ));
-                        }
-                    }
-                }
+                self.authorize_source(principal, &spec.source)?;
                 spec
             }
             None => {
@@ -416,7 +429,12 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         let principal = cx.principal();
-        if self.authority.is_root(principal) {
+        let ActorWorktreeGrant::Bound {
+            enumerate,
+            allocate,
+            integrate,
+        } = self.authority.grant(principal)
+        else {
             if matches!(&req, WorktreeReq::WorktreeBound) {
                 if camino::Utf8Path::from_path(self.inner.manager.source_repository()).is_none() {
                     return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
@@ -433,9 +451,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
                 );
             }
             return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
-        }
-
-        let grant = self.authority.grant(principal);
+        };
         let permitted_tree = match &req {
             WorktreeReq::WorktreeBound => {
                 let Some(id) = self.authority.bound_worktree(principal) else {
@@ -459,52 +475,38 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             | WorktreeReq::WorktreeBranchOf(id)
             | WorktreeReq::WorktreeHeadOf(id)
             | WorktreeReq::WorktreeObserveSubmission(id) => Some(id),
-            WorktreeReq::WorktreeCreateForActorPath(spec, path) if grant.allocate => {
-                return cx.respond(
-                    self.inner
-                        .worktree_create_for_actor_path(spec.clone(), path.clone()),
-                );
+            WorktreeReq::WorktreeCreateForActorPath(spec, path) if allocate => {
+                return cx.respond(self.admit_fork_workspace(
+                    principal,
+                    path.clone(),
+                    Some(spec.clone()),
+                    spec.spec_dirty_policy,
+                ));
             }
-            WorktreeReq::WorktreeCreateFromBoundForActorPath(dirty_policy, path)
-                if grant.allocate =>
-            {
-                let Some(source) = self.authority.bound_worktree(principal) else {
-                    return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
-                        "boundHead requires one active bound worktree".into(),
-                    )));
-                };
-                let spec = WorktreeSpec {
-                    source: WorktreeSource::Worktree(source),
-                    label: path.clone(),
-                    dirty_policy: dirty_policy_from_wire(*dirty_policy),
-                };
-                let actor_path = match tidepool_repr::ActorPath::parse(path) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
-                            format!("invalid actor path: {error}"),
-                        )));
-                    }
-                };
-                let result = self
-                    .inner
-                    .manager
-                    .create_for_actor_path(&spec, &actor_path)
-                    .map(|handle| handle_to_wire(&handle))
-                    .map_err(error_to_wire);
+            WorktreeReq::WorktreeCreateFromBoundForActorPath(dirty_policy, path) if allocate => {
+                return cx.respond(self.admit_fork_workspace(
+                    principal,
+                    path.clone(),
+                    None,
+                    *dirty_policy,
+                ));
+            }
+            WorktreeReq::WorktreeCreate(spec) if allocate => {
+                let result = (|| {
+                    let spec = spec_from_wire(spec.clone())?;
+                    self.authorize_source(principal, &spec.source)?;
+                    self.inner
+                        .manager
+                        .create(&spec)
+                        .map(|handle| handle_to_wire(&handle))
+                        .map_err(error_to_wire)
+                })();
                 return cx.respond(result);
             }
-            WorktreeReq::WorktreeCreate(_) if grant.allocate => {
+            WorktreeReq::WorktreeList | WorktreeReq::WorktreeListMatching(..) if enumerate => {
                 return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
             }
-            WorktreeReq::WorktreeList | WorktreeReq::WorktreeListMatching(..)
-                if grant.enumerate =>
-            {
-                return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
-            }
-            WorktreeReq::WorktreeTryMerge(..) if grant.integrate => {
-                return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
-            }
+            WorktreeReq::WorktreeTryMerge(request) if integrate => Some(&request.target_worktree),
             WorktreeReq::WorktreeCreate(_)
             | WorktreeReq::WorktreeCreateForActorPath(..)
             | WorktreeReq::WorktreeCreateFromBoundForActorPath(..)
@@ -1036,13 +1038,20 @@ mod tests {
         let root = tidepool_repr::PrincipalId::new(1, 1);
         let worker = tidepool_repr::PrincipalId::new(2, 3);
         let tree = WorktreeId::from_raw("worker-tree");
-        authority.install_root(root);
+        authority.install_grant(root, ActorWorktreeGrant::Repository);
 
         let worker_principal = WorktreePrincipal::exact_actor("run-1", 2, 3);
         let binding = bindings.lock().bind(&tree, &worker_principal, 1).unwrap();
 
-        assert!(authority.is_root(root));
-        assert!(authority.is_root(tidepool_repr::PrincipalId::SYSTEM));
+        let peer = tidepool_repr::PrincipalId::new(4, 1);
+        authority.install_grant(peer, ActorWorktreeGrant::Repository);
+        assert!(authority.has_repository_access(root));
+        assert!(authority.has_repository_access(peer));
+        assert!(!authority.has_repository_access(tidepool_repr::PrincipalId::new(4, 2)));
+        authority.remove_grant(root);
+        assert!(!authority.has_repository_access(root));
+        assert!(authority.has_repository_access(peer));
+        assert!(authority.has_repository_access(tidepool_repr::PrincipalId::SYSTEM));
         assert!(authority.owns(worker, &tree));
         assert!(!authority.owns(tidepool_repr::PrincipalId::new(2, 4), &tree));
         assert!(!authority.owns(tidepool_repr::PrincipalId::new(3, 3), &tree));
@@ -1072,7 +1081,7 @@ mod tests {
         ));
         let authority = ActorWorktreeAuthority::new("run-1", Arc::clone(&bindings));
         let root = tidepool_repr::PrincipalId::new(1, 1);
-        authority.install_root(root);
+        authority.install_grant(root, ActorWorktreeGrant::Repository);
         let mut handler =
             ActorWorktreeHandler::new(WorktreeHandler::from_manager(manager), authority);
 
@@ -1157,6 +1166,56 @@ mod tests {
             std::fs::read_to_string(repository.path().join("README.md")).unwrap(),
             "uncommitted root content\n"
         );
+        // General allocation and merge effects use the same resource membrane
+        // as fork admission, even when their verbs are granted to a worker.
+        handler.authority.install_grant(
+            worker,
+            ActorWorktreeGrant::Bound {
+                enumerate: false,
+                allocate: true,
+                integrate: true,
+            },
+        );
+        use tidepool_bridge::FromCore;
+        use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+        let table = crate::test_support::full_effect_test_table();
+        let captured = tidepool_mcp::CapturedOutput::new();
+        let cx = EffectContext::with_principal(&table, worker, &captured);
+        let root_source = WtWorktreeSpec {
+            spec_source: WtWorktreeSource::SourceCurrentRepository,
+            spec_label: "forbidden-root-snapshot".into(),
+            spec_dirty_policy: WtDirtyPolicy::AllowDirtySnapshot,
+        };
+        for request in [
+            WorktreeReq::WorktreeCreate(root_source.clone()),
+            WorktreeReq::WorktreeCreateForActorPath(root_source, "campaign/direct/denied".into()),
+        ] {
+            let value =
+                crate::test_support::response_value(handler.handle(request, &cx).unwrap(), &table);
+            let result =
+                Result::<WtWorktreeHandle, WorktreeError>::from_value(&value, &table).unwrap();
+            assert!(matches!(
+                result,
+                Err(WorktreeError::WorktreeAuthorityDenied(_))
+            ));
+        }
+        let foreign_merge = WorktreeReq::WorktreeTryMerge(WtMergeRequest {
+            source_head: tidepool_bridge_effects::WtGitOid {
+                raw: committed.as_str().into(),
+            },
+            source_branch: None,
+            target_worktree: reviewed.handle_receipt.tree_id.clone(),
+            merge_message: "must not merge another worker's checkout".into(),
+        });
+        let value = crate::test_support::response_value(
+            handler.handle(foreign_merge, &cx).unwrap(),
+            &table,
+        );
+        let result = Result::<WtMergeOutcome, WorktreeError>::from_value(&value, &table).unwrap();
+        assert!(matches!(
+            result,
+            Err(WorktreeError::WorktreeUnauthorized(_))
+        ));
         binding.release(&mut bindings.lock()).unwrap();
         assert!(handler
             .admit_fork_workspace(
