@@ -15,6 +15,7 @@ pub struct ActorDescriptor {
     placement: ActorPlacement,
     source_imports: ActorSourceImports,
     role: EffectiveRole,
+    creator: Option<ActorRef>,
     supervisor_parent: Option<ActorRef>,
     context_parent: Option<ActorRef>,
     actor_path: Option<tidepool_repr::ActorPath>,
@@ -37,6 +38,7 @@ impl ActorDescriptor {
             placement,
             source_imports: ActorSourceImports::default(),
             role: EffectiveRole::coding(),
+            creator: None,
             supervisor_parent: None,
             context_parent: None,
             actor_path: None,
@@ -137,6 +139,17 @@ impl ActorDescriptor {
     #[must_use]
     pub fn supervisor_parent(&self) -> Option<ActorRef> {
         self.supervisor_parent
+    }
+
+    #[must_use]
+    pub fn creator(&self) -> Option<ActorRef> {
+        self.creator
+    }
+
+    #[must_use]
+    pub fn with_creator(mut self, actor: ActorRef) -> Self {
+        self.creator = Some(actor);
+        self
     }
 
     #[must_use]

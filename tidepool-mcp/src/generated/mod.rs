@@ -157,6 +157,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     (
         "AgentInspection",
         &[
+            "ObservationShareResult",
             "ProviderFailureKind",
             "ProviderHealth",
             "AgentDisposition",
@@ -169,6 +170,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "AgentInspectCleanupWith",
             "AgentInspectWith",
             "AgentListWith",
+            "AgentShareObservationWith",
             "AgentGroupListWith",
             "AgentForgetWith",
         ],
@@ -177,6 +179,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     (
         "Forks",
         &[
+            "WorkerLifetime",
             "ForkContext",
             "ForkEffort",
             "ActorEffectKey",

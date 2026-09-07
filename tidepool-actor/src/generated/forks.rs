@@ -29,6 +29,7 @@ pub enum ForksReq {
         Option<String>,
         crate::ForkContext,
         Option<String>,
+        crate::WorkerLifetime,
     ),
     ForksPreviewWith(
         crate::ActorLaunchRoleWire,

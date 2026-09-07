@@ -16,6 +16,7 @@ pub enum AgentInspectionReq {
     AgentInspectCleanupWith(i64),
     AgentInspectWith((i64, i64)),
     AgentListWith,
+    AgentShareObservationWith((i64, i64), (i64, i64)),
     AgentGroupListWith(i64),
     AgentForgetWith((i64, i64)),
 }

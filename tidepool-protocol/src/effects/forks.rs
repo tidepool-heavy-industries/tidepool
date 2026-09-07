@@ -25,6 +25,24 @@ pub fn forks() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
+                name: "WorkerLifetime",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: ["ParentOwned", "SwarmOwned"]
+                        .into_iter()
+                        .map(|ctor| SumVariant {
+                            ctor,
+                            fields: VariantFields::Positional(Vec::new()),
+                            doc: &[],
+                        })
+                        .collect(),
+                },
+                json: JsonInstance::None,
+                derives: WireDerives(&[]),
+                domain: None,
+                doc: &["Whether the creating actor or the enclosing swarm owns worker lifetime."],
+            },
+            TypeDef {
                 name: "ForkContext",
                 wire_rust: None,
                 shape: TypeShape::Sum {
@@ -203,6 +221,11 @@ pub fn forks() -> Effect {
                     name: "instructions",
                     ty: HsType::maybe(HsType::Text),
                     rust: RustBinding::Path("Option<String>"),
+                });
+                args.push(Arg {
+                    name: "lifetime",
+                    ty: HsType::Named("WorkerLifetime"),
+                    rust: RustBinding::Path("crate::WorkerLifetime"),
                 });
                 Verb {
                     ctor: "ForksStartWith",

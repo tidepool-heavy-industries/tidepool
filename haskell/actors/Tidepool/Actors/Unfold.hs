@@ -32,6 +32,8 @@ module Tidepool.Actors.Unfold
   , subgroup
   , Branch
   , withInstructions
+  , withLifetime
+  , WorkerLifetime (..)
   , withBranchGuidance
   , withBranchDeadline
   , ForkEffort (..)
@@ -141,6 +143,7 @@ import Tidepool.Effects.Core
   , WorktreeSource (..)
   , Forks (..)
   , ForkContext (..)
+  , WorkerLifetime (..)
   , ForkEffort (..)
   , AgentInspection (..)
   , WorktreeSpec (..)
@@ -247,11 +250,12 @@ data BranchOptions = BranchOptions
   , branchEffort :: Maybe ForkEffort
   , branchModel :: Maybe Text
   , branchContext :: ForkContext
+  , branchLifetime :: WorkerLifetime
   , branchBudget :: Maybe ForkBudget
   }
 
 defaultBranchOptions :: BranchOptions
-defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing Nothing InheritedContext Nothing
+defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing Nothing InheritedContext ParentOwned Nothing
 
 -- | Requested descendant generations and active descendants across the subtree.
 -- The runtime clamps these to configured ceilings and remaining parent authority.
@@ -333,6 +337,12 @@ withContext context (Branch label role seed effects options input) =
 withInstructions :: Text -> Branch child input result -> Branch child input result
 withInstructions body (Branch label role seed effects options input) =
   Branch label role seed effects (options { branchInstructions = Just body }) input
+
+-- | Swarm-owned workers have selected contexts and outlive their creator.
+-- The runtime admits them only from a top-level actor; authority is not widened.
+withLifetime :: WorkerLifetime -> Branch child input result -> Branch child input result
+withLifetime lifetime (Branch label role seed effects options input) =
+  Branch label role seed effects (options { branchLifetime = lifetime }) input
 
 withBranchGuidance
   :: Text
@@ -683,6 +693,7 @@ startBranch groupId allocated (Branch _ role seed effects options _) = do
     (branchModel options)
     (branchContext options)
     (branchInstructions options)
+    (branchLifetime options)
   pure $ case launched of
     Left failure -> Left (UnfoldBranchRejected allocated failure)
     Right branch -> Right branch

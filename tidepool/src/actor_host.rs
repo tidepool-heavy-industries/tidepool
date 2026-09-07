@@ -1653,7 +1653,8 @@ async fn run_interactive_applications(
                 let Some(event) = event else { break None };
                 match event {
                     LocalResidentDeployment::PolicyInstalled(installation) => {
-                        if installation.supervisor_parent.is_none() {
+                        if installation.creator.is_none() {
+                            launch_context.config = root_config.borrow_and_update().clone();
                             root_identity = installation.actor.identity();
                             launch_context.root = root_identity;
                         }
@@ -2530,7 +2531,7 @@ async fn launch_prepared_interactive_application(
     );
     let effort = launch_effort(
         &launch_mode,
-        if installation.supervisor_parent.is_some() {
+        if installation.creator.is_some() {
             ReasoningEffort::Low
         } else {
             config.effort

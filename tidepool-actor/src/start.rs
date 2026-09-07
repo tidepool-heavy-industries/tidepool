@@ -30,6 +30,12 @@ pub enum ForkContext {
     SelectedContext,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+pub enum WorkerLifetime {
+    ParentOwned,
+    SwarmOwned,
+}
+
 pub(crate) struct ActorStartRequest {
     pub label: String,
     pub role: ActorLaunchRoleWire,
@@ -42,6 +48,7 @@ pub(crate) struct ActorStartRequest {
     pub model: Option<String>,
     pub instructions: Option<String>,
     pub context: ForkContext,
+    pub lifetime: WorkerLifetime,
     pub fork_budget: Option<(i64, i64)>,
     pub session_id: tidepool_repr::SessionId,
     pub parent_actor: crate::ActorRef,
@@ -194,6 +201,7 @@ impl ResidentActorStart {
                 model: None,
                 instructions: None,
                 context: ForkContext::SelectedContext,
+                lifetime: WorkerLifetime::ParentOwned,
                 fork_budget: None,
                 session_id,
                 parent_actor,
@@ -222,6 +230,7 @@ impl ResidentActorStart {
             model,
             instructions,
             context,
+            lifetime,
             fork_budget,
             session_id,
             parent_actor,
@@ -270,8 +279,11 @@ impl ResidentActorStart {
         .with_model(model)
         .with_instructions(instructions)
         .with_fork_budget(fork_budget)
-        .with_supervisor_parent(parent_actor)
+        .with_creator(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
+        if lifetime == WorkerLifetime::ParentOwned {
+            descriptor = descriptor.with_supervisor_parent(parent_actor);
+        }
         if context_fork {
             descriptor = descriptor.with_context_parent(parent_actor);
         }

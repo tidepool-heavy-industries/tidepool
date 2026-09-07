@@ -428,6 +428,7 @@ fn agent_roster_value(
     };
     let usage = entry.runtime.latest_provider_usage();
     let supervisor = entry.descriptor.supervisor_parent();
+    let creator = entry.descriptor.creator();
     let context_parent = entry.descriptor.context_parent();
     let cache_boundary = usage
         .map(|sample| {
@@ -535,6 +536,14 @@ fn agent_roster_value(
                 .runtime
                 .compactions
                 .map(actor_int)
+                .transpose()?
+                .to_value(table)?,
+            creator
+                .map(|actor| actor_int(actor.id.0))
+                .transpose()?
+                .to_value(table)?,
+            creator
+                .map(|actor| actor_int(actor.incarnation.0))
                 .transpose()?
                 .to_value(table)?,
             supervisor
@@ -761,6 +770,11 @@ pub(crate) enum ResidentActorBoundary {
     AgentAttachment(ResidentAgentAttachment),
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
+    AgentShareObservation {
+        continuation: ResidentHole,
+        recipient: crate::ActorRef,
+        scope: crate::ActorRef,
+    },
     AgentGroupList {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
@@ -884,6 +898,7 @@ impl ResidentActorBoundary {
             Self::AgentAttachment(_) => "agent attachment",
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
+            Self::AgentShareObservation { .. } => "shareObservation",
             Self::AgentGroupList { .. } => "observeForkGroup",
             Self::AgentForget(_) => "forgetAgent",
             Self::AgentStop(_) => "stopAgent",
@@ -1026,6 +1041,11 @@ impl ResidentRequest {
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
             ) => "listAgents",
+            Self::AgentInspection(
+                crate::generated::agent_inspection::AgentInspectionReq::AgentShareObservationWith(
+                    ..,
+                ),
+            ) => "shareObservation",
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(..),
             ) => "observeForkGroup",
@@ -2043,6 +2063,7 @@ where
                             label, role, profile, launch_worktrees: worktrees,
                             fork_group: None, fork_workspace: None, effect_keys: None,
                             fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
+                            lifetime: crate::WorkerLifetime::ParentOwned,
                             session_id: context.placement.session, parent_actor: context.actor,
                         },
                     )
@@ -2060,7 +2081,7 @@ where
                         effect_keys,
                         effort,
                         budget,
-                        model, fork_context, instructions,
+                        model, fork_context, instructions, lifetime,
                     )) => {
                         let group = u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -2077,7 +2098,7 @@ where
                                     Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
                                     None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
                                 }),
-                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context,
+                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context, lifetime,
                                 session_id: context.placement.session, parent_actor: context.actor,
                             },
                         )
@@ -2148,6 +2169,11 @@ where
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),
+                    ResidentRequest::AgentInspection(crate::generated::agent_inspection::AgentInspectionReq::AgentShareObservationWith(recipient, scope)) => Ok(ResidentActorBoundary::AgentShareObservation {
+                        continuation: hole,
+                        recipient: crate::wait::decode_address(recipient.0, recipient.1)?,
+                        scope: crate::wait::decode_address(scope.0, scope.1)?,
+                    }),
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(group),
                     ) => Ok(ResidentActorBoundary::AgentGroupList {
@@ -4172,7 +4198,7 @@ where
         Ok(Some(command)) => command,
         Ok(None) => {
             return Ok(Err(format!(
-            "unknown actor workbench command `:{}` (supported: :status, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :recovery, :show imports, :doc)",
+            "unknown actor workbench command `:{}` (supported: :status, :status!, :lineage, :trace, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :recovery, :show imports, :doc)",
             line.name
         )))
         }

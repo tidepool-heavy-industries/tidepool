@@ -198,6 +198,19 @@ impl KernelContext {
     where
         C: KernelBehavior,
     {
+        self.spawn_worker(name, behavior, crate::WorkerLifetime::ParentOwned)
+            .await
+    }
+
+    pub(crate) async fn spawn_worker<C>(
+        &self,
+        name: Option<String>,
+        behavior: C,
+        lifetime: crate::WorkerLifetime,
+    ) -> Result<LocalActorRef, ractor::SpawnErr>
+    where
+        C: KernelBehavior,
+    {
         // Hold admission through registration so retirement cannot miss a
         // child whose startup is already in flight.
         let admission = self.child_admission_closed.read().await;
@@ -211,19 +224,22 @@ impl KernelContext {
             accounted: false,
         };
         let terminal = RetainedActorExit::new();
-        let spawned = self
-            .myself
-            .spawn_linked(
-                name,
-                LocalActor::<C>(PhantomData),
-                LocalActorArguments {
-                    behavior,
-                    terminal: terminal.clone(),
-                    directory: self.directory.clone(),
-                    incarnation: self.identity.incarnation,
-                },
-            )
-            .await;
+        let arguments = LocalActorArguments {
+            behavior,
+            terminal: terminal.clone(),
+            directory: self.directory.clone(),
+            incarnation: self.identity.incarnation,
+        };
+        let spawned = match lifetime {
+            crate::WorkerLifetime::ParentOwned => {
+                self.myself
+                    .spawn_linked(name, LocalActor::<C>(PhantomData), arguments)
+                    .await
+            }
+            crate::WorkerLifetime::SwarmOwned => {
+                LocalActor::<C>::spawn(name, LocalActor::<C>(PhantomData), arguments).await
+            }
+        };
         let (address, task) = match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
@@ -240,9 +256,11 @@ impl KernelContext {
         };
         drop(task);
         let child = LocalActorRef::new_in_incarnation(address, terminal, self.identity.incarnation);
-        self.children
-            .lock()
-            .insert(child.address().get_id(), child.clone());
+        if lifetime == crate::WorkerLifetime::ParentOwned {
+            self.children
+                .lock()
+                .insert(child.address().get_id(), child.clone());
+        }
         custody.accounted = true;
         Ok(child)
     }

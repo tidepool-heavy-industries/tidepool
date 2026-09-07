@@ -88,6 +88,7 @@ import Tidepool.Effects.Core
   ( ActorEffectKey
   , ForkEffort
   , ForkContext
+  , WorkerLifetime
   , ActorEffectProfile (..)
   , ActorKernel (..)
   , ActorLaunchRole (..)
@@ -269,8 +270,9 @@ startForkedAgent
   -> Maybe Text
   -> ForkContext
   -> Maybe Text
+  -> WorkerLifetime
   -> Eff effs (Either Text (AgentRef, Text, WorktreeHandle))
-startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys effort budget model context instructions = do
+startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys effort budget model context instructions lifetime = do
   launched <- launchForkedActor
     launchRole
     forkGroup
@@ -284,6 +286,7 @@ startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effect
     model
     context
     instructions
+    lifetime
   pure $ case launched of
     Left failure -> Left failure
     Right (actor, allocatedPath, tree) ->
@@ -489,6 +492,7 @@ launchForkedActor
   -> Maybe Text
   -> ForkContext
   -> Maybe Text
+  -> WorkerLifetime
   -> Eff effs (Either Text (Actor.ActorRef api exit, Text, WorktreeHandle))
 launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   { Actor.label = actorLabel
@@ -496,7 +500,7 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   , Actor.initialization = startupAction
   , Actor.behavior = install
   , Actor.onShutdown = shutdownAction
-  } startup worktreeSpec dirtyPolicy effectKeys effort budget model context instructions = do
+  } startup worktreeSpec dirtyPolicy effectKeys effort budget model context instructions lifetime = do
   let cell = newExitCell startup
       shutdownEntry reasonCode =
         raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
@@ -522,7 +526,8 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
       budget
       model
       context
-      instructions)
+      instructions
+      lifetime)
   pure $ case launched of
     Left failure -> Left failure
     Right ((actorId, incarnation, allocatedPath), tree) ->

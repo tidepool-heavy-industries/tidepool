@@ -25,6 +25,14 @@ Sol executes the branch with short task-focused contexts. Haskell recipes bind
 repeated choices; they are machine coordination code, so use concise ordinary
 functions rather than narrative boilerplate or a workflow framework.
 
+The planner can launch cooperating roots with
+`withLifetime SwarmOwned (solTask label seed task)` through ordinary `unfold`.
+These workers keep their selected context and normal TUI after the planner exits.
+Use `shareObservation rsi scope` to let a later RSI worker inspect a declared
+creation tree; this shares observations without giving it stop authority.
+Default workers remain supervised by their creator. Swarm shutdown still owns
+all independent roots, and configuration remains frozen across their lifetimes.
+
 A Sol lead installs its declared lane with:
 
 ```haskell

@@ -70,6 +70,7 @@ pub struct LocalResidentInstallation {
     pub fork_effort: Option<crate::ForkEffort>,
     pub model: Option<String>,
     pub instructions: Option<String>,
+    pub creator: Option<crate::ActorRef>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
@@ -115,18 +116,35 @@ struct ResidentEnvironment<H, O> {
     fork_groups: crate::ForkGroupRegistry,
     actors: Arc<Mutex<std::collections::HashMap<ActorRef, ResidentActorRecord>>>,
     fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+    root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
 }
 
 #[derive(Clone)]
 struct ResidentActorRecord {
     forest_control: bool,
+    observation_roots: std::collections::HashSet<ActorRef>,
     descriptor: ActorDescriptor,
     bound_worktree: Option<String>,
     terminal: Option<ActorTerminal>,
     runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
-fn actor_can_access(
+#[derive(tidepool_bridge_derive::ToCore)]
+enum ObservationShareResult {
+    #[core(module = "Tidepool.Effects.Core", name = "ObservationShared")]
+    Shared,
+    #[core(
+        module = "Tidepool.Effects.Core",
+        name = "ObservationRecipientUnavailable"
+    )]
+    RecipientUnavailable,
+    #[core(module = "Tidepool.Effects.Core", name = "ObservationScopeUnavailable")]
+    ScopeUnavailable,
+    #[core(module = "Tidepool.Effects.Core", name = "ObservationUnauthorized")]
+    Unauthorized,
+}
+
+fn actor_can_control(
     owner: ActorRef,
     candidate: ActorRef,
     records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
@@ -137,19 +155,44 @@ fn actor_can_access(
     {
         return true;
     }
+    actor_in_creation_tree(owner, candidate, records)
+}
+
+fn actor_can_observe(
+    owner: ActorRef,
+    candidate: ActorRef,
+    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
+) -> bool {
+    actor_can_control(owner, candidate, records)
+        || records.get(&owner).is_some_and(|record| {
+            record
+                .observation_roots
+                .iter()
+                .any(|root| actor_in_creation_tree(*root, candidate, records))
+        })
+}
+
+fn actor_in_creation_tree(
+    owner: ActorRef,
+    candidate: ActorRef,
+    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
+) -> bool {
     let mut cursor = candidate;
-    loop {
+    for _ in 0..=records.len() {
         if cursor == owner {
             return true;
         }
-        let Some(parent) = records
-            .get(&cursor)
-            .and_then(|record| record.descriptor.supervisor_parent())
-        else {
+        let Some(parent) = records.get(&cursor).and_then(|record| {
+            record
+                .descriptor
+                .creator()
+                .or(record.descriptor.supervisor_parent())
+        }) else {
             return false;
         };
         cursor = parent;
     }
+    false
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
@@ -162,6 +205,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             fork_groups: self.fork_groups.clone(),
             actors: Arc::clone(&self.actors),
             fork_workspaces: self.fork_workspaces.clone(),
+            root_admission_closed: self.root_admission_closed.clone(),
         }
     }
 }
@@ -541,6 +585,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let records = self.environment.actors.lock();
         let hidden_terminal_actors = records
             .iter()
+            .filter(|(identity, _)| actor_can_observe(actor, **identity, &records))
             .filter(|(identity, record)| {
                 record
                     .terminal
@@ -555,6 +600,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .count();
         let mut roster = records
             .iter()
+            .filter(|(identity, _)| actor_can_observe(actor, **identity, &records))
             .filter_map(|(identity, record)| {
                 let terminal = record.terminal.clone().or_else(|| {
                     kernel
@@ -597,9 +643,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 }
                 if view == StatusView::Lineage {
                     return Some(format!(
-                        "  - {:?} ({}@{}) supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
+                        "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
                         record.descriptor.label(), identity.id.0, identity.incarnation.0,
-                        record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
+                        record.descriptor.creator(), record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
                         record.descriptor.fork_group(), record.descriptor.placement().lexical_scope.0,
                         runtime.provider_thread, runtime.provider_parent_thread,
                         runtime.first_provider_usage.as_ref().map(|sample| (&sample.observation_id, sample.cached_input_tokens, sample.uncached_input_tokens)),
@@ -692,10 +738,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         } else {
             format!(
-            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
+            "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
+            self.descriptor.creator(),
             self.descriptor.supervisor_parent(),
             self.descriptor.context_parent(),
             self.descriptor.fork_group(),
@@ -1018,6 +1065,33 @@ where
             fork_workspace,
         } = child;
         let fork_group = descriptor.fork_group();
+        let root_admission = self.environment.root_admission_closed.clone();
+        let _root_admission = if descriptor.supervisor_parent().is_none() {
+            let admission = root_admission.read().await;
+            if *admission {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "swarm root admission is closed".into(),
+                ));
+            }
+            Some(admission)
+        } else {
+            None
+        };
+        let lifetime = if descriptor.supervisor_parent().is_none() {
+            if descriptor.context_parent().is_some() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "a swarm-owned worker requires a selected context".into(),
+                ));
+            }
+            if self.descriptor.supervisor_parent().is_some() && !self.forest_control {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "only a top-level actor can admit a swarm-owned worker".into(),
+                ));
+            }
+            crate::WorkerLifetime::SwarmOwned
+        } else {
+            crate::WorkerLifetime::ParentOwned
+        };
         if self.active_route.is_some() && descriptor.context_parent().is_some() {
             return Err(ResidentActorWorkbenchError::ActorProtocol("automatic routes have no provider transcript boundary; select a task context for spawned workers".into()));
         }
@@ -1108,7 +1182,7 @@ where
         }
         let allocated_label = descriptor.label().to_string();
         let child = kernel
-            .spawn_child(
+            .spawn_worker(
                 None,
                 Self::child(
                     descriptor,
@@ -1116,6 +1190,7 @@ where
                     entry,
                     launch_worktrees,
                 ),
+                lifetime,
             )
             .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
@@ -1311,7 +1386,7 @@ where
             ResidentActorBoundary::AgentInspect(inspection) => {
                 let records = self.environment.actors.lock().clone();
                 let observation = records.get(&inspection.target).and_then(|record| {
-                    actor_can_access(context.actor, inspection.target, &records).then(|| {
+                    actor_can_observe(context.actor, inspection.target, &records).then(|| {
                         crate::resident_workbench::AgentRosterProjection {
                             received: self.environment.requests.received_counts(inspection.target),
                             requests: self.environment.requests.work_for_target(inspection.target),
@@ -1336,7 +1411,7 @@ where
                 let records = self.environment.actors.lock().clone();
                 let mut roster = records
                     .iter()
-                    .filter(|(actor, _)| actor_can_access(context.actor, **actor, &records))
+                    .filter(|(actor, _)| actor_can_observe(context.actor, **actor, &records))
                     .map(
                         |(actor, record)| crate::resident_workbench::AgentRosterProjection {
                             received: self.environment.requests.received_counts(*actor),
@@ -1357,6 +1432,39 @@ where
                 self.environment
                     .runner
                     .resume_agent_roster(context.clone(), continuation, roster)
+                    .await
+            }
+            ResidentActorBoundary::AgentShareObservation {
+                continuation,
+                recipient,
+                scope,
+            } => {
+                let outcome = {
+                    let mut records = self.environment.actors.lock();
+                    if records
+                        .get(&recipient)
+                        .is_none_or(|record| record.terminal.is_some())
+                        || kernel
+                            .resolve(recipient)
+                            .is_none_or(|actor| actor.terminal().get().is_some())
+                    {
+                        ObservationShareResult::RecipientUnavailable
+                    } else if !records.contains_key(&scope) {
+                        ObservationShareResult::ScopeUnavailable
+                    } else if !actor_can_observe(context.actor, scope, &records) {
+                        ObservationShareResult::Unauthorized
+                    } else {
+                        records
+                            .get_mut(&recipient)
+                            .expect("checked exact recipient")
+                            .observation_roots
+                            .insert(scope);
+                        ObservationShareResult::Shared
+                    }
+                };
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, outcome)
                     .await
             }
             ResidentActorBoundary::AgentGroupList {
@@ -1402,7 +1510,7 @@ where
                 let authorized_terminal = {
                     let records = self.environment.actors.lock();
                     records.get(&forget.target).and_then(|record| {
-                        actor_can_access(context.actor, forget.target, &records)
+                        actor_can_control(context.actor, forget.target, &records)
                             .then(|| {
                                 record.terminal.clone().or_else(|| {
                                     kernel
@@ -1416,7 +1524,7 @@ where
                 let outcome = if authorized_terminal.is_none() {
                     let records = self.environment.actors.lock();
                     if records.contains_key(&forget.target)
-                        && actor_can_access(context.actor, forget.target, &records)
+                        && actor_can_control(context.actor, forget.target, &records)
                     {
                         crate::resident_workbench::AgentForgetProjection::Running
                     } else {
@@ -1453,7 +1561,7 @@ where
                     (
                         records.contains_key(&stop.target),
                         stop.target != context.actor
-                            && actor_can_access(context.actor, stop.target, &records),
+                            && actor_can_control(context.actor, stop.target, &records),
                     )
                 };
                 let outcome = if stop.target == context.actor {
@@ -2486,6 +2594,7 @@ where
                             fork_effort: self.descriptor.fork_effort(),
                             model: self.descriptor.model().map(str::to_owned),
                             instructions: self.descriptor.instructions().map(str::to_owned),
+                            creator: self.descriptor.creator(),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
@@ -2661,6 +2770,7 @@ where
             fork_effort: self.descriptor.fork_effort(),
             model: self.descriptor.model().map(str::to_owned),
             instructions: self.descriptor.instructions().map(str::to_owned),
+            creator: self.descriptor.creator(),
             fork_boundary: self.descriptor.fork_boundary().cloned(),
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
@@ -3819,6 +3929,7 @@ where
                 context.actor,
                 ResidentActorRecord {
                     forest_control: self.forest_control,
+                    observation_roots: Default::default(),
                     descriptor: self.descriptor.clone(),
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
@@ -4649,6 +4760,7 @@ where
 pub struct ActorGraphNode {
     pub actor: ActorRef,
     pub label: String,
+    pub creator: Option<ActorRef>,
     pub supervisor_parent: Option<ActorRef>,
     pub context_parent: Option<ActorRef>,
     pub terminal: Option<ActorTerminal>,
@@ -4695,6 +4807,7 @@ where
             fork_groups: crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default()),
             actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             fork_workspaces,
+            root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
         };
         (
             Self {
@@ -4725,7 +4838,7 @@ where
         }
         let mut nodes = records
             .iter()
-            .filter(|(actor, _)| actor_can_access(requester, **actor, &records))
+            .filter(|(actor, _)| actor_can_observe(requester, **actor, &records))
             .map(|(actor, record)| {
                 let runtime = record.runtime_observation.snapshot();
                 let (active_requests, queued_requests) =
@@ -4733,6 +4846,7 @@ where
                 ActorGraphNode {
                     actor: *actor,
                     label: record.descriptor.label().to_owned(),
+                    creator: record.descriptor.creator(),
                     supervisor_parent: record.descriptor.supervisor_parent(),
                     context_parent: record.descriptor.context_parent(),
                     terminal: record.terminal.clone().or_else(|| {
@@ -4763,15 +4877,20 @@ where
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        let admission = self.environment.root_admission_closed.read().await;
+        if *admission {
+            return Err(std::io::Error::other("swarm root admission is closed").into());
+        }
         let (placement, outcome) = self
             .environment
             .runner
             .prepare_root_program(self.session, compiled)
             .await?;
         match self
-            .admit_root(
+            .admit_prepared_root(
                 ActorDescriptor::new(label, placement).with_effective_role(role),
                 outcome,
+                &admission,
             )
             .await
         {
@@ -4787,6 +4906,7 @@ where
     }
 
     pub async fn shutdown(&self) {
+        *self.environment.root_admission_closed.write().await = true;
         let roots = self
             .environment
             .actors
@@ -4816,6 +4936,10 @@ where
         label: String,
         role: crate::EffectiveRole,
     ) -> Result<LocalActorRef, Box<dyn std::error::Error + Send + Sync>> {
+        let admission = self.environment.root_admission_closed.read().await;
+        if *admission {
+            return Err(std::io::Error::other("swarm root admission is closed").into());
+        }
         let placement = self
             .environment
             .runner
@@ -4854,6 +4978,22 @@ where
         &self,
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
+    ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
+        let admission = self.environment.root_admission_closed.read().await;
+        if *admission {
+            return Err(ractor::SpawnErr::StartupFailed(
+                std::io::Error::other("swarm root admission is closed").into(),
+            ));
+        }
+        self.admit_prepared_root(descriptor, outcome, &admission)
+            .await
+    }
+
+    async fn admit_prepared_root(
+        &self,
+        descriptor: ActorDescriptor,
+        outcome: ResidentOutcome,
+        _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         if descriptor.placement().session != self.session
             || descriptor.supervisor_parent().is_some()

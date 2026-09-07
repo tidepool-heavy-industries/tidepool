@@ -8,17 +8,20 @@ module Tidepool.Actors.Observe
   , UsageDelta (..)
   , snapshot
   , subtree
+  , creationTree
+  , shareObservation
+  , ObservationShareResult (..)
   , swarmUsage
   , usageByRequestedModel
   , usageDelta
   ) where
 
-import Control.Monad.Freer (Eff, Member)
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 import Data.List (nub)
 import Data.Maybe (isNothing)
 import Prelude
-import Tidepool.Actors.Internal.Agent (listAgents)
+import Tidepool.Actors.Internal.Agent (AgentRef, agentIdentity, listAgents)
 import Tidepool.Effects.Core
 
 newtype SwarmSnapshot = SwarmSnapshot { snapshotActors :: [AgentRosterEntry] }
@@ -46,10 +49,21 @@ data UsageDelta = UsageDelta
 snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
 snapshot = SwarmSnapshot <$> listAgents
 
+shareObservation :: Member AgentInspection effects => AgentRef -> AgentRef -> Eff effects ObservationShareResult
+shareObservation recipient scope = send (AgentShareObservationWith (agentIdentity recipient) (agentIdentity scope))
+
 -- | Supervision descendants, including the selected actor. Context inheritance
 -- is a separate relationship and does not determine subtree accounting.
 subtree :: (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
-subtree root (SwarmSnapshot actors) = SwarmSnapshot (filter belongs actors)
+subtree = treeBy (\actor -> (rosterSupervisorId actor, rosterSupervisorIncarnation actor))
+
+-- | Creation provenance includes independently owned workers. It does not
+-- imply that retiring the creator will retire the members of this tree.
+creationTree :: (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
+creationTree = treeBy (\actor -> (rosterCreatorId actor, rosterCreatorIncarnation actor))
+
+treeBy :: (AgentRosterEntry -> (Maybe Int, Maybe Int)) -> (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
+treeBy parentOf root (SwarmSnapshot actors) = SwarmSnapshot (filter belongs actors)
   where
     identity actor = (rosterActorId actor, rosterActorIncarnation actor)
     belongs actor = reaches [] (identity actor)
@@ -57,7 +71,7 @@ subtree root (SwarmSnapshot actors) = SwarmSnapshot (filter belongs actors)
       | key == root = True
       | key `elem` seen = False
       | otherwise = case filter ((== key) . identity) actors of
-          actor : _ -> case (rosterSupervisorId actor, rosterSupervisorIncarnation actor) of
+          actor : _ -> case parentOf actor of
             (Just parent, Just incarnation) -> reaches (key : seen) (parent, incarnation)
             _ -> False
           _ -> False

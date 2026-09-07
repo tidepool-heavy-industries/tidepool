@@ -25,6 +25,13 @@ pub fn agent_inspection() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
+                name: "ObservationShareResult", wire_rust: None,
+                shape: TypeShape::Sum { variants: ["ObservationShared", "ObservationRecipientUnavailable", "ObservationScopeUnavailable", "ObservationUnauthorized"]
+                    .into_iter().map(|name| variant(name, vec![])).collect() },
+                json: JsonInstance::None, derives: NO_WIRE, domain: None,
+                doc: &["Observation sharing never grants mutation or lifecycle control."],
+            },
+            TypeDef {
                 name: "ProviderFailureKind", wire_rust: None,
                 shape: TypeShape::Sum { variants: vec![variant("RequestRejected", vec![]),
                     variant("TransportFailed", vec![]), variant("OtherProviderFailure", vec![HsType::Text])] },
@@ -130,6 +137,8 @@ pub fn agent_inspection() -> Effect {
                         field("rosterReceivedRequests", HsType::Int),
                         field("rosterReceivedCoordinationEvents", HsType::Int),
                         field("rosterCompactions", HsType::maybe(HsType::Int)),
+                        field("rosterCreatorId", HsType::maybe(HsType::Int)),
+                        field("rosterCreatorIncarnation", HsType::maybe(HsType::Int)),
                         field("rosterSupervisorId", HsType::maybe(HsType::Int)),
                         field("rosterSupervisorIncarnation", HsType::maybe(HsType::Int)),
                         field("rosterContextParentId", HsType::maybe(HsType::Int)),
@@ -243,6 +252,18 @@ pub fn agent_inspection() -> Effect {
                 method: "agent_list_with",
                 args: vec![],
                 ret: HsType::List(Box::new(HsType::Named("AgentRosterEntry"))),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "AgentShareObservationWith",
+                method: "agent_share_observation_with",
+                args: ["recipient", "scope"].into_iter().map(|name| Arg {
+                    name, ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                    rust: RustBinding::Path("(i64, i64)"),
+                }).collect(),
+                ret: HsType::Named("ObservationShareResult"),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

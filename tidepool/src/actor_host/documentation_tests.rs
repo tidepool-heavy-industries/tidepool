@@ -1256,6 +1256,226 @@ async fn next_project_worker(
 }
 
 #[tokio::test]
+async fn independent_admission_rejects_inheritance_and_supervised_escape() {
+    let mut campaign = workspace_campaign().await;
+    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign
+        ._repository
+        .writer()
+        .commit_empty("workspace program")
+        .unwrap();
+    let root = campaign.root_installation.policy.clone();
+    let fixture = include_str!("fixtures/independent_worker_setup.hs");
+    let inherited = fixture
+        .replace("withContext (selected id)", "withContext inherited")
+        .replace("peer <- unfold", "peerAttempt <- attemptUnfold");
+    committed(root.as_ref(), &inherited).await;
+    let result = committed(
+        root.as_ref(),
+        "inspectFull (either show (const \"unexpected acceptance\") peerAttempt)",
+    )
+    .await;
+    assert!(
+        result.to_string().contains("requires a selected context"),
+        "{result}"
+    );
+    committed(root.as_ref(), &fixture.replace("SwarmOwned", "ParentOwned")).await;
+    let (worker, _binding) = next_project_worker(&mut campaign).await;
+    assert_eq!(
+        worker.supervisor_parent,
+        Some(campaign.root_installation.actor.identity())
+    );
+    let attempted = fixture
+        .replace("projectHead", "boundHead")
+        .replace("peer <- unfold", "standaloneAttempt <- attemptUnfold");
+    committed(worker.policy.as_ref(), &attempted).await;
+    let result = committed(
+        worker.policy.as_ref(),
+        "inspectFull (either show (const \"unexpected acceptance\") standaloneAttempt)\npollReply sessionReply",
+    )
+    .await;
+    assert!(
+        result["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("only a top-level actor"),
+        "{result}"
+    );
+    assert_eq!(result["items"][1]["output"], "ReplyOpen", "{result}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn independent_workers_retain_peer_requests_after_creator_retirement() {
+    let mut campaign = workspace_campaign().await;
+    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign
+        ._repository
+        .writer()
+        .commit_empty("workspace program")
+        .unwrap();
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/independent_worker_setup.hs"),
+    )
+    .await;
+    let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
+    assert!(worker.supervisor_parent.is_none());
+    assert!(worker.context_parent.is_none());
+    assert_eq!(
+        worker.creator,
+        Some(campaign.root_installation.actor.identity())
+    );
+    let result = dispatch_haskell_script(
+        worker.policy.as_ref(),
+        "reply sessionReply (\"ready\" :: Text)",
+    )
+    .await;
+    assert_eq!(result["status"], "replied", "{result}");
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/independent_peer_setup.hs"),
+    )
+    .await;
+    let (observer, _observer_binding) = next_project_worker(&mut campaign).await;
+    assert!(observer.supervisor_parent.is_none());
+    assert_eq!(observer.creator, worker.creator);
+    let unshared = committed(observer.policy.as_ref(), "let retainedPeer = sessionInput\nvisibleBefore <- snapshot\ninspectFull (length (snapshotActors visibleBefore))\nshareObservation retainedPeer retainedPeer").await;
+    assert_eq!(unshared["items"][2]["output"], "1", "{unshared}");
+    assert_eq!(
+        unshared["items"][3]["output"], "ObservationUnauthorized",
+        "{unshared}"
+    );
+    assert_eq!(
+        campaign
+            .forest
+            .inspect_graph(observer.actor.identity())
+            .unwrap()
+            .len(),
+        1
+    );
+    let status = committed(observer.policy.as_ref(), ":lineage").await;
+    assert!(
+        !status["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains(&worker.label),
+        "{status}"
+    );
+    let shared = committed(
+        root.as_ref(),
+        "shareObservation (forkedActor peerObserver) (forkedActor peer)",
+    )
+    .await;
+    assert_eq!(
+        shared["items"][0]["output"], "ObservationShared",
+        "{shared}"
+    );
+    let observed = committed(observer.policy.as_ref(), "visibleAfter <- snapshot\ninspectFull (length (snapshotActors visibleAfter))\nstopAgent retainedPeer").await;
+    assert_eq!(observed["items"][1]["output"], "2", "{observed}");
+    assert_eq!(
+        observed["items"][2]["output"], "StopUnauthorized",
+        "{observed}"
+    );
+    assert_eq!(
+        campaign
+            .forest
+            .inspect_graph(observer.actor.identity())
+            .unwrap()
+            .len(),
+        2
+    );
+    let status = committed(observer.policy.as_ref(), ":lineage").await;
+    assert!(
+        status["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains(&worker.label),
+        "{status}"
+    );
+    let result = dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "reply sessionReply (\"ready\" :: Text)",
+    )
+    .await;
+    assert_eq!(result["status"], "replied", "{result}");
+    campaign
+        .root_installation
+        .actor
+        .shutdown(ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "planner finished".into(),
+        })
+        .await
+        .unwrap();
+    assert!(worker.actor.terminal().get().is_none());
+    assert!(observer.actor.terminal().get().is_none());
+    committed(observer.policy.as_ref(), "let Right followupLabel = requestLabel \"peer-followup\"\nfollowup <- request @Text retainedPeer followupLabel (\"after planner retirement\" :: Text)").await;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if let Some(LocalResidentDeployment::SessionReady { activation }) =
+                campaign.deployments.recv().await
+            {
+                if activation.id.actor() == worker.actor.identity() {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let result = dispatch_haskell_script(
+        worker.policy.as_ref(),
+        "reply sessionReply (sessionInput <> \" accepted\" :: Text)",
+    )
+    .await;
+    assert_eq!(result["status"], "replied", "{result}");
+    let result = committed(
+        observer.policy.as_ref(),
+        "settled <- pollResponse followup\ninspectFull settled",
+    )
+    .await;
+    assert!(
+        result["items"][1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("after planner retirement accepted"),
+        "{result}"
+    );
+    worker
+        .actor
+        .shutdown(ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "peer finished".into(),
+        })
+        .await
+        .unwrap();
+    let stale = committed(
+        observer.policy.as_ref(),
+        "shareObservation retainedPeer retainedPeer",
+    )
+    .await;
+    assert_eq!(
+        stale["items"][0]["output"], "ObservationRecipientUnavailable",
+        "{stale}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    assert!(worker.actor.terminal().get().is_some());
+    assert!(observer.actor.terminal().get().is_some());
+    assert!(campaign
+        .forest
+        .new_workbench(
+            "after-swarm-stop".into(),
+            tidepool_actor::EffectiveRole::root()
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn project_review_retains_evidence_and_owns_direct_repair() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".shoal").unwrap();

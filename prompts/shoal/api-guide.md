@@ -72,6 +72,8 @@ data ForkEffort = Low | Medium | High
 withEffort :: ForkEffort -> Branch child input result -> Branch child input result
 withModel :: Text -> Branch child input result -> Branch child input result
 withInstructions :: Text -> Branch child input result -> Branch child input result
+data WorkerLifetime = ParentOwned | SwarmOwned
+withLifetime :: WorkerLifetime -> Branch child input result -> Branch child input result
 selected :: (input -> Text) -> WorkerContext input
 inherited :: WorkerContext input
 withContext :: WorkerContext input -> Branch child input result -> Branch child input result
@@ -96,6 +98,14 @@ Coding/scaffolding/integration branches have coding worktrees; research branches
 are inspection-only. `researchingLeaf` omits delegation. Available effects and
 runtime depth/width still limit admission. For recursive budget proposals use
 `:doc unfold` and `previewBranch`; do not infer permission from visible handles.
+
+Workers default to `ParentOwned`. A top-level actor can select `SwarmOwned` with
+a selected context to create a cooperating independent root through the same
+`unfold` path. It retains its normal TUI and can receive followups after its creator
+retires. Swarm shutdown still owns its retirement. A supervised actor cannot use
+this selector to escape its owner's lifetime. Creation, supervision, and context
+inheritance are separate observed relationships; lifetime does not widen effects
+or worktree authority.
 Unspecified fork effort defaults to Low, not the parent setting.
 `withEffort` requests initial effort, not a change to a running actor or proof
 of provider application.
@@ -215,6 +225,9 @@ pollRoute :: Member Watches effects => Route -> Eff effects RouteState
 listRoutes :: Member Watches effects => Eff effects [Route]
 snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
 subtree :: (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
+creationTree :: (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
+shareObservation :: Member AgentInspection effects
+                 => AgentRef -> AgentRef -> Eff effects ObservationShareResult
 swarmUsage :: SwarmSnapshot -> UsageTotal
 usageByRequestedModel :: SwarmSnapshot -> [(Maybe Text, UsageTotal)]
 usageDelta :: SwarmSnapshot -> SwarmSnapshot -> UsageDelta
@@ -239,10 +252,17 @@ does not run. Exact request ownership, cancellation and update fences still
 apply. Use this to deliver a completed chain directly to its original requester.
 
 Snapshots read existing observations without asking models to report. They include
-supervision and context ancestry, actual/requested model, current requests, received
+creation, supervision and context ancestry, actual/requested model, current requests, received
 request and coordination-event counts, compactions when known, and provider usage.
 Received coordination events count watch/cancellation notifications issued by the
 request owner; they do not claim to count all provider/TUI events or presentation.
+`shareObservation recipient scope` grants visibility into that exact actor's
+creation tree, including later workers. The caller must already observe that
+scope. Inspect `ObservationShareResult`: the recipient/scope may be unavailable,
+or sharing may be unauthorized. Sharing is observation-only; it never permits
+stopping workers or mutating their resources. Snapshots, host graph reads and
+`:status`/`:lineage` use the same visibility policy. Use `creationTree` to group
+planner-created work independently of supervision lifetimes.
 Usage totals deduplicate provider threads, choose a compatible cumulative
 observation across resumed actors, and expose unknown actors, inconsistent sources
 and partial coverage. `usageByRequestedModel` groups those totals by requested

@@ -70,6 +70,8 @@ module Tidepool.Actors.Shoal
   , Branch
   , withBranchGuidance
   , withInstructions
+  , withLifetime
+  , WorkerLifetime (..)
   , withBranchDeadline
   , ForkEffort (..)
   , withEffort
@@ -148,6 +150,9 @@ module Tidepool.Actors.Shoal
   , UsageDelta (..)
   , snapshot
   , subtree
+  , creationTree
+  , shareObservation
+  , ObservationShareResult (..)
   , swarmUsage
   , usageByRequestedModel
   , usageDelta

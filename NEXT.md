@@ -77,6 +77,12 @@ The implemented foundation includes:
 - Independent `withModel` and `withContext` selection through TUI launch.
   Selected contexts have fresh transcripts and isolated local bindings; inherited
   contexts preserve the completed-call boundary. Both load the frozen modules.
+- `withLifetime SwarmOwned` admits a selected-context independent root from a
+  top-level actor through ordinary `unfold`. It outlives its creator and retains
+  peer requests; swarm shutdown closes root admission and retires it. Default
+  workers remain supervised. Creation, supervision and context ancestry are
+  separate observations. `shareObservation` grants scoped creation-tree visibility
+  without stop authority; snapshots, host graphs and status share this policy.
 - Watch-owned `route`, `listRoutes`, `pollRoute` and `forgetRoute`, with automatic callbacks,
   selected-worker admission, retained failures and scoped callback child cleanup.
   Failed callbacks emit one exceptional owner notification; successful callbacks
@@ -106,8 +112,6 @@ both general capability and a complete authored orchestration package:
   not the resolved prompt, model, context and definition selection.
 - Complete repair and specialist-answer compositions preserving request ownership,
   the waiting obligation, exact evidence and useful retained workers.
-- A normal control path for cooperating independent roots and scoped observation.
-  Rust forest support exists; a complete model-facing usage has not been established.
 - A usable plan-tree package and aligned prompts. Existing defaults still teach
   inherited recursive work. The example now supplies repair and question recipes;
   review now retains candidate checks/gates and the exact implementer, and local
@@ -180,6 +184,11 @@ Snapshot comparison checks execute resumed-thread deduplication, model-selection
 groups, partial and missing observations, and counter/source discontinuities.
 Ordinary value bindings also shadow imported default vocabulary consistently in
 the resident workbench; qualified names remain available.
+
+Independent-root checks cover retained peer requests after creator retirement,
+inherited-context and supervised-escape refusals, observation-only sharing across
+snapshots/host graphs/status, stale recipients and closed swarm admission. The
+existing native operator graph consumer and published guide signatures pass.
 
 Evidence recorded for `42e27421`: focused resident acceptance, ownership,
 configuration, protocol and usage checks passed; production compilation and all
