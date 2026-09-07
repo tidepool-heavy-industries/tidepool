@@ -145,9 +145,12 @@ module Tidepool.Actors.Shoal
   , listAgents
   , SwarmSnapshot (..)
   , UsageTotal (..)
+  , UsageDelta (..)
   , snapshot
   , subtree
   , swarmUsage
+  , usageByRequestedModel
+  , usageDelta
   , AgentForgetOutcome (..)
   , forgetAgent
   , Response

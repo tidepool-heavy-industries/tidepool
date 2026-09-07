@@ -84,6 +84,10 @@ The implemented foundation includes:
 - `snapshot`, `subtree` and `swarmUsage` over existing observations, including
   requested/observed models, received request/coordination-event counts and
   compactions when known. Usage is observed thread usage, not a billing ledger.
+  Totals select compatible cumulative observations across resumed incarnations.
+  `usageByRequestedModel` groups by launch selection without claiming billing
+  attribution. `usageDelta` separates comparable increases, newly visible history,
+  disappeared observations and source/counter discontinuities.
 - Codex `4372d1a1cf9952178aff25bafdb7e3a6de49b491`: completion acknowledgments run on
   an ordered background queue with 60-second attempts. Exhausted failures disable
   hosted tools while preserving the TUI conversation and other tools.
@@ -171,6 +175,11 @@ frozen-source compilation, exact prompt-byte round trips, owned route recovery,
 planned specialist consultation, failed-owner lifecycle propagation, and a mounted
 process surviving failure cleanup in a real tmux pane. The complete package and
 its integration acceptance remain outstanding.
+
+Snapshot comparison checks execute resumed-thread deduplication, model-selection
+groups, partial and missing observations, and counter/source discontinuities.
+Ordinary value bindings also shadow imported default vocabulary consistently in
+the resident workbench; qualified names remain available.
 
 Evidence recorded for `42e27421`: focused resident acceptance, ownership,
 configuration, protocol and usage checks passed; production compilation and all

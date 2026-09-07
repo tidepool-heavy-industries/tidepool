@@ -459,18 +459,18 @@ fn extract_user_imports(src: &str) -> (String, Vec<String>) {
 ///   never collide with an unqualified session decl. Empty `all_session_heads`
 ///   also returns the line unchanged (no session decls yet to guard against).
 pub(super) fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -> String {
-    if all_session_heads.is_empty() || imp.trim_start().starts_with("import qualified") {
+    if all_session_heads.is_empty() || import_is_qualified(imp) {
         return imp.to_string();
     }
     let mut hides: Vec<String> = all_session_heads.iter().map(|p| p.render_entry()).collect();
     let base = if let Some(hiding_at) = imp.find(" hiding (") {
         let prefix = &imp[..hiding_at];
         let list_start = hiding_at + " hiding (".len();
-        if let Some(rel_end) = imp[list_start..].find(')') {
-            let existing = &imp[list_start..list_start + rel_end];
+        if let Some(list_end) = imp.rfind(')') {
+            let existing = &imp[list_start..list_end];
             hides.extend(
-                existing
-                    .split(',')
+                split_top_level_commas(existing)
+                    .into_iter()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(String::from),
@@ -489,6 +489,14 @@ pub(super) fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -
     format!("{base} hiding ({})", hides.join(", "))
 }
 
+fn import_is_qualified(line: &str) -> bool {
+    line.split('(')
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(|token| token == "qualified")
+}
+
 /// Subtract `names` from an unqualified `import M (a, b)` explicit-list line.
 /// GHC forbids combining an explicit list with a `hiding` clause, so shadowing
 /// a listed name means REMOVING its entry; an emptied list stays `import M ()`
@@ -504,8 +512,7 @@ pub(super) fn hide_session_heads(imp: &str, all_session_heads: &[&ExportItem]) -
 #[must_use]
 pub fn subtract_import_list_names(line: &str, names: &[&str]) -> Option<String> {
     let t = line.trim_start();
-    if !t.starts_with("import ") || t.starts_with("import qualified") || line.contains(" hiding (")
-    {
+    if !t.starts_with("import ") || import_is_qualified(t) || line.contains(" hiding (") {
         return None;
     }
     let (open, close) = (line.find('(')?, line.rfind(')')?);
@@ -828,6 +835,18 @@ mod tests {
     fn push_chained(log: &mut DeclLog, mut t: DeclTurn) -> Generation {
         t.parent = (log.generation().0 > 0).then_some(log.generation());
         log.push(t)
+    }
+
+    #[test]
+    fn shadowing_preserves_qualified_names_and_nested_hiding_entries() {
+        let after = val("after");
+        for import in ["import qualified M as Q", "import M qualified as Q (after)"] {
+            assert_eq!(hide_session_heads(import, &[&after]), import);
+        }
+        assert_eq!(
+            hide_session_heads("import M hiding (Choice(Left, Right), old)", &[&after]),
+            "import M hiding (Choice(Left, Right), after, old)"
+        );
     }
 
     #[test]

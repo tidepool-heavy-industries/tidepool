@@ -67,7 +67,12 @@ For an ordinary human-started Astra RSI session:
 observed <- snapshot
 inspectFull observed
 inspectFull (swarmUsage observed)
+inspectFull (usageByRequestedModel observed)
 ```
+
+Keep a snapshot before a wave segment, bind `later <- snapshot` afterwards, and
+inspect `usageDelta observed later`. Its comparable totals exclude newly visible
+thread histories and discontinuities, which remain explicit in the same result.
 
 Read selected plan branches and outcomes, identify repetitive context or routing
 work, then edit prompts/helpers for the next swarm. Keep raw event streams out of

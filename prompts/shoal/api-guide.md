@@ -216,6 +216,8 @@ listRoutes :: Member Watches effects => Eff effects [Route]
 snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
 subtree :: (Int, Int) -> SwarmSnapshot -> SwarmSnapshot
 swarmUsage :: SwarmSnapshot -> UsageTotal
+usageByRequestedModel :: SwarmSnapshot -> [(Maybe Text, UsageTotal)]
+usageDelta :: SwarmSnapshot -> SwarmSnapshot -> UsageDelta
 ```
 
 A route installs one callback, returns promptly, and runs it on its owning actor
@@ -241,8 +243,14 @@ supervision and context ancestry, actual/requested model, current requests, rece
 request and coordination-event counts, compactions when known, and provider usage.
 Received coordination events count watch/cancellation notifications issued by the
 request owner; they do not claim to count all provider/TUI events or presentation.
-Usage totals deduplicate provider threads and expose unknown actors and partial
-coverage. Token counts are observations, not a kill budget. Use ordinary TUI
+Usage totals deduplicate provider threads, choose a compatible cumulative
+observation across resumed actors, and expose unknown actors, inconsistent sources
+and partial coverage. `usageByRequestedModel` groups those totals by requested
+launch model; mixed/unspecified selections share `Nothing`. It is not attribution
+to the model billed for every response. `usageDelta before after` separates
+comparable increases, newly observed thread histories, lost observations and
+discontinuities. Newly visible history may predate the first snapshot.
+Token counts are observations, not a kill budget. Use ordinary TUI
 conversations to steer workers and request high-leverage decisions.
 
 The original workspace root has the swarm’s one authoritative `.shoal`. Copies

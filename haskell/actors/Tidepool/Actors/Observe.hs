@@ -5,13 +5,18 @@
 module Tidepool.Actors.Observe
   ( SwarmSnapshot (..)
   , UsageTotal (..)
+  , UsageDelta (..)
   , snapshot
   , subtree
   , swarmUsage
+  , usageByRequestedModel
+  , usageDelta
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
+import Data.List (nub)
+import Data.Maybe (isNothing)
 import Prelude
 import Tidepool.Actors.Internal.Agent (listAgents)
 import Tidepool.Effects.Core
@@ -28,6 +33,14 @@ data UsageTotal = UsageTotal
   , observedProviderThreads :: [Text]
   , unknownActors :: [(Int, Int)]
   , partialProviderThreads :: [Text]
+  , inconsistentProviderThreads :: [Text]
+  } deriving (Show, Eq)
+
+data UsageDelta = UsageDelta
+  { comparableUsage :: UsageTotal
+  , newlyObservedUsage :: UsageTotal
+  , lostProviderThreads :: [Text]
+  , discontinuousProviderThreads :: [Text]
   } deriving (Show, Eq)
 
 snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
@@ -50,23 +63,118 @@ subtree root (SwarmSnapshot actors) = SwarmSnapshot (filter belongs actors)
           _ -> False
 
 swarmUsage :: SwarmSnapshot -> UsageTotal
-swarmUsage (SwarmSnapshot actors) = foldl add (UsageTotal 0 0 0 0 0 [] [] []) actors
+swarmUsage (SwarmSnapshot actors) = summarize actors
+
+-- | Group by the requested launch model, not an inferred billing model. A
+-- thread spanning different or unspecified selections belongs in Nothing.
+usageByRequestedModel :: SwarmSnapshot -> [(Maybe Text, UsageTotal)]
+usageByRequestedModel (SwarmSnapshot actors) =
+  [(model, summarize rows) | model <- nub (map selection groups),
+    let rows = concat (filter ((== model) . selection) groups)]
   where
-    unknown actor total = total { unknownActors = (rosterActorId actor, rosterActorIncarnation actor) : unknownActors total }
-    add total actor = case rosterUsageSummary actor of
-      Nothing -> unknown actor total
-      Just usage -> case usageSummaryScope usage of
-        UsageTurn _ _ -> unknown actor total
-        UsageThread thread
-          | thread `elem` observedProviderThreads total -> total
-          | otherwise -> total
-              { totalCachedInput = totalCachedInput total + usageSummaryCachedInputTokens usage
-              , totalUncachedInput = totalUncachedInput total + usageSummaryUncachedInputTokens usage
-              , totalOutput = totalOutput total + usageSummaryOutputTokens usage
-              , totalReasoningOutput = totalReasoningOutput total + usageSummaryReasoningTokens usage
-              , totalTokens = totalTokens total + usageSummaryTotalTokens usage
-              , observedProviderThreads = thread : observedProviderThreads total
-              , partialProviderThreads = case usageSummaryCompleteness usage of
-                  UsageComplete -> partialProviderThreads total
-                  UsagePartial -> thread : partialProviderThreads total
-              }
+    groups = map snd (threadGroups actors) ++ [[actor] | actor <- actors, threadKey actor == Nothing]
+    selection rows = case nub (map rosterRequestedModel rows) of
+      [model] -> model
+      _ -> Nothing
+
+-- | Subtract comparable cumulative observations. Newly visible threads are
+-- reported separately: their history may predate the first snapshot. Missing
+-- observations and changed origins never become zero spend or negative spend.
+usageDelta :: SwarmSnapshot -> SwarmSnapshot -> UsageDelta
+usageDelta (SwarmSnapshot before) (SwarmSnapshot after) = UsageDelta
+  { comparableUsage = foldl addChange (emptyUsage { unknownActors = unknownActors (summarize after) }) pairs
+  , newlyObservedUsage = summarize (concat [rows | (key, rows) <- newGroups, isNothing (lookup key oldGroups)])
+  , lostProviderThreads = [key | (key, _) <- oldGroups, isNothing (lookup key newGroups)]
+  , discontinuousProviderThreads = [key | (key, old, new) <- pairs, isNothing (comparable old new)]
+  }
+  where
+    oldGroups = threadGroups before
+    newGroups = threadGroups after
+    pairs = [(key, old, new) | (key, new) <- newGroups, Just old <- [lookup key oldGroups]]
+    comparable old new = do
+      earlier <- newest old
+      later <- newest new
+      oldUsage <- rosterUsageSummary earlier
+      newUsage <- rosterUsageSummary later
+      if sameOrigin earlier later && dominates newUsage oldUsage
+        then Just newUsage
+          { usageSummaryCachedInputTokens = usageSummaryCachedInputTokens newUsage - usageSummaryCachedInputTokens oldUsage
+          , usageSummaryUncachedInputTokens = usageSummaryUncachedInputTokens newUsage - usageSummaryUncachedInputTokens oldUsage
+          , usageSummaryOutputTokens = usageSummaryOutputTokens newUsage - usageSummaryOutputTokens oldUsage
+          , usageSummaryReasoningTokens = usageSummaryReasoningTokens newUsage - usageSummaryReasoningTokens oldUsage
+          , usageSummaryTotalTokens = usageSummaryTotalTokens newUsage - usageSummaryTotalTokens oldUsage
+          , usageSummaryCompleteness = if complete oldUsage && complete newUsage then UsageComplete else UsagePartial
+          }
+        else Nothing
+    addChange total (key, old, new) = maybe total (addUsage key total) (comparable old new)
+
+emptyUsage :: UsageTotal
+emptyUsage = UsageTotal 0 0 0 0 0 [] [] [] []
+
+identity :: AgentRosterEntry -> (Int, Int)
+identity actor = (rosterActorId actor, rosterActorIncarnation actor)
+
+threadKey :: AgentRosterEntry -> Maybe Text
+threadKey actor = case rosterUsageSummary actor of
+  Just usage -> case usageSummaryScope usage of
+    UsageThread key -> Just key
+    _ -> Nothing
+  _ -> Nothing
+
+threadGroups :: [AgentRosterEntry] -> [(Text, [AgentRosterEntry])]
+threadGroups actors = [(key, filter ((== Just key) . threadKey) actors)
+  | key <- nub [key | actor <- actors, Just key <- [threadKey actor]]]
+
+sameOrigin :: AgentRosterEntry -> AgentRosterEntry -> Bool
+sameOrigin a b = case (rosterFirstUsage a, rosterFirstUsage b) of
+  (Just x, Just y) -> usageObservationId x == usageObservationId y
+  _ -> False
+
+complete :: ProviderUsageSummary -> Bool
+complete usage = case usageSummaryCompleteness usage of
+  UsageComplete -> True
+  UsagePartial -> False
+
+dominates :: ProviderUsageSummary -> ProviderUsageSummary -> Bool
+dominates newer older = and
+  [ field newer >= field older
+  | field <- [usageSummaryObservations, usageSummaryCachedInputTokens,
+      usageSummaryUncachedInputTokens, usageSummaryOutputTokens,
+      usageSummaryReasoningTokens, usageSummaryTotalTokens]
+  ]
+
+-- Multiple actor incarnations may observe the same provider thread. Select an
+-- aggregate that includes every other observation, or expose the inconsistency.
+newest :: [AgentRosterEntry] -> Maybe AgentRosterEntry
+newest [] = Nothing
+newest rows = case filter coversAll rows of
+  winner : _ -> Just winner
+  [] -> Nothing
+  where
+    coversAll candidate = all (covers candidate) rows
+    covers candidate other = case (rosterUsageSummary candidate, rosterUsageSummary other) of
+      (Just x, Just y) -> dominates x y &&
+        (identity candidate == identity other || sameOrigin candidate other)
+      _ -> False
+
+summarize :: [AgentRosterEntry] -> UsageTotal
+summarize actors = foldl addGroup initial (threadGroups actors)
+  where
+    initial = emptyUsage { unknownActors = map identity (filter ((== Nothing) . threadKey) actors) }
+    addGroup total (key, rows) = case newest rows >>= rosterUsageSummary of
+      Just usage -> addUsage key total usage
+      Nothing -> total
+        { unknownActors = map identity rows ++ unknownActors total
+        , inconsistentProviderThreads = key : inconsistentProviderThreads total
+        }
+
+addUsage :: Text -> UsageTotal -> ProviderUsageSummary -> UsageTotal
+addUsage key total usage = total
+  { totalCachedInput = totalCachedInput total + usageSummaryCachedInputTokens usage
+  , totalUncachedInput = totalUncachedInput total + usageSummaryUncachedInputTokens usage
+  , totalOutput = totalOutput total + usageSummaryOutputTokens usage
+  , totalReasoningOutput = totalReasoningOutput total + usageSummaryReasoningTokens usage
+  , totalTokens = totalTokens total + usageSummaryTotalTokens usage
+  , observedProviderThreads = key : observedProviderThreads total
+  , partialProviderThreads = if complete usage then partialProviderThreads total else key : partialProviderThreads total
+  }

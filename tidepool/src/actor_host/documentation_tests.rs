@@ -1184,6 +1184,22 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
 }
 
 #[tokio::test]
+async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() {
+    let campaign = workspace_campaign().await;
+    let result = committed(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("fixtures/usage_comparisons.hs"),
+    )
+    .await;
+    let output = result["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap();
+    assert!(output.contains("True"), "{result}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     let campaign = workspace_campaign().await;
     let policy = campaign.root_installation.policy.as_ref();

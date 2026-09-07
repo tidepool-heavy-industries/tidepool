@@ -218,7 +218,10 @@ impl SessionCompileView {
     /// modules, ready for a turn template.
     #[must_use]
     pub fn turn_imports(&self, external: &SourceImports) -> String {
-        let mut specs = self.workbench_imports(external);
+        let mut specs = SourceImports::new();
+        specs.extend_declaration_source(
+            &self.shadow_preamble(&self.workbench_imports(external).declaration_prefix()),
+        );
         if let Some(module) = self.library {
             specs.extend_text(&module.module_name());
         }
@@ -259,7 +262,7 @@ mod tests {
 
     #[test]
     fn compile_view_keeps_visible_and_injected_value_sets_distinct() {
-        let view = SessionCompileView {
+        let mut view = SessionCompileView {
             session: SessionId(4),
             lexical_scope: ScopeId::ROOT,
             root: PathBuf::from("/session"),
@@ -284,6 +287,12 @@ mod tests {
             view.injected_module_names(),
             ["Tidepool.Session.Val.G2", "Tidepool.Session.Val.G5"]
         );
+        view.shadowing.push(super::super::ExportItem::Value {
+            name: "after".into(),
+        });
+        let external = SourceImports::from_specs(["Tidepool.Duration (after)"]);
+        assert_eq!(view.turn_imports(&external),
+            "Tidepool.Duration ()\nData.Set qualified as Set\nTidepool.Session.Lib.G3\nTidepool.Session.Val.G5");
     }
 
     #[test]
