@@ -65,6 +65,7 @@ pub struct LocalResidentInstallation {
     pub policy: Arc<dyn ResidentToolEndpoint>,
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
+    pub worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     pub effective_role: crate::EffectiveRole,
     pub fork_effort: Option<crate::ForkEffort>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -77,6 +78,8 @@ pub struct LocalResidentInstallation {
 
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
+    NotificationSend(Arc<crate::NotificationSend>),
+    NotificationPoll(Arc<crate::NotificationPoll>),
     PolicyInstalled(LocalResidentInstallation),
     /// A resident program opened another typed session in an already-running
     /// interactive application. The message is an ordinary User activation;
@@ -334,6 +337,7 @@ pub struct ResidentKernelBehavior<H, O> {
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
     launch_worktrees: Vec<String>,
+    worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     policy_installed: bool,
     forest_control: bool,
     pending_program: Option<ResidentOutcome>,
@@ -437,6 +441,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             launch_worktrees,
+            worktree_custody: None,
             policy_installed: false,
             forest_control: false,
             pending_program: None,
@@ -1921,6 +1926,80 @@ where
                 }
                 Ok(outcome)
             }
+            ResidentActorBoundary::NotificationSend {
+                continuation,
+                target,
+                message,
+            } => {
+                let permitted = self
+                    .descriptor
+                    .effective_role()
+                    .effect_keys()
+                    .contains(&crate::ActorEffectKey::Notifications);
+                let destination = kernel.resolve(target).zip(kernel.session_context(target));
+                let outcome = if !permitted {
+                    Err(crate::NotificationError::Unauthorized)
+                } else if destination.as_ref().is_none_or(|(actor, target_context)| {
+                    actor.terminal().get().is_some()
+                        || target_context.placement.session != context.placement.session
+                }) {
+                    Err(crate::NotificationError::Unavailable)
+                } else {
+                    let (command, receive) =
+                        crate::NotificationSend::new(context.actor, target, message);
+                    if self
+                        .environment
+                        .deployments
+                        .send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
+                        .is_err()
+                    {
+                        Err(crate::NotificationError::Unavailable)
+                    } else {
+                        crate::notification::receive_admission(receive)
+                            .await
+                            .and_then(crate::NotificationReceipt::into_wire)
+                    }
+                };
+                self.environment
+                    .runner
+                    .resume_notification(context.clone(), continuation, outcome)
+                    .await
+            }
+            ResidentActorBoundary::NotificationPoll {
+                continuation,
+                receipt,
+            } => {
+                let permitted = self
+                    .descriptor
+                    .effective_role()
+                    .effect_keys()
+                    .contains(&crate::ActorEffectKey::Notifications);
+                let prepared = if permitted {
+                    crate::NotificationReceipt::from_wire(receipt)
+                        .and_then(|receipt| crate::NotificationPoll::new(context.actor, receipt))
+                } else {
+                    Err(crate::NotificationError::Unauthorized)
+                };
+                let outcome = match prepared {
+                    Err(error) => Err(error),
+                    Ok((command, receive)) => {
+                        if self
+                            .environment
+                            .deployments
+                            .send(LocalResidentDeployment::NotificationPoll(Arc::new(command)))
+                            .is_err()
+                        {
+                            Err(crate::NotificationError::Unavailable)
+                        } else {
+                            crate::notification::receive_observation(receive).await
+                        }
+                    }
+                };
+                self.environment
+                    .runner
+                    .resume_notification(context.clone(), continuation, outcome)
+                    .await
+            }
             ResidentActorBoundary::RequestReservation(reservation) => {
                 crate::ActorPathSegment::new(&reservation.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -2269,6 +2348,7 @@ where
                             policy,
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
+                            worktree_custody: self.worktree_custody.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
                             fork_effort: self.descriptor.fork_effort(),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
@@ -2441,6 +2521,7 @@ where
             policy,
             initial_user_message,
             launch_worktrees: self.launch_worktrees.clone(),
+            worktree_custody: self.worktree_custody.clone(),
             effective_role: self.descriptor.effective_role().clone(),
             fork_effort: self.descriptor.fork_effort(),
             fork_boundary: self.descriptor.fork_boundary().cloned(),
@@ -2466,6 +2547,48 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
+        if self.worktree_custody.is_none() {
+            match self.launch_worktrees.as_slice() {
+                [] => {}
+                [worktree] => {
+                    let admission = self.environment.fork_workspaces.as_ref().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "pre-bootstrap worktree custody is unavailable".into(),
+                        )
+                    })?;
+                    let admission = admission.clone();
+                    let actor = context.actor;
+                    let worktree = worktree.clone();
+                    self.worktree_custody = Some(
+                        tokio::task::spawn_blocking(move || {
+                            admission.install_custody(actor, &worktree)
+                        })
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Join)?
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?,
+                    );
+                }
+                _ => {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "actor bootstrap requires at most one worktree".into(),
+                    ))
+                }
+            }
+        }
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Ok(KernelStep::Stop {
+                output: (),
+                terminal,
+            });
+        }
         let outcome = match boot {
             ResidentBoot::Workbench => {
                 self.standing = ResidentStanding::Workbench;
@@ -2480,7 +2603,7 @@ where
                     .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
                     .await?;
                 loop {
-                    match self
+                    let startup_step = self
                         .environment
                         .runner
                         .capture_startup_step(
@@ -2488,8 +2611,14 @@ where
                             outcome,
                             context.placement.resource_scope,
                         )
-                        .await?
-                    {
+                        .await?;
+                    if let Some(terminal) = kernel.requested_shutdown() {
+                        return Ok(KernelStep::Stop {
+                            output: (),
+                            terminal,
+                        });
+                    }
+                    match startup_step {
                         ResidentActorStartupStep::InstallShutdown(shutdown) => {
                             if self.shutdown_hook.is_some() {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -4131,6 +4260,29 @@ where
         terminal: &'a ActorTerminal,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
+            let (hook, realm) = self.shutdown_components(kernel, terminal).await;
+            for component in [hook, realm] {
+                if let crate::CleanupComponentOutcome::Unconfirmed(detail) = component {
+                    return Err(KernelBehaviorError { detail });
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn shutdown_components<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        terminal: &'a ActorTerminal,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        (
+            crate::CleanupComponentOutcome,
+            crate::CleanupComponentOutcome,
+        ),
+    > {
+        Box::pin(async move {
+            use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
             let context = self.context(kernel.identity());
             let notifications = self
                 .environment
@@ -4143,8 +4295,9 @@ where
                 "fork owner stopped before tool completion",
             )
             .await;
-            if let Some(hook) = self.shutdown_hook.take() {
-                self.environment
+            let hook = if let Some(hook) = self.shutdown_hook.take() {
+                match self
+                    .environment
                     .runner
                     .run_shutdown(
                         context.clone(),
@@ -4154,23 +4307,32 @@ where
                         std::time::Duration::from_secs(30),
                     )
                     .await
-                    .map_err(Self::failure)?;
-            }
-            if self.descriptor.supervisor_parent().is_none() {
+                {
+                    Ok(()) => Confirmed,
+                    Err(error) => Unconfirmed(error.to_string()),
+                }
+            } else {
+                Confirmed
+            };
+            // Realm retirement obtains its own exclusive checkout. A failed hook
+            // does not skip this safe cleanup; it also never becomes success.
+            let realm_result = if self.descriptor.supervisor_parent().is_none() {
                 self.environment
                     .runner
                     .retire_root_placement(self.descriptor.placement())
                     .await
-                    .map_err(Self::failure)?;
             } else {
                 self.environment
                     .runner
                     .close_realm(context, self.descriptor.placement().resource_scope)
                     .await
-                    .map_err(Self::failure)?;
-            }
+            };
+            let realm = match realm_result {
+                Ok(()) => Confirmed,
+                Err(error) => Unconfirmed(error.to_string()),
+            };
             self.standing = ResidentStanding::Terminal;
-            Ok(())
+            (hook, realm)
         })
     }
 
@@ -4180,6 +4342,9 @@ where
         terminal: &'a ActorTerminal,
     ) -> futures_util::future::BoxFuture<'a, ()> {
         Box::pin(async move {
+            if let Some(custody) = &self.worktree_custody {
+                custody.actor_stopped(terminal);
+            }
             let notifications = self
                 .environment
                 .requests

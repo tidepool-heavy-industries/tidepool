@@ -11,6 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "process_scope.rs"]
+pub mod service_scope;
+
 pub const BUBBLEWRAP_PROGRAM: &str = "bwrap";
 
 /// An exact executable plus argv, ready for a process launcher.
@@ -32,6 +35,22 @@ pub struct ProcessMountBoundary {
 }
 
 impl ProcessMountBoundary {
+    /// Prepare an opt-in service scope without spawning or changing legacy wrap().
+    ///
+    /// Requires a host-trusted absolute bubblewrap executable compatible with
+    /// 0.11.0 default namespace init/block-fd/sync-fd semantics, and Linux init
+    /// exit ordering audited at v6.12.63 (namespace drain before pidfd readiness).
+    /// Path validation does not attest binary compatibility or kernel ordering;
+    /// deployment must establish these prerequisites before using cleanup as
+    /// evidence. See the prepared scope's spawn documentation.
+    pub fn prepare_service_scope(
+        &self,
+        bubblewrap: PathBuf,
+        command: ProcessInvocation,
+    ) -> Result<service_scope::PreparedServiceScope, service_scope::ServiceScopeError> {
+        service_scope::PreparedServiceScope::new(self.clone(), bubblewrap, command)
+    }
+
     pub fn new(
         cwd: impl AsRef<Path>,
         read_only_roots: impl IntoIterator<Item = PathBuf>,
@@ -133,6 +152,15 @@ impl ProcessMountBoundary {
         bubblewrap: impl Into<String>,
         command: ProcessInvocation,
     ) -> ProcessInvocation {
+        self.wrap_with_options(bubblewrap.into(), command, &[])
+    }
+
+    fn wrap_with_options(
+        &self,
+        bubblewrap: String,
+        command: ProcessInvocation,
+        options: &[String],
+    ) -> ProcessInvocation {
         let mut args = vec![
             "--bind".into(),
             "/".into(),
@@ -172,6 +200,7 @@ impl ProcessMountBoundary {
                 target.to_string_lossy().into_owned(),
             ]);
         }
+        args.extend_from_slice(options);
         args.extend([
             "--chdir".into(),
             self.project_root.to_string_lossy().into_owned(),

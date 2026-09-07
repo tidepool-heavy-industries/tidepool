@@ -5,11 +5,16 @@
 //! tmux is process ownership and observability, never message transport.
 
 #[cfg(test)]
+mod custody_tests;
+#[cfg(test)]
 mod documentation_tests;
 mod host_incarnation;
 mod prompt_catalog;
 #[cfg(test)]
 mod research_policy_tests;
+#[allow(dead_code)] // Staged owner; no launch switch before native/quiescence integration.
+mod scoped_custody;
+mod socket_directory;
 #[cfg(test)]
 mod test_campaign;
 
@@ -55,8 +60,8 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_worktree::{
-    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, BindingTerminal, GitCli,
-    WorktreeHandle, WorktreeId, WorktreeManager, WorktreeRegistry,
+    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, GitCli, WorktreeHandle, WorktreeId,
+    WorktreeManager, WorktreeRegistry,
 };
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -64,6 +69,7 @@ use tokio::task::JoinSet;
 
 use self::host_incarnation::HostIncarnationLease;
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
+use self::socket_directory::SocketDirectory;
 
 /// Every interactive actor sees its own repository at this path. Bubblewrap
 /// mount namespaces make the shared name safe across concurrent actors, while
@@ -105,9 +111,103 @@ type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 
 struct ActorForkWorkspaceAdmission {
     worktrees: Mutex<ActorWorktreeHandler>,
+    manager: WorktreeManager,
+    bindings: Arc<Mutex<BindingTable>>,
+    runtime: String,
+}
+
+struct ActorWorkspaceCustody {
+    bindings: Arc<Mutex<BindingTable>>,
+    binding: Option<ActiveBinding>,
+    actor: ActorRef,
+    state: Mutex<scoped_custody::CustodyState>,
+}
+
+impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
+    fn actor_stopped(&self, terminal: &tidepool_actor::ActorTerminal) {
+        // Observation is monotonic: duplicate notifications cannot replace the
+        // first exact terminal or confuse "not completed" with "still active".
+        self.state
+            .lock()
+            .terminal
+            .get_or_insert_with(|| terminal.clone());
+    }
+    fn process_may_exist(&self) {
+        self.state.lock().launch = scoped_custody::LaunchCustody::Legacy;
+    }
+}
+
+impl Drop for ActorWorkspaceCustody {
+    fn drop(&mut self) {
+        let state = self.state.get_mut();
+        if matches!(
+            state.launch,
+            scoped_custody::LaunchCustody::Legacy | scoped_custody::LaunchCustody::ScopedClaimed
+        ) {
+            tracing::error!(actor = ?self.actor, "retaining worktree custody: process or host cleanup is unconfirmed");
+            return;
+        }
+        if let Some(binding) = self.binding.take() {
+            let result = if state
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.kind == ActorExitKind::Completed)
+            {
+                binding.complete(&mut self.bindings.lock())
+            } else {
+                binding.release(&mut self.bindings.lock())
+            };
+            if let Err(error) = result {
+                tracing::error!(actor = ?self.actor, %error, "worktree custody release failed");
+            }
+        }
+    }
 }
 
 impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
+    fn install_custody(
+        &self,
+        actor: ActorRef,
+        worktree: &str,
+    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        if !WorktreeId::is_path_safe(worktree) {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "invalid custody worktree id".into(),
+            });
+        }
+        if self
+            .manager
+            .lookup(&WorktreeId::from_raw(worktree))
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?
+            .is_none()
+        {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "custody worktree is not registered".into(),
+            });
+        }
+        let principal =
+            WorktreePrincipal::exact_actor(&self.runtime, actor.id.0, actor.incarnation.0);
+        let binding = self
+            .bindings
+            .lock()
+            .bind(
+                &WorktreeId::from_raw(worktree),
+                &principal,
+                current_time_ms(),
+            )
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?;
+        Ok(Arc::new(ActorWorkspaceCustody {
+            bindings: self.bindings.clone(),
+            binding: Some(binding),
+            actor,
+            state: Mutex::new(scoped_custody::CustodyState::default()),
+        }))
+    }
+
     fn admit(
         &self,
         owner: ActorRef,
@@ -133,8 +233,13 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
 fn fork_workspace_admission(
     worktrees: WorktreeManager,
     authority: ActorWorktreeAuthority,
+    bindings: Arc<Mutex<BindingTable>>,
+    runtime: String,
 ) -> Arc<dyn ForkWorkspaceAdmission> {
     Arc::new(ActorForkWorkspaceAdmission {
+        bindings,
+        runtime,
+        manager: worktrees.clone(),
         worktrees: Mutex::new(ActorWorktreeHandler::new(
             WorktreeHandler::from_manager(worktrees),
             authority,
@@ -193,11 +298,12 @@ struct InteractiveDeployment {
     local_actor: LocalActorRef,
     pane: TmuxPaneId,
     workspace: PathBuf,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
+    notification_inbox_key: String,
     connection: InteractiveConnection,
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
-    socket_root: PathBuf,
-    worktree_binding: Option<ActiveBinding>,
+    socket_directory: SocketDirectory,
+    worktree_custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     failure_reported: bool,
     last_activation_sequence: u64,
     thread: Option<QueueReadyThread>,
@@ -210,7 +316,14 @@ struct InteractiveDeployment {
 #[derive(Debug)]
 struct BuildResourceLease {
     path: PathBuf,
-    released: bool,
+    state: BuildResourceState,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BuildResourceState {
+    Unsubmitted,
+    RetainedUnconfirmed,
+    Released,
 }
 
 impl BuildResourceLease {
@@ -220,10 +333,23 @@ impl BuildResourceLease {
             actor.id.0,
             actor.incarnation.0,
         );
-        std::fs::create_dir_all(&path)?;
+        Self::allocate_path(path)
+    }
+
+    fn allocate_path(path: PathBuf) -> Result<Self, std::io::Error> {
+        // A retained directory may still be used by an uncertain prior launch.
+        // Only an exclusively created leaf grants prelaunch deletion ownership.
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "build resource has no parent",
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir(&path)?;
         Ok(Self {
             path,
-            released: false,
+            state: BuildResourceState::Unsubmitted,
         })
     }
 
@@ -231,14 +357,25 @@ impl BuildResourceLease {
         &self.path
     }
 
+    fn process_may_exist(&mut self) {
+        self.state = BuildResourceState::RetainedUnconfirmed;
+    }
+
     fn release(mut self) -> Result<(), std::io::Error> {
+        if self.state == BuildResourceState::RetainedUnconfirmed {
+            return Err(std::io::Error::other(
+                "build resource retained: exact process and hosted work cleanup is unconfirmed",
+            ));
+        }
+        // Deletion failure may be partial; Drop must not silently retry it.
+        self.state = BuildResourceState::RetainedUnconfirmed;
         match std::fs::remove_dir_all(&self.path) {
             Ok(()) => {
-                self.released = true;
+                self.state = BuildResourceState::Released;
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.released = true;
+                self.state = BuildResourceState::Released;
                 Ok(())
             }
             Err(error) => Err(error),
@@ -248,7 +385,7 @@ impl BuildResourceLease {
 
 impl Drop for BuildResourceLease {
     fn drop(&mut self) {
-        if !self.released {
+        if self.state == BuildResourceState::Unsubmitted {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -275,15 +412,23 @@ struct LaunchedInteractiveApplication {
 
 struct OwnerNotification {
     owner: ActorRef,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
+}
+
+type ActorInbox = DurableInbox<DurableActorEvent, NotificationProvenance>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NotificationProvenance {
+    sender: ActorRef,
+    target: ActorRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum DurableActorEvent {
     Typed(TypedActorEvent),
-    Legacy(String),
+    Text(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,7 +490,7 @@ impl DurableActorEvent {
                 actor.id.0, actor.incarnation.0,
             ),
             Self::Typed(TypedActorEvent::SessionReady { message, .. }) => message.clone(),
-            Self::Legacy(message) => message.clone(),
+            Self::Text(message) => message.clone(),
             Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
                 "watch {} {:?}: {:?} → {:?} ({}). Poll its retained handle with `pollWatch`.",
                 notification.watch.0,
@@ -431,9 +576,227 @@ impl InteractiveCleanupReceipt {
     }
 }
 
-struct PendingInteractiveLaunch {
-    cancel: oneshot::Sender<()>,
+struct InteractiveApplicationOwner {
+    cancel: Option<oneshot::Sender<()>>,
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
+    custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
+    scoped_retention: Option<scoped_custody::ScopedHostRetention>,
+    launch: HostLaunchState,
+    terminal: Option<ActorTerminal>,
+    retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
+}
+
+#[derive(Clone, Copy)]
+enum HostLaunchState {
+    Pending,
+    Published,
+    Abandoned,
+    Failed,
+}
+
+type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
+
+impl InteractiveApplicationOwner {
+    #[allow(dead_code)] // Staged slot admission; production selection remains disabled.
+    fn reserve_scope(
+        &mut self,
+        custody: Arc<ActorWorkspaceCustody>,
+        actor: ActorRef,
+    ) -> Result<Arc<Mutex<scoped_custody::ScopedProcessSlot>>, scoped_custody::ScopedClaimError>
+    {
+        let erased: Arc<dyn tidepool_actor::ForkWorkspaceCustody> = custody.clone();
+        if !self
+            .custody
+            .as_ref()
+            .is_some_and(|installed| Arc::ptr_eq(installed, &erased))
+        {
+            return Err(scoped_custody::ScopedClaimError::WrongActor);
+        }
+        if self.scoped_retention.is_some() {
+            return Err(scoped_custody::ScopedClaimError::AlreadyClaimed);
+        }
+        let retention = scoped_custody::reserve(custody, actor)?;
+        let slot = retention.slot.clone();
+        self.scoped_retention = Some(retention);
+        Ok(slot)
+    }
+
+    fn cancel(&mut self) {
+        if let Some(gate) = &self.fork_gate {
+            let _ = gate.mark_failed();
+        }
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+
+    fn retired(&mut self, terminal: ActorTerminal) {
+        if let Some(custody) = &self.custody {
+            custody.actor_stopped(&terminal);
+        }
+        self.terminal.get_or_insert(terminal);
+        self.cancel();
+    }
+}
+
+/// Returned to run's real host caller, not formatted into a resource-free error.
+/// The host retains this error through shutdown. Dropping it at process exit is
+/// not settlement, nor continuity of process handles across host death.
+pub(crate) struct RetainedInteractiveFleet {
+    owners: InteractiveOwners,
+    unfinished: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    failures: Vec<Box<dyn std::error::Error>>,
+}
+impl fmt::Debug for RetainedInteractiveFleet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetainedInteractiveFleet")
+            .field("actors", &self.owners.lock().keys().collect::<Vec<_>>())
+            .field("unfinished", &self.unfinished.is_some())
+            .field("failures", &self.failures)
+            .finish()
+    }
+}
+impl fmt::Display for RetainedInteractiveFleet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for error in &self.failures {
+            write!(f, "{error}; ")?;
+        }
+        write!(f, "addressable actor resources retained: host work/process settlement remains unsupported")
+    }
+}
+impl std::error::Error for RetainedInteractiveFleet {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.failures.first().map(|error| error.as_ref())
+    }
+}
+
+/// Host-only operations. These never select a launch mode, release the command
+/// gate, establish host-work quiescence, or settle workspace custody.
+#[allow(dead_code)] // Available to the crate's host error consumer; not a model API.
+pub(crate) enum RetainedProcessOperation {
+    Observe,
+    Pin,
+    Stop,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum RetainedProcessState {
+    Reserved,
+    Spawning,
+    NotSpawned(String),
+    Owned,
+    Pinned,
+    ProcessStopped(tidepool_node::ServiceScopeCleanup),
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct RetainedProcessObservation {
+    pub(crate) actor: ActorRef,
+    pub(crate) actor_terminal: Option<ActorTerminal>,
+    pub(crate) process: RetainedProcessState,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RetainedProcessError {
+    #[error("exact actor has no retained scoped process")]
+    NoScopedActor,
+    #[error("retained process observation deadline elapsed")]
+    Deadline,
+    #[error(transparent)]
+    Scope(#[from] tidepool_node::ServiceScopeError),
+}
+
+#[allow(dead_code)]
+impl RetainedInteractiveFleet {
+    /// Recover the actual resource-bearing error after the host's ordinary
+    /// Box<dyn Error> propagation. Crate visibility lets shoal own a subsequent
+    /// recovery policy without exposing this mechanism to authored programs.
+    pub(crate) fn from_error<'a>(
+        error: &'a mut (dyn std::error::Error + 'static),
+    ) -> Option<&'a mut Self> {
+        error.downcast_mut::<Self>()
+    }
+
+    /// Blocking, deadline-bounded host operation: call outside an actor turn.
+    /// Exact identity includes incarnation. Even ProcessStopped is status only;
+    /// the row remains owned by this carrier after every result or error.
+    pub(crate) fn recover_process(
+        &self,
+        actor: ActorRef,
+        operation: RetainedProcessOperation,
+        deadline: std::time::Instant,
+    ) -> Result<RetainedProcessObservation, RetainedProcessError> {
+        if std::time::Instant::now() >= deadline {
+            return Err(RetainedProcessError::Deadline);
+        }
+        let rows = self
+            .owners
+            .try_lock_until(deadline)
+            .ok_or(RetainedProcessError::Deadline)?;
+        let retention = rows
+            .get(&actor)
+            .and_then(|row| row.scoped_retention.as_ref())
+            .ok_or(RetainedProcessError::NoScopedActor)?;
+        let mut slot = retention
+            .slot
+            .try_lock_until(deadline)
+            .ok_or(RetainedProcessError::Deadline)?;
+        use scoped_custody::ScopedProcessSlot;
+        let process = match (operation, &mut *slot) {
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Reserved) => {
+                RetainedProcessState::Reserved
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Spawning) => {
+                RetainedProcessState::Spawning
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::NotSpawned(error)) => {
+                RetainedProcessState::NotSpawned(error.to_string())
+            }
+            (RetainedProcessOperation::Observe, ScopedProcessSlot::Owned(_)) => {
+                RetainedProcessState::Owned
+            }
+            (RetainedProcessOperation::Pin, ScopedProcessSlot::Owned(scope)) => {
+                scope.pin_init(deadline)?;
+                RetainedProcessState::Pinned
+            }
+            (RetainedProcessOperation::Stop, ScopedProcessSlot::Owned(scope)) => {
+                RetainedProcessState::ProcessStopped(scope.terminate_and_wait(deadline)?)
+            }
+            _ => return Err(tidepool_node::ServiceScopeError::WrongPhase.into()),
+        };
+        Ok(RetainedProcessObservation {
+            actor,
+            actor_terminal: retention
+                .terminal_until(deadline)
+                .ok_or(RetainedProcessError::Deadline)?,
+            process,
+        })
+    }
+}
+
+fn handoff_application_owners(
+    owners: InteractiveOwners,
+    task: tokio::task::JoinHandle<Result<(), String>>,
+    cleanup: Result<(), Box<dyn std::error::Error>>,
+    run_result: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let retained = owners
+        .lock()
+        .values()
+        .any(|owner| owner.scoped_retention.is_some() || owner.custody.is_some());
+    let unfinished = !task.is_finished();
+    if retained || unfinished {
+        return Err(Box::new(RetainedInteractiveFleet {
+            owners,
+            unfinished: unfinished.then_some(task),
+            // Preserve the errors themselves: they may own resources too.
+            failures: cleanup.err().into_iter().chain(run_result.err()).collect(),
+        }));
+    }
+    cleanup?;
+    run_result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,6 +990,8 @@ pub async fn run(
         Some(fork_workspace_admission(
             worktrees.clone(),
             worktree_authority.clone(),
+            bindings.clone(),
+            runtime_namespace(&run_root),
         )),
         host_incarnation.incarnation(),
     );
@@ -671,8 +1036,10 @@ pub async fn run(
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
     let (shutdown, shutdown_rx) = watch::channel(false);
     let (root_config, root_config_rx) = watch::channel(config.clone());
+    let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
+        application_owners.clone(),
         InteractiveFleet {
             root: root_actor.clone(),
             config: config.clone(),
@@ -725,10 +1092,12 @@ pub async fn run(
     operator.shutdown().await;
     forest.shutdown().await;
     shutdown.send_replace(true);
-    if !applications_finished {
-        await_applications(&mut applications_task).await?;
-    }
-    result
+    let cleanup = if !applications_finished {
+        await_applications(&mut applications_task, APPLICATION_SHUTDOWN_TIMEOUT).await
+    } else {
+        Ok(())
+    };
+    handoff_application_owners(application_owners, applications_task, cleanup, result)
 }
 
 /// Classify an intentional completion or prepare an abnormal root for a fresh
@@ -779,13 +1148,15 @@ async fn root_recovery_launch_mode(
 
 async fn await_applications(
     task: &mut tokio::task::JoinHandle<Result<(), String>>,
+    timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, &mut *task).await {
+    match tokio::time::timeout(timeout, &mut *task).await {
         Ok(result) => result.map_err(join_error)?.map_err(runtime_error),
         Err(_) => {
-            task.abort();
+            // The caller transfers the unfinished task AND its addressable
+            // owner map into the host result; timeout is not cancellation proof.
             Err(runtime_error(format!(
-                "interactive fleet did not stop within {APPLICATION_SHUTDOWN_TIMEOUT:?}"
+                "interactive fleet did not stop within {timeout:?}"
             )))
         }
     }
@@ -837,6 +1208,7 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_context_decl(),
         tidepool_mcp::agent_control_decl(),
+        tidepool_mcp::notifications_decl(),
         tidepool_mcp::agent_inspection_decl(),
         tidepool_mcp::agent_launch_decl(),
         tidepool_mcp::forks_decl(),
@@ -1020,8 +1392,48 @@ fn render_root_compile_failure(
     ))
 }
 
+fn spawn_owned_retirement(
+    retirements: &mut JoinSet<InteractiveCleanupReceipt>,
+    deployment: InteractiveDeployment,
+    tmux: TmuxSession,
+    owners: &InteractiveOwners,
+) {
+    let (scope, receipt_slot) = {
+        let rows = owners.lock();
+        let row = rows
+            .get(&deployment.actor)
+            .expect("exact deployment retention row");
+        (
+            row.scoped_retention
+                .as_ref()
+                .map(|retention| retention.slot.clone()),
+            row.retirement.clone(),
+        )
+    };
+    // Only slots cross the task boundary; neither owns a back-reference to its
+    // map row. Namespace cleanup is status only and does not discharge host work.
+    retirements.spawn(async move {
+        if let Some(scope) = scope {
+            let stopped = tokio::task::spawn_blocking(move || {
+                scoped_custody::stop_slot(
+                    &scope,
+                    std::time::Instant::now() + APPLICATION_SHUTDOWN_TIMEOUT,
+                )
+            })
+            .await;
+            if !matches!(stopped, Ok(Ok(_))) {
+                tracing::warn!("scoped process cleanup remains unconfirmed in retained owner");
+            }
+        }
+        let receipt = retire_interactive_application_guarded(deployment, &tmux).await;
+        receipt_slot.lock().get_or_insert_with(|| receipt.clone());
+        receipt
+    });
+}
+
 async fn run_interactive_applications(
     mut lifecycle: mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    application_owners: InteractiveOwners,
     fleet: InteractiveFleet,
     shutdown: watch::Receiver<bool>,
     mut root_config: watch::Receiver<ActorHostConfig>,
@@ -1053,7 +1465,6 @@ async fn run_interactive_applications(
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
     let mut launches = JoinSet::new();
     let mut binding_discoveries = JoinSet::new();
-    let mut pending_launches = HashMap::new();
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
@@ -1146,14 +1557,20 @@ async fn run_interactive_applications(
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
                         let (cancel, cancelled) = oneshot::channel();
-                        let previous = pending_launches.insert(
-                            actor,
-                            PendingInteractiveLaunch {
-                                cancel,
-                                fork_gate: installation.fork_gate.clone(),
-                            },
-                        );
-                        debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
+                        let mut owners = application_owners.lock();
+                        if owners.contains_key(&actor) {
+                            break Some(format!("duplicate application owner for {actor:?}"));
+                        }
+                        owners.insert(actor, InteractiveApplicationOwner {
+                            cancel: Some(cancel),
+                            fork_gate: installation.fork_gate.clone(),
+                            custody: installation.worktree_custody.clone(),
+                            scoped_retention: None, // No scope launch selection before native pin.
+                            launch: HostLaunchState::Pending,
+                            terminal: None,
+                            retirement: Arc::new(Mutex::new(None)),
+                        });
+                        drop(owners);
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
                             let result = AssertUnwindSafe(launch_interactive_application(
@@ -1210,31 +1627,28 @@ async fn run_interactive_applications(
                     }
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
-                        let pending = pending_launches.remove(&actor);
-                        if let Some(pending) = pending {
-                            if let Some(gate) = pending.fork_gate {
-                                let _ = gate.mark_failed();
-                            }
-                            let _ = pending.cancel.send(());
+                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
+                            owner.retired(terminal);
                         }
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
-                            let tmux = tmux.clone();
-                            let bindings = Arc::clone(&bindings);
-                            let binding_terminal = if terminal.kind == ActorExitKind::Completed {
-                                BindingTerminal::Completed
-                            } else {
-                                BindingTerminal::Released
-                            };
-                            retirements.spawn(async move {
-                                retire_interactive_application_guarded(
-                                    deployment,
-                                    &tmux,
-                                    &bindings,
-                                    binding_terminal,
-                                ).await
-                            });
+                            spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
                         }
+                    }
+                    LocalResidentDeployment::NotificationSend(command) => {
+                        // No correlated notification controller is installed yet.
+                        // Reject before publication rather than route through legacy push.
+                        command.rejected(tidepool_actor::NotificationError::Unavailable);
+                    }
+                    LocalResidentDeployment::NotificationPoll(command) => {
+                        let result = deployments.iter()
+                            .find(|application| application.actor == command.receipt().target())
+                            .ok_or(tidepool_actor::NotificationError::Unavailable)
+                            .and_then(|application| observe_notification_receipt(
+                                &command, application.actor,
+                                &application.notification_inbox_key, &application.inbox,
+                            ));
+                        command.observed(result);
                     }
                     LocalResidentDeployment::RequestUpdate { delivery } => {
                         let target = delivery.target();
@@ -1299,8 +1713,17 @@ async fn run_interactive_applications(
                 match launched {
                     Some(Ok((local_actor, Ok(Some(launched))))) => {
                         let actor = local_actor.identity();
-                        pending_launches.remove(&actor);
+                        let already_retired = {
+                            let mut owners = application_owners.lock();
+                            let owner = owners.get_mut(&actor).expect("registered launch owner");
+                            owner.launch = HostLaunchState::Published;
+                            owner.terminal.is_some()
+                        };
                         let deployment = launched.deployment;
+                        if already_retired {
+                            spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
+                            continue;
+                        }
                         if actor == root_identity {
                             let _ = readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity });
                         }
@@ -1358,18 +1781,16 @@ async fn run_interactive_applications(
                     }
                     Some(Ok((local_actor, Ok(None)))) => {
                         let actor = local_actor.identity();
-                        if let Some(pending) = pending_launches.remove(&actor) {
-                            if let Some(gate) = pending.fork_gate {
-                                let _ = gate.mark_failed();
-                            }
+                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
+                            owner.launch = HostLaunchState::Abandoned;
+                            owner.cancel();
                         }
                     }
                     Some(Ok((local_actor, Err(error)))) => {
                         let actor = local_actor.identity();
-                        if let Some(pending) = pending_launches.remove(&actor) {
-                            if let Some(gate) = pending.fork_gate {
-                                let _ = gate.mark_failed();
-                            }
+                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
+                            owner.launch = HostLaunchState::Failed;
+                            owner.cancel();
                         }
                         if let Err(error) = apply_application_failure(
                             root_identity,
@@ -1450,6 +1871,9 @@ async fn run_interactive_applications(
             retired = retirements.join_next(), if !retirements.is_empty() => {
                 match retired {
                     Some(Ok(receipt)) => {
+                        if let Some(owner) = application_owners.lock().get_mut(&receipt.actor) {
+                            owner.retirement.lock().get_or_insert_with(|| receipt.clone());
+                        }
                         let degraded = receipt.degraded();
                         if degraded {
                             tracing::warn!(actor = ?receipt.actor, components = ?receipt.components, "interactive application cleanup degraded");
@@ -1506,37 +1930,38 @@ async fn run_interactive_applications(
         }
     };
 
-    for (_, pending) in pending_launches.drain() {
-        let _ = pending.cancel.send(());
+    for owner in application_owners.lock().values_mut() {
+        owner.cancel();
     }
-    let launch_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
-        let mut completed = Vec::new();
-        while let Some(result) = launches.join_next().await {
-            if let Ok((_actor, Ok(Some(launched)))) = result {
-                completed.push(launched.deployment);
-            }
-        }
-        completed
-    })
-    .await;
-    match launch_cleanup {
-        Ok(completed) => deployments.extend(completed),
-        Err(_) => launches.abort_all(),
-    }
+    let launch_cleanup =
+        drain_launches_for_shutdown(&mut launches, APPLICATION_SHUTDOWN_TIMEOUT).await;
+    deployments.extend(
+        launch_cleanup
+            .completed
+            .into_iter()
+            .map(|launched| launched.deployment),
+    );
+    let launch_failure = if launch_cleanup.failures.is_empty() {
+        None
+    } else {
+        Some(
+            launch_cleanup
+                .failures
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    };
     binding_discoveries.abort_all();
     while binding_discoveries.join_next().await.is_some() {}
     for deployment in deployments {
-        let tmux = tmux.clone();
-        let bindings = Arc::clone(&bindings);
-        retirements.spawn(async move {
-            retire_interactive_application_guarded(
-                deployment,
-                &tmux,
-                &bindings,
-                BindingTerminal::Released,
-            )
-            .await
-        });
+        spawn_owned_retirement(
+            &mut retirements,
+            deployment,
+            tmux.clone(),
+            &application_owners,
+        );
     }
     let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
@@ -1555,6 +1980,11 @@ async fn run_interactive_applications(
     let cleanup_failure = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
         while let Some(result) = retirements.join_next().await {
+            if let Ok(receipt) = &result {
+                if let Some(owner) = application_owners.lock().get_mut(&receipt.actor) {
+                    owner.retirement.lock().get_or_insert_with(|| receipt.clone());
+                }
+            }
             match result {
                 Ok(receipt) if receipt.degraded() && receipt.actor == root_identity => {
                     failure.get_or_insert_with(|| receipt.render());
@@ -1572,10 +2002,14 @@ async fn run_interactive_applications(
     })
     .await
     .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
-    let cleanup_failure = match (notification_cleanup, cleanup_failure) {
-        (Some(notification), Some(retirement)) => Some(format!("{notification}; {retirement}")),
-        (Some(error), None) | (None, Some(error)) => Some(error),
-        (None, None) => None,
+    let cleanup_failures = [launch_failure, notification_cleanup, cleanup_failure]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let cleanup_failure = if cleanup_failures.is_empty() {
+        None
+    } else {
+        Some(cleanup_failures.join("; "))
     };
     match (failure, cleanup_failure) {
         (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
@@ -1584,52 +2018,89 @@ async fn run_interactive_applications(
     }
 }
 
+struct LaunchShutdown<T> {
+    completed: Vec<T>,
+    failures: Vec<LaunchShutdownFailure>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LaunchShutdownFailure {
+    #[error("interactive launch cleanup failed: {0}")]
+    Launch(InteractiveApplicationError),
+    #[error("interactive launch join failed; cleanup unconfirmed: {0}")]
+    Join(tokio::task::JoinError),
+    #[error("interactive launch cleanup timed out with {pending} unsettled tasks; abort requested, cleanup unconfirmed")]
+    TimedOut { pending: usize },
+}
+
+impl<T> LaunchShutdown<T> {
+    fn record<A>(
+        &mut self,
+        result: Result<(A, Result<Option<T>, InteractiveApplicationError>), tokio::task::JoinError>,
+    ) {
+        match result {
+            Ok((_, Ok(Some(completed)))) => self.completed.push(completed),
+            Ok((_, Ok(None))) => {}
+            Ok((_, Err(error))) => self.failures.push(LaunchShutdownFailure::Launch(error)),
+            Err(error) => self.failures.push(LaunchShutdownFailure::Join(error)),
+        }
+    }
+}
+
+/// Keep observed completed deployments outside timeout-owned futures so they can
+/// still be retired if a later launch fails or cannot finish. Aborting a task is
+/// not proof that its process, hosted work or resource cleanup completed.
+async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
+    launches: &mut JoinSet<(A, Result<Option<T>, InteractiveApplicationError>)>,
+    grace: Duration,
+) -> LaunchShutdown<T> {
+    let mut outcome = LaunchShutdown {
+        completed: Vec::new(),
+        failures: Vec::new(),
+    };
+    let deadline = tokio::time::Instant::now() + grace;
+    while !launches.is_empty() {
+        match tokio::time::timeout_at(deadline, launches.join_next()).await {
+            Ok(Some(result)) => outcome.record(result),
+            Ok(None) => break,
+            Err(_) => {
+                outcome.failures.push(LaunchShutdownFailure::TimedOut {
+                    pending: launches.len(),
+                });
+                launches.abort_all();
+                // Preserve results already ready at the cutoff. Do not wait
+                // indefinitely for cancellation or label it cleanup success.
+                while let Some(result) = launches.try_join_next() {
+                    outcome.record(result);
+                }
+                break;
+            }
+        }
+    }
+    outcome
+}
+
 async fn launch_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
     cancelled: oneshot::Receiver<()>,
     fork_parent_thread: Option<BackendThreadId>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
-    let actor = installation.actor.identity();
-    let prepared = prepare_actor_worktree(&installation, &context)?;
-    let worktree = prepared.as_ref().map(|(handle, _)| handle.clone());
-    let result = launch_prepared_interactive_application(
+    let worktree = prepare_actor_worktree(&installation, &context)?;
+    launch_prepared_interactive_application(
         installation,
-        context.clone(),
+        context,
         worktree,
         cancelled,
         fork_parent_thread,
     )
-    .await;
-    match (result, prepared) {
-        (Ok(Some(mut launched)), Some((_handle, binding))) => {
-            launched.deployment.worktree_binding = Some(binding);
-            Ok(Some(launched))
-        }
-        (Ok(Some(deployment)), None) => Ok(Some(deployment)),
-        (Ok(None), Some((_handle, binding))) => {
-            release_worktree_binding(&context.bindings, binding).map_err(|error| {
-                application_error(actor, InteractiveOperation::BindWorktree, error)
-            })?;
-            Ok(None)
-        }
-        (Ok(None), None) => Ok(None),
-        (Err(mut error), Some((_handle, binding))) => {
-            if let Err(rollback) = release_worktree_binding(&context.bindings, binding) {
-                error
-                    .detail
-                    .push_str(&format!("; binding rollback failed: {rollback}"));
-            }
-            Err(error)
-        }
-        (Err(error), None) => Err(error),
-    }
+    .await
 }
 
 fn prepare_actor_worktree(
     installation: &LocalResidentInstallation,
     context: &InteractiveLaunchContext,
-) -> Result<Option<(WorktreeHandle, ActiveBinding)>, InteractiveApplicationError> {
+) -> Result<Option<WorktreeHandle>, InteractiveApplicationError> {
     let actor = installation.actor.identity();
     let raw_id =
         match actor_workspace_request(actor == context.root, &installation.launch_worktrees)
@@ -1663,12 +2134,20 @@ fn prepare_actor_worktree(
         actor.id.0,
         actor.incarnation.0,
     );
-    let binding = context
-        .bindings
-        .lock()
-        .bind(handle.id(), &principal, current_time_ms())
-        .map_err(|error| application_error(actor, InteractiveOperation::BindWorktree, error))?;
-    Ok(Some((handle, binding)))
+    if installation.worktree_custody.is_none()
+        || !context
+            .bindings
+            .lock()
+            .current(handle.id())
+            .is_some_and(|binding| binding.agent() == &principal)
+    {
+        return Err(application_error(
+            actor,
+            InteractiveOperation::BindWorktree,
+            "exact pre-bootstrap worktree custody is absent",
+        ));
+    }
+    Ok(Some(handle))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1694,13 +2173,6 @@ fn actor_workspace_request<'a>(
             worktrees.len()
         )),
     }
-}
-
-fn release_worktree_binding(
-    bindings: &Arc<Mutex<BindingTable>>,
-    binding: ActiveBinding,
-) -> Result<(), tidepool_worktree::WorktreeError> {
-    binding.release(&mut bindings.lock())
 }
 
 fn current_time_ms() -> i64 {
@@ -1794,7 +2266,7 @@ async fn launch_prepared_interactive_application(
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
-    let build_resource = if native_tool_policy == InteractiveNativeToolPolicy::InspectionOnly {
+    let mut build_resource = if native_tool_policy == InteractiveNativeToolPolicy::InspectionOnly {
         None
     } else {
         let run_id = run_root
@@ -1834,34 +2306,18 @@ async fn launch_prepared_interactive_application(
         actor_identity.id.0,
         actor_identity.incarnation.0
     ));
-    std::fs::create_dir(&socket_root).map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_root, std::fs::Permissions::from_mode(0o700)).map_err(
-            |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
-        )?;
-    }
-    let endpoint = socket_root.join("host-tools.sock");
-    let listener = UnixListener::bind(&endpoint).map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::BindToolHost, error)
-    })?;
+    let (mut socket_directory, listener, inbox) = prepare_socket_inbox(
+        actor_identity,
+        socket_root,
+        actor_root.join("inbox.jsonl"),
+        actor_root.join("inbox.cursor"),
+    )?;
+    let endpoint = socket_directory.path().join("host-tools.sock");
     let binding_path = if actor_identity == root {
         config.root_binding_path.clone()
     } else {
         actor_root.join("binding.json")
     };
-    let inbox = Arc::new(
-        DurableInbox::<DurableActorEvent>::open(
-            actor_root.join("inbox.jsonl"),
-            actor_root.join("inbox.cursor"),
-        )
-        .map_err(|error| {
-            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-        })?,
-    );
     let launch_mode = if let Some(parent) = fork_parent_thread.clone() {
         let boundary = installation
             .fork_boundary
@@ -1960,6 +2416,9 @@ async fn launch_prepared_interactive_application(
         expected_resume.clone(),
     )
     .map_err(|error| application_error(actor_identity, InteractiveOperation::BuildPolicy, error))?;
+    // Accepted hosted work may outlive listener cancellation. Retention starts
+    // before either hosted submission or native process submission can occur.
+    socket_directory.work_may_exist();
     let service = tokio::spawn(async move {
         server.serve(listener).await.map_err(|error| {
             application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
@@ -1968,8 +2427,12 @@ async fn launch_prepared_interactive_application(
     if cancelled.try_recv().is_ok() {
         service.abort();
         let _ = service.await;
-        let _ = std::fs::remove_dir_all(&socket_root);
-        return Ok(None);
+        return Err(socket_launch_failure(
+            actor_identity,
+            InteractiveOperation::LaunchProcess,
+            "launch cancelled after hosted work submission",
+            socket_directory,
+        ));
     }
     let mut launch_environment = actor_launch_environment(
         config.pane_environment.clone(),
@@ -1986,6 +2449,12 @@ async fn launch_prepared_interactive_application(
             .to_string_lossy()
             .into_owned(),
     );
+    if let Some(resource) = &mut build_resource {
+        resource.process_may_exist();
+    }
+    if let Some(custody) = &installation.worktree_custody {
+        custody.process_may_exist();
+    }
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
@@ -2012,47 +2481,54 @@ async fn launch_prepared_interactive_application(
         Ok(Err(error)) => {
             service.abort();
             let _ = service.await;
-            let _ = std::fs::remove_dir_all(&socket_root);
-            return Err(application_error(
+            return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
                 error,
+                socket_directory,
             ));
         }
         Err(_) => {
             service.abort();
             let _ = service.await;
-            let _ = std::fs::remove_dir_all(&socket_root);
-            return Err(application_error(
+            return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
                 format!("tmux launch exceeded {PROCESS_OPERATION_TIMEOUT:?}"),
+                socket_directory,
             ));
         }
     };
 
     if let Err(error) = tmux.retain_pane_on_exit(&pane).await {
-        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-        return Err(application_error(
+        abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
+        return Err(socket_launch_failure(
             actor_identity,
             InteractiveOperation::LaunchProcess,
             format!("cannot retain actor pane for exit diagnosis: {error}"),
+            socket_directory,
         ));
     }
 
     if actor_identity == root {
         if let Err(error) = tmux.select_window_for_pane(&pane).await {
-            abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-            return Err(application_error(
+            abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
+            return Err(socket_launch_failure(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,
                 error,
+                socket_directory,
             ));
         }
     }
     if cancelled.try_recv().is_ok() {
-        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-        return Ok(None);
+        abandon_interactive_application(&tmux, &pane, service, socket_directory.path()).await;
+        return Err(socket_launch_failure(
+            actor_identity,
+            InteractiveOperation::LaunchProcess,
+            "launch cancelled after native submission",
+            socket_directory,
+        ));
     }
     tracing::info!(
         actor = ?actor_identity,
@@ -2072,10 +2548,16 @@ async fn launch_prepared_interactive_application(
             pane,
             workspace,
             inbox,
+            notification_inbox_key: format!(
+                "{}:{}:{}",
+                runtime_namespace(&run_root),
+                actor_identity.id.0,
+                actor_identity.incarnation.0
+            ),
             connection: InteractiveConnection::AwaitingBinding,
             service,
-            socket_root,
-            worktree_binding: None,
+            socket_directory,
+            worktree_custody: installation.worktree_custody.clone(),
             failure_reported: false,
             last_activation_sequence: 0,
             thread: None,
@@ -2089,6 +2571,66 @@ async fn launch_prepared_interactive_application(
             expected: expected_resume,
         },
     }))
+}
+
+/// Acquire exclusive path custody before the first fallible preparation step.
+fn prepare_socket_inbox(
+    actor: ActorRef,
+    socket_root: PathBuf,
+    rows: PathBuf,
+    cursor: PathBuf,
+) -> Result<(SocketDirectory, UnixListener, Arc<ActorInbox>), InteractiveApplicationError> {
+    let socket = SocketDirectory::create(socket_root)
+        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
+    let prepared: Result<_, InteractiveApplicationError> = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(socket.path(), std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| {
+                    application_error(actor, InteractiveOperation::PrepareRuntime, error)
+                })?;
+        }
+        let listener = UnixListener::bind(socket.path().join("host-tools.sock"))
+            .map_err(|error| application_error(actor, InteractiveOperation::BindToolHost, error))?;
+        let inbox = ActorInbox::open(rows, cursor).map_err(|error| {
+            application_error(actor, InteractiveOperation::PrepareRuntime, error)
+        })?;
+        Ok((listener, Arc::new(inbox)))
+    })();
+    match prepared {
+        Ok((listener, inbox)) => Ok((socket, listener, inbox)),
+        Err(error) => Err(socket_launch_failure(
+            actor,
+            error.operation,
+            error.detail,
+            socket,
+        )),
+    }
+}
+
+fn socket_cleanup_outcome(socket: SocketDirectory) -> CleanupComponentOutcome {
+    match socket.release() {
+        Ok(()) => CleanupComponentOutcome::Completed,
+        Err(error) => CleanupComponentOutcome::Failed {
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn socket_launch_failure(
+    actor: ActorRef,
+    operation: InteractiveOperation,
+    cause: impl fmt::Display,
+    socket: SocketDirectory,
+) -> InteractiveApplicationError {
+    let detail = match socket_cleanup_outcome(socket) {
+        CleanupComponentOutcome::Failed { detail } => {
+            format!("{cause}; socket cleanup failed: {detail}")
+        }
+        _ => cause.to_string(),
+    };
+    application_error(actor, operation, detail)
 }
 
 fn accepts_activation(
@@ -2172,9 +2714,49 @@ fn orient_launch_instructions(
     }
 }
 
+fn observe_notification_receipt(
+    command: &tidepool_actor::NotificationPoll,
+    target: ActorRef,
+    inbox_key: &str,
+    inbox: &ActorInbox,
+) -> Result<tidepool_actor::NotificationState, tidepool_actor::NotificationError> {
+    use tidepool_actor::{NotificationError, NotificationState};
+    use tidepool_node::{DeliveryPhase, ReceiptLookup};
+    let receipt = command.receipt();
+    if receipt.owner() != command.owner() {
+        return Err(NotificationError::Unauthorized);
+    }
+    if receipt.target() != target || receipt.inbox() != inbox_key {
+        return Err(NotificationError::InvalidReceipt);
+    }
+    match inbox
+        .observe_receipt(receipt.sequence())
+        .map_err(|error| NotificationError::StorageFailure(error.to_string()))?
+    {
+        ReceiptLookup::Unavailable => Err(NotificationError::Unavailable),
+        ReceiptLookup::Retained(evidence) => {
+            if evidence.context
+                != (NotificationProvenance {
+                    sender: command.owner(),
+                    target,
+                })
+            {
+                return Err(NotificationError::Unauthorized);
+            }
+            Ok(match evidence.phase {
+                DeliveryPhase::Accepted => NotificationState::Accepted,
+                DeliveryPhase::Presented => NotificationState::Presented,
+                DeliveryPhase::InFlight | DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed => {
+                    NotificationState::Unconfirmed
+                }
+            })
+        }
+    }
+}
+
 async fn deliver_pending(
     actor: ActorRef,
-    inbox: &Arc<DurableInbox<DurableActorEvent>>,
+    inbox: &Arc<ActorInbox>,
     thread: &QueueReadyThread,
     backend: &dyn InteractiveAgentBackend,
     workspace: &Path,
@@ -2182,7 +2764,7 @@ async fn deliver_pending(
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
-    let pending = tokio::task::spawn_blocking(move || pending_inbox.pending())
+    let pending = tokio::task::spawn_blocking(move || pending_inbox.legacy_pending_prefix())
         .await
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
@@ -2245,7 +2827,7 @@ async fn deliver_pending(
 
 async fn run_delivery_pump(
     actor: ActorRef,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     thread: QueueReadyThread,
     backend: Arc<dyn InteractiveAgentBackend>,
     workspace: PathBuf,
@@ -2322,14 +2904,14 @@ async fn publish_owner_notification(
 
 async fn publish_inbox_event_for(
     actor: ActorRef,
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
 ) -> (ActorRef, Result<(), String>) {
     (actor, publish_inbox_event(inbox, event).await)
 }
 
 async fn publish_inbox_event(
-    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    inbox: Arc<ActorInbox>,
     event: DurableActorEvent,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -2363,18 +2945,11 @@ async fn publish_inbox_event(
 async fn retire_interactive_application_guarded(
     deployment: InteractiveDeployment,
     tmux: &TmuxSession,
-    bindings: &Arc<Mutex<BindingTable>>,
-    binding_terminal: BindingTerminal,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
-    match AssertUnwindSafe(retire_interactive_application(
-        deployment,
-        tmux,
-        bindings,
-        binding_terminal,
-    ))
-    .catch_unwind()
-    .await
+    match AssertUnwindSafe(retire_interactive_application(deployment, tmux))
+        .catch_unwind()
+        .await
     {
         Ok(receipt) => receipt,
         Err(_) => InteractiveCleanupReceipt {
@@ -2392,8 +2967,6 @@ async fn retire_interactive_application_guarded(
 async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
-    bindings: &Arc<Mutex<BindingTable>>,
-    binding_terminal: BindingTerminal,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
     let mut components = Vec::with_capacity(6);
@@ -2411,7 +2984,10 @@ async fn retire_interactive_application(
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Process,
         outcome: match tmux.kill_pane(&deployment.pane).await {
-            Ok(()) => CleanupComponentOutcome::Completed,
+            Ok(()) => CleanupComponentOutcome::Failed {
+                detail: "pane cleanup requested; exact process termination remains unconfirmed"
+                    .into(),
+            },
             Err(error) => CleanupComponentOutcome::Failed {
                 detail: error.to_string(),
             },
@@ -2438,15 +3014,7 @@ async fn retire_interactive_application(
     });
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Socket,
-        outcome: match std::fs::remove_dir_all(&deployment.socket_root) {
-            Ok(()) => CleanupComponentOutcome::Completed,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                CleanupComponentOutcome::Completed
-            }
-            Err(error) => CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            },
-        },
+        outcome: socket_cleanup_outcome(deployment.socket_directory),
     });
     let build_outcome =
         deployment
@@ -2464,16 +3032,10 @@ async fn retire_interactive_application(
         component: CleanupComponent::BuildResource,
         outcome: build_outcome,
     });
-    let binding_outcome = if let Some(binding) = deployment.worktree_binding.take() {
-        let result = match binding_terminal {
-            BindingTerminal::Completed => binding.complete(&mut bindings.lock()),
-            BindingTerminal::Released => binding.release(&mut bindings.lock()),
-        };
-        match result {
-            Ok(()) => CleanupComponentOutcome::Completed,
-            Err(error) => CleanupComponentOutcome::Failed {
-                detail: error.to_string(),
-            },
+    let binding_outcome = if deployment.worktree_custody.take().is_some() {
+        // Pane removal (including an absent/non-owned pane) is not a process reap.
+        CleanupComponentOutcome::Failed {
+            detail: "custody retained: tmux cannot prove exact process termination".into(),
         }
     } else {
         CleanupComponentOutcome::Completed
@@ -2537,7 +3099,9 @@ async fn abandon_interactive_application(
     let _ = tmux.kill_pane(pane).await;
     service.abort();
     let _ = service.await;
-    let _ = std::fs::remove_dir_all(socket_root);
+    // The path is diagnostic, not deletion authority. The caller's custody guard
+    // remains retained and reports a failed cleanup alongside the launch error.
+    tracing::warn!(path = %socket_root.display(), "abandoned socket directory retained: exact process and accepted hosted work cleanup unconfirmed");
 }
 
 async fn discover_interactive_binding(
@@ -3166,7 +3730,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let rows = directory.path().join("rows");
         let cursor = directory.path().join("cursor");
-        let inbox = Arc::new(DurableInbox::open(rows.clone(), cursor.clone()).unwrap());
+        let inbox = Arc::new(ActorInbox::open(rows.clone(), cursor.clone()).unwrap());
         let notice = |turn: &str, revision| {
             DurableActorEvent::Typed(TypedActorEvent::ProviderTurnFailed {
                 actor: tidepool_actor::ActorRef::first(tidepool_actor::ActorId(7)),
@@ -3185,7 +3749,7 @@ mod tests {
         assert_eq!(inbox.pending().unwrap().len(), 1);
         inbox.acknowledge(1).unwrap();
         drop(inbox);
-        let inbox = Arc::new(DurableInbox::open(rows, cursor).unwrap());
+        let inbox = Arc::new(ActorInbox::open(rows, cursor).unwrap());
         publish_inbox_event(inbox.clone(), notice("first", 10))
             .await
             .unwrap();
@@ -3699,7 +4263,7 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<DurableActorEvent>(serde_json::json!("old notice"))
                 .expect("decode legacy actor event"),
-            DurableActorEvent::Legacy("old notice".into())
+            DurableActorEvent::Text("old notice".into())
         );
     }
 
@@ -3749,14 +4313,525 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn launch_shutdown_preserves_socket_error_and_completed_results() {
+        let root = tempfile::tempdir().unwrap();
+        let actor = ActorRef::first(tidepool_actor::ActorId(80));
+        let successful_path = root.path().join("successful");
+        let failed_path = root.path().join("failed");
+        let mut successful = SocketDirectory::create(successful_path.clone()).unwrap();
+        successful.work_may_exist();
+        let mut failed = SocketDirectory::create(failed_path.clone()).unwrap();
+        failed.work_may_exist();
+        let error = socket_launch_failure(
+            actor,
+            InteractiveOperation::LaunchProcess,
+            "launch cancelled after hosted work submission",
+            failed,
+        );
+        let mut launches = JoinSet::new();
+        launches.spawn(async move { ((), Ok(Some(successful))) });
+        launches.spawn(async move { ((), Err(error)) });
+        launches.spawn(async { ((), Ok(None)) });
+        let outcome = drain_launches_for_shutdown(&mut launches, Duration::from_secs(1)).await;
+        assert_eq!(outcome.completed.len(), 1);
+        assert_eq!(outcome.completed[0].path(), successful_path);
+        assert!(
+            matches!(outcome.failures.as_slice(), [LaunchShutdownFailure::Launch(error)]
+            if error.actor == actor && error.detail.contains("socket cleanup failed:") && error.detail.contains("unconfirmed"))
+        );
+        assert!(failed_path.exists());
+        assert!(launches.is_empty());
+        // This is the same value the production caller transfers into retirement.
+        assert!(matches!(
+            socket_cleanup_outcome(outcome.completed.into_iter().next().unwrap()),
+            CleanupComponentOutcome::Failed { .. }
+        ));
+        assert!(successful_path.exists());
+    }
+
+    #[tokio::test]
+    async fn launch_shutdown_retains_join_failure_without_a_deployment() {
+        let mut launches: JoinSet<((), Result<Option<()>, InteractiveApplicationError>)> =
+            JoinSet::new();
+        launches.spawn(async { panic!("launch task panicked before result") });
+        let outcome = drain_launches_for_shutdown(&mut launches, Duration::from_secs(1)).await;
+        assert!(outcome.completed.is_empty());
+        assert!(
+            matches!(outcome.failures.as_slice(), [LaunchShutdownFailure::Join(error)] if error.is_panic())
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_shutdown_timeout_preserves_partial_success_and_reports_uncertain_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let ready_path = root.path().join("ready");
+        let pending_path = root.path().join("pending");
+        let mut ready = SocketDirectory::create(ready_path.clone()).unwrap();
+        ready.work_may_exist();
+        let mut pending = SocketDirectory::create(pending_path.clone()).unwrap();
+        pending.work_may_exist();
+        let mut launches = JoinSet::new();
+        launches.spawn(async move { ((), Ok(Some(ready))) });
+        launches.spawn(async move {
+            let _retained = pending;
+            std::future::pending::<(
+                (),
+                Result<Option<SocketDirectory>, InteractiveApplicationError>,
+            )>()
+            .await
+        });
+        let outcome = drain_launches_for_shutdown(&mut launches, Duration::from_millis(100)).await;
+        assert_eq!(outcome.completed.len(), 1);
+        assert_eq!(outcome.completed[0].path(), ready_path);
+        assert!(outcome
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, LaunchShutdownFailure::TimedOut { pending: 1 })));
+        // Confirm the test task stops, without upgrading the recorded uncertainty.
+        while !launches.is_empty() {
+            let result = tokio::time::timeout(Duration::from_secs(1), launches.join_next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.unwrap_err().is_cancelled());
+        }
+        assert!(pending_path.exists());
+        assert!(ready_path.exists());
+        assert!(!outcome.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn socket_preparation_cleans_failed_inbox_open_and_preserves_collision() {
+        let root = tempfile::tempdir().unwrap();
+        let actor = ActorRef::first(tidepool_actor::ActorId(77));
+        let socket_path = root.path().join("socket");
+        let rows = root.path().join("rows");
+        let cursor = root.path().join("cursor");
+        std::fs::write(&cursor, b"not a checkpoint").unwrap();
+        let error = prepare_socket_inbox(actor, socket_path.clone(), rows.clone(), cursor.clone())
+            .err()
+            .expect("invalid inbox checkpoint must fail preparation");
+        assert!(matches!(
+            error.operation,
+            InteractiveOperation::PrepareRuntime
+        ));
+        assert!(error.detail.contains("expected"), "{error}");
+        // BindToolHost succeeded before the malformed checkpoint was read. Its
+        // named socket and exclusively created parent must both be removed.
+        assert!(!socket_path.join("host-tools.sock").exists());
+        assert!(!socket_path.exists());
+        assert_eq!(std::fs::read(&cursor).unwrap(), b"not a checkpoint");
+
+        std::fs::create_dir(&socket_path).unwrap();
+        let preexisting = UnixListener::bind(socket_path.join("host-tools.sock")).unwrap();
+        std::fs::write(socket_path.join("marker"), b"belongs to another owner").unwrap();
+        assert!(prepare_socket_inbox(actor, socket_path.clone(), rows, cursor).is_err());
+        assert!(socket_path.join("host-tools.sock").exists());
+        assert_eq!(
+            std::fs::read(socket_path.join("marker")).unwrap(),
+            b"belongs to another owner"
+        );
+        drop(preexisting);
+    }
+
+    #[tokio::test]
+    async fn socket_preparation_cleans_bind_failure() {
+        let root = tempfile::tempdir().unwrap();
+        // Valid directory component, but longer than Unix socket sockaddr paths.
+        let path = root.path().join("s".repeat(150));
+        let error = prepare_socket_inbox(
+            ActorRef::first(tidepool_actor::ActorId(79)),
+            path.clone(),
+            root.path().join("rows"),
+            root.path().join("cursor"),
+        )
+        .err()
+        .expect("overlong socket endpoint must fail to bind");
+        assert!(matches!(
+            error.operation,
+            InteractiveOperation::BindToolHost
+        ));
+        assert!(!path.exists());
+        assert!(!root.path().join("rows").exists());
+    }
+
+    #[tokio::test]
+    async fn socket_postsubmission_error_and_retirement_report_retention() {
+        let root = tempfile::tempdir().unwrap();
+        let actor = ActorRef::first(tidepool_actor::ActorId(78));
+        for retire in [false, true] {
+            let path = root.path().join(if retire { "retire" } else { "launch" });
+            let (mut socket, listener, _) = prepare_socket_inbox(
+                actor,
+                path.clone(),
+                root.path().join("rows"),
+                root.path().join("cursor"),
+            )
+            .unwrap();
+            socket.work_may_exist();
+            // Dropping/aborting the listener does not prove accepted hosted work
+            // or a native process is finished.
+            drop(listener);
+            if retire {
+                assert!(matches!(socket_cleanup_outcome(socket),
+                    CleanupComponentOutcome::Failed { detail } if detail.contains("unconfirmed")));
+            } else {
+                let error = socket_launch_failure(
+                    actor,
+                    InteractiveOperation::LaunchProcess,
+                    "launch timed out",
+                    socket,
+                );
+                assert!(error
+                    .detail
+                    .contains("launch timed out; socket cleanup failed:"));
+                assert!(error.detail.contains("unconfirmed"));
+            }
+            assert!(path.join("host-tools.sock").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_admission_and_poll_preserve_typed_request_bindings() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/notification_setup.hs"),
+        )
+        .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let child = match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            LocalResidentDeployment::PolicyInstalled(child) => child,
+            _ => panic!("expected recipient policy"),
+        };
+        let activation =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::SessionReady { activation } => activation,
+                _ => panic!("expected original request activation"),
+            };
+        assert_eq!(activation.id.actor(), child.actor.identity());
+        let directory = tempfile::tempdir().unwrap();
+        // Distinct fresh hierarchies exercise both strict directory owners at
+        // the authored notification/inbox seam; syscall denial is tested by node.
+        let inbox = ActorInbox::open(
+            directory.path().join("rows-tree/deep/rows"),
+            directory.path().join("checkpoint-tree/deep/cursor"),
+        )
+        .unwrap();
+        let inbox_key = "notification-test-inbox";
+        let policy = root.clone();
+        let send = tokio::spawn(async move {
+            dispatch_haskell_script(
+                policy.as_ref(),
+                "Right receipt <- notify worker \"one-way notice\"",
+            )
+            .await
+        });
+        let command =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::NotificationSend(command) => command,
+                _ => panic!("notification fabricated another activation"),
+            };
+        assert_eq!(command.owner(), campaign.actor.identity());
+        assert_eq!(command.target(), child.actor.identity());
+        // This is real durable admission through the interpreter handoff, not a
+        // native presentation fixture. Production send remains unavailable.
+        let envelope = inbox
+            .publish_tracked(
+                DurableActorEvent::Text(command.message().to_owned()),
+                NotificationProvenance {
+                    sender: command.owner(),
+                    target: command.target(),
+                },
+            )
+            .unwrap();
+        command.admitted(inbox_key.into(), envelope.sequence);
+        let sent = send.await.unwrap();
+        assert_eq!(sent["status"], "committed", "{sent:?}");
+        let policy = root.clone();
+        let poll = tokio::spawn(async move {
+            dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
+        });
+        let poll_command =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::NotificationPoll(command) => command,
+                _ => panic!("poll fabricated another activation"),
+            };
+        let result =
+            observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox);
+        assert_eq!(result, Ok(tidepool_actor::NotificationState::Accepted));
+        assert_eq!(
+            observe_notification_receipt(
+                &poll_command,
+                child.actor.identity(),
+                "foreign-inbox",
+                &inbox
+            ),
+            Err(tidepool_actor::NotificationError::InvalidReceipt)
+        );
+        let foreign_directory = tempfile::tempdir().unwrap();
+        let foreign = ActorInbox::open(
+            foreign_directory.path().join("rows-tree/deep/rows"),
+            foreign_directory.path().join("checkpoint-tree/deep/cursor"),
+        )
+        .unwrap();
+        assert_eq!(
+            observe_notification_receipt(
+                &poll_command,
+                child.actor.identity(),
+                inbox_key,
+                &foreign
+            ),
+            Err(tidepool_actor::NotificationError::Unavailable)
+        );
+        foreign
+            .publish_tracked(
+                DurableActorEvent::Text("another sender".into()),
+                NotificationProvenance {
+                    sender: child.actor.identity(),
+                    target: child.actor.identity(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            observe_notification_receipt(
+                &poll_command,
+                child.actor.identity(),
+                inbox_key,
+                &foreign
+            ),
+            Err(tidepool_actor::NotificationError::Unauthorized)
+        );
+        let stale = ActorRef {
+            incarnation: tidepool_actor::Incarnation(child.actor.identity().incarnation.0 + 1),
+            ..child.actor.identity()
+        };
+        assert_eq!(
+            observe_notification_receipt(&poll_command, stale, inbox_key, &inbox),
+            Err(tidepool_actor::NotificationError::InvalidReceipt)
+        );
+        drop(inbox);
+        let inbox = ActorInbox::open(
+            directory.path().join("rows-tree/deep/rows"),
+            directory.path().join("checkpoint-tree/deep/cursor"),
+        )
+        .unwrap();
+        assert_eq!(
+            observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox),
+            Ok(tidepool_actor::NotificationState::Accepted)
+        );
+        // Submitted transport acceptance is explicitly NOT model presentation.
+        inbox
+            .begin_tracked_delivery(envelope.sequence)
+            .unwrap()
+            .submitted()
+            .unwrap();
+        assert_eq!(
+            observe_notification_receipt(&poll_command, child.actor.identity(), inbox_key, &inbox),
+            Ok(tidepool_actor::NotificationState::Unconfirmed)
+        );
+        poll_command.observed(result);
+        let observed = poll.await.unwrap();
+        assert_eq!(observed["status"], "committed", "{observed:?}");
+        assert!(
+            observed.to_string().contains("NotificationAccepted"),
+            "{observed:?}"
+        );
+        let unchanged =
+            dispatch_haskell_script(child.policy.as_ref(), "inspectFull sessionInput").await;
+        assert_eq!(unchanged["status"], "committed", "{unchanged:?}");
+        assert!(
+            unchanged.to_string().contains("original assignment"),
+            "{unchanged:?}"
+        );
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "notification created an assignment/wake obligation"
+        );
+        let reply =
+            dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
+        assert_eq!(reply["status"], "replied", "{reply:?}");
+        let answer =
+            dispatch_haskell_script(root.as_ref(), "inspectFull <$> pollResponse answer").await;
+        assert_eq!(answer["status"], "committed", "{answer:?}");
+        assert!(
+            answer.to_string().contains("original assignment"),
+            "{answer:?}"
+        );
+        let root_reply = dispatch_haskell_script(root.as_ref(), ":type respond").await;
+        assert!(
+            root_reply
+                .to_string()
+                .to_lowercase()
+                .contains("not in scope"),
+            "{root_reply:?}"
+        );
+        let idle_setup = dispatch_haskell_script(
+            root.as_ref(),
+            "idle <- startAgent (readonlyAgent \"idle-notification-recipient\")",
+        )
+        .await;
+        assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
+        let idle = match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            LocalResidentDeployment::PolicyInstalled(child) => child,
+            _ => panic!("expected never-assigned recipient policy"),
+        };
+        let policy = root.clone();
+        let idle_send = tokio::spawn(async move {
+            dispatch_haskell_script(
+                policy.as_ref(),
+                "Right idleReceipt <- notify idle \"idle notice\"",
+            )
+            .await
+        });
+        let command =
+            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::NotificationSend(command) => command,
+                _ => panic!("idle notification fabricated request activation"),
+            };
+        assert_eq!(command.target(), idle.actor.identity());
+        let idle_directory = tempfile::tempdir().unwrap();
+        let idle_inbox = ActorInbox::open(
+            idle_directory.path().join("rows-tree/deep/rows"),
+            idle_directory.path().join("checkpoint-tree/deep/cursor"),
+        )
+        .unwrap();
+        let row = idle_inbox
+            .publish_tracked(
+                DurableActorEvent::Text(command.message().into()),
+                NotificationProvenance {
+                    sender: command.owner(),
+                    target: command.target(),
+                },
+            )
+            .unwrap();
+        command.admitted("idle-inbox".into(), row.sequence);
+        let admitted = idle_send.await.unwrap();
+        assert_eq!(admitted["status"], "committed", "{admitted:?}");
+        for name in ["respond", "sessionReply", "sessionInput"] {
+            let absent =
+                dispatch_haskell_script(idle.policy.as_ref(), &format!(":type {name}")).await;
+            assert!(
+                absent.to_string().to_lowercase().contains("not in scope"),
+                "idle recipient gained {name}: {absent:?}"
+            );
+        }
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "idle admission fabricated an activation"
+        );
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn notification_barrier_never_enters_legacy_push_or_batch_ack() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = Arc::new(
+            ActorInbox::open(root.path().join("rows"), root.path().join("cursor")).unwrap(),
+        );
+        let target = ActorRef::first(tidepool_actor::ActorId(7));
+        inbox
+            .publish(DurableActorEvent::Text("ordinary prefix".into()))
+            .unwrap();
+        inbox
+            .publish_tracked(
+                DurableActorEvent::Text("one-way text".into()),
+                NotificationProvenance {
+                    sender: ActorRef::first(tidepool_actor::ActorId(8)),
+                    target,
+                },
+            )
+            .unwrap();
+        inbox
+            .publish(DurableActorEvent::Text("ordinary suffix".into()))
+            .unwrap();
+        // An old envelope decoder ignores receipt metadata but must accept every
+        // payload before it gets the chance to reject the upgraded checkpoint.
+        // A schema-invalid final row could otherwise trigger old tail repair.
+        #[derive(Deserialize)]
+        struct OldTextEnvelope {
+            sequence: u64,
+            payload: String,
+        }
+        let rows = std::fs::read_to_string(root.path().join("rows")).unwrap();
+        let old_rows = rows
+            .lines()
+            .map(|line| serde_json::from_str::<OldTextEnvelope>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(old_rows.len(), 3);
+        assert_eq!(old_rows[1].sequence, 2);
+        assert_eq!(old_rows[1].payload, "one-way text");
+        let backend = ScriptedPush {
+            fail: std::sync::atomic::AtomicBool::new(false),
+            messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let binding = root.path().join("binding.json");
+        tidepool_agent::accept_interactive_session_binding(
+            &binding,
+            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
+        )
+        .await
+        .unwrap();
+        let thread = tidepool_agent::read_interactive_binding(&binding)
+            .await
+            .unwrap();
+        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+        for _ in 0..2 {
+            deliver_pending(target, &inbox, &thread, &backend, root.path(), &observation)
+                .await
+                .unwrap();
+        }
+        assert_eq!(*backend.messages.lock().unwrap(), vec!["ordinary prefix"]);
+        assert_eq!(inbox.cursor(), 1);
+        assert_eq!(inbox.watermark(), 3);
+        assert!(matches!(
+            inbox.pending(),
+            Err(tidepool_node::InboxError::TrackedBarrier { sequence: 2 })
+        ));
+        assert!(inbox.legacy_pending_prefix().unwrap().is_empty());
+        assert!(matches!(
+            inbox.observe_receipt(2).unwrap(),
+            tidepool_node::ReceiptLookup::Retained(evidence)
+                if evidence.phase == tidepool_node::DeliveryPhase::Accepted
+        ));
+    }
+
+    #[tokio::test]
     async fn native_push_acknowledges_only_after_acceptance_and_retries_the_same_row() {
         let root = tempfile::tempdir().expect("inbox root");
         let inbox = Arc::new(
-            DurableInbox::open(root.path().join("rows"), root.path().join("cursor"))
+            ActorInbox::open(root.path().join("rows"), root.path().join("cursor"))
                 .expect("open inbox"),
         );
         inbox
-            .publish(DurableActorEvent::Legacy("child completed".into()))
+            .publish(DurableActorEvent::Text("child completed".into()))
             .expect("publish");
         let backend = ScriptedPush {
             fail: std::sync::atomic::AtomicBool::new(true),
@@ -3810,7 +4885,7 @@ mod tests {
             tidepool_actor::ActorActivationKind::RootStarted
         );
         inbox
-            .publish(DurableActorEvent::Legacy("second event".into()))
+            .publish(DurableActorEvent::Text("second event".into()))
             .expect("publish second event");
 
         backend
@@ -4078,7 +5153,6 @@ mod tests {
             .find(|installation| installation.label.ends_with("/scaffold"))
             .expect("scaffold installation")
             .clone();
-        let mut test_bindings = Vec::new();
         for installation in &child_installations {
             assert_eq!(installation.context_parent, Some(actor.identity()));
             assert_eq!(
@@ -4113,11 +5187,10 @@ mod tests {
                 installation.actor.identity().id.0,
                 installation.actor.identity().incarnation.0,
             );
-            test_bindings.push(
-                bindings
-                    .lock()
-                    .bind(worktree.id(), &principal, current_time_ms())
-                    .expect("bind named worktree to test child"),
+            assert!(installation.worktree_custody.is_some());
+            assert_eq!(
+                bindings.lock().current(worktree.id()).unwrap().agent(),
+                &principal
             );
         }
         worker_installation
@@ -4548,11 +5621,10 @@ mod tests {
                 installation.actor.identity().id.0,
                 installation.actor.identity().incarnation.0,
             );
-            test_bindings.push(
-                bindings
-                    .lock()
-                    .bind(worktree.id(), &principal, current_time_ms())
-                    .expect("bind nested worktree"),
+            assert!(installation.worktree_custody.is_some());
+            assert_eq!(
+                bindings.lock().current(worktree.id()).unwrap().agent(),
+                &principal
             );
             installation
                 .fork_gate
@@ -4858,5 +5930,71 @@ mod tests {
             .await
             .expect("shutdown root");
         hosted.await.expect("root actor task");
+    }
+    #[test]
+    fn build_resource_retains_after_launch_uncertainty_and_failed_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("build");
+        std::fs::create_dir(&path).unwrap();
+        let mut lease = BuildResourceLease {
+            path: path.clone(),
+            state: BuildResourceState::Unsubmitted,
+        };
+        lease.process_may_exist();
+        assert!(lease.release().is_err());
+        assert!(
+            path.is_dir(),
+            "failed release and Drop must retain resource"
+        );
+        let lease = BuildResourceLease {
+            path: path.clone(),
+            state: BuildResourceState::RetainedUnconfirmed,
+        };
+        drop(lease);
+        assert!(
+            path.is_dir(),
+            "unconfirmed launch Drop must retain resource"
+        );
+    }
+
+    #[test]
+    fn build_resource_reallocation_cannot_adopt_retained_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("run").join("build");
+        let mut lease = BuildResourceLease::allocate_path(path.clone()).unwrap();
+        std::fs::write(path.join("live-output"), b"retained").unwrap();
+        lease.process_may_exist();
+        drop(lease);
+        let error = BuildResourceLease::allocate_path(path.clone()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(path.join("live-output")).unwrap(),
+            b"retained"
+        );
+    }
+
+    #[test]
+    fn build_resource_fresh_allocation_can_release_and_reallocate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("run").join("build");
+        BuildResourceLease::allocate_path(path.clone())
+            .unwrap()
+            .release()
+            .unwrap();
+        assert!(!path.exists());
+        drop(BuildResourceLease::allocate_path(path.clone()).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn build_resource_prelaunch_drop_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("build");
+        std::fs::create_dir(&path).unwrap();
+        drop(BuildResourceLease {
+            path: path.clone(),
+            state: BuildResourceState::Unsubmitted,
+        });
+        assert!(!path.exists());
     }
 }

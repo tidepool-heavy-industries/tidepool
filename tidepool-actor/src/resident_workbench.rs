@@ -718,6 +718,15 @@ fn cleanup_step_value(
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    NotificationSend {
+        continuation: ResidentHole,
+        target: crate::ActorRef,
+        message: String,
+    },
+    NotificationPoll {
+        continuation: ResidentHole,
+        receipt: crate::notification::NotificationReceiptWire,
+    },
     Completed,
     ActorContext(ResidentHole),
     ForkGroup(ForkGroupBoundary),
@@ -828,6 +837,8 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::NotificationSend { .. } => "notify",
+            Self::NotificationPoll { .. } => "pollNotification",
             Self::ActorContext(_) => "actorContext",
             Self::ForkGroup(ForkGroupBoundary::Preview { .. }) => "preview context-fork policy",
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
@@ -877,6 +888,7 @@ impl ResidentActorBoundary {
 /// boundaries. Generated request enums own constructor recognition and field
 /// shape; this sum owns orchestration routing.
 enum ResidentRequest {
+    Notifications(crate::generated::notifications::NotificationsReq),
     Actor(crate::generated::actor::ActorReq),
     ActorContext(crate::generated::actor_context::ActorContextReq),
     AgentControl(crate::generated::agent_control::AgentControlReq),
@@ -908,6 +920,10 @@ impl ResidentRequest {
             };
         }
 
+        try_member!(
+            Self::Notifications,
+            crate::generated::notifications::NotificationsReq
+        );
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
         try_member!(
             Self::ActorContext,
@@ -952,6 +968,12 @@ impl ResidentRequest {
 
     fn operation(&self) -> &'static str {
         match self {
+            Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
+                ..,
+            )) => "notify",
+            Self::Notifications(
+                crate::generated::notifications::NotificationsReq::PollNotificationWith(..),
+            ) => "pollNotification",
             Self::Actor(crate::generated::actor::ActorReq::ActorBeginForkGroupWith(..)) => {
                 "begin context-fork group"
             }
@@ -2085,6 +2107,12 @@ where
                             })?),
                         },
                     )),
+                    ResidentRequest::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(target, message)) => {
+                        Ok(ResidentActorBoundary::NotificationSend { continuation: hole, target: crate::wait::decode_address(target.0, target.1)?, message })
+                    }
+                    ResidentRequest::Notifications(crate::generated::notifications::NotificationsReq::PollNotificationWith(receipt)) => {
+                        Ok(ResidentActorBoundary::NotificationPoll { continuation: hole, receipt })
+                    }
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(
                             target,
@@ -3036,6 +3064,22 @@ where
                     ),
                 };
                 let answer = actor_context_constructor(table, name, fields)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_notification<T: ToCore + Send + 'static>(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<T, crate::NotificationError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = outcome.to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

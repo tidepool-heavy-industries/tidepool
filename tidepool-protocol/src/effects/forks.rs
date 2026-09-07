@@ -58,6 +58,7 @@ pub fn forks() -> Effect {
                         "EffectWorktreeRegistry",
                         "EffectWorktreeAllocation",
                         "EffectWorktreeIntegration",
+                        "EffectNotifications",
                     ]
                     .into_iter()
                     .map(|ctor| SumVariant {

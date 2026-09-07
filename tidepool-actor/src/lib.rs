@@ -26,6 +26,7 @@ mod descriptor;
 mod external_application;
 mod fork_workspace;
 mod generated;
+mod hosted_lifecycle;
 mod identity;
 mod interactive_session;
 mod kernel;
@@ -33,6 +34,7 @@ mod lineage;
 mod local_actor;
 mod mailbox;
 mod mount;
+mod notification;
 mod profile;
 mod prompt_catalog;
 mod request;
@@ -45,6 +47,9 @@ mod role;
 mod runtime_observation;
 mod start;
 mod termination;
+pub use hosted_lifecycle::{
+    CleanupComponentOutcome, HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown,
+};
 mod typed_request;
 mod wait;
 mod workbench_display;
@@ -53,7 +58,9 @@ pub use descriptor::ActorDescriptor;
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
-pub use fork_workspace::{ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceSeed};
+pub use fork_workspace::{
+    ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceCustody, ForkWorkspaceSeed,
+};
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
     ActivationId, InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentActivation,
@@ -77,6 +84,9 @@ pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports,
+};
+pub use notification::{
+    NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
 };
 pub use profile::ActorEffectProfile;
 pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerprint;

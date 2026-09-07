@@ -6,7 +6,14 @@ mod inbox;
 mod process_boundary;
 mod tmux;
 
-pub use inbox::{DurableEnvelope, DurableInbox, InboxError};
+pub use inbox::{
+    DeliveryAttempt, DeliveryPhase, DurableEnvelope, DurableInbox, InboxError, InboxWriteOperation,
+    ReceiptEvidence, ReceiptLookup, MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_RECEIPTS,
+    MAX_TOTAL_RECEIPT_CONTEXT_BYTES,
+};
+pub use process_boundary::service_scope::{
+    PreparedServiceScope, ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError,
+};
 pub use process_boundary::{
     ProcessBoundaryError, ProcessInvocation, ProcessMountBoundary, BUBBLEWRAP_PROGRAM,
 };

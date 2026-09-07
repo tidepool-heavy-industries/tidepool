@@ -35,8 +35,111 @@ enum ToolKind {
     Function,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostToolPhase {
+    Serving,
+    Quiescing,
+    Draining,
+}
+
+#[derive(Clone, Copy)]
+enum AdmissionKind {
+    NewWork,
+    CompletionOrRead,
+}
+
+/// One service's HTTP admission control, never resident-effect custody.
+#[derive(Clone)]
+pub(crate) struct HostToolControl {
+    phase: tokio::sync::watch::Sender<HostToolPhase>,
+    endpoint: Arc<dyn ResidentToolEndpoint>,
+}
+
+pub(crate) type HostToolSealFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<tidepool_actor::HostedWorkSeal, HostToolSealError>>
+            + Send,
+    >,
+>;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HostToolSealError {
+    #[error("HTTP tool service is already draining")]
+    AlreadyDraining,
+    #[error(transparent)]
+    Endpoint(#[from] ResidentToolError),
+    #[error("resident seal belongs to {actual:?}, expected {expected:?}")]
+    ForeignActor {
+        expected: tidepool_actor::ActorRef,
+        actual: tidepool_actor::ActorRef,
+    },
+}
+
+impl HostToolControl {
+    /// Immediately quiesce HTTP admission, then return the exact endpoint barrier
+    /// future. The host must retain this future (or its owned task/result) across
+    /// bounded waits; dropping it is uncertainty, not cancellation or permission
+    /// to retry. Already-Draining admission is rejected without invoking the
+    /// endpoint. The host must separately serialize raw drain against pending
+    /// seals/completions; this operation does not reserve completion access.
+    /// A seal is not cleanup.
+    #[allow(dead_code)] // Parent pending/lifecycle consumer is staged separately.
+    pub(crate) fn quiesce_and_seal(
+        &self,
+        expected: tidepool_actor::ActorRef,
+    ) -> HostToolSealFuture {
+        let mut already_draining = false;
+        self.phase.send_modify(|phase| match phase {
+            HostToolPhase::Draining => already_draining = true,
+            HostToolPhase::Serving | HostToolPhase::Quiescing => {
+                *phase = HostToolPhase::Quiescing;
+            }
+        });
+        if already_draining {
+            return Box::pin(async { Err(HostToolSealError::AlreadyDraining) });
+        }
+        let endpoint = Arc::clone(&self.endpoint);
+        Box::pin(async move {
+            let seal = endpoint.seal_hosted_work_boxed().await?;
+            if seal.actor() != expected {
+                return Err(HostToolSealError::ForeignActor {
+                    expected,
+                    actual: seal.actor(),
+                });
+            }
+            Ok(seal)
+        })
+    }
+
+    // Parent host integration is staged separately from this owning primitive.
+    #[allow(dead_code)]
+    pub(crate) fn quiesce(&self) {
+        self.phase.send_modify(|phase| {
+            if *phase == HostToolPhase::Serving {
+                *phase = HostToolPhase::Quiescing;
+            }
+        });
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn drain(&self) {
+        self.phase.send_replace(HostToolPhase::Draining);
+    }
+
+    fn admits(&self, kind: AdmissionKind) -> bool {
+        // The watch read lock linearizes admission against phase publication.
+        // An admitted handler may finish; this guard never spans endpoint await.
+        match *self.phase.borrow() {
+            HostToolPhase::Serving => true,
+            HostToolPhase::Quiescing => matches!(kind, AdmissionKind::CompletionOrRead),
+            HostToolPhase::Draining => false,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct HostState {
+    control: HostToolControl,
     registration: Arc<Registration>,
     tools: Arc<HashMap<String, ToolKind>>,
     endpoint: Arc<dyn ResidentToolEndpoint>,
@@ -105,6 +208,10 @@ impl HostDynamicToolService {
         };
         Ok(Self {
             state: HostState {
+                control: HostToolControl {
+                    phase: tokio::sync::watch::channel(HostToolPhase::Serving).0,
+                    endpoint: Arc::clone(&endpoint),
+                },
                 registration: Arc::new(registration),
                 tools: Arc::new(identities),
                 endpoint,
@@ -115,7 +222,27 @@ impl HostDynamicToolService {
         })
     }
 
+    /// Retain this control before moving the service into its server task.
+    #[allow(dead_code)]
+    pub(crate) fn control(&self) -> HostToolControl {
+        self.state.control.clone()
+    }
+
+    /// HTTP-only drain. Quiesce first, retain completion access until the owner
+    /// has reconciled native/resident work, then drain and await this future.
+    /// On timeout retain the server JoinHandle; abort is not successful drain.
     pub(crate) async fn serve(self, listener: UnixListener) -> Result<(), std::io::Error> {
+        let mut phase = self.state.control.phase.subscribe();
+        let shutdown = async move {
+            loop {
+                if *phase.borrow_and_update() == HostToolPhase::Draining {
+                    return;
+                }
+                if phase.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
         let app = Router::new()
             .route("/v1/dynamic-tools/registration", get(registration))
             .route("/v1/dynamic-tools/session", post(attach_session))
@@ -123,7 +250,9 @@ impl HostDynamicToolService {
             .route("/v1/dynamic-tools/completed", post(completed))
             .layer(DefaultBodyLimit::max(REQUEST_LIMIT))
             .with_state(self.state);
-        axum::serve(listener, app).await
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
     }
 }
 
@@ -192,6 +321,12 @@ async fn completed(
     State(state): State<HostState>,
     Json(request): Json<CompletionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !state.control.admits(AdmissionKind::CompletionOrRead) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tool host is draining".into(),
+        ));
+    }
     if request.protocol_version != PROTOCOL_VERSION
         || request.context_call_id.is_empty()
         || request.context_call_id.len() > 256
@@ -218,8 +353,11 @@ async fn completed(
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
 
-async fn registration(State(state): State<HostState>) -> Json<Registration> {
-    Json((*state.registration).clone())
+async fn registration(State(state): State<HostState>) -> Result<Json<Registration>, StatusCode> {
+    if !state.control.admits(AdmissionKind::CompletionOrRead) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    Ok(Json((*state.registration).clone()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +371,9 @@ async fn attach_session(
     State(state): State<HostState>,
     Json(request): Json<SessionRequest>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
+    if !state.control.admits(AdmissionKind::NewWork) {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "tool host is quiescing"));
+    }
     let thread = parse_thread(request.thread_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid thread id"))?;
     if state
@@ -341,6 +482,8 @@ impl CallResponse {
 
 #[derive(Debug, thiserror::Error)]
 enum HostToolFailure {
+    #[error("tool host is quiescing")]
+    Quiescing,
     #[error("unsupported dynamic-tool protocol version {actual}; expected {expected}")]
     UnsupportedProtocol { expected: u32, actual: u32 },
     #[error("dynamic-tool namespace mismatch: received {actual:?}; expected {expected:?}")]
@@ -434,6 +577,9 @@ async fn call(
     State(state): State<HostState>,
     Json(request): Json<CallRequest>,
 ) -> Json<CallResponse> {
+    if !state.control.admits(AdmissionKind::NewWork) {
+        return Json(CallResponse::failure(&HostToolFailure::Quiescing));
+    }
     if request.protocol_version != PROTOCOL_VERSION {
         return Json(CallResponse::failure(
             &HostToolFailure::UnsupportedProtocol {
@@ -1006,3 +1152,7 @@ mod tests {
         let _ = server.await;
     }
 }
+
+#[cfg(test)]
+#[path = "host_dynamic_tools_drain_tests.rs"]
+mod drain_tests;
