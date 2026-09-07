@@ -6,6 +6,13 @@ are relative to `.shoal/config.toml`. The normal Codex TUI remains the interface
 for every worker. A swarm captures selected inputs once; restart explicitly to
 activate edits. No import launches work.
 
+Worker instructions live in `prompts/*.md`, selected by `[prompts.files]` in
+TOML. The captured `Shoal.Workspace` module exposes `workspacePrompt`, returning
+`Maybe Text`, plus the selection identity and configured module names.
+`Project.Work` chooses instructions and combines them with typed task evidence;
+missing required project prompts fail explicitly. Editing a prompt affects the
+next swarm, including when an existing swarm launches a worker later.
+
 The original workspace root has the swarm’s one authoritative `.shoal`. Every
 actor uses its frozen selection, even when a managed checkout contains a copy.
 Treat edits in those checkouts as candidates to integrate into the authoritative
@@ -26,7 +33,7 @@ reviewRoute <- route (awaitSettledFork candidate) $ \settled ->
   case settled of
     ReplyUnavailable failure -> handleUnavailable failure
     ReplyAvailable answer -> do
-      reviewed <- reviewCandidate reviewGroup reviewLabel task (responseValue answer)
+      reviewed <- reviewCandidate reviewGroup reviewLabel task (forkedActor candidate) (responseValue answer)
       _ <- route (awaitSettledFork reviewed) $ \decision ->
         case decision of
           ReplyUnavailable failure -> handleUnavailable failure

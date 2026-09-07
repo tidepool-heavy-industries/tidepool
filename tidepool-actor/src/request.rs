@@ -146,6 +146,9 @@ pub enum ReplyError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WatchTransition {
     Ready,
+    RouteFailed {
+        detail: String,
+    },
     Unavailable {
         request: RequestId,
         failure: ResponseFailure,
@@ -156,6 +159,10 @@ pub enum WatchTransition {
 pub enum WatchStateProjection {
     Pending,
     Ready,
+    RouteRunning,
+    RouteFailed {
+        detail: String,
+    },
     Unavailable {
         request: RequestId,
         failure: ResponseFailure,
@@ -1540,7 +1547,7 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                 watch.progress.insert(key, ProgressCapture::Closed);
             }
         }
-        let transition = watch.dependencies.iter().find_map(|dependency| {
+        let next_state = watch.dependencies.iter().find_map(|dependency| {
             let record = state.requests.get(&dependency.request)?;
             match &record.owner_state {
                 OwnerState::Unavailable(failure)
@@ -1549,7 +1556,7 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                             allow_failure: false,
                         }) =>
                 {
-                    Some(WatchTransition::Unavailable {
+                    Some(WatchState::Unavailable {
                         request: dependency.request,
                         failure: failure.clone(),
                     })
@@ -1560,7 +1567,7 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                             allow_failure: false,
                         }) =>
                 {
-                    Some(WatchTransition::Unavailable {
+                    Some(WatchState::Unavailable {
                         request: dependency.request,
                         failure: ResponseFailure::Abandoned,
                     })
@@ -1568,7 +1575,7 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                 _ => None,
             }
         });
-        let transition = transition.or_else(|| {
+        let next_state = next_state.or_else(|| {
             watch
                 .dependencies
                 .iter()
@@ -1590,34 +1597,33 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                             _ => false,
                         })
                 })
-                .then_some(WatchTransition::Ready)
+                .then_some(WatchState::Ready)
         });
-        let Some(transition) = transition else {
+        let Some(next_state) = next_state else {
             continue;
         };
-        watch.state = match &transition {
-            WatchTransition::Ready => WatchState::Ready,
-            WatchTransition::Unavailable { request, failure } => {
+        let (transition, current) = match &next_state {
+            WatchState::Pending => continue,
+            WatchState::Ready => (WatchTransition::Ready, WatchStateProjection::Ready),
+            WatchState::Unavailable { request, failure } => {
                 watch.progress.clear();
-                WatchState::Unavailable {
-                    request: *request,
-                    failure: failure.clone(),
-                }
+                (
+                    WatchTransition::Unavailable {
+                        request: *request,
+                        failure: failure.clone(),
+                    },
+                    WatchStateProjection::Unavailable {
+                        request: *request,
+                        failure: failure.clone(),
+                    },
+                )
             }
         };
+        watch.state = next_state;
         if let Some(route) = &mut watch.route {
             route.schedule(*watch_id);
             continue;
         }
-        let current = match &transition {
-            WatchTransition::Ready => WatchStateProjection::Ready,
-            WatchTransition::Unavailable { request, failure } => {
-                WatchStateProjection::Unavailable {
-                    request: *request,
-                    failure: failure.clone(),
-                }
-            }
-        };
         let label = watch.label.clone();
         let owner = watch.owner;
         let watch = *watch_id;

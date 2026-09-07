@@ -199,6 +199,11 @@ pub fn forks() -> Effect {
                     ty: HsType::Named("ForkContext"),
                     rust: RustBinding::Path("crate::ForkContext"),
                 });
+                args.push(Arg {
+                    name: "instructions",
+                    ty: HsType::maybe(HsType::Text),
+                    rust: RustBinding::Path("Option<String>"),
+                });
                 Verb {
                     ctor: "ForksStartWith",
                     method: "forks_start_with",

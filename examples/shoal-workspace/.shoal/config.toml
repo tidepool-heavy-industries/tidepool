@@ -8,3 +8,9 @@ modules = ["Project.Types", "Project.Work"]
 
 [prompts]
 core = "prompts/core.md"
+
+[prompts.files]
+task = "prompts/task.md"
+review = "prompts/review.md"
+repair = "prompts/repair.md"
+integrate = "prompts/integrate.md"

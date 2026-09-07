@@ -69,6 +69,7 @@ module Tidepool.Actors.Shoal
   , subgroup
   , Branch
   , withBranchGuidance
+  , withInstructions
   , withBranchDeadline
   , ForkEffort (..)
   , withEffort

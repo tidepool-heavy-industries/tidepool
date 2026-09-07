@@ -31,6 +31,7 @@ module Tidepool.Actors.Unfold
   , batch
   , subgroup
   , Branch
+  , withInstructions
   , withBranchGuidance
   , withBranchDeadline
   , ForkEffort (..)
@@ -240,7 +241,8 @@ data Branch (childEffects :: [Type -> Type]) input result where
     -> Branch childEffects input result
 
 data BranchOptions = BranchOptions
-  { branchGuidance :: Maybe Text
+  { branchInstructions :: Maybe Text
+  , branchGuidance :: Maybe Text
   , branchDeadline :: Maybe RequestDeadline
   , branchEffort :: Maybe ForkEffort
   , branchModel :: Maybe Text
@@ -249,7 +251,7 @@ data BranchOptions = BranchOptions
   }
 
 defaultBranchOptions :: BranchOptions
-defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing InheritedContext Nothing
+defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing Nothing InheritedContext Nothing
 
 -- | Requested descendant generations and active descendants across the subtree.
 -- The runtime clamps these to configured ceilings and remaining parent authority.
@@ -326,6 +328,11 @@ withContext context (Branch label role seed effects options input) =
         Inherited -> options { branchContext = InheritedContext }
         Selected render -> options { branchContext = SelectedContext, branchGuidance = Just (render input) }
   in Branch label role seed effects updated input
+
+-- | Persistent behavioral instructions, independent of task context and authority.
+withInstructions :: Text -> Branch child input result -> Branch child input result
+withInstructions body (Branch label role seed effects options input) =
+  Branch label role seed effects (options { branchInstructions = Just body }) input
 
 withBranchGuidance
   :: Text
@@ -675,6 +682,7 @@ startBranch groupId allocated (Branch _ role seed effects options _) = do
     (budgetPair <$> branchBudget options)
     (branchModel options)
     (branchContext options)
+    (branchInstructions options)
   pure $ case launched of
     Left failure -> Left (UnfoldBranchRejected allocated failure)
     Right branch -> Right branch

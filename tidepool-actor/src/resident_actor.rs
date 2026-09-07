@@ -69,6 +69,7 @@ pub struct LocalResidentInstallation {
     pub effective_role: crate::EffectiveRole,
     pub fork_effort: Option<crate::ForkEffort>,
     pub model: Option<String>,
+    pub instructions: Option<String>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
@@ -2401,6 +2402,7 @@ where
                             effective_role: self.descriptor.effective_role().clone(),
                             fork_effort: self.descriptor.fork_effort(),
                             model: self.descriptor.model().map(str::to_owned),
+                            instructions: self.descriptor.instructions().map(str::to_owned),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
@@ -2575,6 +2577,7 @@ where
             effective_role: self.descriptor.effective_role().clone(),
             fork_effort: self.descriptor.fork_effort(),
             model: self.descriptor.model().map(str::to_owned),
+            instructions: self.descriptor.instructions().map(str::to_owned),
             fork_boundary: self.descriptor.fork_boundary().cloned(),
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
@@ -4326,9 +4329,11 @@ where
             self.environment.requests.abort_unsubmitted(context.actor);
             self.active_route = None;
             self.active_fork_boundary = None;
-            self.environment
+            let notification = self
+                .environment
                 .requests
                 .finish_route(context.actor, watch, result);
+            self.publish_watch_notifications(notification);
             Ok(())
         })
     }

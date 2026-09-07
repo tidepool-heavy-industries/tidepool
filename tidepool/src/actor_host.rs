@@ -493,6 +493,13 @@ impl DurableActorEvent {
             ),
             Self::Typed(TypedActorEvent::SessionReady { message, .. }) => message.clone(),
             Self::Text(message) => message.clone(),
+            Self::Typed(TypedActorEvent::WatchChanged { notification })
+                if matches!(notification.transition, tidepool_actor::WatchTransition::RouteFailed { .. }) => format!(
+                "route {} failed: {:?} ({}). Inspect its retained handle with `pollRoute`. Earlier effects may have completed; do not replay the callback blindly.",
+                notification.watch.0,
+                notification.current,
+                elapsed(notification.occurred_at_unix_ms),
+            ),
             Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
                 "watch {} {:?}: {:?} → {:?} ({}). Poll its retained handle with `pollWatch`.",
                 notification.watch.0,
@@ -1273,7 +1280,7 @@ fn compile_root(
     );
     if let Some(inputs) = &config.workspace_inputs {
         include.extend(inputs.include.iter().cloned());
-        for module in &inputs.modules {
+        for module in inputs.import_modules() {
             preamble = insert_preamble_imports(&preamble, module);
         }
     }
@@ -2458,6 +2465,7 @@ async fn launch_prepared_interactive_application(
         &installation.effective_role,
         &launch_mode,
         config.workspace_inputs.as_ref(),
+        installation.instructions.as_deref(),
     );
     developer_instructions.push_str(
         "\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n",
@@ -3320,14 +3328,18 @@ fn developer_instructions(
     effective_role: &tidepool_actor::EffectiveRole,
     mode: &InteractiveLaunchMode,
 ) -> String {
-    developer_instructions_selected(effective_role, mode, None)
+    developer_instructions_selected(effective_role, mode, None, None)
 }
 
 fn developer_instructions_selected(
     effective_role: &tidepool_actor::EffectiveRole,
     mode: &InteractiveLaunchMode,
     inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+    instructions: Option<&str>,
 ) -> String {
+    if let Some(body) = instructions {
+        return append_effective_role(body.to_owned(), effective_role);
+    }
     let role = effective_role.role();
     let key = match role {
         tidepool_actor::ActorRole::Root => "root",

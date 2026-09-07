@@ -1,6 +1,7 @@
 module Project.Types where
 
 import Data.Text (Text)
+import Tidepool.Actors.Shoal (AgentRef)
 
 -- Project language is ordinary source, independent of runtime authority.
 data Task = Task
@@ -15,7 +16,43 @@ data Candidate = Candidate
   , remainingGates :: [Text]
   } deriving (Show, Eq)
 
-data Review = Accepted Candidate | Repair Candidate Text | NeedsDesign Text
+-- Review owns the next repair request; an implementer reference does not grant
+-- access to the original requester's response or worktree authority.
+data ReviewTask = ReviewTask
+  { reviewAssignment :: Task
+  , reviewInput :: Candidate
+  , reviewImplementer :: AgentRef
+  }
+
+data ReviewedCandidate = ReviewedCandidate
+  { reviewedCandidate :: Candidate
+  , reviewHead :: Text
+  , reviewChecks :: [Text]
+  , reviewRationale :: Text
+  } deriving (Show, Eq)
+
+data RepairTask = RepairTask
+  { repairAssignment :: Task
+  , repairInput :: Candidate
+  , repairFindings :: [Text]
+  } deriving (Show, Eq)
+
+data DesignQuestion = DesignQuestion
+  { questionPlan :: Text
+  , questionSource :: Text
+  , questionFinding :: Text
+  , questionEvidence :: [Text]
+  , questionAlternatives :: [Text]
+  , questionUnblocks :: [Text]
+  } deriving (Show, Eq)
+
+data DesignAnswer
+  = Decision Text [Text]
+  | AmendPlan Text [Text]
+  | NeedEvidence [Text]
+  deriving (Show, Eq)
+
+data ReviewDecision = Accepted ReviewedCandidate | Repair Candidate Text | NeedsDesign DesignQuestion
   deriving (Show, Eq)
 
 data Delivery = Integrated Text [Text] | Preparation Candidate | Blocked Text

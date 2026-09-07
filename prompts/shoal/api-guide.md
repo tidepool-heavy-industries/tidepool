@@ -71,6 +71,7 @@ researchingLeaf :: BranchLabel -> WorktreeSeed -> input -> Branch ResearchLeafEf
 data ForkEffort = Low | Medium | High
 withEffort :: ForkEffort -> Branch child input result -> Branch child input result
 withModel :: Text -> Branch child input result -> Branch child input result
+withInstructions :: Text -> Branch child input result -> Branch child input result
 selected :: (input -> Text) -> WorkerContext input
 inherited :: WorkerContext input
 withContext :: WorkerContext input -> Branch child input result -> Branch child input result
@@ -111,6 +112,13 @@ is independent of context inheritance. Prefer selected contexts for independent
 plan branches, and inherit when the actual shared reasoning is useful. Route
 callbacks can launch selected-context workers; they have no provider transcript
 to inherit. Specialist tasks use the model tagged by the plan.
+
+`withInstructions body` selects persistent worker behavior independently of the
+task input, context ancestry and runtime permissions. It replaces legacy role
+prose while retaining the shared guide and host-supplied authority facts. Select
+authored Markdown through the frozen `Shoal.Workspace.workspacePrompt` when a
+workspace is configured; compose project behavior in Haskell. Request guidance
+still applies to the individual obligation, including later repair requests.
 
 ## Read results without another discovery round
 
@@ -215,7 +223,9 @@ both `ReplyAvailable` and `ReplyUnavailable`. Callback effects have the owner's
 permissions; captured handles never confer someone else's authority. Keep callbacks
 short: submit work or install the next route, then return. `pollRoute` reports
 waiting, running, completed, or retained failure. A failed callback is not retried
-automatically because earlier effects may have happened.
+automatically because earlier effects may have happened. Callback failure sends
+one exceptional notification to its owner; ordinary successful routing does not
+wake the model. Inspect the failed route before deciding how to continue.
 
 Snapshots read existing observations without asking models to report. They include
 supervision and context ancestry, actual/requested model, current requests, received

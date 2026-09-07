@@ -2054,7 +2054,7 @@ where
                         crate::start::ActorStartRequest {
                             label, role, profile, launch_worktrees: worktrees,
                             fork_group: None, fork_workspace: None, effect_keys: None,
-                            fork_effort: None, fork_budget: None, model: None, context: crate::ForkContext::SelectedContext,
+                            fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
                             session_id: context.placement.session, parent_actor: context.actor,
                         },
                     )
@@ -2072,7 +2072,7 @@ where
                         effect_keys,
                         effort,
                         budget,
-                        model, fork_context,
+                        model, fork_context, instructions,
                     )) => {
                         let group = u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -2089,7 +2089,7 @@ where
                                     Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
                                     None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
                                 }),
-                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, context: fork_context,
+                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context,
                                 session_id: context.placement.session, parent_actor: context.actor,
                             },
                         )

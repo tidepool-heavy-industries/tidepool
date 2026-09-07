@@ -66,15 +66,21 @@ alongside each primitive extension.
 
 ## Current implementation
 
-At Tidepool `42e27421`, the foundation includes:
+The implemented foundation includes:
 
-- Frozen TOML-selected modules and core/legacy-role prompts, source integrity
-  checks and pinned Haskell library identity. Authored `.shoal` files are trackable.
+- Frozen TOML-selected modules and Markdown prompts, source integrity checks,
+  stable selection identity and pinned Haskell library identity. `Shoal.Workspace`
+  exposes captured resources to Haskell. Authored `.shoal` files are trackable.
+- `withInstructions` selects persistent behavior in Haskell independently of
+  model, request guidance and runtime authority. The example uses Markdown
+  prompts selected by `[prompts.files]`; Rust retains the shared authority facts.
 - Independent `withModel` and `withContext` selection through TUI launch.
   Selected contexts have fresh transcripts and isolated local bindings; inherited
   contexts preserve the completed-call boundary. Both load the frozen modules.
 - Watch-owned `route`, `pollRoute` and `forgetRoute`, with automatic callbacks,
   selected-worker admission, retained failures and scoped callback child cleanup.
+  Failed callbacks emit one exceptional owner notification; successful callbacks
+  do not wake the model merely to relay success.
 - `snapshot`, `subtree` and `swarmUsage` over existing observations, including
   requested/observed models, received request/coordination-event counts and
   compactions when known. Usage is observed thread usage, not a billing ledger.
@@ -88,8 +94,6 @@ both general capability and a complete authored orchestration package:
 - Composable project behavior and responsibility-specific context packets, with
   actual launch previews. Existing `previewBranch` reports authority/capacity,
   not the resolved prompt, model, context and definition selection.
-- Exceptional attention for failed routes. Failure is retained today, but an
-  idle owner is not notified merely because the callback failed.
 - Complete repair and specialist-answer compositions preserving request ownership,
   the waiting obligation, exact evidence and useful retained workers.
 - A normal control path for cooperating independent roots and scoped observation.
@@ -98,8 +102,10 @@ both general capability and a complete authored orchestration package:
   current whole-tmux cleanup on host error in `tidepool/src/shoal.rs`.
 - A usable plan-tree package and aligned prompts. Existing defaults still teach
   inherited recursive work. The example leaves repair/question handlers undefined;
-  its reviewer receives a commit hash but loses the candidate's checks and gates.
-  Integration accepts an ordinary candidate rather than a distinct reviewed input.
+  review now retains candidate checks/gates and the exact implementer, and local
+  repair uses a distinct request without closing the review or replacing the
+  original candidate response. Integration accepts a distinct reviewed input;
+  the complete routed integration/specialist chain remains to be exercised.
 - Project observations connecting the plan, actual work, usage and RSI. Complete
   delivery/failure examples must execute, not merely typecheck recipe signatures.
 
@@ -144,6 +150,12 @@ recipe does not establish a working delivery chain, and deterministic fixtures
 do not prove that fresh Sols can use the supplied guidance. Keep unperformed
 acceptance visible. Follow the user's goal scope for implementation and later
 application runs; this handoff does not itself start a paid swarm.
+
+Current focused checks: frozen selection and resident recipe checks passed,
+including selected Markdown instructions, preserved authority, direct retained
+repair and original response identity. `just fixtures-check` passed all 217
+semantic tests after the instruction protocol extension. The complete package
+and host failure containment remain outstanding.
 
 Evidence recorded for `42e27421`: focused resident acceptance, ownership,
 configuration, protocol and usage checks passed; production compilation and all

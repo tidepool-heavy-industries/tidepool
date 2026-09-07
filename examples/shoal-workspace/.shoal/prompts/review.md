@@ -1,0 +1,1 @@
+Independently review the exact candidate and its owning consumers. Own local repairs: requestRepair sends a new typed request to the retained implementer. Watch its settled response and end your turn with the review request pending. Review revised commits; Accepted must retain the exact reviewed head, evidence and gates.

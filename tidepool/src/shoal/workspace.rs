@@ -23,12 +23,17 @@ pub(super) struct PromptConfig {
     pub coding: Option<PathBuf>,
     pub scaffolding: Option<PathBuf>,
     pub integration: Option<PathBuf>,
+    pub files: BTreeMap<String, PathBuf>,
 }
 
 /// Captured workspace inputs. Actor launch and compilation use only this run's
 /// materialized paths and bytes, never the mutable workspace configuration.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrozenWorkspace {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    identity: String,
     pub(crate) include: Vec<PathBuf>,
     pub(crate) modules: Vec<String>,
     pub(crate) prompts: BTreeMap<String, String>,
@@ -43,6 +48,9 @@ impl FrozenWorkspace {
         let manifest = directory.join("selection.json");
         if manifest.exists() {
             let frozen: Self = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+            if frozen.version != 1 {
+                return Err("unsupported frozen workspace format; start a new swarm".into());
+            }
             if frozen.library_identity != crate::haskell_sources::source_identity() {
                 return Err(
                     "frozen workspace library differs from this build; start a new swarm".into(),
@@ -104,28 +112,109 @@ impl FrozenWorkspace {
                 prompts.insert(name.to_owned(), text);
             }
         }
+        for (name, path) in config.prompts.files {
+            if name.trim().is_empty()
+                || matches!(
+                    name.as_str(),
+                    "core" | "root" | "research" | "coding" | "scaffolding" | "integration"
+                )
+            {
+                return Err(format!("project prompt name is empty or reserved: {name:?}").into());
+            }
+            let text = std::fs::read_to_string(base.join(path))?;
+            if text.trim().is_empty() {
+                return Err(format!("configured project prompt {name:?} is empty").into());
+            }
+            prompts.insert(name, text);
+        }
+        let library_identity = crate::haskell_sources::source_identity();
+        let source_prefix = PathBuf::from(format!("sources/{capture}"));
+        let logical_files = files
+            .iter()
+            .map(|(path, hash)| (path.strip_prefix(&source_prefix).unwrap_or(path), hash))
+            .collect::<Vec<_>>();
+        let identity = blake3::hash(&serde_json::to_vec(&(
+            &config_text,
+            &library_identity,
+            &prompts,
+            logical_files,
+        ))?)
+        .to_hex()
+        .to_string();
+        let resources = resource_module(&identity, &config.haskell.modules, &prompts);
+        let resources_path = PathBuf::from("resources/Shoal/Workspace.hs");
+        if include.iter().any(|root| {
+            root.join("Shoal/Workspace.hs").exists() || root.join("Shoal/Workspace.lhs").exists()
+        }) {
+            return Err("Shoal.Workspace is reserved for the frozen workspace interface".into());
+        }
+        std::fs::create_dir_all(directory.join("resources/Shoal"))?;
+        tidepool_atomic_write::write_durable(
+            &directory.join(&resources_path),
+            resources.as_bytes(),
+        )?;
+        files.insert(
+            resources_path,
+            blake3::hash(resources.as_bytes()).to_hex().to_string(),
+        );
+        include.push(directory.join("resources"));
         let frozen = Self {
+            version: 1,
+            identity,
             include,
             modules: config.haskell.modules,
             prompts,
             files,
             config: config_text,
-            library_identity: crate::haskell_sources::source_identity(),
+            library_identity,
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
         Ok(frozen)
     }
 
     pub(crate) fn imports(&self) -> Vec<String> {
-        self.modules
-            .iter()
+        self.import_modules()
             .map(|module| format!("import {module}"))
             .collect()
+    }
+
+    pub(crate) fn import_modules(&self) -> impl Iterator<Item = &str> {
+        std::iter::once("Shoal.Workspace").chain(self.modules.iter().map(String::as_str))
     }
 
     pub(super) fn config(&self) -> Result<super::ShoalConfig> {
         Ok(toml::from_str(&self.config)?)
     }
+}
+
+fn resource_module(
+    identity: &str,
+    modules: &[String],
+    prompts: &BTreeMap<String, String>,
+) -> String {
+    let literal = |value: &str| {
+        format!(
+            "\"{}\"",
+            tidepool_runtime::session::escape_workbench_haskell_string(value)
+        )
+    };
+    let module_names = modules
+        .iter()
+        .map(|name| literal(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let entries = prompts
+        .iter()
+        .map(|(name, body)| format!("({}, {})", literal(name), literal(body)))
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    format!(
+        "{}\nworkspaceIdentity = {}\nworkspaceModules = [{}]\nworkspacePrompts = [{}]\n",
+        include_str!("workspace.hs"),
+        literal(identity),
+        module_names,
+        entries
+    )
 }
 
 fn valid_module(module: &str) -> bool {
@@ -201,6 +290,9 @@ mod tests {
         .unwrap();
         std::fs::write(authored.join("core.md"), "Original guidance").unwrap();
         let frozen = FrozenWorkspace::load(project.path(), first.path()).unwrap();
+        let identical_run = tempfile::tempdir().unwrap();
+        let identical = FrozenWorkspace::load(project.path(), identical_run.path()).unwrap();
+        assert_eq!(identical.identity, frozen.identity);
         std::fs::write(
             authored.join("Project/Types.hs"),
             "module Project.Types where\ndata Result = New\n",
@@ -215,6 +307,7 @@ mod tests {
                 .contains("Old")
         );
         let next = FrozenWorkspace::load(project.path(), second.path()).unwrap();
+        assert_ne!(next.identity, frozen.identity);
         assert_eq!(next.prompts["core"], "Revised guidance");
         assert!(
             std::fs::read_to_string(next.include[0].join("Project/Types.hs"))

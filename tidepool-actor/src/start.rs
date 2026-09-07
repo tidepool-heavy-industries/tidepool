@@ -40,6 +40,7 @@ pub(crate) struct ActorStartRequest {
     pub effect_keys: Option<Vec<ActorEffectKeyWire>>,
     pub fork_effort: Option<ForkEffort>,
     pub model: Option<String>,
+    pub instructions: Option<String>,
     pub context: ForkContext,
     pub fork_budget: Option<(i64, i64)>,
     pub session_id: tidepool_repr::SessionId,
@@ -191,6 +192,7 @@ impl ResidentActorStart {
                 effect_keys: None,
                 fork_effort: None,
                 model: None,
+                instructions: None,
                 context: ForkContext::SelectedContext,
                 fork_budget: None,
                 session_id,
@@ -218,6 +220,7 @@ impl ResidentActorStart {
             effect_keys,
             fork_effort,
             model,
+            instructions,
             context,
             fork_budget,
             session_id,
@@ -265,6 +268,7 @@ impl ResidentActorStart {
         .with_effective_role(effective_role)
         .with_fork_effort(fork_effort)
         .with_model(model)
+        .with_instructions(instructions)
         .with_fork_budget(fork_budget)
         .with_supervisor_parent(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));

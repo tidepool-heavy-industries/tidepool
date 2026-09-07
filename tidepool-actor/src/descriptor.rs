@@ -21,6 +21,7 @@ pub struct ActorDescriptor {
     fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
     model: Option<String>,
+    instructions: Option<String>,
     fork_budget: Option<(i64, i64)>,
     fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 }
@@ -42,6 +43,7 @@ impl ActorDescriptor {
             fork_group: None,
             fork_effort: None,
             model: None,
+            instructions: None,
             fork_budget: None,
             fork_boundary: None,
         }
@@ -60,6 +62,18 @@ impl ActorDescriptor {
     #[must_use]
     pub fn with_model(mut self, model: Option<String>) -> Self {
         self.model = model;
+        self
+    }
+
+    /// Authored behavior; does not grant runtime authority.
+    #[must_use]
+    pub fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_instructions(mut self, instructions: Option<String>) -> Self {
+        self.instructions = instructions;
         self
     }
 
