@@ -16,6 +16,9 @@ archive).
   Haskell toolbox with portable candidate checks. Its [review](next/evidence/workbench-curation.md)
   records implementation readiness and the separate live-acceptance boundary.
   Ordinary human-requested RSI improves the next swarm.
+  The [plan-understanding follow-up](next/plan-readback.md) adds Sol-authored branch
+  interpretations, questions and original Astra planner review before implementation
+  fan-out; the current application wave is exercising the checkpoint through steering.
   The [vision](next/planned-swarm.md), [workspace design](next/workspace-pilot.md)
   and [Haskell reference](next/sol-worker-routing.md) define the chosen direction.
   Live acceptance uses fresh actors on `shoal-repl` (the standalone TUI app) or

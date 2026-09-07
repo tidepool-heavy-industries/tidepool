@@ -98,9 +98,44 @@ interactive Codex TUIs. Model choice, context, typed input/result, and actual
 permissions express their differences. Review, leadership, specialist work, and
 RSI are compositions and assignments, not separate runtime or UI subsystems.
 
-The initial planner can become idle once the plan is delivered. Material
+The initial planner can become idle once the execution owners' understanding
+has been reviewed and consequential corrections incorporated. Material
 architectural amendments still have an explicit owner. Routine execution does
 not depend on a permanently monitoring Astra.
+
+## Sol explains its plan before execution expands
+
+Human and Astra establish the initial architecture, intended decomposition and
+model placements before commissioning the Sol execution tree. A tagged Astra
+implementation specialist does not replace that initial planning responsibility.
+
+The Sol integration owner and substantive component leads then write detailed
+execution plans in their own words, scoped to their plan branches. Explain the
+intended user behavior with concrete examples, proposed implementation boundaries,
+dependency and fork structure, acceptance evidence, and meaningful partial
+deliveries. Distinguish verified capabilities from assumptions. Include questions,
+perceived contradictions, suggested improvements and reasons to challenge the
+initial plan. Repeating the planner's prose does not establish understanding.
+
+The original Astra planner reviews these interpretations together with their
+feedback. It corrects misconceptions, resolves shared questions with the human
+when necessary, and improves the authored plan where the Sols found a real gap.
+Owners incorporate the specific corrections into their branch plans and downstream
+assignments before dependent implementation fans out. Carry the accepted source
+and the reasoning together; a receipt or acknowledgment alone is insufficient.
+
+Keep the checkpoint at useful architectural boundaries. Admit the leads needed
+to understand and refine the plan, without launching their whole implementation
+trees first. Independent investigation and explicitly authorized bounded work can
+continue. One coordinator can collect branch interpretations; Astra receives the
+plans and consequential questions, not every worker's transcript. Local routine
+splits do not need repeated planner approval, and this is not a mandatory extra
+worker role, plan compiler or Rust lifecycle stage. Ordinary Markdown artifacts,
+typed requests/progress and existing steering support the interaction.
+
+The [plan-understanding follow-up](plan-readback.md) tracks adoption in the authored
+workspace package. Current live work can use explicit operator steering over the
+frozen interfaces; shared prompt/helper changes activate at the next swarm boundary.
 
 ## Astra delivers a plan that can be executed
 
