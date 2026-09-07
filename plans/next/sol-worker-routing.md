@@ -76,6 +76,10 @@ branches, without inheriting the builder's transcript or learning orchestration
 from the Shoal implementation. This document does not itself launch a swarm.
 The [wave closeout](evidence/wave-closeout.md) records historical source and checks;
 NEXT.md owns current scope and acceptance.
+The [workbench curation plan](package-curation.md) is the next implementation pass:
+independently callable GHCi tools, substantive lead ownership, complete decision
+handoffs and useful task contexts. The worked stage diagrams below express
+responsibilities and possible compositions, not a required actor for each stage.
 The [small-agent design](../small-agents.md)
 retains broader typed-tool and authority requirements.
 
@@ -1236,8 +1240,8 @@ Fix concrete failure behavior in the current TUI/host path. The pinned Codex
 build runs completion acknowledgments on an ordered background queue, with
 60-second attempts and hosted-tool degradation after exhausted failures. This
 preserves conversation and other tools at that boundary. Shoal host failure
-containment remains separate work: its current whole-tmux cleanup on host error
-can still destroy the conversations. Extend the owning lifecycle paths without
+containment now also preserves native panes and uncertain custody; intentional
+retirement remains distinct. Keep that behavior through package changes without
 erasing uncertain effects or silently replaying them. NEXT.md records the source
 and existing checks; do not redo the landed ACK implementation by default.
 
@@ -1326,21 +1330,17 @@ Current Haskell exposes `coding`, `child`, `unfold`, typed requests, responses,
 watches, explicit model/context selection, automatic routes and basic snapshots.
 Explicit model selection reaches inherited and selected launches independently.
 TOML-selected workspace modules and core/legacy-role prompts are frozen per swarm.
-The current example compiles individual recipes but does not implement the full
-repair/question/integration composition described here.
+The package executes routed delivery, retained repair, specialist consultation,
+plan incorporation and an ordinary RSI customization fixture. Review found gaps
+between those checks and a coherent fresh-worker experience: thin contexts,
+implicit decision propagation, pending-question attention and unnecessary stages.
+The curation plan owns the corresponding implementation and complete walkthrough.
 
-Current prompting already encourages concise typed inputs and compact folds,
-but also assigns parent integration responsibility and asks for standalone final
-reports. Revise that guidance when the new workflow exists: the relevant Sol
-owner performs integration; peer replies and human-facing final reports have
-different audiences. Make runtime capabilities, callable examples, and role
-instructions change together.
-
-The API guide describes selected contexts and explicit Sol recipes, while the
-default base and role prose still emphasizes inherited recursive work. Align
-their defaults and assignment boundaries with the authored plan mode. Preserve
-deliberate inheritance and a stable common prefix; give each responsibility the
-relevant runnable recipe rather than this entire blueprint.
+The selected workspace core and worker instructions teach planned Sol execution;
+the generic shipped defaults also support inherited recursive work. Preserve that
+capability and the stable shared guide while improving the project toolbox and
+its relevant runnable examples. Peer replies and human-facing reports have
+different audiences. Keep actual signatures, context and examples aligned.
 
 Do not paste proposed names into shipped prompts before they work. Use the
 existing focused guide/example tests when changing that surface. Avoid changes

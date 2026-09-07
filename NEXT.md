@@ -19,8 +19,18 @@ context packaging; the [Haskell reference](plans/next/sol-worker-routing.md)
 contains broader interface sketches. Exact implemented signatures belong in the
 [shipped API guide](prompts/shoal/api-guide.md) and checked source.
 The [workspace package](examples/shoal-workspace/README.md) now contains the
-executable operating mode and a concrete application plan tree. It is installed
-in `/home/inanna/dev/shoal-repl/.shoal`; live model acceptance is the next phase.
+executable recipes and a concrete application plan tree. It is installed
+in `/home/inanna/dev/shoal-repl/.shoal`. Before live acceptance, complete the
+[workbench curation plan](plans/next/package-curation.md): useful lead ownership,
+independently callable Haskell operations, complete task/decision handoffs,
+pending-question attention, stronger prompts and candidate-package checks.
+
+The readiness review found that compilation and the existing deterministic
+checks do not establish a sufficiently curated first-run package. In particular,
+the fixed worker procession adds unnecessary stages, repaired/accepted revision
+fields can disagree, and selected contexts do not explicitly carry accepted
+expert decisions into downstream work. The curation plan is the current next
+implementation task; the foundation/check inventory below records what landed.
 
 ## Architecture and settled boundaries
 

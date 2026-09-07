@@ -34,6 +34,14 @@ contains the current deliverable, decomposition, assignments, and decisions.
 Runtime-owned state contains live actors, messages, and observations. Give these
 different lifetimes; a helper improvement should survive the plan that taught it.
 
+Design these modules as powerful tools for invocation in resident GHCi-style
+sessions. A pilot binds useful values, calls an operation, inspects its result,
+partially applies a helper or connects a route without entering a prescribed
+workflow. Convenience recipes compose those operations; they must not hide the
+underlying handles or require a zoo of workers. Shared code earns its place by
+making these interactions more capable and economical. The
+[curation plan](package-curation.md) applies this standard to the prepared package.
+
 Project-specific improvement is a first-class outcome. A compiler project may
 grow helpers that relate an IR change to its owning consumers and fixture checks;
 a service project may encode preparation versus native acceptance in its result
