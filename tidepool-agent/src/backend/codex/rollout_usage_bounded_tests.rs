@@ -238,3 +238,27 @@ fn bounded_usage_validates_selection_and_shared_usage_invariants() {
     invalid["payload"]["usage"]["total_tokens"] = json!(6);
     assert!(parse_usage(&invalid["payload"]["usage"]).is_none());
 }
+
+#[test]
+fn bounded_usage_response_ids_cannot_be_double_counted_across_bound_threads() {
+    let mut selected = selection();
+    selected.threads.insert("sibling".into());
+    let result = read_bounded_usage(
+        [(
+            "fixture".into(),
+            Ok(input(&[
+                row("child", "same", "1970-01-01T00:00:01Z", 5),
+                row("sibling", "same", "1970-01-01T00:00:01Z", 5),
+            ])),
+        )],
+        selected,
+        UsageReadLimits::default(),
+    )
+    .unwrap();
+    assert!(result.aggregate.is_none());
+    assert!(result.records.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d.issue, UsageIssue::ConflictingResponse { .. })));
+}
