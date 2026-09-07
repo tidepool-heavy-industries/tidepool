@@ -41,7 +41,10 @@ fn materialize(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let hash = content_hash(entries);
     let sentinel = destination.join(".complete");
-    let complete = std::fs::read_to_string(&sentinel).is_ok_and(|recorded| recorded == hash);
+    let complete = std::fs::read_to_string(&sentinel).is_ok_and(|recorded| recorded == hash)
+        && entries.iter().all(|(relative, content)| {
+            std::fs::read(destination.join(relative)).is_ok_and(|bytes| bytes == content.as_bytes())
+        });
     if !complete {
         for (relative, content) in entries {
             let path = destination.join(relative);
@@ -55,17 +58,21 @@ fn materialize(
     Ok(destination)
 }
 
-/// Resolve the complete embedded Tidepool Haskell library.
+/// Resolve the general Tidepool library, honoring development overrides before
+/// falling back to the complete embedded source bundle.
 pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let hash = content_hash(EMBEDDED_STDLIB);
     let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
-        bundle: Some(materialize(
-            EMBEDDED_STDLIB,
-            tidepool_runtime::paths::stdlib_dir(&hash),
-        )?),
+        bundle: Some(ensure_embedded_stdlib()?),
         build_tree: None,
     };
     Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
+}
+
+/// Shoal's frozen library must match `source_identity`, independent of launch
+/// cwd or development overrides used by the general Tidepool tools.
+pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let hash = content_hash(EMBEDDED_STDLIB);
+    materialize(EMBEDDED_STDLIB, tidepool_runtime::paths::stdlib_dir(&hash))
 }
 
 /// Resolve the Haskell modules used by Shoal's interactive workbench.
@@ -101,6 +108,20 @@ mod tests {
             std::fs::read_to_string(destination.join(".complete")).unwrap(),
             content_hash(SOURCES)
         );
+    }
+
+    #[test]
+    fn completion_marker_does_not_hide_changed_or_missing_library_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("bundle");
+        materialize(SOURCES, destination.clone()).unwrap();
+        let module = destination.join("Tidepool/One.hs");
+        std::fs::write(&module, "changed despite valid marker").unwrap();
+        materialize(SOURCES, destination.clone()).unwrap();
+        assert_eq!(std::fs::read_to_string(&module).unwrap(), SOURCES[0].1);
+        std::fs::remove_file(&module).unwrap();
+        materialize(SOURCES, destination).unwrap();
+        assert_eq!(std::fs::read_to_string(module).unwrap(), SOURCES[0].1);
     }
 
     #[test]

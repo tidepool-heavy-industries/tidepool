@@ -1324,7 +1324,7 @@ fn compile_driver(
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
     include.push(haskell_root.to_path_buf());
-    include.push(crate::haskell_sources::ensure_stdlib()?);
+    include.push(crate::haskell_sources::ensure_embedded_stdlib()?);
     let mut preamble = insert_preamble_imports(
         &tidepool_mcp::build_preamble_with_companions_hiding(
             &declarations,
