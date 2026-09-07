@@ -2498,18 +2498,19 @@ async fn launch_prepared_interactive_application(
             args: command.args,
         },
     );
-    let server = crate::host_dynamic_tools::HostDynamicToolService::new(
-        installation.policy,
-        binding_path.clone(),
-        expected_resume.clone(),
-    )
-    .map_err(|error| application_error(actor_identity, InteractiveOperation::BuildPolicy, error))?;
     // Accepted hosted work may outlive listener cancellation. Retention starts
     // before either hosted submission or native process submission can occur.
     socket_directory.work_may_exist();
-    let service = hosted_retirement::start(&hosted_slot, actor.clone(), server, listener).map_err(
-        |error| application_error(actor_identity, InteractiveOperation::ServeToolHost, error),
-    )?;
+    let service = hosted_retirement::start(
+        &hosted_slot,
+        actor.clone(),
+        binding_path.clone(),
+        expected_resume.clone(),
+        listener,
+    )
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
+    })?;
     if cancelled.try_recv().is_ok() {
         let _ = hosted_retirement::observe(
             &service,

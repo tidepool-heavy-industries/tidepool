@@ -1,5 +1,4 @@
 use super::*;
-use crate::host_dynamic_tools::HostDynamicToolService;
 use tidepool_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
 use tidepool_runtime::session::ModuleEnv;
 use tidepool_tool::{HostedTool, ToolInvocation};
@@ -72,11 +71,18 @@ struct HttpFixture {
 }
 impl HttpFixture {
     async fn start(actor: LocalActorRef, endpoint: Arc<dyn ResidentToolEndpoint>) -> Self {
+        Self::with_endpoint(actor, Some(endpoint)).await
+    }
+    async fn canonical(actor: LocalActorRef) -> Self {
+        Self::with_endpoint(actor, None).await
+    }
+    async fn with_endpoint(
+        actor: LocalActorRef,
+        endpoint: Option<Arc<dyn ResidentToolEndpoint>>,
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("http.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let service =
-            HostDynamicToolService::new(endpoint, directory.path().join("binding"), None).unwrap();
         let owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
         let exact = actor.identity();
         owners.lock().insert(
@@ -93,7 +99,12 @@ impl HttpFixture {
             },
         );
         let slot = owners.lock().get(&exact).unwrap().hosted.clone();
-        let owner = start(&slot, actor, service, listener).unwrap();
+        let binding = directory.path().join("binding");
+        let owner = match endpoint {
+            Some(endpoint) => start_untrusted(&slot, actor, endpoint, binding, listener),
+            None => start(&slot, actor, binding, None, listener),
+        }
+        .unwrap();
         assert!(Arc::ptr_eq(slot.lock().as_ref().unwrap(), &owner));
         let client = client(&socket);
         attach(&client).await;
@@ -214,11 +225,7 @@ async fn entered(semaphore: &Semaphore) {
 async fn hosted_live_seal_keeps_completion_until_abort_and_drains_exact_actor() {
     let campaign = test_campaign::TestCampaign::start().await;
     let actor = campaign.actor.identity();
-    let fixture = HttpFixture::start(
-        campaign.actor.clone(),
-        campaign.root_installation.policy.clone(),
-    )
-    .await;
+    let fixture = HttpFixture::canonical(campaign.actor.clone()).await;
     let result = call(&fixture.client, "let hostedAnswer = 42 :: Int", "initial").await;
     assert_eq!(result["success"], true, "{result:?}");
     let observation = observe(
@@ -256,8 +263,6 @@ async fn hosted_live_seal_keeps_completion_until_abort_and_drains_exact_actor() 
 #[tokio::test]
 async fn hosted_terminal_path_uses_retained_cleanup_without_seal() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let endpoint = held(campaign.root_installation.policy.clone(), true, false);
-    let fixture = HttpFixture::start(campaign.actor.clone(), endpoint.clone()).await;
     let cleanup = campaign
         .actor
         .shutdown_with_cleanup(cancelled())
@@ -265,6 +270,7 @@ async fn hosted_terminal_path_uses_retained_cleanup_without_seal() {
         .unwrap()
         .cleanup;
     assert!(cleanup.is_confirmed(), "{cleanup:?}");
+    let fixture = HttpFixture::canonical(campaign.actor.clone()).await;
     let observation = fixture.finish().await;
     assert!(matches!(
         observation,
@@ -274,7 +280,7 @@ async fn hosted_terminal_path_uses_retained_cleanup_without_seal() {
         }
     ));
     confirmed_http(observation, campaign.actor.identity());
-    assert_eq!(endpoint.seals.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(fixture.owner.lock().await.seal.is_none());
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -882,4 +888,46 @@ async fn hosted_lost_pending_shutdown_waiter_retains_real_operation() {
     let weak = Arc::downgrade(&fixture.owner);
     drop(fixture);
     assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn hosted_initially_terminal_actor_cannot_drain_foreign_endpoint() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let sibling = test_campaign::TestCampaign::start().await;
+    campaign
+        .actor
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap();
+    let fixture = HttpFixture::start(
+        campaign.actor.clone(),
+        sibling.root_installation.policy.clone(),
+    )
+    .await;
+    let observation = fixture.finish().await;
+    let rejected = matches!(
+        observation,
+        HostedObservation::Observed {
+            seal: SealObservation::Failed(_),
+            resident: ResidentObservation::Pending,
+            http: HttpObservation::Pending,
+        }
+    );
+    let sibling_live = sibling.actor.terminal().get().is_none();
+    assert!(!service_finished(&fixture.owner));
+    sibling
+        .actor
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap();
+    fixture.dispose_http().await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    sibling.forest.shutdown().await;
+    sibling.hosted.await.unwrap();
+    assert!(sibling_live);
+    assert!(
+        rejected,
+        "foreign endpoint used unrelated terminal: {observation:?}"
+    );
 }

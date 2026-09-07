@@ -57,7 +57,14 @@ pub(crate) enum HostedObservation {
     },
 }
 
+enum EndpointSource {
+    Canonical,
+    #[cfg(test)]
+    Untrusted(Arc<dyn tidepool_actor::ResidentToolEndpoint>),
+}
+
 pub(super) struct HostedRetirement {
+    endpoint_source: EndpointSource,
     actor: LocalActorRef,
     control: crate::host_dynamic_tools::HostToolControl,
     boundary: CompletionBoundary,
@@ -69,14 +76,63 @@ pub(super) struct HostedRetirement {
     service_result: Option<Result<(), String>>,
 }
 
-/// Store control and the gated task in the pre-existing exact owner slot before
-/// opening the service start gate. The task captures no owner/slot back-reference.
+/// Construct the canonical policy from this exact actor inside the owning entry.
+/// No independently supplied endpoint can authorize the terminal cleanup path.
 pub(super) fn start(
     slot: &HostedSlot,
     actor: LocalActorRef,
-    server: HostDynamicToolService,
+    binding_path: PathBuf,
+    expected_resume: Option<BackendThreadId>,
     listener: tokio::net::UnixListener,
 ) -> Result<HostedOwner, String> {
+    start_endpoint(
+        slot,
+        actor,
+        binding_path,
+        expected_resume,
+        listener,
+        EndpointSource::Canonical,
+    )
+}
+
+// Arbitrary endpoint decorators are a negative-test seam, never a production
+// identity capability. They must obtain an exact seal even for terminal actors.
+#[cfg(test)]
+fn start_untrusted(
+    slot: &HostedSlot,
+    actor: LocalActorRef,
+    endpoint: Arc<dyn tidepool_actor::ResidentToolEndpoint>,
+    binding_path: PathBuf,
+    listener: tokio::net::UnixListener,
+) -> Result<HostedOwner, String> {
+    start_endpoint(
+        slot,
+        actor,
+        binding_path,
+        None,
+        listener,
+        EndpointSource::Untrusted(endpoint),
+    )
+}
+
+/// Store control and the gated task before opening the service start gate.
+/// Neither task nor endpoint holds a back-reference to the owner slot.
+fn start_endpoint(
+    slot: &HostedSlot,
+    actor: LocalActorRef,
+    binding_path: PathBuf,
+    expected_resume: Option<BackendThreadId>,
+    listener: tokio::net::UnixListener,
+    endpoint_source: EndpointSource,
+) -> Result<HostedOwner, String> {
+    let endpoint: Arc<dyn tidepool_actor::ResidentToolEndpoint> = match &endpoint_source {
+        EndpointSource::Canonical => Arc::new(tidepool_actor::ResidentInteractivePolicy::local(
+            actor.clone(),
+        )),
+        #[cfg(test)]
+        EndpointSource::Untrusted(endpoint) => endpoint.clone(),
+    };
+    let server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)?;
     let mut entry = slot.lock();
     if entry.is_some() {
         return Err("host service already installed".into());
@@ -93,6 +149,7 @@ pub(super) fn start(
             .map_err(|error| error.to_string())
     });
     let owner = Arc::new(tokio::sync::Mutex::new(HostedRetirement {
+        endpoint_source,
         actor,
         control,
         boundary: CompletionBoundary::AwaitingNativeDecision,
@@ -152,7 +209,9 @@ impl HostedRetirement {
     async fn advance(&mut self) {
         let exact = self.actor.identity();
         if self.seal.is_none() && !self.terminal_path {
-            if self.actor.terminal().get().is_some() {
+            if matches!(self.endpoint_source, EndpointSource::Canonical)
+                && self.actor.terminal().get().is_some()
+            {
                 self.terminal_path = true;
                 self.control.quiesce();
             } else {
