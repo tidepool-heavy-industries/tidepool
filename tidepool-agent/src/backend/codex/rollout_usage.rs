@@ -11,6 +11,110 @@ use tidepool_model::{
     ProviderUsageSummary, TokenUsage,
 };
 
+/// Explicit offline selection; never inferred from provider-home or fork history.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageSelection {
+    pub threads: BTreeSet<String>,
+    pub from_unix_ms: Option<i64>,
+    pub until_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UsageReadLimits {
+    pub sources: usize,
+    pub lines: usize,
+    pub bytes_per_line: usize,
+    pub responses: usize,
+}
+impl Default for UsageReadLimits {
+    fn default() -> Self {
+        Self {
+            sources: 256,
+            lines: 100_000,
+            bytes_per_line: 1_048_576,
+            responses: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UsageProvenance {
+    pub source: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BoundedUsageRecord {
+    pub thread: String,
+    pub turn: String,
+    pub response: String,
+    pub timestamp_unix_ms: i64,
+    pub usage: TokenUsage,
+    pub provenance: UsageProvenance,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageLimit {
+    Sources,
+    Lines,
+    LineBytes,
+    Responses,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum UsageIssue {
+    SourceUnavailable,
+    ReadFailure,
+    InvalidJson,
+    PartialLine,
+    InvalidRecord,
+    InvalidTimestamp,
+    MissingThread,
+    ConflictingResponse {
+        response: String,
+        first: UsageProvenance,
+    },
+    Limit(UsageLimit),
+    MissingThreadCoverage {
+        thread: String,
+    },
+    AggregateOverflow,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageDiagnostic {
+    pub provenance: UsageProvenance,
+    pub issue: UsageIssue,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSourceState {
+    ReadThroughEof,
+    LimitedOrInvalid,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageSourceCoverage {
+    pub source: String,
+    pub state: UsageSourceState,
+    pub ignored_cumulative_records: usize,
+}
+
+/// Counts only the recorded nonconflicting subset, never entire billing/history.
+/// None aggregate means no usable response evidence or arithmetic overflow, not zero.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BoundedUsageReport {
+    pub selection: UsageSelection,
+    pub records: Vec<BoundedUsageRecord>,
+    pub aggregate: Option<TokenUsage>,
+    pub diagnostics: Vec<UsageDiagnostic>,
+    pub sources: Vec<UsageSourceCoverage>,
+}
+
 #[derive(Default)]
 struct Turn {
     records: Vec<ProviderUsageObservation>,
