@@ -115,6 +115,273 @@ pub struct BoundedUsageReport {
     pub sources: Vec<UsageSourceCoverage>,
 }
 
+/// Read only explicitly supplied inputs; each label is retained as provenance.
+/// Limits apply across the whole invocation. Inputs and limits do not imply
+/// coverage of missing provider responses or complete history.
+pub fn read_bounded_usage<R: BufRead>(
+    sources: impl IntoIterator<Item = (String, io::Result<R>)>,
+    selection: UsageSelection,
+    limits: UsageReadLimits,
+) -> io::Result<BoundedUsageReport> {
+    use std::io::Read;
+    if selection.threads.is_empty()
+        || selection.threads.iter().any(String::is_empty)
+        || matches!((selection.from_unix_ms, selection.until_unix_ms), (Some(from), Some(until)) if from > until)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "nonempty bound threads and an ordered window are required",
+        ));
+    }
+    let read_bound = u64::try_from(limits.bytes_per_line)
+        .ok()
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "line byte limit cannot support an overflow probe",
+            )
+        })?;
+    let mut report = BoundedUsageReport {
+        selection,
+        records: Vec::new(),
+        aggregate: None,
+        diagnostics: Vec::new(),
+        sources: Vec::new(),
+    };
+    // None marks a conflicted ID, preventing any later duplicate from restoring it.
+    let mut records = BTreeMap::<String, Option<BoundedUsageRecord>>::new();
+    let mut lines = 0usize;
+    let mut response_limit = false;
+    for (source_index, (source, reader)) in sources.into_iter().enumerate() {
+        if source_index == limits.sources {
+            report.diagnostics.push(UsageDiagnostic {
+                provenance: UsageProvenance { source, line: 0 },
+                issue: UsageIssue::Limit(UsageLimit::Sources),
+            });
+            break;
+        }
+        let mut coverage = UsageSourceCoverage {
+            source: source.clone(),
+            state: UsageSourceState::ReadThroughEof,
+            ignored_cumulative_records: 0,
+        };
+        let mut reader = match reader {
+            Ok(reader) => reader,
+            Err(_) => {
+                coverage.state = UsageSourceState::Unavailable;
+                report.diagnostics.push(UsageDiagnostic {
+                    provenance: UsageProvenance { source, line: 0 },
+                    issue: UsageIssue::SourceUnavailable,
+                });
+                report.sources.push(coverage);
+                continue;
+            }
+        };
+        let mut line = 0usize;
+        loop {
+            let provenance = UsageProvenance {
+                source: source.clone(),
+                line: line.saturating_add(1),
+            };
+            if lines == limits.lines {
+                match reader.fill_buf() {
+                    Ok(bytes) if bytes.is_empty() => (),
+                    Ok(_) => {
+                        coverage.state = UsageSourceState::LimitedOrInvalid;
+                        report.diagnostics.push(UsageDiagnostic {
+                            provenance,
+                            issue: UsageIssue::Limit(UsageLimit::Lines),
+                        });
+                    }
+                    Err(_) => {
+                        coverage.state = UsageSourceState::LimitedOrInvalid;
+                        report.diagnostics.push(UsageDiagnostic {
+                            provenance,
+                            issue: UsageIssue::ReadFailure,
+                        });
+                    }
+                }
+                break;
+            }
+            let mut bytes = Vec::new();
+            let count = match reader
+                .by_ref()
+                .take(read_bound)
+                .read_until(b'\n', &mut bytes)
+            {
+                Ok(count) => count,
+                Err(_) => {
+                    coverage.state = UsageSourceState::LimitedOrInvalid;
+                    report.diagnostics.push(UsageDiagnostic {
+                        provenance,
+                        issue: UsageIssue::ReadFailure,
+                    });
+                    break;
+                }
+            };
+            if count == 0 {
+                break;
+            }
+            lines += 1;
+            line += 1;
+            let issue = if count > limits.bytes_per_line {
+                Some(UsageIssue::Limit(UsageLimit::LineBytes))
+            } else if bytes.last() != Some(&b'\n') {
+                Some(UsageIssue::PartialLine)
+            } else {
+                None
+            };
+            if let Some(issue) = issue {
+                coverage.state = UsageSourceState::LimitedOrInvalid;
+                report
+                    .diagnostics
+                    .push(UsageDiagnostic { provenance, issue });
+                break;
+            }
+            let value: Value = match serde_json::from_slice(&bytes) {
+                Ok(value) => value,
+                Err(_) => {
+                    coverage.state = UsageSourceState::LimitedOrInvalid;
+                    report.diagnostics.push(UsageDiagnostic {
+                        provenance,
+                        issue: UsageIssue::InvalidJson,
+                    });
+                    continue;
+                }
+            };
+            let payload = &value["payload"];
+            if value["type"] == "event_msg" && payload["type"] == "token_count" {
+                coverage.ignored_cumulative_records += 1;
+                continue;
+            }
+            if value["type"] != "token_usage_record" {
+                continue;
+            }
+            let Some(thread) = payload["thread_id"].as_str() else {
+                coverage.state = UsageSourceState::LimitedOrInvalid;
+                report.diagnostics.push(UsageDiagnostic {
+                    provenance,
+                    issue: UsageIssue::MissingThread,
+                });
+                continue;
+            };
+            if !report.selection.threads.contains(thread) {
+                continue;
+            }
+            let timestamp = value["timestamp"]
+                .as_str()
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                .map(|time| time.timestamp_millis());
+            let Some(timestamp_unix_ms) = timestamp else {
+                coverage.state = UsageSourceState::LimitedOrInvalid;
+                report.diagnostics.push(UsageDiagnostic {
+                    provenance,
+                    issue: UsageIssue::InvalidTimestamp,
+                });
+                continue;
+            };
+            let Some((response, turn, usage)) = record(payload) else {
+                coverage.state = UsageSourceState::LimitedOrInvalid;
+                report.diagnostics.push(UsageDiagnostic {
+                    provenance,
+                    issue: UsageIssue::InvalidRecord,
+                });
+                continue;
+            };
+            let candidate = BoundedUsageRecord {
+                thread: thread.into(),
+                turn: turn.into(),
+                response: response.into(),
+                timestamp_unix_ms,
+                usage,
+                provenance,
+            };
+            if let Some(prior) = records.get_mut(response) {
+                if let Some(prior_record) = prior {
+                    if prior_record.thread != candidate.thread
+                        || prior_record.turn != candidate.turn
+                        || prior_record.timestamp_unix_ms != candidate.timestamp_unix_ms
+                        || prior_record.usage != candidate.usage
+                    {
+                        coverage.state = UsageSourceState::LimitedOrInvalid;
+                        report.diagnostics.push(UsageDiagnostic {
+                            provenance: candidate.provenance,
+                            issue: UsageIssue::ConflictingResponse {
+                                response: response.into(),
+                                first: prior_record.provenance.clone(),
+                            },
+                        });
+                        *prior = None;
+                    }
+                }
+                continue;
+            }
+            if records.len() == limits.responses {
+                coverage.state = UsageSourceState::LimitedOrInvalid;
+                report.diagnostics.push(UsageDiagnostic {
+                    provenance: candidate.provenance,
+                    issue: UsageIssue::Limit(UsageLimit::Responses),
+                });
+                response_limit = true;
+                break;
+            }
+            records.insert(response.into(), Some(candidate));
+        }
+        report.sources.push(coverage);
+        if response_limit {
+            break;
+        }
+    }
+    // Reconcile IDs before selecting time: a contradictory timestamp outside
+    // the window must not make the same response inside it look unambiguous.
+    report.records = records
+        .into_values()
+        .flatten()
+        .filter(|record| {
+            report
+                .selection
+                .from_unix_ms
+                .is_none_or(|from| record.timestamp_unix_ms >= from)
+                && report
+                    .selection
+                    .until_unix_ms
+                    .is_none_or(|until| record.timestamp_unix_ms < until)
+        })
+        .collect();
+    if !report.records.is_empty() {
+        report.aggregate = total_usage(report.records.iter().map(|record| record.usage));
+        if report.aggregate.is_none() {
+            report.diagnostics.push(UsageDiagnostic {
+                provenance: UsageProvenance {
+                    source: "selected aggregate".into(),
+                    line: 0,
+                },
+                issue: UsageIssue::AggregateOverflow,
+            });
+        }
+    }
+    let covered: BTreeSet<_> = report
+        .records
+        .iter()
+        .map(|record| record.thread.as_str())
+        .collect();
+    for thread in &report.selection.threads {
+        if !covered.contains(thread.as_str()) {
+            report.diagnostics.push(UsageDiagnostic {
+                provenance: UsageProvenance {
+                    source: "selection".into(),
+                    line: 0,
+                },
+                issue: UsageIssue::MissingThreadCoverage {
+                    thread: thread.clone(),
+                },
+            });
+        }
+    }
+    Ok(report)
+}
+
 #[derive(Default)]
 struct Turn {
     records: Vec<ProviderUsageObservation>,
@@ -364,10 +631,23 @@ fn summarize(
     if records.is_empty() {
         return None;
     }
-    let usage = records
-        .iter()
-        .try_fold(TokenUsage::default(), |sum, record| {
-            let usage = record.usage;
+    let usage = total_usage(records.iter().map(|record| record.usage))?;
+    Some(ProviderUsageSummary {
+        scope,
+        completeness: if complete {
+            ProviderUsageCompleteness::Complete
+        } else {
+            ProviderUsageCompleteness::Partial
+        },
+        observations: i64::try_from(records.len()).ok()?,
+        usage,
+    })
+}
+
+fn total_usage(usages: impl IntoIterator<Item = TokenUsage>) -> Option<TokenUsage> {
+    usages
+        .into_iter()
+        .try_fold(TokenUsage::default(), |sum, usage| {
             Some(TokenUsage {
                 input_tokens: sum.input_tokens.checked_add(usage.input_tokens)?,
                 cached_input_tokens: sum
@@ -379,17 +659,7 @@ fn summarize(
                     .checked_add(usage.reasoning_output_tokens)?,
                 total_tokens: sum.total_tokens.checked_add(usage.total_tokens)?,
             })
-        })?;
-    Some(ProviderUsageSummary {
-        scope,
-        completeness: if complete {
-            ProviderUsageCompleteness::Complete
-        } else {
-            ProviderUsageCompleteness::Partial
-        },
-        observations: i64::try_from(records.len()).ok()?,
-        usage,
-    })
+        })
 }
 
 fn record(value: &Value) -> Option<(&str, &str, TokenUsage)> {
@@ -414,8 +684,9 @@ pub(super) fn parse_usage(value: &Value) -> Option<TokenUsage> {
         && usage.cached_input_tokens <= usage.input_tokens
         && usage.output_tokens >= 0
         && usage.reasoning_output_tokens >= 0
-        && usage.total_tokens >= 0)
-        .then_some(usage)
+        && usage.reasoning_output_tokens <= usage.output_tokens
+        && usage.input_tokens.checked_add(usage.output_tokens) == Some(usage.total_tokens))
+    .then_some(usage)
 }
 
 #[cfg(test)]
@@ -726,3 +997,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rollout_usage_bounded_tests.rs"]
+mod bounded_tests;
