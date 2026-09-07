@@ -94,13 +94,13 @@ import Tidepool.Session (isSessionValModule)
 import Tidepool.TypePolicy
   ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType, nominalHeadsOfType
   , stabilizeEffectRows )
+import System.IO.Unsafe (unsafePerformIO)
 import qualified System.Environment
 import qualified Data.List
 import qualified Data.Maybe
 import qualified Numeric
 import qualified Tidepool.GhcPipeline
 import qualified Debug.Trace
-import System.IO.Unsafe (unsafePerformIO)
 
 data TransState = TransState
   { tsNodes :: !(Seq FlatNode)
@@ -201,22 +201,9 @@ freshSynthVarId = do
   -- Tag 'T' = 0x54, shifted left 56 bits
   return (0x5400000000000000 .|. c)
 
--- | Mutation-test fault injection for constructor-metadata coverage:
--- @TIDEPOOL_TEST_DROP_DC=\<module-qualified-name\>@ makes 'recordDC' silently
--- skip recording exactly the one constructor whose 'qualifiedName' matches —
--- simulating a constructor that reaches the emitted IR but never lands in
--- the authoritative translation's 'tsUsedDCs', exercising the artifact
--- metadata coverage check. Inert unless set; checked once via 'unsafePerformIO',
--- same pattern as 'joinrecDebugEnabled'.
-{-# NOINLINE testDropDC #-}
-testDropDC :: Maybe String
-testDropDC = unsafePerformIO $ System.Environment.lookupEnv "TIDEPOOL_TEST_DROP_DC"
-
 recordDC :: DataCon -> TransM ()
-recordDC dc
-  | testDropDC == Just (T.unpack (qualifiedName (dataConName dc))) = return ()
-  | otherwise = modify' $ \s ->
-      s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
+recordDC dc = modify' $ \s ->
+  s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
 -- | Allocate the binder-local ordinal component of a typed suspension site.
 freshSiteOrdinal :: TransM (Text, Word64)

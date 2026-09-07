@@ -29,7 +29,7 @@ groups =
   , ("closure-tier classification (higher-kinded arrow instantiation)", ClosureTier.checks)
   , ("GHC diagnostic-recovery topological order (Known Limits cascade)", TopoRecovery.checks)
   , ("Rust-to-Haskell extractor request protocol", ExtractRequest.checks)
-  , ("fatal missing record fields", MissingFields.checks)
+  , ("missing record-field diagnostics", MissingFields.checks)
   ]
 
 main :: IO ()

@@ -13,6 +13,7 @@ module Fidelity.Harness
   ( Check
   , check
   , extractBinding
+  , extractBindingWithWarnings
   , extractError
   , extractResultTier
   , nodeList
@@ -57,7 +58,13 @@ extractBinding
   -> String              -- ^ module source
   -> String              -- ^ target top-level binder
   -> IO (Either String ClosedModule)
-extractBinding tag modName src target = do
+extractBinding tag modName src target = fmap (fmap fst) $
+  extractBindingWithWarnings tag modName src target
+
+extractBindingWithWarnings
+  :: String -> String -> String -> String
+  -> IO (Either String (ClosedModule, [String]))
+extractBindingWithWarnings tag modName src target = do
   let dir  = workRoot ++ "/" ++ tag
       path = dir ++ "/" ++ modName ++ ".hs"
   createDirectoryIfMissing True dir
@@ -66,7 +73,7 @@ extractBinding tag modName src target = do
     res <- runPipeline path [dir, "lib"]
     cm  <- translateModuleClosed (prHscEnv res) (prBinds res) target
     _   <- evaluate (length (nodeList cm))
-    pure cm
+    pure (cm, prWarnings res)
   pure $ case r of
     Left (e :: SomeException) -> Left (oneLine (show e))
     Right cm                  -> Right cm

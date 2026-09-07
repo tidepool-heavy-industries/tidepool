@@ -24,6 +24,7 @@ import qualified Data.Text as T
 import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory (doesFileExist, listDirectory, removeFile)
+import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, stderr)
 
@@ -148,6 +149,10 @@ writeClosedTargets
   -> [(String, String, ClosedModule)]  -- ^ (targetName, outFileBase, closed)
   -> IO [(String, [YieldSite])]   -- ^ outFileBase -> typed suspension sites
 writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts targets = do
+  -- Child-local mutation testing targets the final metadata table, after all
+  -- legitimate collectors have contributed. Read per invocation so a resident
+  -- worker never caches fault state across requests.
+  dropConstructor <- lookupEnv "TIDEPOOL_TEST_DROP_DC"
   let multi = length targets > 1
 
   -- Tree and metadata encoding share one timing phase.
@@ -181,8 +186,9 @@ writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts target
       siblingMeta    = siblingCloseDCons allUsedDCs
       transitiveMeta = collectTransitiveDCons typeUniverse allReachBinds
       wiredInMeta    = wiredInDataCons
-      allMeta = mergeMetaPreserving
+      mergedMeta = mergeMetaPreserving
                   [ wiredInMeta, concatMap twUsedMeta writes, siblingMeta, transitiveMeta ]
+      allMeta = filter (\meta -> Just (T.unpack (dcmQualName meta)) /= dropConstructor) mergedMeta
       hasIO       = or (map twHasIO writes)
       allVarNames = concatMap twVarNames writes
       allPoisoned = mergePoisonedTables (map twPoisoned writes)

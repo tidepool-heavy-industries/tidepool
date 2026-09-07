@@ -2,9 +2,9 @@
 
 -- | Mutation test for the pre-write metadata coverage contract.
 --
--- The fixture keeps @Data.List.NonEmpty.:|@ observable only through the
--- translator's constructor recording. A test-only fault removes that entry;
--- extraction must then fail before writing the target artifact.
+-- The fixture emits @Data.List.NonEmpty.:|@. A child-local fault removes that
+-- constructor from the final metadata table after all collectors contribute;
+-- extraction must fail before writing the target artifact.
 module Fidelity.MetadataCoverage (checks) where
 
 import Fidelity.Harness (Check, check)
@@ -23,9 +23,8 @@ workDir = "test-fidelity/work/metadata-coverage"
 dropTarget :: String
 dropTarget = "GHC.Internal.Base.:|"
 
--- | @stash@ keeps the constructor in optimized Core without mentioning
--- @NonEmpty@ in a top-level type, preventing the type-closure collector from
--- independently supplying the metadata under test.
+-- | @stash@ keeps the constructor observable in optimized Core. The mutation
+-- targets the completed table, including metadata from transitive types.
 fixtureSrc :: String
 fixtureSrc = unlines
   [ "module MetadataCoverageFixture (target) where"
