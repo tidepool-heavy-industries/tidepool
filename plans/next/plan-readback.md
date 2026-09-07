@@ -10,10 +10,12 @@ of a plan and evidence that its execution owners understood it.
 - [x] Make the planning/understanding/review sequence explicit in the swarm vision.
 - [x] Request a concrete Sol-authored readback in the current shoal-repl wave before
   opening its four product lanes. Existing contract and acceptance work continues.
-- [ ] Review that wave's readback against the intended product and actual public
+- [x] Review that wave's initial owner readback against the intended product and actual public
   capabilities; return corrections, questions and accepted plan improvements.
-- [ ] Verify the Sol owner incorporates consequential corrections in its branch
-  plans and fresh task packets before releasing dependent implementation.
+- [x] Verify the Sol owner records initial planner corrections: application commit
+  `027b243` incorporates the review of `a2b3d50`.
+- [ ] Review the substantive component leads' own branch plans as a batch, verify
+  corrections reach their task packets, then release dependent implementation.
 - [ ] Curate the next workspace owner/lead prompts to request plans in the owners'
   own words: examples, interfaces, ownership, fork/dependency tree, model placement,
   acceptance, assumptions, questions and feedback on the original plan.
