@@ -10,8 +10,9 @@ archive).
 
 - [Shoal implementation handoff](../NEXT.md): complete the programmable foundation
   and a usable workspace orchestration package. Model/context selection, frozen
-  customization, routes and basic snapshots have landed; the full planned Sol
-  operating mode remains incomplete. One Astra Medium implements sequentially.
+  customization, routes, scoped observations, launch previews and the executable
+  planned Sol package have landed. The single-session implementation is followed
+  by application acceptance and ordinary human-requested RSI.
   The [vision](next/planned-swarm.md), [workspace design](next/workspace-pilot.md)
   and [Haskell reference](next/sol-worker-routing.md) define the chosen direction.
   Live acceptance uses fresh actors on `shoal-repl` (the standalone TUI app) or

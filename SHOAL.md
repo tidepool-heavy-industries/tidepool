@@ -5,35 +5,25 @@ It keeps the runnable surface visibly distinct from active replacement
 designs. Runtime semantics remain owned by the relevant crate documentation;
 active designs remain in `plans/`.
 
-## Current handoff (2026-09-05)
+## Current operating package
 
-The reliability and typed-progress implementation landed in `398d38ae`.
-It includes provider health and provenance, durable failure notifications,
-cleanup revalidation, and typed progress with one producer and independent
-observer cursors. Progress is a coalescing latest-value channel; each watch
-retains its first qualifying snapshot, including while other dependencies
-remain pending. See [progress design and checks](plans/actor-model/shoal-progress-channel.md).
+Shoal supports ordinary interactive Codex TUIs, frozen workspace customization,
+selected or inherited contexts, independent roots, typed direct request/repair,
+automatic routes and scoped observations. Native Codex goals are disabled on
+all actors; Shoal owns continuation. The packaged Codex pin is
+`4372d1a1cf9952178aff25bafdb7e3a6de49b491`, with background completion
+acknowledgments and hosted-tool degradation that preserves the TUI conversation.
 
-Focused provider, inbox, request-registry, hosted progress/cleanup, and GC
-checks passed, along with all 217 extractor fixtures, 12 script tests,
-formatting, and the Shoal build. The later live smoke below checks fork
-completion and typed replies; it is not a full progress/cleanup campaign.
-Check older follow-up plan items against the implementation before treating
-them as outstanding work.
+The [workspace package](examples/shoal-workspace/README.md) implements the planned
+Sol operating mode: an Astra-authored Markdown tree, Sol leads and workers, tagged
+Astra work and an ordinary human-requested RSI engagement. Its Haskell modules
+and prompts can be customized per project. TOML selects them; one original-root
+`.shoal` supplies a frozen selection to the whole swarm. `shoal check --workspace
+/path/to/project` compiles a proposed selection without starting actors/providers.
+Explicit swarm restart activates source edits.
 
-The Sol configuration-update fix is in the separate Codex repository at
-`/home/inanna/dev/codex`, commit `702639b55a`. It applies to roots and children:
-only `gpt-6-astra` with Responses Lite can record durable reasoning controls.
-For Sol, request construction also filters inherited `configuration_update`
-items out of outgoing input while preserving durable history. Sol still uses
-ordinary request-level reasoning effort. This does not depend on spawning.
-
-The Shoal flake now pins Codex `c8460ff`, which includes that fix and hosted
-protocol v3 completion acknowledgements. The packaged contract check and a
-live two-child smoke passed: both children inherited the real tool result and
-final block bindings, excluding a later parent rebinding. Use `just shoal-console`
-to build and launch the matching host and Codex. See the
-[fork/cache investigation](docs/SHOAL_FORK_CACHE_RCA.md) for evidence and limits.
+See [NEXT.md](NEXT.md) for implementation readiness and separate application-run
+acceptance. Historical incidents and integration checkpoints belong in Git.
 
 ## Working model
 
@@ -201,10 +191,11 @@ root because a thread ID alone cannot establish queue readiness.
 
 Shoal owns the actor tree and reply routing. Hosted Codex processes disable
 native collaboration tools; their `/root` names belong to a different tree.
-Child processes also disable autonomous goals, so a context fork cannot inherit
-the root's goal and continue spending model turns after settling its assignment.
-The root retains its configured goal behavior. Replies leave children available
-for follow-up requests; explicitly retire finished workers with `stopAgent`.
+Native autonomous goals are disabled uniformly on roots and children. Replies
+leave workers available for follow-up requests; explicitly retire finished
+workers with `stopAgent`. `withLifetime SwarmOwned` creates a selected-context
+independent worker from a top-level actor; otherwise supervision follows its
+creator. Swarm shutdown still owns independent worker retirement.
 
 The target activation carries the task as an ordinary User message. Its
 request scope mounts visibly distinct input and output authority:
@@ -621,8 +612,10 @@ let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel 
 previewBranch proposal
 ```
 
-`previewBranch` reports role, workspace access, effect row, requested and effective
-budgets, and whether delegation is omitted or exhausted. It neither allocates a
+`previewBranch` reports role, workspace access/source, context, lifetime, request
+guidance, effective budgets and whether delegation is omitted or exhausted.
+Its optional `previewLaunch` uses the native host selector for model/effort,
+static instructions, common-base fingerprint and frozen definition/module identity. It neither allocates a
 worktree nor launches a provider. It previews authority, not available slots or
 source validity; admission still checks current capacity, seeds, and provenance.
 The same runtime policy calculation governs preview and actual admission.

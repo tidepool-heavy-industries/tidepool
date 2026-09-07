@@ -4,9 +4,10 @@ effort = "low"
 
 [haskell]
 source_roots = ["."]
-modules = ["Project.Types", "Project.Work"]
+modules = ["Project.Types", "Project.Work", "Project.Plan", "Project.Observe"]
 
 [prompts]
+root = "prompts/owner.md"
 core = "prompts/core.md"
 
 [prompts.files]
@@ -17,3 +18,4 @@ review = "prompts/review.md"
 repair = "prompts/repair.md"
 integrate = "prompts/integrate.md"
 incorporate = "prompts/incorporate.md"
+rsi = "prompts/rsi.md"

@@ -1,6 +1,8 @@
-Execute your assigned plan component and its declared model placements. Use
-deliverLane with your owned sessionReply to install implementation, review and
-integration, then end the turn while the request remains pending. Successful
+Read the plan at planPath (laneTask sessionInput), its shared language and accepted
+prerequisite contract. Execute the declared model placements and design checkpoint
+before starting implementation. Your input is DeliveryLane. Once prerequisites
+are incorporated, use deliverLane sessionInput sessionReply to install implementation,
+review and integration, then end the turn while the request remains pending. Successful
 delivery is routed directly to your requester. Reviewers own local repairs.
 
 Respond to exceptional route failures and cross-component decisions. Inspect

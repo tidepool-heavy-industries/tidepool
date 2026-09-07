@@ -18,8 +18,9 @@ the [workspace design](plans/next/workspace-pilot.md) owns customization and
 context packaging; the [Haskell reference](plans/next/sol-worker-routing.md)
 contains broader interface sketches. Exact implemented signatures belong in the
 [shipped API guide](prompts/shoal/api-guide.md) and checked source.
-The [workspace example](examples/shoal-workspace/README.md) is currently a partial
-consumer, not the completed orchestration package.
+The [workspace package](examples/shoal-workspace/README.md) now contains the
+executable operating mode and a concrete application plan tree. It is installed
+in `/home/inanna/dev/shoal-repl/.shoal`; live model acceptance is the next phase.
 
 ## Architecture and settled boundaries
 
@@ -104,19 +105,19 @@ The implemented foundation includes:
   observed dead pane before resuming the retained conversation; unknown or live
   native execution never triggers a competing resume.
 
-This does **not** complete the planned Sol operating mode. The remaining work is
-both general capability and a complete authored orchestration package:
+The authored operating package composes this foundation:
 
-- Complete responsibility-specific context packets and the authored plan tree.
-  `previewBranch` now resolves static host instructions, model selection, effort,
+- Responsibility-specific context builders and a Markdown plan tree declare
+  dependencies, recipients, discretion, exact seeds and a tagged Astra slot.
+  `previewBranch` resolves static host instructions, model selection, effort,
   frozen definition/module identity and context/lifetime through the same host
   selector as native worker launch. Admission-time paths and request orientation
   remain explicit later facts; preview does not reserve runtime capacity.
-- Complete repair and specialist-answer compositions preserving request ownership,
+- Repair and specialist-answer compositions preserve request ownership,
   the waiting obligation, exact evidence and useful retained workers.
-- A usable plan-tree package and aligned prompts. Existing defaults still teach
-  inherited recursive work. The example now supplies repair and question recipes;
-  review now retains candidate checks/gates and the exact implementer, and local
+- The selected workspace owner/core/lead prompts teach the planned Sol model;
+  the generic shipped API still supports inherited recursive work. Project
+  review retains candidate checks/gates and the exact implementer, and local
   repair uses a distinct request without closing the review or replacing the
   original candidate response. Integration accepts a distinct reviewed input;
   the routed implementation/review/integration chain now executes under a Sol
@@ -124,9 +125,14 @@ both general capability and a complete authored orchestration package:
   against the revised source while the owning review stays open. Typed plan
   proposals now retain exact commits and affected obligations; a separate direct
   incorporation request returns the resulting head and checks without closing
-  the original review. The complete plan package remains outstanding.
-- Project observations connecting the plan, actual work, usage and RSI. Complete
-  delivery/failure examples must execute, not merely typecheck recipe signatures.
+  the original review.
+- `Project.Plan` supplies component lanes and the declared expert placement.
+  `Project.Observe` projects existing handles into plan/definition/actor/outcome
+  evidence and selected RSI context. The deterministic delivery cycle exercises
+  local integration, an ordinary RSI worker, its customization commit, current
+  prompt retention and compilation of the next frozen selection.
+- `shoal check --workspace PATH` validates authored customization through the same
+  frozen-source compiler as startup, without starting actors or providers.
 
 ## Acceptance on a separate application
 
@@ -181,8 +187,9 @@ snapshots are rejected by the owning worktree handler. `just fixtures-check` pas
 semantic tests after the instruction protocol extension. Further checks cover
 frozen-source compilation, exact prompt-byte round trips, owned route recovery,
 planned specialist consultation, failed-owner lifecycle propagation, and a mounted
-process surviving failure cleanup in a real tmux pane. The complete package and
-its integration acceptance remain outstanding.
+process surviving failure cleanup in a real tmux pane. The planned package's
+resident delivery/RSI cycle and the actual `shoal-repl` workspace compilation pass.
+Fresh-model application acceptance remains deliberately unperformed.
 
 Snapshot comparison checks execute resumed-thread deduplication, model-selection
 groups, partial and missing observations, and counter/source discontinuities.

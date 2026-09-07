@@ -28,6 +28,7 @@ name = "tidepool-compile-report"
 path = "src/bin/tidepool-compile-report.rs"
 
 [dependencies]
+tempfile.workspace = true
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true
 tidepool-heap.workspace = true
@@ -71,5 +72,4 @@ reqwest.workspace = true
 
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
-tempfile.workspace = true
 tidepool-testing.workspace = true

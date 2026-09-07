@@ -37,6 +37,11 @@ enum Command {
         /// Directory to initialize. Defaults to the current directory.
         path: Option<PathBuf>,
     },
+    /// Compile workspace customization without launching actors or providers.
+    Check {
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
     /// Create a project-local actor run in its own tmux session.
     Init {
         /// Repository the ensemble will work in. Defaults to the current project.
@@ -141,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tidepool::operator::command(&socket, action).await
         }
         Command::New { path } => tidepool::shoal::new(tidepool::shoal::NewOptions { path }).await,
+        Command::Check { workspace } => tidepool::shoal::check(workspace),
         Command::Init {
             workspace,
             session,

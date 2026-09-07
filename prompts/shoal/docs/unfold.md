@@ -76,8 +76,13 @@ previewBranch proposal
 
 Requested depth/width are capped by config and parent allowance. Preview reports
 role, workspace access, effects, requested/effective budgets, and `CanFork`,
-`ForksOmitted`, or `BudgetExhausted`. It uses admission's policy calculation but
-allocates nothing and starts no child. It does not reserve current capacity or
+`ForksOmitted`, or `BudgetExhausted`. `previewSource`, `previewContext`,
+`previewLifetime` and `previewGuidance` expose the branch selection. The optional
+`previewLaunch` resolves host model/effort, static instructions, base fingerprint,
+frozen definition identity and configured imports through the native launch
+selector. An absent launch resolver is explicit; an absent resolved model means
+inherit the parent's boundary selection. Runtime paths/request orientation are
+added at admission. Preview allocates nothing and starts no child. It does not reserve current capacity or
 validate the worktree seed. A leaf-sized assignment and zero fork authority are
 different things. `researchingLeaf` explicitly omits delegation; a researcher
 with an exhausted budget retains `Forks` in its row but cannot admit children.

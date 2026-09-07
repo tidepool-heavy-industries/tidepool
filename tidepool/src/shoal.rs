@@ -319,15 +319,35 @@ pub enum RunPhase {
     Exited,
 }
 
-pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let workspace = match options.workspace {
+/// Check the authored next-swarm selection without touching native execution.
+/// The capture is temporary; compilation uses the normal toolchain cache.
+pub fn check(workspace: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = resolve_workspace(workspace)?;
+    let scratch = tempfile::tempdir()?;
+    let selected = workspace::FrozenWorkspace::load(&workspace, scratch.path())?;
+    crate::actor_host::validate_workspace_program(&selected, scratch.path())?;
+    println!("Workspace definitions compile: {}", selected.identity());
+    println!(
+        "Modules: {}",
+        selected.import_modules().collect::<Vec<_>>().join(", ")
+    );
+    println!("No actors or providers launched; edits activate at the next swarm boundary.");
+    Ok(())
+}
+
+fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let workspace = match workspace {
         Some(workspace) => workspace,
         None => {
             let cwd = std::env::current_dir()?;
             tidepool_runtime::paths::find_project_root(&cwd).unwrap_or(cwd)
         }
     };
-    let workspace = std::fs::canonicalize(workspace)?;
+    Ok(std::fs::canonicalize(workspace)?)
+}
+
+pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = resolve_workspace(options.workspace)?;
     install_local_exclude(&workspace)?;
     let agent = resolve_agent_defaults(
         ensure_project_config(&workspace)?.defaults,

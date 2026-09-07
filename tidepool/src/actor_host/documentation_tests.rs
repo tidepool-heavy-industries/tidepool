@@ -1141,6 +1141,22 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
                     include_str!("../../../examples/shoal-workspace/.shoal/Project/Work.hs"),
                 ),
                 (
+                    "Project/Plan.hs",
+                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Plan.hs"),
+                ),
+                (
+                    "Project/Observe.hs",
+                    include_str!("../../../examples/shoal-workspace/.shoal/Project/Observe.hs"),
+                ),
+                (
+                    "prompts/owner.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/owner.md"),
+                ),
+                (
+                    "prompts/rsi.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/prompts/rsi.md"),
+                ),
+                (
                     "prompts/task.md",
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/task.md"),
                 ),
@@ -1167,6 +1183,42 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
                 (
                     "prompts/incorporate.md",
                     include_str!("../../../examples/shoal-workspace/.shoal/prompts/incorporate.md"),
+                ),
+                (
+                    "plans/README.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/plans/README.md"),
+                ),
+                (
+                    "plans/language.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/plans/language.md"),
+                ),
+                (
+                    "plans/run.md",
+                    include_str!("../../../examples/shoal-workspace/.shoal/plans/run.md"),
+                ),
+                (
+                    "plans/graph/contract/README.md",
+                    include_str!(
+                        "../../../examples/shoal-workspace/.shoal/plans/graph/contract/README.md"
+                    ),
+                ),
+                (
+                    "plans/graph/contract/design.md",
+                    include_str!(
+                        "../../../examples/shoal-workspace/.shoal/plans/graph/contract/design.md"
+                    ),
+                ),
+                (
+                    "plans/graph/projection/README.md",
+                    include_str!(
+                        "../../../examples/shoal-workspace/.shoal/plans/graph/projection/README.md"
+                    ),
+                ),
+                (
+                    "plans/graph/controls/README.md",
+                    include_str!(
+                        "../../../examples/shoal-workspace/.shoal/plans/graph/controls/README.md"
+                    ),
                 ),
                 (
                     "prompts/core.md",
@@ -1818,12 +1870,17 @@ async fn route_reply_case(cancel: bool) {
 async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".shoal").unwrap();
-    campaign
+    let baseline = campaign
         ._repository
         .writer()
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        &format!("let baseline = GitRef \"{}\"", baseline.as_str()),
+    )
+    .await;
     committed(
         root.as_ref(),
         include_str!("fixtures/delivery_lane_setup.hs"),
@@ -1946,6 +2003,79 @@ async fn workspace_delivery_lane_integrates_partial_work_without_lead_relay() {
             "missing {expected}: {delivery}"
         );
     }
+    committed(root.as_ref(), include_str!("fixtures/delivery_lane_rsi.hs")).await;
+    let (rsi, _rsi_binding) = next_project_worker(&mut campaign).await;
+    assert_eq!(rsi.model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(rsi.context_parent, None);
+    let packet = committed(rsi.policy.as_ref(), "inspectFull (rsiContext sessionInput)").await;
+    for expected in [
+        "projection/README.md",
+        "Owner:",
+        "visible: True",
+        "Preparation",
+        "open product gate",
+        "integration content check",
+        "Current definitions:",
+    ] {
+        assert!(
+            packet.to_string().contains(expected),
+            "missing {expected}: {packet}"
+        );
+    }
+    let rsi_tree = campaign
+        .worktrees
+        .lookup(&tidepool_worktree::WorktreeId::from_raw(
+            &rsi.launch_worktrees[0],
+        ))
+        .unwrap()
+        .unwrap();
+    let changed_prompt = format!(
+        "{}\nNext-wave fixture: preserve the exact plan source in every handoff.\n",
+        include_str!("../../../examples/shoal-workspace/.shoal/prompts/task.md")
+    );
+    let improvement_commit = campaign
+        ._repository
+        .writer_at(rsi_tree.cwd())
+        .commit_file(
+            ".shoal/prompts/task.md",
+            &changed_prompt,
+            "improve selected task context",
+        )
+        .unwrap();
+    let result = dispatch_haskell_script(rsi.policy.as_ref(), &format!(
+        "respond (Candidate \"{}\" [\"reviewed authored task guidance\"] [\"activate at next swarm boundary\"])", improvement_commit.as_str())).await;
+    assert_eq!(result["status"], "replied", "{result}");
+    let receipt = committed(root.as_ref(), "improvementReceipt <- pollResponse (forkedResponse improvement)\ninspectFull improvementReceipt").await;
+    assert!(
+        receipt.to_string().contains(improvement_commit.as_str()),
+        "{receipt}"
+    );
+    tidepool_worktree::GitCli::new()
+        .run(
+            campaign._repository.path(),
+            &["merge", "--ff-only", improvement_commit.as_str()],
+        )
+        .unwrap();
+    let unchanged = committed(
+        root.as_ref(),
+        "inspectFull (fmap (T.isInfixOf \"Next-wave fixture\") (workspacePrompt \"task\"))",
+    )
+    .await;
+    assert_eq!(unchanged["items"][0]["output"], "Just False", "{unchanged}");
+    let current = crate::shoal::workspace::FrozenWorkspace::load(
+        campaign._repository.path(),
+        &campaign._runtime.path().join("run"),
+    )
+    .unwrap();
+    let next_run = tempfile::tempdir().unwrap();
+    let next = crate::shoal::workspace::FrozenWorkspace::load(
+        campaign._repository.path(),
+        next_run.path(),
+    )
+    .unwrap();
+    assert_ne!(current.identity(), next.identity());
+    assert_eq!(next.prompts["task"], changed_prompt);
+    validate_workspace_program(&next, next_run.path()).unwrap();
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
