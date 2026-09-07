@@ -10,7 +10,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 20;
+    pub(super) const CATALOG_VERSION: u32 = 21;
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
@@ -105,13 +105,7 @@ impl FrozenBasePrompt {
         run_root: &std::path::Path,
         core: Option<&str>,
     ) -> std::io::Result<Self> {
-        let body = match core {
-            Some(core) => format!(
-                "{core}\n\n{}",
-                include_str!("../../../prompts/shoal/api-guide.md")
-            ),
-            None => PromptId::ShoalBase.body().to_owned(),
-        };
+        let body = Self::selected_body(core);
         let directory = run_root.join("prompts");
         std::fs::create_dir_all(&directory)?;
         let directory = directory.canonicalize()?;
@@ -134,6 +128,16 @@ impl FrozenBasePrompt {
             file,
             body,
         })
+    }
+
+    pub(super) fn selected_body(core: Option<&str>) -> String {
+        match core {
+            Some(core) => format!(
+                "{core}\n\n{}",
+                include_str!("../../../prompts/shoal/api-guide.md")
+            ),
+            None => PromptId::ShoalBase.body().to_owned(),
+        }
     }
 
     pub(super) fn body(&self) -> &str {

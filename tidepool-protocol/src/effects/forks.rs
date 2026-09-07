@@ -2,8 +2,8 @@
 
 use crate::hs::HsType;
 use crate::schema::{
-    Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef,
-    TypeShape, VariantFields, Verb, WireDerives,
+    Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RecordField, RustBinding, SumVariant,
+    TypeDef, TypeShape, VariantFields, Verb, WireDerives,
 };
 
 use super::agent_launch::launch_args;
@@ -24,6 +24,23 @@ pub fn forks() -> Effect {
         helpers_row_polymorphic: true,
         extra_imports: &[],
         type_defs: vec![
+            TypeDef {
+                name: "WorkerLaunchPreview",
+                wire_rust: None,
+                shape: TypeShape::Record { fields: vec![
+                    RecordField { hs_name: "launchModel", rust_name: "launchModel", ty: HsType::maybe(HsType::Text), doc: &[] },
+                    RecordField { hs_name: "launchEffort", rust_name: "launchEffort", ty: HsType::Named("ForkEffort"), doc: &[] },
+                    RecordField { hs_name: "launchInstructions", rust_name: "launchInstructions", ty: HsType::Text, doc: &[] },
+                    RecordField { hs_name: "launchBaseFingerprint", rust_name: "launchBaseFingerprint", ty: HsType::Text, doc: &[] },
+                    RecordField { hs_name: "launchWorkspaceIdentity", rust_name: "launchWorkspaceIdentity", ty: HsType::maybe(HsType::Text), doc: &[] },
+                    RecordField { hs_name: "launchModules", rust_name: "launchModules", ty: HsType::list(HsType::Text), doc: &[] },
+                ] },
+                json: JsonInstance::None,
+                derives: WireDerives(&[]),
+                domain: None,
+                doc: &["Resolved host settings. Nothing model preserves the parent's boundary selection; paths and request orientation are added at admission."],
+            },
+
             TypeDef {
                 name: "WorkerLifetime",
                 wire_rust: None,
@@ -259,8 +276,13 @@ pub fn forks() -> Effect {
                         ty: HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int])),
                         rust: RustBinding::Path("Option<(i64, i64)>"),
                     },
+                    Arg { name: "model", ty: HsType::maybe(HsType::Text), rust: RustBinding::Path("Option<String>") },
+                    Arg { name: "effort", ty: HsType::maybe(HsType::Named("ForkEffort")), rust: RustBinding::Path("Option<crate::ForkEffort>") },
+                    Arg { name: "context", ty: HsType::Named("ForkContext"), rust: RustBinding::Path("crate::ForkContext") },
+                    Arg { name: "instructions", ty: HsType::maybe(HsType::Text), rust: RustBinding::Path("Option<String>") },
+                    Arg { name: "lifetime", ty: HsType::Named("WorkerLifetime"), rust: RustBinding::Path("crate::WorkerLifetime") },
                 ],
-                ret: fallible(HsType::Tuple(vec![HsType::Text, HsType::Int, HsType::Int])),
+                ret: fallible(HsType::Tuple(vec![HsType::Tuple(vec![HsType::Text, HsType::Int, HsType::Int]), HsType::maybe(HsType::Named("WorkerLaunchPreview"))])),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

@@ -117,6 +117,7 @@ struct ResidentEnvironment<H, O> {
     actors: Arc<Mutex<std::collections::HashMap<ActorRef, ResidentActorRecord>>>,
     fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
     root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
+    launch_resolver: Option<crate::WorkerLaunchResolver>,
 }
 
 #[derive(Clone)]
@@ -206,6 +207,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             actors: Arc::clone(&self.actors),
             fork_workspaces: self.fork_workspaces.clone(),
             root_admission_closed: self.root_admission_closed.clone(),
+            launch_resolver: self.launch_resolver.clone(),
         }
     }
 }
@@ -1045,6 +1047,25 @@ where
         }
     }
 
+    fn validate_worker_context(
+        &self,
+        lifetime: crate::WorkerLifetime,
+        context: crate::ForkContext,
+    ) -> Result<(), String> {
+        if lifetime == crate::WorkerLifetime::SwarmOwned {
+            if context == crate::ForkContext::InheritedContext {
+                return Err("a swarm-owned worker requires a selected context".into());
+            }
+            if self.descriptor.supervisor_parent().is_some() && !self.forest_control {
+                return Err("only a top-level actor can admit a swarm-owned worker".into());
+            }
+        }
+        if self.active_route.is_some() && context == crate::ForkContext::InheritedContext {
+            return Err("automatic routes have no provider transcript boundary; select a task context for spawned workers".into());
+        }
+        Ok(())
+    }
+
     async fn try_start_child(
         &mut self,
         kernel: &KernelContext,
@@ -1078,23 +1099,17 @@ where
             None
         };
         let lifetime = if descriptor.supervisor_parent().is_none() {
-            if descriptor.context_parent().is_some() {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "a swarm-owned worker requires a selected context".into(),
-                ));
-            }
-            if self.descriptor.supervisor_parent().is_some() && !self.forest_control {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "only a top-level actor can admit a swarm-owned worker".into(),
-                ));
-            }
             crate::WorkerLifetime::SwarmOwned
         } else {
             crate::WorkerLifetime::ParentOwned
         };
-        if self.active_route.is_some() && descriptor.context_parent().is_some() {
-            return Err(ResidentActorWorkbenchError::ActorProtocol("automatic routes have no provider transcript boundary; select a task context for spawned workers".into()));
-        }
+        let fork_context = if descriptor.context_parent().is_some() {
+            crate::ForkContext::InheritedContext
+        } else {
+            crate::ForkContext::SelectedContext
+        };
+        self.validate_worker_context(lifetime, fork_context)
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         if descriptor.fork_group().is_some() {
             if self.policy_installed
                 && self.active_fork_boundary.as_ref().is_none_or(|boundary| {
@@ -1860,21 +1875,43 @@ where
                 role,
                 effect_keys,
                 budget,
+                model,
+                effort,
+                context: fork_context,
+                instructions,
+                lifetime,
             }) => {
-                let child = role
-                    .effective_role(true)
-                    .with_effect_keys(effect_keys.into_iter().map(Into::into).collect());
                 let preview = self
-                    .descriptor
-                    .effective_role()
-                    .preview_child(child, budget)
-                    .map(|role| {
-                        let budget = role.descendants();
-                        (
-                            role.haskell_effects_type(),
-                            i64::from(budget.maximum_depth),
-                            i64::from(budget.maximum_active_children),
-                        )
+                    .validate_worker_context(lifetime, fork_context)
+                    .and_then(|()| {
+                        let child = role
+                            .effective_role(true)
+                            .with_effect_keys(effect_keys.into_iter().map(Into::into).collect());
+                        self.descriptor
+                            .effective_role()
+                            .preview_child(child, budget)
+                            .map(|role| {
+                                let budget = role.descendants();
+                                let row = role.haskell_effects_type();
+                                let launch =
+                                    self.environment.launch_resolver.as_ref().map(|resolve| {
+                                        resolve(&crate::WorkerLaunchRequest {
+                                            role,
+                                            model,
+                                            effort,
+                                            context: fork_context,
+                                            instructions,
+                                        })
+                                    });
+                                (
+                                    (
+                                        row,
+                                        i64::from(budget.maximum_depth),
+                                        i64::from(budget.maximum_active_children),
+                                    ),
+                                    launch,
+                                )
+                            })
                     });
                 self.environment
                     .runner
@@ -4795,6 +4832,17 @@ where
         fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
         incarnation: crate::Incarnation,
     ) -> (Self, mpsc::UnboundedReceiver<LocalResidentDeployment>) {
+        Self::new_with_launch_resolver(source, session, machine, fork_workspaces, incarnation, None)
+    }
+
+    pub fn new_with_launch_resolver(
+        source: ActorWorkbenchSource,
+        session: tidepool_repr::SessionId,
+        machine: ResidentSession<H, O>,
+        fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+        incarnation: crate::Incarnation,
+        launch_resolver: Option<crate::WorkerLaunchResolver>,
+    ) -> (Self, mpsc::UnboundedReceiver<LocalResidentDeployment>) {
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
         machines.insert_idle(session, machine);
         let runner = ResidentActorRunner::new(machines, source);
@@ -4808,6 +4856,7 @@ where
             actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             fork_workspaces,
             root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
+            launch_resolver,
         };
         (
             Self {

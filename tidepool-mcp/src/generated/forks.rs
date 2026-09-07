@@ -10,12 +10,13 @@ pub fn forks_decl() -> crate::EffectDecl {
         constructors: &[
             "ForksBeginWith :: Bool -> Text -> [Text] -> Forks (Either Text (Int, Text, [Text]))",
             "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Maybe ForkEffort -> Maybe (Int, Int) -> Maybe Text -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
-            "ForksPreviewWith :: ActorLaunchRole -> [ActorEffectKey] -> Maybe (Int, Int) -> Forks (Either Text (Text, Int, Int))",
+            "ForksPreviewWith :: ActorLaunchRole -> [ActorEffectKey] -> Maybe (Int, Int) -> Maybe Text -> Maybe ForkEffort -> ForkContext -> Maybe Text -> WorkerLifetime -> Forks (Either Text ((Text, Int, Int), Maybe WorkerLaunchPreview))",
             "ForksCommitWith :: Int -> Forks (Either Text ())",
             "ForksAbortWith :: Int -> Forks (Either Text ())",
             "ForksCleanupWith :: Int -> Forks ForkGroupCleanupOutcome",
         ],
         type_defs: &[
+            "data WorkerLaunchPreview = WorkerLaunchPreview { launchModel :: Maybe Text, launchEffort :: ForkEffort, launchInstructions :: Text, launchBaseFingerprint :: Text, launchWorkspaceIdentity :: Maybe Text, launchModules :: [Text] } deriving (Show, Eq)",
             "data WorkerLifetime = ParentOwned | SwarmOwned deriving (Show, Eq)",
             "data ForkContext = InheritedContext | SelectedContext deriving (Show, Eq)",
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",

@@ -1904,3 +1904,75 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+#[tokio::test]
+async fn worker_preview_resolves_frozen_host_selection_and_checks_lifetime() {
+    let mut campaign = workspace_campaign().await;
+    campaign._repository.writer().stage(".shoal").unwrap();
+    campaign
+        ._repository
+        .writer()
+        .commit_empty("workspace program")
+        .unwrap();
+    // Future source edits must not change either preview or the late child.
+    std::fs::write(
+        campaign._repository.path().join(".shoal/prompts/task.md"),
+        "mutated prompt",
+    )
+    .unwrap();
+    let result = committed(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("fixtures/worker_launch_preview.hs"),
+    )
+    .await;
+    let outputs = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["output"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "(True,True,True,True,True,True,True,True,True)",
+        "Right (Just (Nothing,Low))",
+        "Right (Just (Just \"test-model\",Low))",
+        "a swarm-owned worker requires a selected context",
+    ] {
+        assert!(
+            outputs.iter().any(|output| output.contains(expected)),
+            "missing {expected}: {result}"
+        );
+    }
+    let (worker, _custody) = next_project_worker(&mut campaign).await;
+    assert_eq!(worker.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(worker.fork_effort, Some(tidepool_actor::ForkEffort::Low));
+    assert_eq!(
+        worker.instructions.as_deref(),
+        Some(include_str!(
+            "../../../examples/shoal-workspace/.shoal/prompts/task.md"
+        ))
+    );
+    let root_identity = committed(
+        campaign.root_installation.policy.as_ref(),
+        "inspectFull workspaceIdentity",
+    )
+    .await;
+    let child_identity = committed(worker.policy.as_ref(), "inspectFull workspaceIdentity").await;
+    assert_eq!(
+        root_identity["items"][0]["output"],
+        child_identity["items"][0]["output"]
+    );
+    let instructions = committed(
+        campaign.root_installation.policy.as_ref(),
+        "inspectFull (launchInstructions selectedLaunch)",
+    )
+    .await;
+    let mut expected =
+        append_effective_role(worker.instructions.clone().unwrap(), &worker.effective_role);
+    append_inheritance_authority(&mut expected);
+    assert_eq!(
+        instructions["items"][0]["output"].as_str(),
+        Some(expected.as_str())
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}

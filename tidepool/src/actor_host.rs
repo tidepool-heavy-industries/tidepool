@@ -266,6 +266,55 @@ pub struct ActorHostConfig {
     pub pane_environment: std::collections::BTreeMap<String, String>,
 }
 
+fn worker_launch_resolver(config: &ActorHostConfig) -> tidepool_actor::WorkerLaunchResolver {
+    let config = config.clone();
+    let base = FrozenBasePrompt::selected_body(
+        config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|inputs| inputs.prompts.get("core"))
+            .map(String::as_str),
+    );
+    let fingerprint = blake3::hash(base.as_bytes()).to_hex().to_string();
+    Arc::new(move |request| resolve_worker_launch(&config, request, &fingerprint))
+}
+
+fn resolve_worker_launch(
+    config: &ActorHostConfig,
+    request: &tidepool_actor::WorkerLaunchRequest,
+    base_fingerprint: &str,
+) -> tidepool_actor::WorkerLaunchPreview {
+    let mut instructions = developer_instructions_selected(
+        &request.role,
+        &InteractiveLaunchMode::Fresh,
+        config.workspace_inputs.as_ref(),
+        request.instructions.as_deref(),
+    );
+    append_inheritance_authority(&mut instructions);
+    tidepool_actor::WorkerLaunchPreview {
+        model: request.model.clone().or_else(|| {
+            (request.context == tidepool_actor::ForkContext::SelectedContext)
+                .then(|| config.model.clone())
+        }),
+        effort: request.effort.unwrap_or(tidepool_actor::ForkEffort::Low),
+        instructions,
+        base_fingerprint: base_fingerprint.into(),
+        workspace_identity: config
+            .workspace_inputs
+            .as_ref()
+            .map(|inputs| inputs.identity().into()),
+        modules: config
+            .workspace_inputs
+            .as_ref()
+            .map(|inputs| inputs.import_modules().map(str::to_owned).collect())
+            .unwrap_or_default(),
+    }
+}
+
+fn append_inheritance_authority(instructions: &mut String) {
+    instructions.push_str("\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n");
+}
+
 fn launch_effort(
     mode: &InteractiveLaunchMode,
     default: ReasoningEffort,
@@ -982,7 +1031,7 @@ pub async fn run(
         worktree_authority.clone(),
     )?;
     let (descriptor, machine, outcome) = root.into_parts();
-    let (forest, deployments) = ResidentForest::new(
+    let (forest, deployments) = ResidentForest::new_with_launch_resolver(
         source,
         descriptor.placement().session,
         machine,
@@ -993,6 +1042,7 @@ pub async fn run(
             runtime_namespace(&run_root),
         )),
         host_incarnation.incarnation(),
+        Some(worker_launch_resolver(&config)),
     );
     let forest = Arc::new(forest);
     let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
@@ -2509,15 +2559,37 @@ async fn launch_prepared_interactive_application(
     };
     runtime_observation.publish_workspace(workspace_observation);
     runtime_observation.publish_launch_role(installation.effective_role.clone(), current_time_ms());
-    let mut developer_instructions = developer_instructions_selected(
-        &installation.effective_role,
-        &launch_mode,
-        config.workspace_inputs.as_ref(),
-        installation.instructions.as_deref(),
-    );
-    developer_instructions.push_str(
-        "\nInherited parent bindings do not grant parent authority; the runtime policy above governs this actor.\n",
-    );
+    let resolved_worker = installation.creator.map(|_| {
+        resolve_worker_launch(
+            &config,
+            &tidepool_actor::WorkerLaunchRequest {
+                role: installation.effective_role.clone(),
+                model: installation.model.clone(),
+                effort: installation.fork_effort,
+                context: if matches!(launch_mode, InteractiveLaunchMode::Fork { .. }) {
+                    tidepool_actor::ForkContext::InheritedContext
+                } else {
+                    tidepool_actor::ForkContext::SelectedContext
+                },
+                instructions: installation.instructions.clone(),
+            },
+            &blake3::hash(base_prompt.body().as_bytes())
+                .to_hex()
+                .to_string(),
+        )
+    });
+    let developer_instructions = if let Some(resolved) = &resolved_worker {
+        resolved.instructions.clone()
+    } else {
+        let mut instructions = developer_instructions_selected(
+            &installation.effective_role,
+            &launch_mode,
+            config.workspace_inputs.as_ref(),
+            installation.instructions.as_deref(),
+        );
+        append_inheritance_authority(&mut instructions);
+        instructions
+    };
     let developer_instructions =
         orient_launch_instructions(&developer_instructions, &runtime_observation.snapshot());
     runtime_observation.publish_prompt_profile(
@@ -2529,18 +2601,20 @@ async fn launch_prepared_interactive_application(
             &tidepool_actor::shoal_hosted_prompt_fingerprint(),
         ),
     );
-    let effort = launch_effort(
-        &launch_mode,
-        if installation.creator.is_some() {
-            ReasoningEffort::Low
-        } else {
-            config.effort
-        },
-        installation.fork_effort,
-    );
-    let model = installation.model.clone().or_else(|| {
-        (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. })).then(|| config.model.clone())
-    });
+    let (model, effort) = if let Some(resolved) = resolved_worker {
+        (
+            resolved.model,
+            launch_effort(&launch_mode, ReasoningEffort::Low, Some(resolved.effort)),
+        )
+    } else {
+        (
+            installation.model.clone().or_else(|| {
+                (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. }))
+                    .then(|| config.model.clone())
+            }),
+            launch_effort(&launch_mode, config.effort, installation.fork_effort),
+        )
+    };
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         // Shoal owns continuation on every node. Keep the native tool surface

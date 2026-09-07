@@ -99,6 +99,20 @@ are inspection-only. `researchingLeaf` omits delegation. Available effects and
 runtime depth/width still limit admission. For recursive budget proposals use
 `:doc unfold` and `previewBranch`; do not infer permission from visible handles.
 
+`previewBranch proposed` resolves the branch's effective authority and static
+launch settings without allocating a checkout or starting a provider. Inspect
+`previewSource`, `previewContext`, `previewLifetime`, `previewGuidance` and
+`previewLaunch`.
+The host launch value contains `launchModel`, `launchEffort`,
+`launchInstructions` (selected behavior plus effective authority),
+`launchBaseFingerprint`, `launchWorkspaceIdentity` and `launchModules`.
+`launchModel = Nothing` means preserve the inherited parent model at the completed
+call boundary; a fresh worker resolves the configured default. `previewLaunch =
+Nothing` means this embedding has no host resolver, not an instruction-free launch.
+The common base is identified by content hash instead of copied into each preview.
+Runtime workspace paths, request IDs and orientation are appended at admission.
+A preview is not a capacity reservation or a proof of provider acceptance.
+
 Workers default to `ParentOwned`. A top-level actor can select `SwarmOwned` with
 a selected context to create a cooperating independent root through the same
 `unfold` path. It retains its normal TUI and can receive followups after its creator

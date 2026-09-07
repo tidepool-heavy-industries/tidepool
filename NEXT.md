@@ -107,9 +107,11 @@ The implemented foundation includes:
 This does **not** complete the planned Sol operating mode. The remaining work is
 both general capability and a complete authored orchestration package:
 
-- Composable project behavior and responsibility-specific context packets, with
-  actual launch previews. Existing `previewBranch` reports authority/capacity,
-  not the resolved prompt, model, context and definition selection.
+- Complete responsibility-specific context packets and the authored plan tree.
+  `previewBranch` now resolves static host instructions, model selection, effort,
+  frozen definition/module identity and context/lifetime through the same host
+  selector as native worker launch. Admission-time paths and request orientation
+  remain explicit later facts; preview does not reserve runtime capacity.
 - Complete repair and specialist-answer compositions preserving request ownership,
   the waiting obligation, exact evidence and useful retained workers.
 - A usable plan-tree package and aligned prompts. Existing defaults still teach

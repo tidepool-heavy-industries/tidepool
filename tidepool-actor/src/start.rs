@@ -17,10 +17,21 @@ use tidepool_runtime::session::{
 
 use crate::generated::actor::ActorReq;
 use crate::ActorDescriptor;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    tidepool_bridge_derive::FromCore,
+    tidepool_bridge_derive::ToCore,
+)]
 pub enum ForkEffort {
+    #[core(module = "Tidepool.Effects.Core")]
     Low,
+    #[core(module = "Tidepool.Effects.Core")]
     Medium,
+    #[core(module = "Tidepool.Effects.Core")]
     High,
 }
 
@@ -426,3 +437,28 @@ mod tests {
         assert!(heads.is_empty());
     }
 }
+
+/// Static launch inputs after actor authority attenuation. The host resolves its
+/// provider defaults and frozen prompts; the actor runtime owns admission.
+pub struct WorkerLaunchRequest {
+    pub role: crate::EffectiveRole,
+    pub model: Option<String>,
+    pub effort: Option<ForkEffort>,
+    pub context: ForkContext,
+    pub instructions: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, tidepool_bridge_derive::ToCore)]
+#[core(module = "Tidepool.Effects.Core")]
+pub struct WorkerLaunchPreview {
+    pub model: Option<String>,
+    pub effort: ForkEffort,
+    pub instructions: String,
+    pub base_fingerprint: String,
+    pub workspace_identity: Option<String>,
+    pub modules: Vec<String>,
+}
+
+/// Installed once when constructing a forest. No provider call or file reload.
+pub type WorkerLaunchResolver =
+    std::sync::Arc<dyn Fn(&WorkerLaunchRequest) -> WorkerLaunchPreview + Send + Sync>;

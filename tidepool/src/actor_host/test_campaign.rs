@@ -103,7 +103,7 @@ impl TestCampaign {
         )
         .expect("compile permanent root");
         let (descriptor, machine, outcome) = root.into_parts();
-        let (forest, mut deployments) = ResidentForest::new(
+        let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(
             source,
             descriptor.placement().session,
             machine,
@@ -114,6 +114,7 @@ impl TestCampaign {
                 runtime_namespace(session_root.path()),
             ))),
             tidepool_actor::Incarnation::FIRST,
+            Some(worker_launch_resolver(&config)),
         );
         let forest = Arc::new(forest);
         let (actor, hosted) = forest

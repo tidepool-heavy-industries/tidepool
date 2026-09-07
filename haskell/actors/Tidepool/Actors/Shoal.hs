@@ -89,6 +89,8 @@ module Tidepool.Actors.Shoal
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , ForkBudget (..)
+  , WorkerLaunchPreview (..)
+  , ForkContext (..)
   , BranchPreview (..)
   , DelegationAuthority (..)
   , withForkBudget

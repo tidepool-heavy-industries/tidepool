@@ -837,6 +837,11 @@ pub(crate) enum ForkGroupBoundary {
         role: crate::ActorLaunchRoleWire,
         effect_keys: Vec<crate::ActorEffectKeyWire>,
         budget: Option<(i64, i64)>,
+        model: Option<String>,
+        effort: Option<crate::ForkEffort>,
+        context: crate::ForkContext,
+        instructions: Option<String>,
+        lifetime: crate::WorkerLifetime,
     },
     Begin {
         continuation: ResidentHole,
@@ -2105,7 +2110,7 @@ where
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(role, effect_keys, budget)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview { continuation: hole, role, effect_keys, budget })),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(role, effect_keys, budget, model, effort, context, instructions, lifetime)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview { continuation: hole, role, effect_keys, budget, model, effort, context, instructions, lifetime })),
                     ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksBeginWith(
                         relative,
                         group,

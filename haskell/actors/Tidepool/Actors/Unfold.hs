@@ -52,6 +52,8 @@ module Tidepool.Actors.Unfold
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , ForkBudget (..)
+  , WorkerLaunchPreview (..)
+  , ForkContext (..)
   , BranchPreview (..)
   , DelegationAuthority (..)
   , withForkBudget
@@ -128,7 +130,8 @@ import Tidepool.Actors.Role
   , knownEffects
   )
 import Tidepool.Effects.Core
-  ( ActorEffectKey (..)
+  ( WorkerLaunchPreview (..)
+  , ActorEffectKey (..)
   , AgentControl (..)
   , CleanupActorPlan (..)
   , CleanupActorState (..)
@@ -204,6 +207,7 @@ validateSegment value
 data WorktreeSeed
   = WorktreeSeed WorktreeSource DirtyPolicy
   | BoundHeadSeed DirtyPolicy
+  deriving (Show, Eq)
 
 projectHead :: WorktreeSeed
 projectHead = WorktreeSeed SourceCurrentRepository RequireClean
@@ -268,9 +272,14 @@ data DelegationAuthority = ForksOmitted | BudgetExhausted | CanFork
 data BranchPreview = BranchPreview
   { previewRole :: ForkRole
   , previewWorkspace :: ForkWorkspaceAccess
+  , previewSource :: WorktreeSeed
   , previewRequestedBudget :: Maybe ForkBudget
   , previewEffectiveBudget :: ForkBudget
   , previewEffects :: Text
+  , previewContext :: ForkContext
+  , previewLifetime :: WorkerLifetime
+  , previewGuidance :: Maybe Text
+  , previewLaunch :: Maybe WorkerLaunchPreview
   , previewDelegation :: DelegationAuthority
   } deriving (Show, Eq)
 
@@ -281,23 +290,29 @@ withForkBudget budget (Branch label role seed effects options input) =
 budgetPair :: ForkBudget -> (Int, Int)
 budgetPair (ForkBudget depth width) = (depth, width)
 
--- | Read policy without allocating a worktree or starting a provider. Admission
--- still checks current capacity, worktree seeds, and provider provenance.
+-- | Resolve policy and static host settings without allocating a worktree or
+-- starting a provider. Nothing launch means no resolver in this embedding.
+-- Admission still checks capacity, worktree seeds and provider provenance.
 previewBranch
   :: Member Forks effects
   => Branch child input result
   -> Eff effects (Either Text BranchPreview)
-previewBranch (Branch _ role _ effects options _) = do
+previewBranch (Branch _ role seed effects options _) = do
   let keys = effectKeys effects
-  answer <- send (ForksPreviewWith (roleCode (launchRoleFor role)) keys (budgetPair <$> branchBudget options))
+  answer <- send (ForksPreviewWith (roleCode (launchRoleFor role)) keys (budgetPair <$> branchBudget options) (branchModel options) (branchEffort options) (branchContext options) (branchInstructions options) (branchLifetime options))
   pure $ case answer of
     Left failure -> Left failure
-    Right (row, depth, width) -> Right BranchPreview
+    Right ((row, depth, width), launch) -> Right BranchPreview
       { previewRole = role
       , previewWorkspace = accessFor role
+      , previewSource = seed
       , previewRequestedBudget = branchBudget options
       , previewEffectiveBudget = ForkBudget depth width
       , previewEffects = row
+      , previewContext = branchContext options
+      , previewLifetime = branchLifetime options
+      , previewGuidance = branchGuidance options
+      , previewLaunch = launch
       , previewDelegation = if not (includesForks keys) then ForksOmitted
           else if depth == 0 || width == 0 then BudgetExhausted else CanFork
       }

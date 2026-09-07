@@ -172,6 +172,10 @@ impl FrozenWorkspace {
         Ok(frozen)
     }
 
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
+    }
+
     pub(crate) fn imports(&self) -> Vec<String> {
         self.import_modules()
             .map(|module| format!("import {module}"))
