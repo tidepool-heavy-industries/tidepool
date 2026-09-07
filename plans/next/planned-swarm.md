@@ -520,21 +520,35 @@ introduce a backend migration or change the human's TUI steering interface.
 This makes recursive improvement an occasional high-value use of Astra
 cognition, grounded in useful work the system has already performed.
 
-## Build the smallest complete instance of this mode
+## Build the foundation and a usable orchestration package
 
 The implementation owner is one Astra at Medium working sequentially, without
-delegating implementation or review. The topology below is the product behavior
-to build and verify, not a Shoal tree to launch for the implementation effort.
+delegating implementation or review. The topology in this document is the product
+behavior to build and verify, not a Shoal tree for implementing the system.
 
-Begin with an actual systems change and an Astra-authored plan package. Include
-a Sol lead, useful Sol implementation/review work, and an explicitly tagged
-specialist obligation. Establish the shared source contract and the relevant
-language/types before independent execution.
+Complete the general worker, interaction, lifecycle and inspection capabilities
+alongside a real workspace Haskell consumer. Build a reusable orchestration
+package with project prompts, context builders and a Markdown plan tree. Changes
+to model placement, decomposition, review policy or reporting should normally be
+workspace source changes. Rust extensions serve missing execution capabilities
+and ownership invariants, not named project roles or one preferred workflow.
 
-Make model selection and focused context real at the launch boundary. Astra and
-Sol placements need explicit configured identities and observed selection.
-Fable is out of scope for this phase. Do not assume
-that a label in Markdown changes the model used by an inherited launch.
+Frozen customization, model/context selectors, routes and basic snapshots have
+landed. [NEXT.md](../../NEXT.md) distinguishes that foundation from the remaining
+work. A compiled signature or illustrative handler is not a complete consumer.
+
+Use `shoal-repl` (the standalone TUI application) or another non-self-hosting
+project for the next live runs. A fixed Shoal build hosts fresh actors working
+on the target application. The Astra planner supplies the shared source contract,
+language/types and declared model placements before independent execution.
+Include multiple Sol lanes, review/integration and a tagged Astra obligation.
+
+The application actors learn the orchestration surface from the authored prompts,
+guide, modules and selected plan documents. They inspect target-project source
+normally, but do not inherit the Shoal builder's conversation or need to read
+Shoal implementation code to learn how to operate it. Missing usage knowledge
+becomes an explicit prompt/helper/API improvement. This separates the quality of
+the supplied interface from incidental knowledge gained while building the harness.
 
 Complete a useful candidate, local repair, independent review, and integration
 at the resulting revision. Preserve unavailable outcomes and acceptance limits.
@@ -557,7 +571,8 @@ The mode is working when:
 - Existing interactive Codex TUIs remain the human steering/review interface.
 - A worker uses project operations without reconstructing runtime mechanics.
 
-Verify these behaviors at their owning boundaries with focused checks. Extend
-existing mechanisms as the real consumer requires them. The next implementation
-phase is one linear Astra Medium coding session; this vision does not authorize
-starting or stopping live services.
+Verify these behaviors at their owning boundaries with focused checks, including
+execution of the actual recipes and their failure paths. Then establish live
+product acceptance on the separate application. Implementation readiness and live
+acceptance are distinct milestones. This vision does not itself start a live run
+or authorize replacing unrelated services.

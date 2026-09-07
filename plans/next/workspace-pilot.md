@@ -1,8 +1,8 @@
 # Workspace Haskell configuration and task context
 
-Implementation boundary: the existing Rust role presets may select compatible
-prompt overrides during this build. This is transitional: project-defined role
-names, prompt selection, and worker behavior belong in Haskell compositions.
+Implementation boundary: the existing Rust role presets select compatible
+prompt overrides. This is transitional: project-defined role names, prompt
+selection and worker behavior belong in Haskell compositions.
 Adding a reviewer, specialist, or other project role must not require a Rust
 enum variant. Rust retains capability enforcement and launch mechanics.
 
@@ -16,8 +16,11 @@ The intended experience resembles an XMonad configuration: import a useful
 default, override the pieces that matter here, and gradually grow ordinary
 Haskell functions that express how this project works. Edit the Markdown and
 Haskell files normally. A swarm uses one fixed configuration; changes take
-effect at an explicit swarm teardown/restart boundary. The examples are desired
-interfaces, not currently implemented exports or commands.
+effect at an explicit swarm teardown/restart boundary. TOML selection, frozen
+modules/core prompts and model/context selectors are implemented. Per-worker
+behavioral composition and resolved launch previews remain incomplete. Examples
+here are design sketches; use the [shipped guide](../../prompts/shoal/api-guide.md)
+for exact implemented exports and [NEXT.md](../../NEXT.md) for current gaps.
 
 ## The workspace owns an executable working style
 
@@ -178,6 +181,15 @@ shows the normal composition, and the meaningful failure or question case has
 a destination. Supply the relevant rationale alongside the recipe. A compact
 eDSL should make independent judgment easier, not turn the assignment into
 unexplained commands.
+
+Validate that package on a separate application such as the standalone
+`shoal-repl` TUI. Fresh workers receive its plan and source, plus the authored
+orchestration guidance; they do not inherit the harness builder's transcript.
+If operating Shoal requires knowledge found only in its implementation, improve
+the owning prompt, helper or API instead of silently adding implementation lore
+to the application assignment. Runtime debugging and target-application work
+have different purposes; the acceptance run should establish that the supplied
+interface is sufficient for the latter.
 
 The useful package has three parts:
 

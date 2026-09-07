@@ -8,61 +8,46 @@ archive).
 
 ## Active work
 
-- [Shoal implementation handoff](../NEXT.md): one linear Astra Medium run building
-  TOML-configured project Haskell and prompt customization on the existing
-  interactive Codex TUIs. The [vision](next/planned-swarm.md) explains planned
-  Astra/Sol collaboration; the [workspace design](next/workspace-pilot.md) covers
-  fixed-per-swarm inputs and context packaging; the
-  [Haskell reference](next/sol-worker-routing.md) provides interface sketches.
-  RSI uses ordinary human-started Astra sessions, and steering uses existing
-  TUI/Haskell primitives.
+- [Shoal implementation handoff](../NEXT.md): complete the programmable foundation
+  and a usable workspace orchestration package. Model/context selection, frozen
+  customization, routes and basic snapshots have landed; the full planned Sol
+  operating mode remains incomplete. One Astra Medium implements sequentially.
+  The [vision](next/planned-swarm.md), [workspace design](next/workspace-pilot.md)
+  and [Haskell reference](next/sol-worker-routing.md) define the chosen direction.
+  Live acceptance uses fresh actors on `shoal-repl` (the standalone TUI app) or
+  another non-self-hosting project, using authored guidance rather than knowledge
+  inherited from implementing Shoal. Keep normal Codex TUIs for worker interaction.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers
   with selected typed context and reusable Haskell-defined tool interfaces.
+  These broader capabilities and typed file tools are complementary designs;
+  they do not gate the current orchestration package without a concrete consumer.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): executable-memory
   reclamation and honest recovery after removing the fixed JIT arena ceiling.
-- [Self-writing Haskell actors](actor-model/README.md): Rust-owned actor
-  mechanics around typed Haskell programs with resident model contexts and
-  resident GHCi-style environments; live function-valued messages, caller-
-  checked capabilities, program-image reuse, fresh and cache-preserving fork
-  construction, and a staged migration away from global
-  `State`/`render`/`loop` orchestration. Its current request/activation contract
-  is [persistent applications, typed replies, and watches](actor-model/persistent-applications-replies-and-watches.md),
-  and the canonical root plan, implementation handoff, and todo checklist for the
-  accepted next interaction surface is
-  [cache-preserving context unfold](actor-model/cache-preserving-context-unfold.md).
-  Live recursive dogfood findings and the linear implementation handoff for
-  resident-root UX, fault containment, observability, resource stability, and
-  honest recovery are in
-  [live context-unfold dogfood follow-ups](actor-model/live-context-unfold-dogfood-followups.md).
-  The prompt and LLM-efficacy direction is
-  [context trees and an emergent resident Haskell surface](actor-model/context-tree-emergent-haskell-ux.md):
-  a shared scaffold/unfold/fold/refine practice with task-specific Haskell
-  discovered during use, retained specialists, and effort-aware context reuse.
-  Its scaffold and integration contract is the
-  [recursive scaffold campaign](actor-model/recursive-scaffold-campaign.md):
-  disjoint obligations, intentional partial commits, typed integration, and
-  recursive repair in a lightweight standalone project.
-  The accepted next core use case and prompt delivery plan is
-  [recursive context collaboration](actor-model/recursive-context-collaboration.md):
-  shared-interface scaffolds, recursive specialist contexts, review from current
-  parent understanding, and direct typed review/repair loops. Improve through
-  useful work rather than a broad comparative experiment campaign.
-  [Preparation handoff](actor-model/recursive-context-collaboration-handoff.md)
-  identifies the prompt/interface drafts and focused verification required
-  before the fresh `shoal-repl` application run.
-- [DevSwarm Haskell DSL](devswarm-haskell-dsl.md): clean-slate successor to
-  `harness-dogfooding/dev-tree`; dynamic recursive owner sessions plus a typed
-  candidate/review/revision interpreter. The current runnable slice uses a
-  thin compatibility `State` while node-scoped workspace/store, durable owner
-  re-entry, and a no-State entrypoint remain the platform gaps.
 - [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
   merged, turn-count top-5 lane in flight.
-- [Flight dogfood campaign](flight-dogfood-campaign.md): live process doc
-  for autonomous fresh-session dogfood rounds driven by the root + native
-  subagents while the operator is offline; robot-operator form answering,
-  per-round analysis reports, scenario battery.
+
+## Supporting actor designs and separate harness work
+
+These references do not replace NEXT.md or prescribe the current swarm topology.
+Verify mechanics against owning source; old dispatch and acceptance instructions
+are not current assignments.
+
+- [Self-writing Haskell actors](actor-model/README.md) and
+  [persistent applications, replies and watches](actor-model/persistent-applications-replies-and-watches.md):
+  actor, request and residency design references.
+- [Context unfold](actor-model/cache-preserving-context-unfold.md) and
+  [live follow-ups](actor-model/live-context-unfold-dogfood-followups.md):
+  earlier interaction design and runtime findings.
+- [Context-tree surface](actor-model/context-tree-emergent-haskell-ux.md),
+  [scaffold campaign](actor-model/recursive-scaffold-campaign.md) and
+  [recursive collaboration](actor-model/recursive-context-collaboration.md):
+  supporting context, ownership and integration ideas. The planned Astra/Sol
+  vision owns current model placement, decomposition and guidance.
+- [DevSwarm](devswarm-haskell-dsl.md) and
+  [flight campaign](flight-dogfood-campaign.md): separate self-harness designs;
+  their migration proposals and dogfood loops are not current Shoal gates.
 
 ## Carried-forward one-liners
 

@@ -2,9 +2,12 @@
 
 ## Status
 
-Active on branch `devswarm-haskell-native`. The existing
-`harness-dogfooding/dev-tree/` remains the production dogfood while the
-successor runs in parallel at `harness-dogfooding/devswarm/`.
+This is the earlier self-harness design for `harness-dogfooding/devswarm/`.
+It is not the current Shoal implementation plan or a live campaign assignment.
+[NEXT.md](../NEXT.md) and the [planned-swarm vision](next/planned-swarm.md) own
+the current direction: Astra-authored plans, Sol execution and tagged Astra work,
+with application acceptance outside the self-hosting repository. The migration
+proposals below concern this self-harness and are not prerequisites for that mode.
 
 ## Boundary
 
@@ -33,9 +36,9 @@ pre-authored `Plan`, a git graph, or the set of retained worktrees. A static
 bottom-up fold remains a useful local technique for an already-known dependency
 tree, but it is not DevSwarm's execution engine.
 
-Current Tidepool fork children are full multi-round agent sessions that may
-fork and delegate recursively. They are one-shot within a loop iteration and
-retire after `finalize`; durable node re-entry is still an open platform item.
+This self-harness uses multi-round fork sessions that may delegate recursively
+and retire after `finalize` within a loop iteration. That lifecycle is specific
+to this driver; current Shoal actors retain their contexts after typed replies.
 
 ## Organization and authority
 
@@ -119,8 +122,9 @@ functions over paths, task text, reports, or any other useful local data.
 
 ## Platform issues
 
-These are the remaining blockers. They are deliberately scoped to behavior the
-runnable program needs.
+These proposals address the self-harness driver's workspace and re-entry model.
+They are not a current inventory of Shoal actor capabilities. Revalidate an owning
+source and consumer before carrying any proposal into active implementation.
 
 ### DS-01 — Node-scoped workspace and store
 

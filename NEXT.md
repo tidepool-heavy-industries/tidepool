@@ -2,234 +2,159 @@
 
 ## Objective and execution mode
 
-Use **one Astra at Medium, working sequentially in the repository**, to build a
-small, expressive Haskell coordination surface with project-specific
-customization. Do not delegate implementation or review or use a Shoal tree to
-build the system. The same agent reviews its changes and runs focused checks.
-Keep one concise checkpoint here as implementation proceeds.
+Build a powerful, composable Shoal foundation and a usable orchestration package
+in workspace Haskell and Markdown. Astra authors the architecture, plan tree,
+shared language, and working recipes. Sol leads execute declared components and
+activate Astra specialists at explicitly tagged obligations. The human requests
+ordinary Astra RSI engagements to improve the next swarm's working definitions.
 
-The product operating mode is: Astra authors a tree of Markdown plans and shared
-project language; Sol leads execute the declared tasks through Haskell recipes,
-with Astra specialists at explicitly tagged obligations. The human starts an
-ordinary Astra session for RSI when wanted. Markdown remains the plan; no plan
-compiler or mandatory executable workstream description is required.
+Use **one Astra at Medium working sequentially** to implement, review, and check
+the system. Do not delegate its implementation or review or build it through a
+Shoal development tree. The builder's user-directed goal loop is distinct from
+the product actors: native Codex goals remain disabled on all Shoal nodes.
 
-Read the [vision](plans/next/planned-swarm.md), then the
-[workspace/context design](plans/next/workspace-pilot.md). Consult the
-[Haskell reference](plans/next/sol-worker-routing.md) only for the current
-implementation slice. These documents retain the broader design and illustrative interfaces. The
-[shipped API guide](prompts/shoal/api-guide.md) and
-[compiled workspace example](examples/shoal-workspace/README.md) describe the
-implemented surface; use their exact signatures.
+The [vision](plans/next/planned-swarm.md) owns the operating model;
+the [workspace design](plans/next/workspace-pilot.md) owns customization and
+context packaging; the [Haskell reference](plans/next/sol-worker-routing.md)
+contains broader interface sketches. Exact implemented signatures belong in the
+[shipped API guide](prompts/shoal/api-guide.md) and checked source.
+The [workspace example](examples/shoal-workspace/README.md) is currently a partial
+consumer, not the completed orchestration package.
 
-## Settled boundaries
+## Architecture and settled boundaries
 
-- **Keep the existing interactive Codex TUI execution path.** The human opens a
-  worker's pane and talks to it normally. No replacement viewer, new operator UI,
-  operator-input protocol, or service/controller migration belongs to this build.
-- **TOML owns core configuration.** Extend `.shoal/config.toml` for module/source
-  lists, prompt references, and necessary metadata. Preserve existing defaults
-  and explicit CLI overrides. Haskell owns typed worker specifications, context
-  builders, project types, and coordination recipes; Markdown owns prompt prose.
-- **Edit ordinary repository files.** Track authored `.shoal` content and exclude
-  only private runtime artifacts. Do not introduce a second configuration loader.
-- **One authoritative `.shoal` per swarm, at the original workspace root.**
-  Managed-checkout copies are candidate source, never independent configuration
-  authorities. Keep authored files in the main repository for now; a nested Git
-  repository is optional future storage, not a requirement. Freeze the selected TOML, prompt, and module
-  inputs at startup, using existing run/source owners. Later roots, children, and
-  fresh task contexts use that selection. Changes activate at an explicit swarm
-  teardown/restart boundary, never by live reload.
-- **Keep working state fluent.** New task data, evidence, local bindings, and
-  Haskell compositions remain usable over the fixed shared interfaces.
-- **Build strong primitives and project recipes.** Rust owns runtime mechanics;
-  model-facing Haskell exposes useful operations, outcomes, and inspection.
-  Retain existing actor/request/watch/value ownership instead of adding registries.
-- **Worker roles compose the same mechanisms.** Implementers, leads, reviewers,
-  specialists, and RSI sessions use normal Codex TUIs and the same underlying
-  actor/request primitives. Their model, context, typed task/result, and actual
-  permissions can differ; a role name does not require a new UI or runtime path.
-- **Observation and steering compose.** Provide topology, activity, received
-  message/event, compaction, and usage observations. Steer through ordinary Codex
-  conversations and existing Haskell operations. No new budget governor,
-  specialist-admission policy subsystem, or dedicated checkpoint protocol.
-- **RSI is an ordinary Astra engagement.** Supply useful context and projections;
-  edit/check source for the next swarm. No RSI-specific actor lifecycle, request
-  type, approval pipeline, or adoption swarm.
-- Preserve native-goals-disabled policy and useful in-flight specialists.
-  Fable and a comparative model evaluation campaign are outside scope.
+| Layer | Responsibility |
+|---|---|
+| Rust runtime | Processes, provider integration, scheduling, authority, custody, persistence, observations |
+| General Haskell surface | Worker construction, typed interaction, dependencies, routing, inspection |
+| Workspace Haskell and prompts | Context builders, model placement, review/repair, questions, reporting, project behavior |
+| Markdown plan tree | Current architecture, decomposition, assignments, dependencies, acceptance, amendments |
 
-## Implementation sequence
+A substantial change in collaboration should normally be expressible by editing
+workspace Haskell and prompts. Add runtime behavior when a real composition
+exposes a missing capability or ownership invariant. Build the Haskell consumer
+alongside each primitive extension.
 
-### 1. Preserve the TUI and verify failure containment
+- Keep normal interactive Codex TUIs for every worker and for human steering.
+  No replacement viewer, new operator-input protocol, or controller/service
+  migration is required. Preserve conversation when hosted coordination fails.
+- TOML owns core configuration: module/source lists, prompt references, metadata,
+  defaults, and explicit CLI overrides. Haskell composes behavior; Markdown
+  supplies authored prose. Do not introduce a second configuration loader.
+- One authoritative `.shoal` at the original workspace root supplies the swarm.
+  Managed-checkout copies are candidate source. Track authored files in the
+  main repository and exclude runtime artifacts; nested Git is optional future
+  storage, not a prerequisite.
+- Freeze selected configuration, prompt bytes, modules and library identity for
+  all collaborating roots and descendants. Activate edits only at an explicit
+  swarm boundary. Task data, plan amendments and local Haskell compositions
+  remain live over the fixed interfaces.
+- Project role names and behavioral prompts belong in Haskell compositions.
+  Existing Rust role presets are a tolerated compatibility boundary. Runtime
+  capability checks remain authoritative; no new Rust role for each workflow.
+- Keep model selection, context ancestry, supervision, result ownership,
+  workspace access and pane placement distinct. Use existing owners for each.
+- Markdown remains the plan. Ordinary project functions connect declared work;
+  no plan compiler, second scheduler, universal workflow engine or duplicate
+  task/response registry is required.
+- Make spending visible and steerable. Do not kill useful in-flight specialists
+  at a token target or introduce a new budget governor.
+- RSI is an ordinary human-requested Astra engagement that edits/checks source.
+  No RSI lifecycle, approval/adoption subsystem, or mandatory implementation tree.
+- Fable, comparative model evaluations and self-hosting acceptance campaigns are
+  outside this work. Do not replace or restart unrelated user services.
 
-Tidepool now pins Codex `4372d1a1cf9952178aff25bafdb7e3a6de49b491`, published
-on the fork branch `shoal-async-completion`. Completion acknowledgments use
-60-second attempts on an ordered background queue; exhausted failures disable
-hosted tools while retaining the TUI conversation and other tools. No running
-service or installed binary has been replaced as part of implementation.
+## Current implementation
 
-Verify the selected build and actual failure path. Check whether awaited completion
-handling blocks normal TUI input/event processing; if it does, repair that
-asynchronous boundary in its existing owner. Preserve ordered completion and
-uncertain-effect evidence. Retry idempotent acknowledgments, not original effects.
-Do not turn slow or unavailable hosted coordination into fatal TUI exit.
+At Tidepool `42e27421`, the foundation includes:
 
-Native controller and read-only observer code exists in the fork. Its existence
-does not make migration a requirement. Fix concrete defects in the current path.
-Do not launch, stop, or replace existing user services incidentally.
+- Frozen TOML-selected modules and core/legacy-role prompts, source integrity
+  checks and pinned Haskell library identity. Authored `.shoal` files are trackable.
+- Independent `withModel` and `withContext` selection through TUI launch.
+  Selected contexts have fresh transcripts and isolated local bindings; inherited
+  contexts preserve the completed-call boundary. Both load the frozen modules.
+- Watch-owned `route`, `pollRoute` and `forgetRoute`, with automatic callbacks,
+  selected-worker admission, retained failures and scoped callback child cleanup.
+- `snapshot`, `subtree` and `swarmUsage` over existing observations, including
+  requested/observed models, received request/coordination-event counts and
+  compactions when known. Usage is observed thread usage, not a billing ledger.
+- Codex `4372d1a1cf9952178aff25bafdb7e3a6de49b491`: completion acknowledgments run on
+  an ordered background queue with 60-second attempts. Exhausted failures disable
+  hosted tools while preserving the TUI conversation and other tools.
 
-### 2. Establish TOML configuration, frozen modules, and prompts
+This does **not** complete the planned Sol operating mode. The remaining work is
+both general capability and a complete authored orchestration package:
 
-Extend the current Shoal configuration and prompt composition owners. TOML selects
-source roots/import modules and prompt files. Resolve paths relative to the
-workspace configuration, not an actor's incidental checkout directory.
-Use the existing compiler/workbench to load configured Haskell; loading definitions
-alone must not spawn agents.
+- Composable project behavior and responsibility-specific context packets, with
+  actual launch previews. Existing `previewBranch` reports authority/capacity,
+  not the resolved prompt, model, context and definition selection.
+- Exceptional attention for failed routes. Failure is retained today, but an
+  idle owner is not notified merely because the callback failed.
+- Complete repair and specialist-answer compositions preserving request ownership,
+  the waiting obligation, exact evidence and useful retained workers.
+- A normal control path for cooperating independent roots and scoped observation.
+  Rust forest support exists; a complete model-facing usage has not been established.
+- Host-level failure containment. Codex ACK degradation does not cover Shoal's
+  current whole-tmux cleanup on host error in `tidepool/src/shoal.rs`.
+- A usable plan-tree package and aligned prompts. Existing defaults still teach
+  inherited recursive work. The example leaves repair/question handlers undefined;
+  its reviewer receives a commit hash but loses the candidate's checks and gates.
+  Integration accepts an ordinary candidate rather than a distinct reviewed input.
+- Project observations connecting the plan, actual work, usage and RSI. Complete
+  delivery/failure examples must execute, not merely typecheck recipe signatures.
 
-Materialize selected editable sources and prompt bytes under existing run storage.
-Retain their identity and pinned library/build identity. Compile later actors from
-that same selection, including configured project-module dependencies, rather than
-rereading mutable sources. Keep candidate source checks separate from active state.
-No generalized configuration-version service or hot-reload machinery is needed.
+## Acceptance on a separate application
 
-Allow replacement of authored core prompt prose and role guidance while retaining
-truthful tool/API and authority information. Keep the common prompt/tool prefix
-stable within the swarm; append relevant role/task context afterward. Expose the
-resolved configuration and context through focused inspection.
+Use `shoal-repl` (the standalone TUI application) or another non-self-hosting
+project for the next live runs. The test team changes that application using a
+fixed Shoal build; it does not implement or repair the orchestrator running it.
 
-Narrow the existing blanket `/.shoal/` local exclusion to runtime artifacts;
-preserve existing files and unrelated Git exclusions. Update owning guidance
-and prompt checks when the per-workspace behavior becomes real.
+Fresh application actors receive the authored prompts/API guide, project modules,
+selected plan branches and relevant target-project source. They must not depend
+on the builder's transcript, implementation handoff, or knowledge accumulated
+while reading Shoal internals. Ordinary investigation of the target application
+is expected. A need to inspect the harness implementation merely to learn how to
+use it is a guidance/API finding, not a successful substitute for the package.
 
-### 3. Make model and context selection real
+Distill discovered usage knowledge into the owning prompt, API or helper. Check
+it, then supply the revision through the explicit next-swarm boundary. Do not
+make an acceptance run succeed by privately tutoring it with implementation lore.
+Specific runtime diagnosis remains ordinary engineering work outside the
+application team's product obligation.
 
-Carry explicit model/effort and selected-versus-inherited context through worker
-specifications, actor admission, and the current Codex TUI launch boundary.
-An Astra parent must be able to spawn Sol without accidentally inheriting Astra.
-Exact-context forks preserve the actual completed-call boundary; selected contexts
-receive their relevant definitions and typed input without the parent's transcript.
+Product acceptance requires a useful multi-lane application change: Sol leads
+execute an Astra-authored plan, a tagged Astra specialist contributes hard work,
+review and repair retain exact evidence, and partial results integrate while
+independent work continues. Questions and failed routes reach the right owner
+without polling or routine Astra relay. An ordinary requested RSI engagement
+then prepares a checked workspace improvement consumed by the next swarm.
 
-Context builders supply task, current source/owners, rationale, acceptance,
-relevant recipes, and result/question recipients. Their advertised definitions
-must exist in the receiving Haskell environment. Model, context ancestry,
-supervision, reply authority, and pane placement remain separate.
-Use existing support for multiple top-level actors; no new global manager.
+## Verification and checkpoint discipline
 
-### 4. Complete one typed coordination path
+Use the smallest owning checks in the repository Nix/toolchain environment;
+compile changed consumers and execute normal, unavailable, failure and cleanup
+paths. Exercise the actual project recipes through deterministic resident fixtures.
+Use focused checks during development and relevant broad boundaries at integration.
+Run `just fixtures-check` after extractor translation or serialization changes.
+Run appropriate formatting and `git diff --check`; inspect the final diff for
+duplicated policy, stale callers, magic-string control flow and obsolete comments.
 
-Implement owned asynchronous result routing over existing `Forked`, `Response`,
-`Await`, and `Settlement` mechanisms. A route installs one continuation, returns
-promptly, and executes known forwarding without a model relay. Retain callback
-failures and unavailable outcomes at the actual owner. Never synchronously wait
-for children inside the tool block that admits them.
+Separate implementation readiness from live product acceptance. A compile-only
+recipe does not establish a working delivery chain, and deterministic fixtures
+do not prove that fresh Sols can use the supplied guidance. Keep unperformed
+acceptance visible. Follow the user's goal scope for implementation and later
+application runs; this handoff does not itself start a paid swarm.
 
-Build project Haskell recipes for implementation, independent review/direct repair,
-checked integration, and tagged architectural questions. Bind repetitive launch,
-context, and recipient choices once. Preserve exact candidate/review/integration
-evidence and partial acceptance. Return answers to the waiting obligation without
-queueing behind it or manufacturing authority from a captured handle.
+Evidence recorded for `42e27421`: focused resident acceptance, ownership,
+configuration, protocol and usage checks passed; production compilation and all
+217 fixture semantic tests passed. The exact pinned Codex release build and
+host-tools contract passed. Codex's six focused completion tests and scoped
+Clippy passed; its full TUI suite had 20 failures out of 4,282 executed tests.
+Tidepool strict Clippy retained known pre-existing diagnostics. These are
+baseline results, not checks of future edits. No live planned-Sol application
+acceptance has run.
 
-Use ordinary functions and extensible effect constraints. Do not require a new
-domain effect family or universal workflow state machine. The first useful
-consumer determines the small surface; compile its normal and failure examples.
-
-### 5. Add observation, teaching, and ordinary RSI usage
-
-Project existing actor/provider observations into typed Haskell snapshots.
-Include creation, supervision and context relationships, actual model, obligation,
-received messages/events, compactions, and own/subtree usage. Add missing counters
-at their owners. Distinguish received from presented, deduplicate provider usage,
-and retain incomplete coverage instead of showing unknown values as zero.
-Snapshots read state; they do not wake agents to compose reports.
-
-Ship a compact common guide plus focused project recipes. Keep signatures,
-explanations, and examples aligned with source; offer deeper inspection on demand.
-Ordinary Haskell functions can assemble a useful RSI input from plan, definitions,
-outcomes, and selected observations. Demonstrate source editing/checking and use
-of the revision after the next explicit swarm boundary, without a dedicated RSI
-protocol or new control subsystem.
-
-## Verification and completion
-
-Use repository Nix/toolchain commands and the smallest owning checks. Compile
-changed consumers, inspect failure/cleanup paths, and review the final diff in
-the same implementing session. Broaden checks at final integration; run
-`just fixtures-check` if extractor translation or serialization changes.
-
-Decisive coverage:
-
-- Existing TUI input, steering, and normal launch remain usable. Delayed/failed
-  completion acknowledgments preserve responsiveness and conversation; disabled
-  hosted calls fail visibly while other tools remain usable.
-- Existing TOML defaults work; configured modules/prompts load; invalid input fails
-  before launch. Disk edits affect neither active actors nor late spawns; a new
-  swarm uses the revised inputs.
-- Sol model selection survives Astra ancestry. Selected context and exact forks
-  preserve their distinct contracts and actual authority.
-- A candidate reaches review, repair, and checked integration. Questions resume
-  the right obligation; independent deliveries do not wait for unrelated work.
-  Lost workers, route failures, and cancellation retain honest outcomes.
-- Observation counts preserve provenance and avoid inherited-history double
-  counting. Reading snapshots or previewing candidate context causes no model call.
-- A checked project prompt/helper change is usable in the next swarm.
-
-Prefer deterministic owning fixtures during development. Any paid live-agent
-acceptance is a separately scoped exercise, not a recursive implementation run.
-Report what ran, what only compiled, and what remains unverified. Useful partial
-commits are acceptable; they do not close outstanding acceptance requirements.
-
-## Current checkpoint and historical evidence
-
-The implementation and focused acceptance are complete in Tidepool.
-The Codex fix is committed and published; Tidepool selects that exact revision.
-Existing user services have not been restarted.
-
-- Ordered, bounded Codex completion settlement runs off the TUI loop. Six focused
-  tests and scoped Clippy pass under Rust 1.95. The full TUI suite ran 4,282 tests:
-  4,262 passed and 20 failed outside the focused completion tests. This is not a
-  clean full-suite result. The exact pinned Nix release build and host-tool contract also pass.
-- TOML-selected module roots/imports and core/legacy-role prompts are frozen in
-  run storage, with source integrity and library identity checked on reuse.
-  Authored `.shoal` files are trackable. Configuration/prompt tests and actual
-  configured-module compilation pass, including reuse after mutable source edits.
-- `withModel` and `withContext` (`selected renderer` or `inherited`) reach normal
-  TUI launch independently. Resident acceptance proves Sol selection, common
-  supervision, inherited binding visibility and selected isolation. Both modes
-  preserve the completion startup gate.
-- Watch-owned `route`, `pollRoute`, and `forgetRoute` retain callbacks/outcomes on
-  the existing actor queue. Acceptance covers typed forwarding, selected reviewer
-  admission, callback failure, unavailable replies and explicit route cleanup.
-  Callback child cleanup is restricted to that callback's admitted groups.
-- `snapshot`, `subtree`, and `swarmUsage` project the existing roster and provider
-  observations. Received request and coordination-event counters have explicit
-  owner-local meanings; compaction parsing excludes inherited history. Missing
-  coverage stays unknown. Usage is observed thread usage, not a billing ledger;
-  inspect the roster's stale/provenance fields when judging freshness.
-- The project example's types and implementation/review/integration recipes
-  compile in a real frozen resident workbench. The guide's signatures compile.
-  No paid live model has executed the example's full repository delivery chain.
-- Embedded Haskell uses captured source bytes rather than stale absolute paths
-  from a shared build directory; build provenance follows the current checkout.
-- Named Rust role-to-prompt mappings remain a tolerated transitional boundary.
-  Project roles and recipes belong in Haskell; no new role runtime was introduced.
-
-Final verification: 9 resident acceptance tests, 12 lineage/request-counter tests,
-19 rollout-usage tests and 6 protocol contracts pass. Earlier focused config,
-prompt and ownership checks also passed. Production `cargo check -p tidepool
---bins` passes. Fixture regeneration changes only the source fingerprint; all
-217 fixture semantic tests pass. Formatting and `git diff --check` pass.
-
-Strict Clippy is not clean: dependency-inclusive checking stops at an existing
-`tidepool-node` conversion warning; `--no-deps` reports five existing
-unwrap/expect/boolean diagnostics in host retirement/launch code. Those exact
-statements predate this implementation. No live paid swarm acceptance has run.
-The exact pinned Nix Codex release build and host-tool contract pass
-(`nix build .#checks.x86_64-linux.codex-host-tools-contract --no-link`).
-The final two workspace packaging checks also pass. Runtime build directories
-remain ignored; authored example modules are included in the repository.
-
-The [previous-wave closeout](plans/next/evidence/wave-closeout.md) records merged
-source, checks, and resource history. Its service migration and observer
-acceptance goals are historical, not current gates. Previous dispatch instructions
-remain in Git history; do not redispatch that tree or assume its handles exist.
+The [previous-wave closeout](plans/next/evidence/wave-closeout.md) retains older
+source/check evidence. Its service migration, dispatch tree and observer goals
+are not current implementation requirements. Git retains earlier detailed logs
+and superseded handoffs.

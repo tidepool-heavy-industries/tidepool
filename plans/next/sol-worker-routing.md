@@ -58,18 +58,24 @@ This supersedes a fully discretionary Sol decomposition model and the earlier de
 Astra technical tree. It also supersedes older default-full-prefix and
 numeric-first sequencing in the linked worker plans.
 
-**All Haskell snippets and signatures below are proposed design sketches.**
-They combine existing concepts with desired helpers and extensions; they are not
-runnable repository examples or claims that those APIs exist. Names are suggestions.
+**The Haskell snippets below are design sketches, not the runnable API reference.**
+Some constituent primitives have landed, including model/context selectors,
+automatic routes and basic snapshots. The sketches also contain desired helpers
+and omitted setup. Use the [shipped guide](../../prompts/shoal/api-guide.md) for
+exact signatures and [NEXT.md](../../NEXT.md) for implemented scope and remaining gaps.
+Names for unimplemented compositions are suggestions.
 Builders must turn chosen signatures into coherent, compiled interfaces and
 executable examples together. Supporting labels, imports, domain definitions, and
 effect constraints are omitted where they distract from the usage.
 
-The next implementation phase is one linear Astra Medium coding session, with
-no implementation or review delegation and no Shoal tree building the system. This
-document does not launch a swarm, authorize process shutdown/restart, or claim
-that the native service path is complete. The [wave closeout](evidence/wave-closeout.md)
-records historical integrated source and checks; NEXT.md owns current acceptance.
+Implementation uses one linear Astra Medium coding session, with no implementation
+or review delegation and no Shoal tree building the system. Live acceptance uses
+`shoal-repl` (the standalone TUI application) or another non-self-hosting project.
+Fresh actors use the authored guide, prompts, project modules and selected plan
+branches, without inheriting the builder's transcript or learning orchestration
+from the Shoal implementation. This document does not itself launch a swarm.
+The [wave closeout](evidence/wave-closeout.md) records historical source and checks;
+NEXT.md owns current scope and acceptance.
 The [small-agent design](../small-agents.md)
 retains broader typed-tool and authority requirements.
 
@@ -77,8 +83,8 @@ retains broader typed-tool and authority requirements.
 
 The operating model, API design principles, and worked flows establish the shared
 contract. Context construction and the sidecar sections explain how it remains
-effective over time. The implementation sequence identifies useful increments
-and the behavioral acceptance table describes what must actually work.
+effective over time. NEXT.md records the current implementation boundary; the
+behavioral acceptance table describes what must actually work.
 
 Read the sections relevant to the obligation. Do not put this whole blueprint
 into every worker's prompt. The production result should be a small working
@@ -1200,10 +1206,10 @@ review verdict, or question can have a small display without losing its full
 typed content. Project projections can show only the fields needed for the next
 action. Do not require every peer delivery to be a standalone human report.
 
-Human-facing progress still explains meaningful outcomes plainly. The Sol root
-owns that communication, and the human can directly consult an Astra about
-architecture or style. Neither requirement should force all internal exchanges
-into the same narrative format.
+Human-facing progress still explains meaningful outcomes plainly. The assigned Sol
+integration owner or coordinator owns that communication. The human can consult
+Astra about architecture or style. Neither requirement should force all internal
+exchanges into the same narrative format.
 
 Avoid hard message-length limits. They can encourage omission of negation,
 qualification, or the tested revision. If a recipient repeatedly needs
@@ -1226,12 +1232,14 @@ where the existing presentation owner supports it; this does not share identity,
 history, or reply ownership. Do not build a new operator UI, dedicated steering
 transport, or read-only replacement viewer for this implementation.
 
-Fix concrete failure behavior in the current TUI/host path. Codex source
-`72d1628c…` already changes completion-ACK waits to 60 seconds per attempt and
-disables hosted tools after settlement failure while retaining the conversation
-and other tools. Verify the actual build and check that slow acknowledgments
-do not stall normal input/event processing. Keep uncertain effects visible and
-never silently replay them.
+Fix concrete failure behavior in the current TUI/host path. The pinned Codex
+build runs completion acknowledgments on an ordered background queue, with
+60-second attempts and hosted-tool degradation after exhausted failures. This
+preserves conversation and other tools at that boundary. Shoal host failure
+containment remains separate work: its current whole-tmux cleanup on host error
+can still destroy the conversations. Extend the owning lifecycle paths without
+erasing uncertain effects or silently replaying them. NEXT.md records the source
+and existing checks; do not redo the landed ACK implementation by default.
 
 Controller-service and read-only observer work in the previous wave is historical
 source, not a prerequisite or migration target. Do not move hosted forwarding
@@ -1275,25 +1283,14 @@ The improvement produces a changed working definition and an actual consumer.
 No control group, comparative benchmark, or expensive evaluation campaign is
 required before using it.
 
-## Implementation sequence for the dedicated coding run
+## Implementation boundary
 
-[NEXT.md](../../NEXT.md) is the authoritative linear implementation sequence and
-acceptance checklist. One Astra at Medium implements, reviews, and checks the
-work without delegation. The swarm examples here describe the product, not a
-development team to launch.
-
-Follow these increments in the same source/integration context:
-
-1. Preserve the current TUI and verify hosted-completion failure containment and
-   responsiveness. Fix concrete defects instead of introducing a backend migration.
-2. Extend TOML configuration, configured Haskell modules, and prompt overrides.
-   Freeze the inputs per swarm using existing run/source owners.
-3. Make model/context selection real at the current TUI launch boundary, including
-   Sol selection from Astra ancestry and both selected and inherited context.
-4. Complete owned asynchronous routing and one project implementation/review/repair/
-   integration path. Add tagged questions through the same primitives.
-5. Expose useful typed observation and focused project recipes. Support ordinary
-   human-started Astra RSI through context helpers and next-swarm source changes.
+[NEXT.md](../../NEXT.md) records implemented capabilities, remaining gaps and
+acceptance. One Astra at Medium implements, reviews and checks the work without
+delegation. The product consists of a complete programmable foundation and a
+usable workspace orchestration package over it. The package carries the planned
+Sol topology; the runtime supports different compositions through the same
+worker, interaction and observation primitives.
 
 Start each slice from a useful model-facing expression and its production consumer.
 Put repetitive setup in project helpers. Add missing primitive behavior only at
@@ -1303,8 +1300,10 @@ avoid another registry, scheduler, configuration service, or plan compiler.
 Use focused Nix-backed checks, compile changed consumers, and inspect the final
 diff in the same implementing agent. Broader checks belong at final integration.
 Keep normal and failure examples executable when their APIs land. Record what
-ran, what only compiled, and remaining limits in the single handoff. Paid live
-model acceptance is separately scoped; no dogfood development tree is required.
+ran, what only compiled, and remaining limits in the single handoff. Establish
+live product acceptance on the separate application using fresh contexts and the
+authored interface. A successful source-informed implementation session does not
+prove that this guidance is sufficient for application workers.
 
 ## Existing owners and source checkpoints
 
@@ -1323,11 +1322,12 @@ changing a subsystem.
 | Worktree authority and managed source | `tidepool-worktree`, `tidepool-node` |
 | Historical source/check evidence | [Wave closeout](evidence/wave-closeout.md); former service/observer goals are not current requirements |
 
-At planning inspection, current Haskell exposes `coding`, `child`, `unfold`,
-typed requests, retained responses, and watches. The launch code explicitly
-selects the configured model for non-fork launches; fork launches inherit their
-model. The per-worker model/context selectors, autonomous typed routes, and
-curated helpers in this document are desired behavior, not existing guarantees.
+Current Haskell exposes `coding`, `child`, `unfold`, typed requests, responses,
+watches, explicit model/context selection, automatic routes and basic snapshots.
+Explicit model selection reaches inherited and selected launches independently.
+TOML-selected workspace modules and core/legacy-role prompts are frozen per swarm.
+The current example compiles individual recipes but does not implement the full
+repair/question/integration composition described here.
 
 Current prompting already encourages concise typed inputs and compact folds,
 but also assigns parent integration responsibility and asks for standalone final
@@ -1336,11 +1336,11 @@ owner performs integration; peer replies and human-facing final reports have
 different audiences. Make runtime capabilities, callable examples, and role
 instructions change together.
 
-The current shipped prompt guide and contributor guidance describe a globally
-frozen base/API superset. The desired workspace-customizable base is a planned
-change to that owner, with one fixed selection per swarm. Align the owning
-guidance and checks when implementing it; this planning pass does not change
-shipped prompts or claim that `.shoal` overrides already work.
+The API guide describes selected contexts and explicit Sol recipes, while the
+default base and role prose still emphasizes inherited recursive work. Align
+their defaults and assignment boundaries with the authored plan mode. Preserve
+deliberate inheritance and a stable common prefix; give each responsibility the
+relevant runnable recipe rather than this entire blueprint.
 
 Do not paste proposed names into shipped prompts before they work. Use the
 existing focused guide/example tests when changing that surface. Avoid changes
