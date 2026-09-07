@@ -233,6 +233,51 @@ later work to show how current foundations become functioning consumers and an
 integrated feature; refine dependent detail when earlier discoveries make it
 concrete. Do not require the whole future tree to be known in advance.
 
+The intended execution shape for ambitious projects is a heavily branching tree
+whose substantial nodes each own multiple local waves. A Sol lead repeatedly
+scaffolds, forks independent obligations, folds checked results into its own
+integration history, and establishes the next scaffold. Its children can own
+the same recursive pattern. The parent retains the component's delivery
+obligation through these waves until that component's acceptance is met.
+
+Each local wave starts from a concrete buildable scaffold commit resolving its
+shared interfaces and important semantics. Children receive that exact source
+and the relevant reasoning. The lead incorporates coherent deliveries as they
+arrive, checks the resulting source and records an integration commit. That
+accepted source supports the next local wave; retain useful specialists and
+fork fresh contexts for newly independent obligations. A scaffold and integration
+checkpoint may be the same commit when the resulting code already provides the
+next interfaces. Extra empty commits or actors are not required.
+
+```mermaid
+flowchart TD
+    P["Sol component lead: owns the complete deliverable"] --> S1["Local wave 1: scaffold commit"]
+    S1 --> A["Sol child A: several local waves"]
+    S1 --> B["Sol child B: parallel implementation"]
+    S1 --> C["Sol child C: independent consumer"]
+    A --> A1["A's scaffold: fork several grandchildren"]
+    A1 --> A2["A's checked integration and next wave"]
+    A2 --> I1["Parent integrates coherent deliveries"]
+    B --> I1
+    C --> I1
+    I1 --> S2["Local wave 2: accepted source and next scaffold"]
+    S2 --> D["Retained specialist with accepted source update"]
+    S2 --> E["Fresh Sol subtree for new obligations"]
+    S2 --> F["Declared Astra task where needed"]
+    D --> I2["Checked integration; continue until component acceptance"]
+    E --> I2
+    F --> I2
+```
+
+Waves belong to their nodes. One branch can be in its third wave while a sibling
+finishes its first; only actual dependencies synchronize them. Parent integration
+can accept useful partial results without treating the whole child obligation as
+complete. The initial planner and Sol readbacks should expose this intended
+branching and succession of usable baselines, including where further discovery
+will refine the tree. This is the operating pattern for substantial work, not
+merely a contingency if one batch of leaf workers fails to finish. Small terminal
+obligations can still be implemented directly.
+
 The plan may contain `waves/` directories with scoped plans and compact closeouts.
 Each closeout records accepted source, what actually works, remaining product
 gates and their next owners, important discoveries and corrected assumptions,
@@ -242,18 +287,22 @@ superseded assumptions explicitly so older notes do not compete with the current
 contract. Git and existing run artifacts retain detailed history; do not copy
 every transcript into a new log or every worker's starting prompt.
 
-For example, a recipe feature can establish recipient semantics and source
-generation in one wave, implement the real palette and composer interaction in
-another, and complete live execution and integration in a later wave if needed.
-The agreed user flow is the acceptance target throughout. These are possible
-milestones, not a mandatory number of waves or worker-stage pipeline; one wave
-may complete the feature when its dependencies permit it.
+For example, the recipe lead can establish a renderer and initial consumer,
+fork catalog/interaction/check obligations, integrate them, then scaffold richer
+composition and fork a second set of obligations. The relationship lead can
+concurrently run its own projection, controls and navigation waves. Each can
+delegate substantial children that repeat this process. The project integration
+owner folds useful app slices while those local trees continue. The agreed user
+flow remains the final acceptance target across all of them.
 
 An approved post-planning context is a useful future `checkpointContext` fork
 point, and later accepted contracts may establish additional ones. This capability
 is proposed, not currently promised by the package. Preserve exact transcript
 boundaries and definition identities through the existing runtime owners when
 implemented; a retained checkpoint does not guarantee provider cache residency.
+A retained context does not learn later commits automatically. Select the source
+baseline independently and supply the accepted decisions and source delta needed
+for that wave, whether reusing a specialist or forking from an earlier checkpoint.
 
 Fresh contexts or a new task wave can use the current frozen swarm definitions.
 Adopting changed shared prompts/modules still requires an explicit swarm boundary.

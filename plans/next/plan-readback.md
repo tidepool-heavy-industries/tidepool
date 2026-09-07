@@ -13,6 +13,9 @@ planning, scaffolding and individual wave acceptance are intermediate milestones
 - [x] Make the planning/understanding/review sequence explicit in the swarm vision.
 - [x] Require focused human interviewing and a concrete finished user flow in the
   planning guidance, with continuity of product obligations across multiple waves.
+- [x] Specify heavily branching recursive execution: each substantial node owns
+  repeated local scaffold/fork/integrate waves over exact committed baselines;
+  sibling branches advance independently where dependencies permit.
 - [x] Request a concrete Sol-authored readback in the current shoal-repl wave before
   opening its four product lanes. Contract and acceptance preparation landed before
   the subsequent operator hold.
@@ -34,6 +37,10 @@ planning, scaffolding and individual wave acceptance are intermediate milestones
 - [ ] Curate the next workspace owner/lead prompts to request plans in the owners'
   own words: examples, interfaces, ownership, fork/dependency tree, model placement,
   acceptance, assumptions, questions and feedback on the original plan.
+- [ ] Teach leads to execute successive local waves through fluent Haskell:
+  committed scaffold, useful parallel subtrees, checked integration, updated
+  context/source and the next scaffold. Preserve the encompassing delivery
+  obligation and retain specialists across local waves where useful.
 - [ ] Provide a small useful Haskell composition for collecting interpretations
   and delivering planner steering if the live use shows a reusable need. Reuse
   Task, source-bearing decisions, retained requests and progress; do not introduce
