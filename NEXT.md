@@ -1,5 +1,12 @@
 # Next Shoal wave — root restart handoff
 
+> **Wave closed out; this original plan is now historical.** Implementation and
+> partial integration have happened. Read the [goal comparison and dedicated-run
+> handoff](plans/next/evidence/wave-closeout.md) for current source, remaining gates,
+> verification and preserved work. The next phase is a single-session dedicated
+> implementation run, not another dogfood ensemble. Do not redispatch the tree or
+> assume the live handles described below still exist.
+
 ## Start here, not with the old transcript
 
 The user approved planning a recursive tree of workers to improve Shoal after the
