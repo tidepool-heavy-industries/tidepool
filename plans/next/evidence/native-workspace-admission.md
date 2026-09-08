@@ -83,19 +83,32 @@ Bazel lock verification remains outstanding.
 
 Shoal's fork-launch path now calls this protocol through `InteractiveAgentBackend`.
 `OverlayResourceLease` persists the sequence, binding, phase, native receipt, and
-prior view record in `native-publication.json` before transitions. Busy or
+prior view record and exact target/nested-mount layout in
+`native-publication.json` before transitions. Busy or
 unsupported admission preserves the latest warm snapshot. The existing host health
 loop retries uncertain publications. A lost finish reply retries finish only;
 a changed durable view record prevents a second rotation when recording the finish
 phase failed. Source capture is not yet connected.
-The local publication record is now version 2; unshipped version-1 records are
-rejected rather than adopted without process identity. `MountNamespace` compares
-start time from the pinned proc directory and the opened namespace inode with the
-receipt, then retains pidfd-backed liveness for subsequent host operations.
+The local publication record is now version 3. Earlier versions are retained and
+rejected rather than adopted without process identity and exact target binding.
+This does not change the native HTTP protocol, `view.json`, or `pending.json`.
+`MountNamespace` compares start time from the pinned proc directory and the opened
+namespace inode with the receipt. Publication requires that process to stay live;
+retained filesystem access can outlive it.
 
-Focused checks passed: all four build-resource tests, including a real OverlayFS
-rotation with a simulated lost native finish reply; and the Unix-socket transport
-test for exact identity/sequence and no automatic retry after a lost reply. These
+Publication returns either the confirmed snapshot and native sequence, or an
+explicit native-busy, native-unavailable, or no-new-generation result. Build
+inheritance continues using the older available snapshot on skipped attempts.
+The returned sequence can belong to a recovered earlier attempt: source admission
+must correlate it with its fork checkpoint before treating it as inherited working
+files. Interrupted manifest cleanup is completed before returning a snapshot, and
+the snapshot's layer identities must match the recorded view.
+
+All six focused overlay-resource checks passed. The native-publication test covers
+a lost finish reply, target mismatch, a busy filesystem, native busy/unavailable
+replies, and interrupted in-memory snapshot installation after a durable view
+write. The earlier Unix-socket transport check verified exact identity/sequence
+and no automatic retry after a lost reply. These
 are composed-boundary tests, not a full native-TUI/managed-unfold acceptance run.
 Changed agent and host test targets compiled; formatting and whitespace checks
 passed. Unrelated codegen formatter churn was excluded.

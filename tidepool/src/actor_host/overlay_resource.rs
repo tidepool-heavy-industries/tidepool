@@ -13,6 +13,7 @@ use tidepool_node::{
 
 #[path = "overlay_resource/native_publication.rs"]
 mod native_publication;
+pub(super) use native_publication::{NativePublication, PublicationSkip};
 
 #[derive(Debug)]
 pub(super) struct OverlayResourceLease {
@@ -694,6 +695,7 @@ mod tests {
             start_ticks: u64,
             mount_namespace_inode: u64,
             calls: Mutex<Vec<(u64, PublicationOperation)>>,
+            begin_override: Mutex<Option<PublicationReply>>,
         }
         impl InteractiveAgentBackend for Backend {
             fn prepare_native_tool_policy(
@@ -734,12 +736,16 @@ mod tests {
                     let mut calls = self.calls.lock();
                     calls.push((sequence.get(), operation));
                     match operation {
-                        PublicationOperation::Begin { .. } => Ok(PublicationReply::Ready {
-                            pid: self.pid,
-                            start_ticks: self.start_ticks,
-                            mount_namespace_inode: self.mount_namespace_inode,
-                            cgroup_path: "/test/writers".into(),
-                        }),
+                        PublicationOperation::Begin { .. } => {
+                            Ok(self.begin_override.lock().take().unwrap_or(
+                                PublicationReply::Ready {
+                                    pid: self.pid,
+                                    start_ticks: self.start_ticks,
+                                    mount_namespace_inode: self.mount_namespace_inode,
+                                    cgroup_path: "/test/writers".into(),
+                                },
+                            ))
+                        }
                         PublicationOperation::Finish { .. } if calls.len() == 2 => {
                             Err(AgentBackendError::BackendUnavailable {
                                 detail: "lost finish reply".into(),
@@ -754,7 +760,7 @@ mod tests {
         let project = directory.path().join("project");
         let mut lease =
             OverlayResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
-        let (worker, _namespace) = Worker::start(&mut lease, &project);
+        let (mut worker, namespace) = Worker::start(&mut lease, &project);
         use std::os::unix::fs::MetadataExt;
         let stat = std::fs::read_to_string(format!("/proc/{}/stat", worker.pid)).unwrap();
         let start_ticks: u64 = stat
@@ -786,6 +792,7 @@ mod tests {
             start_ticks,
             mount_namespace_inode,
             calls: Mutex::new(Vec::new()),
+            begin_override: Mutex::new(None),
         };
         let binding = directory.path().join("binding.json");
         tidepool_agent::accept_interactive_session_binding(
@@ -800,29 +807,117 @@ mod tests {
             .await
             .unwrap();
         assert!(lease
-            .publish_native(&backend, &thread, &project.join("target"))
+            .publish_native(&backend, &thread, &project.join("target"), &[])
             .await
             .is_err());
         assert!(lease.native_publication_needs_retry());
+        let native_record = std::fs::read(lease.path().join("native-publication.json")).unwrap();
         let upper = lease.upper.clone();
         let layers = lease.layers.len();
-        lease
-            .publish_native(&backend, &thread, &project.join("target"))
+        // A retained native sequence cannot be repurposed for another mount.
+        assert!(lease
+            .publish_native(&backend, &thread, &project, &[])
+            .await
+            .is_err());
+        assert_eq!(backend.calls.lock().len(), 2);
+        let result = lease
+            .publish_native(&backend, &thread, &project.join("target"), &[])
             .await
             .unwrap();
+        let NativePublication::Published { sequence, snapshot } = result else {
+            panic!("the completed mount must return its published snapshot");
+        };
+        assert_eq!(sequence.get(), 1);
+        assert_eq!(snapshot.layers.len(), layers);
         assert!(!lease.native_publication_needs_retry());
         assert_eq!(lease.upper, upper);
         assert_eq!(lease.layers.len(), layers);
         assert!(lease.latest_snapshot().is_some());
-        let calls = backend.calls.lock();
         assert!(matches!(
-            calls.as_slice(),
+            backend.calls.lock().as_slice(),
             [
                 (1, PublicationOperation::Begin { .. }),
                 (1, PublicationOperation::Finish { .. }),
                 (1, PublicationOperation::Finish { .. })
             ]
         ));
+        assert_eq!(worker.exchange("hold"), "held");
+        let result = lease
+            .publish_native(&backend, &thread, &project.join("target"), &[])
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            NativePublication::Skipped(PublicationSkip::NoNewGeneration)
+        ));
+        assert_eq!(lease.latest_snapshot().unwrap().layers.len(), layers);
+        assert!(!lease.native_publication_needs_retry());
+        assert_eq!(worker.exchange("close"), "closed");
+        *backend.begin_override.lock() = Some(PublicationReply::Busy);
+        assert!(matches!(
+            lease
+                .publish_native(&backend, &thread, &project.join("target"), &[])
+                .await
+                .unwrap(),
+            NativePublication::Skipped(PublicationSkip::NativeBusy)
+        ));
+        *backend.begin_override.lock() = Some(PublicationReply::Unavailable {
+            detail: "not local".into(),
+        });
+        let NativePublication::Skipped(PublicationSkip::NativeUnavailable(detail)) = lease
+            .publish_native(&backend, &thread, &project.join("target"), &[])
+            .await
+            .unwrap()
+        else {
+            panic!("unavailable native admission cannot publish a snapshot");
+        };
+        assert_eq!(detail, "not local");
+        assert_eq!(lease.latest_snapshot().unwrap().layers.len(), layers);
+        assert!(matches!(
+            &backend.calls.lock()[3..],
+            [
+                (2, PublicationOperation::Begin { .. }),
+                (2, PublicationOperation::Finish { .. }),
+                (3, PublicationOperation::Begin { .. }),
+                (3, PublicationOperation::Begin { .. }),
+            ]
+        ));
+        // Simulate interruption after the durable view write but before the
+        // lease installed its latest snapshot and completed pending cleanup.
+        let before = std::fs::read(lease.path().join("view.json")).unwrap();
+        assert!(matches!(
+            lease
+                .publish(&namespace, &project.join("target"), &[])
+                .unwrap(),
+            OverlayRotationOutcome::Rotated
+        ));
+        let upper = lease.upper.clone();
+        let snapshot = lease.latest.take().unwrap();
+        let layer_count = snapshot.layers.len();
+        lease.publication = PublicationState::NeedsRecord {
+            bytes: std::fs::read(lease.path().join("view.json")).unwrap(),
+            snapshot,
+        };
+        let mut interrupted: serde_json::Value = serde_json::from_slice(&native_record).unwrap();
+        interrupted["phase"] = "Publish".into();
+        interrupted["sequence"] = 3.into();
+        interrupted["view_before"] = serde_json::to_value(before).unwrap();
+        std::fs::write(
+            lease.path().join("native-publication.json"),
+            serde_json::to_vec(&interrupted).unwrap(),
+        )
+        .unwrap();
+        let NativePublication::Published { sequence, snapshot } = lease
+            .publish_native(&backend, &thread, &project.join("target"), &[])
+            .await
+            .unwrap()
+        else {
+            panic!("record cleanup must recover the already-published generation");
+        };
+        assert_eq!(sequence.get(), 3);
+        assert_eq!(snapshot.layers.len(), layer_count);
+        assert_eq!(lease.upper, upper);
+        assert!(!lease.native_publication_needs_retry());
     }
 
     #[test]

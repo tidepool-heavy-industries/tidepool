@@ -74,7 +74,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use self::host_incarnation::HostIncarnationLease;
-use self::overlay_resource::{OverlayResourceLease, OverlaySnapshot};
+use self::overlay_resource::{
+    NativePublication, OverlayResourceLease, OverlaySnapshot, PublicationSkip,
+};
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
 
@@ -1588,7 +1590,7 @@ async fn run_interactive_applications(
                                 publication_retries.spawn(async move {
                                     if let Err(error) = resource.publish_native(
                                         backend.as_ref(), &thread,
-                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET), &[],
                                     ).await {
                                         tracing::debug!(?actor, %error, "build publication recovery remains pending");
                                     }
@@ -1714,13 +1716,26 @@ async fn run_interactive_applications(
                                     // Once native admission starts, settle it before
                                     // observing launch cancellation. Dropping this
                                     // wait could strand the creator's writer gate.
-                                    if let Err(error) = resource.publish_native(
+                                    match resource.publish_native(
                                         context.backend.as_ref(), &thread,
-                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET), &[],
                                     ).await {
-                                        tracing::warn!(?actor, %error, "creator build publication retained for recovery");
+                                        Ok(NativePublication::Published { sequence, snapshot }) => {
+                                            tracing::debug!(?actor, %sequence, "creator build snapshot published");
+                                            Some(snapshot)
+                                        }
+                                        Ok(NativePublication::Skipped(reason)) => {
+                                            match reason {
+                                                PublicationSkip::NativeUnavailable(reason) => tracing::debug!(?actor, %reason, "creator build publication unavailable"),
+                                                PublicationSkip::NativeBusy | PublicationSkip::NoNewGeneration => {}
+                                            }
+                                            resource.latest_snapshot()
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(?actor, %error, "creator build publication retained for recovery");
+                                            resource.latest_snapshot()
+                                        }
                                     }
-                                    resource.latest_snapshot()
                                 } else { None };
                                 launch_interactive_application(
                                     installation,
