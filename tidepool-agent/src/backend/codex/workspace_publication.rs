@@ -13,6 +13,16 @@ struct Request<'a> {
     thread_id: &'a str,
     sequence: NonZeroU64,
     operation: Operation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_identity: Option<Identity>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Identity {
+    pid: u32,
+    start_ticks: u64,
+    mount_namespace_inode: u64,
 }
 
 #[derive(Serialize)]
@@ -27,6 +37,10 @@ enum Operation {
 enum Reply {
     Ready {
         pid: u32,
+        #[serde(rename = "startTicks")]
+        start_ticks: u64,
+        #[serde(rename = "mountNamespaceInode")]
+        mount_namespace_inode: u64,
         #[serde(rename = "cgroupPath")]
         cgroup_path: PathBuf,
     },
@@ -64,9 +78,18 @@ pub(super) async fn request(
             thread_id: &thread.id().0,
             sequence,
             operation: match operation {
-                PublicationOperation::Begin => Operation::Begin,
-                PublicationOperation::Finish => Operation::Finish,
+                PublicationOperation::Begin { .. } => Operation::Begin,
+                PublicationOperation::Finish { .. } => Operation::Finish,
             },
+            expected_identity: match operation {
+                PublicationOperation::Begin { expected } => expected,
+                PublicationOperation::Finish { expected } => Some(expected),
+            }
+            .map(|identity| Identity {
+                pid: identity.pid,
+                start_ticks: identity.start_ticks,
+                mount_namespace_inode: identity.mount_namespace_inode,
+            }),
         })
         .send()
         .await
@@ -85,8 +108,18 @@ pub(super) async fn request(
         body.extend_from_slice(&chunk);
     }
     Ok(match serde_json::from_slice(&body).map_err(unconfirmed)? {
-        Reply::Ready { pid, cgroup_path } if pid > 0 && cgroup_path.is_absolute() => {
-            PublicationReply::Ready { pid, cgroup_path }
+        Reply::Ready {
+            pid,
+            start_ticks,
+            mount_namespace_inode,
+            cgroup_path,
+        } if pid > 0 && mount_namespace_inode > 0 && cgroup_path.is_absolute() => {
+            PublicationReply::Ready {
+                pid,
+                start_ticks,
+                mount_namespace_inode,
+                cgroup_path,
+            }
         }
         Reply::Ready { .. } => return Err(unconfirmed("invalid native publication identity")),
         Reply::Settled => PublicationReply::Settled,

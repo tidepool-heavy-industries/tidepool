@@ -2,7 +2,7 @@
 
 use super::*;
 use std::num::NonZeroU64;
-use tidepool_agent::interactive::{PublicationOperation, PublicationReply};
+use tidepool_agent::interactive::{PublicationIdentity, PublicationOperation, PublicationReply};
 use tidepool_agent::{InteractiveAgentBackend, QueueReadyThread};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -26,6 +26,8 @@ enum Phase {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NativeOwner {
     pid: u32,
+    start_ticks: u64,
+    mount_namespace_inode: u64,
     cgroup_path: PathBuf,
 }
 
@@ -58,7 +60,7 @@ impl BuildResourceLease {
         let mut record: Record = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Record {
-                version: 1,
+                version: 2,
                 thread: thread.id().0.clone(),
                 sequence: NonZeroU64::MIN,
                 phase: Phase::Begin,
@@ -67,7 +69,7 @@ impl BuildResourceLease {
             },
             Err(error) => return Err(error),
         };
-        if record.version != 1 || record.thread != thread.id().0 {
+        if record.version != 2 || record.thread != thread.id().0 {
             return Err(io::Error::other(
                 "publication belongs to another native binding or record version",
             ));
@@ -92,11 +94,27 @@ impl BuildResourceLease {
         record.write(&path)?;
         if !matches!(record.phase, Phase::Finish) {
             let reply = backend
-                .workspace_publication(thread, record.sequence, PublicationOperation::Begin)
+                .workspace_publication(
+                    thread,
+                    record.sequence,
+                    PublicationOperation::Begin {
+                        expected: record.native.as_ref().map(NativeOwner::identity),
+                    },
+                )
                 .await
                 .map_err(io::Error::other)?;
             let native = match reply {
-                PublicationReply::Ready { pid, cgroup_path } => NativeOwner { pid, cgroup_path },
+                PublicationReply::Ready {
+                    pid,
+                    start_ticks,
+                    mount_namespace_inode,
+                    cgroup_path,
+                } => NativeOwner {
+                    pid,
+                    start_ticks,
+                    mount_namespace_inode,
+                    cgroup_path,
+                },
                 PublicationReply::Busy | PublicationReply::Unavailable { .. }
                     if matches!(record.phase, Phase::Begin) =>
                 {
@@ -113,11 +131,18 @@ impl BuildResourceLease {
                 }
             };
             if record.native.as_ref().is_some_and(|prior| {
-                prior.pid != native.pid || prior.cgroup_path != native.cgroup_path
+                prior.pid != native.pid
+                    || prior.start_ticks != native.start_ticks
+                    || prior.mount_namespace_inode != native.mount_namespace_inode
+                    || prior.cgroup_path != native.cgroup_path
             }) {
                 return Err(io::Error::other("publication native owner changed"));
             }
-            let namespace = MountNamespace::capture(native.pid)?;
+            let namespace = MountNamespace::capture_matching(
+                native.pid,
+                native.start_ticks,
+                native.mount_namespace_inode,
+            )?;
             record.native = Some(native);
             let view = std::fs::read(self.storage.path.join("view.json"))?;
             let already_recorded = matches!(record.phase, Phase::Publish)
@@ -146,7 +171,17 @@ impl BuildResourceLease {
             record.write(&path)?;
         }
         match backend
-            .workspace_publication(thread, record.sequence, PublicationOperation::Finish)
+            .workspace_publication(
+                thread,
+                record.sequence,
+                PublicationOperation::Finish {
+                    expected: record
+                        .native
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("missing native publication identity"))?
+                        .identity(),
+                },
+            )
             .await
             .map_err(io::Error::other)?
         {
@@ -167,5 +202,15 @@ impl Record {
             path,
             &serde_json::to_vec(self).map_err(io::Error::other)?,
         )?)
+    }
+}
+
+impl NativeOwner {
+    fn identity(&self) -> PublicationIdentity {
+        PublicationIdentity {
+            pid: self.pid,
+            start_ticks: self.start_ticks,
+            mount_namespace_inode: self.mount_namespace_inode,
+        }
     }
 }

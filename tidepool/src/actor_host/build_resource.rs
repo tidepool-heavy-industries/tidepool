@@ -403,6 +403,8 @@ mod tests {
         use tidepool_agent::{AgentBackendError, BackendThreadId};
         struct Backend {
             pid: u32,
+            start_ticks: u64,
+            mount_namespace_inode: u64,
             calls: Mutex<Vec<(u64, PublicationOperation)>>,
         }
         impl InteractiveAgentBackend for Backend {
@@ -444,16 +446,18 @@ mod tests {
                     let mut calls = self.calls.lock();
                     calls.push((sequence.get(), operation));
                     match operation {
-                        PublicationOperation::Begin => Ok(PublicationReply::Ready {
+                        PublicationOperation::Begin { .. } => Ok(PublicationReply::Ready {
                             pid: self.pid,
+                            start_ticks: self.start_ticks,
+                            mount_namespace_inode: self.mount_namespace_inode,
                             cgroup_path: "/test/writers".into(),
                         }),
-                        PublicationOperation::Finish if calls.len() == 2 => {
+                        PublicationOperation::Finish { .. } if calls.len() == 2 => {
                             Err(AgentBackendError::BackendUnavailable {
                                 detail: "lost finish reply".into(),
                             })
                         }
-                        PublicationOperation::Finish => Ok(PublicationReply::Settled),
+                        PublicationOperation::Finish { .. } => Ok(PublicationReply::Settled),
                     }
                 })
             }
@@ -463,8 +467,36 @@ mod tests {
         let mut lease =
             BuildResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
         let (worker, _namespace) = Worker::start(&mut lease, &project);
+        use std::os::unix::fs::MetadataExt;
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", worker.pid)).unwrap();
+        let start_ticks: u64 = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mount_namespace_inode = std::fs::metadata(format!("/proc/{}/ns/mnt", worker.pid))
+            .unwrap()
+            .ino();
+        assert!(MountNamespace::capture_matching(
+            worker.pid,
+            start_ticks + 1,
+            mount_namespace_inode
+        )
+        .is_err());
+        assert!(MountNamespace::capture_matching(
+            worker.pid,
+            start_ticks,
+            mount_namespace_inode + 1
+        )
+        .is_err());
         let backend = Backend {
             pid: worker.pid,
+            start_ticks,
+            mount_namespace_inode,
             calls: Mutex::new(Vec::new()),
         };
         let binding = directory.path().join("binding.json");
@@ -498,9 +530,9 @@ mod tests {
         assert!(matches!(
             calls.as_slice(),
             [
-                (1, PublicationOperation::Begin),
-                (1, PublicationOperation::Finish),
-                (1, PublicationOperation::Finish)
+                (1, PublicationOperation::Begin { .. }),
+                (1, PublicationOperation::Finish { .. }),
+                (1, PublicationOperation::Finish { .. })
             ]
         ));
     }

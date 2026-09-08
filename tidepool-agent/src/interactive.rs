@@ -253,15 +253,33 @@ pub trait InteractiveAgentBackend: Send + Sync {
 
 #[derive(Clone, Copy, Debug)]
 pub enum PublicationOperation {
-    Begin,
-    Finish,
+    Begin {
+        expected: Option<PublicationIdentity>,
+    },
+    Finish {
+        expected: PublicationIdentity,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PublicationIdentity {
+    pub pid: u32,
+    pub start_ticks: u64,
+    pub mount_namespace_inode: u64,
 }
 
 #[derive(Debug)]
 pub enum PublicationReply {
-    Ready { pid: u32, cgroup_path: PathBuf },
+    Ready {
+        pid: u32,
+        start_ticks: u64,
+        mount_namespace_inode: u64,
+        cgroup_path: PathBuf,
+    },
     Settled,
     Busy,
     Conflict,
-    Unavailable { detail: String },
+    Unavailable {
+        detail: String,
+    },
 }

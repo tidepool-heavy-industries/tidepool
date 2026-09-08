@@ -58,6 +58,19 @@ impl MountNamespace {
     /// Capture namespaces through a pinned proc directory and confirm that the
     /// process is still live. The caller must already own the supplied process.
     pub fn capture(pid: u32) -> io::Result<Self> {
+        Self::capture_inner(pid, None)
+    }
+
+    /// Match a native receipt against pinned kernel process and namespace state.
+    pub fn capture_matching(
+        pid: u32,
+        start_ticks: u64,
+        mount_namespace_inode: u64,
+    ) -> io::Result<Self> {
+        Self::capture_inner(pid, Some((start_ticks, mount_namespace_inode)))
+    }
+
+    fn capture_inner(pid: u32, expected: Option<(u64, u64)>) -> io::Result<Self> {
         let pid = i32::try_from(pid)
             .ok()
             .and_then(rustix::process::Pid::from_raw)
@@ -78,6 +91,29 @@ impl MountNamespace {
         )?;
         // The workload may occupy a nested user namespace that does not own
         // its mount namespace. Ask the kernel for the actual mount owner.
+        if let Some((start_ticks, mount_namespace_inode)) = expected {
+            let stat = rustix::fs::openat(
+                &directory,
+                "stat",
+                OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?;
+            let mut stat = std::fs::File::from(stat);
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut stat, &mut text)?;
+            let observed: u64 = text
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+                .ok_or_else(|| io::Error::other("process start time unavailable"))?
+                .parse()
+                .map_err(io::Error::other)?;
+            if observed != start_ticks || rustix::fs::fstat(&mount)?.st_ino != mount_namespace_inode
+            {
+                return Err(io::Error::other(
+                    "native publication process or mount namespace changed",
+                ));
+            }
+        }
         // SAFETY: GetUserNamespace implements the namespace FD ioctl contract.
         let user = unsafe { rustix::ioctl::ioctl(&mount, GetUserNamespace)? };
         let root = rustix::fs::openat(
