@@ -268,6 +268,16 @@ operations on the blocking pool. This is the insertion point for the common
 native source/index/build transaction, not an additional launch-time capture.
 Admission still creates the legacy Git worktree until that transaction is wired.
 
+Admission returns an owned `PreparedForkWorkspace`, containing the model-facing
+receipt and a consuming host custody installer. The resident actor transfers it
+into child bootstrap before spawning; installation binds it to the allocated
+incarnation. Host resources can travel in the installer rather than a second
+registry keyed by checkout ID. Explicitly prebound actors retain the existing
+custody lookup path. Snapshot resources still need to be attached to this handoff.
+The sibling/nested bootstrap and failed-installation checks passed with the
+ID-only installation path disabled in their adapter, proving that admitted
+children consume the preparation. Shoal compiled with the changed admission API.
+
 The focused current-thread admission test and existing sibling custody ordering
 and failed-custody publication tests passed (3 tests). The Shoal binary compiled.
 

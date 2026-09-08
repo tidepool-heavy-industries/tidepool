@@ -37,8 +37,48 @@ pub trait ForkWorkspaceCustody: Send + Sync + 'static {
     fn process_may_exist(&self);
 }
 
+/// Owned preparation travels into child bootstrap. Its installer may retain
+/// host resources that cannot be reconstructed from the model-facing receipt.
+/// Installation consumes the preparation and binds it to one exact incarnation.
+pub struct PreparedForkWorkspace {
+    handle: WtWorktreeHandle,
+    install: Box<
+        dyn FnOnce(ActorRef) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>
+            + Send
+            + Sync,
+    >,
+}
+
+impl PreparedForkWorkspace {
+    pub fn new(
+        handle: WtWorktreeHandle,
+        install: impl FnOnce(ActorRef) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self {
+            handle,
+            install: Box::new(install),
+        }
+    }
+
+    pub fn handle(&self) -> &WtWorktreeHandle {
+        &self.handle
+    }
+
+    pub fn install(
+        self,
+        actor: ActorRef,
+    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        (self.install)(actor)
+    }
+}
+
 pub type ForkWorkspaceAdmissionFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<WtWorktreeHandle, ForkWorkspaceAdmissionError>> + Send + 'a>,
+    Box<
+        dyn Future<Output = Result<PreparedForkWorkspace, ForkWorkspaceAdmissionError>> + Send + 'a,
+    >,
 >;
 
 pub trait ForkWorkspaceAdmission: Send + Sync + 'static {

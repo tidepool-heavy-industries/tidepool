@@ -60,7 +60,7 @@ pub use external_application::{
 };
 pub use fork_workspace::{
     ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceAdmissionFuture,
-    ForkWorkspaceCustody, ForkWorkspaceSeed,
+    ForkWorkspaceCustody, ForkWorkspaceSeed, PreparedForkWorkspace,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{

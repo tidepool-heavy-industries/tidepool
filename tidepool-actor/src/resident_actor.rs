@@ -385,6 +385,7 @@ pub struct ResidentKernelBehavior<H, O> {
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
     launch_worktrees: Vec<String>,
+    prepared_workspace: Option<crate::PreparedForkWorkspace>,
     worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     policy_installed: bool,
     forest_control: bool,
@@ -490,6 +491,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             launch_worktrees,
+            prepared_workspace: None,
             worktree_custody: None,
             policy_installed: false,
             forest_control: false,
@@ -1166,7 +1168,7 @@ where
                 "context fork did not name an admission group".into(),
             ));
         }
-        let admitted_worktree = if let Some(seed) = fork_workspace {
+        let prepared_workspace = if let Some(seed) = fork_workspace {
             let admission = self.environment.fork_workspaces.clone().ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
                     "context-fork workspace admission is not installed".into(),
@@ -1184,7 +1186,7 @@ where
                         error
                     ))
                 })?;
-            launch_worktrees = vec![admitted.handle_receipt.tree_id.raw.clone()];
+            launch_worktrees = vec![admitted.handle().handle_receipt.tree_id.raw.clone()];
             Some(admitted)
         } else {
             None
@@ -1195,17 +1197,18 @@ where
             ));
         }
         let allocated_label = descriptor.label().to_string();
+        let admitted_worktree = prepared_workspace
+            .as_ref()
+            .map(|prepared| prepared.handle().clone());
+        let mut behavior = Self::child(
+            descriptor,
+            self.environment.clone(),
+            entry,
+            launch_worktrees,
+        );
+        behavior.prepared_workspace = prepared_workspace;
         let child = kernel
-            .spawn_worker(
-                None,
-                Self::child(
-                    descriptor,
-                    self.environment.clone(),
-                    entry,
-                    launch_worktrees,
-                ),
-                lifetime,
-            )
+            .spawn_worker(None, behavior, lifetime)
             .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         Ok((child, allocated_label, admitted_worktree))
@@ -2835,6 +2838,19 @@ where
                 output: (),
                 terminal,
             });
+        }
+        if self.worktree_custody.is_none() {
+            if let Some(prepared) = self.prepared_workspace.take() {
+                let actor = context.actor;
+                self.worktree_custody = Some(
+                    tokio::task::spawn_blocking(move || prepared.install(actor))
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Join)?
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?,
+                );
+            }
         }
         if self.worktree_custody.is_none() {
             match self.launch_worktrees.as_slice() {

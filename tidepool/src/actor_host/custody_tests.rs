@@ -62,7 +62,9 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
     holder.join().unwrap();
     let handle = admission
         .manager
-        .lookup(&WorktreeId::from_raw(&prepared.handle_receipt.tree_id.raw))
+        .lookup(&WorktreeId::from_raw(
+            &prepared.handle().handle_receipt.tree_id.raw,
+        ))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -139,6 +141,7 @@ enum InstallPhase {
     AfterBind,
 }
 
+#[derive(Clone)]
 struct DelayedCustody {
     phase: InstallPhase,
     inner: Arc<dyn ForkWorkspaceAdmission>,
@@ -152,16 +155,36 @@ impl ForkWorkspaceAdmission for DelayedCustody {
         path: String,
         seed: ForkWorkspaceSeed,
     ) -> tidepool_actor::ForkWorkspaceAdmissionFuture<'_> {
-        self.inner.admit(owner, path, seed)
+        let controller = self.clone();
+        Box::pin(async move {
+            let prepared = self.inner.admit(owner, path, seed).await?;
+            Ok(tidepool_actor::PreparedForkWorkspace::new(
+                prepared.handle().clone(),
+                move |actor| controller.delay_installation(actor, || prepared.install(actor)),
+            ))
+        })
     }
     fn install_custody(
         &self,
-        actor: ActorRef,
-        worktree: &str,
+        _actor: ActorRef,
+        _worktree: &str,
     ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        Err(ForkWorkspaceAdmissionError {
+            detail: "admitted child must consume its owned preparation".into(),
+        })
+    }
+}
+
+impl DelayedCustody {
+    fn delay_installation(
+        &self,
+        actor: ActorRef,
+        install: impl FnOnce() -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>,
+    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        let mut install = Some(install);
         let installed = match self.phase {
             InstallPhase::BeforeBind => None,
-            InstallPhase::AfterBind => Some(self.inner.install_custody(actor, worktree)?),
+            InstallPhase::AfterBind => Some(install.take().unwrap()()?),
         };
         let (release, ready) = oneshot::channel();
         self.entered
@@ -176,7 +199,7 @@ impl ForkWorkspaceAdmission for DelayedCustody {
             })?;
         match installed {
             Some(custody) => Ok(custody),
-            None => self.inner.install_custody(actor, worktree),
+            None => install.take().unwrap()(),
         }
     }
 }
