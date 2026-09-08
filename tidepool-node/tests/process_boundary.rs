@@ -158,3 +158,99 @@ fn git<const N: usize>(cwd: &std::path::Path, args: [&str; N]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn build_overlay_shares_layers_and_isolates_writes() {
+    let root = tempfile::tempdir().unwrap();
+    for name in [
+        "workspace",
+        "base",
+        "newer",
+        "upper-a",
+        "work-a",
+        "upper-b",
+        "work-b",
+    ] {
+        std::fs::create_dir(root.path().join(name)).unwrap();
+    }
+    let workspace = root.path().join("workspace");
+    let target = workspace.join("target");
+    std::fs::create_dir(&target).unwrap();
+    let base = root.path().join("base");
+    let newer = root.path().join("newer");
+    std::fs::write(base.join("artifact"), "old").unwrap();
+    std::fs::write(newer.join("artifact"), "warm").unwrap();
+    std::fs::write(base.join("untouched"), vec![42; 1024 * 1024]).unwrap();
+    for suffix in ["a", "b"] {
+        let upper = root.path().join(format!("upper-{suffix}"));
+        let boundary =
+            ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()])
+                .unwrap()
+                .with_build_overlay(
+                    [base.clone(), newer.clone()],
+                    &upper,
+                    root.path().join(format!("work-{suffix}")),
+                    &target,
+                )
+                .unwrap();
+        let invocation = boundary.wrap("bwrap", ProcessInvocation {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(),
+                "test \"$(cat target/artifact)\" = warm && printf '%s' \"$1\" > target/artifact && ! touch \"$2/escape\" && ! touch \"$3/escape\"".into(),
+                "probe".into(), suffix.into(), newer.to_string_lossy().into_owned(), upper.to_string_lossy().into_owned()],
+        });
+        let output = Command::new(invocation.program)
+            .args(invocation.args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(upper.join("artifact")).unwrap(),
+            suffix
+        );
+        assert!(!upper.join("untouched").exists());
+    }
+    assert_eq!(
+        std::fs::read_to_string(newer.join("artifact")).unwrap(),
+        "warm"
+    );
+    assert_eq!(
+        std::fs::read_to_string(base.join("artifact")).unwrap(),
+        "old"
+    );
+}
+
+#[test]
+fn build_overlay_rejects_escape_and_overlapping_backing_directories() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["workspace", "base", "upper", "work"] {
+        std::fs::create_dir(root.path().join(name)).unwrap();
+    }
+    let workspace = root.path().join("workspace");
+    let boundary =
+        ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()]).unwrap();
+    for target in [workspace.clone(), workspace.join("../escape")] {
+        assert!(matches!(
+            boundary.clone().with_build_overlay(
+                [root.path().join("base")],
+                root.path().join("upper"),
+                root.path().join("work"),
+                target,
+            ),
+            Err(tidepool_node::ProcessBoundaryError::OverlayOutsideProjectRoot { .. })
+        ));
+    }
+    assert!(matches!(
+        boundary.with_build_overlay(
+            [root.path().join("base")],
+            root.path().join("upper"),
+            root.path().join("upper"),
+            workspace.join("target"),
+        ),
+        Err(tidepool_node::ProcessBoundaryError::InvalidBuildOverlay)
+    ));
+}

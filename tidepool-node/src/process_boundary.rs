@@ -32,6 +32,16 @@ pub struct ProcessMountBoundary {
     writable_roots: Vec<PathBuf>,
     read_only_overlays: Vec<(PathBuf, PathBuf)>,
     writable_overlays: Vec<(PathBuf, PathBuf)>,
+    build_overlays: Vec<BuildOverlay>,
+}
+
+/// Immutable layers are ordered oldest first, matching Bubblewrap's source order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildOverlay {
+    layers: Vec<PathBuf>,
+    upper: PathBuf,
+    work: PathBuf,
+    target: PathBuf,
 }
 
 impl ProcessMountBoundary {
@@ -95,6 +105,7 @@ impl ProcessMountBoundary {
             writable_roots,
             read_only_overlays: Vec::new(),
             writable_overlays: Vec::new(),
+            build_overlays: Vec::new(),
         })
     }
 
@@ -141,6 +152,57 @@ impl ProcessMountBoundary {
         self.writable_overlays.push((source, target));
         self.writable_overlays.sort();
         self.writable_overlays.dedup();
+        Ok(self)
+    }
+
+    /// Mount a private writable build view over retained immutable layers.
+    ///
+    /// The resource owner retains all backing directories until process cleanup
+    /// is confirmed. This boundary protects their ordinary aliases in the worker
+    /// namespace; it cannot freeze other processes' aliases to the same files.
+    pub fn with_build_overlay(
+        mut self,
+        layers: impl IntoIterator<Item = PathBuf>,
+        upper: impl AsRef<Path>,
+        work: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> Result<Self, ProcessBoundaryError> {
+        let layers = layers
+            .into_iter()
+            .map(|path| canonicalize("build snapshot layer", &path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let upper = canonicalize("build upper directory", upper.as_ref())?;
+        let work = canonicalize("build work directory", work.as_ref())?;
+        let target = target.as_ref().to_path_buf();
+        if !target.starts_with(&self.project_root)
+            || target == self.project_root
+            || target
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(ProcessBoundaryError::OverlayOutsideProjectRoot { path: target });
+        }
+        let paths: Vec<_> = layers.iter().chain([&upper, &work]).collect();
+        if layers.is_empty()
+            || paths.iter().any(|path| !path.is_dir())
+            || paths
+                .iter()
+                .any(|path| target.starts_with(path) || path.starts_with(&target))
+            || paths.iter().enumerate().any(|(i, a)| {
+                paths
+                    .iter()
+                    .skip(i + 1)
+                    .any(|b| a.starts_with(b) || b.starts_with(a))
+            })
+        {
+            return Err(ProcessBoundaryError::InvalidBuildOverlay);
+        }
+        self.build_overlays.push(BuildOverlay {
+            layers,
+            upper,
+            work,
+            target,
+        });
         Ok(self)
     }
 
@@ -200,6 +262,21 @@ impl ProcessMountBoundary {
                 target.to_string_lossy().into_owned(),
             ]);
         }
+        for overlay in &self.build_overlays {
+            for path in overlay.layers.iter().chain([&overlay.upper, &overlay.work]) {
+                let path = path.to_string_lossy().into_owned();
+                args.extend(["--ro-bind".into(), path.clone(), path]);
+            }
+            for layer in &overlay.layers {
+                args.extend(["--overlay-src".into(), layer.to_string_lossy().into_owned()]);
+            }
+            args.extend([
+                "--overlay".into(),
+                overlay.upper.to_string_lossy().into_owned(),
+                overlay.work.to_string_lossy().into_owned(),
+                overlay.target.to_string_lossy().into_owned(),
+            ]);
+        }
         args.extend_from_slice(options);
         args.extend([
             "--chdir".into(),
@@ -227,6 +304,8 @@ fn canonicalize(kind: &'static str, path: &Path) -> Result<PathBuf, ProcessBound
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessBoundaryError {
+    #[error("build overlay requires nonempty immutable layers and disjoint backing directories")]
+    InvalidBuildOverlay,
     #[error("cannot resolve {kind} {}: {source}", .path.display())]
     InvalidPath {
         kind: &'static str,

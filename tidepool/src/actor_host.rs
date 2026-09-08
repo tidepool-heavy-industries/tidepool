@@ -400,10 +400,14 @@ impl BuildResourceLease {
         })?;
         std::fs::create_dir_all(parent)?;
         std::fs::create_dir(&path)?;
-        Ok(Self {
+        let lease = Self {
             path,
             state: BuildResourceState::Unsubmitted,
-        })
+        };
+        for name in ["base", "upper", "work"] {
+            std::fs::create_dir(lease.path.join(name))?;
+        }
+        Ok(lease)
     }
 
     fn path(&self) -> &Path {
@@ -2485,7 +2489,12 @@ async fn launch_prepared_interactive_application(
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?;
         process_boundary = process_boundary
-            .with_writable_overlay(lease.path(), agent_workspace.join(ACTOR_BUILD_TARGET))
+            .with_build_overlay(
+                [lease.path().join("base")],
+                lease.path().join("upper"),
+                lease.path().join("work"),
+                agent_workspace.join(ACTOR_BUILD_TARGET),
+            )
             .map_err(|error| {
                 application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
             })?;
