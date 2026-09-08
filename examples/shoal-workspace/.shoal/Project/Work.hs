@@ -8,7 +8,7 @@
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
   , withDecision, raiseQuestion, resolveQuestion
-  , solTask, implement, reviewCandidate, reviewAgain, repair
+  , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
   , requestIncorporation, consultDesign, followAttention
   , settledValue
   ) where
@@ -77,9 +77,14 @@ decisionContext decision = Text.unlines
   ]
 
 solTask :: BranchLabel -> Task -> Branch CodingEffects Task result
-solTask label task = withInstructions (projectPrompt "task") $
-  withContext (selected taskContext) $ withModel "gpt-5.6-sol" $ withEffort Low $
-  coding label (atRef (GitRef (taskSource task))) task
+solTask label = solTaskFrom label boundHead
+
+-- Source and context are independent choices. Roots use projectHead; an exact
+-- committed review seed uses atRef. Fresh context is an explicit withContext.
+solTaskFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task result
+solTaskFrom label source task = withInstructions (projectPrompt "task") $
+  withContext inherited $ withModel "gpt-5.6-sol" $ withEffort Low $
+  coding label source task
 
 implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)

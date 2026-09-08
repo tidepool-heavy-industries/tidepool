@@ -56,10 +56,18 @@ forwardCandidate disposition = do
         CancelDestination -> "route-cancel"
         LoseProducer -> "route-unavailable"
   void $ turn owner ("let routeCampaign = " <> literal campaign <> " :: Text")
+  baseline <- git owner ["rev-parse", "HEAD"]
+  void $ turn owner ("let sourceHead = " <> literal baseline <> " :: Text")
   script owner "route-reply-setup"
   lead <- activation
+  shared <- checkpoint (checkActor lead) "contract.txt" "shared contract\n" "establish shared contract"
+  void $ turn (checkActor lead) "let sharedReasoning = (\"consumer contract established\" :: Text)"
   script (checkActor lead) "route-reply-worker"
   worker <- activation
+  inheritedReasoning <- turn (checkActor worker) "inspectFull sharedReasoning"
+  check "implementation inherits the parent's resident reasoning binding" ("consumer contract established" `Text.isInfixOf` output inheritedReasoning)
+  inheritedHead <- git (checkActor worker) ["rev-parse", "HEAD"]
+  check "implementation uses current parent source despite older task provenance" (inheritedHead == shared)
   candidate <- checkpoint (checkActor worker) "feature.txt" "routed candidate\n" "prepare candidate"
   source <- readFile (checkActor worker) "feature.txt"
   check "the routed candidate has actual source evidence" (source == "routed candidate\n")

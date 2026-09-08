@@ -7,5 +7,6 @@ reportProgress remainingQuestions
 let newer = semantics { questionDetails = (questionDetails semantics) { questionFinding = "A new owning consumer contradicts the earlier answer." } }
 let changedQuestions = raiseQuestion newer openQuestions
 inspectFull (map questionKey remainingQuestions == ["product-gate"], resolveQuestion acceptedDecision changedQuestions == changedQuestions, raiseQuestion semantics firstQuestions == firstQuestions, taskSource assignment == incorporatedHead)
-(consumer, consumerQuestions) <- implement assignment
+let Right consumerLabel = branchLabel "implement"
+(consumer, consumerQuestions) <- unfold (taskGroup assignment) (childWithProgress @Attention @(Outcome Candidate) (withContext (selected taskContext) (solTask consumerLabel assignment)))
 pollReply sessionReply

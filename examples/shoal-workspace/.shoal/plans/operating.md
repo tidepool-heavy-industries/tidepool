@@ -93,8 +93,8 @@ let Right leftLabel = branchLabel "generator"
 let Right rightLabel = branchLabel "consumer"
 let left = leftTask { taskGroup = group, taskSource = source }
 let right = rightTask { taskGroup = group, taskSource = source }
-let leftBranch = withContext inherited (solTask leftLabel left) :: Branch CodingEffects Task (Outcome Candidate)
-let rightBranch = withContext inherited (solTask rightLabel right) :: Branch CodingEffects Task (Outcome Candidate)
+let leftBranch = solTask leftLabel left :: Branch CodingEffects Task (Outcome Candidate)
+let rightBranch = solTask rightLabel right :: Branch CodingEffects Task (Outcome Candidate)
 ```
 
 When their prerequisites and any release condition are met, admit them together:
@@ -117,8 +117,10 @@ completes when the tool block returns; do not await its new child in that same b
 `inherited` chooses the caller's current completed context boundary. Use it when
 shared investigation and accepted decisions are valuable to the child, and fork
 before unrelated debugging accumulates. Default solTask/componentLead uses
-selected taskContext for a focused fresh transcript. Override context deliberately;
-model selection is independent. Descendants normally remain supervised. A root
+inherited context and boundHead, as does implement. Original-root callers use
+solTaskFrom/componentLeadFrom with projectHead. Select a fresh taskContext
+explicitly for unrelated work; use an explicit atRef source for exact committed
+inspection. Model selection is independent. Descendants normally remain supervised. A root
 may admit SwarmOwned selected leads; that lifetime is not compatible with an
 inherited context.
 

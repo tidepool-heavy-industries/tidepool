@@ -3,7 +3,7 @@
 -- The application allocation is editable Haskell. It describes meaningful work,
 -- not a required actor for every noun or a pipeline executed during import.
 module Project.Plan
-  ( GraphComponent (..), component, componentLead, relationDesign
+  ( GraphComponent (..), component, componentLead, componentLeadFrom, relationDesign
   ) where
 
 import Data.Text (Text)
@@ -12,7 +12,7 @@ import Data.Bifunctor (first)
 import Tidepool.Actors.Shoal
 import Tidepool.Effects.Core (GitRef (..))
 import Project.Types
-import Project.Work (projectPrompt, taskContext)
+import Project.Work (projectPrompt, solTaskFrom)
 
 data GraphComponent = RelationContract | RelationProjection | RelationControls
   deriving (Show, Eq)
@@ -48,9 +48,11 @@ component campaign part (GitRef source) = do
 -- The lead implements useful work itself and commissions independent review.
 -- withLifetime remains an ordinary caller choice when admitting this branch.
 componentLead :: BranchLabel -> Task -> Branch CodingEffects Task Delivery
-componentLead label task = withInstructions (projectPrompt "lead") $
-  withContext (selected taskContext) $ withModel "gpt-5.6-sol" $ withEffort Low $
-  coding label (atRef (GitRef (taskSource task))) task
+componentLead label = componentLeadFrom label boundHead
+
+componentLeadFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task Delivery
+componentLeadFrom label source task = withInstructions (projectPrompt "lead") $
+  solTaskFrom label source task
 
 relationDesign :: CampaignLabel -> Either Text DesignSlot
 relationDesign campaign = do

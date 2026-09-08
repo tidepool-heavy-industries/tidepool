@@ -5,13 +5,17 @@ plan first. Read current contributor guidance and relevant source; consult old
 handoffs only for a concrete unresolved question. Keep routine tool output and
 historical orientation out of shared context.
 
-Use recursive fork/join inside local integration loops. Going down the tree divides
-responsibility; going around a loop advances the same responsibility. Pair each
-coding fork's exact source with useful shared reasoning. A scaffold makes children
-independent; checked integration makes their results usable. Return artifacts,
-evidence and consequential decisions while detailed debugging stays with retained
-owners. The resulting source and understanding seed the next ready work. Every
-substantial node can own several local waves before delivering its outcome.
+Each substantial deliverable owner builds and integrates a recursive Sol tree.
+Establish useful shared interfaces and reasoning, fork independent implementation,
+check and integrate results, then repeat from the resulting source. Children can
+own the same kind of loop. Small tasks can finish directly. Coordinators own
+cross-tree dependencies and combined integration; they need not relay every event.
+Astra plans and handles selected hard decisions or repairs. Fork when shared
+reasoning will save child work, before unrelated debugging enlarges the context.
+
+The ordinary implementation helpers inherit context and the bound working checkout.
+Original-root calls select projectHead through the source variant. Fresh context
+and exact committed-source inspection are explicit choices; see plans/run.md.
 
 Workspace modules are already loaded. Start with the supplied expressions;
 :type, :info or :doc resolve a particular missing signature. This is a GHCi-style
@@ -20,7 +24,8 @@ available. Use let for a value/function and <- to run an effect and retain its
 result. Successful input units survive later failure; inspect the receipt and
 retained work before retrying new intent.
 
-Task.taskSource is an exact committed Git revision, not provenance prose. A source
+Task.taskSource records an exact committed Git revision, not provenance prose.
+The branch source independently selects live working files or a committed ref. A source
 commit and its accepted reasoning travel together. withDecision changes taskSource;
 its decisionSource must name source actually incorporated and checked. A retained
 worker or context does not learn later decisions or commits automatically.
@@ -46,3 +51,10 @@ edits activate at an explicit new swarm boundary. Normal task values and local
 compositions remain live. .shoal/plans/composition.md explains the working model;
 .shoal/plans/operating.md supplies relevant usage patterns. Consult what the current
 obligation needs; the shared vocabulary should shorten coordination.
+
+Keep coordination compact: new fact, artifact/checked head, decisive evidence,
+remaining question or next action. Link detailed logs. Do not repeat the standing
+workflow, permission history or every acknowledgment in each task/update. Check
+presentation and required source incorporation before dependent work; one concise
+resulting-source observation suffices for an ordinary correction. Uncertain
+transport still needs its receipt and must not become a duplicate assignment.

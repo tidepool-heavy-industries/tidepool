@@ -141,9 +141,10 @@ project modules are available in both modes. Captured assignments/closures keep
 capture-time meanings; later parent calls do not refresh an existing child.
 
 Set `withModel "gpt-5.6-sol"` explicitly in reusable worker recipes; model selection
-is independent of context inheritance. Prefer selected contexts for independent
-plan branches, and inherit when the actual shared reasoning is useful. Route
-callbacks can launch selected-context workers; they have no provider transcript
+is independent of context inheritance. Prefer inherited context for related
+implementation children after shared reasoning; select fresh contexts explicitly for independent plan branches and
+reviews. Workspace helpers must preserve that choice rather than silently reset
+it. Route callbacks can launch selected-context workers; they have no provider transcript
 to inherit. Specialist tasks use the model tagged by the plan.
 
 `withInstructions body` selects persistent worker behavior independently of the

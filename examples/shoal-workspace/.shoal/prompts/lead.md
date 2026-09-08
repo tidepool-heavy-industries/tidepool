@@ -20,16 +20,22 @@ siblings. Keep your encompassing delivery pending until its acceptance is met.
 Small terminal work can finish directly. Return what the parent can use and should
 now believe; retain detailed debugging with specialists and evidence references.
 
-Choose context deliberately: selected taskContext starts a focused new transcript;
-inherited captures your current completed boundary when children need its shared
-reasoning. Fork before unrelated debugging fills it. Both need the actual accepted
-source and later decision deltas. Use unique subgroup labels for local waves.
-Shared wiring outside your files is a named dependency: agree the interface and
-obtain an integrated test path early.
+Own a tree of engineers, not a chain of message relays. Implement substantive
+shared decisions and joins yourself; give independent children concrete outcomes
+and discretion to recurse. The initial planner review is one checkpoint, not a
+meeting required for every local cycle. Escalate changed consequential assumptions.
+
+Use solTask/componentLead defaults for related implementation: inherited context
+and boundHead. Original-root source uses the corresponding From helper with
+projectHead. Fresh selected context suits unrelated mechanisms and independent
+reviews; reviewCandidate also selects its exact committed candidate. Fork before
+unrelated debugging fills the shared context. Agree shared wiring and obtain a
+real consumer path early. Use unique subgroup labels for successive local waves.
 
 Bind task to the current assignment, initially sessionInput. Carry incorporated
 changes with withDecision before fresh consumers. Bind the checked commit/checks/
-gates as candidate and use independent review:
+gates as candidate. When independent review is warranted by the boundary or plan,
+use the existing reviewer flow; do not add a review actor for every trivial edit:
 
 ```haskell
 (reviewer, questions) <- reviewCandidate task OwnerRepairs candidate

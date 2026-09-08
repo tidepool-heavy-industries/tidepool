@@ -21,6 +21,20 @@ TUIs; talk directly to the owner, lead or specialist for steering. The original
 root's .shoal is authoritative. Candidate files in managed checkouts activate only
 after checked incorporation there and an explicit next-swarm selection.
 
+## Context and source defaults
+
+`solTask` and `componentLead` inherit the current completed reasoning and use
+`boundHead`. `implement` uses `solTask`. They suit recursive implementation from
+an allocated checkout. Original-root callers use `solTaskFrom label projectHead`
+or `componentLeadFrom label projectHead`. A Task's source hash records provenance;
+it does not override that live checkout selection. Commit coherent work for Git
+integration and restart recovery, even though ordinary unfold inherits working files.
+
+Use `withContext (selected taskContext)` for an independent component or fresh
+inspection; use `atRef (GitRef source)` with the source variant for an exact
+committed checkout. Context/source/model/lifetime stay separate choices. Review
+helpers deliberately select fresh context and the exact candidate commit.
+
 ## Commission the current component
 
 The workbench accepts an ordinary Task for any project. Prefer a constructor from
@@ -36,7 +50,7 @@ let Right owners = forkGroupLabel "owners"
 let Right label = branchLabel "component-a"
 let group = batch campaign owners
 let task = Task group plan source outcome why paths criterion decisions
-work <- unfold group (childWithProgress @Attention @Delivery (componentLead label task))
+work <- unfold group (childWithProgress @Attention @Delivery (withContext (selected taskContext) (componentLeadFrom label projectHead task)))
 let (lead, questions) = work
 let Right resultLabel = watchLabel "component-ready"
 resultReady <- watch resultLabel (awaitSettledFork lead)
@@ -65,7 +79,7 @@ let Right leads = forkGroupLabel "leads"
 let Right contractLabel = branchLabel "contract"
 let Right contractTask = component campaign RelationContract baseline
 before <- snapshot
-contractWork <- unfold (batch campaign leads) (childWithProgress @Attention @Delivery (withLifetime SwarmOwned (componentLead contractLabel contractTask)))
+contractWork <- unfold (batch campaign leads) (childWithProgress @Attention @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom contractLabel projectHead contractTask))))
 let (contract, contractQuestions) = contractWork
 let Right contractReadyLabel = watchLabel "contract-ready"
 contractReady <- watch contractReadyLabel (awaitSettledFork contract)
@@ -225,7 +239,7 @@ let controlsTask = withDecision contractDecision controlsBase
 let Right products = forkGroupLabel "product"
 let Right projectionLabel = branchLabel "projection"
 let Right controlsLabel = branchLabel "controls"
-(projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @Attention @Delivery (withLifetime SwarmOwned (componentLead projectionLabel projectionTask)) <*> childWithProgress @Attention @Delivery (withLifetime SwarmOwned (componentLead controlsLabel controlsTask)))
+(projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @Attention @Delivery (componentLeadFrom projectionLabel projectHead projectionTask) <*> childWithProgress @Attention @Delivery (componentLeadFrom controlsLabel projectHead controlsTask))
 ```
 
 Register independent result and question watches as for contractWork; either

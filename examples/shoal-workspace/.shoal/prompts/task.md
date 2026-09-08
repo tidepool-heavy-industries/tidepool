@@ -6,7 +6,8 @@ implementation begins when its release condition is met.
 Build the real owning consumer and check behavior there. For substantial work,
 repeat committed scaffold, useful independent Sol branches, checked integration
 and the next local wave within the plan's discretion. Retain useful reasoning
-before forking; pass exact source and decision deltas. Keep small terminal tasks
+before forking; pass exact source and decision deltas. Default implementation helpers preserve inherited context and the current bound
+checkout; use fresh context only for an explicit reason. Keep small terminal tasks
 simple. Preserve the component's stated integration and acceptance boundaries.
 
 Compile changed consumers and run focused checks for important behavior and
