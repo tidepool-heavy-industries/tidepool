@@ -8,6 +8,10 @@ Start with [the feasibility evidence and agreed behavior](evidence/build-snapsho
 The ordinary Haskell `unfold` surface stays simple. Its preferred implementation
 now inherits the live source workspace as well as warm build artifacts.
 
+The [implementation review](evidence/build-snapshot-review.md) identifies the
+next integration checkpoint and the source-view, metadata, admission and retention
+boundaries that must be joined before the substrate is transparent to models.
+
 ## Contract
 
 Linux is the implementation target. Use native namespace and OverlayFS primitives;
