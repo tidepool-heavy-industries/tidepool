@@ -8,7 +8,10 @@ use tidepool_node::{
     MountNamespace, OverlayRotation, OverlayRotationOutcome, ProcessInvocation,
     ProcessMountBoundary,
 };
-use tidepool_worktree::{git::inspect, testing::TestRepo};
+use tidepool_repr::ActorPath;
+use tidepool_worktree::{
+    git::inspect, testing::TestRepo, WorktreeManager, WorktreeRecordStatus, WorktreeRegistry,
+};
 
 struct Owner(Child);
 
@@ -129,20 +132,6 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         ],
     )
     .unwrap();
-    let child_checkout = root.join("child-git");
-    git.try_run(
-        repository.path(),
-        &[
-            "worktree",
-            "add",
-            "--no-checkout",
-            "-qb",
-            "child",
-            child_checkout.to_str().unwrap(),
-            "HEAD",
-        ],
-    )
-    .unwrap();
     for name in [
         "view",
         "source-u0",
@@ -196,7 +185,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         "build-u0",
         "build-w0",
     ));
-    shell(&parent, &view, "printf staged > tracked; git add tracked; printf unstaged > tracked; printf ignored > ignored; printf untracked > untracked; rm deleted");
+    shell(&parent, &view, "printf staged > tracked; git add tracked; printf unstaged > tracked; printf ignored > ignored; printf untracked > untracked; rm deleted; printf intent > intent; git add -N intent; git update-index --assume-unchanged Cargo.toml; git update-index --split-index");
     let parent_git = git.with_mount_namespace(parent.clone());
     let staged = parent_git
         .try_run(&view, &["diff", "--cached"])
@@ -247,9 +236,36 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
 
     // Working files inherit their layers; only private Git administration is copied.
     let parent_admin = inspect::git_dir(&parent_git, &view).unwrap();
-    let child_admin = inspect::git_dir(git, &child_checkout).unwrap();
-    std::fs::copy(parent_admin.join("index"), child_admin.join("index")).unwrap();
-    std::fs::copy(child_checkout.join(".git"), root.join("source-uc/.git")).unwrap();
+    let original_index = std::fs::read(parent_admin.join("index")).unwrap();
+    let manager = WorktreeManager::new(
+        parent_git.clone(),
+        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        root.join("managed"),
+        view.clone(),
+    );
+    let prepared = manager
+        .prepare_inherited_source(&ActorPath::parse("root/child").unwrap())
+        .unwrap();
+    assert_eq!(prepared.receipt().status, WorktreeRecordStatus::Provisional);
+    assert!(matches!(
+        manager.lookup(&prepared.receipt().worktree_id),
+        Err(tidepool_worktree::WorktreeError::WorktreeAuthorityDenied(_))
+    ));
+    assert_eq!(
+        manager
+            .registry()
+            .get(&prepared.receipt().worktree_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        WorktreeRecordStatus::Provisional
+    );
+    assert!(!prepared.receipt().cwd.join("src").exists());
+    assert_eq!(
+        std::fs::read(parent_admin.join("index")).unwrap(),
+        original_index
+    );
+    std::fs::copy(prepared.git_file(), root.join("source-uc/.git")).unwrap();
     let (_child, child) = launch(boundary(
         source_layers,
         "source-uc",
@@ -259,6 +275,16 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         "build-wc",
     ));
     let child_git = git.with_mount_namespace(child.clone());
+    assert_eq!(
+        child_git
+            .try_run(&view, &["ls-files", "-v"])
+            .unwrap()
+            .stdout,
+        parent_git
+            .try_run(&view, &["ls-files", "-v"])
+            .unwrap()
+            .stdout
+    );
     assert_eq!(
         child_git
             .try_run(&view, &["diff", "--cached"])

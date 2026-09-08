@@ -132,6 +132,24 @@ pub struct WorktreeManager {
     source_repository: PathBuf,
 }
 
+/// Independent child Git state awaiting its inherited working-file view.
+/// Its durable receipt remains provisional; it is not a launchable worktree.
+#[derive(Debug)]
+pub struct PreparedSourceWorktree {
+    receipt: WorktreeReceipt,
+}
+
+impl PreparedSourceWorktree {
+    pub fn receipt(&self) -> &WorktreeReceipt {
+        &self.receipt
+    }
+
+    /// This pointer belongs in the child's private source upper directory.
+    pub fn git_file(&self) -> PathBuf {
+        self.receipt.cwd.join(".git")
+    }
+}
+
 impl WorktreeManager {
     pub fn new(
         git: GitCli,
@@ -247,6 +265,63 @@ impl WorktreeManager {
         self.create_with_branch(spec, Some(BranchName::from_raw(actor_path.git_branch())))
     }
 
+    /// Prepare a child of this manager's current repository without checking out
+    /// files or converting staging into a commit. The source-view owner invokes
+    /// this while holding native mutation admission and retains the prepared
+    /// checkout until its source mount is installed. Explicit commit seeds use
+    /// `create_for_actor_path` instead.
+    pub fn prepare_inherited_source(
+        &self,
+        actor_path: &ActorPath,
+    ) -> Result<PreparedSourceWorktree, WorktreeError> {
+        let source = &self.source_repository;
+        if let Some(kind) = inspect::in_progress(&self.git, source)? {
+            return Err(WorktreeError::SourceOperationInProgress(kind));
+        }
+        self.prepare_worktree_root()?;
+        let temporary = tempfile::Builder::new()
+            .prefix(".source-index-")
+            .tempdir_in(&self.worktree_root)
+            .map_err(|error| crate::storage::storage_failure(&self.worktree_root, error))?;
+        let index = temporary.path().join("index");
+        let source_index = self.git.try_run(
+            source,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        )?;
+        let index_utf8 = camino::Utf8Path::from_path(&index).ok_or_else(|| {
+            crate::storage::storage_failure(&index, "index path is not valid UTF-8")
+        })?;
+        let temporary_git = self.git.with_env("GIT_INDEX_FILE", index_utf8.as_str());
+        if self.git.try_exists(Path::new(source_index.trimmed()))? {
+            self.git
+                .copy_file_to_host(Path::new(source_index.trimmed()), &index)?;
+            // Resolve split-index dependencies while the original Git directory
+            // still supplies them. Only the temporary index may be rewritten.
+            temporary_git.try_run(source, &["update-index", "--no-split-index"])?;
+        } else {
+            // A missing index is an empty staging area, not an index at HEAD.
+            temporary_git.try_run(source, &["read-tree", "--empty"])?;
+        }
+        let seed = GitOid::from_raw(self.git.try_run(source, &["rev-parse", "HEAD"])?.trimmed());
+        let resolved = ResolvedSeed {
+            seed,
+            snapshot_ref: None,
+            origin: WorktreeOrigin::CurrentRepository,
+            git_repository: source.clone(),
+            source_repository: source.clone(),
+        };
+        let handle = self.materialize(
+            self.registry.mint_id()?,
+            resolved,
+            &actor_path.to_string(),
+            Some(BranchName::from_raw(actor_path.git_branch())),
+            Some(&index),
+        )?;
+        Ok(PreparedSourceWorktree {
+            receipt: handle.receipt,
+        })
+    }
+
     fn create_with_branch(
         &self,
         spec: &WorktreeSpec,
@@ -255,31 +330,23 @@ impl WorktreeManager {
         let id = self.registry.mint_id()?;
         let resolved = self.resolve_source(spec, &id)?;
 
-        fs::create_dir_all(&self.worktree_root).map_err(|e| WorktreeError::StorageFailure {
-            path: self.worktree_root.clone(),
-            detail: e.to_string(),
-        })?;
-        // Never-dirty-the-source, enforced rather than documentary: refuse a
-        // worktree_root that resolves inside a git working tree (same check +
-        // error as `WorktreeRegistry::open` — git walks UP from the root, so
-        // the managed worktrees materialized BELOW this root never trip it).
-        if let Ok(canonical_root) = self.worktree_root.canonicalize() {
-            if let Ok(toplevel) = inspect::work_tree(&self.git, &canonical_root) {
-                if let Ok(canonical_toplevel) = toplevel.canonicalize() {
-                    if canonical_root.starts_with(&canonical_toplevel) {
-                        return Err(WorktreeError::InvalidRegistryRoot {
-                            root: canonical_root,
-                            inside: canonical_toplevel,
-                        });
-                    }
-                }
-            }
-        }
+        self.materialize(id, resolved, &spec.label, named_branch, None)
+    }
+
+    fn materialize(
+        &self,
+        id: WorktreeId,
+        resolved: ResolvedSeed,
+        label: &str,
+        named_branch: Option<BranchName>,
+        inherited_index: Option<&Path>,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        self.prepare_worktree_root()?;
         let cwd = self.worktree_root.join(id.as_str());
         let branch = named_branch.unwrap_or_else(|| {
             BranchName::from_raw(format!(
                 "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
-                sanitize_branch_label(&spec.label),
+                sanitize_branch_label(label),
                 id.as_str()
             ))
         });
@@ -300,16 +367,26 @@ impl WorktreeManager {
         // Native linked worktrees give each actor separate working files,
         // index, and HEAD while keeping commits and branches in one ordinary
         // repository namespace shared with the root.
-        let args: Vec<OsString> = vec![
-            "worktree".into(),
-            "add".into(),
-            "-q".into(),
+        let mut args: Vec<OsString> = vec!["worktree".into(), "add".into(), "-q".into()];
+        if inherited_index.is_some() {
+            args.push("--no-checkout".into());
+        }
+        args.extend([
             "-b".into(),
             OsString::from(branch.as_str()),
             cwd.clone().into_os_string(),
             OsString::from(resolved.seed.as_str()),
-        ];
+        ]);
         self.git.try_run(&resolved.git_repository, &args)?;
+
+        if let Some(index) = inherited_index {
+            let directory = inspect::git_dir(&self.git, &cwd)?;
+            fs::copy(index, directory.join("index"))
+                .map_err(|error| crate::storage::storage_failure(&directory, error))?;
+            // Working files are not installed yet. Keep the durable receipt
+            // provisional until the source-view owner completes that step.
+            return Ok(WorktreeHandle::from_receipt(provisional));
+        }
 
         let finalized = WorktreeReceipt {
             status: WorktreeRecordStatus::Finalized,
@@ -318,6 +395,30 @@ impl WorktreeManager {
         self.registry.put(&finalized)?;
 
         Ok(WorktreeHandle::from_receipt(finalized))
+    }
+
+    fn prepare_worktree_root(&self) -> Result<(), WorktreeError> {
+        fs::create_dir_all(&self.worktree_root).map_err(|e| WorktreeError::StorageFailure {
+            path: self.worktree_root.clone(),
+            detail: e.to_string(),
+        })?;
+        // Never-dirty-the-source, enforced rather than documentary: refuse a
+        // worktree_root that resolves inside a git working tree (same check +
+        // error as `WorktreeRegistry::open` — git walks UP from the root, so
+        // the managed worktrees materialized BELOW this root never trip it).
+        if let Ok(canonical_root) = self.worktree_root.canonicalize() {
+            if let Ok(toplevel) = inspect::work_tree(&self.git, &canonical_root) {
+                if let Ok(canonical_toplevel) = toplevel.canonicalize() {
+                    if canonical_root.starts_with(&canonical_toplevel) {
+                        return Err(WorktreeError::InvalidRegistryRoot {
+                            root: canonical_root,
+                            inside: canonical_toplevel,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Resolve what commit a new worktree should be rooted at, and where.
@@ -404,13 +505,19 @@ impl WorktreeManager {
         }
     }
 
-    /// Look a worktree up by durable id. `Err(WorktreeLost)` when it is
-    /// registered but gone from disk; `Ok(None)` when it was never registered.
+    /// Look a finalized worktree up by durable id. Missing registered storage
+    /// returns `WorktreeLost`; present provisional storage cannot grant a
+    /// usable handle. `Ok(None)` means it was never registered.
     pub fn lookup(&self, id: &WorktreeId) -> Result<Option<WorktreeHandle>, WorktreeError> {
         match self.registry.get(id)? {
             None => Ok(None),
             Some(receipt) => {
                 if worktree_present(&self.git, &receipt.cwd)? {
+                    if receipt.status != WorktreeRecordStatus::Finalized {
+                        return Err(WorktreeError::WorktreeAuthorityDenied(format!(
+                            "worktree {id} initialization is not finalized"
+                        )));
+                    }
                     Ok(Some(WorktreeHandle::from_receipt(receipt)))
                 } else {
                     Err(WorktreeError::WorktreeLost(id.clone()))

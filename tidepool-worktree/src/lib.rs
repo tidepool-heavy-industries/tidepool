@@ -44,8 +44,8 @@ pub mod testing;
 
 pub use binding::{ActiveBinding, AgentRef, Binding, BindingState, BindingTable, BindingTerminal};
 pub use create::{
-    DirtyPolicy, WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec,
-    TIDEPOOL_BRANCH_PREFIX, TIDEPOOL_SNAPSHOT_REF_PREFIX,
+    DirtyPolicy, PreparedSourceWorktree, WorktreeHandle, WorktreeManager, WorktreeSource,
+    WorktreeSpec, TIDEPOOL_BRANCH_PREFIX, TIDEPOOL_SNAPSHOT_REF_PREFIX,
 };
 pub use error::{DirtySummary, GitFailureReceipt, InProgressKind, WorktreeError};
 pub use git::{GitCli, GitOutput};

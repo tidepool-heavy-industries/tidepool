@@ -501,10 +501,8 @@ fn provisional_row_with_no_directory_is_visible_not_recreated() {
     assert!(!summary.present, "no directory backs it");
     assert_eq!(summary.receipt.status, WorktreeRecordStatus::Provisional);
 
-    // lookup(): today's lookup only checks directory presence, not status —
-    // so an unfinalized row with no directory reports exactly the same
-    // WorktreeLost a hand-deleted FINALIZED row would (see
-    // `hand_deleted_worktree_is_lost_not_recreated` above).
+    // Missing storage remains lost, even for a provisional row. Present but
+    // provisional storage is separately refused as unfinished initialization.
     let err = manager
         .lookup(&id)
         .expect_err("no directory backs this row");

@@ -99,11 +99,22 @@ index and the child's `.git` pointer. This does not yet measure allocated bytes
 or prove resource retirement.
 
 Check: `cargo test -p tidepool-worktree --test source_build_fork -- --nocapture`
-passed (one test, 2.20 seconds). This is a provider-free composition check using
+passed. This is a provider-free composition check using
 production mount and Git primitives, not native admission or managed-unfold
-acceptance. The fixture still assembles the child checkout and copies its index
-manually; production allocation must own that transaction, including split-index
-and interrupted Git-operation semantics.
+acceptance. Child Git preparation now uses
+`WorktreeManager::prepare_inherited_source`, sharing the existing provisional
+allocation path. It preserves staged/unstaged changes, intent-to-add and index
+flags, and expands a copied split index without changing the parent's index
+bytes. The prepared checkout has independent HEAD/branch/index and no freshly
+checked-out files. It remains provisional until a source view is installed;
+normal lookup refuses a handle to present but unfinished storage. The fixture
+still installs the child's source view manually. Host admission, source-view
+registration/finalization and automatic fallback remain unwired.
+
+After that owner change, the combined source/build test and all 22 worktree-core
+checks passed. Clippy on both changed test targets, formatting and whitespace
+checks passed. Serialized receipts keep their existing format: preparation uses
+the existing provisional status rather than recording a completed checkout.
 
 The source integration entry is `ActorForkWorkspaceAdmission::admit`, called by
 `try_start_child` in `tidepool-actor/src/resident_actor.rs` before the child is allocated and

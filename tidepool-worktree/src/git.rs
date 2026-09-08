@@ -106,6 +106,35 @@ impl GitCli {
         result.map_err(|error| crate::storage::storage_failure(path, error))
     }
 
+    /// Copy private Git state out of the same filesystem view used for commands.
+    /// The destination belongs to the host; it need not be writable in that view.
+    pub(crate) fn copy_file_to_host(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), WorktreeError> {
+        let copy = || -> std::io::Result<()> {
+            #[cfg(target_os = "linux")]
+            if let Some(namespace) = &self.namespace {
+                let output = namespace
+                    .host_command(Path::new("/"), OsStr::new("cat"))?
+                    .arg("--")
+                    .arg(source)
+                    .stdout(std::fs::File::create(destination)?)
+                    .output()?;
+                if !output.status.success() {
+                    return Err(std::io::Error::other(
+                        String::from_utf8_lossy(&output.stderr).into_owned(),
+                    ));
+                }
+                return Ok(());
+            }
+            std::fs::copy(source, destination)?;
+            Ok(())
+        };
+        copy().map_err(|error| crate::storage::storage_failure(source, error))
+    }
+
     /// Run git in `cwd`. `Err` only for a nonzero exit or a spawn failure; a
     /// command that succeeds with output on stderr is still `Ok`.
     pub fn run<S: AsRef<OsStr>>(
