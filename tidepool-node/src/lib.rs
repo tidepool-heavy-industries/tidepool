@@ -14,7 +14,10 @@ pub use inbox::{
     MAX_TOTAL_RECEIPT_CONTEXT_BYTES,
 };
 #[cfg(target_os = "linux")]
-pub use mount_namespace::{MountNamespace, OverlayRotation, OverlayRotationOutcome};
+pub use mount_namespace::{
+    MountNamespace, OverlayRecovery, OverlayRotation, OverlayRotationOutcome,
+    PreparedOverlayRotation,
+};
 pub use process_boundary::service_scope::{
     PreparedServiceScope, ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError,
 };

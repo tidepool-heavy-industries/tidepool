@@ -7,7 +7,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tidepool_actor::ActorRef;
 use tidepool_node::{
-    MountNamespace, OverlayRotation, OverlayRotationOutcome, ProcessBoundaryError,
+    MountNamespace, OverlayRecovery, OverlayRotation, OverlayRotationOutcome, ProcessBoundaryError,
     ProcessMountBoundary,
 };
 
@@ -59,7 +59,17 @@ enum PublicationState {
         bytes: Vec<u8>,
         snapshot: BuildSnapshot,
     },
-    Unconfirmed,
+    Unconfirmed(Box<PendingRotation>),
+}
+
+#[derive(Debug)]
+struct PendingRotation {
+    recovery: OverlayRecovery,
+    next: PathBuf,
+    upper: PathBuf,
+    work: PathBuf,
+    frozen: Vec<BuildLayer>,
+    bytes: Vec<u8>,
 }
 
 #[derive(serde::Serialize)]
@@ -199,21 +209,19 @@ impl BuildResourceLease {
             self.record_publication()?;
             return Ok(OverlayRotationOutcome::Rotated);
         }
-        if matches!(self.publication, PublicationState::Unconfirmed) {
-            return Err(io::Error::other(
-                "build publication requires reconciliation",
-            ));
+        if let PublicationState::Unconfirmed(pending) = &self.publication {
+            let outcome = pending.recovery.reconcile();
+            return self.settle_rotation(outcome);
         }
         if *self.storage.state.lock() != BuildResourceState::RetainedUnconfirmed {
             return Err(io::Error::other(
                 "build publication requires retained process custody",
             ));
         }
-        let next = self
-            .storage
-            .path
-            .join(format!("generation-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&next)?;
+        let generation = tempfile::Builder::new()
+            .prefix("generation-")
+            .tempdir_in(&self.storage.path)?;
+        let next = generation.path();
         let upper = next.join("upper");
         let work = next.join("work");
         std::fs::create_dir(&upper)?;
@@ -233,11 +241,47 @@ impl BuildResourceLease {
             &upper,
             &work,
         )?;
+        let prepared = namespace.prepare_overlay_rotation(rotation)?;
         // Once prepared, a lost receipt must never cause a second publication.
         let pending = encode_view(&frozen, &upper, &work, true)?;
         tidepool_atomic_write::write_durable(&self.storage.path.join("pending.json"), &pending)?;
-        self.publication = PublicationState::Unconfirmed;
-        let outcome = namespace.rotate_overlay(rotation);
+        // Preparation failures reclaim their unused directories. Once a mount
+        // can exist, only confirmed transition settlement may release storage.
+        let next = generation.keep();
+        let (recovery, outcome) = prepared.apply();
+        self.publication = PublicationState::Unconfirmed(Box::new(PendingRotation {
+            recovery,
+            next,
+            upper,
+            work,
+            frozen,
+            bytes: pending,
+        }));
+        self.settle_rotation(outcome)
+    }
+
+    fn settle_rotation(
+        &mut self,
+        outcome: OverlayRotationOutcome,
+    ) -> io::Result<OverlayRotationOutcome> {
+        if matches!(outcome, OverlayRotationOutcome::Unconfirmed(_)) {
+            return Ok(outcome);
+        }
+        let PublicationState::Unconfirmed(pending) =
+            std::mem::replace(&mut self.publication, PublicationState::Writable)
+        else {
+            return Err(io::Error::other(
+                "build rotation has no retained transition",
+            ));
+        };
+        let PendingRotation {
+            next,
+            upper,
+            work,
+            frozen,
+            bytes,
+            ..
+        } = *pending;
         match &outcome {
             OverlayRotationOutcome::Rotated => {
                 // Mount state is known even if recording it subsequently fails.
@@ -246,7 +290,7 @@ impl BuildResourceLease {
                 self.work = work;
                 self.layers = frozen;
                 self.publication = PublicationState::NeedsRecord {
-                    bytes: pending,
+                    bytes,
                     snapshot: BuildSnapshot {
                         layers: self.layers.clone().into(),
                     },
@@ -261,7 +305,9 @@ impl BuildResourceLease {
                 std::fs::remove_dir_all(&next)?;
                 self.finish_publication()?;
             }
-            OverlayRotationOutcome::Unconfirmed(_) => {}
+            OverlayRotationOutcome::Unconfirmed(_) => {
+                unreachable!("unconfirmed transition retained above")
+            }
         }
         Ok(outcome)
     }
@@ -606,7 +652,18 @@ mod tests {
         // Preparation failed before invoking the mount owner. The old view is
         // known to be writable and retry needs no reconciliation.
         std::fs::create_dir(parent.path().join("pending.json")).unwrap();
+        let before = std::fs::read_dir(parent.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<std::collections::BTreeSet<_>>();
         assert!(parent.publish(&namespace, &project.join("target")).is_err());
+        assert_eq!(
+            std::fs::read_dir(parent.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<std::collections::BTreeSet<_>>(),
+            before
+        );
         std::fs::remove_dir(parent.path().join("pending.json")).unwrap();
         assert!(matches!(
             parent.publish(&namespace, &project.join("target")).unwrap(),

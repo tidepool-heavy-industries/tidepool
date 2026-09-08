@@ -47,6 +47,47 @@ pub struct OverlayRotation {
     preserved_mounts: Vec<CString>,
 }
 
+/// Captured before a transition; applying it consumes the ability to rotate.
+#[derive(Debug)]
+pub struct PreparedOverlayRotation {
+    recovery: OverlayRecovery,
+}
+
+/// Retains the exact namespace and transition evidence for observation retries.
+/// Recovery can settle or thaw the original view, but cannot rotate it again.
+#[derive(Debug)]
+pub struct OverlayRecovery {
+    namespace: MountNamespace,
+    rotation: OverlayRotation,
+    before: observation::Observation,
+}
+
+impl PreparedOverlayRotation {
+    pub fn apply(self) -> (OverlayRecovery, OverlayRotationOutcome) {
+        let recovery = self.recovery;
+        let result = match recovery
+            .namespace
+            .rotate_overlay_inner(recovery.rotation.clone())
+        {
+            Ok(outcome) => outcome,
+            Err(error) => OverlayRotationOutcome::Unconfirmed(error.to_string()),
+        };
+        let outcome =
+            recovery
+                .namespace
+                .settle_rotation(&recovery.rotation, &recovery.before, result);
+        (recovery, outcome)
+    }
+}
+
+impl OverlayRecovery {
+    pub fn reconcile(&self) -> OverlayRotationOutcome {
+        self.namespace
+            .reconcile_rotation(&self.rotation, &self.before)
+            .unwrap_or_else(|error| OverlayRotationOutcome::Unconfirmed(error.to_string()))
+    }
+}
+
 #[derive(Debug)]
 pub enum OverlayRotationOutcome {
     /// The previous overlay is read-only and the replacement is writable.
@@ -334,15 +375,24 @@ impl MountNamespace {
     /// method performs mount mechanics; it does not establish native quiescence
     /// or publish resource metadata. Run it outside the async actor loop.
     pub fn rotate_overlay(&self, rotation: OverlayRotation) -> OverlayRotationOutcome {
-        let before = match self.observe_overlay(&rotation.target) {
-            Ok(before) => before,
-            Err(error) => return OverlayRotationOutcome::Unchanged(error),
-        };
-        let result = match self.rotate_overlay_inner(rotation.clone()) {
-            Ok(outcome) => outcome,
-            Err(error) => OverlayRotationOutcome::Unconfirmed(error.to_string()),
-        };
-        self.settle_rotation(&rotation, &before, result)
+        match self.prepare_overlay_rotation(rotation) {
+            Ok(prepared) => prepared.apply().1,
+            Err(error) => OverlayRotationOutcome::Unchanged(error),
+        }
+    }
+
+    pub fn prepare_overlay_rotation(
+        &self,
+        rotation: OverlayRotation,
+    ) -> io::Result<PreparedOverlayRotation> {
+        let before = self.observe_overlay(&rotation.target)?;
+        Ok(PreparedOverlayRotation {
+            recovery: OverlayRecovery {
+                namespace: self.clone(),
+                rotation,
+                before,
+            },
+        })
     }
 
     fn settle_rotation(

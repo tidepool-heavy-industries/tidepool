@@ -18,7 +18,9 @@ use rustix::fs::{Mode, OFlags};
 use rustix::thread::{CapabilitySet, CapabilitySets, LinkNameSpaceType};
 
 mod overlay;
-pub use overlay::{OverlayRotation, OverlayRotationOutcome};
+pub use overlay::{
+    OverlayRecovery, OverlayRotation, OverlayRotationOutcome, PreparedOverlayRotation,
+};
 
 /// A retained view into the mount namespace of an owned live process.
 ///

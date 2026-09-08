@@ -82,23 +82,30 @@ fn fixture(root: &Path) -> (Worker, MountNamespace, OverlayRotation) {
 fn lost_receipt_after_publication_recovers_the_exact_replacement() {
     let directory = tempfile::tempdir().unwrap();
     let (mut worker, namespace, rotation) = fixture(directory.path());
-    let before = namespace.observe_overlay(&rotation.target).unwrap();
     assert_eq!(worker.exchange("write"), "wrote");
-    let transition = namespace.rotate_overlay_inner(rotation.clone()).unwrap();
+    let prepared = namespace
+        .prepare_overlay_rotation(rotation.clone())
+        .unwrap();
+    let (recovery, transition) = prepared.apply();
     assert!(
         matches!(transition, OverlayRotationOutcome::Rotated),
         "{transition:?}"
     );
     let installed = namespace.observe_overlay(&rotation.target).unwrap().id;
-    let result = namespace.settle_rotation(
-        &rotation,
-        &before,
-        OverlayRotationOutcome::Unconfirmed("lost receipt".into()),
-    );
+    // Keep the recovery handle after losing the initial transition result.
+    let result = recovery.reconcile();
     assert!(
         matches!(result, OverlayRotationOutcome::Rotated),
         "{result:?}"
     );
+    assert_eq!(
+        namespace.observe_overlay(&rotation.target).unwrap().id,
+        installed
+    );
+    assert!(matches!(
+        recovery.reconcile(),
+        OverlayRotationOutcome::Rotated
+    ));
     assert_eq!(
         namespace.observe_overlay(&rotation.target).unwrap().id,
         installed
