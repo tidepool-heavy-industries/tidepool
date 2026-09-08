@@ -86,6 +86,35 @@ for changed inputs. Include a busy parent: it remains usable and the child recei
 the documented fallback. This is the next priority before broader consolidation,
 recovery and telemetry work; those remain required for full completion.
 
+The composed source/build fixture in
+`tidepool-worktree/tests/source_build_fork.rs` now proves the filesystem/Git/Cargo
+part together. It rotates a built parent's source and nested build views, starts
+an independent child over the frozen layers, and preserves staged versus
+unstaged changes, deletions, ignored/untracked files, and source file mtimes.
+Cargo reports every inherited compiler artifact fresh. Changing a build-script
+input and then local Rust source each rebuilds the child with the expected new
+output; the parent's executable, index and HEAD remain independent. No source or
+target file tree is copied on the child path: the fixture copies only the Git
+index and the child's `.git` pointer. This does not yet measure allocated bytes
+or prove resource retirement.
+
+Check: `cargo test -p tidepool-worktree --test source_build_fork -- --nocapture`
+passed (one test, 2.20 seconds). This is a provider-free composition check using
+production mount and Git primitives, not native admission or managed-unfold
+acceptance. The fixture still assembles the child checkout and copies its index
+manually; production allocation must own that transaction, including split-index
+and interrupted Git-operation semantics.
+
+The source integration entry is `ActorForkWorkspaceAdmission::admit`, called by
+`try_start_child` in `tidepool-actor/src/resident_actor.rs` before the child is allocated and
+before `LocalResidentDeployment::PolicyInstalled`. Its current handler delegates
+to `WorktreeManager::create_for_actor_path`, which resolves a clean commit or a
+synthetic dirty commit. Capturing source only in the later launch event cannot
+preserve the correct index/HEAD transaction. Move capture into admission and hand
+the resulting retained workspace view to launch; preserve the separate creator
+build snapshot selection. Do not reuse the synthetic-commit path for successful
+live source inheritance.
+
 Focused verification of the inspection changes: the namespace Git integration
 test passed, including manager lookup/list/submission against mounted-only state;
 three lost-worktree cases and the in-progress rebase refusal passed in
