@@ -244,12 +244,13 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         owner: ActorRef,
         actor_path: String,
         seed: ForkWorkspaceSeed,
+        native_tools: tidepool_actor::NativeToolClass,
     ) -> tidepool_actor::ForkWorkspaceAdmissionFuture<'_> {
         let worktrees = self.worktrees.clone();
         let custody = self.clone();
         Box::pin(async move {
             let build_snapshot = match &custody.native {
-                Some(native) => native.build_snapshot(owner).await,
+                Some(native) => native.build_snapshot(owner, native_tools).await,
                 None => None,
             };
             let handle = tokio::task::spawn_blocking(move || {
@@ -660,8 +661,28 @@ struct NativeForkAdmission {
     backend: Arc<dyn InteractiveAgentBackend>,
 }
 
+fn native_tool_policy(
+    native_tools: tidepool_actor::NativeToolClass,
+) -> InteractiveNativeToolPolicy {
+    match native_tools {
+        tidepool_actor::NativeToolClass::InspectionOnly => {
+            InteractiveNativeToolPolicy::InspectionOnly
+        }
+        tidepool_actor::NativeToolClass::Coding
+        | tidepool_actor::NativeToolClass::Integration
+        | tidepool_actor::NativeToolClass::Inherited => InteractiveNativeToolPolicy::Standard,
+    }
+}
+
 impl NativeForkAdmission {
-    async fn build_snapshot(&self, creator: ActorRef) -> Option<OverlaySnapshot> {
+    async fn build_snapshot(
+        &self,
+        creator: ActorRef,
+        native_tools: tidepool_actor::NativeToolClass,
+    ) -> Option<OverlaySnapshot> {
+        if native_tool_policy(native_tools) == InteractiveNativeToolPolicy::InspectionOnly {
+            return None;
+        }
         let source = self
             .owners
             .lock()
@@ -1820,7 +1841,7 @@ async fn run_interactive_applications(
                                 let build_snapshot = match build_inheritance {
                                     BuildInheritance::Prepared(snapshot) => snapshot,
                                     BuildInheritance::Unprepared => match installation.creator {
-                                        Some(creator) => native_admission.build_snapshot(creator).await,
+                                        Some(creator) => native_admission.build_snapshot(creator, installation.effective_role.native_tools()).await,
                                         None => None,
                                     },
                                 };
@@ -2570,14 +2591,7 @@ async fn launch_prepared_interactive_application(
         &git_common_dir,
     );
     let agent_workspace = PathBuf::from(ACTOR_PROJECT_ROOT);
-    let native_tool_policy = match installation.effective_role.native_tools() {
-        tidepool_actor::NativeToolClass::InspectionOnly => {
-            InteractiveNativeToolPolicy::InspectionOnly
-        }
-        tidepool_actor::NativeToolClass::Coding
-        | tidepool_actor::NativeToolClass::Integration
-        | tidepool_actor::NativeToolClass::Inherited => InteractiveNativeToolPolicy::Standard,
-    };
+    let native_tool_policy = native_tool_policy(installation.effective_role.native_tools());
     let policy_mounts = backend
         .prepare_native_tool_policy(native_tool_policy, &actor_root.join("native-policy"))
         .map_err(|error| {

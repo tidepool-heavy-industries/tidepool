@@ -97,6 +97,7 @@ pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
         owner: ActorRef,
         actor_path: String,
         seed: ForkWorkspaceSeed,
+        native_tools: crate::NativeToolClass,
     ) -> ForkWorkspaceAdmissionFuture<'_>;
 }
 

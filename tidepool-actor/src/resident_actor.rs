@@ -1177,7 +1177,12 @@ where
             let owner = context.actor;
             let actor_path = descriptor.label().to_owned();
             let admitted = admission
-                .admit(owner, actor_path, seed)
+                .admit(
+                    owner,
+                    actor_path,
+                    seed,
+                    descriptor.effective_role().native_tools(),
+                )
                 .await
                 .map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(

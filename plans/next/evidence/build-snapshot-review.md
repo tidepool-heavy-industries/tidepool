@@ -292,6 +292,9 @@ also exercised actual host fork admission with a busy creator, removed that
 creator from the fleet before bootstrap, and confirmed that installed custody
 retained the exact selected layer set without a second native request. Shoal
 compiled; no TUI was launched for these checks.
+Admission receives the child's already-attenuated native-tool class. It shares
+the launch policy mapping and skips build publication and snapshot retention for
+inspection-only children, whose launch does not mount a private build view.
 
 The focused current-thread admission test and existing sibling custody ordering
 and failed-custody publication tests passed (3 tests). The Shoal binary compiled.

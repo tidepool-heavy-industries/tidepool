@@ -53,6 +53,7 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
         owner,
         "root/async-child".into(),
         ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+        tidepool_actor::NativeToolClass::Coding,
     );
     std::future::poll_fn(|cx| {
         assert!(preparation.as_mut().poll(cx).is_pending());
@@ -159,10 +160,11 @@ impl ForkWorkspaceAdmission for DelayedCustody {
         owner: ActorRef,
         path: String,
         seed: ForkWorkspaceSeed,
+        native_tools: tidepool_actor::NativeToolClass,
     ) -> tidepool_actor::ForkWorkspaceAdmissionFuture<'_> {
         let controller = self.clone();
         Box::pin(async move {
-            let prepared = self.inner.admit(owner, path, seed).await?;
+            let prepared = self.inner.admit(owner, path, seed, native_tools).await?;
             Ok(tidepool_actor::PreparedForkWorkspace::new(
                 prepared.handle().clone(),
                 move |actor| controller.delay_installation(actor, || prepared.install(actor)),

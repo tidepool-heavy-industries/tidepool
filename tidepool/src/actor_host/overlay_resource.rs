@@ -967,9 +967,29 @@ mod tests {
                 creator,
                 "root/warm-child".into(),
                 ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+                tidepool_actor::NativeToolClass::Coding,
             )
             .await
             .unwrap();
+        assert_eq!(backend.calls.lock().len(), before_calls + 1);
+        let inspection = admission
+            .admit(
+                creator,
+                "root/inspection-child".into(),
+                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+                tidepool_actor::NativeToolClass::InspectionOnly,
+            )
+            .await
+            .unwrap()
+            .install(ActorRef::first(tidepool_actor::ActorId(9)))
+            .unwrap();
+        let inspection = (inspection.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ActorWorkspaceCustody>()
+            .unwrap();
+        assert!(matches!(
+            inspection.build_inheritance,
+            BuildInheritance::Prepared(None)
+        ));
         assert_eq!(backend.calls.lock().len(), before_calls + 1);
         owners.lock().remove(&creator);
         let installed = prepared
