@@ -146,6 +146,38 @@ impl MountNamespace {
         Ok(())
     }
 
+    /// Compare retained kernel namespace and root identities, not current file
+    /// contents or process liveness. Separate captures of the same view compare
+    /// equal without relying on a PID or the allocation identity of this handle.
+    pub fn same_view_as(&self, other: &Self) -> io::Result<bool> {
+        for (left, right) in [
+            (&self.descriptors.user, &other.descriptors.user),
+            (&self.descriptors.mount, &other.descriptors.mount),
+            (&self.descriptors.root, &other.descriptors.root),
+        ] {
+            let left = rustix::fs::fstat(left)?;
+            let right = rustix::fs::fstat(right)?;
+            if (left.st_dev, left.st_ino) != (right.st_dev, right.st_ino) {
+                return Ok(false);
+            }
+        }
+        // Bind mounts can share device/inode while exposing different nested
+        // mounts. The retained root must identify the same mount as well.
+        let root_mount = |root: &OwnedFd| -> io::Result<u64> {
+            let stat = rustix::fs::statx(
+                root,
+                c"",
+                rustix::fs::AtFlags::EMPTY_PATH,
+                rustix::fs::StatxFlags::MNT_ID,
+            )?;
+            if stat.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
+                return Err(io::Error::other("root mount identity unavailable"));
+            }
+            Ok(stat.stx_mnt_id)
+        };
+        Ok(root_mount(&self.descriptors.root)? == root_mount(&other.descriptors.root)?)
+    }
+
     /// Prepare a trusted host command inside this view. The command retains the
     /// namespace descriptors through spawn and changes directory only after
     /// entering the namespace. Do not use this to bypass actor launch policy.

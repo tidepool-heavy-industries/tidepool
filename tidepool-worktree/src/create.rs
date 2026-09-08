@@ -362,6 +362,31 @@ impl WorktreeManager {
         Ok(WorktreeHandle::from_receipt(finalized))
     }
 
+    /// Reattach filesystem access after the resource owner recovers its exact
+    /// namespace. This verifies the registered Git identity without resetting
+    /// HEAD, the index, or working files. It does not recover native execution
+    /// ownership or reconstruct mounts on the caller's behalf.
+    #[cfg(target_os = "linux")]
+    pub fn restore_mounted_source(
+        &self,
+        id: &WorktreeId,
+        namespace: tidepool_node::MountNamespace,
+        visible_root: &Path,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        let receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        if receipt.status != WorktreeRecordStatus::Mounted {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "filesystem recovery requires a completed mounted checkout".into(),
+            ));
+        }
+        self.registry
+            .install_view(&receipt, namespace, visible_root)?;
+        Ok(WorktreeHandle::from_receipt(receipt))
+    }
+
     fn create_with_branch(
         &self,
         spec: &WorktreeSpec,

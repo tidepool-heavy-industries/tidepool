@@ -127,8 +127,14 @@ remain unchanged, and older binaries reject the new enum variant rather than
 mistaking the Git-only host directory for working files. No bulk migration of
 ordinary records is needed. Reopening seeds unavailable view requirements from
 these receipts; direct Git access and lookup fail until resource recovery restores
-the view. Namespace reattachment after restart is not yet implemented. There is
-no separate view manifest or second durable registry.
+the view. `restore_mounted_source` now reattaches a resource-owner-supplied namespace
+to an existing mounted receipt after verifying its private Git directory. It does
+not reset later commits or working changes. Repeated attachment of the same kernel
+namespace/root is idempotent; a different namespace cannot replace a retained view
+merely by sharing its Git directory. Namespace comparison uses pinned kernel file
+identities rather than PIDs or Rust allocation identity. There is no separate view
+manifest or second durable registry. Recovering the native owner, mount recipes
+and resource dependencies after host loss remains unfinished.
 
 Checks for this extension: the combined source/build check, 22 worktree-core
 checks, 14 storage-error checks and 10 durable-format checks passed. Wrong-view
@@ -144,6 +150,14 @@ dirty-snapshot checks passed after this change.
 `nix develop --command cargo check -p tidepool --bin shoal` compiled the application
 and changed consumers successfully. Clippy on the affected worktree test targets,
 formatting and whitespace checks passed.
+
+The reattachment extension passed the combined source/build check and the existing
+mounted-Git check. It reopens the registry, refuses access before reattachment,
+rejects the parent's Git identity, recaptures the child's namespace through new
+descriptors, and restores inspection after independent child commits/edits. A
+second namespace with the same Git pointer is refused without replacing the
+retained child's files. This proves the worktree-side reattachment boundary, not
+full native/host restart recovery.
 
 The source integration entry is `ActorForkWorkspaceAdmission::admit`, called by
 `try_start_child` in `tidepool-actor/src/resident_actor.rs` before the child is allocated and

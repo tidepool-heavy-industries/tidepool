@@ -33,10 +33,19 @@ impl WorktreeViews {
     }
 
     pub fn install(&self, cwd: &Path, view: MountedView) -> io::Result<()> {
-        self.0
+        let mut views = self
+            .0
             .write()
-            .map_err(|_| io::Error::other("worktree view lock poisoned"))?
-            .insert(cwd.to_owned(), ViewAccess::Mounted(view));
+            .map_err(|_| io::Error::other("worktree view lock poisoned"))?;
+        if let Some(ViewAccess::Mounted(current)) = views.get(cwd) {
+            if current.root != view.root || !current.namespace.same_view_as(&view.namespace)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "worktree already has a different retained filesystem view",
+                ));
+            }
+        }
+        views.insert(cwd.to_owned(), ViewAccess::Mounted(view));
         Ok(())
     }
 

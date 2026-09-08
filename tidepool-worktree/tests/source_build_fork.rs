@@ -23,7 +23,7 @@ impl Drop for Owner {
     }
 }
 
-fn launch(boundary: ProcessMountBoundary) -> (Owner, MountNamespace) {
+fn launch(boundary: ProcessMountBoundary) -> (Owner, MountNamespace, u32) {
     let command = boundary.wrap(
         "bwrap",
         ProcessInvocation {
@@ -43,8 +43,9 @@ fn launch(boundary: ProcessMountBoundary) -> (Owner, MountNamespace) {
     BufReader::new(owner.0.stdout.take().unwrap())
         .read_line(&mut line)
         .unwrap();
-    let namespace = MountNamespace::capture(line.trim().parse().unwrap()).unwrap();
-    (owner, namespace)
+    let pid = line.trim().parse().unwrap();
+    let namespace = MountNamespace::capture(pid).unwrap();
+    (owner, namespace, pid)
 }
 
 fn shell(namespace: &MountNamespace, cwd: &Path, script: &str) -> String {
@@ -179,7 +180,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
             )
             .unwrap()
     };
-    let (_parent, parent) = launch(boundary(
+    let (_parent, parent, _) = launch(boundary(
         vec![base.clone()],
         "source-u0",
         "source-w0",
@@ -280,7 +281,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         original_index
     );
     std::fs::copy(prepared.git_file(), root.join("source-uc/.git")).unwrap();
-    let (_child, child) = launch(boundary(
+    let (_child, child, child_pid) = launch(boundary(
         source_layers,
         "source-uc",
         "source-wc",
@@ -403,6 +404,59 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
             .try_run(&view, &["rev-parse", "HEAD"])
             .unwrap()
             .stdout
+    );
+    assert!(matches!(
+        reopened.restore_mounted_source(handle.id(), parent.clone(), &view),
+        Err(tidepool_worktree::WorktreeError::WorktreeAuthorityDenied(_))
+    ));
+    assert!(reopened.lookup(handle.id()).is_err());
+    let recaptured = MountNamespace::capture(child_pid).unwrap();
+    assert!(child.same_view_as(&recaptured).unwrap());
+    assert!(!child.same_view_as(&parent).unwrap());
+    let restored = reopened
+        .restore_mounted_source(handle.id(), recaptured, &view)
+        .unwrap();
+    assert_eq!(restored, handle);
+    assert_eq!(
+        reopened
+            .restore_mounted_source(handle.id(), child.clone(), &view)
+            .unwrap(),
+        handle
+    );
+    assert_eq!(
+        reopened.worktree_head(&restored).unwrap(),
+        host_manager.worktree_head(&handle).unwrap()
+    );
+    assert_eq!(
+        reopened
+            .git()
+            .try_run(restored.cwd(), &["diff"])
+            .unwrap()
+            .stdout,
+        child_git.try_run(&view, &["diff"]).unwrap().stdout
+    );
+    // Sharing Git administration alone must not replace an already retained
+    // filesystem view with a different namespace's empty working directory.
+    let (_other, other, _) = launch(
+        ProcessMountBoundary::new(
+            handle.cwd(),
+            [handle.cwd().to_owned()],
+            [handle.cwd().to_owned()],
+        )
+        .unwrap()
+        .with_project_root(&view)
+        .unwrap(),
+    );
+    assert!(reopened
+        .restore_mounted_source(handle.id(), other, &view)
+        .is_err());
+    assert_eq!(
+        reopened
+            .git()
+            .try_run(restored.cwd(), &["diff"])
+            .unwrap()
+            .stdout,
+        child_git.try_run(&view, &["diff"]).unwrap().stdout
     );
     assert_eq!(
         host_manager.worktree_head(&handle).unwrap().as_str(),
