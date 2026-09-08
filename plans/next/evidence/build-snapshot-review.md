@@ -101,6 +101,15 @@ and uncertain child custody retain the inherited layer. Preparation failures rem
 retryable; a confirmed mount with a failed metadata write retries recording without
 another rotation. Only an uncertain mount outcome requires mount reconciliation.
 This exercises filesystem artifacts, not Cargo reuse or native admission.
+The mount owner now immediately reconciles an uncertain helper result using
+`statx` mount identity and the kernel's OverlayFS options in the same namespace.
+It recognizes the intended writable replacement or restores only the original
+mount. A different recipe or unavailable observation remains unconfirmed. Three
+real-mount recovery tests cover lost receipts after publication, interruption after
+freeze, and refusal to modify an unexpected replacement. Paths include spaces,
+commas, colons and backslashes; this also exposed and fixed upper/work argument
+escaping. These tests do not implement recovery across a host restart or retain
+a retryable mount witness when immediate observation is unavailable.
 Shoal compilation passed. Strict application Clippy remains blocked by existing
 warnings in hosted retirement, launch custody and prompt hashing (and a dependency
 warning in rollout usage without `--no-deps`); the new excessive-argument warning

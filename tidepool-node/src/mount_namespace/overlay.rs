@@ -12,20 +12,37 @@ use rustix::mount::MountFlags;
 
 use super::MountNamespace;
 
+mod observation;
+#[cfg(test)]
+mod recovery_tests;
 mod root_metadata;
 use root_metadata::RootMetadata;
+
+// Unlike lowerdir+, upperdir/workdir still pass through ovl_unescape even with
+// fsconfig. Escape literal backslashes before handing these paths to the kernel.
+fn directory_option(path: &CString) -> io::Result<CString> {
+    let mut bytes = Vec::with_capacity(path.as_bytes().len());
+    for &byte in path.as_bytes() {
+        if byte == b'\\' {
+            bytes.push(b'\\');
+        }
+        bytes.push(byte);
+    }
+    CString::new(bytes).map_err(io::Error::other)
+}
 
 /// A prepared replacement over retained layers, ordered oldest first.
 ///
 /// The resource owner must keep the layers immutable and exclude new native
 /// writes through the transition. An open writable FD is an additional kernel
 /// refusal boundary, not proof that background work has finished.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct OverlayRotation {
     target: CString,
     lower: Vec<CString>,
     upper: CString,
-    work: CString,
+    upper_option: CString,
+    work_option: CString,
     backing_target: CString,
     preserved_mounts: Vec<CString>,
 }
@@ -40,6 +57,9 @@ pub enum OverlayRotationOutcome {
     Unchanged(io::Error),
     /// Replacement failed, and the original writable view was restored.
     Restored(io::Error),
+    /// Reconciliation confirmed the original view is writable; no replacement
+    /// is published. This does not infer how far the lost helper progressed.
+    RecoveredOriginal,
     /// Keep resources and reconcile mount state before publishing or retrying.
     Unconfirmed(String),
 }
@@ -129,7 +149,8 @@ impl OverlayRotation {
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
             lower: aliases[..layers.len()].iter().rev().cloned().collect(),
             upper: aliases[layers.len()].clone(),
-            work: aliases[layers.len() + 1].clone(),
+            upper_option: directory_option(&aliases[layers.len()])?,
+            work_option: directory_option(&aliases[layers.len() + 1])?,
             backing_target,
             preserved_mounts: Vec::new(),
         })
@@ -198,8 +219,8 @@ impl OverlayRotation {
         for lower in &self.lower {
             fsconfig_set_string(&context, c"lowerdir+", lower.as_c_str())?;
         }
-        fsconfig_set_string(&context, c"upperdir", self.upper.as_c_str())?;
-        fsconfig_set_string(&context, c"workdir", self.work.as_c_str())?;
+        fsconfig_set_string(&context, c"upperdir", self.upper_option.as_c_str())?;
+        fsconfig_set_string(&context, c"workdir", self.work_option.as_c_str())?;
         fsconfig_set_flag(&context, c"userxattr")?;
         fsconfig_create(&context)?;
         let mount = fsmount(
@@ -313,9 +334,71 @@ impl MountNamespace {
     /// method performs mount mechanics; it does not establish native quiescence
     /// or publish resource metadata. Run it outside the async actor loop.
     pub fn rotate_overlay(&self, rotation: OverlayRotation) -> OverlayRotationOutcome {
-        match self.rotate_overlay_inner(rotation) {
+        let before = match self.observe_overlay(&rotation.target) {
+            Ok(before) => before,
+            Err(error) => return OverlayRotationOutcome::Unchanged(error),
+        };
+        let result = match self.rotate_overlay_inner(rotation.clone()) {
             Ok(outcome) => outcome,
             Err(error) => OverlayRotationOutcome::Unconfirmed(error.to_string()),
+        };
+        self.settle_rotation(&rotation, &before, result)
+    }
+
+    fn settle_rotation(
+        &self,
+        rotation: &OverlayRotation,
+        before: &observation::Observation,
+        result: OverlayRotationOutcome,
+    ) -> OverlayRotationOutcome {
+        match result {
+            OverlayRotationOutcome::Unconfirmed(detail) => {
+                match self.reconcile_rotation(rotation, before) {
+                    Ok(recovered) => recovered,
+                    Err(error) => OverlayRotationOutcome::Unconfirmed(format!(
+                        "{detail}; reconciliation: {error}"
+                    )),
+                }
+            }
+            confirmed => confirmed,
+        }
+    }
+
+    // The publisher still holds native mutation admission. Only its original
+    // mount may be thawed; an unrelated view is retained without modification.
+    fn reconcile_rotation(
+        &self,
+        rotation: &OverlayRotation,
+        before: &observation::Observation,
+    ) -> io::Result<OverlayRotationOutcome> {
+        let current = self.observe_overlay(&rotation.target)?;
+        if current.id != before.id && current.matches(rotation) && !current.readonly {
+            return Ok(OverlayRotationOutcome::Rotated);
+        }
+        if current.id != before.id || before.readonly {
+            return Err(io::Error::other("unexpected mount at publication target"));
+        }
+        if !current.readonly {
+            return Ok(OverlayRotationOutcome::RecoveredOriginal);
+        }
+        let target = rotation.target.clone();
+        let original_id = before.id;
+        // SAFETY: only syscall wrappers and preconstructed arguments after fork.
+        let mut command = unsafe {
+            self.command_with_setup(Path::new("/"), "/bin/sh".as_ref(), move || {
+                if observation::mount_id(target.as_c_str())? != original_id {
+                    return Err(io::Error::from(Errno::BUSY));
+                }
+                rustix::mount::mount_remount(target.as_c_str(), MountFlags::empty(), c"")?;
+                Ok(())
+            })?
+        };
+        let _ = command.args(["-c", ":"]).status();
+        let restored = self.observe_overlay(&rotation.target)?;
+        if restored.id == before.id && !restored.readonly {
+            Ok(OverlayRotationOutcome::RecoveredOriginal)
+        } else {
+            Err(io::Error::other("original mount is not confirmed writable"))
         }
     }
 

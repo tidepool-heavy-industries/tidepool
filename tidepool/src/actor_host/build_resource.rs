@@ -250,6 +250,7 @@ impl BuildResourceLease {
                 self.record_publication()?;
             }
             OverlayRotationOutcome::Busy
+            | OverlayRotationOutcome::RecoveredOriginal
             | OverlayRotationOutcome::Unchanged(_)
             | OverlayRotationOutcome::Restored(_) => {
                 self.publication = PublicationState::Writable;
