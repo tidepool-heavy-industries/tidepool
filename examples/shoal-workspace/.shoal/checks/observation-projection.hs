@@ -12,4 +12,3 @@ let rows =
       , base { rosterActorId = 9, rosterState = RosterRunning, rosterCurrentRequests = [42] }
       ]
 let focusedActors = workingAndAbnormal (SwarmSnapshot rows)
-inspectFull (map rosterActorId (snapshotActors focusedActors) == [1,2,3,5,6,8,9] && length (actorSummary focusedActors) == 7)

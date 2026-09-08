@@ -24,7 +24,7 @@ routing = do
   script owner "progress-route-consumer"
   consumer <- activation
   script (checkActor consumer) "layout-reply"
-  layoutResult <- turn owner "observed <- pollResponse (forkedResponse consumer)\ninspectFull (case observed of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
+  layoutResult <- turn owner "pollResponse (forkedResponse consumer) >>= \\observed -> inspectFull (case observed of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
   check "an indented finding list reaches the actual reply" (output layoutResult == "Just \"ready; layout preserved\"")
   script owner "progress-route"
   script (checkActor producer) "progress-route-questions"

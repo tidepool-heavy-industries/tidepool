@@ -32,7 +32,8 @@ startComponent = do
 workbench :: Member RecipeCheck effects => Eff effects ()
 workbench = do
   (owner, lead) <- startComponent
-  projection <- readFile owner ".shoal/checks/observation-projection.hs" >>= turn owner
+  script owner "observation-projection"
+  projection <- turn owner "inspectFull (map rosterActorId (snapshotActors focusedActors) == [1,2,3,5,6,8,9] && length (actorSummary focusedActors) == 7)"
   check "compact roster retains work and uncertain terminals" (output projection == "True")
   candidate <- checkpoint (checkActor lead) "feature.txt" "candidate feature\n" "implement feature"
   void $ turn (checkActor lead) ("let candidate = Candidate " <> literal candidate <> " [\"implementation content check\"] [\"open product gate\"]")
