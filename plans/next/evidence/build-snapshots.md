@@ -1,6 +1,7 @@
 # Build snapshots for actor forks
 
-Status: local feasibility demonstrated; production integration remains unimplemented.
+Status: private build overlays and host namespace access are checked foundations;
+warm snapshot publication and ordinary-unfold integration remain unimplemented.
 This records the build-cache discussion alongside the parallel dogfood run. It does
 not change the running harness.
 
@@ -70,6 +71,21 @@ Private probe programs and logs are currently in
 evidence, not committed regression tests. The mount experiment ran inside one
 private namespace with a trusted helper. It did **not** demonstrate a live native
 TUI surviving rotation, cross-namespace child launch, or crash recovery.
+
+## Checked host access foundation
+
+`tidepool-node::MountNamespace` retains namespace/root descriptors and a pidfd.
+Host commands enter the mount's owning user namespace, enter the mount namespace,
+select its root and working directory, then drop capabilities before executing.
+This uses Linux syscalls directly and does not depend on an `nsenter` executable.
+The kernel's [NS_GET_USERNS interface](https://man7.org/linux/man-pages/man2/NS_GET_USERNS.2const.html)
+identifies the mount owner even when the workload occupies a nested user namespace.
+
+`cargo test -p tidepool-worktree --test mount_namespace -- --nocapture` checks a
+real Bubblewrap overlay: host Git sees the mounted files while the underlying host
+directory lacks them, child commits leave the parent unchanged, commands have no
+capabilities, and owner exit rejects both new and previously prepared commands.
+This is a tested GitCli boundary, not yet managed-source allocation or recovery.
 
 ## Owning implementation
 

@@ -10,6 +10,9 @@ now inherits the live source workspace as well as warm build artifacts.
 
 ## Contract
 
+Linux is the implementation target. Use native namespace and OverlayFS primitives;
+Windows support and cross-platform filesystem emulation are out of scope.
+
 An actor owns a private writable source view and a separate private writable build
 view over immutable layers. Ordinary unfolding prefers the parent's live workspace,
 including staged and unstaged changes, ignored and untracked files, and timestamps.

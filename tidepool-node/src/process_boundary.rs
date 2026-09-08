@@ -287,7 +287,7 @@ impl ProcessMountBoundary {
         ]);
         args.extend(command.args);
         ProcessInvocation {
-            program: bubblewrap.into(),
+            program: bubblewrap,
             args,
         }
     }

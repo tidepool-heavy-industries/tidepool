@@ -54,11 +54,22 @@ pub struct GitCli {
     /// Extra environment applied to every invocation (the snapshot lane sets
     /// `GIT_INDEX_FILE` here; the monitor sets nothing).
     env: BTreeMap<String, String>,
+    #[cfg(target_os = "linux")]
+    namespace: Option<tidepool_node::MountNamespace>,
 }
 
 impl GitCli {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind host Git operations to the same mounted filesystem as its owner.
+    /// Environment scrubbing and failure receipts remain at this entry point.
+    #[cfg(target_os = "linux")]
+    pub fn with_mount_namespace(&self, namespace: tidepool_node::MountNamespace) -> Self {
+        let mut next = self.clone();
+        next.namespace = Some(namespace);
+        next
     }
 
     /// Return a clone with one environment variable overridden for its
@@ -73,6 +84,16 @@ impl GitCli {
         next
     }
 
+    fn command(&self, cwd: &Path) -> std::io::Result<Command> {
+        #[cfg(target_os = "linux")]
+        if let Some(namespace) = &self.namespace {
+            return namespace.host_command(cwd, OsStr::new("git"));
+        }
+        let mut command = Command::new("git");
+        command.current_dir(cwd);
+        Ok(command)
+    }
+
     /// Run git in `cwd`. `Err` only for a nonzero exit or a spawn failure; a
     /// command that succeeds with output on stderr is still `Ok`.
     pub fn run<S: AsRef<OsStr>>(
@@ -85,8 +106,13 @@ impl GitCli {
             .map(|a| a.as_ref().to_string_lossy().into_owned())
             .collect();
 
-        let mut cmd = Command::new("git");
-        cmd.current_dir(cwd);
+        let mut cmd = self.command(cwd).map_err(|error| GitFailureReceipt {
+            args: arg_strings.clone(),
+            cwd: cwd.to_path_buf(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: error.to_string(),
+        })?;
         cmd.args(args);
 
         // Scrub the ambient git environment. Inheriting GIT_DIR/GIT_INDEX_FILE/

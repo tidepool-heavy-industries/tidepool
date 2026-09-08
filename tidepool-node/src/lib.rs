@@ -3,6 +3,8 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 mod inbox;
+#[cfg(target_os = "linux")]
+mod mount_namespace;
 mod process_boundary;
 mod tmux;
 
@@ -11,6 +13,8 @@ pub use inbox::{
     ReceiptEvidence, ReceiptLookup, MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_RECEIPTS,
     MAX_TOTAL_RECEIPT_CONTEXT_BYTES,
 };
+#[cfg(target_os = "linux")]
+pub use mount_namespace::MountNamespace;
 pub use process_boundary::service_scope::{
     PreparedServiceScope, ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError,
 };

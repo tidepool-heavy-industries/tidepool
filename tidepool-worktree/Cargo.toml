@@ -11,6 +11,7 @@ rust-version.workspace = true
 description = "Managed git worktrees, durable registry, and typed repository events (PRD 19)"
 
 [dependencies]
+tidepool-node = { path = "../tidepool-node" }
 tidepool-atomic-write.workspace = true
 # The shared durable-JSONL append/read primitive (journal.rs).
 tidepool-repr.workspace = true
