@@ -87,6 +87,30 @@ directory lacks them, child commits leave the parent unchanged, commands have no
 capabilities, and owner exit rejects both new and previously prepared commands.
 This is a tested GitCli boundary, not yet managed-source allocation or recovery.
 
+## Checked live mount transition
+
+`MountNamespace::rotate_overlay` now freezes an existing overlay and installs a
+new writable view through the retained namespace. A short helper uses a private
+mount namespace to prepare a detached replacement, then attaches it to the
+worker's original namespace. Writable backing aliases remain private to the helper;
+normal commands still enter without mount capabilities. No resident mount daemon
+or TUI restart is required for this transition.
+
+`cargo test -p tidepool-node --test overlay_rotation -- --nocapture` passes three
+real-kernel tests: writable-FD refusal followed by successful parent/child
+continuation, replacement failure with writable-parent restoration, and rejection
+of an ordinary filesystem before remount. The continuation test also checks
+read-only backing aliases and stale cwd behavior: absolute access to the stable
+view works, but relative writes require re-entering that path after rotation.
+The original host-Git namespace test also passes after this extension.
+
+This is mount mechanics, **not yet native execution admission or durable snapshot
+publication**. The caller still needs to exclude native writers, refresh native cwd
+at admission, retain/reconcile generations, and connect ordinary source/build
+inheritance. Source replacement must also preserve separately owned nested mounts.
+The actor launcher now protects the entire owned build-resource directory read-only,
+covering future generations as well as the initial backing paths.
+
 ## Owning implementation
 
 Extend `BuildResourceLease` in `tidepool/src/actor_host.rs` and the mount boundary

@@ -17,6 +17,9 @@ use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::thread::{CapabilitySet, CapabilitySets, LinkNameSpaceType};
 
+mod overlay;
+pub use overlay::{OverlayRotation, OverlayRotationOutcome};
+
 /// A retained view into the mount namespace of an owned live process.
 ///
 /// This is access to a filesystem, not proof that any process has stopped or
@@ -35,6 +38,16 @@ struct Descriptors {
 }
 
 impl Descriptors {
+    fn enter_mount_root(&self) -> rustix::io::Result<()> {
+        rustix::thread::move_into_link_name_space(
+            self.mount.as_fd(),
+            Some(LinkNameSpaceType::Mount),
+        )?;
+        rustix::process::fchdir(&self.root)?;
+        rustix::process::chroot(c".")?;
+        rustix::process::chdir(c"/")
+    }
+
     fn owner_is_live(&self) -> rustix::io::Result<bool> {
         let mut poll = [PollFd::new(&self.process, PollFlags::IN)];
         Ok(rustix::event::poll(&mut poll, Some(&Timespec::default()))? == 0)
@@ -99,6 +112,19 @@ impl MountNamespace {
     /// namespace descriptors through spawn and changes directory only after
     /// entering the namespace. Do not use this to bypass actor launch policy.
     pub fn host_command(&self, directory: &Path, program: &std::ffi::OsStr) -> io::Result<Command> {
+        // SAFETY: the empty setup callback performs no operations.
+        unsafe { self.command_with_setup(directory, program, || Ok(())) }
+    }
+
+    /// # Safety
+    /// `setup` runs after fork and must use only async-signal-safe operations
+    /// with preconstructed arguments. It must not allocate or acquire locks.
+    unsafe fn command_with_setup(
+        &self,
+        directory: &Path,
+        program: &std::ffi::OsStr,
+        setup: impl Fn() -> io::Result<()> + Send + Sync + 'static,
+    ) -> io::Result<Command> {
         if !directory.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -123,13 +149,9 @@ impl MountNamespace {
                     descriptors.user.as_fd(),
                     Some(LinkNameSpaceType::User),
                 )?;
-                rustix::thread::move_into_link_name_space(
-                    descriptors.mount.as_fd(),
-                    Some(LinkNameSpaceType::Mount),
-                )?;
-                rustix::process::fchdir(&descriptors.root)?;
-                rustix::process::chroot(c".")?;
+                descriptors.enter_mount_root()?;
                 rustix::process::chdir(directory.as_c_str())?;
+                setup()?;
                 // Git and its hooks need filesystem access, not the mount
                 // capabilities obtained while entering the user namespace.
                 rustix::thread::set_no_new_privs(true)?;

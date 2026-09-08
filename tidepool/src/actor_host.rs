@@ -2489,6 +2489,10 @@ async fn launch_prepared_interactive_application(
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?;
         process_boundary = process_boundary
+            .with_read_only_overlay(lease.path(), lease.path())
+            .map_err(|error| {
+                application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+            })?
             .with_build_overlay(
                 [lease.path().join("base")],
                 lease.path().join("upper"),
