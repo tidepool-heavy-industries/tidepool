@@ -6,17 +6,19 @@ Sol coordinator. Product authority: [applications](applications.md) A0–A8 and
 parallel implementation after the initial proposal review; older sequential or
 planning-only restrictions do not restrict that released implementation.
 
-## Baseline and first-run safety
+## Restart baseline and running tools
 
-Product seed: `293d0c0f806656e767301ef58fef8910d4523303`. This contract is a
-planning-only descendant; use its actual committed revision in the first Task.
+Use the committed restart brief and current workspace-fork implementation
+(`8e0bcbe8` or its reviewed successor) as the new baseline. The previous product
+seed and stopped actors are historical; recover partial work via `saved-work.md`.
+Record the actual starting revision in the new Task.
 Preserve the existing dirty `plans/README.md`, untracked context-checkpoint plan,
 and authoritative `.shoal`. Do not activate candidate tools, redirect live
 extractor/compiler sockets, or edit frozen prompts/modules. Application work uses
 an isolated Codex checkout, never the original. Its exact seed and matched binary
 remain A0 observations, not assumptions inferred from this Tidepool hash.
 
-This is the first run of this harness version. On ambiguous launch, update,
+This is the first dogfood run with source/build inheritance. On ambiguous launch, update,
 worktree or watch evidence, inspect retained receipts before new intent. Stop the
 affected operation and ask the planner/human if safe continuation is not supported;
 do not duplicate work or repair the running harness in place. An operator hold

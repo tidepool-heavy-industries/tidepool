@@ -1,4 +1,8 @@
-# Initial execution review and release
+# Previous wave: initial execution review
+
+Historical review of the stopped wave. Retain its substantive design corrections;
+old pending responses, watches and release recipients do not exist in the new wave.
+Use restart.md for current execution.
 
 Reviewed proposals:
 - Applications `182ea607408448b3efed555ecb290898a1dc2684`:

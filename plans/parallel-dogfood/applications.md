@@ -8,6 +8,10 @@ files 01–05 as their frontier approaches. First deliver the
 The existing steering repair is the baseline. Preserve full native Codex TUIs
 and their embedded execution owners. The detailed plan owns semantics and tests.
 
+Before planning new implementation, inspect your lane in [saved work](saved-work.md).
+Resume its actual unfinished frontier; the table below describes dependencies,
+not an instruction to redo completed scaffolds.
+
 ## Initial decomposition to refine
 
 | Frontier | Scaffold → useful forks → integration |

@@ -5,7 +5,7 @@ Codex TUI. The external setup conversation only supervises the harness. Both
 product designs already exist; focus your substantial reasoning on executing them
 well, rather than rewriting them or repeating the product interview.
 
-Start with this wave's README and the two short lane maps. Read deeper only for
+Start with this wave's README, restart.md and the two short lane maps. Read deeper only for
 consequential dependencies or uncertainties. Preserve the full product acceptance.
 
 ## Decisions to make before commissioning

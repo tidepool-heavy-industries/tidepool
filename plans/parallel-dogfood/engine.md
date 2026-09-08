@@ -9,6 +9,10 @@ The outcome is a smaller, correct, cheaper production engine using prepared STG.
 An importer alone does not complete it. The detailed plan owns semantics and
 acceptance; resolve stale Core-only guidance explicitly at the accepted cutover.
 
+Before planning new implementation, inspect your lane in [saved work](saved-work.md).
+Resume its actual unfinished frontier; the table below describes dependencies,
+not an instruction to redo completed scaffolds.
+
 ## Initial decomposition to refine
 
 | Frontier | Scaffold → useful forks → integration |

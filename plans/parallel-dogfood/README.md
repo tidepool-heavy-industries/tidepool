@@ -1,6 +1,7 @@
 # Parallel dogfood wave
 
-Status: preparing the Astra planner session; implementation has not started.
+Status: preparing a new wave from preserved partial implementation. Start with
+[the restart brief](restart.md); lane owners use [saved work](saved-work.md).
 
 Deliver both existing designs: full interactive Codex applications (A0–A8) and
 prepared-STG production execution (M0–M7). Reviewed partial slices are useful;
