@@ -76,6 +76,7 @@ use tokio::task::JoinSet;
 use self::host_incarnation::HostIncarnationLease;
 use self::overlay_resource::{
     NativePublication, OverlayResourceLease, OverlaySnapshot, PublicationSkip,
+    SharedOverlayResource,
 };
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
@@ -429,7 +430,7 @@ struct InteractiveDeployment {
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
     runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
-    build_resource: Option<Arc<tokio::sync::Mutex<OverlayResourceLease>>>,
+    build_resource: Option<SharedOverlayResource>,
 }
 
 enum InteractiveConnection {
@@ -659,7 +660,7 @@ type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner
 
 #[derive(Clone)]
 struct CreatorBuild {
-    resource: Arc<tokio::sync::Mutex<OverlayResourceLease>>,
+    resource: SharedOverlayResource,
     thread: QueueReadyThread,
 }
 
@@ -697,7 +698,10 @@ impl NativeForkAdmission {
             .get(&creator)
             .filter(|owner| owner.terminal.is_none())
             .and_then(|owner| owner.creator_build.clone())?;
-        let mut resource = source.resource.lock().await;
+        let mut resource = match source.resource.publication.try_lock() {
+            Ok(resource) => resource,
+            Err(_) => return source.resource.latest_snapshot(),
+        };
         // Complete native admission before dropping the resource lock. Retained
         // publication records own any uncertain transition across host failure.
         match resource
@@ -1716,7 +1720,7 @@ async fn run_interactive_applications(
             _ = health.tick() => {
                 for deployment in &deployments {
                     if let (Some(resource), Some(thread)) = (&deployment.build_resource, &deployment.thread) {
-                        if let Ok(mut resource) = resource.clone().try_lock_owned() {
+                        if let Ok(mut resource) = resource.publication.clone().try_lock_owned() {
                             if resource.native_publication_needs_retry() {
                                 let backend = backend.clone();
                                 let thread = thread.clone();
@@ -3012,8 +3016,7 @@ async fn launch_prepared_interactive_application(
             fork_gate,
             runtime_observation,
             fork_parent_thread,
-            build_resource: build_resource
-                .map(|resource| Arc::new(tokio::sync::Mutex::new(resource))),
+            build_resource: build_resource.map(SharedOverlayResource::new),
         },
         binding: InteractiveBindingRequest {
             control: binding_control,
@@ -3469,13 +3472,7 @@ async fn retire_interactive_application(
             .build_resource
             .take()
             .map_or(CleanupComponentOutcome::Completed, |lease| {
-                let released = Arc::try_unwrap(lease)
-                    .map_err(|_| {
-                        std::io::Error::other(
-                            "build publication still owns the resource; cleanup is unconfirmed",
-                        )
-                    })
-                    .and_then(|lease| lease.into_inner().release());
+                let released = lease.release();
                 match released {
                     Ok(()) => CleanupComponentOutcome::Completed,
                     Err(error) => CleanupComponentOutcome::Failed {

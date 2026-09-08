@@ -299,6 +299,12 @@ Source authorization now precedes native publication. The worktree handler issue
 one owned authorized request; Git materialization consumes it outside the shared
 handler lock. Existing Haskell worktree effects use the same authorization and
 materialization implementation. A denied source cannot trigger a native request.
+Completed build snapshots remain readable while publication is in flight. The
+shared resource retains one published-snapshot cell alongside its exclusive
+publication lock; admission uses the completed generation immediately when that
+lock is busy. This also covers waiting for native replies, without queuing every
+fork behind the same publication attempt. It does not change source capture's
+freshness requirements.
 
 The focused current-thread admission test and existing sibling custody ordering
 and failed-custody publication tests passed (3 tests). The Shoal binary compiled.

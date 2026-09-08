@@ -21,9 +21,42 @@ pub(super) struct OverlayResourceLease {
     layers: Vec<OverlayLayer>,
     upper: PathBuf,
     work: PathBuf,
-    latest: Option<OverlaySnapshot>,
+    latest: Arc<Mutex<Option<OverlaySnapshot>>>,
     publication: PublicationState,
     native_retry: bool,
+}
+
+/// Publication is exclusive, but readers of completed generations need not
+/// wait for a native request or mount transition. Both access paths share the
+/// resource owner's single published-snapshot cell.
+#[derive(Clone)]
+pub(super) struct SharedOverlayResource {
+    pub(super) publication: Arc<tokio::sync::Mutex<OverlayResourceLease>>,
+    latest: Arc<Mutex<Option<OverlaySnapshot>>>,
+}
+
+impl SharedOverlayResource {
+    pub(super) fn new(resource: OverlayResourceLease) -> Self {
+        Self {
+            latest: resource.latest.clone(),
+            publication: Arc::new(tokio::sync::Mutex::new(resource)),
+        }
+    }
+
+    pub(super) fn latest_snapshot(&self) -> Option<OverlaySnapshot> {
+        self.latest.lock().clone()
+    }
+
+    pub(super) fn release(self) -> io::Result<()> {
+        Arc::try_unwrap(self.publication)
+            .map_err(|_| {
+                io::Error::other(
+                    "build publication still owns the resource; cleanup is unconfirmed",
+                )
+            })?
+            .into_inner()
+            .release()
+    }
 }
 
 /// Only the publication owner can construct a snapshot of a frozen generation.
@@ -177,7 +210,7 @@ impl OverlayResourceLease {
             layers,
             upper,
             work,
-            latest,
+            latest: Arc::new(Mutex::new(latest)),
             publication: PublicationState::Writable,
             native_retry: false,
         })
@@ -213,7 +246,7 @@ impl OverlayResourceLease {
     }
 
     pub(super) fn latest_snapshot(&self) -> Option<OverlaySnapshot> {
-        self.latest.clone()
+        self.latest.lock().clone()
     }
 
     pub(super) fn process_may_exist(&mut self) {
@@ -465,7 +498,8 @@ impl OverlayResourceLease {
         };
         tidepool_atomic_write::write_durable(&self.storage.path.join("view.json"), bytes)?;
         self.finish_publication()?;
-        self.latest = Some(snapshot.clone());
+        let previous = self.latest.lock().replace(snapshot.clone());
+        drop(previous);
         self.publication = PublicationState::Writable;
         Ok(())
     }
@@ -892,7 +926,7 @@ mod tests {
             OverlayRotationOutcome::Rotated
         ));
         let upper = lease.upper.clone();
-        let snapshot = lease.latest.take().unwrap();
+        let snapshot = lease.latest.lock().take().unwrap();
         let layer_count = snapshot.layers.len();
         lease.publication = PublicationState::NeedsRecord {
             bytes: std::fs::read(lease.path().join("view.json")).unwrap(),
@@ -932,13 +966,13 @@ mod tests {
         let creator_custody = admission
             .install_custody(creator, tree.id().as_str())
             .unwrap();
-        let resource = Arc::new(tokio::sync::Mutex::new(
+        let resource = SharedOverlayResource::new(
             OverlayResourceLease::allocate_path(
                 directory.path().join("creator-cache"),
                 Some(snapshot.clone()),
             )
             .unwrap(),
-        ));
+        );
         *backend.begin_override.lock() = Some(PublicationReply::Busy);
         let backend = Arc::new(backend);
         let before_calls = backend.calls.lock().len();
@@ -1005,6 +1039,41 @@ mod tests {
             BuildInheritance::Prepared(None)
         ));
         assert_eq!(backend.calls.lock().len(), before_calls + 1);
+        let publishing = owners
+            .lock()
+            .get(&creator)
+            .unwrap()
+            .creator_build
+            .as_ref()
+            .unwrap()
+            .resource
+            .publication
+            .clone();
+        let publication_guard = publishing.lock().await;
+        let contended = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            admission.admit(
+                creator,
+                "root/concurrent-child".into(),
+                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+                tidepool_actor::NativeToolClass::Coding,
+            ),
+        )
+        .await
+        .expect("fork admission must not wait for in-flight publication")
+        .unwrap();
+        assert_eq!(backend.calls.lock().len(), before_calls + 1);
+        drop(publication_guard);
+        let contended = contended
+            .install(ActorRef::first(tidepool_actor::ActorId(10)))
+            .unwrap();
+        let contended = (contended.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ActorWorkspaceCustody>()
+            .unwrap();
+        let BuildInheritance::Prepared(Some(previous)) = &contended.build_inheritance else {
+            panic!("in-flight publication must leave the completed generation available");
+        };
+        assert!(Arc::ptr_eq(&previous.layers, &snapshot.layers));
         owners.lock().remove(&creator);
         let installed = prepared
             .install(ActorRef::first(tidepool_actor::ActorId(8)))
@@ -1040,6 +1109,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("build");
         drop(OverlayResourceLease::allocate_path(path.clone(), None).unwrap());
+        assert!(!path.exists());
+        let shared = SharedOverlayResource::new(
+            OverlayResourceLease::allocate_path(path.clone(), None).unwrap(),
+        );
+        let pending_publication = shared.clone();
+        assert!(shared.release().is_err());
+        assert!(path.exists());
+        pending_publication.release().unwrap();
         assert!(!path.exists());
         OverlayResourceLease::allocate_path(path.clone(), None)
             .unwrap()
