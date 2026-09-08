@@ -21,7 +21,7 @@ mod entry;
 pub use entry::NamespaceEntry;
 mod overlay;
 pub use overlay::{
-    OverlayRecovery, OverlayRecoveryRecord, OverlayRotation, OverlayRotationOutcome,
+    copy_overlay_root_metadata, OverlayRecovery, OverlayRotation, OverlayRotationOutcome,
     PreparedOverlayRotation,
 };
 

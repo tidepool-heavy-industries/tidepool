@@ -191,6 +191,25 @@ pub struct AuthorizedForkWorkspace {
 }
 
 impl AuthorizedForkWorkspace {
+    pub fn source(&self) -> &tidepool_worktree::WorktreeSource {
+        &self.spec.source
+    }
+
+    pub fn prepare_source(
+        &self,
+    ) -> Result<tidepool_worktree::PreparedSourceWorktree, WorktreeError> {
+        self.manager
+            .prepare_inherited_source(&self.spec.source, &self.actor_path)
+            .map_err(error_to_wire)
+    }
+
+    pub fn materialize_committed(self) -> Result<WtWorktreeHandle, WorktreeError> {
+        self.manager
+            .create_committed_fork(&self.spec.source, &self.actor_path)
+            .map(|handle| handle_to_wire(&handle))
+            .map_err(error_to_wire)
+    }
+
     pub fn materialize(self) -> Result<WtWorktreeHandle, WorktreeError> {
         self.manager
             .create_for_actor_path(&self.spec, &self.actor_path)
@@ -709,7 +728,7 @@ fn receipt_to_wire(r: &WorktreeReceipt) -> WtWorktreeReceipt {
     }
 }
 
-pub(crate) fn handle_to_wire(h: &WorktreeHandle) -> WtWorktreeHandle {
+pub fn handle_to_wire(h: &WorktreeHandle) -> WtWorktreeHandle {
     WtWorktreeHandle {
         handle_receipt: receipt_to_wire(h.receipt()),
     }

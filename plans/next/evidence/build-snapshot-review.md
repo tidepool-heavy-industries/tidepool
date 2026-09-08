@@ -1,5 +1,10 @@
 # Review: transparent, cache-ready unfolds
 
+Historical checkpoint. For current production composition, removed restart
+machinery and acceptance status, read
+[workspace fork implementation](workspace-fork-implementation.md).
+
+
 Review baseline: Tidepool 43ddd89f on work/build-snapshots; native Codex
 06d99357be on work/build-snapshot-admission. The runner still pins d760c5cb8c
 and does not enable CODEX_WORKSPACE_SNAPSHOTS.

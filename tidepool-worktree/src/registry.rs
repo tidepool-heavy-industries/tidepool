@@ -201,14 +201,15 @@ impl WorktreeRegistry {
             }
         }
         let mounted = WorktreeReceipt {
-            status: WorktreeRecordStatus::Mounted,
+            status: if receipt.status == WorktreeRecordStatus::Provisional {
+                WorktreeRecordStatus::Mounted
+            } else {
+                receipt.status.clone()
+            },
             ..receipt.clone()
         };
-        // Commit the requirement for this view before exposing runtime access.
-        // Reopening must never silently inspect the underlying host directory.
-        if receipt.status != WorktreeRecordStatus::Mounted {
-            self.put(&mounted)?;
-        }
+        // Install access before publishing Mounted so concurrent readers never
+        // observe a completed receipt without its retained filesystem view.
         self.views
             .install(
                 &receipt.cwd,
@@ -218,6 +219,11 @@ impl WorktreeRegistry {
                 },
             )
             .map_err(|error| storage_failure(&receipt.cwd, error))?;
+        // Only inherited source depends on mounts for its working files.
+        // Host-backed checkouts remain usable from Git after this wave ends.
+        if receipt.status != mounted.status {
+            self.put(&mounted)?;
+        }
         Ok(mounted)
     }
 

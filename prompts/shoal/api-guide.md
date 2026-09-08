@@ -90,9 +90,18 @@ forkedLaunch   :: Forked result -> BranchReceipt
 
 Labels use nonempty lowercase letters/digits separated by single hyphens, at
 most 48 characters. The example uses validated literals; handle `Left` for
-externally supplied labels. `projectHead` selects the project repository's
-committed head; `boundHead` requires an allocated bound checkout, not merely
-write access. Both require clean source unless wrapped in `snapshotDirty`.
+externally supplied labels. `projectHead` selects the project checkout;
+`boundHead` requires an allocated bound checkout, not merely write access.
+Ordinary `unfold` inherits its working files and index, including untracked and
+ignored project files. Busy or unavailable capture falls back to the selected
+checkout's committed HEAD and reports the omission. Explicit Git refs remain
+committed seeds; `snapshotDirty` is unnecessary for ordinary managed unfolding.
+
+Build caches follow the creator independently of source/context selection. A useful
+shared build before forking helps descendants; finish edits and leave source/build
+files idle when convenient. Active builds continue, and forks use the latest
+completed cache or an empty private cache. Keep durable work in Git: a Shoal host
+crash ends the wave, and a new wave starts from committed branches.
 
 Coding/scaffolding/integration branches have coding worktrees; research branches
 are inspection-only. `researchingLeaf` omits delegation. Available effects and

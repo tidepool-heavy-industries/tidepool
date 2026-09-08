@@ -261,7 +261,7 @@ pub enum PublicationOperation {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PublicationIdentity {
     pub pid: u32,
     pub start_ticks: u64,

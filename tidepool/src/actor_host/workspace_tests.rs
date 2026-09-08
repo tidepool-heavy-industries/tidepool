@@ -1,0 +1,712 @@
+use super::*;
+use std::io::{BufRead, BufReader};
+use std::os::unix::fs::MetadataExt;
+use std::process::{Child, Stdio};
+use tidepool_actor::{ForkWorkspaceAdmission, ForkWorkspacePolicy};
+use tidepool_agent::interactive::*;
+use tidepool_agent::{AgentBackendError, BackendThreadId};
+
+#[derive(Default)]
+struct Backend {
+    identity: Mutex<Option<PublicationIdentity>>,
+    busy: Mutex<bool>,
+    calls: Mutex<Vec<(u64, PublicationOperation)>>,
+    lose_finish: Mutex<bool>,
+    lose_begin: Mutex<bool>,
+    unavailable: Mutex<bool>,
+    begin_pause: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+}
+
+impl InteractiveAgentBackend for Backend {
+    fn prepare_native_tool_policy(
+        &self,
+        _: InteractiveNativeToolPolicy,
+        _: &Path,
+    ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+        Ok(vec![])
+    }
+    fn render(
+        &self,
+        _: &InteractiveAgentSpec,
+    ) -> Result<InteractiveAgentCommand, AgentBackendError> {
+        unreachable!()
+    }
+    fn push<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a QueueReadyThread,
+        _: &'a str,
+    ) -> InteractiveFuture<'a, ()> {
+        unreachable!()
+    }
+    fn archive<'a>(&'a self, _: &'a str, _: &'a QueueReadyThread) -> InteractiveFuture<'a, ()> {
+        unreachable!()
+    }
+    fn workspace_publication<'a>(
+        &'a self,
+        _: &'a QueueReadyThread,
+        sequence: std::num::NonZeroU64,
+        operation: PublicationOperation,
+    ) -> InteractiveFuture<'a, PublicationReply> {
+        Box::pin(async move {
+            self.calls.lock().push((sequence.get(), operation));
+            match operation {
+                PublicationOperation::Begin { expected } => {
+                    let pause = self.begin_pause.lock().take();
+                    if let Some((entered, release)) = pause {
+                        entered.send(()).unwrap();
+                        release.await.unwrap();
+                    }
+                    if *self.unavailable.lock() {
+                        return Ok(PublicationReply::Unavailable {
+                            detail: "test native unavailable".into(),
+                        });
+                    }
+                    if std::mem::take(&mut *self.lose_begin.lock()) {
+                        return Err(AgentBackendError::BackendUnavailable {
+                            detail: "lost begin reply".into(),
+                        });
+                    }
+                    if *self.busy.lock() {
+                        return Ok(PublicationReply::Busy);
+                    }
+                    let identity = self.identity.lock().unwrap();
+                    assert!(expected.is_none_or(|expected| expected == identity));
+                    Ok(PublicationReply::Ready {
+                        pid: identity.pid,
+                        start_ticks: identity.start_ticks,
+                        mount_namespace_inode: identity.mount_namespace_inode,
+                        cgroup_path: "/test/writers".into(),
+                    })
+                }
+                PublicationOperation::Finish { expected } => {
+                    assert_eq!(Some(expected), *self.identity.lock());
+                    if std::mem::take(&mut *self.lose_finish.lock()) {
+                        Err(AgentBackendError::BackendUnavailable {
+                            detail: "lost finish reply".into(),
+                        })
+                    } else {
+                        Ok(PublicationReply::Settled)
+                    }
+                }
+            }
+        })
+    }
+}
+
+struct NativeProcess(Child);
+impl NativeProcess {
+    fn start(workspace: &PreparedWorkspace, backend: &Backend) -> Self {
+        let mut child = workspace
+            .view
+            .host_command(
+                Path::new(ACTOR_PROJECT_ROOT),
+                std::ffi::OsStr::new("/bin/sh"),
+            )
+            .unwrap()
+            .args(["-c", "echo $$; read -r ignored"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid: u32 = line.trim().parse().unwrap();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let start_ticks = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mount_namespace_inode = std::fs::metadata(format!("/proc/{pid}/ns/mnt"))
+            .unwrap()
+            .ino();
+        *backend.identity.lock() = Some(PublicationIdentity {
+            pid,
+            start_ticks,
+            mount_namespace_inode,
+        });
+        Self(child)
+    }
+}
+impl Drop for NativeProcess {
+    fn drop(&mut self) {
+        drop(self.0.stdin.take());
+        let _ = self.0.wait();
+    }
+}
+fn shell(workspace: &PreparedWorkspace, script: &str) -> String {
+    let output = workspace
+        .view
+        .host_command(
+            Path::new(ACTOR_PROJECT_ROOT),
+            std::ffi::OsStr::new("/bin/sh"),
+        )
+        .unwrap()
+        .args(["-ec", script])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+fn build(workspace: &PreparedWorkspace) -> Vec<bool> {
+    let output = shell(workspace, "CARGO_HOME=\"$PWD/.shoal/build/cargo/home\" CARGO_TARGET_DIR=\"$PWD/.shoal/build/cargo\" RUSTC_WRAPPER= cargo build --offline --message-format=json");
+    let artifacts: Vec<bool> = output
+        .lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            (value["reason"] == "compiler-artifact").then(|| value["fresh"].as_bool().unwrap())
+        })
+        .collect();
+    assert!(!artifacts.is_empty(), "Cargo reported no artifacts");
+    artifacts
+}
+
+fn owner(
+    workspace: Arc<PreparedWorkspace>,
+    thread: QueueReadyThread,
+) -> InteractiveApplicationOwner {
+    InteractiveApplicationOwner {
+        creator_workspace: Some(BoundWorkspace { workspace, thread }),
+        cancel: None,
+        native_retirement: Default::default(),
+        pane: Arc::new(Mutex::new(None)),
+        fork_gate: None,
+        custody: None,
+        scoped_retention: None,
+        hosted: Arc::new(Mutex::new(None)),
+        launch: HostLaunchState::Published,
+        terminal: None,
+        retirement: Arc::new(Mutex::new(None)),
+    }
+}
+const CODING: ForkWorkspacePolicy = ForkWorkspacePolicy {
+    native_tools: tidepool_actor::NativeToolClass::Coding,
+    workspace: tidepool_actor::WorkspaceAccess::WritableBound,
+};
+
+#[tokio::test]
+async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
+    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    repo.writer().commit_file("Cargo.toml", "[package]\nname = \"workspace-fork-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n", "crate").unwrap();
+    repo.writer()
+        .commit_file(
+            "src/main.rs",
+            "fn main() { println!(\"{}\", env!(\"VALUE\")); }",
+            "source",
+        )
+        .unwrap();
+    repo.writer().commit_file("build.rs", "fn main() { println!(\"cargo:rerun-if-changed=input.txt\"); println!(\"cargo:rustc-env=VALUE={}\", std::fs::read_to_string(\"input.txt\").unwrap()); }", "build script").unwrap();
+    repo.writer()
+        .commit_file("input.txt", "first", "input")
+        .unwrap();
+    repo.writer()
+        .commit_file("file", "committed", "seed")
+        .unwrap();
+    repo.writer()
+        .commit_file(".gitignore", "ignored\n.shoal/\n", "ignore")
+        .unwrap();
+    std::fs::create_dir(repo.path().join(".shoal")).unwrap();
+    std::fs::write(repo.path().join(".shoal/config"), "canonical").unwrap();
+    std::fs::write(repo.path().join("file"), "staged").unwrap();
+    repo.git().try_run(repo.path(), &["add", "file"]).unwrap();
+    std::fs::write(repo.path().join("file"), "working").unwrap();
+    std::fs::write(repo.path().join("untracked"), "untracked").unwrap();
+    std::fs::write(repo.path().join("ignored"), "ignored").unwrap();
+    std::fs::create_dir(repo.path().join("target")).unwrap();
+    std::fs::write(repo.path().join("target/source"), "ordinary source").unwrap();
+    let source_modified = std::fs::metadata(repo.path().join("file"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let index = std::fs::read(repo.path().join(".git/index")).unwrap();
+    let head = std::fs::read(repo.path().join(".git/HEAD")).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, bindings) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let bindings = Arc::new(Mutex::new(bindings));
+    let authority = ActorWorktreeAuthority::new("workspace-test", bindings.clone());
+    let root = ActorRef::first(tidepool_actor::ActorId(1));
+    authority.install_grant(
+        root.into(),
+        tidepool_handlers::handlers::worktree::ActorWorktreeGrant::Repository,
+    );
+    let backend = Arc::new(Backend::default());
+    let layout = WorkspaceLayout {
+        source_root: repo.path().into(),
+        worktrees: manager.clone(),
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: backend.clone(),
+    };
+    let workspace = layout
+        .prepare(repo.path().into(), None, "root", true, CODING, None, None)
+        .unwrap();
+    assert!(build(&workspace).iter().any(|fresh| !fresh));
+    let _native = NativeProcess::start(&workspace, &backend);
+    let binding = runtime.path().join("binding.json");
+    tidepool_agent::accept_interactive_session_binding(
+        &binding,
+        3,
+        BackendThreadId(uuid::Uuid::new_v4().to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = tidepool_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
+    let owners = Arc::new(Mutex::new(std::collections::HashMap::from([(
+        root,
+        owner(workspace.clone(), thread.clone()),
+    )])));
+    let admission = fork_workspace_admission(
+        manager,
+        authority,
+        bindings,
+        "workspace-test".into(),
+        Some(NativeForkAdmission {
+            owners,
+            backend: backend.clone(),
+            layout: Some(layout),
+        }),
+    );
+    let seed = || {
+        ForkWorkspaceSeed::Explicit(tidepool_bridge_effects::WtWorktreeSpec {
+            spec_source: tidepool_bridge_effects::WtWorktreeSource::SourceCurrentRepository,
+            spec_label: "child".into(),
+            spec_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+        })
+    };
+    let prepared = admission
+        .admit(root, "root/child".into(), seed(), CODING)
+        .await
+        .unwrap();
+    let custody = prepared
+        .install(ActorRef::first(tidepool_actor::ActorId(2)))
+        .unwrap();
+    let child = (custody.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(child.inheritance_notice.is_none());
+    let child = child.workspace.as_ref().unwrap();
+    assert_eq!(shell(child, "cat target/source"), "ordinary source");
+    let layout = admission.native.as_ref().unwrap().layout.as_ref().unwrap();
+    let allocated = |path: PathBuf| {
+        let mut paths = vec![path];
+        let mut inodes = std::collections::HashSet::new();
+        let mut bytes = 0;
+        while let Some(path) = paths.pop() {
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            if inodes.insert((metadata.dev(), metadata.ino())) {
+                bytes += metadata.blocks() * 512;
+            }
+            if metadata.is_dir() {
+                match std::fs::read_dir(&path) {
+                    Ok(entries) => paths.extend(entries.map(|entry| entry.unwrap().path())),
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                        assert_eq!(
+                            metadata.mode() & 0o777,
+                            0,
+                            "only opaque kernel scratch may be excluded"
+                        );
+                    }
+                    Err(error) => panic!("{}: {error}", path.display()),
+                }
+            }
+        }
+        bytes
+    };
+    let root_bytes = allocated(layout.resource_root("root").join("build"));
+    let child_bytes = allocated(
+        layout
+            .resource_root(child.worktree.as_ref().unwrap().as_str())
+            .join("build"),
+    );
+    assert!(
+        child_bytes < root_bytes / 10,
+        "new child should allocate private metadata, not copy the build tree"
+    );
+    eprintln!("build backing storage (excluding opaque kernel scratch): root={root_bytes} bytes; new child={child_bytes} bytes");
+    assert!(
+        build(child).iter().all(|fresh| *fresh),
+        "unchanged source must reuse the root build"
+    );
+    shell(child, "printf '\n// changed locally\n' >> src/main.rs");
+    assert!(
+        build(child).iter().any(|fresh| !fresh),
+        "changed Rust source must rebuild"
+    );
+    shell(child, "printf second > input.txt");
+    assert!(
+        build(child).iter().any(|fresh| !fresh),
+        "changed build-script input must rebuild"
+    );
+    assert_eq!(
+        shell(child, ".shoal/build/cargo/debug/workspace-fork-fixture"),
+        "second\n"
+    );
+
+    assert_eq!(
+        shell(
+            child,
+            "cat file; git show :file; cat untracked ignored .shoal/config"
+        ),
+        "workingstageduntrackedignoredcanonical"
+    );
+    assert_eq!(
+        shell(child, "stat -c '%y' file"),
+        shell(&workspace, "stat -c '%y' file")
+    );
+    assert_eq!(
+        std::fs::metadata(repo.path().join("file"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        source_modified
+    );
+    assert_eq!(
+        std::fs::read(repo.path().join(".git/index")).unwrap(),
+        index
+    );
+    assert_eq!(std::fs::read(repo.path().join(".git/HEAD")).unwrap(), head);
+    std::fs::write(repo.path().join("file"), "later").unwrap();
+    assert_eq!(shell(child, "cat file"), "working");
+    shell(child, "printf child > file");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("file")).unwrap(),
+        "later"
+    );
+    std::fs::write(
+        repo.path().join("target/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    let tagged = admission
+        .admit(root, "root/tagged-cache".into(), seed(), CODING)
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(30)))
+        .unwrap();
+    let tagged = (tagged.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(tagged.inheritance_notice.is_none());
+    shell(tagged.workspace.as_ref().unwrap(), "test ! -e target");
+    *backend.busy.lock() = true;
+    let fallback = admission
+        .admit(root, "root/busy".into(), seed(), CODING)
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(3)))
+        .unwrap();
+    let fallback = (fallback.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(fallback
+        .inheritance_notice
+        .as_ref()
+        .unwrap()
+        .contains("source is busy"));
+    assert_eq!(
+        shell(
+            fallback.workspace.as_ref().unwrap(),
+            "cat file; test ! -e untracked; test ! -e ignored"
+        ),
+        "committed"
+    );
+    *backend.busy.lock() = false;
+    *backend.lose_finish.lock() = true;
+    let mut publication = workspace.publication.lock().await;
+    assert!(matches!(
+        publication.begin(backend.as_ref(), &thread).await.unwrap(),
+        Admission::Ready(_)
+    ));
+    assert!(publication.finish(backend.as_ref(), &thread).await.is_err());
+    assert!(publication.is_pending());
+    BoundWorkspace {
+        workspace: workspace.clone(),
+        thread,
+    }
+    .settle_publication(&mut publication, backend.as_ref())
+    .await
+    .unwrap();
+    assert!(!publication.is_pending());
+    drop(publication);
+    let calls = backend.calls.lock();
+    let retries = &calls[calls.len() - 3..];
+    assert!(retries
+        .iter()
+        .all(|(sequence, _)| *sequence == retries[0].0));
+    drop(calls);
+    let _child_native = NativeProcess::start(child, &backend);
+    let child_actor = ActorRef::first(tidepool_actor::ActorId(2));
+    admission.native.as_ref().unwrap().owners.lock().insert(
+        child_actor,
+        owner(
+            child.clone(),
+            tidepool_agent::read_interactive_binding(&binding)
+                .await
+                .unwrap(),
+        ),
+    );
+    shell(child, "printf staged-child > file; git add file; printf dirty-child > file; printf warm > .shoal/build/cargo/artifact");
+    let grandchild = admission
+        .admit(
+            child_actor,
+            "root/child/grandchild".into(),
+            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            CODING,
+        )
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(4)))
+        .unwrap();
+    let grandchild = (grandchild.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(
+        grandchild.inheritance_notice.is_none(),
+        "{:?}",
+        grandchild.inheritance_notice
+    );
+    let grandchild = grandchild.workspace.as_ref().unwrap();
+    assert_eq!(
+        shell(
+            grandchild,
+            "cat file; git show :file; cat .shoal/build/cargo/artifact .shoal/config"
+        ),
+        "dirty-childstaged-childwarmcanonical"
+    );
+    shell(
+        child,
+        "printf later-child > file; printf later-build > .shoal/build/cargo/artifact",
+    );
+    assert_eq!(
+        shell(grandchild, "cat file .shoal/build/cargo/artifact"),
+        "dirty-childwarm"
+    );
+    shell(grandchild, "git commit -qm grandchild");
+    assert_eq!(shell(child, "git show HEAD:file"), "committed");
+
+    let inspection = admission
+        .admit(
+            child_actor,
+            "root/child/inspection".into(),
+            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            ForkWorkspacePolicy {
+                native_tools: tidepool_actor::NativeToolClass::InspectionOnly,
+                workspace: tidepool_actor::WorkspaceAccess::InspectOnly,
+            },
+        )
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(5)))
+        .unwrap();
+    let inspection = (inspection.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    let inspection = inspection.workspace.as_ref().unwrap();
+    assert!(inspection.build.is_none());
+    assert_eq!(
+        shell(
+            inspection,
+            "cat file; if touch forbidden 2>/dev/null; then exit 1; fi"
+        ),
+        "later-child"
+    );
+    shell(
+        child,
+        "git rev-parse HEAD > \"$(git rev-parse --git-path MERGE_HEAD)\"",
+    );
+    let fallback = admission
+        .admit(
+            child_actor,
+            "root/child/in-progress".into(),
+            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            CODING,
+        )
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(6)))
+        .unwrap();
+    let fallback = (fallback.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(fallback
+        .inheritance_notice
+        .as_ref()
+        .unwrap()
+        .contains("Git operation in progress"));
+    assert_eq!(
+        shell(fallback.workspace.as_ref().unwrap(), "cat file"),
+        "committed"
+    );
+    shell(child, "rm -- \"$(git rev-parse --git-path MERGE_HEAD)\"");
+    *backend.lose_begin.lock() = true;
+    let failed = admission
+        .admit(
+            child_actor,
+            "root/child/lost-begin".into(),
+            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            CODING,
+        )
+        .await;
+    assert!(failed.is_err());
+    assert!(
+        !child.publication.lock().await.is_pending(),
+        "lost begin must settle the same operation"
+    );
+    assert_eq!(shell(child, "cat file"), "later-child");
+    let foreign = admission
+        .admit(
+            root,
+            "root/foreign-source".into(),
+            ForkWorkspaceSeed::Explicit(tidepool_bridge_effects::WtWorktreeSpec {
+                spec_source: tidepool_bridge_effects::WtWorktreeSource::SourceWorktree(
+                    tidepool_bridge_effects::WtWorktreeId {
+                        raw: child.worktree.as_ref().unwrap().as_str().into(),
+                    },
+                ),
+                spec_label: "foreign-source".into(),
+                spec_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            }),
+            CODING,
+        )
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(7)))
+        .unwrap();
+    let foreign = (foreign.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    let foreign = foreign.workspace.as_ref().unwrap();
+    assert_eq!(
+        shell(
+            foreign,
+            "cat input.txt; .shoal/build/cargo/debug/workspace-fork-fixture"
+        ),
+        "secondfirst\n",
+        "source follows the selected child; cache follows the root creator"
+    );
+    let calls = backend.calls.lock().len();
+    let explicit = admission
+        .admit(
+            root,
+            "root/explicit-ref".into(),
+            ForkWorkspaceSeed::Explicit(tidepool_bridge_effects::WtWorktreeSpec {
+                spec_source: tidepool_bridge_effects::WtWorktreeSource::SourceRef(
+                    tidepool_bridge_effects::WtGitRef { raw: "HEAD".into() },
+                ),
+                spec_label: "explicit-ref".into(),
+                spec_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+            }),
+            CODING,
+        )
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(8)))
+        .unwrap();
+    assert_eq!(
+        backend.calls.lock().len(),
+        calls,
+        "explicit refs require no live capture"
+    );
+    let explicit = (explicit.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(explicit.inheritance_notice.is_none());
+    assert_eq!(
+        shell(
+            explicit.workspace.as_ref().unwrap(),
+            "cat file; test ! -e untracked"
+        ),
+        "committed"
+    );
+    *backend.unavailable.lock() = true;
+    let unavailable = admission
+        .admit(
+            child_actor,
+            "root/child/unavailable".into(),
+            ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            CODING,
+        )
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(9)))
+        .unwrap();
+    let unavailable = (unavailable.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    assert!(unavailable
+        .inheritance_notice
+        .as_ref()
+        .unwrap()
+        .contains("test native unavailable"));
+    assert_eq!(
+        shell(unavailable.workspace.as_ref().unwrap(), "cat file"),
+        "committed"
+    );
+    *backend.unavailable.lock() = false;
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, resumed) = tokio::sync::oneshot::channel();
+    *backend.begin_pause.lock() = Some((entered, resumed));
+    let caller_admission = admission.clone();
+    let caller = tokio::spawn(async move {
+        caller_admission
+            .admit(
+                child_actor,
+                "root/child/cancelled".into(),
+                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+                CODING,
+            )
+            .await
+    });
+    ready.await.unwrap();
+    caller.abort();
+    assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+    release.send(()).unwrap();
+    let publication = tokio::time::timeout(Duration::from_secs(10), child.publication.lock())
+        .await
+        .unwrap();
+    assert!(
+        !publication.is_pending(),
+        "abandoning the caller must not abandon native admission"
+    );
+    drop(publication);
+    assert!(matches!(
+        backend.calls.lock().last().unwrap().1,
+        PublicationOperation::Finish { .. }
+    ));
+    let branch = tidepool_repr::ActorPath::parse("root/child/cancelled")
+        .unwrap()
+        .git_branch();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let complete = admission.manager.list().unwrap().iter().any(|summary| {
+                summary.receipt.branch.as_str() == branch
+                    && summary.receipt.status == tidepool_worktree::WorktreeRecordStatus::Mounted
+            });
+            if complete {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(shell(child, "cat file"), "later-child");
+}

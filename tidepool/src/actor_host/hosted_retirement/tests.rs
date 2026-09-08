@@ -88,7 +88,7 @@ impl HttpFixture {
         owners.lock().insert(
             exact,
             InteractiveApplicationOwner {
-                creator_build: None,
+                creator_workspace: None,
                 cancel: None,
                 native_retirement: Default::default(),
                 pane: Arc::new(Mutex::new(None)),

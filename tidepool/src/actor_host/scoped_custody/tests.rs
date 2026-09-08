@@ -37,11 +37,12 @@ impl Fixture {
             _runtime: runtime,
             tree,
             custody: Arc::new(ActorWorkspaceCustody {
+                workspace: None,
+                inheritance_notice: None,
                 bindings: Arc::new(Mutex::new(bindings)),
                 binding: Some(binding),
                 actor,
                 state: Mutex::new(CustodyState::default()),
-                build_inheritance: super::super::BuildInheritance::Unprepared,
             }),
         }
     }
@@ -67,7 +68,7 @@ impl Fixture {
         owners.lock().insert(
             self.custody.actor,
             InteractiveApplicationOwner {
-                creator_build: None,
+                creator_workspace: None,
                 cancel: None,
                 native_retirement: Default::default(),
                 pane: Arc::new(Mutex::new(None)),

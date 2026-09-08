@@ -12,7 +12,10 @@ mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
 mod overlay_resource;
+mod workspace;
+mod workspace_publication;
 pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
+use workspace::{PreparedWorkspace, WorkspaceLayout};
 mod model_free;
 mod prompt_catalog;
 pub(crate) mod recipe_checks;
@@ -74,10 +77,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 use self::host_incarnation::HostIncarnationLease;
-use self::overlay_resource::{
-    NativePublication, OverlayResourceLease, OverlaySnapshot, PublicationSkip,
-    SharedOverlayResource,
-};
+use self::overlay_resource::{OverlayResourceLease, OverlaySnapshot, SharedOverlayResource};
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
 
@@ -128,19 +128,13 @@ struct ActorForkWorkspaceAdmission {
     native: Option<NativeForkAdmission>,
 }
 
-#[derive(Clone, Default)]
-enum BuildInheritance {
-    #[default]
-    Unprepared,
-    Prepared(Option<OverlaySnapshot>),
-}
-
 struct ActorWorkspaceCustody {
     bindings: Arc<Mutex<BindingTable>>,
     binding: Option<ActiveBinding>,
     actor: ActorRef,
     state: Mutex<scoped_custody::CustodyState>,
-    build_inheritance: BuildInheritance,
+    workspace: Option<Arc<PreparedWorkspace>>,
+    inheritance_notice: Option<String>,
 }
 
 impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
@@ -189,7 +183,8 @@ impl ActorForkWorkspaceAdmission {
         &self,
         actor: ActorRef,
         worktree: &str,
-        build_inheritance: BuildInheritance,
+        workspace: Option<Arc<PreparedWorkspace>>,
+        inheritance_notice: Option<String>,
     ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         if !WorktreeId::is_path_safe(worktree) {
             return Err(ForkWorkspaceAdmissionError {
@@ -226,7 +221,8 @@ impl ActorForkWorkspaceAdmission {
             binding: Some(binding),
             actor,
             state: Mutex::new(scoped_custody::CustodyState::default()),
-            build_inheritance,
+            workspace,
+            inheritance_notice,
         }))
     }
 }
@@ -237,7 +233,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         actor: ActorRef,
         worktree: &str,
     ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        self.bind_workspace(actor, worktree, BuildInheritance::Unprepared)
+        self.bind_workspace(actor, worktree, None, None)
     }
 
     fn admit(
@@ -245,7 +241,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         owner: ActorRef,
         actor_path: String,
         seed: ForkWorkspaceSeed,
-        native_tools: tidepool_actor::NativeToolClass,
+        policy: tidepool_actor::ForkWorkspacePolicy,
     ) -> tidepool_actor::ForkWorkspaceAdmissionFuture<'_> {
         let worktrees = self.worktrees.clone();
         let custody = self.clone();
@@ -269,28 +265,32 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             .map_err(|error| ForkWorkspaceAdmissionError {
                 detail: format!("workspace preparation task failed: {error}"),
             })??;
-            let build_snapshot = match &custody.native {
-                Some(native) => native.build_snapshot(owner, native_tools).await,
-                None => None,
+            let (handle, workspace, notice) = match &custody.native {
+                Some(native) if native.layout.is_some() => {
+                    let prepared = native
+                        .prepare_workspace(owner, authorized, policy)
+                        .await
+                        .map_err(|error| ForkWorkspaceAdmissionError {
+                            detail: error.to_string(),
+                        })?;
+                    (prepared.handle, Some(prepared.workspace), prepared.notice)
+                }
+                _ => {
+                    let handle = tokio::task::spawn_blocking(move || authorized.materialize())
+                        .await
+                        .map_err(|error| ForkWorkspaceAdmissionError {
+                            detail: format!("workspace preparation task failed: {error}"),
+                        })?
+                        .map_err(|error| ForkWorkspaceAdmissionError {
+                            detail: format!("{error:?}"),
+                        })?;
+                    (handle, None, None)
+                }
             };
-            let handle = tokio::task::spawn_blocking(move || authorized.materialize())
-                .await
-                .map_err(|error| ForkWorkspaceAdmissionError {
-                    detail: format!("workspace preparation task failed: {error}"),
-                })?
-                .map_err(|error| ForkWorkspaceAdmissionError {
-                    detail: format!("{error:?}"),
-                })?;
             let worktree = handle.handle_receipt.tree_id.raw.clone();
             Ok(tidepool_actor::PreparedForkWorkspace::new(
                 handle,
-                move |actor| {
-                    custody.bind_workspace(
-                        actor,
-                        &worktree,
-                        BuildInheritance::Prepared(build_snapshot),
-                    )
-                },
+                move |actor| custody.bind_workspace(actor, &worktree, workspace, notice),
             ))
         })
     }
@@ -411,7 +411,7 @@ pub enum ActorHostReadiness {
 
 struct InteractiveDeployment {
     /// Retain the view independently of the bootstrap and native process lifetimes.
-    _workspace_view: tidepool_node::MountNamespace,
+    prepared_workspace: Arc<PreparedWorkspace>,
     supervisor: Option<ActorRef>,
     notified_provider_failures: std::collections::BTreeSet<(String, String)>,
     actor: ActorRef,
@@ -430,7 +430,6 @@ struct InteractiveDeployment {
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
     runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
-    build_resource: Option<SharedOverlayResource>,
 }
 
 enum InteractiveConnection {
@@ -627,7 +626,7 @@ impl InteractiveCleanupReceipt {
 }
 
 struct InteractiveApplicationOwner {
-    creator_build: Option<CreatorBuild>,
+    creator_workspace: Option<BoundWorkspace>,
     cancel: Option<oneshot::Sender<NativeRetirement>>,
     native_retirement: NativeRetirement,
     pane: Arc<Mutex<Option<TmuxPaneId>>>,
@@ -659,8 +658,8 @@ enum HostLaunchState {
 type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
 
 #[derive(Clone)]
-struct CreatorBuild {
-    resource: SharedOverlayResource,
+struct BoundWorkspace {
+    workspace: Arc<PreparedWorkspace>,
     thread: QueueReadyThread,
 }
 
@@ -668,6 +667,7 @@ struct CreatorBuild {
 struct NativeForkAdmission {
     owners: InteractiveOwners,
     backend: Arc<dyn InteractiveAgentBackend>,
+    layout: Option<WorkspaceLayout>,
 }
 
 fn native_tool_policy(
@@ -692,42 +692,13 @@ impl NativeForkAdmission {
         if native_tool_policy(native_tools) == InteractiveNativeToolPolicy::InspectionOnly {
             return None;
         }
-        let source = self
-            .owners
+        self.owners
             .lock()
             .get(&creator)
             .filter(|owner| owner.terminal.is_none())
-            .and_then(|owner| owner.creator_build.clone())?;
-        let mut resource = match source.resource.publication.try_lock() {
-            Ok(resource) => resource,
-            Err(_) => return source.resource.latest_snapshot(),
-        };
-        // Complete native admission before dropping the resource lock. Retained
-        // publication records own any uncertain transition across host failure.
-        match resource
-            .publish_native(
-                self.backend.as_ref(),
-                &source.thread,
-                &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
-                &[],
-            )
-            .await
-        {
-            Ok(NativePublication::Published { sequence, snapshot }) => {
-                tracing::debug!(?creator, %sequence, "creator build snapshot published during admission");
-                Some(snapshot)
-            }
-            Ok(NativePublication::Skipped(reason)) => {
-                if let PublicationSkip::NativeUnavailable(reason) = reason {
-                    tracing::debug!(?creator, %reason, "creator build publication unavailable");
-                }
-                resource.latest_snapshot()
-            }
-            Err(error) => {
-                tracing::warn!(?creator, %error, "creator build publication retained for recovery");
-                resource.latest_snapshot()
-            }
-        }
+            .and_then(|owner| owner.creator_workspace.as_ref())
+            .and_then(|owner| owner.workspace.build.as_ref())
+            .and_then(SharedOverlayResource::latest_snapshot)
     }
 }
 
@@ -757,7 +728,7 @@ impl InteractiveApplicationOwner {
     }
 
     fn cancel(&mut self) {
-        self.creator_build = None;
+        self.creator_workspace = None;
         if let Some(gate) = &self.fork_gate {
             let _ = gate.mark_failed();
         }
@@ -1111,6 +1082,19 @@ pub async fn run(
             Some(NativeForkAdmission {
                 owners: application_owners.clone(),
                 backend: backend.clone(),
+                layout: Some(WorkspaceLayout {
+                    source_root: config.workspace.clone(),
+                    worktrees: worktrees.clone(),
+                    backend: backend.clone(),
+                    base_prompt: FrozenBasePrompt::materialize_selected(
+                        &run_root,
+                        config
+                            .workspace_inputs
+                            .as_ref()
+                            .and_then(|inputs| inputs.prompts.get("core"))
+                            .map(String::as_str),
+                    )?,
+                }),
             }),
         )),
         host_incarnation.incarnation(),
@@ -1719,18 +1703,16 @@ async fn run_interactive_applications(
             }
             _ = health.tick() => {
                 for deployment in &deployments {
-                    if let (Some(resource), Some(thread)) = (&deployment.build_resource, &deployment.thread) {
-                        if let Ok(mut resource) = resource.publication.clone().try_lock_owned() {
-                            if resource.native_publication_needs_retry() {
+                    if let Some(thread) = &deployment.thread {
+                        let workspace = deployment.prepared_workspace.clone();
+                        if let Ok(mut publication) = workspace.publication.clone().try_lock_owned() {
+                            if publication.is_pending() {
                                 let backend = backend.clone();
-                                let thread = thread.clone();
+                                let owner = BoundWorkspace { workspace, thread: thread.clone() };
                                 let actor = deployment.actor;
                                 publication_retries.spawn(async move {
-                                    if let Err(error) = resource.publish_native(
-                                        backend.as_ref(), &thread,
-                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET), &[],
-                                    ).await {
-                                        tracing::debug!(?actor, %error, "build publication recovery remains pending");
+                                    if let Err(error) = owner.settle_publication(&mut publication, backend.as_ref()).await {
+                                        tracing::debug!(?actor, %error, "workspace publication recovery remains pending");
                                     }
                                 });
                             }
@@ -1816,13 +1798,12 @@ async fn run_interactive_applications(
                                 Some(thread.id().clone())
                             }
                         };
-                        let build_inheritance = installation.worktree_custody.as_ref()
+                        let workspace_prepared = installation.worktree_custody.as_ref()
                             .and_then(|custody| (custody.as_ref() as &dyn std::any::Any)
                                 .downcast_ref::<ActorWorkspaceCustody>())
-                            .map(|custody| custody.build_inheritance.clone())
-                            .unwrap_or_default();
+                            .is_some_and(|custody| custody.workspace.is_some());
                         let native_admission = NativeForkAdmission {
-                            owners: application_owners.clone(), backend: backend.clone(),
+                            owners: application_owners.clone(), backend: backend.clone(), layout: None,
                         };
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
@@ -1834,7 +1815,7 @@ async fn run_interactive_applications(
                         let hosted_slot = Arc::new(Mutex::new(None));
                         let pane_slot = Arc::new(Mutex::new(None));
                         owners.insert(actor, InteractiveApplicationOwner {
-                            creator_build: None,
+                            creator_workspace: None,
                             cancel: Some(cancel),
                             native_retirement: NativeRetirement::Preserve,
                             pane: pane_slot.clone(),
@@ -1850,12 +1831,11 @@ async fn run_interactive_applications(
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
                             let result = AssertUnwindSafe(async {
-                                let build_snapshot = match build_inheritance {
-                                    BuildInheritance::Prepared(snapshot) => snapshot,
-                                    BuildInheritance::Unprepared => match installation.creator {
+                                let build_snapshot = if workspace_prepared { None } else {
+                                    match installation.creator {
                                         Some(creator) => native_admission.build_snapshot(creator, installation.effective_role.native_tools()).await,
                                         None => None,
-                                    },
+                                    }
                                 };
                                 launch_interactive_application(
                                     installation,
@@ -2124,8 +2104,8 @@ async fn run_interactive_applications(
                         };
                         deployment.thread = Some(thread.clone());
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
-                            owner.creator_build = deployment.build_resource.as_ref().map(|resource| CreatorBuild {
-                                resource: resource.clone(), thread: thread.clone(),
+                            owner.creator_workspace = Some(BoundWorkspace {
+                                workspace: deployment.prepared_workspace.clone(), thread: thread.clone(),
                             });
                         }
                         if actor == root_identity {
@@ -2556,7 +2536,7 @@ fn retained_workspace_command(
 async fn launch_prepared_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
-    mut worktree: Option<WorktreeHandle>,
+    worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<NativeRetirement>,
     inherited: InteractiveInheritance,
     hosted_slot: hosted_retirement::HostedSlot,
@@ -2591,79 +2571,67 @@ async fn launch_prepared_interactive_application(
     std::fs::create_dir_all(&actor_root).map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
-    let git_common_dir =
-        tidepool_worktree::git::inspect::git_common_dir(worktrees.git(), &workspace).map_err(
-            |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
-        )?;
-    let writable_roots = writable_repository_roots(
-        actor_identity == root,
-        installation.effective_role.workspace(),
-        &config.workspace,
-        worktree.as_ref().map(WorktreeHandle::cwd),
-        &git_common_dir,
-    );
     let agent_workspace = PathBuf::from(ACTOR_PROJECT_ROOT);
-    let native_tool_policy = native_tool_policy(installation.effective_role.native_tools());
-    let policy_mounts = backend
-        .prepare_native_tool_policy(native_tool_policy, &actor_root.join("native-policy"))
-        .map_err(|error| {
-            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-        })?;
-    let mut process_boundary = ProcessMountBoundary::new(
-        &workspace,
-        [
-            config.workspace.clone(),
-            worktrees.managed_root().to_path_buf(),
-            git_common_dir,
-        ],
-        writable_roots,
-    )
-    .and_then(|boundary| boundary.with_project_root(&agent_workspace))
-    .and_then(|boundary| {
-        boundary.with_read_only_overlay(base_prompt.directory(), base_prompt.directory())
-    })
-    .map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-    })?;
-    for InteractivePolicyMount { source, target } in policy_mounts {
-        process_boundary = process_boundary
-            .with_read_only_overlay(source, target)
-            .map_err(|error| {
-                application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-            })?;
-    }
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
-    let mut build_resource = if native_tool_policy == InteractiveNativeToolPolicy::InspectionOnly {
-        None
-    } else {
-        let run_id = run_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("run");
-        let lease = OverlayResourceLease::allocate_build(run_id, actor_identity, build_snapshot)
+    if let Some(custody) = &installation.worktree_custody {
+        custody.process_may_exist();
+    }
+    let prepared_workspace = installation
+        .worktree_custody
+        .as_ref()
+        .and_then(|custody| {
+            (custody.as_ref() as &dyn std::any::Any).downcast_ref::<ActorWorkspaceCustody>()
+        })
+        .and_then(|custody| custody.workspace.clone());
+    let prepared_workspace = match prepared_workspace {
+        Some(prepared) => prepared,
+        None => {
+            let layout = WorkspaceLayout {
+                source_root: config.workspace.clone(),
+                worktrees: worktrees.clone(),
+                base_prompt: base_prompt.clone(),
+                backend: backend.clone(),
+            };
+            let host_path = workspace.clone();
+            let id = worktree.as_ref().map(|tree| tree.id().clone());
+            let key = id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_else(|| {
+                    format!(
+                        "actor-{}-{}",
+                        actor_identity.id.0, actor_identity.incarnation.0
+                    )
+                });
+            let policy = tidepool_actor::ForkWorkspacePolicy {
+                native_tools: installation.effective_role.native_tools(),
+                workspace: installation.effective_role.workspace(),
+            };
+            tokio::task::spawn_blocking(move || {
+                layout.prepare(
+                    host_path,
+                    id,
+                    &key,
+                    actor_identity == root,
+                    policy,
+                    None,
+                    build_snapshot,
+                )
+            })
+            .await
             .map_err(|error| {
                 application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-            })?;
-        let mountpoint = workspace.join(ACTOR_BUILD_TARGET);
-        std::fs::create_dir_all(&mountpoint).map_err(|error| {
-            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-        })?;
-        process_boundary = lease
-            .mount(process_boundary, &agent_workspace.join(ACTOR_BUILD_TARGET))
+            })?
             .map_err(|error| {
                 application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-            })?;
-        tracing::info!(
-            actor = ?actor_identity,
-            resource = %lease.path().display(),
-            target = ACTOR_BUILD_TARGET,
-            "actor build resource allocated"
-        );
-        Some(lease)
+            })?
+        }
     };
-    let build_output = build_resource
+    let workspace_view = prepared_workspace.view.clone();
+    let build_output = prepared_workspace
+        .build
         .as_ref()
         .map(|_| agent_workspace.join(ACTOR_BUILD_TARGET));
     let run_socket_id = run_root
@@ -2759,6 +2727,18 @@ async fn launch_prepared_interactive_application(
         append_inheritance_authority(&mut instructions);
         instructions
     };
+    let mut developer_instructions = developer_instructions;
+    if let Some(notice) = installation
+        .worktree_custody
+        .as_ref()
+        .and_then(|custody| {
+            (custody.as_ref() as &dyn std::any::Any).downcast_ref::<ActorWorkspaceCustody>()
+        })
+        .and_then(|custody| custody.inheritance_notice.as_ref())
+    {
+        developer_instructions.push('\n');
+        developer_instructions.push_str(notice);
+    }
     let developer_instructions =
         orient_launch_instructions(&developer_instructions, &runtime_observation.snapshot());
     runtime_observation.publish_prompt_profile(
@@ -2810,43 +2790,6 @@ async fn launch_prepared_interactive_application(
         spec.model.clone(),
         spec.effort.map(|effort| format!("{effort:?}")),
     );
-    if let Some(resource) = &mut build_resource {
-        resource.process_may_exist();
-    }
-    if let Some(custody) = &installation.worktree_custody {
-        custody.process_may_exist();
-    }
-    let workspace_view = tokio::task::spawn_blocking(move || {
-        process_boundary.prepare_view(
-            BUBBLEWRAP_PROGRAM,
-            std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT,
-        )
-    })
-    .await
-    .map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-    })?
-    .map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-    })?;
-    if let Some(handle) = &worktree {
-        let manager = worktrees.clone();
-        let id = handle.id().clone();
-        let namespace = workspace_view.clone();
-        let visible_root = agent_workspace.clone();
-        worktree = Some(
-            tokio::task::spawn_blocking(move || {
-                manager.mount_worktree(&id, namespace, &visible_root)
-            })
-            .await
-            .map_err(|error| {
-                application_error(actor_identity, InteractiveOperation::BindWorktree, error)
-            })?
-            .map_err(|error| {
-                application_error(actor_identity, InteractiveOperation::BindWorktree, error)
-            })?,
-        );
-    }
     let command = retained_workspace_command(
         &config.shoal_executable,
         &workspace_view,
@@ -2992,7 +2935,7 @@ async fn launch_prepared_interactive_application(
     let binding_control = service.lock().await.control.clone();
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
-            _workspace_view: workspace_view,
+            prepared_workspace,
             supervisor: installation.supervisor_parent,
             notified_provider_failures: Default::default(),
             actor: actor_identity,
@@ -3016,7 +2959,6 @@ async fn launch_prepared_interactive_application(
             fork_gate,
             runtime_observation,
             fork_parent_thread,
-            build_resource: build_resource.map(SharedOverlayResource::new),
         },
         binding: InteractiveBindingRequest {
             control: binding_control,
@@ -3138,6 +3080,7 @@ fn actor_launch_environment(
     is_root: bool,
     build_output: Option<&Path>,
 ) -> ActorLaunchEnvironment {
+    inherited.insert("CODEX_WORKSPACE_SNAPSHOTS".into(), "1".into());
     if let Some(build_output) = build_output {
         inherited.insert(
             "CARGO_TARGET_DIR".into(),
@@ -3467,19 +3410,18 @@ async fn retire_interactive_application(
         component: CleanupComponent::Socket,
         outcome: socket_cleanup_outcome(deployment.socket_directory),
     });
-    let build_outcome =
-        deployment
-            .build_resource
-            .take()
-            .map_or(CleanupComponentOutcome::Completed, |lease| {
-                let released = lease.release();
-                match released {
-                    Ok(()) => CleanupComponentOutcome::Completed,
-                    Err(error) => CleanupComponentOutcome::Failed {
-                        detail: error.to_string(),
-                    },
-                }
-            });
+    let build_outcome = deployment.prepared_workspace.build.clone().map_or(
+        CleanupComponentOutcome::Completed,
+        |lease| {
+            let released = lease.release();
+            match released {
+                Ok(()) => CleanupComponentOutcome::Completed,
+                Err(error) => CleanupComponentOutcome::Failed {
+                    detail: error.to_string(),
+                },
+            }
+        },
+    );
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::BuildResource,
         outcome: build_outcome,

@@ -51,6 +51,7 @@ impl GitOutput {
 /// Runs git commands with a scrubbed environment.
 #[derive(Clone, Debug, Default)]
 pub struct GitCli {
+    admission: std::sync::Arc<parking_lot::ReentrantMutex<()>>,
     /// Extra environment applied to every invocation (the snapshot lane sets
     /// `GIT_INDEX_FILE` here; the monitor sets nothing).
     env: BTreeMap<String, String>,
@@ -63,6 +64,14 @@ pub struct GitCli {
 impl GitCli {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Exclude this repository owner's host Git commands while capturing source
+    /// and private Git state. The capture thread can issue nested Git commands;
+    /// other threads wait at the normal invocation entry point. Native writers
+    /// require their separate admission boundary.
+    pub fn try_capture(&self) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
+        self.admission.try_lock()
     }
 
     /// Bind host Git operations to the same mounted filesystem as its owner.
@@ -177,6 +186,7 @@ impl GitCli {
         cwd: &Path,
         args: &[S],
     ) -> Result<GitOutput, GitFailureReceipt> {
+        let _admission = self.admission.lock();
         let arg_strings: Vec<String> = args
             .iter()
             .map(|a| a.as_ref().to_string_lossy().into_owned())
@@ -428,5 +438,52 @@ pub mod inspect {
         } else {
             None
         })
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+
+    #[test]
+    fn source_capture_excludes_host_git_mutation_and_allows_its_own_reads() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("file", "seed", "seed").unwrap();
+        std::fs::write(repo.path().join("file"), "changed").unwrap();
+        let git = repo.git().clone();
+        let capture = git.try_capture().unwrap();
+        assert_eq!(
+            git.try_run(repo.path(), &["show", ":file"])
+                .unwrap()
+                .trimmed(),
+            "seed"
+        );
+        let writer = git.clone();
+        let path = repo.path().to_owned();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            assert!(writer.try_capture().is_none());
+            started.send(()).unwrap();
+            writer.try_run(&path, &["add", "file"]).unwrap();
+            finished.send(()).unwrap();
+        });
+        ready.recv().unwrap();
+        assert!(done.try_recv().is_err());
+        assert_eq!(
+            git.try_run(repo.path(), &["show", ":file"])
+                .unwrap()
+                .trimmed(),
+            "seed"
+        );
+        drop(capture);
+        done.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        thread.join().unwrap();
+        assert_eq!(
+            git.try_run(repo.path(), &["show", ":file"])
+                .unwrap()
+                .trimmed(),
+            "changed"
+        );
     }
 }

@@ -5,15 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tidepool_actor::ActorRef;
 use tidepool_node::{
     MountNamespace, OverlayRecovery, OverlayRotation, OverlayRotationOutcome, ProcessBoundaryError,
     ProcessMountBoundary,
 };
-
-#[path = "overlay_resource/native_publication.rs"]
-mod native_publication;
-pub(super) use native_publication::{NativePublication, PublicationSkip};
 
 #[derive(Debug)]
 pub(super) struct OverlayResourceLease {
@@ -23,7 +18,9 @@ pub(super) struct OverlayResourceLease {
     work: PathBuf,
     latest: Arc<Mutex<Option<OverlaySnapshot>>>,
     publication: PublicationState,
-    native_retry: bool,
+    rotations: usize,
+    consolidations: usize,
+    covered_layers: Vec<OverlayLayer>,
 }
 
 /// Publication is exclusive, but readers of completed generations need not
@@ -115,13 +112,6 @@ struct ViewRecord {
     warm: bool,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PendingViewRecord {
-    version: u32,
-    view: ViewRecord,
-    recovery: tidepool_node::OverlayRecoveryRecord,
-}
-
 impl ViewRecord {
     fn new(layers: &[OverlayLayer], upper: &Path, work: &Path, warm: bool) -> Self {
         Self {
@@ -144,20 +134,10 @@ fn encode_view(
 }
 
 impl OverlayResourceLease {
-    pub(super) fn allocate_build(
-        run_id: &str,
-        actor: ActorRef,
+    pub(super) fn allocate_path(
+        path: PathBuf,
         inherited: Option<OverlaySnapshot>,
     ) -> io::Result<Self> {
-        let path = tidepool_runtime::paths::actor_build_resource_dir(
-            run_id,
-            actor.id.0,
-            actor.incarnation.0,
-        );
-        Self::allocate_path(path, inherited)
-    }
-
-    fn allocate_path(path: PathBuf, inherited: Option<OverlaySnapshot>) -> io::Result<Self> {
         // Exclusive creation is required even when the prior launch is uncertain.
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
@@ -212,12 +192,81 @@ impl OverlayResourceLease {
             work,
             latest: Arc::new(Mutex::new(latest)),
             publication: PublicationState::Writable,
-            native_retry: false,
+            rotations: 0,
+            consolidations: 0,
+            covered_layers: Vec::new(),
         })
     }
 
+    #[cfg(test)]
     pub(super) fn path(&self) -> &Path {
         &self.storage.path
+    }
+
+    /// Import ordinary host source into a private base before any mount exists.
+    /// Exclusions are separately owned mount roots, never Git ignore patterns.
+    pub(super) fn import_source(
+        &self,
+        source: &Path,
+        excluded: &[&std::ffi::OsStr],
+    ) -> io::Result<()> {
+        if self.layers.len() != 1 || self.layers[0].storage.path != self.storage.path {
+            return Err(io::Error::other(
+                "source import requires a fresh private base",
+            ));
+        }
+        let before = source_inventory(source, excluded)?;
+        let mut entries = std::fs::read_dir(source)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<io::Result<Vec<_>>>()?;
+        entries.retain(|entry| !excluded.iter().any(|name| entry.file_name() == Some(*name)));
+        entries.sort();
+        if !entries.is_empty() {
+            let output = std::process::Command::new("cp")
+                .args(["--archive", "--reflink=auto", "--target-directory"])
+                .arg(&self.layers[0].path)
+                .arg("--")
+                .args(entries)
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "source import failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+        }
+        if before != source_inventory(source, excluded)? {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "source changed during import",
+            ));
+        }
+        tidepool_node::copy_overlay_root_metadata(source, &self.layers[0].path)
+    }
+
+    pub(super) fn prepare_git_pointer(&self, git_file: &Path) -> io::Result<()> {
+        std::fs::copy(git_file, self.upper.join(".git"))?;
+        std::fs::create_dir_all(self.upper.join(super::ACTOR_BUILD_TARGET))?;
+        let inherited = self
+            .layers
+            .last()
+            .ok_or_else(|| io::Error::other("source has no base"))?;
+        tidepool_node::copy_overlay_root_metadata(&inherited.path, &self.upper)
+    }
+
+    /// Reconcile only an already-started operation; never rotate a fresh view.
+    pub(super) fn settle_pending(&mut self) -> io::Result<()> {
+        match &self.publication {
+            PublicationState::Writable => Ok(()),
+            PublicationState::NeedsRecord { .. } => self.record_publication(),
+            PublicationState::Unconfirmed(pending) => {
+                let outcome = pending.recovery.reconcile();
+                if let OverlayRotationOutcome::Unconfirmed(detail) = &outcome {
+                    return Err(io::Error::other(detail.clone()));
+                }
+                self.settle_rotation(outcome).map(|_| ())
+            }
+        }
     }
 
     fn layers(&self) -> impl Iterator<Item = PathBuf> + '_ {
@@ -258,8 +307,104 @@ impl OverlayResourceLease {
         }
     }
 
-    /// Caller must hold native mutation admission and establish writer completion.
-    /// Kept private to actor composition until that native handshake is connected.
+    /// Flatten only immutable lowers, while the parent's current upper remains
+    /// writable. The caller runs this before taking native writer admission.
+    pub(super) fn consolidate(&mut self) -> io::Result<()> {
+        const COMPACT_AT: usize = 8;
+        if self.consolidations >= 8
+            || self.layers.len() < COMPACT_AT
+            || !matches!(self.publication, PublicationState::Writable)
+        {
+            return Ok(());
+        }
+        self.consolidations += 1;
+        let temporary = tempfile::Builder::new()
+            .prefix("compact-")
+            .tempdir_in(&self.storage.path)?;
+        let base = temporary.path().join("base");
+        let project = temporary.path().join("view");
+        let upper = temporary.path().join("upper");
+        let work = temporary.path().join("work");
+        for path in [&base, &project, &upper, &work] {
+            std::fs::create_dir(path)?;
+        }
+        let top = self
+            .layers
+            .last()
+            .ok_or_else(|| io::Error::other("overlay has no base"))?;
+        tidepool_node::copy_overlay_root_metadata(&top.path, &upper)
+            .map_err(|error| io::Error::other(format!("compact metadata: {error}")))?;
+        let boundary =
+            ProcessMountBoundary::new(&project, [self.storage.root.clone()], [base.clone()])
+                .and_then(|boundary| boundary.with_project_root(&project))
+                .and_then(|boundary| {
+                    boundary.with_overlay_view(
+                        self.layers.iter().map(|layer| layer.path.clone()),
+                        &upper,
+                        &work,
+                        &project,
+                    )
+                })
+                .map_err(io::Error::other)?;
+        // A lost bootstrap receipt leaves unknown mounts; preserve their backing
+        // files. Successful copy commands and namespace teardown precede adoption.
+        let temporary = temporary.keep();
+        let view = boundary
+            .with_read_only_project()
+            .prepare_view(
+                "bwrap",
+                std::time::Instant::now() + super::PROCESS_OPERATION_TIMEOUT,
+            )
+            .map_err(|error| io::Error::other(format!("compact view: {error}")))?;
+        let output = view
+            .host_command(&project, "cp".as_ref())
+            .map_err(|error| io::Error::other(format!("compact command: {error}")))?
+            .args(["--archive", "--reflink=auto", "--"])
+            .arg(project.join("."))
+            .arg(&base)
+            .output()
+            .map_err(|error| io::Error::other(format!("compact copy: {error}")))?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "overlay consolidation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        drop(view);
+        // OverlayFS creates its private work/work directory with mode 000.
+        // The copy process and namespace are gone; this scratch is exclusively
+        // ours and can now be made traversable for deletion.
+        use std::os::unix::fs::PermissionsExt;
+        let kernel_work = work.join("work");
+        if kernel_work.is_dir() {
+            std::fs::set_permissions(&kernel_work, std::fs::Permissions::from_mode(0o700))?;
+        }
+        for path in [&project, &upper, &work] {
+            std::fs::remove_dir_all(path).map_err(|error| {
+                io::Error::other(format!("compact cleanup {}: {error}", path.display()))
+            })?;
+        }
+        let compact = OverlayLayer {
+            path: base,
+            storage: self.storage.clone(),
+        };
+        let bytes = encode_view(
+            std::slice::from_ref(&compact),
+            &self.upper,
+            &self.work,
+            true,
+        )?;
+        tidepool_atomic_write::write_durable(&self.storage.path.join("view.json"), &bytes)?;
+        self.covered_layers
+            .extend(std::mem::replace(&mut self.layers, vec![compact]));
+        *self.latest.lock() = Some(OverlaySnapshot {
+            layers: self.layers.clone().into(),
+        });
+        tracing::debug!(path = %temporary.display(), "consolidated immutable overlay layers");
+        Ok(())
+    }
+
+    /// Caller holds workspace admission across source and optional build rotation.
     pub(super) fn publish(
         &mut self,
         namespace: &MountNamespace,
@@ -279,8 +424,13 @@ impl OverlayResourceLease {
                 "build publication requires retained process custody",
             ));
         }
-        if let Some(outcome) = self.reconcile_pending(namespace, target, preserved_mounts)? {
-            return Ok(outcome);
+        // Covered mounts remain live until native cwd refresh and retirement.
+        // Bound them independently of compacted lower depth.
+        const MAX_ROTATIONS: usize = 32;
+        if self.rotations >= MAX_ROTATIONS || self.layers.len() >= MAX_ROTATIONS {
+            return Ok(OverlayRotationOutcome::Unchanged(io::Error::other(
+                "workspace snapshot capacity reached",
+            )));
         }
         let generation = tempfile::Builder::new()
             .prefix("generation-")
@@ -309,13 +459,6 @@ impl OverlayResourceLease {
         let prepared = namespace.prepare_overlay_rotation(rotation)?;
         // Once prepared, a lost receipt must never cause a second publication.
         let pending = encode_view(&frozen, &upper, &work, true)?;
-        let checkpoint = serde_json::to_vec(&PendingViewRecord {
-            version: 2,
-            view: ViewRecord::new(&frozen, &upper, &work, true),
-            recovery: prepared.recovery_record()?,
-        })
-        .map_err(io::Error::other)?;
-        tidepool_atomic_write::write_durable(&self.storage.path.join("pending.json"), &checkpoint)?;
         // Preparation failures reclaim their unused directories. Once a mount
         // can exist, only confirmed transition settlement may release storage.
         let next = generation.keep();
@@ -329,109 +472,6 @@ impl OverlayResourceLease {
             bytes: pending,
         }));
         self.settle_rotation(outcome)
-    }
-
-    /// A possibly visible checkpoint write can survive even when the in-memory
-    /// state never advanced. Reconcile that record before allocating a candidate.
-    fn reconcile_pending(
-        &mut self,
-        namespace: &MountNamespace,
-        target: &Path,
-        preserved_mounts: &[PathBuf],
-    ) -> io::Result<Option<OverlayRotationOutcome>> {
-        let bytes = match std::fs::read(self.storage.path.join("pending.json")) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let pending: PendingViewRecord =
-            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if pending.version != 2 || pending.view.version != 1 || !pending.view.warm {
-            return Err(io::Error::other(
-                "unsupported pending overlay publication record",
-            ));
-        }
-        let next = pending
-            .view
-            .upper
-            .parent()
-            .ok_or_else(|| io::Error::other("pending upper has no generation"))?
-            .to_owned();
-        if next.parent() != Some(self.storage.path.as_path())
-            || pending.view.upper != next.join("upper")
-            || pending.view.work != next.join("work")
-        {
-            return Err(io::Error::other(
-                "pending overlay generation is outside its owning resource",
-            ));
-        }
-        let current = ViewRecord::new(&self.layers, &self.upper, &self.work, true);
-        let already_installed = current == pending.view;
-        let mut frozen = self.layers.clone();
-        if !already_installed {
-            if self.upper.starts_with(&next)
-                || self.work.starts_with(&next)
-                || self
-                    .layers
-                    .iter()
-                    .any(|layer| layer.path.starts_with(&next))
-            {
-                return Err(io::Error::other(
-                    "pending overlay generation overlaps retained layers",
-                ));
-            }
-            frozen.push(OverlayLayer {
-                path: self.upper.clone(),
-                storage: self.storage.clone(),
-            });
-        }
-        if pending.view.layers
-            != frozen
-                .iter()
-                .map(|layer| layer.path.clone())
-                .collect::<Vec<_>>()
-        {
-            return Err(io::Error::other(
-                "pending publication does not extend the retained overlay view",
-            ));
-        }
-        let recovery = namespace.restore_overlay_recovery(pending.recovery)?;
-        if !recovery.matches_replacement(
-            target,
-            &pending.view.layers,
-            &pending.view.upper,
-            &pending.view.work,
-            preserved_mounts,
-        )? {
-            return Err(io::Error::other(
-                "pending overlay view disagrees with its mount checkpoint",
-            ));
-        }
-        let outcome = recovery.reconcile();
-        if already_installed {
-            if !matches!(outcome, OverlayRotationOutcome::Rotated) {
-                return Err(io::Error::other(
-                    "recorded overlay view is not confirmed mounted",
-                ));
-            }
-            self.publication = PublicationState::NeedsRecord {
-                bytes: serde_json::to_vec(&pending.view).map_err(io::Error::other)?,
-                snapshot: OverlaySnapshot {
-                    layers: self.layers.clone().into(),
-                },
-            };
-            self.record_publication()?;
-            return Ok(Some(outcome));
-        }
-        self.publication = PublicationState::Unconfirmed(Box::new(PendingRotation {
-            recovery,
-            next,
-            upper: pending.view.upper.clone(),
-            work: pending.view.work.clone(),
-            frozen,
-            bytes: serde_json::to_vec(&pending.view).map_err(io::Error::other)?,
-        }));
-        self.settle_rotation(outcome).map(Some)
     }
 
     fn settle_rotation(
@@ -460,6 +500,7 @@ impl OverlayResourceLease {
             OverlayRotationOutcome::Rotated => {
                 // Mount state is known even if recording it subsequently fails.
                 // Retry the record, never rotate the filesystem a second time.
+                self.rotations += 1;
                 self.upper = upper;
                 self.work = work;
                 self.layers = frozen;
@@ -481,7 +522,6 @@ impl OverlayResourceLease {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
                 }
-                self.finish_publication()?;
             }
             OverlayRotationOutcome::Unconfirmed(_) => {
                 unreachable!("unconfirmed transition retained above")
@@ -497,21 +537,9 @@ impl OverlayResourceLease {
             ));
         };
         tidepool_atomic_write::write_durable(&self.storage.path.join("view.json"), bytes)?;
-        self.finish_publication()?;
         let previous = self.latest.lock().replace(snapshot.clone());
         drop(previous);
         self.publication = PublicationState::Writable;
-        Ok(())
-    }
-
-    fn finish_publication(&self) -> io::Result<()> {
-        let pending = self.storage.path.join("pending.json");
-        match std::fs::remove_file(&pending) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        tidepool_atomic_write::sync_parent_directory(&pending)?;
         Ok(())
     }
 
@@ -532,6 +560,51 @@ impl OverlayResourceLease {
             Err(_) => Ok(()),
         }
     }
+}
+
+/// Detect changes made by external writers outside native/host admission.
+/// Do not follow symlinks or let Git ignore rules omit project files.
+fn source_inventory(
+    root: &Path,
+    excluded: &[&std::ffi::OsStr],
+) -> io::Result<std::collections::BTreeMap<PathBuf, SourceStamp>> {
+    use std::os::unix::fs::MetadataExt;
+    let mut inventory = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                let entry = entry?;
+                if path == root && excluded.iter().any(|name| entry.file_name() == *name) {
+                    continue;
+                }
+                pending.push(entry.path());
+            }
+        }
+        inventory.insert(
+            path,
+            SourceStamp {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                mode: metadata.mode(),
+                bytes: metadata.len(),
+                modified: (metadata.mtime(), metadata.mtime_nsec()),
+                changed: (metadata.ctime(), metadata.ctime_nsec()),
+            },
+        );
+    }
+    Ok(inventory)
+}
+
+#[derive(PartialEq, Eq)]
+struct SourceStamp {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
 }
 
 impl OverlayStorage {
@@ -567,7 +640,6 @@ mod tests {
     use tidepool_node::ProcessInvocation;
 
     struct Worker {
-        pid: u32,
         child: Child,
         output: BufReader<ChildStdout>,
     }
@@ -607,7 +679,7 @@ mod tests {
             output.read_line(&mut pid).unwrap();
             let pid = pid.trim().parse().unwrap();
             let namespace = MountNamespace::capture(pid).unwrap();
-            (Self { pid, child, output }, namespace)
+            (Self { child, output }, namespace)
         }
 
         fn exchange(&mut self, command: &str) -> String {
@@ -675,14 +747,11 @@ mod tests {
         assert_eq!(shell(&namespace, "cat file"), b"after");
         assert!(build.latest_snapshot().is_none());
 
-        // Persisted retry must preserve the same nested mounts as the original
-        // transition, even when its in-memory confirmation is unavailable.
+        // A failed manifest write retains the completed mount and nested views.
         std::fs::remove_file(source.path().join("view.json")).unwrap();
         std::fs::create_dir(source.path().join("view.json")).unwrap();
         assert!(source.publish(&namespace, &project, &preserved).is_err());
-        source.publication = PublicationState::Writable;
         std::fs::remove_dir(source.path().join("view.json")).unwrap();
-        assert!(source.publish(&namespace, &project, &[]).is_err());
         assert!(matches!(
             source.publish(&namespace, &project, &preserved).unwrap(),
             OverlayRotationOutcome::Rotated
@@ -718,374 +787,6 @@ mod tests {
         );
         assert_eq!(shell(&namespace, "cat file"), b"after");
         assert_eq!(shell(&child, "cat file"), b"child");
-    }
-
-    #[tokio::test]
-    async fn native_finish_retry_does_not_rotate_build_again() {
-        use tidepool_agent::interactive::*;
-        use tidepool_agent::{AgentBackendError, BackendThreadId};
-        struct Backend {
-            pid: u32,
-            start_ticks: u64,
-            mount_namespace_inode: u64,
-            calls: Mutex<Vec<(u64, PublicationOperation)>>,
-            begin_override: Mutex<Option<PublicationReply>>,
-        }
-        impl InteractiveAgentBackend for Backend {
-            fn prepare_native_tool_policy(
-                &self,
-                _: InteractiveNativeToolPolicy,
-                _: &Path,
-            ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
-                unreachable!()
-            }
-            fn render(
-                &self,
-                _: &InteractiveAgentSpec,
-            ) -> Result<InteractiveAgentCommand, AgentBackendError> {
-                unreachable!()
-            }
-            fn push<'a>(
-                &'a self,
-                _: &'a str,
-                _: &'a QueueReadyThread,
-                _: &'a str,
-            ) -> InteractiveFuture<'a, ()> {
-                unreachable!()
-            }
-            fn archive<'a>(
-                &'a self,
-                _: &'a str,
-                _: &'a QueueReadyThread,
-            ) -> InteractiveFuture<'a, ()> {
-                unreachable!()
-            }
-            fn workspace_publication<'a>(
-                &'a self,
-                _: &'a QueueReadyThread,
-                sequence: std::num::NonZeroU64,
-                operation: PublicationOperation,
-            ) -> InteractiveFuture<'a, PublicationReply> {
-                Box::pin(async move {
-                    let mut calls = self.calls.lock();
-                    calls.push((sequence.get(), operation));
-                    match operation {
-                        PublicationOperation::Begin { .. } => {
-                            Ok(self.begin_override.lock().take().unwrap_or(
-                                PublicationReply::Ready {
-                                    pid: self.pid,
-                                    start_ticks: self.start_ticks,
-                                    mount_namespace_inode: self.mount_namespace_inode,
-                                    cgroup_path: "/test/writers".into(),
-                                },
-                            ))
-                        }
-                        PublicationOperation::Finish { .. } if calls.len() == 2 => {
-                            Err(AgentBackendError::BackendUnavailable {
-                                detail: "lost finish reply".into(),
-                            })
-                        }
-                        PublicationOperation::Finish { .. } => Ok(PublicationReply::Settled),
-                    }
-                })
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let project = directory.path().join("project");
-        let mut lease =
-            OverlayResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
-        let (mut worker, namespace) = Worker::start(&mut lease, &project);
-        use std::os::unix::fs::MetadataExt;
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", worker.pid)).unwrap();
-        let start_ticks: u64 = stat
-            .rsplit_once(')')
-            .unwrap()
-            .1
-            .split_whitespace()
-            .nth(19)
-            .unwrap()
-            .parse()
-            .unwrap();
-        let mount_namespace_inode = std::fs::metadata(format!("/proc/{}/ns/mnt", worker.pid))
-            .unwrap()
-            .ino();
-        assert!(MountNamespace::capture_matching(
-            worker.pid,
-            start_ticks + 1,
-            mount_namespace_inode
-        )
-        .is_err());
-        assert!(MountNamespace::capture_matching(
-            worker.pid,
-            start_ticks,
-            mount_namespace_inode + 1
-        )
-        .is_err());
-        let backend = Backend {
-            pid: worker.pid,
-            start_ticks,
-            mount_namespace_inode,
-            calls: Mutex::new(Vec::new()),
-            begin_override: Mutex::new(None),
-        };
-        let binding = directory.path().join("binding.json");
-        tidepool_agent::accept_interactive_session_binding(
-            &binding,
-            3,
-            BackendThreadId(uuid::Uuid::new_v4().to_string()),
-            None,
-        )
-        .await
-        .unwrap();
-        let thread = tidepool_agent::read_interactive_binding(&binding)
-            .await
-            .unwrap();
-        assert!(lease
-            .publish_native(&backend, &thread, &project.join("target"), &[])
-            .await
-            .is_err());
-        assert!(lease.native_publication_needs_retry());
-        let native_record = std::fs::read(lease.path().join("native-publication.json")).unwrap();
-        let upper = lease.upper.clone();
-        let layers = lease.layers.len();
-        // A retained native sequence cannot be repurposed for another mount.
-        assert!(lease
-            .publish_native(&backend, &thread, &project, &[])
-            .await
-            .is_err());
-        assert_eq!(backend.calls.lock().len(), 2);
-        let result = lease
-            .publish_native(&backend, &thread, &project.join("target"), &[])
-            .await
-            .unwrap();
-        let NativePublication::Published { sequence, snapshot } = result else {
-            panic!("the completed mount must return its published snapshot");
-        };
-        assert_eq!(sequence.get(), 1);
-        assert_eq!(snapshot.layers.len(), layers);
-        assert!(!lease.native_publication_needs_retry());
-        assert_eq!(lease.upper, upper);
-        assert_eq!(lease.layers.len(), layers);
-        assert!(lease.latest_snapshot().is_some());
-        assert!(matches!(
-            backend.calls.lock().as_slice(),
-            [
-                (1, PublicationOperation::Begin { .. }),
-                (1, PublicationOperation::Finish { .. }),
-                (1, PublicationOperation::Finish { .. })
-            ]
-        ));
-        assert_eq!(worker.exchange("hold"), "held");
-        let result = lease
-            .publish_native(&backend, &thread, &project.join("target"), &[])
-            .await
-            .unwrap();
-        assert!(matches!(
-            result,
-            NativePublication::Skipped(PublicationSkip::NoNewGeneration)
-        ));
-        assert_eq!(lease.latest_snapshot().unwrap().layers.len(), layers);
-        assert!(!lease.native_publication_needs_retry());
-        assert_eq!(worker.exchange("close"), "closed");
-        *backend.begin_override.lock() = Some(PublicationReply::Busy);
-        assert!(matches!(
-            lease
-                .publish_native(&backend, &thread, &project.join("target"), &[])
-                .await
-                .unwrap(),
-            NativePublication::Skipped(PublicationSkip::NativeBusy)
-        ));
-        *backend.begin_override.lock() = Some(PublicationReply::Unavailable {
-            detail: "not local".into(),
-        });
-        let NativePublication::Skipped(PublicationSkip::NativeUnavailable(detail)) = lease
-            .publish_native(&backend, &thread, &project.join("target"), &[])
-            .await
-            .unwrap()
-        else {
-            panic!("unavailable native admission cannot publish a snapshot");
-        };
-        assert_eq!(detail, "not local");
-        assert_eq!(lease.latest_snapshot().unwrap().layers.len(), layers);
-        assert!(matches!(
-            &backend.calls.lock()[3..],
-            [
-                (2, PublicationOperation::Begin { .. }),
-                (2, PublicationOperation::Finish { .. }),
-                (3, PublicationOperation::Begin { .. }),
-                (3, PublicationOperation::Begin { .. }),
-            ]
-        ));
-        // Simulate interruption after the durable view write but before the
-        // lease installed its latest snapshot and completed pending cleanup.
-        let before = std::fs::read(lease.path().join("view.json")).unwrap();
-        assert!(matches!(
-            lease
-                .publish(&namespace, &project.join("target"), &[])
-                .unwrap(),
-            OverlayRotationOutcome::Rotated
-        ));
-        let upper = lease.upper.clone();
-        let snapshot = lease.latest.lock().take().unwrap();
-        let layer_count = snapshot.layers.len();
-        lease.publication = PublicationState::NeedsRecord {
-            bytes: std::fs::read(lease.path().join("view.json")).unwrap(),
-            snapshot,
-        };
-        let mut interrupted: serde_json::Value = serde_json::from_slice(&native_record).unwrap();
-        interrupted["phase"] = "Publish".into();
-        interrupted["sequence"] = 3.into();
-        interrupted["view_before"] = serde_json::to_value(before).unwrap();
-        std::fs::write(
-            lease.path().join("native-publication.json"),
-            serde_json::to_vec(&interrupted).unwrap(),
-        )
-        .unwrap();
-        let NativePublication::Published { sequence, snapshot } = lease
-            .publish_native(&backend, &thread, &project.join("target"), &[])
-            .await
-            .unwrap()
-        else {
-            panic!("record cleanup must recover the already-published generation");
-        };
-        assert_eq!(sequence.get(), 3);
-        assert_eq!(snapshot.layers.len(), layer_count);
-        assert_eq!(lease.upper, upper);
-        assert!(!lease.native_publication_needs_retry());
-
-        // Ordinary admission retains the selected warm generation in the owned
-        // preparation, even when native execution is busy and the creator then
-        // leaves the fleet before child bootstrap.
-        use super::super::{
-            custody_tests, ActorWorkspaceCustody, BuildInheritance, CreatorBuild, HostLaunchState,
-            InteractiveApplicationOwner, NativeForkAdmission,
-        };
-        use tidepool_actor::{ForkWorkspaceAdmission, ForkWorkspaceSeed};
-        let (_repo, _runtime, tree, _bindings, mut admission) = custody_tests::custody_fixture();
-        let creator = ActorRef::first(tidepool_actor::ActorId(7));
-        let creator_custody = admission
-            .install_custody(creator, tree.id().as_str())
-            .unwrap();
-        let resource = SharedOverlayResource::new(
-            OverlayResourceLease::allocate_path(
-                directory.path().join("creator-cache"),
-                Some(snapshot.clone()),
-            )
-            .unwrap(),
-        );
-        *backend.begin_override.lock() = Some(PublicationReply::Busy);
-        let backend = Arc::new(backend);
-        let before_calls = backend.calls.lock().len();
-        let owners = Arc::new(Mutex::new(std::collections::HashMap::from([(
-            creator,
-            InteractiveApplicationOwner {
-                creator_build: Some(CreatorBuild { resource, thread }),
-                cancel: None,
-                native_retirement: Default::default(),
-                pane: Arc::new(Mutex::new(None)),
-                fork_gate: None,
-                custody: Some(creator_custody),
-                scoped_retention: None,
-                hosted: Arc::new(Mutex::new(None)),
-                launch: HostLaunchState::Published,
-                terminal: None,
-                retirement: Arc::new(Mutex::new(None)),
-            },
-        )])));
-        Arc::get_mut(&mut admission).unwrap().native = Some(NativeForkAdmission {
-            owners: owners.clone(),
-            backend: backend.clone(),
-        });
-        let denied = admission
-            .admit(
-                creator,
-                "root/unauthorized".into(),
-                ForkWorkspaceSeed::Explicit(tidepool_bridge_effects::WtWorktreeSpec {
-                    spec_source: tidepool_bridge_effects::WtWorktreeSource::SourceCurrentRepository,
-                    spec_label: "unauthorized".into(),
-                    spec_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
-                }),
-                tidepool_actor::NativeToolClass::Coding,
-            )
-            .await;
-        assert!(denied.is_err());
-        assert_eq!(backend.calls.lock().len(), before_calls);
-        let prepared = admission
-            .admit(
-                creator,
-                "root/warm-child".into(),
-                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
-                tidepool_actor::NativeToolClass::Coding,
-            )
-            .await
-            .unwrap();
-        assert_eq!(backend.calls.lock().len(), before_calls + 1);
-        let inspection = admission
-            .admit(
-                creator,
-                "root/inspection-child".into(),
-                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
-                tidepool_actor::NativeToolClass::InspectionOnly,
-            )
-            .await
-            .unwrap()
-            .install(ActorRef::first(tidepool_actor::ActorId(9)))
-            .unwrap();
-        let inspection = (inspection.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<ActorWorkspaceCustody>()
-            .unwrap();
-        assert!(matches!(
-            inspection.build_inheritance,
-            BuildInheritance::Prepared(None)
-        ));
-        assert_eq!(backend.calls.lock().len(), before_calls + 1);
-        let publishing = owners
-            .lock()
-            .get(&creator)
-            .unwrap()
-            .creator_build
-            .as_ref()
-            .unwrap()
-            .resource
-            .publication
-            .clone();
-        let publication_guard = publishing.lock().await;
-        let contended = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            admission.admit(
-                creator,
-                "root/concurrent-child".into(),
-                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
-                tidepool_actor::NativeToolClass::Coding,
-            ),
-        )
-        .await
-        .expect("fork admission must not wait for in-flight publication")
-        .unwrap();
-        assert_eq!(backend.calls.lock().len(), before_calls + 1);
-        drop(publication_guard);
-        let contended = contended
-            .install(ActorRef::first(tidepool_actor::ActorId(10)))
-            .unwrap();
-        let contended = (contended.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<ActorWorkspaceCustody>()
-            .unwrap();
-        let BuildInheritance::Prepared(Some(previous)) = &contended.build_inheritance else {
-            panic!("in-flight publication must leave the completed generation available");
-        };
-        assert!(Arc::ptr_eq(&previous.layers, &snapshot.layers));
-        owners.lock().remove(&creator);
-        let installed = prepared
-            .install(ActorRef::first(tidepool_actor::ActorId(8)))
-            .unwrap();
-        let custody = (installed.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<ActorWorkspaceCustody>()
-            .unwrap();
-        let BuildInheritance::Prepared(Some(retained)) = &custody.build_inheritance else {
-            panic!("busy creator must retain its completed warm snapshot for bootstrap");
-        };
-        assert!(Arc::ptr_eq(&retained.layers, &snapshot.layers));
-        assert_eq!(backend.calls.lock().len(), before_calls + 1);
     }
 
     #[test]
@@ -1126,16 +827,82 @@ mod tests {
     }
 
     #[test]
-    fn warm_generation_survives_busy_parent_and_independent_child() {
-        exercise_pending_recovery(false);
+    fn consolidation_preserves_whiteouts_and_does_not_stop_a_live_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let mut parent =
+            OverlayResourceLease::allocate_path(directory.path().join("storage/parent"), None)
+                .unwrap();
+        std::fs::write(parent.layers[0].path.join("deleted"), "old").unwrap();
+        let (mut worker, namespace) = Worker::start(&mut parent, &project);
+        let output = namespace
+            .host_command(&project, "/bin/sh".as_ref())
+            .unwrap()
+            .args(["-ec", "rm target/deleted; printf preserved > target/kept"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        for _ in 0..7 {
+            assert_eq!(worker.exchange("write"), "wrote");
+            assert!(matches!(
+                parent
+                    .publish(&namespace, &project.join("target"), &[])
+                    .unwrap(),
+                OverlayRotationOutcome::Rotated
+            ));
+        }
+        assert_eq!(parent.layers.len(), 8);
+        assert_eq!(worker.exchange("hold"), "held");
+        let upper = parent.upper.clone();
+        std::fs::remove_file(parent.path().join("view.json")).unwrap();
+        std::fs::create_dir(parent.path().join("view.json")).unwrap();
+        assert!(parent.consolidate().is_err());
+        assert_eq!(parent.layers.len(), 8);
+        assert_eq!(parent.upper, upper);
+        assert_eq!(worker.exchange("write"), "wrote");
+        std::fs::remove_dir(parent.path().join("view.json")).unwrap();
+        parent.consolidate().unwrap();
+        assert_eq!(parent.layers.len(), 1);
+        assert_eq!(parent.upper, upper);
+        assert_eq!(worker.exchange("write"), "wrote");
+        assert!(!parent.layers[0].path.join("deleted").exists());
+        assert_eq!(
+            std::fs::read_to_string(parent.layers[0].path.join("kept")).unwrap(),
+            "preserved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(parent.layers[0].path.join("value")).unwrap(),
+            "7\n"
+        );
+        assert!(matches!(
+            parent
+                .publish(&namespace, &project.join("target"), &[])
+                .unwrap(),
+            OverlayRotationOutcome::Busy
+        ));
+        assert_eq!(worker.exchange("close"), "closed");
+        for _ in 7..32 {
+            parent.consolidate().unwrap();
+            assert!(matches!(
+                parent
+                    .publish(&namespace, &project.join("target"), &[])
+                    .unwrap(),
+                OverlayRotationOutcome::Rotated
+            ));
+        }
+        let entries = std::fs::read_dir(parent.path()).unwrap().count();
+        assert!(matches!(
+            parent
+                .publish(&namespace, &project.join("target"), &[])
+                .unwrap(),
+            OverlayRotationOutcome::Unchanged(_)
+        ));
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), entries);
+        assert_eq!(worker.exchange("write"), "wrote");
     }
 
     #[test]
-    fn persisted_publication_recovers_before_owner_layout_advances() {
-        exercise_pending_recovery(true);
-    }
-
-    fn exercise_pending_recovery(restore_previous_layout: bool) {
+    fn warm_generation_survives_busy_parent_and_independent_child() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let project = root.join("project");
@@ -1174,66 +941,14 @@ mod tests {
                 .path,
             warm_layer
         );
-        assert!(!parent.path().join("pending.json").exists());
-        // An unreadable checkpoint must prevent allocation and mount mutation.
-        std::fs::create_dir(parent.path().join("pending.json")).unwrap();
-        let before = std::fs::read_dir(parent.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert!(parent
-            .publish(&namespace, &project.join("target"), &[])
-            .is_err());
-        assert_eq!(
-            std::fs::read_dir(parent.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<std::collections::BTreeSet<_>>(),
-            before
-        );
-        std::fs::remove_dir(parent.path().join("pending.json")).unwrap();
-        assert!(matches!(
-            parent
-                .publish(&namespace, &project.join("target"), &[])
-                .unwrap(),
-            OverlayRotationOutcome::Busy
-        ));
-        assert_eq!(
-            parent
-                .latest_snapshot()
-                .unwrap()
-                .layers
-                .last()
-                .unwrap()
-                .path,
-            warm_layer
-        );
         // A confirmed mount with a failed manifest write only needs its record
         // retried. The next attempt must not create another writable generation.
         assert_eq!(worker.exchange("close"), "closed");
-        let old_layout = (
-            parent.layers.clone(),
-            parent.upper.clone(),
-            parent.work.clone(),
-        );
         std::fs::remove_file(parent.path().join("view.json")).unwrap();
         std::fs::create_dir(parent.path().join("view.json")).unwrap();
         assert!(parent
             .publish(&namespace, &project.join("target"), &[])
             .is_err());
-        let mut checkpoint: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(parent.path().join("pending.json")).unwrap())
-                .unwrap();
-        assert_eq!(checkpoint["version"], 2);
-        let recovered = namespace
-            .restore_overlay_recovery(
-                serde_json::from_value(checkpoint["recovery"].take()).unwrap(),
-            )
-            .unwrap();
-        assert!(matches!(
-            recovered.reconcile(),
-            OverlayRotationOutcome::Rotated
-        ));
         let layer_count = parent.layers.len();
         assert_eq!(
             parent
@@ -1246,32 +961,7 @@ mod tests {
             warm_layer
         );
         std::fs::remove_dir(parent.path().join("view.json")).unwrap();
-        // Lose the in-memory transition state while retaining the exact resource
-        // and namespace owners. Retry must use the durable checkpoint alone.
-        parent.publication = PublicationState::Writable;
-        if restore_previous_layout {
-            (parent.layers, parent.upper, parent.work) = old_layout;
-        }
-        let pending_path = parent.path().join("pending.json");
-        let saved = std::fs::read(&pending_path).unwrap();
-        let entries = || {
-            std::fs::read_dir(root.join("storage/parent"))
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| path.is_dir())
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        let generations = entries();
-        let mut invalid: serde_json::Value = serde_json::from_slice(&saved).unwrap();
-        invalid["version"] = 99.into();
-        let invalid = serde_json::to_vec(&invalid).unwrap();
-        std::fs::write(&pending_path, &invalid).unwrap();
-        assert!(parent
-            .publish(&namespace, &project.join("target"), &[])
-            .is_err());
-        assert_eq!(std::fs::read(&pending_path).unwrap(), invalid);
-        assert_eq!(entries(), generations);
-        std::fs::write(&pending_path, saved).unwrap();
+        let upper = parent.upper.clone();
         assert!(matches!(
             parent
                 .publish(&namespace, &project.join("target"), &[])
@@ -1279,8 +969,7 @@ mod tests {
             OverlayRotationOutcome::Rotated
         ));
         assert_eq!(parent.layers.len(), layer_count);
-        assert_eq!(entries(), generations);
-        assert!(!pending_path.exists());
+        assert_eq!(parent.upper, upper);
         assert_eq!(parent.latest_snapshot().unwrap().layers.len(), layer_count);
         let mut child =
             OverlayResourceLease::allocate_path(root.join("storage/child"), Some(snapshot))

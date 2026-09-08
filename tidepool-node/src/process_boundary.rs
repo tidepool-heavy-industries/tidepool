@@ -36,6 +36,7 @@ pub struct ProcessMountBoundary {
     read_only_overlays: Vec<(PathBuf, PathBuf)>,
     writable_overlays: Vec<(PathBuf, PathBuf)>,
     overlay_views: Vec<OverlayView>,
+    project_read_only: bool,
 }
 
 /// Immutable layers are ordered oldest first, matching Bubblewrap's source order.
@@ -125,6 +126,7 @@ impl ProcessMountBoundary {
             read_only_overlays: Vec::new(),
             writable_overlays: Vec::new(),
             overlay_views: Vec::new(),
+            project_read_only: false,
         })
     }
 
@@ -136,6 +138,13 @@ impl ProcessMountBoundary {
     ) -> Result<Self, ProcessBoundaryError> {
         self.project_root = canonicalize("model-visible project root", project_root.as_ref())?;
         Ok(self)
+    }
+
+    /// Apply the workspace access policy after constructing a private source
+    /// overlay, which would otherwise introduce a writable mount of its own.
+    pub fn with_read_only_project(mut self) -> Self {
+        self.project_read_only = true;
+        self
     }
 
     /// Overlay one process-private directory at a namespace-visible path.
@@ -320,6 +329,12 @@ impl ProcessMountBoundary {
                     ]);
                 }
             }
+        }
+        if self.project_read_only {
+            args.extend([
+                "--remount-ro".into(),
+                self.project_root.to_string_lossy().into_owned(),
+            ]);
         }
         args.extend_from_slice(options);
         args.extend([

@@ -86,32 +86,12 @@ fn lost_receipt_after_publication_recovers_the_exact_replacement() {
     let prepared = namespace
         .prepare_overlay_rotation(rotation.clone())
         .unwrap();
-    let checkpoint = serde_json::to_vec(&prepared.recovery_record().unwrap()).unwrap();
-    let record = || serde_json::from_slice::<OverlayRecoveryRecord>(&checkpoint).unwrap();
-    let mut wrong = record();
-    wrong.version += 1;
-    assert!(namespace.restore_overlay_recovery(wrong).is_err());
-    let mut wrong = record();
-    wrong.boot.push_str("different boot");
-    assert!(namespace.restore_overlay_recovery(wrong).is_err());
-    let mut wrong = record();
-    wrong.namespace.root_mount += 1;
-    assert!(namespace.restore_overlay_recovery(wrong).is_err());
-    let mut wrong = record();
-    wrong.rotation.upper_option = CString::new("inconsistent").unwrap();
-    assert!(namespace.restore_overlay_recovery(wrong).is_err());
     let (recovery, transition) = prepared.apply();
     assert!(
         matches!(transition, OverlayRotationOutcome::Rotated),
         "{transition:?}"
     );
     let installed = namespace.observe_overlay(&rotation.target).unwrap().id;
-    // Lose the process-local transition handle and reconstruct only its
-    // reconciliation capability from the record written before mutation.
-    drop(recovery);
-    let recovery = namespace
-        .restore_overlay_recovery(serde_json::from_slice(&checkpoint).unwrap())
-        .unwrap();
     let result = recovery.reconcile();
     assert!(
         matches!(result, OverlayRotationOutcome::Rotated),
@@ -145,8 +125,7 @@ fn interrupted_freeze_restores_only_the_original_mount() {
     let prepared = namespace
         .prepare_overlay_rotation(rotation.clone())
         .unwrap();
-    let checkpoint = serde_json::to_vec(&prepared.recovery_record().unwrap()).unwrap();
-    drop(prepared);
+    let recovery = prepared.recovery;
     let target = rotation.target.clone();
     // SAFETY: preconstructed path and mount syscall only after fork.
     let mut freeze = unsafe {
@@ -173,9 +152,6 @@ fn interrupted_freeze_restores_only_the_original_mount() {
         rotation.upper.as_bytes(),
     )))
     .unwrap();
-    let recovery = namespace
-        .restore_overlay_recovery(serde_json::from_slice(&checkpoint).unwrap())
-        .unwrap();
     let result = recovery.reconcile();
     assert!(
         matches!(result, OverlayRotationOutcome::RecoveredOriginal),

@@ -1,5 +1,10 @@
 # Native workspace admission checkpoint
 
+Historical checkpoint. For current production composition, removed restart
+machinery and acceptance status, read
+[workspace fork implementation](workspace-fork-implementation.md).
+
+
 Codex branch `work/build-snapshot-admission`, commit `06d99357be`, in
 `/tmp/tidepool-build-snapshot-codex`, based on pinned `d760c5cb8c`.
 The Tidepool runner pin and launch environment are unchanged. This is not yet

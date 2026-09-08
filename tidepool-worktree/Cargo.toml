@@ -24,3 +24,4 @@ camino.workspace = true
 # tests (separate crates) can use the scripted writer without a feature dance.
 tempfile.workspace = true
 uuid.workspace = true
+parking_lot.workspace = true

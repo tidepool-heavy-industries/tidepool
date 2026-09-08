@@ -52,8 +52,11 @@ names owned paths, the contract revision, acceptance, and allowed holes. Return
 exact candidates, check evidence, discoveries, and unresolved decisions. Keep
 shared wiring with the coordinator. Review an implementation candidate after it
 exists; the parallel consumer branch tests the contract from the common scaffold.
-`projectHead` requires a clean source; choose `snapshotDirty projectHead`
-explicitly when the branches should inherit existing uncommitted changes.
+Ordinary `unfold` inherits the selected checkout's working files and private
+index. If capture is busy or unavailable, it uses that checkout's committed HEAD
+and reports that working files were omitted. A committed shared interface remains
+useful for integration and crash recovery. Build caches follow the creator; a
+completed warm build helps descendants without stopping active builds.
 
 `coding` children can repeat the scaffold/fork/fold rhythm within their inherited
 descendant budget. Use `boundHead` when their children should start from the

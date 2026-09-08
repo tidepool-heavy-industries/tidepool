@@ -19,6 +19,13 @@ pub enum ForkWorkspaceSeed {
     BoundHead(WtDirtyPolicy),
 }
 
+/// Already-attenuated filesystem and native-tool policy for early preparation.
+#[derive(Debug, Clone, Copy)]
+pub struct ForkWorkspacePolicy {
+    pub native_tools: crate::NativeToolClass,
+    pub workspace: crate::WorkspaceAccess,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{detail}")]
 pub struct ForkWorkspaceAdmissionError {
@@ -97,7 +104,7 @@ pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
         owner: ActorRef,
         actor_path: String,
         seed: ForkWorkspaceSeed,
-        native_tools: crate::NativeToolClass,
+        policy: ForkWorkspacePolicy,
     ) -> ForkWorkspaceAdmissionFuture<'_>;
 }
 

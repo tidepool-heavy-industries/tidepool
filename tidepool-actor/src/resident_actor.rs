@@ -1181,7 +1181,10 @@ where
                     owner,
                     actor_path,
                     seed,
-                    descriptor.effective_role().native_tools(),
+                    crate::ForkWorkspacePolicy {
+                        native_tools: descriptor.effective_role().native_tools(),
+                        workspace: descriptor.effective_role().workspace(),
+                    },
                 )
                 .await
                 .map_err(|error| {

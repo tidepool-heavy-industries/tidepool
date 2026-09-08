@@ -18,6 +18,16 @@ mod recovery_tests;
 mod root_metadata;
 use root_metadata::RootMetadata;
 
+/// Preserve the metadata of a private source base or upper directory before
+/// mounting it. Uses the same metadata contract as live overlay replacement.
+pub fn copy_overlay_root_metadata(source: &Path, destination: &Path) -> io::Result<()> {
+    let source = std::fs::File::open(source)?;
+    let destination = std::fs::File::open(destination)?;
+    RootMetadata::new()
+        .copy(source.as_fd(), destination.as_fd())
+        .map_err(Into::into)
+}
+
 // Unlike lowerdir+, upperdir/workdir still pass through ovl_unescape even with
 // fsconfig. Escape literal backslashes before handing these paths to the kernel.
 fn directory_option(path: &CString) -> io::Result<CString> {
@@ -48,21 +58,6 @@ pub struct OverlayRotation {
     preserved_mounts: Vec<CString>,
 }
 
-// Deserialization is confined to a recovery record; an unvalidated recipe must
-// never become a publicly constructible rotation that can be applied directly.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(remote = "OverlayRotation")]
-struct RotationRecord {
-    target: CString,
-    lower: Vec<CString>,
-    upper: CString,
-    work: CString,
-    upper_option: CString,
-    work_option: CString,
-    backing_target: CString,
-    preserved_mounts: Vec<CString>,
-}
-
 /// Captured before a transition; applying it consumes the ability to rotate.
 #[derive(Debug)]
 pub struct PreparedOverlayRotation {
@@ -78,29 +73,7 @@ pub struct OverlayRecovery {
     before: observation::Observation,
 }
 
-/// Durable evidence captured before mutation. Restoring this record only grants
-/// reconciliation of that transition, never another application of the rotation.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct OverlayRecoveryRecord {
-    version: u32,
-    boot: String,
-    namespace: super::ViewIdentity,
-    #[serde(with = "RotationRecord")]
-    rotation: OverlayRotation,
-    before: observation::Observation,
-}
-
 impl PreparedOverlayRotation {
-    pub fn recovery_record(&self) -> io::Result<OverlayRecoveryRecord> {
-        Ok(OverlayRecoveryRecord {
-            version: 1,
-            boot: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?,
-            namespace: self.recovery.namespace.view_identity()?,
-            rotation: self.recovery.rotation.clone(),
-            before: self.recovery.before.clone(),
-        })
-    }
-
     pub fn apply(self) -> (OverlayRecovery, OverlayRotationOutcome) {
         let recovery = self.recovery;
         let result = match recovery
@@ -119,30 +92,7 @@ impl PreparedOverlayRotation {
 }
 
 impl OverlayRecovery {
-    /// Compare an owning resource's manifest with the validated saved recipe.
-    /// Resource paths must be the resolved paths recorded at allocation time.
-    pub fn matches_replacement(
-        &self,
-        target: &Path,
-        layers: &[PathBuf],
-        upper: &Path,
-        work: &Path,
-        preserved_mounts: &[PathBuf],
-    ) -> io::Result<bool> {
-        let paths = layers
-            .iter()
-            .cloned()
-            .chain([upper.to_owned(), work.to_owned()])
-            .collect::<Vec<_>>();
-        let expected = OverlayRotation::from_resolved_paths(target, &paths, layers.len())?
-            .preserving_mounts(preserved_mounts)?;
-        Ok(self.rotation.target == expected.target
-            && self.rotation.lower == expected.lower
-            && self.rotation.upper == expected.upper
-            && self.rotation.work == expected.work
-            && self.rotation.preserved_mounts == expected.preserved_mounts)
-    }
-
+    /// Settle the retained transition without acquiring another rotation capability.
     pub fn reconcile(&self) -> OverlayRotationOutcome {
         self.namespace
             .reconcile_rotation(&self.rotation, &self.before)
@@ -451,54 +401,6 @@ impl OverlayRotation {
 }
 
 impl MountNamespace {
-    pub fn restore_overlay_recovery(
-        &self,
-        record: OverlayRecoveryRecord,
-    ) -> io::Result<OverlayRecovery> {
-        self.require_live_owner()?;
-        if record.version != 1
-            || record.boot != std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
-            || record.namespace != self.view_identity()?
-        {
-            return Err(io::Error::other(
-                "overlay recovery belongs to another kernel view or format",
-            ));
-        }
-        let path = |value: &CString| PathBuf::from(std::ffi::OsStr::from_bytes(value.as_bytes()));
-        // Reconciliation may need to thaw the original mount after replacement
-        // resources disappeared. Validate the saved recipe without requiring
-        // those paths to exist or granting another application capability.
-        let paths = record
-            .rotation
-            .lower
-            .iter()
-            .rev()
-            .chain([&record.rotation.upper, &record.rotation.work])
-            .map(path)
-            .collect::<Vec<_>>();
-        let rotation = OverlayRotation::from_resolved_paths(
-            &path(&record.rotation.target),
-            &paths,
-            record.rotation.lower.len(),
-        )?
-        .preserving_mounts(
-            &record
-                .rotation
-                .preserved_mounts
-                .iter()
-                .map(path)
-                .collect::<Vec<_>>(),
-        )?;
-        if rotation != record.rotation {
-            return Err(io::Error::other("overlay recovery recipe is inconsistent"));
-        }
-        Ok(OverlayRecovery {
-            namespace: self.clone(),
-            rotation,
-            before: record.before,
-        })
-    }
-
     /// Freeze and replace an overlay without restarting its workload.
     ///
     /// Call only while the owning native write-admission gate is held. This

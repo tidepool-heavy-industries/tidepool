@@ -267,6 +267,57 @@ impl WorktreeManager {
         self.create_with_branch(spec, Some(BranchName::from_raw(actor_path.git_branch())))
     }
 
+    /// Allocate a committed fallback without rejecting or committing dirty files.
+    /// Resolve the selected checkout's current HEAD once, then use that exact oid.
+    pub fn create_committed_fork(
+        &self,
+        source: &WorktreeSource,
+        actor_path: &ActorPath,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        let (repository, origin) = match source {
+            WorktreeSource::CurrentRepository => (
+                self.source_repository.clone(),
+                WorktreeOrigin::CurrentRepository,
+            ),
+            WorktreeSource::Worktree(id) => (
+                self.lookup(id)?
+                    .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?
+                    .cwd()
+                    .to_owned(),
+                WorktreeOrigin::Worktree(id.clone()),
+            ),
+            WorktreeSource::Ref(reference) => (
+                self.source_repository.clone(),
+                WorktreeOrigin::Ref(reference.clone()),
+            ),
+        };
+        let revision = match source {
+            WorktreeSource::Ref(reference) => reference.as_str(),
+            _ => "HEAD",
+        };
+        let seed = GitOid::from_raw(
+            self.git
+                .try_run(
+                    &repository,
+                    &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+                )?
+                .trimmed(),
+        );
+        self.materialize(
+            self.registry.mint_id()?,
+            ResolvedSeed {
+                seed,
+                snapshot_ref: None,
+                origin,
+                git_repository: repository.clone(),
+                source_repository: repository,
+            },
+            &actor_path.to_string(),
+            Some(BranchName::from_raw(actor_path.git_branch())),
+            None,
+        )
+    }
+
     /// Prepare a child of the selected live checkout without checking out
     /// files or converting staging into a commit. The source-view owner invokes
     /// this while holding native mutation admission and retains the prepared
@@ -355,6 +406,37 @@ impl WorktreeManager {
         Ok(PreparedSourceWorktree {
             receipt: handle.receipt,
         })
+    }
+
+    /// Settle an unexposed source preparation as an ordinary committed checkout.
+    /// Only this provisional receipt authorizes replacing its private index.
+    pub fn finish_committed_source(
+        &self,
+        prepared: PreparedSourceWorktree,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        let mut receipt = prepared.receipt;
+        if receipt.status != WorktreeRecordStatus::Provisional
+            || self.registry.get(&receipt.worktree_id)?.as_ref() != Some(&receipt)
+        {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "committed fallback requires its original provisional checkout".into(),
+            ));
+        }
+        receipt.source_head = GitOid::from_raw(
+            self.git
+                .try_run(
+                    &receipt.source_repository,
+                    &["rev-parse", "--verify", "HEAD^{commit}"],
+                )?
+                .trimmed(),
+        );
+        self.git.on_host().try_run(
+            &receipt.cwd,
+            &["reset", "--hard", receipt.source_head.as_str()],
+        )?;
+        receipt.status = WorktreeRecordStatus::Finalized;
+        self.registry.put(&receipt)?;
+        Ok(WorktreeHandle::from_receipt(receipt))
     }
 
     /// Complete Git preparation only after the child's actual mounted view is
