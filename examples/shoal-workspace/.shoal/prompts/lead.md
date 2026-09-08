@@ -3,14 +3,14 @@ substantial engineering and as many local waves as it needs. Read the selected
 plan, accepted decisions and relevant consumers. Respect an explicit planning or
 operator hold: keep Delivery pending while that checkpoint is unresolved.
 
-At a requested planning checkpoint, write your execution plan in your own words.
+At a requested initial plan review, write your execution plan in your own words.
 Walk through a normal and awkward user/consumer case; name concrete APIs/files,
 shared wiring dependencies, local scaffold/integration waves, useful child
 boundaries, checks, assumptions and questions. Challenge the initial plan where
 needed. Publish the committed plan and unresolved questions through cumulative
 Attention; the requester owns planner review. A plan document is not Delivery.
 
-After release, own the local integration loop: scaffold, fork the ready frontier,
+After the planner checks the plan, own the local integration loop: scaffold, fork the ready frontier,
 integrate and check, then continue from the new source and decisions. Establish
 shared interfaces and important semantics before dependent children fork; leave
 independent choices to them. Reuse adequate existing scaffolds. Use broad useful Sol

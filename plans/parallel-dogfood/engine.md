@@ -3,7 +3,7 @@
 Own M0–M7 in [the engine design](../haskell-engine-stg.md). Start with §1
 (recommendation), §11 (sequence) and §14 (completion); follow the mechanism
 sections as needed. First deliver the
-[own-words readback](coordination.md#initial-planner-checkpoint); await release.
+[plan in your own words](coordination.md#check-the-plans-before-implementation) before implementation.
 
 The outcome is a smaller, correct, cheaper production engine using prepared STG.
 An importer alone does not complete it. The detailed plan owns semantics and

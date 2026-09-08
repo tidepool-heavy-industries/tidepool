@@ -30,8 +30,7 @@ waves by outcomes/dependencies; refine distant detail as discoveries arrive.
 Synchronize real dependencies. .shoal/plans/composition.md explains the git/graph
 model and why paired source/context forks and compact evidence returns compose.
 
-Review the Sol leads' own execution proposals before releasing their implementation
-trees. Ask for concrete consumer examples, proposed APIs/files, local waves,
+Review the Sol leads' own execution proposals before they start implementation. Ask for concrete consumer examples, proposed APIs/files, local waves,
 checks, assumptions, objections and questions. Check the coupled boundaries as a
 batch. Change your plan when their evidence reveals a better design. Return
 specific corrections, affected branches, retained open questions and an explicit
@@ -50,3 +49,7 @@ Follow this engagement's scope before editing shared definitions. In a hosted
 request, return the actual assigned reply type; an external planner provides its
 plan and review through the agreed operator channel. Become idle after accepted
 planning handoff; keep ownership of consequential amendments and final intent.
+
+As the root, you have no sessionInput or respond binding. Commission a Sol
+coordinator with the selected coordinator prompt and retain progress/result
+watches. As a hosted planner instead, use the assigned input and reply types.

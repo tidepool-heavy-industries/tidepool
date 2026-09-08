@@ -57,9 +57,9 @@ and let next-run preparation copy them before explicit swarm selection. More gen
 project-owned customization uses the same source/frozen-runtime distinction with
 that project's chosen authoring owner. Preserve unfinished work and runtime artifacts.
 
-The planner prompt is a TOML-selected resource for a human-attached planning
-conversation or withInstructions on an ordinary actor; no new runtime role is
-needed. The original planner reviews readbacks and consequential amendments.
+The default root prompt selects the planner. Launch that root with Astra; worker
+defaults remain Sol. The coordinator prompt selects an ordinary hosted Sol actor
+using withInstructions; no new runtime role is needed. The original planner reviews readbacks and consequential amendments.
 An operator hold is not a failed continuation or permission to resume.
 
 The run guide shows first-turn and continuation expressions: commission a lead,

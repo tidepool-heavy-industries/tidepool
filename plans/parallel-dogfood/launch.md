@@ -10,9 +10,10 @@ Launch preparation only; this file is not a claim of acceptance or deployment.
   checks used the previous runner; record new-run validation separately.
 - Use immutable Shoal/native/extractor executables containing the steering repair.
   Record package identity, native pin and checks in the actual launch record.
-- Launch a unique session with Sol; never recreate or resume an unrelated run.
-  Seed the coordinator with the exact source and this wave's README. Initially
-  commission readbacks only.
+- Launch a unique session with Astra High and the selected planner root prompt;
+  leave Sol as the worker default. Never recreate or resume an unrelated run.
+  Give the planner the exact source and planner.md. It commissions the Sol tree;
+  implementation starts after it checks the Sol execution plans.
 - Preserve run identity, tmux panes, existing run-map observations and opt-in
   bounded private traces for later visualization. Track actual models, forks,
   messages, compactions and usage where observable; missing coverage stays unknown.

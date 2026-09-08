@@ -3,7 +3,7 @@
 Own [A0–A8](../interactive-applications/06-integration.md). Start with the
 [shared decisions](../interactive-applications/README.md), then read mechanism
 files 01–05 as their frontier approaches. First deliver the
-[own-words readback](coordination.md#initial-planner-checkpoint); await release.
+[plan in your own words](coordination.md#check-the-plans-before-implementation) before implementation.
 
 The existing steering repair is the baseline. Preserve full native Codex TUIs
 and their embedded execution owners. The detailed plan owns semantics and tests.

@@ -1,4 +1,4 @@
-# Coordinator: readbacks, shared seams, integration
+# Coordinator: execution plans and integration
 
 Use generic `Task` / `componentLead` with
 `childWithProgress @Attention @Delivery`; the selected `.shoal/plans/run.md`
@@ -6,9 +6,9 @@ contains invocation and watch syntax. Graph task constructors are unrelated
 examples. Every task carries an exact committed source, relevant plan path,
 owned outcome and acceptance.
 
-## Initial planner checkpoint
+## Check the plans before implementation
 
-Each lead commits `applications-readback.md` or `engine-readback.md` here in its
+Each lead commits `applications-execution.md` or `engine-execution.md` here in its
 checkout. Explain, concisely and in its own words:
 
 - Normal behavior and one awkward failure, with actual owners.
@@ -16,11 +16,11 @@ checkout. Explain, concisely and in its own words:
 - Concrete files/APIs, checks, dependencies and challenged assumptions.
 
 Publish artifact commit/path and unresolved questions through Attention; keep
-Delivery pending. Consolidate coupled choices for the external Astra planner.
-Record its accepted corrections and release scope in `release.md`, incorporate
+Delivery pending. Consolidate coupled choices for your Shoal-managed Astra planner through cumulative Attention.
+Record its corrections in those execution plans, incorporate
 that source, and steer the pending owners. Do not queue a new request behind
 pending Delivery. Confirm steering presentation; use the ordinary owning TUI if
-transport fails. The external planner is not a Shoal actor.
+transport fails. Your planner watches your progress; preserve its pending Delivery.
 
 ## Resolve overlaps before edits
 
