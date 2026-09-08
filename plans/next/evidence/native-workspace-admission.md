@@ -1,6 +1,6 @@
 # Native workspace admission checkpoint
 
-Codex branch `work/build-snapshot-admission`, commit `5e914a95ee`, in
+Codex branch `work/build-snapshot-admission`, commit `06d99357be`, in
 `/tmp/tidepool-build-snapshot-codex`, based on pinned `d760c5cb8c`.
 The Tidepool runner pin and launch environment are unchanged. This is not yet
 an enabled or complete native snapshot protocol.
@@ -59,8 +59,13 @@ The existing private input-control socket also serves
 monotonically increasing `sequence`, and `operation` (`begin` or `finish`).
 Responses carry typed `status`: `ready` (with `pid`, `startTicks`, `mountNamespaceInode`, and `cgroupPath`), `settled`,
 `busy`, `conflict`, or `unavailable` (with `reason`). Remote app-server connections
-and disabled admission are rejected. This does not yet validate remote executor
-selection within an in-process runtime; that remains an enablement gate.
+and disabled admission are rejected. External exec-server connection inside an
+in-process runtime disables local publication for that native process's lifetime.
+The common connection entry waits for admitted publication to settle before
+initialization; the stdio transport does so before spawning its executor. A
+retained read permit on the existing mutation gate prevents later publication,
+without disabling local tools or external execution. Client disconnection cannot
+prove that remote descendants have stopped, so it does not restore publication.
 Completion requires `expectedIdentity` containing the PID, start ticks, and
 mount namespace inode. Begin retries supply it once the host has retained a
 receipt. A mismatched identity is rejected before acquiring or releasing admission.
@@ -219,8 +224,17 @@ fallback, and storage acceptance remain required by the full implementation plan
   are disjoint. The memory service also writes files directly outside Git.
 - The TUI's normal app-server client has an in-process implementation sharing the
   native admission singleton. The remote-client variant does not establish local
-  execution custody. Snapshot control must bind the actual execution owner and
-  reject unsupported remote execution, not infer it from the visible pane.
+  execution custody. The control route rejects remote app-server clients;
+  exec-server connection also disables local publication through the native
+  gate, covering external execution selected within the in-process runtime.
+
+The delegated-cgroup regression passed with external-executor admission racing
+an active publication and with local mutation still available afterward. The
+opt-in exec-server regression passed with `CODEX_WORKSPACE_SNAPSHOTS=1`: its stdio
+process did not create a startup marker until publication settled, then connected
+successfully; publication remained unavailable after client drop. Two ordinary
+stdio connection checks also passed. The exec-server library compiled. This is
+native boundary evidence, not a managed-TUI/source-snapshot acceptance run.
 
 The identity extension passed the real-overlay host test, including refusal of a
 wrong process start time or namespace inode, and the socket test covering initial
