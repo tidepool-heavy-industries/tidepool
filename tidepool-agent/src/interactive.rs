@@ -182,6 +182,20 @@ pub struct InteractiveAgentSpec {
 /// command construction; `push` is only the final backend hop to an
 /// already-bound exact conversation.
 pub trait InteractiveAgentBackend: Send + Sync {
+    /// Control a process-owned workspace publication lease. Transport errors are
+    /// unconfirmed: retain the same durable sequence until it can be reconciled.
+    fn workspace_publication<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _sequence: std::num::NonZeroU64,
+        _operation: PublicationOperation,
+    ) -> InteractiveFuture<'a, PublicationReply> {
+        Box::pin(async {
+            Ok(PublicationReply::Unavailable {
+                detail: "workspace publication is unsupported".into(),
+            })
+        })
+    }
     /// Materialize backend-native command policy under `staging_root`.
     ///
     /// The deployment owner installs returned directories as read-only mount
@@ -235,4 +249,19 @@ pub trait InteractiveAgentBackend: Send + Sync {
         cwd: &'a str,
         thread: &'a QueueReadyThread,
     ) -> InteractiveFuture<'a, ()>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PublicationOperation {
+    Begin,
+    Finish,
+}
+
+#[derive(Debug)]
+pub enum PublicationReply {
+    Ready { pid: u32, cgroup_path: PathBuf },
+    Settled,
+    Busy,
+    Conflict,
+    Unavailable { detail: String },
 }

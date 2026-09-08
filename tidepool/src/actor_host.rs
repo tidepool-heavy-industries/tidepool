@@ -1573,6 +1573,18 @@ async fn run_interactive_applications(
                 if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
             }
             _ = health.tick() => {
+                for deployment in &mut deployments {
+                    if let (Some(resource), Some(thread)) = (&mut deployment.build_resource, &deployment.thread) {
+                        if resource.native_publication_needs_retry() {
+                            if let Err(error) = resource.publish_native(
+                                backend.as_ref(), thread,
+                                &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                            ).await {
+                                tracing::debug!(actor = ?deployment.actor, %error, "build publication recovery remains pending");
+                            }
+                        }
+                    }
+                }
                 for index in 0..deployments.len() {
                     let deployment = &deployments[index];
                     let snapshot = deployment.runtime_observation.snapshot();
@@ -1652,10 +1664,18 @@ async fn run_interactive_applications(
                                 Some(thread.id().clone())
                             }
                         };
-                        let build_snapshot = installation.creator
-                            .and_then(|parent| deployments.iter().find(|app| app.actor == parent))
-                            .and_then(|app| app.build_resource.as_ref())
-                            .and_then(BuildResourceLease::latest_snapshot);
+                        let build_snapshot = if let Some(parent) = installation.creator
+                            .and_then(|parent| deployments.iter_mut().find(|app| app.actor == parent)) {
+                            if let (Some(resource), Some(thread)) = (&mut parent.build_resource, &parent.thread) {
+                                if let Err(error) = resource.publish_native(
+                                    backend.as_ref(), thread,
+                                    &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                                ).await {
+                                    tracing::warn!(actor = ?parent.actor, %error, "build publication retained for recovery");
+                                }
+                                resource.latest_snapshot()
+                            } else { None }
+                        } else { None };
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
                         let (cancel, cancelled) = oneshot::channel();

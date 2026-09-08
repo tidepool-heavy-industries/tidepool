@@ -11,6 +11,9 @@ use tidepool_node::{
     ProcessMountBoundary,
 };
 
+#[path = "build_resource/native_publication.rs"]
+mod native_publication;
+
 #[derive(Debug)]
 pub(super) struct BuildResourceLease {
     storage: Arc<BuildStorage>,
@@ -19,6 +22,7 @@ pub(super) struct BuildResourceLease {
     work: PathBuf,
     latest: Option<BuildSnapshot>,
     publication: PublicationState,
+    native_retry: bool,
 }
 
 /// Only the publication owner can construct a snapshot of a frozen generation.
@@ -138,6 +142,7 @@ impl BuildResourceLease {
             work,
             latest,
             publication: PublicationState::Writable,
+            native_retry: false,
         })
     }
 
@@ -185,7 +190,6 @@ impl BuildResourceLease {
 
     /// Caller must hold native mutation admission and establish writer completion.
     /// Kept private to actor composition until that native handshake is connected.
-    #[allow(dead_code)]
     pub(super) fn publish(
         &mut self,
         namespace: &MountNamespace,
@@ -338,6 +342,7 @@ mod tests {
     use tidepool_node::ProcessInvocation;
 
     struct Worker {
+        pid: u32,
         child: Child,
         output: BufReader<ChildStdout>,
     }
@@ -371,8 +376,9 @@ mod tests {
             let mut output = BufReader::new(child.stdout.take().unwrap());
             let mut pid = String::new();
             output.read_line(&mut pid).unwrap();
-            let namespace = MountNamespace::capture(pid.trim().parse().unwrap()).unwrap();
-            (Self { child, output }, namespace)
+            let pid = pid.trim().parse().unwrap();
+            let namespace = MountNamespace::capture(pid).unwrap();
+            (Self { pid, child, output }, namespace)
         }
 
         fn exchange(&mut self, command: &str) -> String {
@@ -389,6 +395,114 @@ mod tests {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    #[tokio::test]
+    async fn native_finish_retry_does_not_rotate_build_again() {
+        use tidepool_agent::interactive::*;
+        use tidepool_agent::{AgentBackendError, BackendThreadId};
+        struct Backend {
+            pid: u32,
+            calls: Mutex<Vec<(u64, PublicationOperation)>>,
+        }
+        impl InteractiveAgentBackend for Backend {
+            fn prepare_native_tool_policy(
+                &self,
+                _: InteractiveNativeToolPolicy,
+                _: &Path,
+            ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+                unreachable!()
+            }
+            fn render(
+                &self,
+                _: &InteractiveAgentSpec,
+            ) -> Result<InteractiveAgentCommand, AgentBackendError> {
+                unreachable!()
+            }
+            fn push<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a QueueReadyThread,
+                _: &'a str,
+            ) -> InteractiveFuture<'a, ()> {
+                unreachable!()
+            }
+            fn archive<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a QueueReadyThread,
+            ) -> InteractiveFuture<'a, ()> {
+                unreachable!()
+            }
+            fn workspace_publication<'a>(
+                &'a self,
+                _: &'a QueueReadyThread,
+                sequence: std::num::NonZeroU64,
+                operation: PublicationOperation,
+            ) -> InteractiveFuture<'a, PublicationReply> {
+                Box::pin(async move {
+                    let mut calls = self.calls.lock();
+                    calls.push((sequence.get(), operation));
+                    match operation {
+                        PublicationOperation::Begin => Ok(PublicationReply::Ready {
+                            pid: self.pid,
+                            cgroup_path: "/test/writers".into(),
+                        }),
+                        PublicationOperation::Finish if calls.len() == 2 => {
+                            Err(AgentBackendError::BackendUnavailable {
+                                detail: "lost finish reply".into(),
+                            })
+                        }
+                        PublicationOperation::Finish => Ok(PublicationReply::Settled),
+                    }
+                })
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let mut lease =
+            BuildResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
+        let (worker, _namespace) = Worker::start(&mut lease, &project);
+        let backend = Backend {
+            pid: worker.pid,
+            calls: Mutex::new(Vec::new()),
+        };
+        let binding = directory.path().join("binding.json");
+        tidepool_agent::accept_interactive_session_binding(
+            &binding,
+            3,
+            BackendThreadId(uuid::Uuid::new_v4().to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        let thread = tidepool_agent::read_interactive_binding(&binding)
+            .await
+            .unwrap();
+        assert!(lease
+            .publish_native(&backend, &thread, &project.join("target"))
+            .await
+            .is_err());
+        assert!(lease.native_publication_needs_retry());
+        let upper = lease.upper.clone();
+        let layers = lease.layers.len();
+        lease
+            .publish_native(&backend, &thread, &project.join("target"))
+            .await
+            .unwrap();
+        assert!(!lease.native_publication_needs_retry());
+        assert_eq!(lease.upper, upper);
+        assert_eq!(lease.layers.len(), layers);
+        assert!(lease.latest_snapshot().is_some());
+        let calls = backend.calls.lock();
+        assert!(matches!(
+            calls.as_slice(),
+            [
+                (1, PublicationOperation::Begin),
+                (1, PublicationOperation::Finish),
+                (1, PublicationOperation::Finish)
+            ]
+        ));
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub mod driver;
 pub mod dynamic_tools;
 pub mod isolation;
 mod trust;
+mod workspace_publication;
 
 pub use trust::trust_interactive_project;
 pub mod node;

@@ -250,6 +250,16 @@ impl CodexInteractiveBackend {
 }
 
 impl InteractiveAgentBackend for CodexInteractiveBackend {
+    fn workspace_publication<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        sequence: std::num::NonZeroU64,
+        operation: crate::interactive::PublicationOperation,
+    ) -> InteractiveFuture<'a, crate::interactive::PublicationReply> {
+        Box::pin(super::workspace_publication::request(
+            thread, sequence, operation,
+        ))
+    }
     fn prepare_native_tool_policy(
         &self,
         policy: InteractiveNativeToolPolicy,
