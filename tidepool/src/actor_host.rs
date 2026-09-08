@@ -249,11 +249,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         let worktrees = self.worktrees.clone();
         let custody = self.clone();
         Box::pin(async move {
-            let build_snapshot = match &custody.native {
-                Some(native) => native.build_snapshot(owner, native_tools).await,
-                None => None,
-            };
-            let handle = tokio::task::spawn_blocking(move || {
+            let authorized = tokio::task::spawn_blocking(move || {
                 let (spec, dirty_policy) = match seed {
                     ForkWorkspaceSeed::Explicit(spec) => {
                         let dirty_policy = spec.spec_dirty_policy;
@@ -263,7 +259,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                 };
                 worktrees
                     .lock()
-                    .admit_fork_workspace(owner.into(), actor_path, spec, dirty_policy)
+                    .authorize_fork_workspace(owner.into(), actor_path, spec, dirty_policy)
                     .map_err(|error| ForkWorkspaceAdmissionError {
                         detail: format!("{error:?}"),
                     })
@@ -272,6 +268,18 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             .map_err(|error| ForkWorkspaceAdmissionError {
                 detail: format!("workspace preparation task failed: {error}"),
             })??;
+            let build_snapshot = match &custody.native {
+                Some(native) => native.build_snapshot(owner, native_tools).await,
+                None => None,
+            };
+            let handle = tokio::task::spawn_blocking(move || authorized.materialize())
+                .await
+                .map_err(|error| ForkWorkspaceAdmissionError {
+                    detail: format!("workspace preparation task failed: {error}"),
+                })?
+                .map_err(|error| ForkWorkspaceAdmissionError {
+                    detail: format!("{error:?}"),
+                })?;
             let worktree = handle.handle_receipt.tree_id.raw.clone();
             Ok(tidepool_actor::PreparedForkWorkspace::new(
                 handle,

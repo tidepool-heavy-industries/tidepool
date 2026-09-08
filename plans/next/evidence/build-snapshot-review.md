@@ -295,6 +295,10 @@ compiled; no TUI was launched for these checks.
 Admission receives the child's already-attenuated native-tool class. It shares
 the launch policy mapping and skips build publication and snapshot retention for
 inspection-only children, whose launch does not mount a private build view.
+Source authorization now precedes native publication. The worktree handler issues
+one owned authorized request; Git materialization consumes it outside the shared
+handler lock. Existing Haskell worktree effects use the same authorization and
+materialization implementation. A denied source cannot trigger a native request.
 
 The focused current-thread admission test and existing sibling custody ordering
 and failed-custody publication tests passed (3 tests). The Shoal binary compiled.

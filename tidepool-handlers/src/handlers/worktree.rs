@@ -181,6 +181,24 @@ pub struct ActorWorktreeHandler {
     authority: ActorWorktreeAuthority,
 }
 
+/// Source authority resolved for one named fork. The host may await native
+/// workspace admission before consuming this request; Git work does not require
+/// holding the actor handler's shared lock.
+pub struct AuthorizedForkWorkspace {
+    manager: WorktreeManager,
+    spec: WorktreeSpec,
+    actor_path: tidepool_repr::ActorPath,
+}
+
+impl AuthorizedForkWorkspace {
+    pub fn materialize(self) -> Result<WtWorktreeHandle, WorktreeError> {
+        self.manager
+            .create_for_actor_path(&self.spec, &self.actor_path)
+            .map(|handle| handle_to_wire(&handle))
+            .map_err(error_to_wire)
+    }
+}
+
 impl ActorWorktreeHandler {
     #[must_use]
     pub fn new(inner: WorktreeHandler, authority: ActorWorktreeAuthority) -> Self {
@@ -244,6 +262,17 @@ impl ActorWorktreeHandler {
         spec: Option<WtWorktreeSpec>,
         bound_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy,
     ) -> Result<WtWorktreeHandle, WorktreeError> {
+        self.authorize_fork_workspace(principal, actor_path, spec, bound_dirty_policy)?
+            .materialize()
+    }
+
+    pub fn authorize_fork_workspace(
+        &self,
+        principal: tidepool_repr::PrincipalId,
+        actor_path: String,
+        spec: Option<WtWorktreeSpec>,
+        bound_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy,
+    ) -> Result<AuthorizedForkWorkspace, WorktreeError> {
         let actor_path = tidepool_repr::ActorPath::parse(&actor_path).map_err(|error| {
             WorktreeError::WorktreeAuthorityDenied(format!("invalid actor path: {error}"))
         })?;
@@ -266,11 +295,11 @@ impl ActorWorktreeHandler {
                 }
             }
         };
-        self.inner
-            .manager
-            .create_for_actor_path(&spec, &actor_path)
-            .map(|handle| handle_to_wire(&handle))
-            .map_err(error_to_wire)
+        Ok(AuthorizedForkWorkspace {
+            manager: self.inner.manager.clone(),
+            spec,
+            actor_path,
+        })
     }
 }
 

@@ -962,6 +962,20 @@ mod tests {
             owners: owners.clone(),
             backend: backend.clone(),
         });
+        let denied = admission
+            .admit(
+                creator,
+                "root/unauthorized".into(),
+                ForkWorkspaceSeed::Explicit(tidepool_bridge_effects::WtWorktreeSpec {
+                    spec_source: tidepool_bridge_effects::WtWorktreeSource::SourceCurrentRepository,
+                    spec_label: "unauthorized".into(),
+                    spec_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy::RequireClean,
+                }),
+                tidepool_actor::NativeToolClass::Coding,
+            )
+            .await;
+        assert!(denied.is_err());
+        assert_eq!(backend.calls.lock().len(), before_calls);
         let prepared = admission
             .admit(
                 creator,
