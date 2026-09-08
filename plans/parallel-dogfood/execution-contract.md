@@ -69,12 +69,25 @@ an owner waiting for this review.
 
 Each substantial Sol node owns multiple local scaffold/fork/integrate cycles.
 At a fork agree concrete types, minimum usable consumer wiring, important failure
-semantics, path ownership and decisive checks; commit that shared source first.
-Each child receives that exact commit and the accepted reasoning. Use inherited
-context for siblings sharing that investigation, before unrelated debugging grows;
-use selected context for unrelated mechanisms and fresh review. Do not copy both
-full designs into common ancestors. Retained workers receive explicit source and
-decision deltas; neither Git integration nor acknowledgment updates their context.
+semantics, path ownership and decisive checks. Task.taskSource records exact
+committed provenance; the actual coding seed may capture current working source.
+For substantial related implementation siblings use `withContext inherited`
+explicitly and `coding` from `boundHead` in allocated checkouts (`projectHead` for
+original-root source), with explicit `withModel "gpt-5.6-sol"` and appropriate
+effort. Fork after shared scaffold/reasoning is useful and before unrelated
+investigation fills the context. Frozen `componentLead` and `solTask` (including
+`implement`) select fresh taskContext and atRef taskSource internally: unmodified
+convenience calls do not meet this requirement. Use primitives or local Haskell
+helpers, not edits to frozen .shoal. Selected fresh contexts remain appropriate
+for unrelated mechanisms and fresh review. Do not restart the selected-context
+coordinator or lane leads. Each lead's first implementation proposal names its
+children's actual context/source choices so the initial frontier can be verified;
+this is not a reporting requirement for every leaf.
+
+Retained workers receive explicit source and decision deltas; neither Git
+integration nor acknowledgment updates their context. Scope contributor-guidance
+and source discovery to the assigned repository and relevant ancestors/nested
+paths; do not traverse /tmp or collect unrelated checkout inventories.
 
 Near frontiers and later outcomes remain in the two lane maps. Applications
 recovers and adapts the partial A0 fixtures, checks the narrow live-session seam,
