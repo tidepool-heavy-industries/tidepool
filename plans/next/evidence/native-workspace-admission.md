@@ -1,6 +1,6 @@
 # Native workspace admission checkpoint
 
-Codex branch `work/build-snapshot-admission`, commit `d6582365fb`, in
+Codex branch `work/build-snapshot-admission`, commit `5e914a95ee`, in
 `/tmp/tidepool-build-snapshot-codex`, based on pinned `d760c5cb8c`.
 The Tidepool runner pin and launch environment are unchanged. This is not yet
 an enabled or complete native snapshot protocol.
@@ -57,10 +57,13 @@ admission while preserving normal native execution.
 The existing private input-control socket also serves
 `POST /v1/workspace/publication`. Request fields are `threadId`, a positive
 monotonically increasing `sequence`, and `operation` (`begin` or `finish`).
-Responses carry typed `status`: `ready` (with `pid` and `cgroupPath`), `settled`,
+Responses carry typed `status`: `ready` (with `pid`, `startTicks`, `mountNamespaceInode`, and `cgroupPath`), `settled`,
 `busy`, `conflict`, or `unavailable` (with `reason`). Remote app-server connections
 and disabled admission are rejected. This does not yet validate remote executor
 selection within an in-process runtime; that remains an enablement gate.
+Completion requires `expectedIdentity` containing the PID, start ticks, and
+mount namespace inode. Begin retries supply it once the host has retained a
+receipt. A mismatched identity is rejected before acquiring or releasing admission.
 
 The native admission singleton retains the active sequence and guard independently
 of HTTP request or listener lifetime. Repeated begin requests reuse a held lease;
@@ -85,6 +88,10 @@ unsupported admission preserves the latest warm snapshot. The existing host heal
 loop retries uncertain publications. A lost finish reply retries finish only;
 a changed durable view record prevents a second rotation when recording the finish
 phase failed. Source capture is not yet connected.
+The local publication record is now version 2; unshipped version-1 records are
+rejected rather than adopted without process identity. `MountNamespace` compares
+start time from the pinned proc directory and the opened namespace inode with the
+receipt, then retains pidfd-backed liveness for subsequent host operations.
 
 Focused checks passed: all four build-resource tests, including a real OverlayFS
 rotation with a simulated lost native finish reply; and the Unix-socket transport
@@ -94,9 +101,8 @@ Changed agent and host test targets compiled; formatting and whitespace checks
 passed. Unrelated codegen formatter churn was excluded.
 
 Automatic publication remains disabled by the native opt-in. Before enabling:
-bind the receipt to verified process birth/namespace identity (PID and cgroup path
-comparison alone are insufficient across reuse), complete retryable unknown-mount
-reconciliation and host-restart reconstruction, and keep publication recovery from
+complete retryable unknown-mount reconciliation and host-restart reconstruction,
+and keep publication recovery from
 blocking the fleet health loop on transport timeouts. A dead host can still leave
 native admission held until ownership is recovered; the native lease alone is not
 a completed recovery design.
@@ -106,8 +112,7 @@ a completed recovery design.
 1. Audit remaining native filesystem writers and unsupported executor environments.
    Hosted coordination itself must not hold the mutation gate. See the consumer
    audit below for the remaining Git paths and native state-directory boundary.
-2. Complete exact process binding and recovery for the connected native control
-   path. Keep the guard until the host finishes; reconcile disconnects and
+2. Complete recovery for the connected native control path. Keep the guard until the host finishes; reconcile disconnects and
    uncertain completion without a timer reopening writes mid-transition.
 3. Connect native admission, namespace identity, cwd refresh, source/Git capture,
    and build publication in Shoal. Select the latest warm snapshot independently
@@ -150,3 +155,9 @@ fallback, and storage acceptance remain required by the full implementation plan
   native admission singleton. The remote-client variant does not establish local
   execution custody. Snapshot control must bind the actual execution owner and
   reject unsupported remote execution, not infer it from the visible pane.
+
+The identity extension passed the real-overlay host test, including refusal of a
+wrong process start time or namespace inode, and the socket test covering initial
+begin, identity-bearing begin retries, and identity-bearing finish with both
+successful and lost replies. The native admission regression passed and the TUI
+library compiled. Formatting and whitespace checks passed in both repositories.
