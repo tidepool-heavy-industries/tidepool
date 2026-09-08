@@ -4,6 +4,7 @@
 //! stock interactive agent is attached to each installed Haskell tool policy;
 //! tmux is process ownership and observability, never message transport.
 
+mod build_resource;
 #[cfg(test)]
 mod custody_tests;
 #[cfg(test)]
@@ -72,6 +73,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
+use self::build_resource::{BuildResourceLease, BuildSnapshot};
 use self::host_incarnation::HostIncarnationLease;
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
@@ -364,88 +366,6 @@ struct InteractiveDeployment {
     runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
     build_resource: Option<BuildResourceLease>,
-}
-
-#[derive(Debug)]
-struct BuildResourceLease {
-    path: PathBuf,
-    state: BuildResourceState,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum BuildResourceState {
-    Unsubmitted,
-    RetainedUnconfirmed,
-    Released,
-}
-
-impl BuildResourceLease {
-    fn allocate(run_id: &str, actor: ActorRef) -> Result<Self, std::io::Error> {
-        let path = tidepool_runtime::paths::actor_build_resource_dir(
-            run_id,
-            actor.id.0,
-            actor.incarnation.0,
-        );
-        Self::allocate_path(path)
-    }
-
-    fn allocate_path(path: PathBuf) -> Result<Self, std::io::Error> {
-        // A retained directory may still be used by an uncertain prior launch.
-        // Only an exclusively created leaf grants prelaunch deletion ownership.
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "build resource has no parent",
-            )
-        })?;
-        std::fs::create_dir_all(parent)?;
-        std::fs::create_dir(&path)?;
-        let lease = Self {
-            path,
-            state: BuildResourceState::Unsubmitted,
-        };
-        for name in ["base", "upper", "work"] {
-            std::fs::create_dir(lease.path.join(name))?;
-        }
-        Ok(lease)
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn process_may_exist(&mut self) {
-        self.state = BuildResourceState::RetainedUnconfirmed;
-    }
-
-    fn release(mut self) -> Result<(), std::io::Error> {
-        if self.state == BuildResourceState::RetainedUnconfirmed {
-            return Err(std::io::Error::other(
-                "build resource retained: exact process and hosted work cleanup is unconfirmed",
-            ));
-        }
-        // Deletion failure may be partial; Drop must not silently retry it.
-        self.state = BuildResourceState::RetainedUnconfirmed;
-        match std::fs::remove_dir_all(&self.path) {
-            Ok(()) => {
-                self.state = BuildResourceState::Released;
-                Ok(())
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.state = BuildResourceState::Released;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-impl Drop for BuildResourceLease {
-    fn drop(&mut self) {
-        if self.state == BuildResourceState::Unsubmitted {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
 }
 
 enum InteractiveConnection {
@@ -1732,6 +1652,10 @@ async fn run_interactive_applications(
                                 Some(thread.id().clone())
                             }
                         };
+                        let build_snapshot = installation.creator
+                            .and_then(|parent| deployments.iter().find(|app| app.actor == parent))
+                            .and_then(|app| app.build_resource.as_ref())
+                            .and_then(BuildResourceLease::latest_snapshot);
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
                         let (cancel, cancelled) = oneshot::channel();
@@ -1760,7 +1684,7 @@ async fn run_interactive_applications(
                                 installation,
                                 context,
                                 cancelled,
-                                fork_parent_thread,
+                                InteractiveInheritance { thread: fork_parent_thread, build_snapshot },
                                 hosted_slot,
                                 pane_slot,
                             ))
@@ -2282,11 +2206,16 @@ async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
     outcome
 }
 
+struct InteractiveInheritance {
+    thread: Option<BackendThreadId>,
+    build_snapshot: Option<BuildSnapshot>,
+}
+
 async fn launch_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
     cancelled: oneshot::Receiver<NativeRetirement>,
-    fork_parent_thread: Option<BackendThreadId>,
+    inherited: InteractiveInheritance,
     hosted_slot: hosted_retirement::HostedSlot,
     pane_slot: Arc<Mutex<Option<TmuxPaneId>>>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
@@ -2296,7 +2225,7 @@ async fn launch_interactive_application(
         context,
         worktree,
         cancelled,
-        fork_parent_thread,
+        inherited,
         hosted_slot,
         pane_slot,
     )
@@ -2394,10 +2323,14 @@ async fn launch_prepared_interactive_application(
     context: InteractiveLaunchContext,
     worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<NativeRetirement>,
-    fork_parent_thread: Option<BackendThreadId>,
+    inherited: InteractiveInheritance,
     hosted_slot: hosted_retirement::HostedSlot,
     pane_slot: Arc<Mutex<Option<TmuxPaneId>>>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
+    let InteractiveInheritance {
+        thread: fork_parent_thread,
+        build_snapshot,
+    } = inherited;
     let InteractiveLaunchContext {
         base_prompt,
         root,
@@ -2481,24 +2414,15 @@ async fn launch_prepared_interactive_application(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("run");
-        let lease = BuildResourceLease::allocate(run_id, actor_identity).map_err(|error| {
-            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-        })?;
+        let lease = BuildResourceLease::allocate(run_id, actor_identity, build_snapshot).map_err(
+            |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
+        )?;
         let mountpoint = workspace.join(ACTOR_BUILD_TARGET);
         std::fs::create_dir_all(&mountpoint).map_err(|error| {
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?;
-        process_boundary = process_boundary
-            .with_read_only_overlay(lease.path(), lease.path())
-            .map_err(|error| {
-                application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-            })?
-            .with_overlay_view(
-                [lease.path().join("base")],
-                lease.path().join("upper"),
-                lease.path().join("work"),
-                agent_workspace.join(ACTOR_BUILD_TARGET),
-            )
+        process_boundary = lease
+            .mount(process_boundary, &agent_workspace.join(ACTOR_BUILD_TARGET))
             .map_err(|error| {
                 application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
             })?;
@@ -6248,71 +6172,5 @@ mod tests {
             .await
             .expect("shutdown root");
         hosted.await.expect("root actor task");
-    }
-    #[test]
-    fn build_resource_retains_after_launch_uncertainty_and_failed_release() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("build");
-        std::fs::create_dir(&path).unwrap();
-        let mut lease = BuildResourceLease {
-            path: path.clone(),
-            state: BuildResourceState::Unsubmitted,
-        };
-        lease.process_may_exist();
-        assert!(lease.release().is_err());
-        assert!(
-            path.is_dir(),
-            "failed release and Drop must retain resource"
-        );
-        let lease = BuildResourceLease {
-            path: path.clone(),
-            state: BuildResourceState::RetainedUnconfirmed,
-        };
-        drop(lease);
-        assert!(
-            path.is_dir(),
-            "unconfirmed launch Drop must retain resource"
-        );
-    }
-
-    #[test]
-    fn build_resource_reallocation_cannot_adopt_retained_directory() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("run").join("build");
-        let mut lease = BuildResourceLease::allocate_path(path.clone()).unwrap();
-        std::fs::write(path.join("live-output"), b"retained").unwrap();
-        lease.process_may_exist();
-        drop(lease);
-        let error = BuildResourceLease::allocate_path(path.clone()).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            std::fs::read(path.join("live-output")).unwrap(),
-            b"retained"
-        );
-    }
-
-    #[test]
-    fn build_resource_fresh_allocation_can_release_and_reallocate() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("run").join("build");
-        BuildResourceLease::allocate_path(path.clone())
-            .unwrap()
-            .release()
-            .unwrap();
-        assert!(!path.exists());
-        drop(BuildResourceLease::allocate_path(path.clone()).unwrap());
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn build_resource_prelaunch_drop_releases() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("build");
-        std::fs::create_dir(&path).unwrap();
-        drop(BuildResourceLease {
-            path: path.clone(),
-            state: BuildResourceState::Unsubmitted,
-        });
-        assert!(!path.exists());
     }
 }

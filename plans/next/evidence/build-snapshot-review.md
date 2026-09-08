@@ -53,10 +53,14 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
    must preserve the prior build snapshot and use the authorized source fallback.
    Do not grow a second general process supervisor to guess quiescence.
 
-5. **Retain generations, not just actor directories.** The current lease deletes
-   an exclusively owned actor directory, which cannot be used unchanged once a
-   descendant retains layers inside it. Retention must account for layer users
-   and uncertain cleanup. Bound both lower-layer depth and retained old mount
+5. **Retain generations, not just actor directories.** Build leases now hold
+   immutable layer dependencies through shared resource custody. Launch selects
+   the orchestration creator's latest published snapshot; inherited snapshots
+   remain available to subsequent children. Uncertain process custody preserves
+   all backing dependencies on disk. The resource owner records current and
+   pending view recipes, but restart reconciliation and confirmed reclamation are
+   unfinished. Automatic publication is not enabled without native admission.
+   Bound both lower-layer depth and retained old mount
    trees; a flat lower list alone does not retire covered mounts or stale cwd
    references. Native cwd refresh belongs at the execution boundary.
 
@@ -88,6 +92,19 @@ three lost-worktree cases and the in-progress rebase refusal passed in
 `worktree_core`. `cargo clippy -p tidepool-node --lib -- -D warnings` and
 `cargo check -p tidepool --bin shoal` passed. These are boundary checks, not
 managed-unfold acceptance.
+
+The build-resource owner has three focused tests, run through
+`just test-lib tidepool 'test(actor_host::build_resource::tests)'`. A real mounted
+parent publishes a generation, remains writable while a busy publication preserves
+the old snapshot, and supplies an independently writable child. Parent lease loss
+and uncertain child custody retain the inherited layer. Preparation failures remain
+retryable; a confirmed mount with a failed metadata write retries recording without
+another rotation. Only an uncertain mount outcome requires mount reconciliation.
+This exercises filesystem artifacts, not Cargo reuse or native admission.
+Shoal compilation passed. Strict application Clippy remains blocked by existing
+warnings in hosted retirement, launch custody and prompt hashing (and a dependency
+warning in rollout usage without `--no-deps`); the new excessive-argument warning
+was fixed by grouping the two independent inheritance inputs.
 
 ## Alternative substrate
 
