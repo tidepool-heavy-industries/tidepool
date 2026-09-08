@@ -3,8 +3,8 @@
 The storage direction remains appropriate for the current ext4 host: immutable
 OverlayFS layers and private writable views avoid eager build-tree copies and can
 preserve source file timestamps. The checked mount transition is useful substrate,
-not yet proof of transparent ordinary unfolding. No native-admission changes have
-been made in the isolated Codex worktree.
+not yet proof of transparent ordinary unfolding. Native admission is staged in
+the isolated Codex worktree; see [its checkpoint](native-workspace-admission.md).
 
 ## Consolidate around an owned workspace view
 
