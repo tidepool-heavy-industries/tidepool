@@ -267,16 +267,37 @@ impl WorktreeManager {
         self.create_with_branch(spec, Some(BranchName::from_raw(actor_path.git_branch())))
     }
 
-    /// Prepare a child of this manager's current repository without checking out
+    /// Prepare a child of the selected live checkout without checking out
     /// files or converting staging into a commit. The source-view owner invokes
     /// this while holding native mutation admission and retains the prepared
     /// checkout until its source mount is installed. Explicit commit seeds use
     /// `create_for_actor_path` instead.
     pub fn prepare_inherited_source(
         &self,
+        source: &WorktreeSource,
         actor_path: &ActorPath,
     ) -> Result<PreparedSourceWorktree, WorktreeError> {
-        let source = &self.source_repository;
+        let (source, origin) = match source {
+            WorktreeSource::CurrentRepository => (
+                self.source_repository.clone(),
+                WorktreeOrigin::CurrentRepository,
+            ),
+            WorktreeSource::Worktree(id) => {
+                let handle = self
+                    .lookup(id)?
+                    .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+                (
+                    handle.cwd().to_path_buf(),
+                    WorktreeOrigin::Worktree(id.clone()),
+                )
+            }
+            WorktreeSource::Ref(_) => {
+                return Err(WorktreeError::WorktreeAuthorityDenied(
+                    "an explicit Git ref has no live checkout to inherit".into(),
+                ));
+            }
+        };
+        let source = &source;
         if let Some(kind) = inspect::in_progress(&self.git, source)? {
             return Err(WorktreeError::SourceOperationInProgress(kind));
         }
@@ -320,7 +341,7 @@ impl WorktreeManager {
         let resolved = ResolvedSeed {
             seed,
             snapshot_ref: None,
-            origin: WorktreeOrigin::CurrentRepository,
+            origin,
             git_repository: source.clone(),
             source_repository: source.clone(),
         };

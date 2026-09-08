@@ -271,6 +271,14 @@ Admission still creates the legacy Git worktree until that transaction is wired.
 The focused current-thread admission test and existing sibling custody ordering
 and failed-custody publication tests passed (3 tests). The Shoal binary compiled.
 
+Source Git preparation now takes the selected `WorktreeSource`, resolving managed
+parents through the existing registry and mounted Git view. It records the
+immediate parent's provenance and copies that parent's private index and current
+HEAD. Explicit refs stay on the committed-checkout path. The combined source/build
+fixture passed with a descendant preparation from a mounted child whose HEAD and
+staging differ from the root; the parent's index remains unchanged. This verifies
+recursive Git preparation, not automatic recursive `unfold` integration.
+
 ## Alternative substrate
 
 A dedicated filesystem with native subvolume snapshots could remove much of the

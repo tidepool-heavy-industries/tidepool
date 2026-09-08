@@ -11,6 +11,7 @@ use tidepool_node::{
 use tidepool_repr::ActorPath;
 use tidepool_worktree::{
     git::inspect, testing::TestRepo, WorktreeManager, WorktreeRecordStatus, WorktreeRegistry,
+    WorktreeSource,
 };
 
 struct Owner(Child);
@@ -252,10 +253,16 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         view.clone(),
     );
     let prepared = manager
-        .prepare_inherited_source(&ActorPath::parse("root/child").unwrap())
+        .prepare_inherited_source(
+            &WorktreeSource::CurrentRepository,
+            &ActorPath::parse("root/child").unwrap(),
+        )
         .unwrap();
     let wrong_view = manager
-        .prepare_inherited_source(&ActorPath::parse("root/wrong-view").unwrap())
+        .prepare_inherited_source(
+            &WorktreeSource::CurrentRepository,
+            &ActorPath::parse("root/wrong-view").unwrap(),
+        )
         .unwrap();
     let wrong_id = wrong_view.receipt().worktree_id.clone();
     assert!(matches!(
@@ -429,6 +436,46 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
             .try_run(&view, &["rev-parse", "HEAD"])
             .unwrap()
             .stdout
+    );
+    // The shared host manager must select the immediate mounted parent, not
+    // its original repository or the parent's Git-only host placeholder.
+    shell(
+        &child,
+        &view,
+        "git add src/main.rs; printf unstaged > input",
+    );
+    let child_admin = inspect::git_dir(&child_git, &view).unwrap();
+    let child_index = std::fs::read(child_admin.join("index")).unwrap();
+    let grandchild = host_manager
+        .prepare_inherited_source(
+            &WorktreeSource::Worktree(handle.id().clone()),
+            &ActorPath::parse("root/child/grandchild").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        grandchild.receipt().source_head,
+        host_manager.worktree_head(&handle).unwrap()
+    );
+    assert_eq!(grandchild.receipt().source_repository, handle.cwd());
+    assert_eq!(
+        grandchild.receipt().origin,
+        tidepool_worktree::WorktreeOrigin::Worktree(handle.id().clone())
+    );
+    let grandchild_admin = inspect::git_dir(git, &grandchild.receipt().cwd).unwrap();
+    assert_ne!(grandchild_admin, child_admin);
+    let grandchild_staged = git
+        .try_run(&grandchild.receipt().cwd, &["diff", "--cached"])
+        .unwrap();
+    assert_eq!(
+        grandchild_staged.stdout,
+        child_git
+            .try_run(&view, &["diff", "--cached"])
+            .unwrap()
+            .stdout
+    );
+    assert_eq!(
+        std::fs::read(child_admin.join("index")).unwrap(),
+        child_index
     );
     assert!(matches!(
         reopened.mount_worktree(handle.id(), parent.clone(), &view),
