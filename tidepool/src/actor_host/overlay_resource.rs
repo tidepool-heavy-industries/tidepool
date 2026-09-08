@@ -918,6 +918,71 @@ mod tests {
         assert_eq!(snapshot.layers.len(), layer_count);
         assert_eq!(lease.upper, upper);
         assert!(!lease.native_publication_needs_retry());
+
+        // Ordinary admission retains the selected warm generation in the owned
+        // preparation, even when native execution is busy and the creator then
+        // leaves the fleet before child bootstrap.
+        use super::super::{
+            custody_tests, ActorWorkspaceCustody, BuildInheritance, CreatorBuild, HostLaunchState,
+            InteractiveApplicationOwner, NativeForkAdmission,
+        };
+        use tidepool_actor::{ForkWorkspaceAdmission, ForkWorkspaceSeed};
+        let (_repo, _runtime, tree, _bindings, mut admission) = custody_tests::custody_fixture();
+        let creator = ActorRef::first(tidepool_actor::ActorId(7));
+        let creator_custody = admission
+            .install_custody(creator, tree.id().as_str())
+            .unwrap();
+        let resource = Arc::new(tokio::sync::Mutex::new(
+            OverlayResourceLease::allocate_path(
+                directory.path().join("creator-cache"),
+                Some(snapshot.clone()),
+            )
+            .unwrap(),
+        ));
+        *backend.begin_override.lock() = Some(PublicationReply::Busy);
+        let backend = Arc::new(backend);
+        let before_calls = backend.calls.lock().len();
+        let owners = Arc::new(Mutex::new(std::collections::HashMap::from([(
+            creator,
+            InteractiveApplicationOwner {
+                creator_build: Some(CreatorBuild { resource, thread }),
+                cancel: None,
+                native_retirement: Default::default(),
+                pane: Arc::new(Mutex::new(None)),
+                fork_gate: None,
+                custody: Some(creator_custody),
+                scoped_retention: None,
+                hosted: Arc::new(Mutex::new(None)),
+                launch: HostLaunchState::Published,
+                terminal: None,
+                retirement: Arc::new(Mutex::new(None)),
+            },
+        )])));
+        Arc::get_mut(&mut admission).unwrap().native = Some(NativeForkAdmission {
+            owners: owners.clone(),
+            backend: backend.clone(),
+        });
+        let prepared = admission
+            .admit(
+                creator,
+                "root/warm-child".into(),
+                ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+            )
+            .await
+            .unwrap();
+        assert_eq!(backend.calls.lock().len(), before_calls + 1);
+        owners.lock().remove(&creator);
+        let installed = prepared
+            .install(ActorRef::first(tidepool_actor::ActorId(8)))
+            .unwrap();
+        let custody = (installed.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ActorWorkspaceCustody>()
+            .unwrap();
+        let BuildInheritance::Prepared(Some(retained)) = &custody.build_inheritance else {
+            panic!("busy creator must retain its completed warm snapshot for bootstrap");
+        };
+        assert!(Arc::ptr_eq(&retained.layers, &snapshot.layers));
+        assert_eq!(backend.calls.lock().len(), before_calls + 1);
     }
 
     #[test]

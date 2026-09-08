@@ -41,6 +41,7 @@ impl Fixture {
                 binding: Some(binding),
                 actor,
                 state: Mutex::new(CustodyState::default()),
+                build_inheritance: super::super::BuildInheritance::Unprepared,
             }),
         }
     }
@@ -66,6 +67,7 @@ impl Fixture {
         owners.lock().insert(
             self.custody.actor,
             InteractiveApplicationOwner {
+                creator_build: None,
                 cancel: None,
                 native_retirement: Default::default(),
                 pane: Arc::new(Mutex::new(None)),

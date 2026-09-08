@@ -124,6 +124,14 @@ struct ActorForkWorkspaceAdmission {
     manager: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
+    native: Option<NativeForkAdmission>,
+}
+
+#[derive(Clone, Default)]
+enum BuildInheritance {
+    #[default]
+    Unprepared,
+    Prepared(Option<OverlaySnapshot>),
 }
 
 struct ActorWorkspaceCustody {
@@ -131,6 +139,7 @@ struct ActorWorkspaceCustody {
     binding: Option<ActiveBinding>,
     actor: ActorRef,
     state: Mutex<scoped_custody::CustodyState>,
+    build_inheritance: BuildInheritance,
 }
 
 impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
@@ -174,11 +183,12 @@ impl Drop for ActorWorkspaceCustody {
     }
 }
 
-impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
-    fn install_custody(
+impl ActorForkWorkspaceAdmission {
+    fn bind_workspace(
         &self,
         actor: ActorRef,
         worktree: &str,
+        build_inheritance: BuildInheritance,
     ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         if !WorktreeId::is_path_safe(worktree) {
             return Err(ForkWorkspaceAdmissionError {
@@ -215,7 +225,18 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             binding: Some(binding),
             actor,
             state: Mutex::new(scoped_custody::CustodyState::default()),
+            build_inheritance,
         }))
+    }
+}
+
+impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
+    fn install_custody(
+        &self,
+        actor: ActorRef,
+        worktree: &str,
+    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        self.bind_workspace(actor, worktree, BuildInheritance::Unprepared)
     }
 
     fn admit(
@@ -227,6 +248,10 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         let worktrees = self.worktrees.clone();
         let custody = self.clone();
         Box::pin(async move {
+            let build_snapshot = match &custody.native {
+                Some(native) => native.build_snapshot(owner).await,
+                None => None,
+            };
             let handle = tokio::task::spawn_blocking(move || {
                 let (spec, dirty_policy) = match seed {
                     ForkWorkspaceSeed::Explicit(spec) => {
@@ -249,7 +274,13 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
             let worktree = handle.handle_receipt.tree_id.raw.clone();
             Ok(tidepool_actor::PreparedForkWorkspace::new(
                 handle,
-                move |actor| custody.install_custody(actor, &worktree),
+                move |actor| {
+                    custody.bind_workspace(
+                        actor,
+                        &worktree,
+                        BuildInheritance::Prepared(build_snapshot),
+                    )
+                },
             ))
         })
     }
@@ -260,10 +291,12 @@ fn fork_workspace_admission(
     authority: ActorWorktreeAuthority,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
+    native: Option<NativeForkAdmission>,
 ) -> Arc<ActorForkWorkspaceAdmission> {
     Arc::new(ActorForkWorkspaceAdmission {
         bindings,
         runtime,
+        native,
         manager: worktrees.clone(),
         worktrees: Arc::new(Mutex::new(ActorWorktreeHandler::new(
             WorktreeHandler::from_manager(worktrees),
@@ -584,6 +617,7 @@ impl InteractiveCleanupReceipt {
 }
 
 struct InteractiveApplicationOwner {
+    creator_build: Option<CreatorBuild>,
     cancel: Option<oneshot::Sender<NativeRetirement>>,
     native_retirement: NativeRetirement,
     pane: Arc<Mutex<Option<TmuxPaneId>>>,
@@ -614,6 +648,56 @@ enum HostLaunchState {
 
 type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
 
+#[derive(Clone)]
+struct CreatorBuild {
+    resource: Arc<tokio::sync::Mutex<OverlayResourceLease>>,
+    thread: QueueReadyThread,
+}
+
+#[derive(Clone)]
+struct NativeForkAdmission {
+    owners: InteractiveOwners,
+    backend: Arc<dyn InteractiveAgentBackend>,
+}
+
+impl NativeForkAdmission {
+    async fn build_snapshot(&self, creator: ActorRef) -> Option<OverlaySnapshot> {
+        let source = self
+            .owners
+            .lock()
+            .get(&creator)
+            .filter(|owner| owner.terminal.is_none())
+            .and_then(|owner| owner.creator_build.clone())?;
+        let mut resource = source.resource.lock().await;
+        // Complete native admission before dropping the resource lock. Retained
+        // publication records own any uncertain transition across host failure.
+        match resource
+            .publish_native(
+                self.backend.as_ref(),
+                &source.thread,
+                &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                &[],
+            )
+            .await
+        {
+            Ok(NativePublication::Published { sequence, snapshot }) => {
+                tracing::debug!(?creator, %sequence, "creator build snapshot published during admission");
+                Some(snapshot)
+            }
+            Ok(NativePublication::Skipped(reason)) => {
+                if let PublicationSkip::NativeUnavailable(reason) = reason {
+                    tracing::debug!(?creator, %reason, "creator build publication unavailable");
+                }
+                resource.latest_snapshot()
+            }
+            Err(error) => {
+                tracing::warn!(?creator, %error, "creator build publication retained for recovery");
+                resource.latest_snapshot()
+            }
+        }
+    }
+}
+
 impl InteractiveApplicationOwner {
     #[allow(dead_code)] // Staged slot admission; production selection remains disabled.
     fn reserve_scope(
@@ -640,6 +724,7 @@ impl InteractiveApplicationOwner {
     }
 
     fn cancel(&mut self) {
+        self.creator_build = None;
         if let Some(gate) = &self.fork_gate {
             let _ = gate.mark_failed();
         }
@@ -973,6 +1058,7 @@ pub async fn run(
         )));
     }
     let backend = native_interactive_backend(config.interactive_agent.clone());
+    let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let (source, root, program) = compile_root(
         &config,
         &run_root,
@@ -989,6 +1075,10 @@ pub async fn run(
             worktree_authority.clone(),
             bindings.clone(),
             runtime_namespace(&run_root),
+            Some(NativeForkAdmission {
+                owners: application_owners.clone(),
+                backend: backend.clone(),
+            }),
         )),
         host_incarnation.incarnation(),
         Some(worker_launch_resolver(&config)),
@@ -1034,7 +1124,6 @@ pub async fn run(
     tracing::info!(socket = %operator_socket.display(), "operator control and attachment ready");
     let (shutdown, shutdown_rx) = watch::channel(None);
     let (root_config, root_config_rx) = watch::channel(config.clone());
-    let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -1694,9 +1783,14 @@ async fn run_interactive_applications(
                                 Some(thread.id().clone())
                             }
                         };
-                        let creator_build = installation.creator
-                            .and_then(|parent| deployments.iter().find(|app| app.actor == parent))
-                            .and_then(|parent| Some((parent.build_resource.clone()?, parent.thread.clone()?)));
+                        let build_inheritance = installation.worktree_custody.as_ref()
+                            .and_then(|custody| (custody.as_ref() as &dyn std::any::Any)
+                                .downcast_ref::<ActorWorkspaceCustody>())
+                            .map(|custody| custody.build_inheritance.clone())
+                            .unwrap_or_default();
+                        let native_admission = NativeForkAdmission {
+                            owners: application_owners.clone(), backend: backend.clone(),
+                        };
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
                         let (cancel, cancelled) = oneshot::channel();
@@ -1707,6 +1801,7 @@ async fn run_interactive_applications(
                         let hosted_slot = Arc::new(Mutex::new(None));
                         let pane_slot = Arc::new(Mutex::new(None));
                         owners.insert(actor, InteractiveApplicationOwner {
+                            creator_build: None,
                             cancel: Some(cancel),
                             native_retirement: NativeRetirement::Preserve,
                             pane: pane_slot.clone(),
@@ -1722,37 +1817,13 @@ async fn run_interactive_applications(
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
                             let result = AssertUnwindSafe(async {
-                                let mut cancelled = cancelled;
-                                let build_snapshot = if let Some((resource, thread)) = creator_build {
-                                    let mut resource = tokio::select! {
-                                        biased;
-                                        _ = &mut cancelled => return Ok(None),
-                                        resource = resource.lock() => resource,
-                                    };
-                                    // Once native admission starts, settle it before
-                                    // observing launch cancellation. Dropping this
-                                    // wait could strand the creator's writer gate.
-                                    match resource.publish_native(
-                                        context.backend.as_ref(), &thread,
-                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET), &[],
-                                    ).await {
-                                        Ok(NativePublication::Published { sequence, snapshot }) => {
-                                            tracing::debug!(?actor, %sequence, "creator build snapshot published");
-                                            Some(snapshot)
-                                        }
-                                        Ok(NativePublication::Skipped(reason)) => {
-                                            match reason {
-                                                PublicationSkip::NativeUnavailable(reason) => tracing::debug!(?actor, %reason, "creator build publication unavailable"),
-                                                PublicationSkip::NativeBusy | PublicationSkip::NoNewGeneration => {}
-                                            }
-                                            resource.latest_snapshot()
-                                        }
-                                        Err(error) => {
-                                            tracing::warn!(?actor, %error, "creator build publication retained for recovery");
-                                            resource.latest_snapshot()
-                                        }
-                                    }
-                                } else { None };
+                                let build_snapshot = match build_inheritance {
+                                    BuildInheritance::Prepared(snapshot) => snapshot,
+                                    BuildInheritance::Unprepared => match installation.creator {
+                                        Some(creator) => native_admission.build_snapshot(creator).await,
+                                        None => None,
+                                    },
+                                };
                                 launch_interactive_application(
                                     installation,
                                     context,
@@ -2019,6 +2090,11 @@ async fn run_interactive_applications(
                             delivery,
                         };
                         deployment.thread = Some(thread.clone());
+                        if let Some(owner) = application_owners.lock().get_mut(&actor) {
+                            owner.creator_build = deployment.build_resource.as_ref().map(|resource| CreatorBuild {
+                                resource: resource.clone(), thread: thread.clone(),
+                            });
+                        }
                         if actor == root_identity {
                             let _ = readiness.send(ActorHostReadiness::Ready {
                                 root: root_identity,

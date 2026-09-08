@@ -1,7 +1,7 @@
 use super::*;
 use tidepool_actor::{ForkWorkspaceCustody, ResidentToolEndpoint};
 
-fn custody_fixture() -> (
+pub(super) fn custody_fixture() -> (
     tidepool_worktree::testing::TestRepo,
     tempfile::TempDir,
     WorktreeHandle,
@@ -23,8 +23,13 @@ fn custody_fixture() -> (
         .unwrap();
     let bindings = Arc::new(Mutex::new(bindings));
     let authority = ActorWorktreeAuthority::new("custody-test", bindings.clone());
-    let admission =
-        fork_workspace_admission(manager, authority, bindings.clone(), "custody-test".into());
+    let admission = fork_workspace_admission(
+        manager,
+        authority,
+        bindings.clone(),
+        "custody-test".into(),
+        None,
+    );
     (repository, runtime, tree, bindings, admission)
 }
 

@@ -48,6 +48,7 @@ impl ModelFreeSession {
                 authority.clone(),
                 bindings.clone(),
                 runtime_namespace(session_root.path()),
+                None,
             ))),
             tidepool_actor::Incarnation::FIRST,
             Some(worker_launch_resolver(config)),

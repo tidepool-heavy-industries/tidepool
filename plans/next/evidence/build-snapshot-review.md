@@ -278,6 +278,21 @@ The sibling/nested bootstrap and failed-installation checks passed with the
 ID-only installation path disabled in their adapter, proving that admitted
 children consume the preparation. Shoal compiled with the changed admission API.
 
+Build inheritance now uses that handoff in production. The existing application
+owner exposes the exact creator's queue-ready native binding and build resource
+to fork admission. Admission attempts publication, selects the resulting or last
+completed warm generation, and retains it through custody installation. Launch
+consumes this selection rather than publishing again. Cancellation removes the
+creator entry; admitted descendants keep their independently retained layers.
+Prebound launches without admission use the same selection owner at launch.
+This does not yet put source/Git capture in the native transaction or enable the
+native snapshot opt-in on deployed TUIs.
+Eight focused custody/publication checks passed. The native publication fixture
+also exercised actual host fork admission with a busy creator, removed that
+creator from the fleet before bootstrap, and confirmed that installed custody
+retained the exact selected layer set without a second native request. Shoal
+compiled; no TUI was launched for these checks.
+
 The focused current-thread admission test and existing sibling custody ordering
 and failed-custody publication tests passed (3 tests). The Shoal binary compiled.
 
