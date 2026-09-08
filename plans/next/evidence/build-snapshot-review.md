@@ -114,6 +114,17 @@ No live TUI was launched for this change. Admission still needs to own and
 transfer the inherited source/build state to this launch path; current ordinary
 admission continues to allocate Git worktrees.
 
+Actor launch now binds each completed worker checkout to its prepared view before
+native submission. The same `mount_worktree` entry point handles initial binding
+and reattachment; provisional source completion retains its separate typed
+preparation receipt. The registry verifies Git identity, durably records the
+mounted-view requirement, then exposes runtime access. A focused ordinary-checkout
+test verifies mounted-only edits/commits, authoritative host submission inspection,
+and refusal to inspect the underlying directory after registry reopen until the
+view is reattached. Both mounted-Git tests and the combined source/build fixture
+passed; Shoal and its changed consumers compiled. Root checkout placement is
+unchanged. Full host-startup reattachment remains unimplemented.
+
 ## Next decisive implementation checkpoint
 
 Implement one real ordinary unfold that joins source, Git state, build inheritance
@@ -160,7 +171,7 @@ remain unchanged, and older binaries reject the new enum variant rather than
 mistaking the Git-only host directory for working files. No bulk migration of
 ordinary records is needed. Reopening seeds unavailable view requirements from
 these receipts; direct Git access and lookup fail until resource recovery restores
-the view. `restore_mounted_source` now reattaches a resource-owner-supplied namespace
+the view. `mount_worktree` now reattaches a resource-owner-supplied namespace
 to an existing mounted receipt after verifying its private Git directory. It does
 not reset later commits or working changes. Repeated attachment of the same kernel
 namespace/root is idempotent; a different namespace cannot replace a retained view

@@ -171,7 +171,7 @@ impl WorktreeRegistry {
         receipt: &WorktreeReceipt,
         namespace: tidepool_node::MountNamespace,
         visible_root: &Path,
-    ) -> Result<(), WorktreeError> {
+    ) -> Result<WorktreeReceipt, WorktreeError> {
         if !visible_root.is_absolute()
             || visible_root
                 .components()
@@ -200,6 +200,15 @@ impl WorktreeRegistry {
                 ));
             }
         }
+        let mounted = WorktreeReceipt {
+            status: WorktreeRecordStatus::Mounted,
+            ..receipt.clone()
+        };
+        // Commit the requirement for this view before exposing runtime access.
+        // Reopening must never silently inspect the underlying host directory.
+        if receipt.status != WorktreeRecordStatus::Mounted {
+            self.put(&mounted)?;
+        }
         self.views
             .install(
                 &receipt.cwd,
@@ -208,7 +217,8 @@ impl WorktreeRegistry {
                     root: visible_root.to_owned(),
                 },
             )
-            .map_err(|error| storage_failure(&receipt.cwd, error))
+            .map_err(|error| storage_failure(&receipt.cwd, error))?;
+        Ok(mounted)
     }
 
     /// Durably record a receipt. Overwrites an existing row for the same id

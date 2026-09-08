@@ -9,7 +9,7 @@ use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::InProgressKind;
 use tidepool_worktree::{
     BranchName, GitOid, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
-    WorktreeRecordStatus, WorktreeRegistry,
+    WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
 };
 
 struct Owner(Child);
@@ -20,6 +20,87 @@ impl Drop for Owner {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen() {
+    let repository = TestRepo::init().unwrap();
+    repository
+        .writer()
+        .commit_file("file", "before\n", "seed")
+        .unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let root = storage.path();
+    let manager = WorktreeManager::new(
+        repository.git().clone(),
+        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        root.join("managed"),
+        repository.path(),
+    );
+    let handle = manager
+        .create(&WorktreeSpec::from_current_repository("child"))
+        .unwrap();
+    for name in ["upper", "work", "view"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let view = root.join("view");
+    let common = inspect::git_common_dir(repository.git(), repository.path()).unwrap();
+    let namespace = tidepool_node::ProcessMountBoundary::new(
+        handle.cwd(),
+        [repository.path().to_owned(), root.join("managed")],
+        [common],
+    )
+    .unwrap()
+    .with_project_root(&view)
+    .unwrap()
+    .with_overlay_view(
+        [handle.cwd().to_owned()],
+        root.join("upper"),
+        root.join("work"),
+        &view,
+    )
+    .unwrap()
+    .prepare_view(
+        "bwrap",
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    let mounted = manager
+        .mount_worktree(handle.id(), namespace.clone(), &view)
+        .unwrap();
+    assert_eq!(mounted.receipt().status, WorktreeRecordStatus::Mounted);
+    let output = namespace
+        .host_command(&view, "/bin/sh".as_ref())
+        .unwrap()
+        .args([
+            "-ec",
+            "printf after > file; git add file; git commit -qm changed",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(handle.cwd().join("file")).unwrap(),
+        "before\n"
+    );
+    let observed = manager.observe_submission(&handle).unwrap();
+    assert_eq!(observed.committed_paths, ["file"]);
+    assert!(observed.working_state.changes.unstaged.is_empty());
+    let reopened = WorktreeManager::new(
+        repository.git().clone(),
+        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        root.join("managed"),
+        repository.path(),
+    );
+    assert!(reopened.lookup(handle.id()).is_err());
+    reopened
+        .mount_worktree(handle.id(), namespace, &view)
+        .unwrap();
+    assert_eq!(reopened.observe_submission(&handle).unwrap(), observed);
 }
 
 #[test]

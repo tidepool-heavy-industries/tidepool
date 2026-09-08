@@ -2416,7 +2416,7 @@ fn retained_workspace_command(
 async fn launch_prepared_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
-    worktree: Option<WorktreeHandle>,
+    mut worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<NativeRetirement>,
     inherited: InteractiveInheritance,
     hosted_slot: hosted_retirement::HostedSlot,
@@ -2695,6 +2695,24 @@ async fn launch_prepared_interactive_application(
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
+    if let Some(handle) = &worktree {
+        let manager = worktrees.clone();
+        let id = handle.id().clone();
+        let namespace = workspace_view.clone();
+        let visible_root = agent_workspace.clone();
+        worktree = Some(
+            tokio::task::spawn_blocking(move || {
+                manager.mount_worktree(&id, namespace, &visible_root)
+            })
+            .await
+            .map_err(|error| {
+                application_error(actor_identity, InteractiveOperation::BindWorktree, error)
+            })?
+            .map_err(|error| {
+                application_error(actor_identity, InteractiveOperation::BindWorktree, error)
+            })?,
+        );
+    }
     let command = retained_workspace_command(
         &config.shoal_executable,
         &workspace_view,

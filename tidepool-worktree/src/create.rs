@@ -352,22 +352,18 @@ impl WorktreeManager {
                 "source preparation does not match this worktree registry".into(),
             ));
         }
-        self.registry
+        let finalized = self
+            .registry
             .install_view(&receipt, namespace, visible_root)?;
-        let finalized = WorktreeReceipt {
-            status: WorktreeRecordStatus::Mounted,
-            ..receipt
-        };
-        self.registry.put(&finalized)?;
         Ok(WorktreeHandle::from_receipt(finalized))
     }
 
-    /// Reattach filesystem access after the resource owner recovers its exact
-    /// namespace. This verifies the registered Git identity without resetting
-    /// HEAD, the index, or working files. It does not recover native execution
-    /// ownership or reconstruct mounts on the caller's behalf.
+    /// Bind a completed checkout to its retained launch view, or reattach that
+    /// view after recovery. Verify the registered Git identity without resetting
+    /// HEAD, the index, or working files. Native execution and mount construction
+    /// remain with their resource owners.
     #[cfg(target_os = "linux")]
-    pub fn restore_mounted_source(
+    pub fn mount_worktree(
         &self,
         id: &WorktreeId,
         namespace: tidepool_node::MountNamespace,
@@ -377,14 +373,15 @@ impl WorktreeManager {
             .registry
             .get(id)?
             .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
-        if receipt.status != WorktreeRecordStatus::Mounted {
+        if receipt.status == WorktreeRecordStatus::Provisional {
             return Err(WorktreeError::WorktreeAuthorityDenied(
-                "filesystem recovery requires a completed mounted checkout".into(),
+                "filesystem binding requires a completed checkout".into(),
             ));
         }
-        self.registry
+        let mounted = self
+            .registry
             .install_view(&receipt, namespace, visible_root)?;
-        Ok(WorktreeHandle::from_receipt(receipt))
+        Ok(WorktreeHandle::from_receipt(mounted))
     }
 
     fn create_with_branch(

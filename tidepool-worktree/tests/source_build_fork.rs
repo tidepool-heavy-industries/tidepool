@@ -345,7 +345,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     let (_child, live_child, child_pid) = capture_worker(process);
     assert!(child.same_view_as(&live_child).unwrap());
     host_manager
-        .restore_mounted_source(handle.id(), live_child.clone(), &view)
+        .mount_worktree(handle.id(), live_child.clone(), &view)
         .unwrap();
     let child = live_child;
     let child_git = git.with_mount_namespace(child.clone());
@@ -431,7 +431,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
             .stdout
     );
     assert!(matches!(
-        reopened.restore_mounted_source(handle.id(), parent.clone(), &view),
+        reopened.mount_worktree(handle.id(), parent.clone(), &view),
         Err(tidepool_worktree::WorktreeError::WorktreeAuthorityDenied(_))
     ));
     assert!(reopened.lookup(handle.id()).is_err());
@@ -439,12 +439,12 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     assert!(child.same_view_as(&recaptured).unwrap());
     assert!(!child.same_view_as(&parent).unwrap());
     let restored = reopened
-        .restore_mounted_source(handle.id(), recaptured, &view)
+        .mount_worktree(handle.id(), recaptured, &view)
         .unwrap();
     assert_eq!(restored, handle);
     assert_eq!(
         reopened
-            .restore_mounted_source(handle.id(), child.clone(), &view)
+            .mount_worktree(handle.id(), child.clone(), &view)
             .unwrap(),
         handle
     );
@@ -472,9 +472,7 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         .with_project_root(&view)
         .unwrap(),
     );
-    assert!(reopened
-        .restore_mounted_source(handle.id(), other, &view)
-        .is_err());
+    assert!(reopened.mount_worktree(handle.id(), other, &view).is_err());
     assert_eq!(
         reopened
             .git()
