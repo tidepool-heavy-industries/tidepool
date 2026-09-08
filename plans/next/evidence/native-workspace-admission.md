@@ -78,19 +78,37 @@ stub, and this Nixpkgs Bazel package is 7.6.0 while the repository requires 9.0.
 Cargo.lock includes the new Linux-only TUI dependency on the existing PTY crate;
 Bazel lock verification remains outstanding.
 
-No Shoal caller or automatic publication is enabled yet. Implement the host
-publication owner next, including recovery of a retained lease after host failure.
-Without that recovery, a lost host can leave command admission held indefinitely;
-the native lease alone is not a completed recovery design.
+Shoal's fork-launch path now calls this protocol through `InteractiveAgentBackend`.
+`BuildResourceLease` persists the sequence, binding, phase, native receipt, and
+prior view record in `native-publication.json` before transitions. Busy or
+unsupported admission preserves the latest warm snapshot. The existing host health
+loop retries uncertain publications. A lost finish reply retries finish only;
+a changed durable view record prevents a second rotation when recording the finish
+phase failed. Source capture is not yet connected.
+
+Focused checks passed: all four build-resource tests, including a real OverlayFS
+rotation with a simulated lost native finish reply; and the Unix-socket transport
+test for exact identity/sequence and no automatic retry after a lost reply. These
+are composed-boundary tests, not a full native-TUI/managed-unfold acceptance run.
+Changed agent and host test targets compiled; formatting and whitespace checks
+passed. Unrelated codegen formatter churn was excluded.
+
+Automatic publication remains disabled by the native opt-in. Before enabling:
+bind the receipt to verified process birth/namespace identity (PID and cgroup path
+comparison alone are insufficient across reuse), complete retryable unknown-mount
+reconciliation and host-restart reconstruction, and keep publication recovery from
+blocking the fleet health loop on transport timeouts. A dead host can still leave
+native admission held until ownership is recovered; the native lease alone is not
+a completed recovery design.
 
 ## Before enabling
 
 1. Audit remaining native filesystem writers and unsupported executor environments.
    Hosted coordination itself must not hold the mutation gate. See the consumer
    audit below for the remaining Git paths and native state-directory boundary.
-2. Consume native publication control from Shoal with durable sequence and exact
-   process binding. Keep the guard until the host finishes; reconcile disconnects
-   and uncertain completion without a timer reopening writes mid-transition.
+2. Complete exact process binding and recovery for the connected native control
+   path. Keep the guard until the host finishes; reconcile disconnects and
+   uncertain completion without a timer reopening writes mid-transition.
 3. Connect native admission, namespace identity, cwd refresh, source/Git capture,
    and build publication in Shoal. Select the latest warm snapshot independently
    from busy source fallback.
