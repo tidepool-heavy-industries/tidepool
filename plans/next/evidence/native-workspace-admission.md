@@ -101,11 +101,24 @@ Changed agent and host test targets compiled; formatting and whitespace checks
 passed. Unrelated codegen formatter churn was excluded.
 
 Automatic publication remains disabled by the native opt-in. Before enabling:
-complete host-restart reconstruction of mount-transition evidence,
-and keep publication recovery from
-blocking the fleet health loop on transport timeouts. A dead host can still leave
+complete host-restart reconstruction of mount-transition evidence. A dead host can still leave
 native admission held until ownership is recovered; the native lease alone is not
 a completed recovery design.
+
+Publication transport waits now run in the existing child launch tasks. The
+deployment retains its build lease through an asynchronous mutex, so launches
+from the same creator serialize publication without blocking the fleet loop.
+Health recovery acquires that same owner only when idle and runs in an owned
+task set; another actor's lifecycle and shutdown events remain selectable during
+native HTTP waits. Cancellation can stop a launch waiting for the resource, but
+an admitted publication settles before ordinary launch cancellation is observed.
+Shutdown timeout and outstanding publication ownership produce unconfirmed
+cleanup, preserving storage rather than claiming resource release.
+
+Verification: the Shoal binary compiled; four build-resource checks and three
+launch-shutdown checks passed through the owning Nix/Nextest command. These checks
+cover publication recovery and existing shutdown accounting; a real multi-actor
+run with delayed native control replies has not been performed.
 
 Unknown mount outcomes now retain an `OverlayRecovery` handle in the build
 resource owner. Preparing captures the original namespace and mount evidence;

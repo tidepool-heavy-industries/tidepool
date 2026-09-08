@@ -365,7 +365,7 @@ struct InteractiveDeployment {
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
     runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
-    build_resource: Option<BuildResourceLease>,
+    build_resource: Option<Arc<tokio::sync::Mutex<BuildResourceLease>>>,
 }
 
 enum InteractiveConnection {
@@ -1564,6 +1564,7 @@ async fn run_interactive_applications(
     let mut binding_discoveries = JoinSet::new();
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
+    let mut publication_retries = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
     let failure = loop {
         tokio::select! {
@@ -1573,14 +1574,21 @@ async fn run_interactive_applications(
                 if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
             }
             _ = health.tick() => {
-                for deployment in &mut deployments {
-                    if let (Some(resource), Some(thread)) = (&mut deployment.build_resource, &deployment.thread) {
-                        if resource.native_publication_needs_retry() {
-                            if let Err(error) = resource.publish_native(
-                                backend.as_ref(), thread,
-                                &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
-                            ).await {
-                                tracing::debug!(actor = ?deployment.actor, %error, "build publication recovery remains pending");
+                for deployment in &deployments {
+                    if let (Some(resource), Some(thread)) = (&deployment.build_resource, &deployment.thread) {
+                        if let Ok(mut resource) = resource.clone().try_lock_owned() {
+                            if resource.native_publication_needs_retry() {
+                                let backend = backend.clone();
+                                let thread = thread.clone();
+                                let actor = deployment.actor;
+                                publication_retries.spawn(async move {
+                                    if let Err(error) = resource.publish_native(
+                                        backend.as_ref(), &thread,
+                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                                    ).await {
+                                        tracing::debug!(?actor, %error, "build publication recovery remains pending");
+                                    }
+                                });
                             }
                         }
                     }
@@ -1664,18 +1672,9 @@ async fn run_interactive_applications(
                                 Some(thread.id().clone())
                             }
                         };
-                        let build_snapshot = if let Some(parent) = installation.creator
-                            .and_then(|parent| deployments.iter_mut().find(|app| app.actor == parent)) {
-                            if let (Some(resource), Some(thread)) = (&mut parent.build_resource, &parent.thread) {
-                                if let Err(error) = resource.publish_native(
-                                    backend.as_ref(), thread,
-                                    &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
-                                ).await {
-                                    tracing::warn!(actor = ?parent.actor, %error, "build publication retained for recovery");
-                                }
-                                resource.latest_snapshot()
-                            } else { None }
-                        } else { None };
+                        let creator_build = installation.creator
+                            .and_then(|parent| deployments.iter().find(|app| app.actor == parent))
+                            .and_then(|parent| Some((parent.build_resource.clone()?, parent.thread.clone()?)));
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
                         let (cancel, cancelled) = oneshot::channel();
@@ -1700,14 +1699,34 @@ async fn run_interactive_applications(
                         drop(owners);
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
-                            let result = AssertUnwindSafe(launch_interactive_application(
-                                installation,
-                                context,
-                                cancelled,
-                                InteractiveInheritance { thread: fork_parent_thread, build_snapshot },
-                                hosted_slot,
-                                pane_slot,
-                            ))
+                            let result = AssertUnwindSafe(async {
+                                let mut cancelled = cancelled;
+                                let build_snapshot = if let Some((resource, thread)) = creator_build {
+                                    let mut resource = tokio::select! {
+                                        biased;
+                                        _ = &mut cancelled => return Ok(None),
+                                        resource = resource.lock() => resource,
+                                    };
+                                    // Once native admission starts, settle it before
+                                    // observing launch cancellation. Dropping this
+                                    // wait could strand the creator's writer gate.
+                                    if let Err(error) = resource.publish_native(
+                                        context.backend.as_ref(), &thread,
+                                        &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                                    ).await {
+                                        tracing::warn!(?actor, %error, "creator build publication retained for recovery");
+                                    }
+                                    resource.latest_snapshot()
+                                } else { None };
+                                launch_interactive_application(
+                                    installation,
+                                    context,
+                                    cancelled,
+                                    InteractiveInheritance { thread: fork_parent_thread, build_snapshot },
+                                    hosted_slot,
+                                    pane_slot,
+                                ).await
+                            })
                             .catch_unwind()
                             .await
                             .unwrap_or_else(|_| {
@@ -1837,6 +1856,11 @@ async fn run_interactive_applications(
                             }),
                         ));
                     }
+                }
+            }
+            recovered = publication_retries.join_next(), if !publication_retries.is_empty() => {
+                if let Some(Err(error)) = recovered {
+                    tracing::warn!(%error, "build publication recovery task interrupted; durable state retained");
                 }
             }
             launched = launches.join_next(), if !launches.is_empty() => {
@@ -2086,6 +2110,20 @@ async fn run_interactive_applications(
                 .join("; "),
         )
     };
+    let publication_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
+        let mut failure = None;
+        while let Some(result) = publication_retries.join_next().await {
+            if let Err(error) = result {
+                failure.get_or_insert_with(|| format!("build publication recovery task: {error}"));
+            }
+        }
+        failure
+    })
+    .await
+    .unwrap_or_else(|_| {
+        publication_retries.abort_all();
+        Some("build publication recovery timed out; durable state and storage retained".into())
+    });
     binding_discoveries.abort_all();
     while binding_discoveries.join_next().await.is_some() {}
     let undeployed = application_owners
@@ -2148,10 +2186,15 @@ async fn run_interactive_applications(
     })
     .await
     .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
-    let cleanup_failures = [launch_failure, notification_cleanup, cleanup_failure]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let cleanup_failures = [
+        launch_failure,
+        publication_cleanup,
+        notification_cleanup,
+        cleanup_failure,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     let cleanup_failure = if cleanup_failures.is_empty() {
         None
     } else {
@@ -2770,7 +2813,8 @@ async fn launch_prepared_interactive_application(
             fork_gate,
             runtime_observation,
             fork_parent_thread,
-            build_resource,
+            build_resource: build_resource
+                .map(|resource| Arc::new(tokio::sync::Mutex::new(resource))),
         },
         binding: InteractiveBindingRequest {
             control: binding_control,
@@ -3226,7 +3270,14 @@ async fn retire_interactive_application(
             .build_resource
             .take()
             .map_or(CleanupComponentOutcome::Completed, |lease| {
-                match lease.release() {
+                let released = Arc::try_unwrap(lease)
+                    .map_err(|_| {
+                        std::io::Error::other(
+                            "build publication still owns the resource; cleanup is unconfirmed",
+                        )
+                    })
+                    .and_then(|lease| lease.into_inner().release());
+                match released {
                     Ok(()) => CleanupComponentOutcome::Completed,
                     Err(error) => CleanupComponentOutcome::Failed {
                         detail: error.to_string(),

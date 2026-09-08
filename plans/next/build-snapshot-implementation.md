@@ -106,6 +106,14 @@ Do not mount a live ordinary ext4 target as an allegedly immutable seed. Keep
 `CARGO_TARGET_DIR` stable in the actor namespace and preserve current wrapper
 disabling until namespace-correct cache-daemon use is separately established.
 
+Root source placement needs the operator's answer before implementation changes
+its checkout behavior. The pending choice is a private managed root checkout
+(with the original repository retaining canonical `.shoal` and serving as the
+integration destination), or keeping the root in the original mutable checkout
+and paying for source capture when its direct children fork. The latter can still
+use cheap inherited source layers below those children. Do not silently change
+the root's branch/index ownership to make source import convenient.
+
 Keep configuration in TOML and orchestration in Haskell. Normal `unfold` should
 benefit automatically. Expose compact snapshot availability/age and storage
 observations through the existing snapshot/control surface only where a real
