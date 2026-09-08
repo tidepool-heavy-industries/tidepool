@@ -6,10 +6,11 @@ the existence of this plan is not evidence that any slice has passed.
 
 ## Delivery approach
 
-Implement sequentially against concrete shared contracts. Preserve unrelated work
-in both repositories. Do not run implementation through the Shoal system being
-changed. Follow the current contributor guidance, including focused Nix-backed
-Tidepool checks and the Codex fork's change-size and test rules.
+The operator selected parallel dogfooding with frozen running tools. Use
+[the current execution allocation](../parallel-dogfood/next-wave/applications.md)
+for recursive worker scheduling. Preserve unrelated work in both repositories;
+new implementations do not replace this wave's executing harness. Follow current
+contributor guidance, including focused Nix-backed Tidepool checks and the Codex fork's change-size and test rules.
 
 Each slice must land with its production consumer, failure paths and affected
 target compilation. Split substantial slices into reviewable commits, especially
@@ -17,17 +18,22 @@ in Codex, whose guidance asks for small changes. Shared type scaffolding is usef
 only when the next consumer is named and implemented; no slice is complete while
 its new mechanism is unused or merely testable in isolation.
 
-The chosen order is:
+The dependency joins below constrain acceptance, not a globally sequential worker
+schedule. Parallel implementation consumes concrete agreed contracts:
 
 ```mermaid
 flowchart LR
     A0[A0 baseline and fixtures] --> A1[A1 live binding]
+    A0 --> A4[A4 terminal process owner]
     A1 --> A2[A2 native admission]
-    A2 --> A3[A3 host delivery]
-    A3 --> A4[A4 terminal process owner]
+    A1 --> A3[A3 host delivery]
+    A2 --> D[Checked admission and delivery join]
+    A3 --> D
     A4 --> A5[A5 custody and retirement]
-    A5 --> A6[A6 hosted completion]
-    A6 --> A7[A7 recovery and operator actions]
+    D --> A5
+    A1 --> A6[A6 hosted completion]
+    A5 --> A7[A7 recovery and operator actions]
+    A6 --> A7
     A7 --> A8[A8 matched release and acceptance]
 ```
 

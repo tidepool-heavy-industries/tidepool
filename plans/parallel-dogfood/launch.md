@@ -2,18 +2,19 @@
 
 Launch preparation only; this file is not a claim of acceptance or deployment.
 
-- Record the exact committed seed, including both design plans and authored engine
-  regressions, while preserving unrelated edits. Workers must see plans at source.
+- Record final current-wave coordinator/lane checkpoints, separate native source,
+  unmerged candidates and exact remaining failures. Select the new source including
+  these plans; do not recycle an earlier commission hash or old actor identity.
 - Materialize the finished canonical `examples/shoal-workspace/.shoal` package
   into the original-root `.shoal`, preserving runtime artifacts. Capture once.
-- Check that selection with the chosen fixed runner. The peer's 43 coordination
-  checks used the previous runner; record new-run validation separately.
+- Check the selected package with a separate persistent compiler. Candidate
+  fe3b0550 passed 49 recipe assertions; record the actual new selection identity.
 - Use immutable Shoal/native/extractor executables containing the steering repair.
   Record package identity, native pin and checks in the actual launch record.
 - Launch a unique session with Astra High and the selected planner root prompt;
   leave Sol as the worker default. Never recreate or resume an unrelated run.
-  Give the planner the exact source and planner.md. It commissions the Sol tree;
-  implementation starts after it checks the Sol execution plans.
+  Give the planner the exact launch record and next-wave/commission.md. It
+  commissions the Sol tree; implementation starts after it checks the Sol execution plans.
 - Preserve run identity, tmux panes, existing run-map observations and opt-in
   bounded private traces for later visualization. Track actual models, forks,
   messages, compactions and usage where observable; missing coverage stays unknown.

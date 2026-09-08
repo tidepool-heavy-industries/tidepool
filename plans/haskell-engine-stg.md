@@ -1,6 +1,9 @@
 # A smaller Haskell engine built from GHC-prepared STG
 
-Status: proposed implementation plan; engine implementation has not started.
+Status: implementation is underway on retained branches. This design defines
+acceptance, not current completion; use the current lane checkpoint for evidence.
+[Recursive execution allocation](parallel-dogfood/next-wave/engine.md) organizes
+worker ownership without weakening the mechanism contracts below.
 Written 2026-09-07 against GHC 9.12.2. The original engine review used commit
 971d3f55a4963f97077d772ef8bcca429ba64c06. The second pass also inspected
 0348b3493ef9428305112e155d765e6bbafa3097; intervening committed changes were
@@ -1466,9 +1469,11 @@ Temporary parallel paths must have an identified deletion milestone.
 
 The phases are reviewable obligations, not a request to implement the entire
 design in one patch. Establish the shared schema/semantics before assigning
-independent implementation work. Changes to tests and a plan have been
-authorized so far; this document does not itself claim an implementation
-or a live deployment.
+independent implementation work. Implementation has been authorized through the
+parallel dogfood allocation. Numbered milestones express evidence/dependency joins,
+not one serial worker per milestone or globally synchronized rounds. The current
+wave's hold and any later launch authorization govern when work runs; this design
+alone does not activate candidates or claim a completed deployment.
 
 ### M0 — Make the baseline independently observable
 

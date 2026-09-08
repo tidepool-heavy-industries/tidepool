@@ -3,8 +3,9 @@
 Use generic `Task` / `componentLead` with
 `childWithProgress @Attention @Delivery`; the selected `.shoal/plans/run.md`
 contains invocation and watch syntax. Graph task constructors are unrelated
-examples. Every task carries an exact committed source, relevant plan path,
-owned outcome and acceptance.
+examples. Every task names its source baseline, relevant plan path, owned outcome
+and acceptance. Related forks continue from the parent's current bound checkout;
+a historical task baseline must not silently select an older checkout.
 
 ## Check the plans before implementation
 
@@ -12,7 +13,8 @@ Each lead commits `applications-execution.md` or `engine-execution.md` here in i
 checkout. Explain, concisely and in its own words:
 
 - Normal behavior and one awkward failure, with actual owners.
-- First shared scaffold, ready child tree, and later integration frontiers.
+- First shared scaffold, ready child tree including useful grandchildren, and
+  later integration frontiers. State what each parent implements and integrates.
 - Concrete files/APIs, checks, dependencies and challenged assumptions.
 
 Publish artifact commit/path and unresolved questions through Attention; keep
@@ -43,3 +45,12 @@ Lane maps declare Astra slots; consult when their frontier needs a concrete hard
 decision. Additional expensive engagements go to the planner. Do not hard-kill
 useful in-flight experts. Human-requested RSI uses selected outcomes and evidence,
 not routinely forwarded raw histories.
+
+## Let implementation trees run
+
+Use next-wave/README.md and its branch maps to refine the next allocation. Initial
+unrelated leads use selected taskContext; recursive implementation normally uses
+inherited context and boundHead. Do not require a new planner review for each
+local scaffold or join after the initial execution agreement. Leads can steer their
+own workers directly. Keep routine handoffs compact and combine only genuinely
+coupled decisions for Astra. Monitor delivered engineering, not actor counts.

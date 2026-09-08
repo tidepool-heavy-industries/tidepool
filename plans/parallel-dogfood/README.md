@@ -1,7 +1,9 @@
 # Parallel dogfood wave
 
-Status: preparing a new wave from preserved partial implementation. Start with
-[the restart brief](restart.md); lane owners use [saved work](saved-work.md).
+Status: the current wave is winding down at committed lane checkpoints. For the
+next authorized wave start with [the execution tree](next-wave/README.md).
+[restart.md](restart.md) and [saved-work.md](saved-work.md) describe the previous
+launch and older saved work; final current handoffs take precedence.
 
 Deliver both existing designs: full interactive Codex applications (A0–A8) and
 prepared-STG production execution (M0–M7). Reviewed partial slices are useful;
@@ -17,10 +19,10 @@ leads. Each lane names focused Astra consultations at consequential decisions.
 
 | Reader | Next file |
 |---|---|
-| Astra planner | [Planner assignment](planner.md) |
+| Astra planner | [Next-wave tree](next-wave/README.md), then [planner assignment](planner.md) |
 | Coordinator | [Coordination](coordination.md), then the two short lane maps |
-| Applications lead | [Applications](applications.md) |
-| Engine lead | [Engine](engine.md) |
+| Applications lead | [Applications tree](next-wave/applications.md) |
+| Engine lead | [Engine tree](next-wave/engine.md) |
 | Descendant | Assigned mechanism section and accepted shared contract |
 | Launch operator | [Launch](launch.md) |
 
@@ -32,7 +34,6 @@ selected workbench guidance rather than repeating its recipes here.
 two leads. Delivery stays pending through review. The planner receives
 consolidated Attention through Shoal, reviews the artifacts, and tells the coordinator when the plans are ready to implement. Routine local waves then proceed within that agreement.
 
-The human selected parallel dogfooding, superseding the application plan's
-sequential/non-dogfood execution restriction. Its semantic and acceptance gates
-still apply. Running tools and `.shoal` stay frozen; candidate activation requires
+The human selected parallel dogfooding. Both designs retain their full semantic
+and acceptance gates. Running tools and `.shoal` stay frozen; candidate activation requires
 a later explicit swarm boundary.

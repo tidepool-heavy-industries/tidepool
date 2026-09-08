@@ -1,6 +1,9 @@
 # Option A: supervised interactive Codex applications
 
-Status: proposed implementation plan; no implementation or acceptance is claimed.
+Status: partial implementation exists on retained branches. This design defines
+acceptance; use the final lane checkpoint for exact source and verified gates.
+[Recursive execution allocation](../parallel-dogfood/next-wave/applications.md)
+defines worker ownership and dependency joins.
 
 Implement one full native Codex TUI for each Shoal actor, with a precise live
 session binding and an independently retained process owner. Shoal remains the
@@ -13,7 +16,7 @@ execution to a dedicated app-server service, replace TUIs with observers, or sha
 one app-server across actors. Those are different architectures. Nothing in this
 plan requires them as an intermediate step.
 
-## Read and implement in this order
+## Read shared decisions, then assigned mechanisms
 
 | File | Implementation obligation |
 |---|---|
@@ -22,7 +25,7 @@ plan requires them as an intermediate step.
 | [03-process-supervision.md](03-process-supervision.md) | Full terminal behavior, exact process ownership, transactional launch and resource settlement |
 | [04-hosted-completion.md](04-hosted-completion.md) | Hosted calls, persisted results, completed-call forks and coordination failure |
 | [05-recovery.md](05-recovery.md) | Reconnection, terminal operations, host failure, new incarnations and recovery limits |
-| [06-integration.md](06-integration.md) | Ordered implementation slices, cross-repository release, checks and complete acceptance |
+| [06-integration.md](06-integration.md) | Implementation dependencies, cross-repository release, checks and complete acceptance |
 
 This file defines shared decisions. The numbered files define the mechanisms and
 failure tests. The integration file is the implementation checklist. Changes to a
@@ -32,8 +35,9 @@ shared decision must update its consumers before implementation continues.
 
 The separately authored steering repair landed while this plan was being written:
 Tidepool `5194426dfec9cac8f2e18a547148190d4908ae71` and Codex fork
-`d760c5cb8c82f533a0bff6cab9e15f3bcdc7e9ed`. Tidepool's `flake.nix` now pins that
-Codex commit. Start A0 from those repairs or their reviewed successors; do not
+`d760c5cb8c82f533a0bff6cab9e15f3bcdc7e9ed`. These are the original planning
+baselines; the launch record selects their reviewed successors. Start from the
+saved A0 work and those repairs; do not
 recreate them. Other changes in the shared workspaces remain outside this plan.
 These are source observations, not claims about the binary in every running pane.
 
@@ -43,7 +47,7 @@ current correlated rollout input records. It is the starting transport for this
 plan. It does not by itself implement operation deduplication, retained native
 outcomes, process custody or whole-host recovery.
 
-The main gaps established by the review are:
+The original review established these gaps; the lane checkpoint records repairs:
 
 | Current boundary | Required outcome |
 |---|---|

@@ -5,8 +5,9 @@ Codex TUI. The external setup conversation only supervises the harness. Both
 product designs already exist; focus your substantial reasoning on executing them
 well, rather than rewriting them or repeating the product interview.
 
-Start with this wave's README, restart.md and the two short lane maps. Read deeper only for
-consequential dependencies or uncertainties. Preserve the full product acceptance.
+Start with next-wave/README.md and its two short branch maps. Read final checkpoint
+evidence supplied by the launch, then deeper mechanisms only for consequential
+dependencies or uncertainties. Preserve the full product acceptance.
 
 ## Decisions to make before commissioning
 
@@ -25,6 +26,11 @@ consequential dependencies or uncertainties. Preserve the full product acceptanc
   before the next fork? Plan the near frontier precisely and later waves by
   dependencies/outcomes. Preserve local discretion and useful parallelism.
 
+Name useful second-level implementation branches, not only a milestone per lead.
+A substantial parent retains shared engineering and integration while its children
+advance independent mechanisms. Explain concrete coupling when a large task must
+stay serial; do not create additional relay managers to make the tree look deeper.
+
 Record the compact decisions in `execution-contract.md` here, with deeper branch
 information linked only where needed. Ask the human about consequential direction
 changes; the existing goals and two-lane implementation are already authorized.
@@ -34,8 +40,9 @@ changes; the existing goals and two-lane implementation are already authorized.
 Commission one Sol coordinator with Task/Delivery, selected taskContext and:
 
 ```haskell
-withInstructions (projectPrompt "coordinator")
-  (withEffort Medium (componentLead coordinatorLabel task))
+withInstructions (projectPrompt "coordinator") $
+  withEffort Medium $ withContext (selected taskContext) $
+  componentLeadFrom coordinatorLabel projectHead task
 ```
 
 Use `childWithProgress @Attention @Delivery`; retain its result and progress watches

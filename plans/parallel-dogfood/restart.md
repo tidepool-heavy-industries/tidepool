@@ -1,5 +1,8 @@
 # Restart the two delivery lanes
 
+Historical commission for the winding-down wave. For the next authorized launch,
+use [next-wave/README.md](next-wave/README.md) and final checkpoint evidence.
+
 Resume A0–A8 and M0–M7 on this repository with the current workspace-fork
 implementation. This is a new Shoal wave from Git, not resurrection of old actors.
 The external supervisor handles cache-reuse validation, build/process watching,
