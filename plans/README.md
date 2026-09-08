@@ -24,6 +24,10 @@ archive).
   Live acceptance uses fresh actors on `shoal-repl` (the standalone TUI app) or
   another non-self-hosting project, using authored guidance rather than knowledge
   inherited from implementing Shoal. Keep normal Codex TUIs for worker interaction.
+- [Supervised interactive Codex applications](interactive-applications/README.md):
+  complete option A implementation plans for full worker TUIs, exact native
+  session binding, durable delivery, process custody, hosted completion and
+  recovery, with staged integration and acceptance across Tidepool and its Codex fork.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers
@@ -32,6 +36,10 @@ archive).
   they do not gate the current orchestration package without a concrete consumer.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): executable-memory
   reclamation and honest recovery after removing the fixed JIT arena ceiling.
+- [Haskell engine through prepared STG](haskell-engine-stg.md): reuse GHC
+  CorePrep and STG preparation throughout the Rust/Cranelift engine: typed
+  calls, compact layouts, full collection, explicit optimization choices,
+  and required code deletion with semantic and performance gates.
 - [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
   merged, turn-count top-5 lane in flight.
 
