@@ -4,7 +4,6 @@
 //! stock interactive agent is attached to each installed Haskell tool policy;
 //! tmux is process ownership and observability, never message transport.
 
-mod build_resource;
 #[cfg(test)]
 mod custody_tests;
 #[cfg(test)]
@@ -12,6 +11,7 @@ mod documentation_tests;
 mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
+mod overlay_resource;
 pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
 mod model_free;
 mod prompt_catalog;
@@ -73,8 +73,8 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
-use self::build_resource::{BuildResourceLease, BuildSnapshot};
 use self::host_incarnation::HostIncarnationLease;
+use self::overlay_resource::{OverlayResourceLease, OverlaySnapshot};
 use self::prompt_catalog::{FrozenBasePrompt, PromptId};
 use self::socket_directory::SocketDirectory;
 
@@ -369,7 +369,7 @@ struct InteractiveDeployment {
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
     runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
-    build_resource: Option<Arc<tokio::sync::Mutex<BuildResourceLease>>>,
+    build_resource: Option<Arc<tokio::sync::Mutex<OverlayResourceLease>>>,
 }
 
 enum InteractiveConnection {
@@ -2275,7 +2275,7 @@ async fn drain_launches_for_shutdown<A: Send + 'static, T: Send + 'static>(
 
 struct InteractiveInheritance {
     thread: Option<BackendThreadId>,
-    build_snapshot: Option<BuildSnapshot>,
+    build_snapshot: Option<OverlaySnapshot>,
 }
 
 async fn launch_interactive_application(
@@ -2509,9 +2509,10 @@ async fn launch_prepared_interactive_application(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("run");
-        let lease = BuildResourceLease::allocate(run_id, actor_identity, build_snapshot).map_err(
-            |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
-        )?;
+        let lease = OverlayResourceLease::allocate_build(run_id, actor_identity, build_snapshot)
+            .map_err(|error| {
+                application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+            })?;
         let mountpoint = workspace.join(ACTOR_BUILD_TARGET);
         std::fs::create_dir_all(&mountpoint).map_err(|error| {
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)

@@ -82,7 +82,7 @@ Cargo.lock includes the new Linux-only TUI dependency on the existing PTY crate;
 Bazel lock verification remains outstanding.
 
 Shoal's fork-launch path now calls this protocol through `InteractiveAgentBackend`.
-`BuildResourceLease` persists the sequence, binding, phase, native receipt, and
+`OverlayResourceLease` persists the sequence, binding, phase, native receipt, and
 prior view record in `native-publication.json` before transitions. Busy or
 unsupported admission preserves the latest warm snapshot. The existing host health
 loop retries uncertain publications. A lost finish reply retries finish only;

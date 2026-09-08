@@ -220,8 +220,8 @@ three lost-worktree cases and the in-progress rebase refusal passed in
 `cargo check -p tidepool --bin shoal` passed. These are boundary checks, not
 managed-unfold acceptance.
 
-The build-resource owner has five focused tests, run through
-`just test-lib tidepool 'test(actor_host::build_resource::tests)'`. A real mounted
+The shared overlay-resource owner has six focused tests, run through
+`just test-lib tidepool 'test(actor_host::overlay_resource::tests)'`. A real mounted
 parent publishes a generation, remains writable while a busy publication preserves
 the old snapshot, and supplies an independently writable child. Parent lease loss
 and uncertain child custody retain the inherited layer. Preparation failures remain
@@ -231,10 +231,19 @@ Persisted `pending.json` records are also reconciled before allocating another
 generation when the in-memory transition state is absent. Real-mount tests cover
 both the previous owner layout and an already-advanced layout after a failed
 manifest write; both recover without another generation and publish the recovered
-snapshot. Unsupported records remain untouched and prevent allocation. All five
-build-resource tests passed after this change. This exercises filesystem artifacts,
+snapshot. Unsupported records remain untouched and prevent allocation. The original five
+build-resource tests remain in this owner. This exercises filesystem artifacts,
 not Cargo reuse or native admission. Full resource-graph reopening at host startup
 remains unimplemented.
+The lease is now named `OverlayResourceLease` and owns the same publication and
+retention mechanism for source and build views. Its serialized view/pending formats
+are unchanged. Source publication supplies the nested mounts to preserve, and
+persisted recovery verifies that exact layout before reconciliation. The sixth
+resource test publishes source over a separately writable build mount, checks that
+source inheritance excludes build data, verifies independent child edits, and
+recovers a failed metadata write without accepting a different nested-mount list.
+All six focused resource tests passed. This does not yet connect source publication
+to native admission or ordinary `unfold`.
 The mount owner now immediately reconciles an uncertain helper result using
 `statx` mount identity and the kernel's OverlayFS options in the same namespace.
 It recognizes the intended writable replacement or restores only the original

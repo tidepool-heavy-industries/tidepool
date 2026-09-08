@@ -31,7 +31,7 @@ struct NativeOwner {
     cgroup_path: PathBuf,
 }
 
-impl BuildResourceLease {
+impl OverlayResourceLease {
     pub(crate) fn native_publication_needs_retry(&self) -> bool {
         self.native_retry
     }
@@ -156,7 +156,7 @@ impl BuildResourceLease {
                     record.phase = Phase::Publish;
                     record.write(&path)?;
                 }
-                match self.publish(&namespace, target)? {
+                match self.publish(&namespace, target, &[])? {
                     OverlayRotationOutcome::Unconfirmed(detail) => {
                         return Err(io::Error::other(detail))
                     }

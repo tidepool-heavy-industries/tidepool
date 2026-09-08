@@ -1,4 +1,4 @@
-//! Build storage custody for interactive actors.
+//! Shared overlay publication and storage custody for source and build views.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,16 +11,16 @@ use tidepool_node::{
     ProcessMountBoundary,
 };
 
-#[path = "build_resource/native_publication.rs"]
+#[path = "overlay_resource/native_publication.rs"]
 mod native_publication;
 
 #[derive(Debug)]
-pub(super) struct BuildResourceLease {
-    storage: Arc<BuildStorage>,
-    layers: Vec<BuildLayer>,
+pub(super) struct OverlayResourceLease {
+    storage: Arc<OverlayStorage>,
+    layers: Vec<OverlayLayer>,
     upper: PathBuf,
     work: PathBuf,
-    latest: Option<BuildSnapshot>,
+    latest: Option<OverlaySnapshot>,
     publication: PublicationState,
     native_retry: bool,
 }
@@ -28,25 +28,25 @@ pub(super) struct BuildResourceLease {
 /// Only the publication owner can construct a snapshot of a frozen generation.
 /// Clones retain every backing resource, independently of the actor's lifetime.
 #[derive(Clone, Debug)]
-pub(super) struct BuildSnapshot {
-    layers: Arc<[BuildLayer]>,
+pub(super) struct OverlaySnapshot {
+    layers: Arc<[OverlayLayer]>,
 }
 
 #[derive(Clone, Debug)]
-struct BuildLayer {
+struct OverlayLayer {
     path: PathBuf,
-    storage: Arc<BuildStorage>,
+    storage: Arc<OverlayStorage>,
 }
 
 #[derive(Debug)]
-struct BuildStorage {
+struct OverlayStorage {
     path: PathBuf,
     root: PathBuf,
-    state: Mutex<BuildResourceState>,
+    state: Mutex<OverlayResourceState>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum BuildResourceState {
+enum OverlayResourceState {
     Unsubmitted,
     RetainedUnconfirmed,
     Released,
@@ -57,7 +57,7 @@ enum PublicationState {
     Writable,
     NeedsRecord {
         bytes: Vec<u8>,
-        snapshot: BuildSnapshot,
+        snapshot: OverlaySnapshot,
     },
     Unconfirmed(Box<PendingRotation>),
 }
@@ -68,7 +68,7 @@ struct PendingRotation {
     next: PathBuf,
     upper: PathBuf,
     work: PathBuf,
-    frozen: Vec<BuildLayer>,
+    frozen: Vec<OverlayLayer>,
     bytes: Vec<u8>,
 }
 
@@ -89,7 +89,7 @@ struct PendingViewRecord {
 }
 
 impl ViewRecord {
-    fn new(layers: &[BuildLayer], upper: &Path, work: &Path, warm: bool) -> Self {
+    fn new(layers: &[OverlayLayer], upper: &Path, work: &Path, warm: bool) -> Self {
         Self {
             version: 1,
             layers: layers.iter().map(|layer| layer.path.clone()).collect(),
@@ -101,7 +101,7 @@ impl ViewRecord {
 }
 
 fn encode_view(
-    layers: &[BuildLayer],
+    layers: &[OverlayLayer],
     upper: &Path,
     work: &Path,
     warm: bool,
@@ -109,11 +109,11 @@ fn encode_view(
     serde_json::to_vec(&ViewRecord::new(layers, upper, work, warm)).map_err(io::Error::other)
 }
 
-impl BuildResourceLease {
-    pub(super) fn allocate(
+impl OverlayResourceLease {
+    pub(super) fn allocate_build(
         run_id: &str,
         actor: ActorRef,
-        inherited: Option<BuildSnapshot>,
+        inherited: Option<OverlaySnapshot>,
     ) -> io::Result<Self> {
         let path = tidepool_runtime::paths::actor_build_resource_dir(
             run_id,
@@ -123,17 +123,20 @@ impl BuildResourceLease {
         Self::allocate_path(path, inherited)
     }
 
-    fn allocate_path(path: PathBuf, inherited: Option<BuildSnapshot>) -> io::Result<Self> {
+    fn allocate_path(path: PathBuf, inherited: Option<OverlaySnapshot>) -> io::Result<Self> {
         // Exclusive creation is required even when the prior launch is uncertain.
         let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "build resource has no parent")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "overlay resource has no parent",
+            )
         })?;
         let name = path
             .file_name()
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "build resource has no directory name",
+                    "overlay resource has no directory name",
                 )
             })?
             .to_owned();
@@ -142,10 +145,10 @@ impl BuildResourceLease {
         let path = parent.join(name);
         std::fs::create_dir(&path)?;
         tidepool_atomic_write::sync_parent_directory(&path)?;
-        let storage = Arc::new(BuildStorage {
+        let storage = Arc::new(OverlayStorage {
             root: parent.to_path_buf(),
             path,
-            state: Mutex::new(BuildResourceState::Unsubmitted),
+            state: Mutex::new(OverlayResourceState::Unsubmitted),
         });
         let latest = inherited.clone();
         let layers = match inherited {
@@ -153,7 +156,7 @@ impl BuildResourceLease {
             None => {
                 let base = storage.path.join("base");
                 std::fs::create_dir(&base)?;
-                vec![BuildLayer {
+                vec![OverlayLayer {
                     path: base,
                     storage: storage.clone(),
                 }]
@@ -208,16 +211,16 @@ impl BuildResourceLease {
         boundary.with_overlay_view(self.layers(), self.upper(), self.work(), target)
     }
 
-    pub(super) fn latest_snapshot(&self) -> Option<BuildSnapshot> {
+    pub(super) fn latest_snapshot(&self) -> Option<OverlaySnapshot> {
         self.latest.clone()
     }
 
     pub(super) fn process_may_exist(&mut self) {
         // A lost host drops its in-memory leases while mounted children may
         // survive. Preserve both this resource and its inherited dependencies.
-        *self.storage.state.lock() = BuildResourceState::RetainedUnconfirmed;
+        *self.storage.state.lock() = OverlayResourceState::RetainedUnconfirmed;
         for layer in &self.layers {
-            *layer.storage.state.lock() = BuildResourceState::RetainedUnconfirmed;
+            *layer.storage.state.lock() = OverlayResourceState::RetainedUnconfirmed;
         }
     }
 
@@ -227,6 +230,7 @@ impl BuildResourceLease {
         &mut self,
         namespace: &MountNamespace,
         target: &Path,
+        preserved_mounts: &[PathBuf],
     ) -> io::Result<OverlayRotationOutcome> {
         if matches!(self.publication, PublicationState::NeedsRecord { .. }) {
             self.record_publication()?;
@@ -236,12 +240,12 @@ impl BuildResourceLease {
             let outcome = pending.recovery.reconcile();
             return self.settle_rotation(outcome);
         }
-        if *self.storage.state.lock() != BuildResourceState::RetainedUnconfirmed {
+        if *self.storage.state.lock() != OverlayResourceState::RetainedUnconfirmed {
             return Err(io::Error::other(
                 "build publication requires retained process custody",
             ));
         }
-        if let Some(outcome) = self.reconcile_pending(namespace, target)? {
+        if let Some(outcome) = self.reconcile_pending(namespace, target, preserved_mounts)? {
             return Ok(outcome);
         }
         let generation = tempfile::Builder::new()
@@ -254,7 +258,7 @@ impl BuildResourceLease {
         std::fs::create_dir(&work)?;
         tidepool_atomic_write::create_dir_all_durable(&next)?;
         let mut frozen = self.layers.clone();
-        frozen.push(BuildLayer {
+        frozen.push(OverlayLayer {
             path: self.upper.clone(),
             storage: self.storage.clone(),
         });
@@ -266,7 +270,8 @@ impl BuildResourceLease {
                 .collect::<Vec<_>>(),
             &upper,
             &work,
-        )?;
+        )?
+        .preserving_mounts(preserved_mounts)?;
         let prepared = namespace.prepare_overlay_rotation(rotation)?;
         // Once prepared, a lost receipt must never cause a second publication.
         let pending = encode_view(&frozen, &upper, &work, true)?;
@@ -298,6 +303,7 @@ impl BuildResourceLease {
         &mut self,
         namespace: &MountNamespace,
         target: &Path,
+        preserved_mounts: &[PathBuf],
     ) -> io::Result<Option<OverlayRotationOutcome>> {
         let bytes = match std::fs::read(self.storage.path.join("pending.json")) {
             Ok(bytes) => bytes,
@@ -308,7 +314,7 @@ impl BuildResourceLease {
             serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         if pending.version != 2 || pending.view.version != 1 || !pending.view.warm {
             return Err(io::Error::other(
-                "unsupported pending build publication record",
+                "unsupported pending overlay publication record",
             ));
         }
         let next = pending
@@ -322,7 +328,7 @@ impl BuildResourceLease {
             || pending.view.work != next.join("work")
         {
             return Err(io::Error::other(
-                "pending build generation is outside its owning resource",
+                "pending overlay generation is outside its owning resource",
             ));
         }
         let current = ViewRecord::new(&self.layers, &self.upper, &self.work, true);
@@ -337,10 +343,10 @@ impl BuildResourceLease {
                     .any(|layer| layer.path.starts_with(&next))
             {
                 return Err(io::Error::other(
-                    "pending build generation overlaps retained layers",
+                    "pending overlay generation overlaps retained layers",
                 ));
             }
-            frozen.push(BuildLayer {
+            frozen.push(OverlayLayer {
                 path: self.upper.clone(),
                 storage: self.storage.clone(),
             });
@@ -352,7 +358,7 @@ impl BuildResourceLease {
                 .collect::<Vec<_>>()
         {
             return Err(io::Error::other(
-                "pending publication does not extend the retained build view",
+                "pending publication does not extend the retained overlay view",
             ));
         }
         let recovery = namespace.restore_overlay_recovery(pending.recovery)?;
@@ -361,21 +367,22 @@ impl BuildResourceLease {
             &pending.view.layers,
             &pending.view.upper,
             &pending.view.work,
+            preserved_mounts,
         )? {
             return Err(io::Error::other(
-                "pending build view disagrees with its mount checkpoint",
+                "pending overlay view disagrees with its mount checkpoint",
             ));
         }
         let outcome = recovery.reconcile();
         if already_installed {
             if !matches!(outcome, OverlayRotationOutcome::Rotated) {
                 return Err(io::Error::other(
-                    "recorded build view is not confirmed mounted",
+                    "recorded overlay view is not confirmed mounted",
                 ));
             }
             self.publication = PublicationState::NeedsRecord {
                 bytes: serde_json::to_vec(&pending.view).map_err(io::Error::other)?,
-                snapshot: BuildSnapshot {
+                snapshot: OverlaySnapshot {
                     layers: self.layers.clone().into(),
                 },
             };
@@ -424,7 +431,7 @@ impl BuildResourceLease {
                 self.layers = frozen;
                 self.publication = PublicationState::NeedsRecord {
                     bytes,
-                    snapshot: BuildSnapshot {
+                    snapshot: OverlaySnapshot {
                         layers: self.layers.clone().into(),
                     },
                 };
@@ -474,13 +481,13 @@ impl BuildResourceLease {
     }
 
     pub(super) fn release(self) -> io::Result<()> {
-        if *self.storage.state.lock() == BuildResourceState::RetainedUnconfirmed {
+        if *self.storage.state.lock() == OverlayResourceState::RetainedUnconfirmed {
             return Err(io::Error::other(
-                "build resource retained: exact process and hosted work cleanup is unconfirmed",
+                "overlay resource retained: exact process and hosted work cleanup is unconfirmed",
             ));
         }
         // Snapshot and descendant leases still own the directory. Last-owner
-        // reclamation happens in BuildStorage, never at actor retirement alone.
+        // reclamation happens in OverlayStorage, never at actor retirement alone.
         let Self {
             storage, layers, ..
         } = self;
@@ -492,16 +499,16 @@ impl BuildResourceLease {
     }
 }
 
-impl BuildStorage {
+impl OverlayStorage {
     fn release(&mut self) -> io::Result<()> {
-        *self.state.get_mut() = BuildResourceState::RetainedUnconfirmed;
+        *self.state.get_mut() = OverlayResourceState::RetainedUnconfirmed;
         match std::fs::remove_dir_all(&self.path) {
             Ok(()) => {
-                *self.state.get_mut() = BuildResourceState::Released;
+                *self.state.get_mut() = OverlayResourceState::Released;
                 Ok(())
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                *self.state.get_mut() = BuildResourceState::Released;
+                *self.state.get_mut() = OverlayResourceState::Released;
                 Ok(())
             }
             Err(error) => Err(error),
@@ -509,9 +516,9 @@ impl BuildStorage {
     }
 }
 
-impl Drop for BuildStorage {
+impl Drop for OverlayStorage {
     fn drop(&mut self) {
-        if *self.state.get_mut() == BuildResourceState::Unsubmitted {
+        if *self.state.get_mut() == OverlayResourceState::Unsubmitted {
             let _ = self.release();
         }
     }
@@ -531,24 +538,28 @@ mod tests {
     }
 
     impl Worker {
-        fn start(lease: &mut BuildResourceLease, project: &Path) -> (Self, MountNamespace) {
+        fn start(lease: &mut OverlayResourceLease, project: &Path) -> (Self, MountNamespace) {
             std::fs::create_dir_all(project.join("target")).unwrap();
             let boundary =
                 ProcessMountBoundary::new(project, [project.into()], [project.into()]).unwrap();
             let boundary = lease.mount(boundary, &project.join("target")).unwrap();
+            lease.process_may_exist();
+            Self::start_in(boundary, project)
+        }
+
+        fn start_in(boundary: ProcessMountBoundary, project: &Path) -> (Self, MountNamespace) {
             let invocation = boundary.wrap(
                 "bwrap",
                 ProcessInvocation {
                     program: "/bin/sh".into(),
                     args: vec![
                         "-c".into(),
-                        include_str!("build_resource/worker.sh").into(),
+                        include_str!("overlay_resource/worker.sh").into(),
                         "build-worker".into(),
                         project.join("target").to_str().unwrap().into(),
                     ],
                 },
             );
-            lease.process_may_exist();
             let mut child = Command::new(invocation.program)
                 .args(invocation.args)
                 .stdin(Stdio::piped())
@@ -578,6 +589,100 @@ mod tests {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    #[test]
+    fn source_publication_preserves_the_independent_build_mount() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let project = root.join("project");
+        let target = project.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let mut source =
+            OverlayResourceLease::allocate_path(root.join("storage/source"), None).unwrap();
+        std::fs::create_dir(source.layers[0].path.join("target")).unwrap();
+        std::fs::write(source.layers[0].path.join("file"), "before").unwrap();
+        let mut build =
+            OverlayResourceLease::allocate_path(root.join("storage/build"), None).unwrap();
+        let boundary =
+            ProcessMountBoundary::new(&project, [project.clone()], [project.clone()]).unwrap();
+        let boundary = source.mount(boundary, &project).unwrap();
+        let boundary = build.mount(boundary, &target).unwrap();
+        source.process_may_exist();
+        build.process_may_exist();
+        let (mut worker, namespace) = Worker::start_in(boundary, &project);
+        let shell = |namespace: &MountNamespace, text: &str| {
+            let output = namespace
+                .host_command(&project, "/bin/sh".as_ref())
+                .unwrap()
+                .args(["-ec", text])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        shell(&namespace, "printf after > file");
+        assert_eq!(worker.exchange("hold"), "held");
+        let preserved = [target.clone()];
+        assert!(matches!(
+            source.publish(&namespace, &project, &preserved).unwrap(),
+            OverlayRotationOutcome::Rotated
+        ));
+        assert_eq!(worker.exchange("write"), "wrote");
+        assert!(matches!(
+            build.publish(&namespace, &target, &[]).unwrap(),
+            OverlayRotationOutcome::Busy
+        ));
+        assert_eq!(shell(&namespace, "cat file"), b"after");
+        assert!(build.latest_snapshot().is_none());
+
+        // Persisted retry must preserve the same nested mounts as the original
+        // transition, even when its in-memory confirmation is unavailable.
+        std::fs::remove_file(source.path().join("view.json")).unwrap();
+        std::fs::create_dir(source.path().join("view.json")).unwrap();
+        assert!(source.publish(&namespace, &project, &preserved).is_err());
+        source.publication = PublicationState::Writable;
+        std::fs::remove_dir(source.path().join("view.json")).unwrap();
+        assert!(source.publish(&namespace, &project, &[]).is_err());
+        assert!(matches!(
+            source.publish(&namespace, &project, &preserved).unwrap(),
+            OverlayRotationOutcome::Rotated
+        ));
+        assert_eq!(worker.exchange("write"), "wrote");
+        assert_eq!(
+            std::fs::read_to_string(build.upper().join("value")).unwrap(),
+            "2\n"
+        );
+        assert_eq!(worker.exchange("close"), "closed");
+
+        let mut child_source = OverlayResourceLease::allocate_path(
+            root.join("storage/child-source"),
+            source.latest_snapshot(),
+        )
+        .unwrap();
+        let boundary =
+            ProcessMountBoundary::new(&project, [project.clone()], [project.clone()]).unwrap();
+        let boundary = child_source.mount(boundary, &project).unwrap();
+        child_source.process_may_exist();
+        let child = boundary
+            .prepare_view(
+                "bwrap",
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(
+            shell(
+                &child,
+                "cat file; test ! -e target/value; printf child > file"
+            ),
+            b"after"
+        );
+        assert_eq!(shell(&namespace, "cat file"), b"after");
+        assert_eq!(shell(&child, "cat file"), b"child");
     }
 
     #[tokio::test]
@@ -648,7 +753,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         let mut lease =
-            BuildResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
+            OverlayResourceLease::allocate_path(directory.path().join("build"), None).unwrap();
         let (worker, _namespace) = Worker::start(&mut lease, &project);
         use std::os::unix::fs::MetadataExt;
         let stat = std::fs::read_to_string(format!("/proc/{}/stat", worker.pid)).unwrap();
@@ -724,12 +829,12 @@ mod tests {
     fn allocation_retains_uncertain_process_and_refuses_reuse() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("build");
-        let mut lease = BuildResourceLease::allocate_path(path.clone(), None).unwrap();
+        let mut lease = OverlayResourceLease::allocate_path(path.clone(), None).unwrap();
         lease.process_may_exist();
         assert!(lease.release().is_err());
         assert!(path.exists());
         assert_eq!(
-            BuildResourceLease::allocate_path(path, None)
+            OverlayResourceLease::allocate_path(path, None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::AlreadyExists
@@ -740,9 +845,9 @@ mod tests {
     fn prelaunch_drop_and_explicit_release_reclaim_exclusive_storage() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("build");
-        drop(BuildResourceLease::allocate_path(path.clone(), None).unwrap());
+        drop(OverlayResourceLease::allocate_path(path.clone(), None).unwrap());
         assert!(!path.exists());
-        BuildResourceLease::allocate_path(path.clone(), None)
+        OverlayResourceLease::allocate_path(path.clone(), None)
             .unwrap()
             .release()
             .unwrap();
@@ -764,10 +869,12 @@ mod tests {
         let root = directory.path();
         let project = root.join("project");
         let mut parent =
-            BuildResourceLease::allocate_path(root.join("storage/parent"), None).unwrap();
+            OverlayResourceLease::allocate_path(root.join("storage/parent"), None).unwrap();
         let (mut worker, namespace) = Worker::start(&mut parent, &project);
         assert_eq!(worker.exchange("write"), "wrote");
-        let outcome = parent.publish(&namespace, &project.join("target")).unwrap();
+        let outcome = parent
+            .publish(&namespace, &project.join("target"), &[])
+            .unwrap();
         assert!(
             matches!(outcome, OverlayRotationOutcome::Rotated),
             "{outcome:?}"
@@ -779,7 +886,9 @@ mod tests {
             "1\n"
         );
         assert_eq!(worker.exchange("hold"), "held");
-        let outcome = parent.publish(&namespace, &project.join("target")).unwrap();
+        let outcome = parent
+            .publish(&namespace, &project.join("target"), &[])
+            .unwrap();
         assert!(
             matches!(outcome, OverlayRotationOutcome::Busy),
             "{outcome:?}"
@@ -801,7 +910,9 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect::<std::collections::BTreeSet<_>>();
-        assert!(parent.publish(&namespace, &project.join("target")).is_err());
+        assert!(parent
+            .publish(&namespace, &project.join("target"), &[])
+            .is_err());
         assert_eq!(
             std::fs::read_dir(parent.path())
                 .unwrap()
@@ -811,7 +922,9 @@ mod tests {
         );
         std::fs::remove_dir(parent.path().join("pending.json")).unwrap();
         assert!(matches!(
-            parent.publish(&namespace, &project.join("target")).unwrap(),
+            parent
+                .publish(&namespace, &project.join("target"), &[])
+                .unwrap(),
             OverlayRotationOutcome::Busy
         ));
         assert_eq!(
@@ -834,7 +947,9 @@ mod tests {
         );
         std::fs::remove_file(parent.path().join("view.json")).unwrap();
         std::fs::create_dir(parent.path().join("view.json")).unwrap();
-        assert!(parent.publish(&namespace, &project.join("target")).is_err());
+        assert!(parent
+            .publish(&namespace, &project.join("target"), &[])
+            .is_err());
         let mut checkpoint: serde_json::Value =
             serde_json::from_slice(&std::fs::read(parent.path().join("pending.json")).unwrap())
                 .unwrap();
@@ -880,12 +995,16 @@ mod tests {
         invalid["version"] = 99.into();
         let invalid = serde_json::to_vec(&invalid).unwrap();
         std::fs::write(&pending_path, &invalid).unwrap();
-        assert!(parent.publish(&namespace, &project.join("target")).is_err());
+        assert!(parent
+            .publish(&namespace, &project.join("target"), &[])
+            .is_err());
         assert_eq!(std::fs::read(&pending_path).unwrap(), invalid);
         assert_eq!(entries(), generations);
         std::fs::write(&pending_path, saved).unwrap();
         assert!(matches!(
-            parent.publish(&namespace, &project.join("target")).unwrap(),
+            parent
+                .publish(&namespace, &project.join("target"), &[])
+                .unwrap(),
             OverlayRotationOutcome::Rotated
         ));
         assert_eq!(parent.layers.len(), layer_count);
@@ -893,7 +1012,8 @@ mod tests {
         assert!(!pending_path.exists());
         assert_eq!(parent.latest_snapshot().unwrap().layers.len(), layer_count);
         let mut child =
-            BuildResourceLease::allocate_path(root.join("storage/child"), Some(snapshot)).unwrap();
+            OverlayResourceLease::allocate_path(root.join("storage/child"), Some(snapshot))
+                .unwrap();
         assert!(
             child.latest_snapshot().is_some(),
             "inherited warm state remains available to grandchildren"

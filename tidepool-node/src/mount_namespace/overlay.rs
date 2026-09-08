@@ -127,17 +127,20 @@ impl OverlayRecovery {
         layers: &[PathBuf],
         upper: &Path,
         work: &Path,
+        preserved_mounts: &[PathBuf],
     ) -> io::Result<bool> {
         let paths = layers
             .iter()
             .cloned()
             .chain([upper.to_owned(), work.to_owned()])
             .collect::<Vec<_>>();
-        let expected = OverlayRotation::from_resolved_paths(target, &paths, layers.len())?;
+        let expected = OverlayRotation::from_resolved_paths(target, &paths, layers.len())?
+            .preserving_mounts(preserved_mounts)?;
         Ok(self.rotation.target == expected.target
             && self.rotation.lower == expected.lower
             && self.rotation.upper == expected.upper
-            && self.rotation.work == expected.work)
+            && self.rotation.work == expected.work
+            && self.rotation.preserved_mounts == expected.preserved_mounts)
     }
 
     pub fn reconcile(&self) -> OverlayRotationOutcome {

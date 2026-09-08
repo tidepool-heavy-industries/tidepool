@@ -58,7 +58,7 @@ claiming the local same-namespace experiment is a production design.
 
 ### 2. Give snapshots one resource owner
 
-Extend `BuildResourceLease` in `tidepool/src/actor_host/build_resource.rs`; use
+Extend `OverlayResourceLease` in `tidepool/src/actor_host/overlay_resource.rs`; use
 `tidepool-node/src/process_boundary.rs` for mount mechanics and
 `tidepool-toolchain` for paths. Introduce typed immutable snapshot identity,
 private writable generation, and retained layer dependencies within these owners.

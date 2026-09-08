@@ -113,7 +113,7 @@ covering future generations as well as the initial backing paths.
 
 ## Owning implementation
 
-Extend `BuildResourceLease` in `tidepool/src/actor_host.rs` and the mount boundary
+Extend `OverlayResourceLease` in `tidepool/src/actor_host/overlay_resource.rs` and the mount boundary
 in `tidepool-node/src/process_boundary.rs`. Today's writable “overlay” is a bind
 mount of a separate empty actor build directory. Preserve those owners and their
 cleanup obligations; do not add another actor scheduler or competing registry.
