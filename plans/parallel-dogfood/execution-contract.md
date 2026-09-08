@@ -8,8 +8,9 @@ planning-only restrictions do not restrict that released implementation.
 
 ## Restart baseline and running tools
 
-Use the committed restart brief and current workspace-fork implementation
-(`8e0bcbe8` or its reviewed successor) as the new baseline. The previous product
+This authorized restart starts from `92a2f423a3a16596d36bd8c53aebf7e1affa7008`,
+including workspace inheritance `8e0bcbe8`. Native source seed is
+`06d99357becc4d870f5b5141ba7626daf68e819a`; saved candidates must be adapted to it. The previous product
 seed and stopped actors are historical; recover partial work via `saved-work.md`.
 Record the actual starting revision in the new Task.
 Preserve the existing dirty `plans/README.md`, untracked context-checkpoint plan,
@@ -75,11 +76,13 @@ use selected context for unrelated mechanisms and fresh review. Do not copy both
 full designs into common ancestors. Retained workers receive explicit source and
 decision deltas; neither Git integration nor acknowledgment updates their context.
 
-Near frontiers and later outcomes remain in the two lane maps. Applications first
-establishes a real isolated native/PTY fixture and matched revision reservations,
-then separates live-binding/native input work from process/terminal work. Engine
-first establishes independently classified baseline outcomes/costs, then separates
-real extractor handoff from failure/storage repairs. Leads refine these splits
+Near frontiers and later outcomes remain in the two lane maps. Applications
+recovers and adapts the partial A0 fixtures, checks the narrow live-session seam,
+then separates binding/durable input from process/terminal work. Engine retains
+M0 evidence and resumes the actual M1 handoff and independent M2 failure/storage
+repairs. Leads read saved-work.md; do not repeat completed scaffolds. A bounded
+Astra repair of the existing stack-map failure is authorized if Sol cannot settle
+it from the saved evidence, with engine lead owning checked incorporation. Leads refine these splits
 against source in their readbacks. Later shared schema and call/layout/root ABI
 must be usable before projection/evaluation/codegen/GC consumers fork. Application
 custody and completion must join before recovery can claim whole-flow behavior.
@@ -102,7 +105,7 @@ quota. Each coding fork carries useful shared reasoning, not merely a file list.
 Retain the four lane-declared Astra High slots: application identity/admission;
 application completion/custody; GHC handoff/schema; call/layout/root/failure ABI.
 Activate each only with a bounded consequential question and owning-boundary
-examples/evidence. Experts advise; Sol checks and incorporates. Additional costly
+examples/evidence. Experts may advise or implement a bounded hard repair; Sol checks and incorporates. Additional costly
 consultations or architectural/scope changes return to this planner. Useful experts
 remain available for repairs; usage targets are not termination instructions.
 
@@ -111,8 +114,9 @@ gates, with detailed logs linked. Coordinator maintains status at real joins,
 serializes resource-heavy checks under worktree guidance, and owns combined release
 verification. Record executed versus compiled-only versus unverified boundaries,
 including required Codex suite permission and candidate-platform limitations.
-Translation/serialization changes require the fixture boundary. Usage reports
-state observed coverage; prompt equality does not establish cache hits.
+Translation/serialization changes require the fixture boundary. External RSI in the original supervising session exclusively owns build/cache/
+disk/usage monitoring. Do not assign infrastructure acceptance, cache validation,
+or usage reporting to workers. Product checks remain with implementation owners.
 
 Partial integration retains both full goals. Final delivery names matched source,
 actual production consumers, deletions, measurements and all remaining limitations.
