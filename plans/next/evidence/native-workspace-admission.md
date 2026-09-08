@@ -5,6 +5,14 @@ Codex branch `work/build-snapshot-admission`, commit `06d99357be`, in
 The Tidepool runner pin and launch environment are unchanged. This is not yet
 an enabled or complete native snapshot protocol.
 
+The operator has since selected Git-state recovery after Shoal host failure.
+The [revised workspace design](../build-snapshot-implementation.md) supersedes
+earlier requirements to reconstruct live mounts/transactions after restart.
+The records and reconstruction checks described below exist in this checkpoint;
+they are not a reason to retain unused restart machinery in the final design.
+In-wave reconciliation, exact identity and safe native gate settlement remain
+required.
+
 ## Implemented boundary
 
 `codex-utils-pty::workspace_admission` owns a shared mutation gate and an exclusively
@@ -118,10 +126,10 @@ are composed-boundary tests, not a full native-TUI/managed-unfold acceptance run
 Changed agent and host test targets compiled; formatting and whitespace checks
 passed. Unrelated codegen formatter churn was excluded.
 
-Automatic publication remains disabled by the native opt-in. Before enabling:
-complete host-restart reconstruction of mount-transition evidence. A dead host can still leave
-native admission held until ownership is recovered; the native lease alone is not
-a completed recovery design.
+Automatic publication remains disabled by the native opt-in. Before enabling,
+connect ordinary workspace inheritance and in-wave settlement. A dead host can
+leave native admission held; under the selected contract that wave ends and a
+new wave starts from Git, rather than automatically reviving the old native owner.
 
 Publication transport waits now run in the existing child launch tasks. The
 deployment retains its build lease through an asynchronous mutex, so launches
@@ -153,9 +161,8 @@ publicly applicable unvalidated rotation. Reconciliation validates saved path
 relationships and option encoding without requiring replacement directories to
 still exist; a missing new upper must not prevent thawing the exact original mount.
 
-The host still needs to reopen its build-resource dependency graph and drive the
-pending record through native ownership recovery. That full startup path remains
-unfinished. Version-1 pending records lack the original transition evidence and
+Full host-startup reconstruction was never connected and is no longer required
+by this wave. Version-1 pending records lack the original transition evidence and
 must stay retained rather than being interpreted as version 2; current `view.json`
 records remain version 1. Preparation uses a temporary generation directory,
 retained only when invoking the mount transition, so repeated pre-mount failures
@@ -183,16 +190,17 @@ refactor as well.
 1. Audit remaining native filesystem writers and unsupported executor environments.
    Hosted coordination itself must not hold the mutation gate. See the consumer
    audit below for the remaining Git paths and native state-directory boundary.
-2. Complete recovery for the connected native control path. Keep the guard until the host finishes; reconcile disconnects and
+2. Complete in-wave settlement for the connected native control path. Keep the guard until the host finishes; reconcile disconnects and
    uncertain completion without a timer reopening writes mid-transition.
 3. Connect native admission, namespace identity, cwd refresh, source/Git capture,
    and build publication in Shoal. Select the latest warm snapshot independently
    from busy source fallback.
 4. Bind cgroup lifetime to host resource custody. The current process-wide static
-   owner retains its group; host cleanup/restart reconciliation and reclamation
-   are not implemented. Never adopt a stale group merely because a PID repeats.
-5. Run native controller and managed-unfold acceptance before updating the runner
-   pin or enabling the opt-in. Core integration tests and the full native suite
+   owner retains its group; confirmed cleanup/reclamation are not connected.
+   Never adopt a stale group merely because a PID repeats. A new wave uses fresh
+   native owners, not reconstructed old cgroups.
+5. Prepare a matched candidate runner, then run native controller and managed-unfold
+   acceptance before enabling the normal launch default. Core integration tests and the full native suite
    have not run for this checkpoint; retain the unresolved shell assertion above.
 
 Kernel contract: [cgroup v2 populated notifications](https://docs.kernel.org/admin-guide/cgroup-v2.html#un-populated-notification)

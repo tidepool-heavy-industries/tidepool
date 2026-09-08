@@ -1,9 +1,11 @@
 # Build snapshots for actor forks
 
-Status: private build overlays and host namespace access are checked foundations;
-warm snapshot publication and ordinary-unfold integration remain unimplemented.
-This records the build-cache discussion alongside the parallel dogfood run. It does
-not change the running harness.
+Status: mount publication, private Git/Cargo composition and retained build
+selection have focused verification. Native publication is staged and disabled;
+ordinary `unfold` still lacks live-source inheritance. The
+[current review](build-snapshot-review.md) records production gaps and accepted
+original-root placement. These feasibility checks do not establish full
+managed-unfold acceptance.
 
 ## Agreed behavior
 
@@ -83,9 +85,10 @@ identifies the mount owner even when the workload occupies a nested user namespa
 
 `cargo test -p tidepool-worktree --test mount_namespace -- --nocapture` checks a
 real Bubblewrap overlay: host Git sees the mounted files while the underlying host
-directory lacks them, child commits leave the parent unchanged, commands have no
-capabilities, and owner exit rejects both new and previously prepared commands.
-This is a tested GitCli boundary, not yet managed-source allocation or recovery.
+directory lacks them, child commits leave the parent unchanged, and commands have
+no capabilities. Retained filesystem access now survives the captured process's
+exit; publication still requires a live owner. This is a tested GitCli boundary,
+not yet managed-source allocation or host-startup recovery.
 
 ## Checked live mount transition
 
@@ -104,18 +107,18 @@ read-only backing aliases and stale cwd behavior: absolute access to the stable
 view works, but relative writes require re-entering that path after rotation.
 The original host-Git namespace test also passes after this extension.
 
-This is mount mechanics, **not yet native execution admission or durable snapshot
-publication**. The caller still needs to exclude native writers, refresh native cwd
-at admission, retain/reconcile generations, and connect ordinary source/build
-inheritance. Source replacement must also preserve separately owned nested mounts.
+These probes establish mount mechanics. Later native admission and durable
+publication work is described in [its checkpoint](native-workspace-admission.md);
+ordinary source/build integration remains incomplete. Source replacement must
+preserve separately owned nested mounts.
 The actor launcher now protects the entire owned build-resource directory read-only,
 covering future generations as well as the initial backing paths.
 
 ## Owning implementation
 
-Extend `OverlayResourceLease` in `tidepool/src/actor_host/overlay_resource.rs` and the mount boundary
-in `tidepool-node/src/process_boundary.rs`. Today's writable “overlay” is a bind
-mount of a separate empty actor build directory. Preserve those owners and their
+Extend `OverlayResourceLease` in `tidepool/src/actor_host/overlay_resource.rs` and
+the mount boundary in `tidepool-node/src/process_boundary.rs`. The launcher now
+mounts private writable build overlays through these owners. Preserve their
 cleanup obligations; do not add another actor scheduler or competing registry.
 
 Represent a published snapshot as retained immutable layers. Each actor uses a
