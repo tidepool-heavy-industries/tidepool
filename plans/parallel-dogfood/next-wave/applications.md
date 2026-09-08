@@ -39,9 +39,11 @@ split exact process launch/scope from host custody consumers once the scope rece
 and cancellation contract are usable. Keep shared lifecycle-row changes with one
 owner; do not treat an entire crate as unavailable to other mechanisms.
 
-**Subsequent joins:** integrate real binding/admission/delivery, then combine process
-custody with hosted-completion ownership. Completed-call persistence/fork release,
-retirement consumers and adversarial failure cases can form recursive sibling work
+**Subsequent joins:** establish the shared accepted-work/process/resource contract
+before dependent A5/A6 forks; this is usable owner wiring, not all of custody
+implemented serially. Integrate real binding/admission/delivery, then combine
+process custody with hosted-completion ownership. Completed-call persistence/fork
+release, retirement consumers and adversarial failure cases can form recursive sibling work
 with exact native-file reservations. Recovery consumes those checked owners and
 engine disposition; its independent status/source-recovery cases need not wait for
 unrelated UI work. Matched package acceptance remains the final integration owner.

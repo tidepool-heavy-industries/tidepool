@@ -35,7 +35,7 @@ Describe later waves by the behavior they unlock, refining details as results la
 A child can recursively own several such waves. Keep current intent concise;
 retain older evidence by reference instead of appending every conversation here.
 
-Before broad execution, Sol owners write their interpretation with a normal and
+Before broad execution, the designated initial Sol leads write their interpretation with a normal and
 awkward consumer example, concrete interfaces, dependency/fork structure, checks,
 assumptions, objections and questions. The original planner reviews coupled choices
 and returns explicit corrections and release scope. Incorporate those decisions
@@ -48,7 +48,8 @@ without repeating this initial interview or inventing more approval stages.
   checked integration and a continuation at every substantial node.
 - [operating.md](operating.md): readback progress, source-bearing decisions, parallel
   branch expressions and the actual asynchronous control boundaries.
-- [run.md](run.md): concrete admission, watch, review, retained repair and RSI examples.
+- [run.md](run.md): concrete admission, watch, review and retained repair recipes.
+- [launch.md](launch.md): operator-only launch and package validation.
 - [language.md](language.md): compact shared distinctions; add project vocabulary
   where it helps collaborators make the same consequential choices.
 - [graph/README.md](graph/README.md): a worked graph-view feature allocation using

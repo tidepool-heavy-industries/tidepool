@@ -82,6 +82,11 @@ incorporation still matter without a paragraph of acknowledgment history.
 
 ## Restart inputs and external supervision
 
+Earlier execution-contract.md, planner-review.md and restart-review.md describe
+older launches. Retain substantive design findings through the final checkpoint;
+their actor handles, release messages and frozen-helper workarounds are historical.
+The selected package and this launch own current invocation and execution guidance.
+
 The next launch record must name final coordinator/lane commits, separate native
 commit, preserved unmerged candidates and exact failed checks from this wind-down.
 Do not use the older saved-work.md inventory as the latest state, or recreate

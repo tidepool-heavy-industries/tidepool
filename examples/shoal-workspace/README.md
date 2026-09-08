@@ -62,9 +62,9 @@ defaults remain Sol. The coordinator prompt selects an ordinary hosted Sol actor
 using withInstructions; no new runtime role is needed. The original planner reviews readbacks and consequential amendments.
 An operator hold is not a failed continuation or permission to resume.
 
-The run guide shows first-turn and continuation expressions: commission a lead,
-transmit an accepted design, review/repair without a queue cycle, return a decision
-to pending work, incorporate independent deliveries and commission requested RSI.
+The run guide shows general first-turn and continuation expressions: commission a
+lead, review/repair without a queue cycle and return a decision to pending work.
+The optional graph walkthrough adds a concrete allocation and requested RSI.
 Typed results distinguish product blockers from execution unavailability. Progress
 is cumulative unresolved state. Callback failures retain evidence; inspect routes
 and effects before replaying a launch that may already have admitted useful work.

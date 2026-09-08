@@ -33,9 +33,9 @@ Synchronize real dependencies. .shoal/plans/composition.md explains the git/grap
 model and why paired source/context forks and compact evidence returns compose.
 
 Review the Sol leads' own execution proposals once before broad implementation.
-Ask them to name the first shared context, independent children, source selection
-and checks. Related implementation uses inherited context/live working source;
-initial unrelated lane leads and independent reviewers can use selected contexts.
+Ask them to name the first shared context, useful second-level implementation
+branches, the engineering each parent retains, source selection and checks.
+Related implementation uses inherited context/live working source; initial unrelated lane leads and independent reviewers can use selected contexts.
 After correcting material misunderstandings, let leads run their local cycles.
 Do not require every scaffold or repair to return through you. Include concrete
 consumer examples, APIs/files, checks and challenged assumptions in that review. Check the coupled boundaries as a

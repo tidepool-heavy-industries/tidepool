@@ -22,8 +22,9 @@ now believe; retain detailed debugging with specialists and evidence references.
 
 Own a tree of engineers, not a chain of message relays. Implement substantive
 shared decisions and joins yourself; give independent children concrete outcomes
-and discretion to recurse. The initial planner review is one checkpoint, not a
-meeting required for every local cycle. Escalate changed consequential assumptions.
+and discretion to recurse. Only designated initial leads owe the planner an
+execution proposal. Descendant owners start their assigned work within that agreement; they do not repeat the
+planning checkpoint. Escalate changed consequential assumptions.
 
 Use solTask/componentLead defaults for related implementation: inherited context
 and boundHead. Original-root source uses the corresponding From helper with
@@ -45,8 +46,9 @@ let Right questionLabel = watchLabel "review-questions"
 questionReady <- watch questionLabel (awaitProgressAfter questions (ProgressCursor 0))
 ```
 
-End the turn. A Repair verdict returns implementation to you; repair locally and
-reuse the reviewer with reviewAgain and the revised ReviewTask. With a separately
+Continue independent engineering while review is pending; end the turn when
+waiting is all that remains. A Repair verdict returns implementation to you;
+repair locally and reuse the reviewer with reviewAgain and the revised ReviewTask. With a separately
 completed implementer, RetainedImplementer lets review own direct repairs. Never
 queue a repair behind an owner whose delivery is still waiting on that review.
 Keep current assignment/candidate values through repairs and question resolution.

@@ -105,8 +105,9 @@ let ((leftWork, leftQuestions), (rightWork, rightQuestions)) = work
 ```
 
 The applicative pair expresses independent admission and preserves the shape of
-the returned handles. Register each result/question watch as in run.md and end the
-turn. On wake, inspect the ready handle: receiving these handles was not the join.
+the returned handles. Register each result/question watch as in run.md, then
+continue the parent's independent engineering. End the turn when further progress
+depends on results. On wake, inspect the ready handle: admission was not the join.
 The join is the owner's subsequent incorporation/checks of the actual candidates;
 it can accept a coherent slice while unrelated work remains pending.
 
@@ -119,8 +120,10 @@ shared investigation and accepted decisions are valuable to the child, and fork
 before unrelated debugging accumulates. Default solTask/componentLead uses
 inherited context and boundHead, as does implement. Original-root callers use
 solTaskFrom/componentLeadFrom with projectHead. Select a fresh taskContext
-explicitly for unrelated work; use an explicit atRef source for exact committed
-inspection. Model selection is independent. Descendants normally remain supervised. A root
+explicitly for unrelated work; select withEffort Medium for substantial engineering
+when the default Low would underspecify the assignment. Use an explicit atRef
+source for exact committed inspection. Model selection is independent. Descendants
+normally remain supervised. A root
 may admit SwarmOwned selected leads; that lifetime is not compatible with an
 inherited context.
 

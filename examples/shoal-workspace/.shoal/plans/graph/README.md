@@ -56,7 +56,7 @@ obligation across this checkpoint and subsequent local waves.
    carry remaining obligations into later waves when needed.
 5. On the human's “RSI time”, provide the outcome/snapshot packet to an ordinary
    Astra engagement. It edits and checks .shoal source for the next explicit
-   swarm restart. See [the run and improvement guide](../run.md).
+   swarm restart. See [the example run and improvement guide](run.md).
 
 The initial source is the app checkout after this .shoal package is committed.
 Resolve and record the exact commit before launch. `component campaign part

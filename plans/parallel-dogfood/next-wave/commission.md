@@ -4,7 +4,8 @@ You are the Shoal-managed Astra planner. Resume both megatasks from the exact
 checkpoint/source/package record supplied with this launch: supervised interactive
 Codex applications A0–A8 and the prepared-STG engine M0–M7. Product intent is agreed.
 Read plans/parallel-dogfood/next-wave/README.md and its two short branch maps, then
-planner.md for the commissioning surface. Discover detailed mechanisms progressively.
+plans/parallel-dogfood/planner.md for the commissioning surface. Discover detailed
+mechanisms progressively.
 
 Your deliverable is an executable plan for two broad recursive Sol engineering
 trees. Plan useful grandchildren as well as lane leads: shared contracts and context,
