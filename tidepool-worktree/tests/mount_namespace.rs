@@ -190,8 +190,10 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
         std::fs::read_to_string(repository.path().join("file")).unwrap(),
         "inherited\n"
     );
-    let mut prepared = namespace
-        .host_command(&view, std::ffi::OsStr::new("/bin/sh"))
+    let serialized = serde_json::to_vec(&namespace.entry().unwrap()).unwrap();
+    let entry: tidepool_node::NamespaceEntry = serde_json::from_slice(&serialized).unwrap();
+    let mut prepared = entry
+        .command(&view, std::ffi::OsStr::new("/bin/sh"))
         .unwrap();
     prepared.args(["-c", "exit 0"]);
     let next_upper = storage.path().join("next-upper");
@@ -232,6 +234,14 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
         tidepool_node::OverlayRotationOutcome::Unconfirmed(_)
     ));
     assert!(std::fs::read_dir(&next_upper).unwrap().next().is_none());
+    let mut invalid: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
+    invalid["start_ticks"] = 0.into();
+    let invalid: tidepool_node::NamespaceEntry = serde_json::from_value(invalid).unwrap();
+    assert!(invalid.command(&view, "/bin/sh".as_ref()).is_err());
+    let mut invalid: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
+    invalid["identity"]["root_mount"] = 0.into();
+    let invalid: tidepool_node::NamespaceEntry = serde_json::from_value(invalid).unwrap();
+    assert!(invalid.command(&view, "/bin/sh".as_ref()).is_err());
     assert!(manager.list().unwrap()[0].present);
     assert!(namespace.try_exists(&view.join("renamed")).unwrap());
     assert!(!view.join("renamed").exists());

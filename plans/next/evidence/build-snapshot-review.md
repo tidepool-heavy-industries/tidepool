@@ -86,6 +86,19 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
    separately authoritative. Confirm these semantics in the first integrated
    parent/child path, not after generalized snapshot machinery is finished.
 
+The existing Shoal executable now has a hidden `enter-view` launch path. It
+acquires descriptors from the retaining host using a versioned, short-lived
+reference checked against the boot, holder PID/start time, and kernel namespace
+and root-mount identities. It enters the view and drops capabilities before exec,
+before constructing Tokio's multithreaded runtime. This is an internal launch
+mechanism, not a durable namespace record or a new model-facing command.
+`just test-target tidepool shoal_namespace_entry 'test(executable_enters_retained_view)'`
+passed against the real executable without a TUI/provider: the original bootstrap
+exits before entry, inherited content remains readable, writes reach only the
+mounted upper, capabilities are empty, and an expired reference runs no command.
+Node Clippy and Shoal compilation passed. Actor launch does not select this path
+yet; admission still needs to prepare and retain the complete source/build view.
+
 ## Next decisive implementation checkpoint
 
 Implement one real ordinary unfold that joins source, Git state, build inheritance

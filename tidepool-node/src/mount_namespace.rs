@@ -17,6 +17,8 @@ use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::thread::{CapabilitySet, CapabilitySets, LinkNameSpaceType};
 
+mod entry;
+pub use entry::NamespaceEntry;
 mod overlay;
 pub use overlay::{
     OverlayRecovery, OverlayRecoveryRecord, OverlayRotation, OverlayRotationOutcome,
@@ -107,21 +109,7 @@ impl MountNamespace {
         // The workload may occupy a nested user namespace that does not own
         // its mount namespace. Ask the kernel for the actual mount owner.
         if let Some((start_ticks, mount_namespace_inode)) = expected {
-            let stat = rustix::fs::openat(
-                &directory,
-                "stat",
-                OFlags::RDONLY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?;
-            let mut stat = std::fs::File::from(stat);
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut stat, &mut text)?;
-            let observed: u64 = text
-                .rsplit_once(')')
-                .and_then(|(_, fields)| fields.split_whitespace().nth(19))
-                .ok_or_else(|| io::Error::other("process start time unavailable"))?
-                .parse()
-                .map_err(io::Error::other)?;
+            let observed = entry::start_ticks(&directory)?;
             if observed != start_ticks || rustix::fs::fstat(&mount)?.st_ino != mount_namespace_inode
             {
                 return Err(io::Error::other(

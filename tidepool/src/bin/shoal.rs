@@ -12,6 +12,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Enter a host-retained workspace view before replacing this process.
+    #[command(hide = true)]
+    EnterView {
+        #[arg(long)]
+        view: String,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Inspect recorded run artifacts without launching or attaching to a host.
     RunMap {
         run_dir: PathBuf,
@@ -114,9 +124,25 @@ impl From<Effort> for ShoalEffort {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match Cli::parse().command {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let command = Cli::parse().command;
+    if let Command::EnterView { view, cwd, command } = command {
+        use std::os::unix::process::CommandExt;
+        let entry: tidepool_node::NamespaceEntry = serde_json::from_str(&view)?;
+        let mut process = entry.command(&cwd, command[0].as_ref())?;
+        process.args(&command[1..]);
+        // Namespace entry must precede construction of the multithreaded runtime.
+        return Err(process.exec().into());
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(command))
+}
+
+async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Command::EnterView { .. } => unreachable!("handled before runtime construction"),
         Command::RunMap {
             run_dir,
             from_unix_ms,
