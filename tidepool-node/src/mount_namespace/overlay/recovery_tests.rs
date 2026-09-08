@@ -151,10 +151,15 @@ fn interrupted_freeze_restores_only_the_original_mount() {
     // SAFETY: preconstructed path and mount syscall only after fork.
     let mut freeze = unsafe {
         namespace
-            .command_with_setup(Path::new("/"), "/bin/sh".as_ref(), move || {
-                rustix::mount::mount_remount(target.as_c_str(), MountFlags::RDONLY, c"")?;
-                Ok(())
-            })
+            .command_with_setup(
+                Path::new("/"),
+                "/bin/sh".as_ref(),
+                OwnerRequirement::LiveProcess,
+                move || {
+                    rustix::mount::mount_remount(target.as_c_str(), MountFlags::RDONLY, c"")?;
+                    Ok(())
+                },
+            )
             .unwrap()
     };
     assert!(freeze.args(["-c", ":"]).status().unwrap().success());

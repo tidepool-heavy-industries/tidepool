@@ -23,13 +23,19 @@ pub use overlay::{
     PreparedOverlayRotation,
 };
 
-/// A retained view into the mount namespace of an owned live process.
+/// A retained filesystem view captured from an owned live process.
 ///
 /// This is access to a filesystem, not proof that any process has stopped or
 /// that its writable layers may be deleted.
 #[derive(Clone, Debug)]
 pub struct MountNamespace {
     descriptors: Arc<Descriptors>,
+}
+
+#[derive(Clone, Copy)]
+enum OwnerRequirement {
+    RetainedView,
+    LiveProcess,
 }
 
 #[derive(Debug)]
@@ -188,10 +194,19 @@ impl MountNamespace {
 
     /// Prepare a trusted host command inside this view. The command retains the
     /// namespace descriptors through spawn and changes directory only after
-    /// entering the namespace. Do not use this to bypass actor launch policy.
+    /// entering the namespace. Retained descriptors keep access valid after the
+    /// captured process exits; this says nothing about remaining writers or safe
+    /// layer deletion. Do not use this to bypass actor launch policy.
     pub fn host_command(&self, directory: &Path, program: &std::ffi::OsStr) -> io::Result<Command> {
         // SAFETY: the empty setup callback performs no operations.
-        unsafe { self.command_with_setup(directory, program, || Ok(())) }
+        unsafe {
+            self.command_with_setup(
+                directory,
+                program,
+                OwnerRequirement::RetainedView,
+                || Ok(()),
+            )
+        }
     }
 
     /// Inspect a path in this view, including symlinks resolved within its root.
@@ -242,6 +257,7 @@ impl MountNamespace {
         &self,
         directory: &Path,
         program: &std::ffi::OsStr,
+        owner: OwnerRequirement,
         mut setup: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<Command> {
         if !directory.is_absolute() {
@@ -250,7 +266,9 @@ impl MountNamespace {
                 "namespace working directory must be absolute",
             ));
         }
-        self.require_live_owner()?;
+        if matches!(owner, OwnerRequirement::LiveProcess) {
+            self.require_live_owner()?;
+        }
         let directory = CString::new(directory.as_os_str().as_bytes())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let descriptors = self.descriptors.clone();
@@ -259,7 +277,7 @@ impl MountNamespace {
         // between fork and exec. The command retains every referenced FD.
         unsafe {
             command.pre_exec(move || {
-                if !descriptors.owner_is_live()? {
+                if matches!(owner, OwnerRequirement::LiveProcess) && !descriptors.owner_is_live()? {
                     return Err(io::Error::from_raw_os_error(
                         rustix::io::Errno::SRCH.raw_os_error(),
                     ));

@@ -10,7 +10,7 @@ use std::process::Stdio;
 use rustix::io::Errno;
 use rustix::mount::MountFlags;
 
-use super::MountNamespace;
+use super::{MountNamespace, OwnerRequirement};
 
 mod observation;
 #[cfg(test)]
@@ -512,6 +512,7 @@ impl MountNamespace {
         &self,
         rotation: OverlayRotation,
     ) -> io::Result<PreparedOverlayRotation> {
+        self.require_live_owner()?;
         let before = self.observe_overlay(&rotation.target)?;
         Ok(PreparedOverlayRotation {
             recovery: OverlayRecovery {
@@ -548,6 +549,7 @@ impl MountNamespace {
         rotation: &OverlayRotation,
         before: &observation::Observation,
     ) -> io::Result<OverlayRotationOutcome> {
+        self.require_live_owner()?;
         let current = self.observe_overlay(&rotation.target)?;
         if current.id != before.id && current.matches(rotation) && !current.readonly {
             return Ok(OverlayRotationOutcome::Rotated);
@@ -562,13 +564,18 @@ impl MountNamespace {
         let original_id = before.id;
         // SAFETY: only syscall wrappers and preconstructed arguments after fork.
         let mut command = unsafe {
-            self.command_with_setup(Path::new("/"), "/bin/sh".as_ref(), move || {
-                if observation::mount_id(target.as_c_str())? != original_id {
-                    return Err(io::Error::from(Errno::BUSY));
-                }
-                rustix::mount::mount_remount(target.as_c_str(), MountFlags::empty(), c"")?;
-                Ok(())
-            })?
+            self.command_with_setup(
+                Path::new("/"),
+                "/bin/sh".as_ref(),
+                OwnerRequirement::LiveProcess,
+                move || {
+                    if observation::mount_id(target.as_c_str())? != original_id {
+                        return Err(io::Error::from(Errno::BUSY));
+                    }
+                    rustix::mount::mount_remount(target.as_c_str(), MountFlags::empty(), c"")?;
+                    Ok(())
+                },
+            )?
         };
         let _ = command.args(["-c", ":"]).status();
         let restored = self.observe_overlay(&rotation.target)?;
@@ -596,25 +603,30 @@ impl MountNamespace {
         // SAFETY: apply and receipt encoding use syscall wrappers and
         // preconstructed or stack-only arguments, with no allocation or locks.
         let mut command = unsafe {
-            self.command_with_setup(Path::new("/"), "/bin/sh".as_ref(), move || {
-                let result = rotation
-                    .apply(&descriptors, &mut preserved, &mut metadata)
-                    .encode();
-                let mut frame = [0u8; 12];
-                for (word, bytes) in result.iter().zip(frame.chunks_exact_mut(4)) {
-                    bytes.copy_from_slice(&word.to_le_bytes());
-                }
-                loop {
-                    match rustix::io::write(&write, &frame) {
-                        Err(Errno::INTR) => continue,
-                        Ok(12) => return Ok(()),
-                        Ok(_) => {
-                            return Err(io::Error::from_raw_os_error(Errno::IO.raw_os_error()))
-                        }
-                        Err(error) => return Err(error.into()),
+            self.command_with_setup(
+                Path::new("/"),
+                "/bin/sh".as_ref(),
+                OwnerRequirement::LiveProcess,
+                move || {
+                    let result = rotation
+                        .apply(&descriptors, &mut preserved, &mut metadata)
+                        .encode();
+                    let mut frame = [0u8; 12];
+                    for (word, bytes) in result.iter().zip(frame.chunks_exact_mut(4)) {
+                        bytes.copy_from_slice(&word.to_le_bytes());
                     }
-                }
-            })?
+                    loop {
+                        match rustix::io::write(&write, &frame) {
+                            Err(Errno::INTR) => continue,
+                            Ok(12) => return Ok(()),
+                            Ok(_) => {
+                                return Err(io::Error::from_raw_os_error(Errno::IO.raw_os_error()))
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                },
+            )?
         };
         let status = command
             .args(["-c", ":"])

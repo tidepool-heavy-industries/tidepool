@@ -69,10 +69,15 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
    references. Native cwd refresh belongs at the execution boundary.
 
    Filesystem custody must also outlive worker execution. `MountNamespace` retains
-   namespace/root descriptors but currently requires a live original process for
-   host commands. Finished checkouts must remain inspectable through their retained
-   view. Separate that authority from native process liveness within the resource
-   owner; do not simply remove the current check without replacing its contract.
+   namespace/root descriptors and now distinguishes retained filesystem commands
+   from operations requiring the captured process to remain live. The mounted-Git
+   fixture proves inspection and independent commits after that process exits;
+   publication preparation and an already-prepared mount transition still refuse
+   a dead owner. Commands still enter the retained root and drop capabilities.
+   This preserves access within the host lifetime, not namespace recovery after
+   host death or authority to delete layers. The focused mounted-Git test and
+   three overlay-recovery tests passed, along with the inbox recovery test selected
+   by the filter; node library Clippy passed.
 
 6. **Make root import and root Git ownership explicit.** The original ext4
    checkout cannot be treated as an immutable lower layer while ordinary host

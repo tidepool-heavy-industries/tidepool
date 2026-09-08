@@ -194,22 +194,57 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
         .host_command(&view, std::ffi::OsStr::new("/bin/sh"))
         .unwrap();
     prepared.args(["-c", "exit 0"]);
+    let next_upper = storage.path().join("next-upper");
+    let next_work = storage.path().join("next-work");
+    std::fs::create_dir(&next_upper).unwrap();
+    std::fs::create_dir(&next_work).unwrap();
+    let rotation = tidepool_node::OverlayRotation::prepare(
+        &view,
+        &[base.clone(), upper.clone()],
+        &next_upper,
+        &next_work,
+    )
+    .unwrap();
+    let publication = namespace
+        .prepare_overlay_rotation(rotation.clone())
+        .unwrap();
     drop(owner.0.stdin.take());
     assert!(owner.0.wait().unwrap().success());
     assert!(
-        prepared.output().is_err(),
-        "owner liveness must be checked at spawn as well as preparation"
+        prepared.output().unwrap().status.success(),
+        "retained filesystem access survives the captured process"
     );
     assert!(
-        mounted_git.run(&view, &["status", "--porcelain"]).is_err(),
-        "a dead owner must never silently select the underlying directory"
+        mounted_git
+            .try_run(&view, &["status", "--porcelain"])
+            .unwrap()
+            .trimmed()
+            .is_empty(),
+        "retained access must still inspect the mounted checkout"
     );
     assert_eq!(
         namespace.require_live_owner().unwrap_err().kind(),
         std::io::ErrorKind::NotFound
     );
-    assert!(
-        manager.list().is_err(),
-        "unavailable namespace is not a missing checkout"
+    assert!(namespace.prepare_overlay_rotation(rotation).is_err());
+    assert!(matches!(
+        publication.apply().1,
+        tidepool_node::OverlayRotationOutcome::Unconfirmed(_)
+    ));
+    assert!(std::fs::read_dir(&next_upper).unwrap().next().is_none());
+    assert!(manager.list().unwrap()[0].present);
+    assert!(namespace.try_exists(&view.join("renamed")).unwrap());
+    assert!(!view.join("renamed").exists());
+    mounted_git
+        .try_run(&view, &["mv", "renamed", "after-exit"])
+        .unwrap();
+    mounted_git
+        .try_run(&view, &["commit", "-qm", "retained view change"])
+        .unwrap();
+    assert_eq!(
+        git.try_run(repository.path(), &["show", "child:after-exit"])
+            .unwrap()
+            .trimmed(),
+        "inherited"
     );
 }
