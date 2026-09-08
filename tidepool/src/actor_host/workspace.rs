@@ -45,6 +45,7 @@ struct CapturedSource {
 
 #[derive(Clone)]
 pub(super) struct WorkspaceLayout {
+    pub(super) run_namespace: String,
     pub(super) source_root: PathBuf,
     pub(super) worktrees: WorktreeManager,
     pub(super) base_prompt: FrozenBasePrompt,
@@ -63,7 +64,12 @@ pub(super) struct PreparedWorkspace {
 
 impl WorkspaceLayout {
     pub(super) fn resource_root(&self, key: &str) -> PathBuf {
-        self.worktrees.managed_root().join(".resources").join(key)
+        // Actor IDs restart in each run; retained resources belong to that run.
+        self.worktrees
+            .managed_root()
+            .join(".resources")
+            .join(&self.run_namespace)
+            .join(key)
     }
 
     pub(super) fn prepare(

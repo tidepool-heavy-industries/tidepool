@@ -398,6 +398,8 @@ fn launch_effort(
 
 #[derive(Debug, Clone)]
 pub enum ActorHostReadiness {
+    /// Coordination failed; the native application may still be alive.
+    CoordinationFailed { root: ActorRef, error: String },
     /// The root pane is selected, but its queue-ready session binding has not
     /// yet been published.
     AwaitingBinding { root: ActorRef },
@@ -991,6 +993,8 @@ async fn apply_application_failure(
     failure: ExternalApplicationFailure,
 ) -> Result<(), String> {
     let identity = actor.identity();
+    tracing::error!(actor = ?identity, class = ?failure.class, detail = %failure.detail,
+        "interactive application failed");
     match actor.report_external_failure(failure).await {
         Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {
             Ok(())
@@ -1083,6 +1087,7 @@ pub async fn run(
                 owners: application_owners.clone(),
                 backend: backend.clone(),
                 layout: Some(WorkspaceLayout {
+                    run_namespace: runtime_namespace(&run_root),
                     source_root: config.workspace.clone(),
                     worktrees: worktrees.clone(),
                     backend: backend.clone(),
@@ -1152,7 +1157,7 @@ pub async fn run(
             backend,
             worktrees,
             bindings,
-            readiness,
+            readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
         },
         shutdown_rx,
@@ -1176,7 +1181,11 @@ pub async fn run(
                         let pane = application_owners.lock().get(&root_actor.identity())
                             .and_then(|owner| owner.pane.lock().clone());
                         if let Err(error) = confirm_native_exit(&tmux, pane.as_ref()).await {
-                            tracing::error!(%error, "root coordination stopped; retaining original TUI without automatic conversation resume");
+                            let _ = readiness.send(ActorHostReadiness::CoordinationFailed {
+                                root: root_actor.identity(),
+                                error: terminal.summary.clone(),
+                            });
+                            tracing::error!(%error, failure = %terminal.summary, "root coordination stopped; native execution unconfirmed, retaining session without automatic conversation resume");
                             root_active = false;
                             continue;
                         }
@@ -1188,6 +1197,10 @@ pub async fn run(
                             continue;
                         }
                         Err(error) => {
+                            let _ = readiness.send(ActorHostReadiness::CoordinationFailed {
+                                root: root_actor.identity(),
+                                error: error.to_string(),
+                            });
                             tracing::error!(%error, "model root recovery unavailable; operator forest remains attached");
                             root_active = false;
                             continue;
@@ -2589,6 +2602,7 @@ async fn launch_prepared_interactive_application(
         Some(prepared) => prepared,
         None => {
             let layout = WorkspaceLayout {
+                run_namespace: runtime_namespace(&run_root),
                 source_root: config.workspace.clone(),
                 worktrees: worktrees.clone(),
                 base_prompt: base_prompt.clone(),

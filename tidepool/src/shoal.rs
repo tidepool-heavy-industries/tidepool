@@ -514,8 +514,10 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let interactive = match wait_until_interactive(&tmux, &status_path, &run_id).await {
         Ok(interactive) => interactive,
         Err(failure) => {
-            let _ = tmux.kill().await;
-            return Err(failure);
+            return Err(runtime_error(format!(
+                "{failure}; session {session_name:?} retained for inspection; native execution may still be running. Status: {}",
+                status_path.display()
+            )));
         }
     };
     match &interactive.phase {
@@ -810,6 +812,19 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     loop {
         tokio::select! {
             readiness = readiness_rx.recv() => match readiness {
+                Some(crate::actor_host::ActorHostReadiness::CoordinationFailed { root, error }) => {
+                    tracing::error!(actor = ?root, %error, "root coordination failed; preserving native application");
+                    if let Err(error) = write_startup_failure(
+                        &options.status_path,
+                        &options.run_id,
+                        &options.workspace,
+                        &options.session,
+                        &options.agent,
+                        &error,
+                    ) {
+                        tracing::error!(%error, "could not publish root failure; host remains active");
+                    }
+                }
                 Some(crate::actor_host::ActorHostReadiness::AwaitingBinding { root }) => {
                     let status = RunStatus::new(
                         &options.run_id,

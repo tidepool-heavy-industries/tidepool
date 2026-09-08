@@ -200,6 +200,72 @@ const CODING: ForkWorkspacePolicy = ForkWorkspacePolicy {
     workspace: tidepool_actor::WorkspaceAccess::WritableBound,
 };
 
+#[test]
+fn root_workspace_resources_are_isolated_between_runs() {
+    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    repo.writer().commit_file("file", "source", "seed").unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let legacy = manager.managed_root().join(".resources/actor-0-1/build");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("retained"), "old run").unwrap();
+    let mut layout = WorkspaceLayout {
+        run_namespace: "first-run".into(),
+        source_root: repo.path().into(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let first = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "actor-0-1",
+            true,
+            CODING,
+            None,
+            None,
+        )
+        .unwrap();
+    shell(&first, "echo first > .shoal/build/cargo/marker");
+    let collision = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "actor-0-1",
+            true,
+            CODING,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
+    assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
+
+    layout.run_namespace = "second-run".into();
+    let second = layout
+        .prepare(
+            repo.path().into(),
+            None,
+            "actor-0-1",
+            true,
+            CODING,
+            None,
+            None,
+        )
+        .unwrap();
+    shell(
+        &second,
+        "test ! -e .shoal/build/cargo/marker; echo second > .shoal/build/cargo/marker",
+    );
+    assert_eq!(shell(&first, "cat .shoal/build/cargo/marker"), "first\n");
+    assert_eq!(shell(&second, "cat .shoal/build/cargo/marker"), "second\n");
+    assert_eq!(
+        std::fs::read_to_string(legacy.join("retained")).unwrap(),
+        "old run"
+    );
+}
+
 #[tokio::test]
 async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
@@ -247,6 +313,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     );
     let backend = Arc::new(Backend::default());
     let layout = WorkspaceLayout {
+        run_namespace: "workspace-test".into(),
         source_root: repo.path().into(),
         worktrees: manager.clone(),
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
