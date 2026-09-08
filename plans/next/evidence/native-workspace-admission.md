@@ -1,6 +1,6 @@
 # Native workspace admission checkpoint
 
-Codex branch `work/build-snapshot-admission`, commit `5428ae8538`, in
+Codex branch `work/build-snapshot-admission`, commit `d6582365fb`, in
 `/tmp/tidepool-build-snapshot-codex`, based on pinned `d760c5cb8c`.
 The Tidepool runner pin and launch environment are unchanged. This is not yet
 an enabled or complete native snapshot protocol.
@@ -52,14 +52,45 @@ admission while preserving normal native execution.
   The subsequent Git/executor pass also passed focused Git/PTY Clippy and formatting.
   Unrelated formatter-only changes to the native justfile were excluded.
 
+## Native control checkpoint
+
+The existing private input-control socket also serves
+`POST /v1/workspace/publication`. Request fields are `threadId`, a positive
+monotonically increasing `sequence`, and `operation` (`begin` or `finish`).
+Responses carry typed `status`: `ready` (with `pid` and `cgroupPath`), `settled`,
+`busy`, `conflict`, or `unavailable` (with `reason`). Remote app-server connections
+and disabled admission are rejected. This does not yet validate remote executor
+selection within an in-process runtime; that remains an enablement gate.
+
+The native admission singleton retains the active sequence and guard independently
+of HTTP request or listener lifetime. Repeated begin requests reuse a held lease;
+completed sequences cannot begin again; an old finish cannot release a newer
+lease. Finish refreshes the original absolute native cwd before reopening writers.
+The host must durably record sequence/identity, confirm its mount transition is
+settled, then finish. A request timeout alone must not advance the sequence.
+
+The delegated-cgroup test passed with sequence replay/conflict and stale-finish
+coverage added. `cargo check -p codex-tui --lib`, focused PTY Clippy, formatting,
+and whitespace checks passed. The new HTTP route has not had an end-to-end test.
+`just bazel-lock-update` was attempted but not completed: ambient Bazel is absent,
+Bazelisk's downloaded 9.0.0 binary cannot start under NixOS's generic ELF-loader
+stub, and this Nixpkgs Bazel package is 7.6.0 while the repository requires 9.0.0.
+Cargo.lock includes the new Linux-only TUI dependency on the existing PTY crate;
+Bazel lock verification remains outstanding.
+
+No Shoal caller or automatic publication is enabled yet. Implement the host
+publication owner next, including recovery of a retained lease after host failure.
+Without that recovery, a lost host can leave command admission held indefinitely;
+the native lease alone is not a completed recovery design.
+
 ## Before enabling
 
 1. Audit remaining native filesystem writers and unsupported executor environments.
    Hosted coordination itself must not hold the mutation gate. See the consumer
    audit below for the remaining Git paths and native state-directory boundary.
-2. Expose exact admission custody through the native controller/request owner.
-   Keep the publication guard until the host finishes; reconcile disconnects and
-   uncertain completion without a timer silently reopening writes mid-transition.
+2. Consume native publication control from Shoal with durable sequence and exact
+   process binding. Keep the guard until the host finishes; reconcile disconnects
+   and uncertain completion without a timer reopening writes mid-transition.
 3. Connect native admission, namespace identity, cwd refresh, source/Git capture,
    and build publication in Shoal. Select the latest warm snapshot independently
    from busy source fallback.
