@@ -454,6 +454,7 @@ enum InteractiveConnection {
 }
 
 struct InteractiveBindingRequest {
+    control: crate::host_dynamic_tools::HostToolControl,
     path: PathBuf,
     expected: Option<BackendThreadId>,
 }
@@ -2786,6 +2787,7 @@ async fn launch_prepared_interactive_application(
             .unwrap_or("source"),
         "interactive application launched"
     );
+    let binding_control = service.lock().await.control.clone();
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
             supervisor: installation.supervisor_parent,
@@ -2814,6 +2816,7 @@ async fn launch_prepared_interactive_application(
             build_resource,
         },
         binding: InteractiveBindingRequest {
+            control: binding_control,
             path: binding_path,
             expected: expected_resume,
         },
@@ -3379,6 +3382,11 @@ async fn discover_interactive_binding(
     loop {
         tokio::select! {
             _ = binding_poll.tick() => {
+                // A retained binding belongs to the previous launch until this
+                // exact tool host has accepted the new TUI's session callback.
+                if !request.control.session_attached() {
+                    continue;
+                }
                 if let Ok(thread) = read_interactive_binding(&request.path).await {
                     if let Some(expected) = &request.expected {
                         if expected != thread.id() {
@@ -4159,7 +4167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_application_waits_for_its_queue_ready_binding() {
+    async fn idle_application_waits_for_current_host_attachment_despite_retained_binding() {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let session = TmuxSession::with_socket(
             format!("shoal_binding_{}", &suffix[..8]),
@@ -4179,10 +4187,30 @@ mod tests {
             .unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("binding.json");
+        let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
+        tidepool_agent::accept_interactive_session_binding(
+            &path,
+            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            thread.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let host = crate::host_dynamic_tools::HostDynamicToolService::new(
+            crate::host_dynamic_tools::test_endpoint(),
+            path.clone(),
+            Some(thread.clone()),
+        )
+        .unwrap();
+        let control = host.control();
+        let socket = root.path().join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(host.serve(listener));
         let actor = ActorRef::first(tidepool_actor::ActorId(1));
         let binding = discover_interactive_binding(
             actor,
             InteractiveBindingRequest {
+                control,
                 path: path.clone(),
                 expected: None,
             },
@@ -4196,14 +4224,18 @@ mod tests {
                 .await
                 .is_err()
         );
-        let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
-        tidepool_agent::accept_interactive_session_binding(
-            &path,
-            tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
-            thread.clone(),
-        )
-        .await
-        .unwrap();
+        let client = reqwest::Client::builder()
+            .unix_socket(socket)
+            .no_proxy()
+            .build()
+            .unwrap();
+        let response = client
+            .post("http://localhost/v1/dynamic-tools/session")
+            .json(&serde_json::json!({"protocolVersion": 3, "threadId":thread.0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), &mut binding)
                 .await
@@ -4213,6 +4245,7 @@ mod tests {
             &thread
         );
         session.kill().await.unwrap();
+        server.abort();
     }
 
     #[test]
@@ -4250,6 +4283,7 @@ mod tests {
             &binding,
             tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             thread.clone(),
+            None,
         )
         .await
         .unwrap();
@@ -5095,6 +5129,7 @@ mod tests {
             &binding,
             tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
+            None,
         )
         .await
         .unwrap();
@@ -5141,6 +5176,7 @@ mod tests {
             &binding_path,
             tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
             BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
+            None,
         )
         .await
         .unwrap();

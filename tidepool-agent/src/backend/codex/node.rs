@@ -281,18 +281,12 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
 
     fn present_update<'a>(
         &'a self,
-        cwd: &'a str,
+        _cwd: &'a str,
         thread: &'a QueueReadyThread,
         key: &'a str,
         message: &'a str,
     ) -> crate::UpdatePresentationFuture<'a> {
-        Box::pin(active_update::present(
-            &self.installation,
-            Path::new(cwd),
-            thread,
-            key,
-            message,
-        ))
+        Box::pin(active_update::present(thread, key, message))
     }
 
     fn observe<'a>(
@@ -540,20 +534,31 @@ fn config_encode_error(error: serde_json::Error) -> AgentBackendError {
 struct RolloutBinding {
     version: u32,
     thread: BackendThreadId,
+    input_control_socket: Option<PathBuf>,
 }
 
 impl RolloutBinding {
     /// V4 certifies that the host session callback ran only after Codex made
     /// the rollout durably discoverable to separate lifecycle processes.
-    const VERSION: u32 = 4;
+    // V5 also retains the exact TUI-owned input endpoint, when negotiated.
+    const VERSION: u32 = 5;
 
     fn new(thread: BackendThreadId) -> Result<Self, AgentBackendError> {
         validate_thread(&thread)?;
         Ok(Self {
             version: Self::VERSION,
             thread,
+            input_control_socket: None,
         })
     }
+}
+
+fn binding_v4_to_v5(
+    mut value: serde_json::Value,
+) -> Result<serde_json::Value, version_ladder::MigrationError> {
+    value = version_ladder::set_version(value, 5);
+    value["input_control_socket"] = serde_json::Value::Null;
+    Ok(value)
 }
 
 pub async fn read_binding(path: &Path) -> Result<QueueReadyThread, AgentBackendError> {
@@ -568,9 +573,9 @@ pub async fn read_binding(path: &Path) -> Result<QueueReadyThread, AgentBackendE
     let value = version_ladder::migrate_to_current(
         value,
         found,
+        4,
         RolloutBinding::VERSION,
-        RolloutBinding::VERSION,
-        &[],
+        &[binding_v4_to_v5],
     )
     .map_err(|error| binding_version_error(path, error))?;
     let binding: RolloutBinding =
@@ -578,7 +583,16 @@ pub async fn read_binding(path: &Path) -> Result<QueueReadyThread, AgentBackendE
             detail: format!("invalid rollout binding {}: {error}", path.display()),
         })?;
     validate_thread(&binding.thread)?;
-    Ok(QueueReadyThread::new(binding.thread))
+    if binding
+        .input_control_socket
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(AgentBackendError::ProtocolRejected {
+            detail: "input control socket must be absolute".into(),
+        });
+    }
+    Ok(QueueReadyThread::new(binding.thread).with_input_control(binding.input_control_socket))
 }
 
 fn binding_version_error(path: &Path, error: LadderError) -> AgentBackendError {
@@ -603,6 +617,7 @@ pub async fn accept_session_binding(
     path: &Path,
     protocol_version: u32,
     thread: BackendThreadId,
+    input_control_socket: Option<PathBuf>,
 ) -> Result<(), AgentBackendError> {
     if protocol_version != HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION {
         return Err(AgentBackendError::ProtocolRejected {
@@ -611,13 +626,24 @@ pub async fn accept_session_binding(
             ),
         });
     }
-    let binding = RolloutBinding::new(thread)?;
+    let mut binding = RolloutBinding::new(thread)?;
+    if input_control_socket
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(AgentBackendError::ProtocolRejected {
+            detail: "input control socket must be absolute".into(),
+        });
+    }
+    binding.input_control_socket = input_control_socket;
     persist_binding(path, &binding).await?;
     Ok(())
 }
 
 pub async fn copy_binding(path: &Path, thread: &QueueReadyThread) -> Result<(), AgentBackendError> {
-    persist_binding(path, &RolloutBinding::new(thread.id().clone())?).await
+    let mut binding = RolloutBinding::new(thread.id().clone())?;
+    binding.input_control_socket = thread.input_control_socket().map(Path::to_owned);
+    persist_binding(path, &binding).await
 }
 
 async fn persist_binding(path: &Path, binding: &RolloutBinding) -> Result<(), AgentBackendError> {
@@ -806,14 +832,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("binding.json");
         let thread = BackendThreadId(THREAD.to_string());
-        accept_session_binding(&path, HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION, thread.clone())
-            .await
-            .unwrap();
-        assert_eq!(read_binding(&path).await.unwrap().id(), &thread);
+        let socket = dir.path().join("input.sock");
+        accept_session_binding(
+            &path,
+            HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+            thread.clone(),
+            Some(socket.clone()),
+        )
+        .await
+        .unwrap();
+        let ready = read_binding(&path).await.unwrap();
+        assert_eq!(ready.id(), &thread);
+        assert_eq!(ready.input_control_socket(), Some(socket.as_path()));
+        let copied = dir.path().join("copied.json");
+        copy_binding(&copied, &ready).await.unwrap();
+        assert_eq!(read_binding(&copied).await.unwrap(), ready);
         let encoded: RolloutBinding =
             serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
-        assert_eq!(encoded.version, 4);
+        assert_eq!(encoded.version, 5);
         assert_eq!(encoded.thread, thread);
+    }
+
+    #[tokio::test]
+    async fn v4_binding_retains_queue_readiness_without_inventing_input_support() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binding.json");
+        tokio::fs::write(&path, format!(r#"{{"version":4,"thread":"{THREAD}"}}"#))
+            .await
+            .unwrap();
+        let ready = read_binding(&path).await.unwrap();
+        assert_eq!(ready.id(), &BackendThreadId(THREAD.into()));
+        assert_eq!(ready.input_control_socket(), None);
     }
 
     #[tokio::test]
@@ -837,11 +886,11 @@ mod tests {
             .contains("cannot prove durable queue readiness"));
         assert!(error.to_string().contains("start a fresh Shoal root"));
 
-        tokio::fs::write(&path, format!(r#"{{"version": 5, "thread": "{THREAD}"}}"#))
+        tokio::fs::write(&path, format!(r#"{{"version": 6, "thread": "{THREAD}"}}"#))
             .await
             .unwrap();
         let error = read_binding(&path).await.unwrap_err();
-        assert!(error.to_string().contains("uses future version 5"));
+        assert!(error.to_string().contains("uses future version 6"));
         assert!(error.to_string().contains("newer Tidepool build"));
 
         assert!(matches!(
@@ -854,7 +903,7 @@ mod tests {
     async fn unsupported_session_protocol_cannot_mint_or_persist_queue_readiness() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("binding.json");
-        let error = accept_session_binding(&path, 1, BackendThreadId(THREAD.to_string()))
+        let error = accept_session_binding(&path, 1, BackendThreadId(THREAD.to_string()), None)
             .await
             .unwrap_err();
         assert!(error

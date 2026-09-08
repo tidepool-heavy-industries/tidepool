@@ -82,8 +82,15 @@ pub async fn accept_interactive_session_binding(
     path: &std::path::Path,
     protocol_version: u32,
     thread: BackendThreadId,
+    input_control_socket: Option<std::path::PathBuf>,
 ) -> Result<(), AgentBackendError> {
-    backend::codex::node::accept_session_binding(path, protocol_version, thread).await
+    backend::codex::node::accept_session_binding(
+        path,
+        protocol_version,
+        thread,
+        input_control_socket,
+    )
+    .await
 }
 
 /// Copy a previously certified queue-ready conversation binding to another

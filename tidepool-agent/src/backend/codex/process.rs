@@ -364,26 +364,6 @@ impl Session<RawAsyncClient> {
         session.initialize(capabilities).await?;
         Ok(session)
     }
-
-    /// Connect to the existing interactive daemon through its native proxy.
-    /// Closing this child closes only the connection, never the daemon/thread.
-    pub(super) async fn connect_proxy(executable: &Path, cwd: &Path) -> Result<Self, SessionError> {
-        let mut command = tokio::process::Command::new(executable);
-        command
-            .args(["app-server", "proxy"])
-            .current_dir(cwd)
-            .env_clear()
-            .envs(child_env_vars());
-        let raw = spawn_transport(command)?;
-        let mut session = Self::over(raw);
-        session
-            .initialize(InitializeCapabilities {
-                experimental_api: Some(true),
-                ..Default::default()
-            })
-            .await?;
-        Ok(session)
-    }
 }
 
 /// The transport owner establishes its pipe and cleanup invariants immediately
@@ -945,6 +925,19 @@ mod tests {
         (directory, executable)
     }
 
+    async fn connect_peer(executable: &Path, cwd: &Path) -> Result<Session, SessionError> {
+        let mut command = tokio::process::Command::new(executable);
+        command.current_dir(cwd).env_clear().envs(child_env_vars());
+        let mut session = Session::over(spawn_transport(command)?);
+        session
+            .initialize(InitializeCapabilities {
+                experimental_api: Some(true),
+                ..Default::default()
+            })
+            .await?;
+        Ok(session)
+    }
+
     async fn assert_peer_reaped(directory: &Path) {
         let pid: u32 = std::fs::read_to_string(directory.join("peer.pid"))
             .unwrap()
@@ -961,16 +954,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_transport_drains_stderr_and_reaps_on_shutdown_and_drop() {
+    async fn stdio_transport_drains_stderr_and_reaps_on_shutdown_and_drop() {
         for shutdown in [true, false] {
             let (directory, executable) = stdio_peer();
             let session = tokio::time::timeout(
                 Duration::from_secs(10),
-                Session::connect_proxy(&executable, directory.path()),
+                connect_peer(&executable, directory.path()),
             )
             .await
             .expect("stderr must not block handshake")
-            .expect("proxy connects");
+            .expect("stdio peer connects");
             assert_eq!(session.frames()[0].frame["method"], "initialize");
             assert_eq!(
                 session.frames()[0].frame["params"]["capabilities"]["experimentalApi"],
@@ -987,12 +980,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_transport_reaps_on_handshake_failure_and_cancellation() {
+    async fn stdio_transport_reaps_on_handshake_failure_and_cancellation() {
         let (directory, executable) = stdio_peer();
         std::fs::write(directory.path().join("close"), "").unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            Session::connect_proxy(&executable, directory.path()),
+            connect_peer(&executable, directory.path()),
         )
         .await
         .unwrap();
@@ -1002,8 +995,7 @@ mod tests {
         let (directory, executable) = stdio_peer();
         std::fs::write(directory.path().join("hang"), "").unwrap();
         let cwd = directory.path().to_owned();
-        let connection =
-            tokio::spawn(async move { Session::connect_proxy(&executable, &cwd).await });
+        let connection = tokio::spawn(async move { connect_peer(&executable, &cwd).await });
         tokio::time::timeout(Duration::from_secs(5), async {
             while !directory.path().join("input.jsonl").exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;

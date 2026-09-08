@@ -26,6 +26,7 @@ rustix = { version = "1", features = ["process", "event"] }
 parking_lot.workspace = true
 tidepool-repr.workspace = true
 tidepool-worktree.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # UTF-8-checked paths at the Haskell/wire boundary (camino-utf8-paths lane).

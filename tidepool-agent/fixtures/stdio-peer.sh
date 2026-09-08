@@ -1,9 +1,6 @@
 #!/bin/sh
 # Controlled process peer: exercise transport plumbing, never provider behavior.
 set -eu
-test "$#" -eq 2
-test "$1" = app-server
-test "$2" = proxy
 printf '%s\n' "$$" > peer.pid
 IFS= read -r request
 printf '%s\n' "$request" > input.jsonl

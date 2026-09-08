@@ -51,6 +51,7 @@ enum AdmissionKind {
 /// One service's HTTP admission control, never resident-effect custody.
 #[derive(Clone)]
 pub(crate) struct HostToolControl {
+    bound_thread: Arc<Mutex<Option<BackendThreadId>>>,
     phase: tokio::sync::watch::Sender<HostToolPhase>,
     endpoint: Arc<dyn ResidentToolEndpoint>,
 }
@@ -76,6 +77,12 @@ pub(crate) enum HostToolSealError {
 }
 
 impl HostToolControl {
+    pub(crate) fn session_attached(&self) -> bool {
+        self.bound_thread
+            .try_lock()
+            .is_ok_and(|bound| bound.is_some())
+    }
+
     /// Immediately quiesce HTTP admission, then return the exact endpoint barrier
     /// future. The host must retain this future (or its owned task/result) across
     /// bounded waits; dropping it is uncertainty, not cancellation or permission
@@ -145,7 +152,6 @@ struct HostState {
     endpoint: Arc<dyn ResidentToolEndpoint>,
     binding_path: PathBuf,
     expected_thread: Option<BackendThreadId>,
-    bound_thread: Arc<Mutex<Option<BackendThreadId>>>,
 }
 
 /// Immutable actor-specific service inputs.
@@ -205,11 +211,13 @@ impl HostDynamicToolService {
                 tools: wire_tools,
             }],
             scope: RegistrationScope::PrimaryThread,
+            input_control_socket: None,
         };
         Ok(Self {
             state: HostState {
                 control: HostToolControl {
                     phase: tokio::sync::watch::channel(HostToolPhase::Serving).0,
+                    bound_thread: Arc::new(Mutex::new(None)),
                     endpoint: Arc::clone(&endpoint),
                 },
                 registration: Arc::new(registration),
@@ -217,7 +225,6 @@ impl HostDynamicToolService {
                 endpoint,
                 binding_path,
                 expected_thread,
-                bound_thread: Arc::new(Mutex::new(None)),
             },
         })
     }
@@ -231,7 +238,13 @@ impl HostDynamicToolService {
     /// HTTP-only drain. Quiesce first, retain completion access until the owner
     /// has reconciled native/resident work, then drain and await this future.
     /// On timeout retain the server JoinHandle; abort is not successful drain.
-    pub(crate) async fn serve(self, listener: UnixListener) -> Result<(), std::io::Error> {
+    pub(crate) async fn serve(mut self, listener: UnixListener) -> Result<(), std::io::Error> {
+        // The existing socket-directory owner retains filesystem custody.
+        let endpoint = listener
+            .local_addr()?
+            .as_pathname()
+            .map(|path| path.with_file_name("input.sock"));
+        Arc::make_mut(&mut self.state.registration).input_control_socket = endpoint;
         let mut phase = self.state.control.phase.subscribe();
         let shutdown = async move {
             loop {
@@ -271,6 +284,8 @@ struct Registration {
     protocol_version: u32,
     dynamic_tools: Vec<DynamicTool>,
     scope: RegistrationScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_control_socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -331,6 +346,7 @@ async fn completed(
         || request.context_call_id.is_empty()
         || request.context_call_id.len() > 256
         || state
+            .control
             .bound_thread
             .lock()
             .await
@@ -365,6 +381,8 @@ async fn registration(State(state): State<HostState>) -> Result<Json<Registratio
 struct SessionRequest {
     protocol_version: u32,
     thread_id: String,
+    #[serde(default)]
+    input_control_socket: Option<PathBuf>,
 }
 
 async fn attach_session(
@@ -373,6 +391,14 @@ async fn attach_session(
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
     if !state.control.admits(AdmissionKind::NewWork) {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "tool host is quiescing"));
+    }
+    if request.input_control_socket.is_some()
+        && request.input_control_socket != state.registration.input_control_socket
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "input endpoint does not match actor socket",
+        ));
     }
     let thread = parse_thread(request.thread_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid thread id"))?;
@@ -387,7 +413,7 @@ async fn attach_session(
         ));
     }
 
-    let mut bound = state.bound_thread.lock().await;
+    let mut bound = state.control.bound_thread.lock().await;
     match bound.as_ref() {
         // Repeated callbacks still enter the acceptance owner below so an
         // unsupported protocol version cannot inherit an earlier acceptance.
@@ -399,6 +425,7 @@ async fn attach_session(
         &state.binding_path,
         request.protocol_version,
         thread.clone(),
+        request.input_control_socket,
     )
     .await
     .map_err(|error| match &error {
@@ -599,7 +626,7 @@ async fn call(
             request.tool,
         )));
     };
-    let bound = state.bound_thread.lock().await.clone();
+    let bound = state.control.bound_thread.lock().await.clone();
     if bound.as_ref().map(|thread| thread.0.as_str()) != Some(request.thread_id.as_str()) {
         return Json(CallResponse::failure(&HostToolFailure::ThreadMismatch {
             expected: bound.map(|thread| thread.0),
@@ -720,7 +747,7 @@ mod tests {
         }
     }
 
-    fn endpoint() -> Arc<dyn ResidentToolEndpoint> {
+    pub(crate) fn endpoint() -> Arc<dyn ResidentToolEndpoint> {
         Arc::new(EchoEndpoint {
             tools: vec![HostedTool::Custom(CustomToolDeclaration {
                 name: "haskell".into(),
@@ -787,6 +814,7 @@ mod tests {
         attach_session(
             State(state.clone()),
             Json(SessionRequest {
+                input_control_socket: None,
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
             }),
@@ -896,6 +924,7 @@ mod tests {
         attach_session(
             State(state.clone()),
             Json(SessionRequest {
+                input_control_socket: None,
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: thread.into(),
             }),
@@ -1064,6 +1093,8 @@ mod tests {
             .unwrap();
         assert_eq!(registration["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(registration["dynamicTools"][0]["name"], NAMESPACE);
+        let input = socket.with_file_name("input.sock");
+        assert_eq!(registration["inputControlSocket"], serde_json::json!(input));
 
         let thread = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
         let source = "let x = \"quotes \\\" and \\\\ and λ\"\n    in x";
@@ -1097,7 +1128,14 @@ mod tests {
         assert_eq!(legacy_session.status(), StatusCode::BAD_REQUEST);
         assert!(!binding.exists());
 
-        let session = serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "threadId": thread});
+        let foreign = client
+            .post("http://localhost/v1/dynamic-tools/session")
+            .json(&serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "threadId": thread, "inputControlSocket": "/tmp/foreign.sock"}))
+            .send().await.unwrap();
+        assert_eq!(foreign.status(), StatusCode::BAD_REQUEST);
+        assert!(!binding.exists());
+
+        let session = serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "threadId": thread, "inputControlSocket": input});
         for _ in 0..2 {
             assert_eq!(
                 client
@@ -1117,6 +1155,9 @@ mod tests {
                 .id(),
             &BackendThreadId(thread.into())
         );
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&binding).await.unwrap()).unwrap();
+        assert_eq!(persisted["input_control_socket"], serde_json::json!(input));
 
         let response: serde_json::Value = client
             .post("http://localhost/v1/dynamic-tools/call")
@@ -1156,3 +1197,6 @@ mod tests {
 #[cfg(test)]
 #[path = "host_dynamic_tools_drain_tests.rs"]
 mod drain_tests;
+
+#[cfg(test)]
+pub(crate) use tests::endpoint as test_endpoint;

@@ -4021,6 +4021,7 @@ dependencies = [
  "chrono",
  "codex-codes",
  "parking_lot",
+ "reqwest 0.13.4",
  "rustix",
  "serde",
  "serde_json",

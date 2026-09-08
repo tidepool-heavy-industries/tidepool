@@ -66,7 +66,7 @@ enum EndpointSource {
 pub(super) struct HostedRetirement {
     endpoint_source: EndpointSource,
     actor: LocalActorRef,
-    control: crate::host_dynamic_tools::HostToolControl,
+    pub(super) control: crate::host_dynamic_tools::HostToolControl,
     boundary: CompletionBoundary,
     terminal_path: bool,
     seal: Option<Operation<HostedWorkSeal>>,

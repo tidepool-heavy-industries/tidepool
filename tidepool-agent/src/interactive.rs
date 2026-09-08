@@ -19,16 +19,31 @@ use crate::{AgentBackendError, BackendThreadId, ReasoningEffort};
 /// Only the interactive binding owner can construct this proof after the
 /// hosted-session readiness contract has been durably recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueueReadyThread(BackendThreadId);
+pub struct QueueReadyThread {
+    thread: BackendThreadId,
+    input_control_socket: Option<PathBuf>,
+}
 
 impl QueueReadyThread {
     pub(crate) fn new(thread: BackendThreadId) -> Self {
-        Self(thread)
+        Self {
+            thread,
+            input_control_socket: None,
+        }
+    }
+
+    pub(crate) fn with_input_control(mut self, socket: Option<PathBuf>) -> Self {
+        self.input_control_socket = socket;
+        self
+    }
+
+    pub(crate) fn input_control_socket(&self) -> Option<&Path> {
+        self.input_control_socket.as_deref()
     }
 
     #[must_use]
     pub fn id(&self) -> &BackendThreadId {
-        &self.0
+        &self.thread
     }
 }
 

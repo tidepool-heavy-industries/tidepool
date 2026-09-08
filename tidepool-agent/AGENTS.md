@@ -35,7 +35,8 @@ actor lifecycle, resident tool policy, and effect-handler wiring stay elsewhere.
 - The Shoal host resolves omitted fork effort to Low. The backend renders the
   explicit resolved policy; it must not introduce another defaulting owner.
 - `src/backend/codex/active_update.rs` owns correlated active presentation;
-  `process.rs` owns proxy/process transport and stream lifecycle. Admission,
+  through the negotiated owning-TUI input socket; `process.rs` owns headless
+  stdio transport and stream lifecycle. Admission,
   confirmed presentation and recipient incorporation are separate boundaries.
   Keep not-submitted and unconfirmed failures distinct; never silently retry
   uncertain delivery as another assignment.
