@@ -1,78 +1,39 @@
-# Engine lane: prepared STG into a simpler production engine
+# Engine lane
 
-Own M0–M7 from [the engine design](../haskell-engine-stg.md). Start with that
-document's recommendation, implementation sequence and completion criteria, then
-read the mechanism sections needed for your frontier. Complete the own-words
-readback in [the wave allocation](README.md) before implementation fanout.
+Own M0–M7 in [the engine design](../haskell-engine-stg.md). Start with §1
+(recommendation), §11 (sequence) and §14 (completion); follow the mechanism
+sections as needed. First deliver the
+[own-words readback](coordination.md#initial-planner-checkpoint); await release.
 
-The result is production prepared-STG execution with less maintained complexity
-and lower costs, preserving Haskell semantics and resident effects. Merely adding
-an importer or keeping two indefinite production engines does not complete it.
-GHC remains the source of prepared semantic facts; Rust owns the execution schema,
-validity boundary, machine, memory and effects. Resolve obsolete Core-only guidance
-explicitly as the accepted STG boundary replaces it; do not keep a duplicate path
-just to satisfy a stale architectural sentence.
+The outcome is a smaller, correct, cheaper production engine using prepared STG.
+An importer alone does not complete it. The detailed plan owns semantics and
+acceptance; resolve stale Core-only guidance explicitly at the accepted cutover.
 
-## Planned recursive frontiers
+## Initial decomposition to refine
 
-1. **M0 evidence and contracts.** Establish the authored engine-review regressions,
-   independent GHC reference outcomes, current production consumers and cost/code
-   baseline. Record actual outcomes, not watchdog guesses. Agree shared runtime
-   error/cleanup and source sequencing contracts with the application lane.
-2. **GHC handoff and ownership repairs.** Fork the M1 prepared-STG boundary and M2
-   independent failure/external-storage ownership work after their shared facts
-   are established. M1 proves the actual GHC pass handoff; it must deliver enough
-   concrete representation evidence to constrain the schema, not a guessed API.
-3. **M3 execution contract.** Lead integrates those results and scaffolds the small
-   recursive execution schema and Rust construction invariants. Once exact facts
-   and encodings agree, Sol subtrees can own Haskell projection/encoding, Rust
-   validation/linking and reference semantics. Check their shared fixtures and
-   real consumers together before the next frontier.
-4. **M4/M5 code and memory.** Freeze an accepted calling/layout/root contract, then
-   open useful code-generation and heap/layout/collection subtrees. Within codegen,
-   split independent function/join/application and thunk/control obligations only
-   after their ABI and failure behavior agree. Precise GC and emitters share a
-   concrete safepoint/root contract; neither can invent it independently. Integrate
-   smaller working execution paths and awkward semantic cases progressively.
-5. **M6 production cutover.** Lead owns the actual extractor/toolchain/artifact/
-   runtime consumers. Fork bounded consumer migrations from the checked engine
-   baseline, consolidate, remove the old production path and verify generated
-   fixtures. Coordinate changed runtime consumers and release inputs with the
-   application lane before overlapping edits.
-6. **M7 measure and simplify.** Compare the accepted implementation against M0 on
-   the specified paths and close the design's concrete optimization/deletion
-   obligations. Measurements choose remaining changes; no ornamental optimization
-   framework. Integrate/check every accepted simplification through production.
+| Frontier | Scaffold → useful forks → integration |
+|---|---|
+| M0 | Independent GHC/reference/JIT outcomes, regression and cost baseline; agree runtime failure/cleanup seams |
+| M1 + M2 | Fork real GHC prepared-STG handoff and independent failure/external-storage ownership repairs |
+| M3 | Integrate GHC evidence; agree execution schema, then fork projection/encoding, Rust validation/linking and reference semantics |
+| M4 + M5 | Agree calling/layout/root/failure contract; fork codegen and precise heap/GC work, subdividing only after shared ABI exists |
+| M6 | Fork production consumer migrations from the checked engine; integrate actual cutover and delete the old path |
+| M7 | Measure specified costs against M0, simplify, integrate and close remaining design obligations |
 
-This is an initial decomposition for the lead to refine, not a stage-worker zoo.
-The lead does substantial implementation and successive integration work. Scope
-children around coherent semantics and consumers; reuse shared context where its
-reasoning is relevant and selected context for independent review.
+Each subtree may repeat scaffold/fork/integrate; the lead implements and owns
+substantive joins. Emitters and GC must share a concrete safepoint/root contract.
+Coordinate runtime/session consumers and release inputs with the application lane.
 
-## Declared Astra consultations
+## Declared Astra slots
 
-- **STG and execution schema:** after M1 evidence, a bounded expert can settle the
-  consequential GHC pass/schema question before M3 freezes its consumers. Include
-  specific GHC facts, examples, proposed representation and actual uncertainties.
-- **Calling, roots and failure:** at the M3→M4/M5 seam, a bounded expert can resolve
-  calling/layout/GC/control-flow correctness with representative normal and failing
-  programs, current owning code and proposed invariants.
+- After M1: consequential GHC pass/schema decisions before M3 consumers freeze.
+- At M3→M4/M5: calling, layout, roots and failure correctness.
 
-Use `DesignSlot` / `consultDesign` with `gpt-6-astra`, ordinarily High. Expert
-results are concrete decisions/amendments for Sol to incorporate. Consult only
-when the frontier needs it; do not load an expert with routine coordination.
+Use `DesignSlot` / `consultDesign`, Astra High, with actual examples and bounded
+uncertainty. Sol incorporates the decision and continues implementation.
 
-## Acceptance and reporting
-
-Apply the engine design's supported-contract matrix, deletion ledger, performance
-obligations and completion criteria. Compile changed consumers and run focused
-semantic/failure cases in the owning Nix setup. Translation/serialization changes
-require the fixture boundary check. Broad checks occur at integration points.
-Report independently observed outcomes, compilation versus execution, source,
-production cutover/deletions, measured changes and remaining M0–M7 gates.
-
-The running swarm's extractor, embedded library and machine remain frozen at the
-launch baseline. Candidate compiler builds and tests must use explicit candidate
-toolchain selection; never redirect the running swarm's compiler socket or mutate
-its installed `.shoal`. Live candidate acceptance belongs at a later explicit
-swarm boundary after matched application integration.
+Acceptance includes the supported-contract matrix, deletion ledger, production
+cutover and measured cost obligations. Use focused Nix-backed checks and the
+required translation/serialization fixture boundary. Record observed outcomes,
+not watchdog guesses. Candidate compiler tests use explicit candidate selection;
+never redirect the running swarm's extractor or compiler socket.
