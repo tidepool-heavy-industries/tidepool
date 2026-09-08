@@ -119,6 +119,27 @@ impl PreparedOverlayRotation {
 }
 
 impl OverlayRecovery {
+    /// Compare an owning resource's manifest with the validated saved recipe.
+    /// Resource paths must be the resolved paths recorded at allocation time.
+    pub fn matches_replacement(
+        &self,
+        target: &Path,
+        layers: &[PathBuf],
+        upper: &Path,
+        work: &Path,
+    ) -> io::Result<bool> {
+        let paths = layers
+            .iter()
+            .cloned()
+            .chain([upper.to_owned(), work.to_owned()])
+            .collect::<Vec<_>>();
+        let expected = OverlayRotation::from_resolved_paths(target, &paths, layers.len())?;
+        Ok(self.rotation.target == expected.target
+            && self.rotation.lower == expected.lower
+            && self.rotation.upper == expected.upper
+            && self.rotation.work == expected.work)
+    }
+
     pub fn reconcile(&self) -> OverlayRotationOutcome {
         self.namespace
             .reconcile_rotation(&self.rotation, &self.before)

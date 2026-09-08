@@ -176,14 +176,21 @@ three lost-worktree cases and the in-progress rebase refusal passed in
 `cargo check -p tidepool --bin shoal` passed. These are boundary checks, not
 managed-unfold acceptance.
 
-The build-resource owner has three focused tests, run through
+The build-resource owner has five focused tests, run through
 `just test-lib tidepool 'test(actor_host::build_resource::tests)'`. A real mounted
 parent publishes a generation, remains writable while a busy publication preserves
 the old snapshot, and supplies an independently writable child. Parent lease loss
 and uncertain child custody retain the inherited layer. Preparation failures remain
 retryable; a confirmed mount with a failed metadata write retries recording without
-another rotation. Only an uncertain mount outcome requires mount reconciliation.
-This exercises filesystem artifacts, not Cargo reuse or native admission.
+another rotation while its in-memory confirmation is retained.
+Persisted `pending.json` records are also reconciled before allocating another
+generation when the in-memory transition state is absent. Real-mount tests cover
+both the previous owner layout and an already-advanced layout after a failed
+manifest write; both recover without another generation and publish the recovered
+snapshot. Unsupported records remain untouched and prevent allocation. All five
+build-resource tests passed after this change. This exercises filesystem artifacts,
+not Cargo reuse or native admission. Full resource-graph reopening at host startup
+remains unimplemented.
 The mount owner now immediately reconciles an uncertain helper result using
 `statx` mount identity and the kernel's OverlayFS options in the same namespace.
 It recognizes the intended writable replacement or restores only the original
@@ -191,8 +198,10 @@ mount. A different recipe or unavailable observation remains unconfirmed. Three
 real-mount recovery tests cover lost receipts after publication, interruption after
 freeze, and refusal to modify an unexpected replacement. Paths include spaces,
 commas, colons and backslashes; this also exposed and fixed upper/work argument
-escaping. These tests do not implement recovery across a host restart or retain
-a retryable mount witness when immediate observation is unavailable.
+escaping. Recovery records now retain the mount witness and validate the boot,
+namespace, root mount and proposed layout before reconciliation. This does not implement
+recovery across a host restart: recovering the live resource and namespace owners
+still needs integration.
 Shoal compilation passed. Strict application Clippy remains blocked by existing
 warnings in hosted retirement, launch custody and prompt hashing (and a dependency
 warning in rollout usage without `--no-deps`); the new excessive-argument warning

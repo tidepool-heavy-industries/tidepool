@@ -72,20 +72,32 @@ struct PendingRotation {
     bytes: Vec<u8>,
 }
 
-#[derive(serde::Serialize)]
-struct ViewRecord<'a> {
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct ViewRecord {
     version: u32,
-    layers: Vec<&'a Path>,
-    upper: &'a Path,
-    work: &'a Path,
+    layers: Vec<PathBuf>,
+    upper: PathBuf,
+    work: PathBuf,
     warm: bool,
 }
 
-#[derive(serde::Serialize)]
-struct PendingViewRecord<'a> {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingViewRecord {
     version: u32,
-    view: ViewRecord<'a>,
+    view: ViewRecord,
     recovery: tidepool_node::OverlayRecoveryRecord,
+}
+
+impl ViewRecord {
+    fn new(layers: &[BuildLayer], upper: &Path, work: &Path, warm: bool) -> Self {
+        Self {
+            version: 1,
+            layers: layers.iter().map(|layer| layer.path.clone()).collect(),
+            upper: upper.to_owned(),
+            work: work.to_owned(),
+            warm,
+        }
+    }
 }
 
 fn encode_view(
@@ -94,14 +106,7 @@ fn encode_view(
     work: &Path,
     warm: bool,
 ) -> io::Result<Vec<u8>> {
-    serde_json::to_vec(&ViewRecord {
-        version: 1,
-        layers: layers.iter().map(|layer| layer.path.as_path()).collect(),
-        upper,
-        work,
-        warm,
-    })
-    .map_err(io::Error::other)
+    serde_json::to_vec(&ViewRecord::new(layers, upper, work, warm)).map_err(io::Error::other)
 }
 
 impl BuildResourceLease {
@@ -123,7 +128,18 @@ impl BuildResourceLease {
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "build resource has no parent")
         })?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "build resource has no directory name",
+                )
+            })?
+            .to_owned();
         tidepool_atomic_write::create_dir_all_durable(parent)?;
+        let parent = parent.canonicalize()?;
+        let path = parent.join(name);
         std::fs::create_dir(&path)?;
         tidepool_atomic_write::sync_parent_directory(&path)?;
         let storage = Arc::new(BuildStorage {
@@ -225,6 +241,9 @@ impl BuildResourceLease {
                 "build publication requires retained process custody",
             ));
         }
+        if let Some(outcome) = self.reconcile_pending(namespace, target)? {
+            return Ok(outcome);
+        }
         let generation = tempfile::Builder::new()
             .prefix("generation-")
             .tempdir_in(&self.storage.path)?;
@@ -253,13 +272,7 @@ impl BuildResourceLease {
         let pending = encode_view(&frozen, &upper, &work, true)?;
         let checkpoint = serde_json::to_vec(&PendingViewRecord {
             version: 2,
-            view: ViewRecord {
-                version: 1,
-                layers: frozen.iter().map(|layer| layer.path.as_path()).collect(),
-                upper: &upper,
-                work: &work,
-                warm: true,
-            },
+            view: ViewRecord::new(&frozen, &upper, &work, true),
             recovery: prepared.recovery_record()?,
         })
         .map_err(io::Error::other)?;
@@ -277,6 +290,107 @@ impl BuildResourceLease {
             bytes: pending,
         }));
         self.settle_rotation(outcome)
+    }
+
+    /// A possibly visible checkpoint write can survive even when the in-memory
+    /// state never advanced. Reconcile that record before allocating a candidate.
+    fn reconcile_pending(
+        &mut self,
+        namespace: &MountNamespace,
+        target: &Path,
+    ) -> io::Result<Option<OverlayRotationOutcome>> {
+        let bytes = match std::fs::read(self.storage.path.join("pending.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let pending: PendingViewRecord =
+            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if pending.version != 2 || pending.view.version != 1 || !pending.view.warm {
+            return Err(io::Error::other(
+                "unsupported pending build publication record",
+            ));
+        }
+        let next = pending
+            .view
+            .upper
+            .parent()
+            .ok_or_else(|| io::Error::other("pending upper has no generation"))?
+            .to_owned();
+        if next.parent() != Some(self.storage.path.as_path())
+            || pending.view.upper != next.join("upper")
+            || pending.view.work != next.join("work")
+        {
+            return Err(io::Error::other(
+                "pending build generation is outside its owning resource",
+            ));
+        }
+        let current = ViewRecord::new(&self.layers, &self.upper, &self.work, true);
+        let already_installed = current == pending.view;
+        let mut frozen = self.layers.clone();
+        if !already_installed {
+            if self.upper.starts_with(&next)
+                || self.work.starts_with(&next)
+                || self
+                    .layers
+                    .iter()
+                    .any(|layer| layer.path.starts_with(&next))
+            {
+                return Err(io::Error::other(
+                    "pending build generation overlaps retained layers",
+                ));
+            }
+            frozen.push(BuildLayer {
+                path: self.upper.clone(),
+                storage: self.storage.clone(),
+            });
+        }
+        if pending.view.layers
+            != frozen
+                .iter()
+                .map(|layer| layer.path.clone())
+                .collect::<Vec<_>>()
+        {
+            return Err(io::Error::other(
+                "pending publication does not extend the retained build view",
+            ));
+        }
+        let recovery = namespace.restore_overlay_recovery(pending.recovery)?;
+        if !recovery.matches_replacement(
+            target,
+            &pending.view.layers,
+            &pending.view.upper,
+            &pending.view.work,
+        )? {
+            return Err(io::Error::other(
+                "pending build view disagrees with its mount checkpoint",
+            ));
+        }
+        let outcome = recovery.reconcile();
+        if already_installed {
+            if !matches!(outcome, OverlayRotationOutcome::Rotated) {
+                return Err(io::Error::other(
+                    "recorded build view is not confirmed mounted",
+                ));
+            }
+            self.publication = PublicationState::NeedsRecord {
+                bytes: serde_json::to_vec(&pending.view).map_err(io::Error::other)?,
+                snapshot: BuildSnapshot {
+                    layers: self.layers.clone().into(),
+                },
+            };
+            self.record_publication()?;
+            return Ok(Some(outcome));
+        }
+        self.publication = PublicationState::Unconfirmed(Box::new(PendingRotation {
+            recovery,
+            next,
+            upper: pending.view.upper.clone(),
+            work: pending.view.work.clone(),
+            frozen,
+            bytes: serde_json::to_vec(&pending.view).map_err(io::Error::other)?,
+        }));
+        self.settle_rotation(outcome).map(Some)
     }
 
     fn settle_rotation(
@@ -321,7 +435,11 @@ impl BuildResourceLease {
             | OverlayRotationOutcome::Unchanged(_)
             | OverlayRotationOutcome::Restored(_) => {
                 self.publication = PublicationState::Writable;
-                std::fs::remove_dir_all(&next)?;
+                match std::fs::remove_dir_all(&next) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
                 self.finish_publication()?;
             }
             OverlayRotationOutcome::Unconfirmed(_) => {
@@ -633,6 +751,15 @@ mod tests {
 
     #[test]
     fn warm_generation_survives_busy_parent_and_independent_child() {
+        exercise_pending_recovery(false);
+    }
+
+    #[test]
+    fn persisted_publication_recovers_before_owner_layout_advances() {
+        exercise_pending_recovery(true);
+    }
+
+    fn exercise_pending_recovery(restore_previous_layout: bool) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let project = root.join("project");
@@ -668,8 +795,7 @@ mod tests {
             warm_layer
         );
         assert!(!parent.path().join("pending.json").exists());
-        // Preparation failed before invoking the mount owner. The old view is
-        // known to be writable and retry needs no reconciliation.
+        // An unreadable checkpoint must prevent allocation and mount mutation.
         std::fs::create_dir(parent.path().join("pending.json")).unwrap();
         let before = std::fs::read_dir(parent.path())
             .unwrap()
@@ -701,6 +827,11 @@ mod tests {
         // A confirmed mount with a failed manifest write only needs its record
         // retried. The next attempt must not create another writable generation.
         assert_eq!(worker.exchange("close"), "closed");
+        let old_layout = (
+            parent.layers.clone(),
+            parent.upper.clone(),
+            parent.work.clone(),
+        );
         std::fs::remove_file(parent.path().join("view.json")).unwrap();
         std::fs::create_dir(parent.path().join("view.json")).unwrap();
         assert!(parent.publish(&namespace, &project.join("target")).is_err());
@@ -729,11 +860,38 @@ mod tests {
             warm_layer
         );
         std::fs::remove_dir(parent.path().join("view.json")).unwrap();
+        // Lose the in-memory transition state while retaining the exact resource
+        // and namespace owners. Retry must use the durable checkpoint alone.
+        parent.publication = PublicationState::Writable;
+        if restore_previous_layout {
+            (parent.layers, parent.upper, parent.work) = old_layout;
+        }
+        let pending_path = parent.path().join("pending.json");
+        let saved = std::fs::read(&pending_path).unwrap();
+        let entries = || {
+            std::fs::read_dir(root.join("storage/parent"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.is_dir())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let generations = entries();
+        let mut invalid: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        invalid["version"] = 99.into();
+        let invalid = serde_json::to_vec(&invalid).unwrap();
+        std::fs::write(&pending_path, &invalid).unwrap();
+        assert!(parent.publish(&namespace, &project.join("target")).is_err());
+        assert_eq!(std::fs::read(&pending_path).unwrap(), invalid);
+        assert_eq!(entries(), generations);
+        std::fs::write(&pending_path, saved).unwrap();
         assert!(matches!(
             parent.publish(&namespace, &project.join("target")).unwrap(),
             OverlayRotationOutcome::Rotated
         ));
         assert_eq!(parent.layers.len(), layer_count);
+        assert_eq!(entries(), generations);
+        assert!(!pending_path.exists());
+        assert_eq!(parent.latest_snapshot().unwrap().layers.len(), layer_count);
         let mut child =
             BuildResourceLease::allocate_path(root.join("storage/child"), Some(snapshot)).unwrap();
         assert!(
