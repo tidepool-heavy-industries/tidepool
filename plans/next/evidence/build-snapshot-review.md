@@ -31,9 +31,13 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
    whose `.git` exists only in its mounted view and private merge metadata hidden
    from the host. Unavailable filesystem access fails rather than reporting a
    missing checkout. Creation still contains host `canonicalize` calls, and actor
-   composition does not yet bind each checkout to its namespace. Distinguish the
-   registered checkout identity from its stable namespace-visible path once, at
-   the worktree owner, rather than patching each caller with another path rewrite.
+   composition does not yet acquire the child source namespace. The registry now
+   retains per-checkout filesystem views, and Git translates registered checkout
+   paths to stable namespace-visible paths at its invocation/inspection owner.
+   `finish_inherited_source` verifies the mounted view's private Git directory,
+   branch and seed HEAD before exposing the checkout. The combined fixture
+   exercises ordinary lookup, listing, head reads and submission through that
+   path after the child commits independently.
 
 3. **Cache continuity needs metadata and path checks.** Empty replacement upper
    directories receive allocation-time metadata unless explicitly initialized.
@@ -108,13 +112,38 @@ flags, and expands a copied split index without changing the parent's index
 bytes. The prepared checkout has independent HEAD/branch/index and no freshly
 checked-out files. It remains provisional until a source view is installed;
 normal lookup refuses a handle to present but unfinished storage. The fixture
-still installs the child's source view manually. Host admission, source-view
-registration/finalization and automatic fallback remain unwired.
+still installs the child's source mount manually, then uses the owner to register
+and finalize it. Host admission, source-resource allocation and automatic fallback
+remain unwired.
 
 After that owner change, the combined source/build test and all 22 worktree-core
 checks passed. Clippy on both changed test targets, formatting and whitespace
-checks passed. Serialized receipts keep their existing format: preparation uses
-the existing provisional status rather than recording a completed checkout.
+checks passed. Preparation uses the existing provisional status rather than
+recording a completed checkout.
+
+Mounted finalization now records `WorktreeRecordStatus::Mounted` in the existing
+receipt. This is the explicit format extension: existing ordinary receipt bytes
+remain unchanged, and older binaries reject the new enum variant rather than
+mistaking the Git-only host directory for working files. No bulk migration of
+ordinary records is needed. Reopening seeds unavailable view requirements from
+these receipts; direct Git access and lookup fail until resource recovery restores
+the view. Namespace reattachment after restart is not yet implemented. There is
+no separate view manifest or second durable registry.
+
+Checks for this extension: the combined source/build check, 22 worktree-core
+checks, 14 storage-error checks and 10 durable-format checks passed. Wrong-view
+finalization is refused and leaves preparation provisional. The existing
+mounted-Git check also passed before the final receipt-loading adjustment.
+
+The combined fixture now protects backing/managed checkout storage read-only in
+the actor namespace. Git source inspection still enters that view, while child
+allocation and temporary-index rewriting use host-owned Git administration.
+This avoids trying to allocate sibling checkouts through the actor's read-only
+mounts. The stricter combined check, all 22 worktree-core checks and all 10
+dirty-snapshot checks passed after this change.
+`nix develop --command cargo check -p tidepool --bin shoal` compiled the application
+and changed consumers successfully. Clippy on the affected worktree test targets,
+formatting and whitespace checks passed.
 
 The source integration entry is `ActorForkWorkspaceAdmission::admit`, called by
 `try_start_child` in `tidepool-actor/src/resident_actor.rs` before the child is allocated and

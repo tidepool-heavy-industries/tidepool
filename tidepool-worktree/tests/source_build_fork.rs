@@ -162,6 +162,8 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
                     build_work: &str| {
         ProcessMountBoundary::new(&view, [view.clone()], [view.clone()])
             .unwrap()
+            .with_read_only_overlay(root, root)
+            .unwrap()
             .with_overlay_view(
                 source_layers,
                 root.join(source_upper),
@@ -246,6 +248,18 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
     let prepared = manager
         .prepare_inherited_source(&ActorPath::parse("root/child").unwrap())
         .unwrap();
+    let wrong_view = manager
+        .prepare_inherited_source(&ActorPath::parse("root/wrong-view").unwrap())
+        .unwrap();
+    let wrong_id = wrong_view.receipt().worktree_id.clone();
+    assert!(matches!(
+        manager.finish_inherited_source(wrong_view, parent.clone(), &view),
+        Err(tidepool_worktree::WorktreeError::WorktreeAuthorityDenied(_))
+    ));
+    assert_eq!(
+        manager.registry().get(&wrong_id).unwrap().unwrap().status,
+        WorktreeRecordStatus::Provisional
+    );
     assert_eq!(prepared.receipt().status, WorktreeRecordStatus::Provisional);
     assert!(matches!(
         manager.lookup(&prepared.receipt().worktree_id),
@@ -274,6 +288,40 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         "build-uc",
         "build-wc",
     ));
+    let host_manager = WorktreeManager::new(
+        tidepool_worktree::GitCli::new(),
+        manager.registry().clone(),
+        root.join("managed"),
+        repository.path(),
+    );
+    let handle = manager
+        .finish_inherited_source(prepared, child.clone(), &view)
+        .unwrap();
+    assert_eq!(handle.receipt().status, WorktreeRecordStatus::Mounted);
+    assert!(host_manager.lookup(handle.id()).unwrap().is_some());
+    assert!(host_manager
+        .registry()
+        .list()
+        .unwrap()
+        .iter()
+        .any(|row| row.receipt.worktree_id == *handle.id() && row.present));
+    let reopened = WorktreeManager::new(
+        tidepool_worktree::GitCli::new(),
+        WorktreeRegistry::open(root.join("registry")).unwrap(),
+        root.join("managed"),
+        repository.path(),
+    );
+    assert!(reopened
+        .git()
+        .try_run(handle.cwd(), &["status", "--porcelain"])
+        .is_err());
+    assert!(
+        matches!(
+            reopened.lookup(handle.id()),
+            Err(tidepool_worktree::WorktreeError::StorageFailure { .. })
+        ),
+        "lost view descriptors cannot expose the Git-only host directory"
+    );
     let child_git = git.with_mount_namespace(child.clone());
     assert_eq!(
         child_git
@@ -356,6 +404,22 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
             .unwrap()
             .stdout
     );
+    assert_eq!(
+        host_manager.worktree_head(&handle).unwrap().as_str(),
+        child_git
+            .try_run(&view, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trimmed()
+    );
+    assert_eq!(
+        host_manager
+            .git()
+            .try_run(handle.cwd(), &["diff"])
+            .unwrap()
+            .stdout,
+        child_git.try_run(&view, &["diff"]).unwrap().stdout
+    );
+    assert!(host_manager.observe_submission(&handle).is_ok());
     assert_eq!(
         parent_git
             .try_run(&view, &["diff", "--cached"])

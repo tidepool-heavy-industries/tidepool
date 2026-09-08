@@ -15,8 +15,8 @@
 //!   a live worktree nothing recorded (invisible, unrecoverable).
 //! - **Never deleted.** There is no removal API and there will not be one in
 //!   v1. Deferred question 1 in the PRD owns that conversation.
-//! - **Restart is a plain re-read.** Nothing about lookup may depend on
-//!   in-process state that a fresh process would not have.
+//! - **Restart retains filesystem requirements.** Mounted receipts require their
+//!   exact retained view to be recovered before filesystem operations can resume.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -53,18 +53,17 @@ pub enum WorktreeOrigin {
     Worktree(WorktreeId),
 }
 
-/// Whether a registry row was recorded before or after the worktree it
-/// describes was actually materialized.
-///
-/// `create` writes `Provisional` before `git worktree add` runs and
-/// `Finalized` after. A crash between those two writes leaves a
-/// `Provisional` row with no matching worktree on disk — discoverable via
-/// `list`, distinguishable from a `Finalized` row that a human later removed
-/// by hand (both report `present: false`, but only the latter was ever live).
+/// Checkout readiness and the filesystem required to access its working files.
+/// Preparation records `Provisional` before Git creation; completion records
+/// `Finalized` for ordinary host files or `Mounted` for an inherited source view.
+/// Provisional storage remains discoverable but cannot grant a usable handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeRecordStatus {
     Provisional,
     Finalized,
+    /// Complete checkout whose working files require its retained mount view.
+    /// Older readers reject this variant instead of inspecting a Git-only host directory.
+    Mounted,
 }
 
 /// The durable registry row for one managed worktree.
@@ -80,7 +79,8 @@ pub struct WorktreeReceipt {
     pub source_head: GitOid,
     /// `Some` exactly when the tree was created through
     /// [`crate::snapshot`] — the Tidepool-owned ref holding the synthetic
-    /// snapshot commit. `None` for a clean creation.
+    /// snapshot commit. `None` when rooted at an actual source commit, including
+    /// live source inheritance that preserves uncommitted changes separately.
     pub snapshot_ref: Option<GitRef>,
     pub origin: WorktreeOrigin,
     /// Absolute path of the immediate checkout this tree was created from.
@@ -115,6 +115,8 @@ pub struct WorktreeSummary {
 pub struct WorktreeRegistry {
     root: PathBuf,
     records: DurableJsonDir,
+    #[cfg(target_os = "linux")]
+    pub(crate) views: crate::view::WorktreeViews,
 }
 
 impl WorktreeRegistry {
@@ -149,19 +151,70 @@ impl WorktreeRegistry {
 
         let records = DurableJsonDir::open(canonical_root.join(RECORDS_DIR))?;
 
-        Ok(Self {
+        let registry = Self {
             root: canonical_root,
             records,
-        })
+            #[cfg(target_os = "linux")]
+            views: crate::view::WorktreeViews::default(),
+        };
+        registry.read_receipts()?;
+        Ok(registry)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn install_view(
+        &self,
+        receipt: &WorktreeReceipt,
+        namespace: tidepool_node::MountNamespace,
+        visible_root: &Path,
+    ) -> Result<(), WorktreeError> {
+        if !visible_root.is_absolute()
+            || visible_root
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(storage_failure(
+                visible_root,
+                "invalid mounted worktree root",
+            ));
+        }
+        let expected = inspect::git_dir(&GitCli::new(), &receipt.cwd)?;
+        let mounted_git = GitCli::new().with_mount_namespace(namespace.clone());
+        if inspect::git_dir(&mounted_git, visible_root)? != expected {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "mounted source view belongs to a different Git worktree".into(),
+            ));
+        }
+        if receipt.status == WorktreeRecordStatus::Provisional {
+            let head = mounted_git.try_run(visible_root, &["rev-parse", "HEAD"])?;
+            let branch = mounted_git.try_run(visible_root, &["symbolic-ref", "--short", "HEAD"])?;
+            if head.trimmed() != receipt.source_head.as_str()
+                || branch.trimmed() != receipt.branch.as_str()
+            {
+                return Err(WorktreeError::WorktreeAuthorityDenied(
+                    "prepared source Git state changed before finalization".into(),
+                ));
+            }
+        }
+        self.views
+            .install(
+                &receipt.cwd,
+                crate::view::MountedView {
+                    namespace,
+                    root: visible_root.to_owned(),
+                },
+            )
+            .map_err(|error| storage_failure(&receipt.cwd, error))
+    }
+
     /// Durably record a receipt. Overwrites an existing row for the same id
     /// (the snapshot lane writes `snapshot_ref` after creation).
     pub fn put(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
+        self.require_view_if_needed(receipt)?;
         #[allow(clippy::expect_used, reason = "serialize WorktreeReceipt")]
         let bytes = serde_json::to_vec_pretty(receipt).expect("serialize WorktreeReceipt");
         self.records.write(receipt.worktree_id.as_str(), &bytes)
@@ -184,6 +237,7 @@ impl WorktreeRegistry {
         };
         let receipt = serde_json::from_slice(&bytes)
             .map_err(|e| storage_failure(&self.records.path_for(id.as_str()), e))?;
+        self.require_view_if_needed(&receipt)?;
         Ok(Some(receipt))
     }
 
@@ -216,12 +270,9 @@ impl WorktreeRegistry {
         &self,
         git: &GitCli,
     ) -> Result<Vec<WorktreeSummary>, WorktreeError> {
-        let mut receipts = Vec::new();
-        for (path, bytes) in self.records.read_all()? {
-            let receipt: WorktreeReceipt =
-                serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
-            receipts.push(receipt);
-        }
+        #[cfg(target_os = "linux")]
+        let git = &git.clone().with_worktree_views(self.views.clone());
+        let mut receipts = self.read_receipts()?;
         receipts.sort_by(|a, b| {
             a.created_at_ms
                 .cmp(&b.created_at_ms)
@@ -234,6 +285,27 @@ impl WorktreeRegistry {
                 Ok(WorktreeSummary { receipt, present })
             })
             .collect()
+    }
+
+    fn read_receipts(&self) -> Result<Vec<WorktreeReceipt>, WorktreeError> {
+        let mut receipts = Vec::new();
+        for (path, bytes) in self.records.read_all()? {
+            let receipt: WorktreeReceipt =
+                serde_json::from_slice(&bytes).map_err(|e| storage_failure(&path, e))?;
+            self.require_view_if_needed(&receipt)?;
+            receipts.push(receipt);
+        }
+        Ok(receipts)
+    }
+
+    fn require_view_if_needed(&self, receipt: &WorktreeReceipt) -> Result<(), WorktreeError> {
+        if receipt.status == WorktreeRecordStatus::Mounted {
+            #[cfg(target_os = "linux")]
+            self.views
+                .require(&receipt.cwd)
+                .map_err(|error| storage_failure(&receipt.cwd, error))?;
+        }
+        Ok(())
     }
 
     /// Mint a fresh, unused worktree id: `wt-<uuid v4>`. A v4 UUID's 122 bits

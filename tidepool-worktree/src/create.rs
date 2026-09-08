@@ -157,6 +157,8 @@ impl WorktreeManager {
         worktree_root: impl Into<PathBuf>,
         source_repository: impl Into<PathBuf>,
     ) -> Self {
+        #[cfg(target_os = "linux")]
+        let git = git.with_worktree_views(registry.views.clone());
         Self {
             git,
             registry,
@@ -291,16 +293,28 @@ impl WorktreeManager {
         let index_utf8 = camino::Utf8Path::from_path(&index).ok_or_else(|| {
             crate::storage::storage_failure(&index, "index path is not valid UTF-8")
         })?;
-        let temporary_git = self.git.with_env("GIT_INDEX_FILE", index_utf8.as_str());
+        let source_directory = inspect::git_dir(&self.git, source)?;
+        let source_directory_utf8 =
+            camino::Utf8Path::from_path(&source_directory).ok_or_else(|| {
+                crate::storage::storage_failure(
+                    &source_directory,
+                    "Git directory is not valid UTF-8",
+                )
+            })?;
+        let temporary_git = self
+            .git
+            .on_host()
+            .with_env("GIT_DIR", source_directory_utf8.as_str())
+            .with_env("GIT_INDEX_FILE", index_utf8.as_str());
         if self.git.try_exists(Path::new(source_index.trimmed()))? {
             self.git
                 .copy_file_to_host(Path::new(source_index.trimmed()), &index)?;
             // Resolve split-index dependencies while the original Git directory
             // still supplies them. Only the temporary index may be rewritten.
-            temporary_git.try_run(source, &["update-index", "--no-split-index"])?;
+            temporary_git.try_run(&self.worktree_root, &["update-index", "--no-split-index"])?;
         } else {
             // A missing index is an empty staging area, not an index at HEAD.
-            temporary_git.try_run(source, &["read-tree", "--empty"])?;
+            temporary_git.try_run(&self.worktree_root, &["read-tree", "--empty"])?;
         }
         let seed = GitOid::from_raw(self.git.try_run(source, &["rev-parse", "HEAD"])?.trimmed());
         let resolved = ResolvedSeed {
@@ -320,6 +334,32 @@ impl WorktreeManager {
         Ok(PreparedSourceWorktree {
             receipt: handle.receipt,
         })
+    }
+
+    /// Complete Git preparation only after the child's actual mounted view is
+    /// accessible. All manager clones and their Git clients then resolve the
+    /// registered checkout path through that same retained filesystem view.
+    #[cfg(target_os = "linux")]
+    pub fn finish_inherited_source(
+        &self,
+        prepared: PreparedSourceWorktree,
+        namespace: tidepool_node::MountNamespace,
+        visible_root: &Path,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        let receipt = prepared.receipt;
+        if self.registry.get(&receipt.worktree_id)?.as_ref() != Some(&receipt) {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "source preparation does not match this worktree registry".into(),
+            ));
+        }
+        self.registry
+            .install_view(&receipt, namespace, visible_root)?;
+        let finalized = WorktreeReceipt {
+            status: WorktreeRecordStatus::Mounted,
+            ..receipt
+        };
+        self.registry.put(&finalized)?;
+        Ok(WorktreeHandle::from_receipt(finalized))
     }
 
     fn create_with_branch(
@@ -377,10 +417,12 @@ impl WorktreeManager {
             cwd.clone().into_os_string(),
             OsString::from(resolved.seed.as_str()),
         ]);
-        self.git.try_run(&resolved.git_repository, &args)?;
+        let common = inspect::git_common_dir(&self.git, &resolved.git_repository)?;
+        let host_git = self.git.on_host();
+        host_git.try_run(&common, &args)?;
 
         if let Some(index) = inherited_index {
-            let directory = inspect::git_dir(&self.git, &cwd)?;
+            let directory = inspect::git_dir(&host_git, &cwd)?;
             fs::copy(index, directory.join("index"))
                 .map_err(|error| crate::storage::storage_failure(&directory, error))?;
             // Working files are not installed yet. Keep the durable receipt
@@ -513,7 +555,7 @@ impl WorktreeManager {
             None => Ok(None),
             Some(receipt) => {
                 if worktree_present(&self.git, &receipt.cwd)? {
-                    if receipt.status != WorktreeRecordStatus::Finalized {
+                    if receipt.status == WorktreeRecordStatus::Provisional {
                         return Err(WorktreeError::WorktreeAuthorityDenied(format!(
                             "worktree {id} initialization is not finalized"
                         )));

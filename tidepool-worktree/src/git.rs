@@ -56,6 +56,8 @@ pub struct GitCli {
     env: BTreeMap<String, String>,
     #[cfg(target_os = "linux")]
     namespace: Option<tidepool_node::MountNamespace>,
+    #[cfg(target_os = "linux")]
+    views: crate::view::WorktreeViews,
 }
 
 impl GitCli {
@@ -72,6 +74,24 @@ impl GitCli {
         next
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_worktree_views(mut self, views: crate::view::WorktreeViews) -> Self {
+        self.views = views;
+        self
+    }
+
+    /// Managed checkout allocation writes host-owned Git administration and
+    /// storage, even when source inspection runs through a read-only actor view.
+    pub(crate) fn on_host(&self) -> Self {
+        let mut host = self.clone();
+        #[cfg(target_os = "linux")]
+        {
+            host.namespace = None;
+            host.views = crate::view::WorktreeViews::default();
+        }
+        host
+    }
+
     /// Return a clone with one environment variable overridden for its
     /// invocations. Used by the dirty-snapshot lane to point at a TEMPORARY
     /// index — the whole no-touch proof rests on that variable never leaking
@@ -86,6 +106,10 @@ impl GitCli {
 
     fn command(&self, cwd: &Path) -> std::io::Result<Command> {
         #[cfg(target_os = "linux")]
+        if let Some(view) = self.views.resolve(cwd)? {
+            return view.namespace.host_command(&view.root, OsStr::new("git"));
+        }
+        #[cfg(target_os = "linux")]
         if let Some(namespace) = &self.namespace {
             return namespace.host_command(cwd, OsStr::new("git"));
         }
@@ -96,6 +120,17 @@ impl GitCli {
 
     /// Filesystem inspection uses the same view as Git, never its host alias.
     pub(crate) fn try_exists(&self, path: &Path) -> Result<bool, WorktreeError> {
+        #[cfg(target_os = "linux")]
+        if let Some(view) = self
+            .views
+            .resolve(path)
+            .map_err(|error| crate::storage::storage_failure(path, error))?
+        {
+            return view
+                .namespace
+                .try_exists(&view.root)
+                .map_err(|error| crate::storage::storage_failure(path, error));
+        }
         #[cfg(target_os = "linux")]
         let result = match &self.namespace {
             Some(namespace) => namespace.try_exists(path),

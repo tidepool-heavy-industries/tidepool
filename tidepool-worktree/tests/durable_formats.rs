@@ -17,7 +17,7 @@
 //!    Closure: [`WorktreeId`], `PathBuf` (×2), [`BranchName`], [`GitOid`],
 //!    `Option<`[`GitRef`]`>`, [`WorktreeOrigin`] (`CurrentRepository` |
 //!    `Ref(GitRef)` | `Worktree(WorktreeId)`), `i64`,
-//!    [`WorktreeRecordStatus`] (`Provisional` | `Finalized`).
+//!    [`WorktreeRecordStatus`] (`Provisional` | `Finalized` | `Mounted`).
 //!
 //! 2. **`Vec<`[`Binding`]`>`** — `tidepool-worktree/src/binding.rs`. One JSON
 //!    file per worktree id at `<binding_root>/<worktree_id>.json`, holding
@@ -149,7 +149,7 @@ fn oid(hex_digit: char) -> GitOid {
 }
 
 // --- WorktreeReceipt samples: WorktreeOrigin's variants, WorktreeRecordStatus's
-// --- 2 variants, and Option<GitRef>'s Some/None. -----------------------------
+// --- variants, and Option<GitRef>'s Some/None. -------------------------------
 
 fn receipt_source_checkout() -> WorktreeReceipt {
     WorktreeReceipt {
@@ -408,6 +408,25 @@ fn worktree_receipt_source_checkout_golden_round_trips() {
         panic!("WorktreeReceipt failed to deserialize from source-checkout golden: {error}")
     });
     assert_eq!(back, sample);
+}
+
+#[test]
+fn mounted_worktree_receipt_golden_round_trips() {
+    let sample = WorktreeReceipt {
+        status: WorktreeRecordStatus::Mounted,
+        ..receipt_finalized_worktree_origin()
+    };
+    let json = assert_golden("worktree_receipt_mounted.json", &sample);
+    assert_eq!(
+        serde_json::from_str::<WorktreeReceipt>(&json).unwrap(),
+        sample
+    );
+    // Existing readers recognize only the two original status strings and
+    // therefore reject a mounted receipt instead of treating it as finalized.
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["status"],
+        "Mounted"
+    );
 }
 
 #[test]

@@ -41,6 +41,8 @@ pub mod snapshot;
 pub mod storage;
 pub mod submission;
 pub mod testing;
+#[cfg(target_os = "linux")]
+mod view;
 
 pub use binding::{ActiveBinding, AgentRef, Binding, BindingState, BindingTable, BindingTerminal};
 pub use create::{
