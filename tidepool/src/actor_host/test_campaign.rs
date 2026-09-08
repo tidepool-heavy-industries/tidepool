@@ -68,6 +68,7 @@ impl TestCampaign {
             .unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let mut config = ActorHostConfig {
+            shoal_executable: std::env::current_exe().unwrap(),
             workspace_inputs: None,
             haskell_root: crate::haskell_sources::ensure_shoal_haskell().unwrap(),
             workspace: repository.path().to_path_buf(),

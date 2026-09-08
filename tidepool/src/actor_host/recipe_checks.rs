@@ -95,6 +95,7 @@ impl Driver {
         )?;
         let defaults = selected.config()?;
         let config = ActorHostConfig {
+            shoal_executable: std::env::current_exe()?,
             workspace_inputs: Some(selected),
             haskell_root: crate::haskell_sources::ensure_shoal_haskell()?,
             workspace: repository.path().to_path_buf(),

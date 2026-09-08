@@ -785,6 +785,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
+            shoal_executable: std::env::current_exe()?,
             workspace: options.workspace.clone(),
             haskell_root,
             run_root: options.run_root.clone(),

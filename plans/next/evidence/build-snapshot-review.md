@@ -104,8 +104,15 @@ a receipt naming an unrelated process rather than the owned bootstrap. The
 combined source/Git/Cargo fixture now uses this owner to prepare and finalize the
 child checkout before any continuing worker is started, then enters that same
 view and confirms warm reuse and correct invalidation. Both checks passed. Node
-Clippy passed. Actor launch does not select this path yet; admission still needs
-to own and transfer the complete source/build state to launch.
+Clippy passed. Normal actor launch now prepares its complete boundary outside
+the fleet loop and invokes the existing Codex command through `enter-view`, with
+the deployment retaining the namespace. Resource custody is fenced before the
+bootstrap can run. The host records its Shoal executable explicitly; the CLI
+helper does not replace the Codex TUI or change native model/tool settings.
+Shoal compilation and all nine selected prompt/launch-shutdown checks passed.
+No live TUI was launched for this change. Admission still needs to own and
+transfer the inherited source/build state to this launch path; current ordinary
+admission continues to allocate Git worktrees.
 
 ## Next decisive implementation checkpoint
 

@@ -256,6 +256,8 @@ fn fork_workspace_admission(
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
+    /// This Shoal installation provides the internal namespace-entry executable.
+    pub shoal_executable: PathBuf,
     pub workspace_inputs: Option<crate::shoal::workspace::FrozenWorkspace>,
     pub workspace: PathBuf,
     pub haskell_root: PathBuf,
@@ -347,6 +349,8 @@ pub enum ActorHostReadiness {
 }
 
 struct InteractiveDeployment {
+    /// Retain the view independently of the bootstrap and native process lifetimes.
+    _workspace_view: tidepool_node::MountNamespace,
     supervisor: Option<ActorRef>,
     notified_provider_failures: std::collections::BTreeSet<(String, String)>,
     actor: ActorRef,
@@ -2381,6 +2385,34 @@ fn current_time_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
+fn retained_workspace_command(
+    executable: &Path,
+    view: &tidepool_node::MountNamespace,
+    cwd: &Path,
+    command: ProcessInvocation,
+) -> std::io::Result<ProcessInvocation> {
+    if !executable.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Shoal entry executable must be absolute",
+        ));
+    }
+    let mut args = vec![
+        "enter-view".into(),
+        "--view".into(),
+        serde_json::to_string(&view.entry()?).map_err(std::io::Error::other)?,
+        "--cwd".into(),
+        cwd.to_string_lossy().into_owned(),
+        "--".into(),
+        command.program,
+    ];
+    args.extend(command.args);
+    Ok(ProcessInvocation {
+        program: executable.to_string_lossy().into_owned(),
+        args,
+    })
+}
+
 async fn launch_prepared_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
@@ -2644,13 +2676,37 @@ async fn launch_prepared_interactive_application(
         spec.model.clone(),
         spec.effort.map(|effort| format!("{effort:?}")),
     );
-    let command = process_boundary.wrap(
-        BUBBLEWRAP_PROGRAM,
+    if let Some(resource) = &mut build_resource {
+        resource.process_may_exist();
+    }
+    if let Some(custody) = &installation.worktree_custody {
+        custody.process_may_exist();
+    }
+    let workspace_view = tokio::task::spawn_blocking(move || {
+        process_boundary.prepare_view(
+            BUBBLEWRAP_PROGRAM,
+            std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT,
+        )
+    })
+    .await
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
+    let command = retained_workspace_command(
+        &config.shoal_executable,
+        &workspace_view,
+        &agent_workspace,
         ProcessInvocation {
             program: command.program,
             args: command.args,
         },
-    );
+    )
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::BuildCommand, error)
+    })?;
     // Accepted hosted work may outlive listener cancellation. Retention starts
     // before either hosted submission or native process submission can occur.
     socket_directory.work_may_exist();
@@ -2693,12 +2749,6 @@ async fn launch_prepared_interactive_application(
             .to_string_lossy()
             .into_owned(),
     );
-    if let Some(resource) = &mut build_resource {
-        resource.process_may_exist();
-    }
-    if let Some(custody) = &installation.worktree_custody {
-        custody.process_may_exist();
-    }
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
@@ -2790,6 +2840,7 @@ async fn launch_prepared_interactive_application(
     let binding_control = service.lock().await.control.clone();
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
+            _workspace_view: workspace_view,
             supervisor: installation.supervisor_parent,
             notified_provider_failures: Default::default(),
             actor: actor_identity,
