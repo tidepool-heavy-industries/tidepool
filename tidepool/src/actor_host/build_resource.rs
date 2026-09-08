@@ -81,6 +81,13 @@ struct ViewRecord<'a> {
     warm: bool,
 }
 
+#[derive(serde::Serialize)]
+struct PendingViewRecord<'a> {
+    version: u32,
+    view: ViewRecord<'a>,
+    recovery: tidepool_node::OverlayRecoveryRecord,
+}
+
 fn encode_view(
     layers: &[BuildLayer],
     upper: &Path,
@@ -244,7 +251,19 @@ impl BuildResourceLease {
         let prepared = namespace.prepare_overlay_rotation(rotation)?;
         // Once prepared, a lost receipt must never cause a second publication.
         let pending = encode_view(&frozen, &upper, &work, true)?;
-        tidepool_atomic_write::write_durable(&self.storage.path.join("pending.json"), &pending)?;
+        let checkpoint = serde_json::to_vec(&PendingViewRecord {
+            version: 2,
+            view: ViewRecord {
+                version: 1,
+                layers: frozen.iter().map(|layer| layer.path.as_path()).collect(),
+                upper: &upper,
+                work: &work,
+                warm: true,
+            },
+            recovery: prepared.recovery_record()?,
+        })
+        .map_err(io::Error::other)?;
+        tidepool_atomic_write::write_durable(&self.storage.path.join("pending.json"), &checkpoint)?;
         // Preparation failures reclaim their unused directories. Once a mount
         // can exist, only confirmed transition settlement may release storage.
         let next = generation.keep();
@@ -685,6 +704,19 @@ mod tests {
         std::fs::remove_file(parent.path().join("view.json")).unwrap();
         std::fs::create_dir(parent.path().join("view.json")).unwrap();
         assert!(parent.publish(&namespace, &project.join("target")).is_err());
+        let mut checkpoint: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(parent.path().join("pending.json")).unwrap())
+                .unwrap();
+        assert_eq!(checkpoint["version"], 2);
+        let recovered = namespace
+            .restore_overlay_recovery(
+                serde_json::from_value(checkpoint["recovery"].take()).unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            recovered.reconcile(),
+            OverlayRotationOutcome::Rotated
+        ));
         let layer_count = parent.layers.len();
         assert_eq!(
             parent

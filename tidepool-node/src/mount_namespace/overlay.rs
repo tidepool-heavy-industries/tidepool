@@ -36,11 +36,27 @@ fn directory_option(path: &CString) -> io::Result<CString> {
 /// The resource owner must keep the layers immutable and exclude new native
 /// writes through the transition. An open writable FD is an additional kernel
 /// refusal boundary, not proof that background work has finished.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayRotation {
     target: CString,
     lower: Vec<CString>,
     upper: CString,
+    work: CString,
+    upper_option: CString,
+    work_option: CString,
+    backing_target: CString,
+    preserved_mounts: Vec<CString>,
+}
+
+// Deserialization is confined to a recovery record; an unvalidated recipe must
+// never become a publicly constructible rotation that can be applied directly.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(remote = "OverlayRotation")]
+struct RotationRecord {
+    target: CString,
+    lower: Vec<CString>,
+    upper: CString,
+    work: CString,
     upper_option: CString,
     work_option: CString,
     backing_target: CString,
@@ -62,7 +78,29 @@ pub struct OverlayRecovery {
     before: observation::Observation,
 }
 
+/// Durable evidence captured before mutation. Restoring this record only grants
+/// reconciliation of that transition, never another application of the rotation.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OverlayRecoveryRecord {
+    version: u32,
+    boot: String,
+    namespace: super::ViewIdentity,
+    #[serde(with = "RotationRecord")]
+    rotation: OverlayRotation,
+    before: observation::Observation,
+}
+
 impl PreparedOverlayRotation {
+    pub fn recovery_record(&self) -> io::Result<OverlayRecoveryRecord> {
+        Ok(OverlayRecoveryRecord {
+            version: 1,
+            boot: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?,
+            namespace: self.recovery.namespace.view_identity()?,
+            rotation: self.recovery.rotation.clone(),
+            before: self.recovery.before.clone(),
+        })
+    }
+
     pub fn apply(self) -> (OverlayRecovery, OverlayRotationOutcome) {
         let recovery = self.recovery;
         let result = match recovery
@@ -137,26 +175,45 @@ impl OverlayRotation {
         upper: &Path,
         work: &Path,
     ) -> io::Result<Self> {
-        if !target.is_absolute()
-            || target
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
-            || layers.is_empty()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid overlay rotation",
-            ));
-        }
         let paths = layers
             .iter()
             .map(PathBuf::as_path)
             .chain([upper, work])
             .map(Path::canonicalize)
             .collect::<io::Result<Vec<_>>>()?;
+        if paths.iter().any(|path| !path.is_dir()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "overlay backing path is not a directory",
+            ));
+        }
+        Self::from_resolved_paths(target, &paths, layers.len())
+    }
+
+    fn from_resolved_paths(
+        target: &Path,
+        paths: &[PathBuf],
+        layer_count: usize,
+    ) -> io::Result<Self> {
+        let absolute = |path: &Path| {
+            path.is_absolute()
+                && !path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+        };
+        if !absolute(target)
+            || layer_count == 0
+            || paths.len() != layer_count + 2
+            || paths.iter().any(|path| !absolute(path))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid overlay rotation",
+            ));
+        }
         if paths
             .iter()
-            .any(|path| !path.is_dir() || target.starts_with(path) || path.starts_with(target))
+            .any(|path| target.starts_with(path) || path.starts_with(target))
             || paths.iter().enumerate().any(|(i, a)| {
                 paths
                     .iter()
@@ -169,10 +226,10 @@ impl OverlayRotation {
                 "overlapping overlay backing directories",
             ));
         }
-        let parent = paths[layers.len()]
+        let parent = paths[layer_count]
             .ancestors()
             .skip(1)
-            .find(|parent| paths[layers.len() + 1].starts_with(parent))
+            .find(|parent| paths[layer_count + 1].starts_with(parent))
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "no common backing parent")
             })?;
@@ -188,10 +245,11 @@ impl OverlayRotation {
         Ok(Self {
             target: CString::new(target.as_os_str().as_bytes())
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
-            lower: aliases[..layers.len()].iter().rev().cloned().collect(),
-            upper: aliases[layers.len()].clone(),
-            upper_option: directory_option(&aliases[layers.len()])?,
-            work_option: directory_option(&aliases[layers.len() + 1])?,
+            lower: aliases[..layer_count].iter().rev().cloned().collect(),
+            upper: aliases[layer_count].clone(),
+            work: aliases[layer_count + 1].clone(),
+            upper_option: directory_option(&aliases[layer_count])?,
+            work_option: directory_option(&aliases[layer_count + 1])?,
             backing_target,
             preserved_mounts: Vec::new(),
         })
@@ -369,6 +427,54 @@ impl OverlayRotation {
 }
 
 impl MountNamespace {
+    pub fn restore_overlay_recovery(
+        &self,
+        record: OverlayRecoveryRecord,
+    ) -> io::Result<OverlayRecovery> {
+        self.require_live_owner()?;
+        if record.version != 1
+            || record.boot != std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+            || record.namespace != self.view_identity()?
+        {
+            return Err(io::Error::other(
+                "overlay recovery belongs to another kernel view or format",
+            ));
+        }
+        let path = |value: &CString| PathBuf::from(std::ffi::OsStr::from_bytes(value.as_bytes()));
+        // Reconciliation may need to thaw the original mount after replacement
+        // resources disappeared. Validate the saved recipe without requiring
+        // those paths to exist or granting another application capability.
+        let paths = record
+            .rotation
+            .lower
+            .iter()
+            .rev()
+            .chain([&record.rotation.upper, &record.rotation.work])
+            .map(path)
+            .collect::<Vec<_>>();
+        let rotation = OverlayRotation::from_resolved_paths(
+            &path(&record.rotation.target),
+            &paths,
+            record.rotation.lower.len(),
+        )?
+        .preserving_mounts(
+            &record
+                .rotation
+                .preserved_mounts
+                .iter()
+                .map(path)
+                .collect::<Vec<_>>(),
+        )?;
+        if rotation != record.rotation {
+            return Err(io::Error::other("overlay recovery recipe is inconsistent"));
+        }
+        Ok(OverlayRecovery {
+            namespace: self.clone(),
+            rotation,
+            before: record.before,
+        })
+    }
+
     /// Freeze and replace an overlay without restarting its workload.
     ///
     /// Call only while the owning native write-admission gate is held. This

@@ -10,7 +10,7 @@ use rustix::io::Errno;
 
 use super::{MountNamespace, OverlayRotation};
 
-#[derive(Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct Observation {
     pub(super) id: u64,
     pub(super) readonly: bool,

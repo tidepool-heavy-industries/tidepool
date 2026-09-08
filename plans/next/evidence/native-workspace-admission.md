@@ -125,15 +125,40 @@ resource owner. Preparing captures the original namespace and mount evidence;
 applying consumes the prepared rotation. The retained handle can reconcile or
 thaw the original transition but cannot start another rotation. The existing
 native-publication retry path uses it before attempting new preparation.
-The handle remains in memory: durable reconstitution after losing the host is
-still outstanding. Preparation uses a temporary generation directory, retained
-only when invoking the mount transition, so repeated pre-mount failures do not
-accumulate unused directories.
+Before applying, the build owner now writes a version-2 `pending.json` containing
+the intended view and an opaque `OverlayRecoveryRecord`. The record includes the
+original observation, validated replacement recipe, boot identity and pinned
+namespace/root identities. The node can reconstruct a reconciliation-only handle
+against a recovered live namespace. Wrong versions, boots, views and inconsistent
+recipes are refused before any mount change. Deserialization does not expose a
+publicly applicable unvalidated rotation. Reconciliation validates saved path
+relationships and option encoding without requiring replacement directories to
+still exist; a missing new upper must not prevent thawing the exact original mount.
+
+The host still needs to reopen its build-resource dependency graph and drive the
+pending record through native ownership recovery. That full startup path remains
+unfinished. Version-1 pending records lack the original transition evidence and
+must stay retained rather than being interpreted as version 2; current `view.json`
+records remain version 1. Preparation uses a temporary generation directory,
+retained only when invoking the mount transition, so repeated pre-mount failures
+do not accumulate unused directories.
 
 Checks passed: three owning mount-recovery tests, including delayed/repeated
 reconciliation without another mount switch; four build-resource tests, including
 preparation-failure cleanup and native finish-reply recovery. Changed host and
 node targets compiled; formatting and whitespace checks passed.
+
+The checkpoint extension passed all three mount-recovery checks after discarding
+process-local recovery handles and round-tripping the pre-mutation records. Both
+an installed replacement and an interrupted freeze reconcile without another
+rotation, including loss of the unused replacement upper. All four build-resource checks passed; the manifest-failure case also
+loads the actual retained `pending.json` and reconstructs its reconciliation
+handle. Node Clippy passed. This is durable transition evidence and node-level
+reconstitution, not proof of a complete host restart.
+All four OverlayFS integration checks also passed after recipe reconstruction was
+separated from filesystem-existence checks.
+The combined worktree/source/Cargo check passed after the shared namespace-identity
+refactor as well.
 
 ## Before enabling
 

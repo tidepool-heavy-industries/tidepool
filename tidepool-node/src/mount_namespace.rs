@@ -19,7 +19,8 @@ use rustix::thread::{CapabilitySet, CapabilitySets, LinkNameSpaceType};
 
 mod overlay;
 pub use overlay::{
-    OverlayRecovery, OverlayRotation, OverlayRotationOutcome, PreparedOverlayRotation,
+    OverlayRecovery, OverlayRecoveryRecord, OverlayRotation, OverlayRotationOutcome,
+    PreparedOverlayRotation,
 };
 
 /// A retained view into the mount namespace of an owned live process.
@@ -37,6 +38,12 @@ struct Descriptors {
     mount: OwnedFd,
     root: OwnedFd,
     process: OwnedFd,
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ViewIdentity {
+    namespaces_and_root: [(u64, u64); 3],
+    root_mount: u64,
 }
 
 impl Descriptors {
@@ -150,32 +157,33 @@ impl MountNamespace {
     /// contents or process liveness. Separate captures of the same view compare
     /// equal without relying on a PID or the allocation identity of this handle.
     pub fn same_view_as(&self, other: &Self) -> io::Result<bool> {
-        for (left, right) in [
-            (&self.descriptors.user, &other.descriptors.user),
-            (&self.descriptors.mount, &other.descriptors.mount),
-            (&self.descriptors.root, &other.descriptors.root),
-        ] {
-            let left = rustix::fs::fstat(left)?;
-            let right = rustix::fs::fstat(right)?;
-            if (left.st_dev, left.st_ino) != (right.st_dev, right.st_ino) {
-                return Ok(false);
-            }
+        Ok(self.view_identity()? == other.view_identity()?)
+    }
+
+    fn view_identity(&self) -> io::Result<ViewIdentity> {
+        let mut identities = [(0, 0); 3];
+        for (identity, fd) in identities.iter_mut().zip([
+            &self.descriptors.user,
+            &self.descriptors.mount,
+            &self.descriptors.root,
+        ]) {
+            let stat = rustix::fs::fstat(fd)?;
+            *identity = (stat.st_dev, stat.st_ino);
         }
-        // Bind mounts can share device/inode while exposing different nested
-        // mounts. The retained root must identify the same mount as well.
-        let root_mount = |root: &OwnedFd| -> io::Result<u64> {
-            let stat = rustix::fs::statx(
-                root,
-                c"",
-                rustix::fs::AtFlags::EMPTY_PATH,
-                rustix::fs::StatxFlags::MNT_ID,
-            )?;
-            if stat.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
-                return Err(io::Error::other("root mount identity unavailable"));
-            }
-            Ok(stat.stx_mnt_id)
-        };
-        Ok(root_mount(&self.descriptors.root)? == root_mount(&other.descriptors.root)?)
+        // Bind roots can share an inode while exposing different nested mounts.
+        let stat = rustix::fs::statx(
+            &self.descriptors.root,
+            c"",
+            rustix::fs::AtFlags::EMPTY_PATH,
+            rustix::fs::StatxFlags::MNT_ID,
+        )?;
+        if stat.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
+            return Err(io::Error::other("root mount identity unavailable"));
+        }
+        Ok(ViewIdentity {
+            namespaces_and_root: identities,
+            root_mount: stat.stx_mnt_id,
+        })
     }
 
     /// Prepare a trusted host command inside this view. The command retains the
