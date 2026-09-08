@@ -212,7 +212,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     campaign.await_watch_ready().await;
     let unavailable = committed(
         root.as_ref(),
-        "state <- pollWatch retainedFailureReady\ninspectFull (fmap (either (const True) (const False) . reportOnly) state)",
+        "state <- pollWatch retainedFailureReady\ninspectFull (fmap (either (const True) (const False) . settledValue) state)",
     )
     .await;
     assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
@@ -1658,7 +1658,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     let pending = committed(reviewer.policy.as_ref(), "pollReply sessionReply").await;
     assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
-    let repair_activation = tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if let Some(LocalResidentDeployment::SessionReady { activation }) =
                 campaign.deployments.recv().await
@@ -1671,18 +1671,19 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     })
     .await
     .unwrap();
+    let repair_packet = committed(
+        implementer.policy.as_ref(),
+        "inspectFull (taskSource (repairAssignment sessionInput), repairInput sessionInput, repairFindings sessionInput)",
+    ).await;
     for expected in [
         source.as_str(),
         candidate.as_str(),
-        "Why:",
-        "Findings:",
-        "Preserved gates:",
         "open product gate",
+        "preserve the product gate",
     ] {
         assert!(
-            repair_activation.message.contains(expected),
-            "missing {expected} from repair activation: {}",
-            repair_activation.message
+            repair_packet.to_string().contains(expected),
+            "missing {expected} from typed repair packet: {repair_packet}"
         );
     }
     let repair = committed(implementer.policy.as_ref(), "inspectFull sessionInput").await;

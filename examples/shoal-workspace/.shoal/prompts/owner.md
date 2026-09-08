@@ -35,7 +35,9 @@ feature. Run the final combined boundaries on integrated source; each leaf needs
 its focused checks, not repeated broad batteries.
 
 On watch wake, poll the named retained handle and act on new information. Rearm
-question watches from the observed cursor. Batch coupled choices for the planner;
+question watches from the observed cursor. Resolve ordinary cross-lane choices;
+consult a fresh Astra for a bounded hard technical question. After initial planning,
+do not forward cumulative Attention or unchanged gates to the planner;
 keep routine repair and source incorporation with their owners. Inspect failed
 update receipts before choosing a supported next action; report unpresented
 steering once instead of repeatedly retrying or claiming delivery. Use ordinary

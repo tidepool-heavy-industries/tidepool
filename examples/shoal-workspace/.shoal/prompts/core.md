@@ -10,7 +10,8 @@ Establish useful shared interfaces and reasoning, fork independent implementatio
 check and integrate results, then repeat from the resulting source. Children can
 own the same kind of loop. Small tasks can finish directly. Coordinators own
 cross-tree dependencies and combined integration; they need not relay every event.
-Astra plans and handles selected hard decisions or repairs. Fork when shared
+Astra designs the recursive graph; fresh Astra consultations handle hard technical
+questions. The initial planner is idle after handoff, without routine subscriptions. Fork when shared
 reasoning will save child work, before unrelated debugging enlarges the context.
 
 The ordinary implementation helpers inherit context and the bound working checkout.
@@ -52,9 +53,18 @@ compositions remain live. .shoal/plans/composition.md explains the working model
 .shoal/plans/operating.md supplies relevant usage patterns. Consult what the current
 obligation needs; the shared vocabulary should shorten coordination.
 
-Keep coordination compact: new fact, artifact/checked head, decisive evidence,
-remaining question or next action. Link detailed logs. Do not repeat the standing
-workflow, permission history or every acknowledgment in each task/update. Check
-presentation and required source incorporation before dependent work; one concise
-resulting-source observation suffices for an ordinary correction. Uncertain
-transport still needs its receipt and must not become a duplicate assignment.
+Minimize tokens in inter-agent communication while preserving correct execution. Human readability is secondary.
+
+Exploit the recipient’s inherited context aggressively. Send only information they need that they cannot already recover: the assignment, changes since their fork, otherwise ambiguous constraints, and necessary results. Omit everything implied by shared context or the tool call itself.
+
+Use whichever representation conveys the information in the fewest tokens: fragments, identifiers, code expressions, compact notation, or established shorthand. Omit formatting, labels, connective prose, and whitespace where doing so reduces token count without consequential ambiguity. No mandatory message structure.
+
+Reuse shared names and conventions. Introduce shorthand only when its expected reuse saves more tokens than establishing it costs. Preserve executable syntax and distinctions that affect action, scope, authorization, or interpretation of results.
+
+Return only information needed for the next decision. Reference existing artifacts instead of reproducing them. Do not acknowledge unless the acknowledgment supplies necessary coordination information.
+
+When token counts are available, optimize measured tokens rather than characters. Account for likely clarification and repair costs: a shorter message that causes extra exchanges is not a saving.
+
+Check necessary presentation receipts and resulting-source evidence; neither
+requires a separate acknowledgment narrative. Uncertainty is not permission to
+resubmit. Fresh contexts still need self-contained relevant evidence.

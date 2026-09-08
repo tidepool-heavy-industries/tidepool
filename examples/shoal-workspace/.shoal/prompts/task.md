@@ -5,8 +5,12 @@ implementation begins when its release condition is met.
 
 Build the real owning consumer and check behavior there. For substantial work,
 repeat committed scaffold, useful independent Sol branches, checked integration
-and the next local wave within the plan's discretion. Retain useful reasoning
-before forking; pass exact source and decision deltas. Default implementation helpers preserve inherited context and the current bound
+and the next local wave within the plan's discretion.
+Before a fork frontier, name the concrete consumer you will integrate and the
+implementation you retain while children work. Deliver minimum usable wiring
+early enough to exercise returned components together; a set of compatible-looking
+contracts is not that join. Retain useful reasoning before forking; pass exact
+source and decision deltas. Default implementation helpers preserve inherited context and the current bound
 checkout; use fresh context only for an explicit reason. Keep small terminal tasks
 simple. Preserve the component's stated integration and acceptance boundaries.
 

@@ -1134,7 +1134,9 @@ impl ResidentRequest {
             }
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
+            Self::Watches(WatchesReq::RegisterWatchGroupsWith(..)) => "watch",
             Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
+            Self::Watches(WatchesReq::RegisterRouteGroupsWith(..)) => "route",
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
             Self::Watches(WatchesReq::ListRoutesWith) => "listRoutes",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
@@ -2532,7 +2534,18 @@ where
                         drop(callback); // Custody is claimed from the suspension, not the decoded value.
                         let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
-                        let dependencies = dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect::<Result<Vec<_>, _>>()?;
+                        let dependencies = dependencies.into_iter().map(|dependency| {
+                            Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
+                        }).collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
+                        Ok(ResidentActorBoundary::RouteRegistration {
+                            registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
+                        })
+                    }
+                    ResidentRequest::Watches(WatchesReq::RegisterRouteGroupsWith(label, callback, groups)) => {
+                        drop(callback); // Custody is claimed from the suspension, not the decoded value.
+                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
+                        let dependencies = groups.into_iter().map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect()).collect::<Result<Vec<Vec<_>>, _>>()?;
                         Ok(ResidentActorBoundary::RouteRegistration {
                             registration: WatchRegistration { continuation: hole, label, dependencies }, entry,
                         })
@@ -2547,14 +2560,25 @@ where
                     )) => {
                         let dependencies = dependencies
                             .into_iter()
-                            .map(crate::request_effect::AwaitDependency::checked)
-                            .collect::<Result<Vec<_>, _>>()?;
+                            .map(|dependency| {
+                                Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
+                            })
+                            .collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
                         Ok(ResidentActorBoundary::WatchRegistration(
                             WatchRegistration {
                                 continuation: hole,
                                 dependencies,
                                 label,
                             },
+                        ))
+                    }
+                    ResidentRequest::Watches(WatchesReq::RegisterWatchGroupsWith(label, groups)) => {
+                        let dependencies = groups
+                            .into_iter()
+                            .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
+                            .collect::<Result<Vec<Vec<_>>, _>>()?;
+                        Ok(ResidentActorBoundary::WatchRegistration(
+                            WatchRegistration { continuation: hole, dependencies, label },
                         ))
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {

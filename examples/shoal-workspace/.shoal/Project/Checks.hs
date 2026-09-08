@@ -32,6 +32,8 @@ startComponent = do
 workbench :: Member RecipeCheck effects => Eff effects ()
 workbench = do
   (owner, lead) <- startComponent
+  projection <- readFile owner ".shoal/checks/observation-projection.hs" >>= turn owner
+  check "compact roster retains work and uncertain terminals" (output projection == "True")
   candidate <- checkpoint (checkActor lead) "feature.txt" "candidate feature\n" "implement feature"
   void $ turn (checkActor lead) ("let candidate = Candidate " <> literal candidate <> " [\"implementation content check\"] [\"open product gate\"]")
   script (checkActor lead) "component-review"
@@ -44,7 +46,8 @@ workbench = do
   void $ turn (checkActor lead) ("let revised = Candidate " <> literal revised <> " [\"repair content check\"] [\"open product gate\"]")
   script (checkActor lead) "review-again"
   reused <- activation
-  check "the same reviewer receives the repaired revision" (checkActor reused == checkActor reviewer && revised `Text.isInfixOf` checkContext reused)
+  revisedInput <- turn (checkActor reused) "inspectFull (reviewInput sessionInput)"
+  check "the same reviewer receives the repaired revision" (checkActor reused == checkActor reviewer && revised `Text.isInfixOf` output revisedInput)
   void $ git (checkActor reviewer) ["merge", "--ff-only", revised]
   content <- readFile (checkActor reviewer) "feature.txt"
   check "review checks the repaired source" (content == "repaired feature\n")

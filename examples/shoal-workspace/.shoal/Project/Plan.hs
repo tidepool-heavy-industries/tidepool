@@ -51,7 +51,7 @@ componentLead :: BranchLabel -> Task -> Branch CodingEffects Task Delivery
 componentLead label = componentLeadFrom label boundHead
 
 componentLeadFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task Delivery
-componentLeadFrom label source task = withInstructions (projectPrompt "lead") $
+componentLeadFrom label source task = withEffort Medium $ withInstructions (projectPrompt "lead") $
   solTaskFrom label source task
 
 relationDesign :: CampaignLabel -> Either Text DesignSlot

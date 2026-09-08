@@ -25,7 +25,8 @@ collaboration = do
   reviewer <- activation
   script (checkActor reviewer) "project_review_repair"
   repair <- activation
-  check "delegated repair reuses its available implementer" (checkActor repair == checkActor implementer && "Preserved gates:" `Text.isInfixOf` checkContext repair)
+  repairPacket <- turn (checkActor repair) "inspectFull (repairInput sessionInput, repairFindings sessionInput)"
+  check "delegated repair reuses its available implementer with exact typed evidence" (checkActor repair == checkActor implementer && candidate `Text.isInfixOf` output repairPacket && "open product gate" `Text.isInfixOf` output repairPacket && "preserve the product gate" `Text.isInfixOf` output repairPacket)
   revised <- checkpoint (checkActor implementer) "feature.txt" "repaired\n" "repair feature"
   void $ turn (checkActor implementer) ("respond (Produced (Candidate " <> literal revised <> " [\"focused repair check\"] [\"open product gate\"]))")
   void $ turn (checkActor reviewer) "state <- pollWatch repaired"
@@ -59,7 +60,7 @@ collaboration = do
   check "failed steering preserves the pending review and receipt" ("UpdateNotPresented" `Text.isInfixOf` output failed && "ResponsePending" `Text.isInfixOf` output failed)
   void $ turn owner "Right supported <- updateRequest (forkedResponse reviewer) (decisionContext acceptedDecision)"
   message <- present
-  check "the owning return carries the exact question and incorporated source" (amendment `Text.isInfixOf` message && "questionKey = \"semantics\"" `Text.isInfixOf` message)
+  check "the owning return carries the exact question and incorporated source" (amendment `Text.isInfixOf` message && "semantics @" `Text.isInfixOf` message)
   void $ git (checkActor reviewer) ["merge", "--ff-only", amendment]
   propagation <- readFile (checkActor reviewer) ".shoal/checks/project_decision_consumer.hs" >>= turn (checkActor reviewer)
   check "an old answer cannot clear a changed question or rewind the task source" ("(True,True,True,True)" `Text.isInfixOf` output propagation)

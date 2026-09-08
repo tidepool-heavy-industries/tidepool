@@ -1,5 +1,9 @@
 # Recursive implementation package improvement
 
+The next iteration is [coordination-rsi.md](coordination-rsi.md). Its planner
+handoff, fresh consultations and progress collection supersede the older execution
+guidance below; this document retains the earlier checked package evidence.
+
 Scope: next-wave authored package and shipped guidance. Keep the current original
 root `.shoal`, running binaries and compiler selection frozen. Resume stopped waves
 from committed artifacts and lane handoffs; do not revive old actors or assume

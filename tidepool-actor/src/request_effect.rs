@@ -68,7 +68,9 @@ pub(crate) enum RepliesReq {
 pub(crate) enum WatchesReq {
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, Vec<AwaitDependency>),
+    RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
     RegisterRouteWith(String, tidepool_eval::Value, Vec<AwaitDependency>),
+    RegisterRouteGroupsWith(String, tidepool_eval::Value, Vec<Vec<AwaitDependency>>),
     ObserveRouteWith(i64),
     ListRoutesWith,
     #[core(module = "Tidepool.Agent.Watch.Internal")]
@@ -157,7 +159,7 @@ pub(crate) struct CancellationAcknowledgement {
 
 pub(crate) struct WatchRegistration {
     pub continuation: ResidentHole,
-    pub dependencies: Vec<(RequestId, crate::request::WatchRequirement)>,
+    pub dependencies: Vec<Vec<(RequestId, crate::request::WatchRequirement)>>,
     pub label: String,
 }
 

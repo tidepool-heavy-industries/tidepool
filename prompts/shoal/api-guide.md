@@ -12,11 +12,6 @@ coding actor. It is a syntax example, not a recommended task size. Replace the
 assignment with a bounded obligation against the actual shared scaffold.
 
 ```haskell
-:{
-reportOnly :: Settlement a -> Either ResponseFailure a
-reportOnly (ReplyAvailable result) = Right (responseValue result)
-reportOnly (ReplyUnavailable failure) = Left failure
-:}
 let Right campaign = campaignLabel "api-guide"
 let Right wave = forkGroupLabel "checks"
 let Right checkBranch = branchLabel "hit-targets"
@@ -31,11 +26,11 @@ waiting on the watch. On its wake, use the retained handle in a later call:
 
 ```haskell
 result <- pollWatch ready
-inspectFull (fmap reportOnly result)
+inspectFull (fmap settledValue result)
 ```
 
 `fmap` preserves `WatchPending` and `WatchUnavailable`; inside `WatchReady`,
-`reportOnly` preserves a failed child as `Left`, rather than pretending it
+`settledValue` preserves a failed child as `Left`, rather than pretending it
 returned a report. A successful report is not review, acceptance, or integration.
 Keep the original result when execution/worktree evidence matters.
 
@@ -161,6 +156,8 @@ awaitSettledFork :: Forked result -> Await (Settlement result)
 awaitFork        :: Forked result -> Await (ResponseResult result)
 awaitSettled     :: Response result -> Await (Settlement result)
 awaitResponse    :: Response result -> Await (ResponseResult result)
+awaitAnyProgress :: [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
+settledValue     :: Settlement result -> Either ResponseFailure result
 watch     :: Member Watches effects => WatchLabel -> Await result -> Eff effects (Watch result)
 pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState result)
 
@@ -181,6 +178,9 @@ responseWorktree  :: ResponseResult result -> WorktreeEvidence
 `Await` describes dependencies; `watch` registers a wake subscription.
 `awaitSettledFork`/`awaitSettled` retain dependency failures inside `Settlement`;
 `awaitFork`/`awaitResponse` propagate unavailability to the watch instead.
+`awaitAnyProgress` wakes when any input advances or closes; captured results retain
+input order, with unchanged inputs Pending. Applicative combinations still wait
+for all combined dependencies. Empty input is immediately ready with [].
 A terminal watch can be polled again without consuming it. A notice is not the
 result: poll its retained handle, and do not repeat the original work.
 
@@ -211,6 +211,12 @@ active response without replacing its reply obligation. Handle its `Left` and
 poll a returned `Right` handle. Presentation is not incorporation. Queued work
 is not yet steerable; unconfirmed delivery can fence settlement. See
 `:doc request` for delivery/recovery policy, and `:doc refinement` for review.
+
+Actor messages are machine coordination: use fragments, exact refs and established
+names. Send only post-fork changes, ambiguous constraints and the next needed
+result. Do not repeat the recipient's task or shared instructions. Preserve
+identity, authority, uncertain submission and acceptance scope when consequential.
+Fresh contexts still need the meaning behind their refs. No mandatory format.
 
 For an active request, activation supplies `sessionInput`'s type and the reply
 type/declaration. Select or apply opaque input; use `inspectFull sessionInput`

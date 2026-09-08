@@ -35,7 +35,8 @@
 - **Task**: source, obligation, rationale, owning scope, acceptance and relevant
   accepted decisions supplied to a fresh context. A plan path alone is insufficient.
 - **Attention**: the cumulative unresolved Question set published by an active
-  request. An AcceptedDecision records the exact answered question, checked source,
+  request, retained by Sol execution owners rather than forwarded to the planner.
+  Hard questions use explicit consultDesign requests. An AcceptedDecision records the exact answered question, checked source,
   reasoning and evidence; it grants no authority and cannot erase a newer question.
 - **Outcome**: Produced value or Blocked reason evidence. This product conclusion
   is separate from a Settlement reporting whether execution supplied any reply.
@@ -44,6 +45,5 @@
   receipt with resulting head and checks. Receiving a proposal is not adoption.
 
 The Haskell task/result types encode these coordination distinctions. Rust owns
-runtime authority and actor/request identity. Compact messages should keep the
-candidate, evidence, uncertainty, current owner and next useful action. Do not
-compress away spaces, units, negation or the difference between a claim and check.
+runtime authority and actor/request identity. Intra-swarm messages use the shared compact-communication policy: no mandatory
+format; include only what the recipient needs for correct next action. Preserve executable syntax, units, negation, authority and claim/check distinctions.

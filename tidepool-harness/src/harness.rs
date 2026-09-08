@@ -3901,8 +3901,8 @@ mod tests {
     }
 
     /// A diagnostic whose raw line falls in NEITHER candidate's window — the
-    /// wrapper-origin shape, since the wrapper sits textually after the
-    /// user's own code — is treated as wrapper FALLOUT, never raw-dumped in
+    /// generated-wrapper shape, since the wrapper sits textually after the
+    /// user's own code — is treated as wrapper fallout, never raw-dumped in
     /// template coordinates: `pick_render_opts` falls back to the first
     /// candidate's window, so `render_diagnostics`'s own fallout partition
     /// classifies the diagnostic as outside the user's code and — since it's
@@ -3928,7 +3928,7 @@ mod tests {
         assert!(out.contains("Expr.hs:9999:1"), "{out}");
         assert!(out.contains("deep in generated scaffolding"), "{out}");
         assert!(
-            out.contains("arose in the harness's result-display wrapper"),
+            out.contains("only on generated workbench wrapper lines"),
             "expected the synthetic wrapper-fallout framing line too: {out}"
         );
     }
@@ -3966,7 +3966,7 @@ mod tests {
         let out = render_compile_error(&helpers_err, "userExprLine0", &expr_source, &bind_source);
         assert!(out.contains("(!!) is partial"), "{out}");
         assert!(
-            !out.contains("arose in the harness's result-display wrapper"),
+            !out.contains("only on generated workbench wrapper lines"),
             "a helpers-region error must never be classified as wrapper fallout: {out}"
         );
 
@@ -3980,7 +3980,7 @@ mod tests {
         let out = render_compile_error(&imports_err, "userExprLine0", &expr_source, &bind_source);
         assert!(out.contains("Could not find module"), "{out}");
         assert!(
-            !out.contains("arose in the harness's result-display wrapper"),
+            !out.contains("only on generated workbench wrapper lines"),
             "an imports-region error must never be classified as wrapper fallout: {out}"
         );
     }
@@ -4002,9 +4002,12 @@ mod tests {
         assert!(out.contains("<turn>:1:"), "{out}");
         assert!(out.contains("Variable not in scope"), "{out}");
         assert!(!out.contains("No instance for Show Foo"), "{out}");
-        assert!(out.contains("further error(s) suppressed"), "{out}");
         assert!(
-            !out.contains("arose in the harness's result-display wrapper"),
+            out.contains("further error(s) reported on generated workbench wrapper lines"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("only on generated workbench wrapper lines"),
             "{out}"
         );
     }

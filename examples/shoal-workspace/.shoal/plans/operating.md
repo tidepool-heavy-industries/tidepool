@@ -64,7 +64,9 @@ and which work may now proceed. Owners incorporate it into their current Task an
 source; record source/check evidence before resolving the exact question. A
 presented update alone proves neither understanding nor incorporation. Complete
 this initial checkpoint once, then allow the agreed local waves; repeat planner
-review for consequential changed architecture, not every small child or repair.
+review only when the human reengages that planning relationship. Hard technical
+questions during execution go directly to fresh Astra consultations; ordinary
+interface and ownership decisions stay with Sol.
 An operator hold is separate and always requires explicit release.
 
 ## Repeated local waves and context choices
@@ -77,7 +79,10 @@ continue, retaining the remaining component obligation.
 
 Commit a usable scaffold before its consumers fork: real interfaces and minimum
 behavior, explicit holes and tests, source ownership and the reasoning for the
-boundary. Root-owned UI/API wiring is a deliverable with a recipient and timing;
+boundary. Give shared fixtures and build/module-list edits one executing owner
+before dependent branches fork; do not discover their conflicts at integration.
+A reservation without a worker or parent implementing it is not a dependency
+being delivered. Root-owned UI/API wiring is a deliverable with a recipient and timing;
 provide it early enough for dependent lanes to exercise the actual consumer.
 A branch awaiting its second scaffold need not stop a sibling's third wave.
 
@@ -120,8 +125,8 @@ shared investigation and accepted decisions are valuable to the child, and fork
 before unrelated debugging accumulates. Default solTask/componentLead uses
 inherited context and boundHead, as does implement. Original-root callers use
 solTaskFrom/componentLeadFrom with projectHead. Select a fresh taskContext
-explicitly for unrelated work; select withEffort Medium for substantial engineering
-when the default Low would underspecify the assignment. Use an explicit atRef
+explicitly for unrelated work. componentLead selects Medium; solTask/implement
+select Low, with withEffort Medium for substantial engineering. Use an explicit atRef
 source for exact committed inspection. Model selection is independent. Descendants
 normally remain supervised. A root
 may admit SwarmOwned selected leads; that lifetime is not compatible with an
@@ -154,8 +159,7 @@ its referenced binding can introduce recursive name capture. Source escaping,
 type inference, invocation, and actual retained effects need appropriate checks.
 A matched golden string is not proof that the intended operation happened.
 
-Report concise evidence: new fact, exact source, decisive check, open gate and
-needed decision or next owner. Preserve original typed results and logs; print
+Use the shared compact-communication policy; no report template is mandatory. Preserve original typed results and logs; print
 small projections such as workSummary when available. Attribute checks to the
 revision actually examined, including inherited baseline failures and unperformed
 live gates. Individual workers run focused checks; integration owns the final

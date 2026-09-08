@@ -14,7 +14,15 @@ For independently integrable work, register one watch per branch so a ready
 candidate does not wait behind its sibling.
 
 End the model response normally. When the watch becomes terminal, Tidepool
-reactivates the actor and `pollWatch joined` returns its typed observation.
+reactivates the actor and For independently advancing progress sources, `awaitAnyProgress [(left, leftCursor),
+(right, rightCursor)]` captures a list in the same order when any input advances or
+closes. Unchanged inputs remain ProgressPending in that captured observation.
+Keep each source's cursor and previous value when rearming; closure does not mean
+its earlier unresolved facts disappeared. `route` can own that continuation
+without another model turn. The curated Project.Work.followAttentionSources
+implements this policy with named sources; it is not a core role requirement.
+
+`pollWatch joined` returns its typed observation.
 
 `Await a` is the pure dependency description; `Watch a` is its registered
 subscription. `ReplyAvailable` carries a typed result and its evidence;
@@ -36,12 +44,9 @@ the two `Text` reports above, this projection preserves pending and failure stat
 
 ```haskell
 :{
-reportOnly :: Settlement a -> Either ResponseFailure a
-reportOnly (ReplyAvailable result) = Right (responseValue result)
-reportOnly (ReplyUnavailable failure) = Left failure
 reportPairView :: WatchState (Settlement Text, Settlement Text)
                -> WatchState (Either ResponseFailure Text, Either ResponseFailure Text)
-reportPairView = fmap (\(left, right) -> (reportOnly left, reportOnly right))
+reportPairView = fmap (\(left, right) -> (settledValue left, settledValue right))
 :}
 joinedState <- pollWatch joined
 inspectFull (reportPairView joinedState)

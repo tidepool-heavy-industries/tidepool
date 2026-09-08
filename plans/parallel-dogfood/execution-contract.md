@@ -118,8 +118,9 @@ quota. Each coding fork carries useful shared reasoning, not merely a file list.
 Retain the four lane-declared Astra High slots: application identity/admission;
 application completion/custody; GHC handoff/schema; call/layout/root/failure ABI.
 Activate each only with a bounded consequential question and owning-boundary
-examples/evidence. Experts may advise or implement a bounded hard repair; Sol checks and incorporates. Additional costly
-consultations or architectural/scope changes return to this planner. Useful experts
+examples/evidence in a fresh selected context. Experts may advise or implement a
+bounded hard repair; the requesting Sol checks and incorporates. Sol can commission
+further bounded consultations when needed. Changed product scope goes to the human. Useful experts
 remain available for repairs; usage targets are not termination instructions.
 
 Returns contain artifact hash, integrated hash, decisive checks and remaining
@@ -133,5 +134,6 @@ or usage reporting to workers. Product checks remain with implementation owners.
 
 Partial integration retains both full goals. Final delivery names matched source,
 actual production consumers, deletions, measurements and all remaining limitations.
-After the initial review I yield to retained progress/result watches; Sol handles
-routine execution, while consequential amendments and final intent remain here.
+After the initial review the planner idles without routine progress subscriptions.
+Sol owns execution, integration and ordinary decisions; hard technical questions
+go directly to fresh Astra consultations. Human steering can reopen planning.

@@ -2470,7 +2470,7 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_with_route(
+                    .register_watch_groups_with_route(
                         context.actor,
                         registration.label,
                         registration.dependencies,
@@ -2525,7 +2525,7 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_requirements(
+                    .register_watch_requirement_groups(
                         context.actor,
                         registration.label,
                         registration.dependencies,

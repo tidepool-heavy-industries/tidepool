@@ -4,6 +4,8 @@
 
 module Project.Observe
   ( WorkObservation (..), observeWork, workSummary, deliverySummary
+  , attentionSummary, progressSummary
+  , workingAndAbnormal, actorSummary
   , RsiInput (..), rsiContext, rsiBranch
   ) where
 
@@ -69,12 +71,42 @@ workSummary observed = Text.unlines
       ProgressClosed -> "progress closed; retained outcomes/watches carry earlier evidence"
       ProgressRejected failure -> "unavailable: " <> shown failure
   , "Requested-model usage (coverage retained): " <> shown (usageByRequestedModel (observedTree observed))
-  , "Actors (label, identity, model, lifecycle/provider state/staleness, current/queued requests, received requests/events, compactions): "
-      <> shown [(rosterLabel actor, (rosterActorId actor, rosterActorIncarnation actor), rosterRequestedModel actor,
-           (rosterState actor, rosterProviderHealth actor, rosterProviderObservationStale actor),
-           rosterCurrentRequests actor, rosterQueuedRequests actor,
-           rosterReceivedRequests actor, rosterReceivedCoordinationEvents actor, rosterCompactions actor)
-         | actor <- snapshotActors (observedTree observed)]
+  , "Working/abnormal actors (identity, label, lifecycle, provider, stale, current/queued): "
+      <> shown (actorSummary (workingAndAbnormal (observedTree observed)))
+  ]
+
+-- Small views for the next decision. Keep original values for full evidence.
+attentionSummary :: Attention -> [(Text, Text, Text)]
+attentionSummary = map (\q -> (questionKey q, questionSource (questionDetails q), questionFinding (questionDetails q)))
+
+progressSummary :: WorkProgress -> ([(Text, [Text])], [(Text, Text, Text)])
+progressSummary progress =
+  ([(candidateCommit candidate, remainingGates candidate) | candidate <- workEvidence progress]
+  , attentionSummary (workQuestions progress))
+
+-- Preserve full rows for drill-down. This is a view, not cleanup authorization;
+-- an omitted actor is not thereby proven safe to retire.
+workingAndAbnormal :: SwarmSnapshot -> SwarmSnapshot
+workingAndAbnormal current = current { snapshotActors = filter relevant (snapshotActors current) }
+  where
+    relevant actor = rosterProviderObservationStale actor
+      || not (null (rosterCurrentRequests actor) && null (rosterQueuedRequests actor))
+      || case rosterState actor of
+        RosterFailed _ -> True
+        RosterCancelled _ -> True
+        RosterStopped -> case rosterProviderHealth actor of
+          ProviderSucceeded -> False
+          _ -> True
+        RosterRunning -> case rosterDisposition actor of
+          Just IdleRetained -> False
+          _ -> True
+
+actorSummary :: SwarmSnapshot -> [((Int, Int), Text, AgentRosterState, ProviderHealth, Bool, ([Int], [Int]))]
+actorSummary current =
+  [ ((rosterActorId actor, rosterActorIncarnation actor), rosterLabel actor,
+      rosterState actor, rosterProviderHealth actor, rosterProviderObservationStale actor,
+      (rosterCurrentRequests actor, rosterQueuedRequests actor))
+  | actor <- snapshotActors current
   ]
 
 -- The human's question selects a useful view, not a permanent monitoring actor.

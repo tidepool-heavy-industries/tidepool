@@ -81,8 +81,9 @@ pub enum GhciInputError {
 /// Parse one custom-tool payload as a small GHCi-style script.
 ///
 /// The grammar reserves colon-prefixed lines for workbench commands, treats
-/// every other nonblank line as Haskell, and recognizes `:{` / `:}` as one
-/// multiline Haskell unit. Block contents retain their exact decoded text;
+/// every other nonblank line as Haskell, joins more-indented continuation
+/// lines to their preceding Haskell unit, and recognizes `:{` / `:}` as one
+/// explicit multiline unit. Block contents retain their exact decoded text;
 /// the delimiters themselves do not become Haskell source.
 pub fn parse_ghci_input(source: &str) -> Result<Vec<GhciInputUnit>, GhciInputError> {
     let script = GhciScriptParser::parse(Rule::script, source)
@@ -100,7 +101,24 @@ pub fn parse_ghci_input(source: &str) -> Result<Vec<GhciInputUnit>, GhciInputErr
                     .ok_or_else(|| GhciInputError::Grammar("code unit contained no source".into()))?
                     .as_str()
                     .to_owned();
-                units.push(GhciInputUnit::Code { source, line });
+                let indent = leading_indent(&source);
+                let extends_previous = matches!(
+                    units.last(),
+                    Some(GhciInputUnit::Code { source: previous, .. })
+                        if indent > leading_indent(previous)
+                );
+                if extends_previous {
+                    let Some(GhciInputUnit::Code {
+                        source: previous, ..
+                    }) = units.last_mut()
+                    else {
+                        unreachable!("extends_previous only matches a code unit");
+                    };
+                    previous.push('\n');
+                    previous.push_str(&source);
+                } else {
+                    units.push(GhciInputUnit::Code { source, line });
+                }
             }
             Rule::command_unit => {
                 let command_pair = pair
@@ -168,6 +186,19 @@ fn strip_one_line_ending(source: &str) -> &str {
         .strip_suffix("\r\n")
         .or_else(|| source.strip_suffix('\n'))
         .unwrap_or(source)
+}
+
+fn leading_indent(source: &str) -> usize {
+    source
+        .chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .fold(0, |column, character| {
+            if character == '\t' {
+                column + (8 - column % 8)
+            } else {
+                column + 1
+            }
+        })
 }
 
 fn meta_command_from_pair(
@@ -1151,6 +1182,81 @@ mod tests {
     }
 
     #[test]
+    fn ghci_script_groups_indented_layout_before_following_reply() {
+        assert_eq!(
+            parse_ghci_input(
+                "let findings =\n  [ \"first\"\n  , \"second\"\n  ]\nrespond findings\n"
+            )
+            .unwrap(),
+            vec![
+                GhciInputUnit::Code {
+                    source: "let findings =\n  [ \"first\"\n  , \"second\"\n  ]".into(),
+                    line: 1,
+                },
+                GhciInputUnit::Code {
+                    source: "respond findings".into(),
+                    line: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ghci_script_keeps_same_indent_haskell_as_separate_units() {
+        assert_eq!(
+            parse_ghci_input("  first = 1\n  second = 2\n").unwrap(),
+            vec![
+                GhciInputUnit::Code {
+                    source: "  first = 1".into(),
+                    line: 1,
+                },
+                GhciInputUnit::Code {
+                    source: "  second = 2".into(),
+                    line: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ghci_script_compares_indentation_at_tab_stops() {
+        assert_eq!(
+            parse_ghci_input("          first = 1\n   \tsecond = 2\n").unwrap(),
+            vec![
+                GhciInputUnit::Code {
+                    source: "          first = 1".into(),
+                    line: 1,
+                },
+                GhciInputUnit::Code {
+                    source: "   \tsecond = 2".into(),
+                    line: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_multiline_layout_still_precedes_following_reply() {
+        assert_eq!(
+            parse_ghci_input(
+                ":{\nlet findings =\n  [ \"first\"\n  , \"second\"\n  ]\n:}\nrespond findings\n"
+            )
+            .unwrap(),
+            vec![
+                GhciInputUnit::Block {
+                    source: "let findings =\n  [ \"first\"\n  , \"second\"\n  ]".into(),
+                    start_line: 1,
+                    end_line: 6,
+                },
+                GhciInputUnit::Code {
+                    source: "respond findings".into(),
+                    line: 7,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn ghci_script_reports_structural_errors() {
         assert_eq!(
             parse_ghci_input(":}\n").unwrap_err(),
@@ -1294,5 +1400,39 @@ mod tests {
                 outcome: "suspended",
             } if committed.len() == 1
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_layout_unit_never_invokes_following_reply() {
+        let blocks = parse_ghci_input("let findings =\n  [ missing\n  ]\nrespond findings\n")
+            .unwrap()
+            .into_iter()
+            .map(|unit| unit.source().to_owned())
+            .collect();
+        let mut invoked = Vec::new();
+        let outcome = run_block_sequence(blocks, |block| {
+            invoked.push(block.source.clone());
+            async move {
+                if block.ordinal == 1 {
+                    Err("parse failure")
+                } else {
+                    Ok(BlockExecution::<(), ()>::Committed(()))
+                }
+            }
+        })
+        .await;
+        assert!(matches!(
+            outcome,
+            BlockSequenceOutcome::Failed {
+                block: ParsedBlock { ordinal: 1, .. },
+                error: "parse failure",
+                ..
+            }
+        ));
+        assert_eq!(
+            invoked,
+            ["let findings =\n  [ missing\n  ]"],
+            "a failed definition must not execute the later reply"
+        );
     }
 }

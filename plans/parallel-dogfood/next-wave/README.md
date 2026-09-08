@@ -5,6 +5,14 @@ an explicit new launch selects the candidate package. The current wind-down stay
 in force. Existing A0–A8 and M0–M7 designs own product semantics and acceptance.
 This directory owns execution shape; it does not waive unverified product gates.
 
+Each run uses an exact runner built from main, including the selected curated
+prompt/Haskell package. The applications and engine implementations remain on
+separate task branches updated from main between runs. Their checkpoint hashes
+are work inputs, not the source of the harness running them. The latest launch
+record and committed handoffs supersede historical source pins below.
+Current package changes and remaining mechanism limits are recorded in
+[coordination RSI](../../next/coordination-rsi.md).
+
 Read this page, then your branch: [applications](applications.md) or
 [engine](engine.md). The planner reads both short maps; descendants read only their
 assigned subtree and the relevant mechanism sections. The launch prompt is
@@ -75,9 +83,13 @@ multiple owning mechanisms, split that work before unrelated debugging fills its
 context. If it cannot split, name the concrete coupling in one sentence and keep
 working; this is judgment, not a quota or a new approval gate. No headcount cap.
 
-Astra plans and owns bounded hard decisions or repairs. Sol owns routine routing,
-implementation and integration. Send Astra a decision with evidence, not the whole
-subtree history. Return compact commits/checks/gates; exact transport and source
+Astra plans the graph and checks Sol's execution understanding once, then idles
+without routine progress subscriptions. Sol owns implementation, integration and
+ordinary choices. Fresh Astra consultations own bounded hard decisions or repairs
+and return directly to the requesting Sol. Haskell handles mechanical collection,
+cursor advancement and routing; use .shoal/plans/coordination.md. Keep routine
+evidence out of Attention and use compact projections at decision boundaries.
+Return compact commits/checks/gates; exact transport and source
 incorporation still matter without a paragraph of acknowledgment history.
 
 ## Restart inputs and external supervision

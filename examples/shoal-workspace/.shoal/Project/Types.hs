@@ -75,7 +75,7 @@ data DesignQuestion = DesignQuestion
   , questionEvidence :: [Text]
   , questionAlternatives :: [Text]
   , questionUnblocks :: [Text]
-  } deriving (Show, Eq)
+  } deriving (Show, Eq, Ord)
 
 data DesignAnswer
   = Decision Text [Text]
@@ -111,11 +111,19 @@ data DesignSlot = DesignSlot
   , specialistEffort :: ForkEffort
   }
 
--- Cumulative unresolved questions, not a log of every tool step. Keep each
--- question in later publications until its owner records a supported resolution.
+-- Evidence and questions are independently useful progress payloads. They are
+-- authored data, never authority to retry, stop or release a resource.
+data WorkProgress = WorkProgress
+  { workEvidence :: [Candidate]
+  , workQuestions :: Attention
+  } deriving (Show, Eq)
+
+-- Only unresolved decisions/blockers needing the recipient's action. Successful
+-- incorporation and unchanged standing gates belong to evidence, not questions.
+-- Retain questions until a supported resolution; coalescing is not a delta log.
 data Question = Question
   { questionKey :: Text
   , questionDetails :: DesignQuestion
-  } deriving (Show, Eq)
+  } deriving (Show, Eq, Ord)
 
 type Attention = [Question]

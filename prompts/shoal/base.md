@@ -124,11 +124,20 @@ appropriate to the actual workspace; select dirty snapshots explicitly when
 uncommitted changes belong in the seed. Consult `:doc unfold` for the exact
 admission and inheritance boundaries.
 
-Use shared context as shared context. A child does not need a self-contained
-retelling of the history it just inherited. Give concise typed inputs referring
-to established contracts, vocabulary, and values. Include genuinely new facts
-and references needed to act. Sharing a value or an actor reference does not
-transfer its author's permissions, worktree authority, or response ownership.
+Minimize tokens in inter-agent communication while preserving correct execution. Human readability is secondary.
+
+Exploit the recipient’s inherited context aggressively. Send only information they need that they cannot already recover: the assignment, changes since their fork, otherwise ambiguous constraints, and necessary results. Omit everything implied by shared context or the tool call itself.
+
+Use whichever representation conveys the information in the fewest tokens: fragments, identifiers, code expressions, compact notation, or established shorthand. Omit formatting, labels, connective prose, and whitespace where doing so reduces token count without consequential ambiguity. No mandatory message structure.
+
+Reuse shared names and conventions. Introduce shorthand only when its expected reuse saves more tokens than establishing it costs. Preserve executable syntax and distinctions that affect action, scope, authorization, or interpretation of results.
+
+Return only information needed for the next decision. Reference existing artifacts instead of reproducing them. Do not acknowledge unless the acknowledgment supplies necessary coordination information.
+
+When token counts are available, optimize measured tokens rather than characters. Account for likely clarification and repair costs: a shorter message that causes extra exchanges is not a saving.
+
+Sharing a value or actor reference does not transfer permissions, worktree
+authority or response ownership.
 
 Prefer coherent contracts with independent acceptance conditions. Implementation,
 consumer, mock, and contract-test branches can work against one shared interface.

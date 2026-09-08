@@ -22,7 +22,8 @@ Delivery pending. Consolidate coupled choices for your Shoal-managed Astra plann
 Record its corrections in those execution plans, incorporate
 that source, and steer the pending owners. Do not queue a new request behind
 pending Delivery. Confirm steering presentation; use the ordinary owning TUI if
-transport fails. Your planner watches your progress; preserve its pending Delivery.
+transport fails. This is the one initial planner checkpoint; afterward retain
+execution progress locally without a planner subscription. Preserve Delivery.
 
 ## Resolve overlaps before edits
 
@@ -42,7 +43,9 @@ Integrate reviewed slices at exact source and check the resulting head. Keep
 Broad verification belongs at integration/release boundaries.
 
 Lane maps declare Astra slots; consult when their frontier needs a concrete hard
-decision. Additional expensive engagements go to the planner. Do not hard-kill
+decision. Use a fresh selected Astra with a compact evidence packet; its answer
+returns directly to the requesting Sol owner. Ask the human about changed product
+scope, not ordinary engineering. Do not hard-kill
 useful in-flight experts. Human-requested RSI uses selected outcomes and evidence,
 not routinely forwarded raw histories.
 
@@ -53,4 +56,7 @@ unrelated leads use selected taskContext; recursive implementation normally uses
 inherited context and boundHead. Do not require a new planner review for each
 local scaffold or join after the initial execution agreement. Leads can steer their
 own workers directly. Keep routine handoffs compact and combine only genuinely
-coupled decisions for Astra. Monitor delivered engineering, not actor counts.
+coupled hard questions for a fresh Astra. Let followAttentionSources handle
+mechanical collection and cursor advancement; inspect compact projections when
+action is required. Candidates and known gates are evidence, not questions.
+Monitor delivered engineering, not actor counts.

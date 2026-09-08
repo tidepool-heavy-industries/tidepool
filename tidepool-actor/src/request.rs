@@ -304,6 +304,7 @@ struct WatchRecord {
     owner: ActorRef,
     label: String,
     dependencies: Vec<WatchDependency>,
+    group_count: usize,
     state: WatchState,
     progress: HashMap<(RequestId, u64), ProgressCapture>,
 }
@@ -324,6 +325,7 @@ pub(crate) enum WatchRequirement {
 struct WatchDependency {
     request: RequestId,
     requirement: WatchRequirement,
+    group: usize,
 }
 
 #[derive(Default)]
@@ -1213,29 +1215,64 @@ impl RequestRegistry {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn register_watch_requirements(
         &self,
         owner: ActorRef,
         label: String,
         dependencies: Vec<(RequestId, WatchRequirement)>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
-        self.register_watch_with_route(owner, label, dependencies, None)
+        self.register_watch_requirement_groups(
+            owner,
+            label,
+            dependencies
+                .into_iter()
+                .map(|dependency| vec![dependency])
+                .collect(),
+        )
     }
 
-    pub(crate) fn register_watch_with_route(
+    pub(crate) fn register_watch_requirement_groups(
         &self,
         owner: ActorRef,
         label: String,
-        dependencies: Vec<(RequestId, WatchRequirement)>,
+        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        self.register_watch_groups_with_route(owner, label, groups, None)
+    }
+
+    pub(crate) fn register_watch_groups_with_route(
+        &self,
+        owner: ActorRef,
+        label: String,
+        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
         route: Option<routes::WatchRoute>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        let group_count = groups.len();
+        let dependencies = groups
+            .iter()
+            .enumerate()
+            .flat_map(|(group, dependencies)| {
+                dependencies
+                    .iter()
+                    .copied()
+                    .map(move |(request, requirement)| WatchDependency {
+                        request,
+                        requirement,
+                        group,
+                    })
+            })
+            .collect::<Vec<_>>();
         let mut state = self.state.lock();
         if state.cleaning.contains(&owner) {
             return Err(ReplyError::CancellationRequested);
         }
         let mut touched = std::collections::HashSet::from([owner]);
-        for (request, _) in &dependencies {
-            let record = state.requests.get(request).ok_or(ReplyError::Stale)?;
+        for dependency in &dependencies {
+            let record = state
+                .requests
+                .get(&dependency.request)
+                .ok_or(ReplyError::Stale)?;
             authorize_owner(record, owner)?;
             if state.cleaning.contains(&record.target) {
                 return Err(ReplyError::CancellationRequested);
@@ -1253,13 +1290,8 @@ impl RequestRegistry {
                 route,
                 owner,
                 label,
-                dependencies: dependencies
-                    .into_iter()
-                    .map(|(request, requirement)| WatchDependency {
-                        request,
-                        requirement,
-                    })
-                    .collect(),
+                dependencies,
+                group_count,
                 state: WatchState::Pending,
                 progress: HashMap::new(),
             },
@@ -1283,13 +1315,17 @@ impl RequestRegistry {
         if record.state != WatchState::Ready {
             return Err(ReplyError::Stale);
         }
-        match record
-            .progress
-            .get(&(request, after))
-            .ok_or(ReplyError::Unauthorized)?
-        {
-            ProgressCapture::Update(snapshot) => Ok((Some(snapshot.clone()), false)),
-            ProgressCapture::Closed => Ok((None, true)),
+        let key = (request, after);
+        if !record.dependencies.iter().any(|dependency| {
+            dependency.request == request
+                && dependency.requirement == WatchRequirement::ProgressAfter(after)
+        }) {
+            return Err(ReplyError::Unauthorized);
+        }
+        match record.progress.get(&key) {
+            Some(ProgressCapture::Update(snapshot)) => Ok((Some(snapshot.clone()), false)),
+            Some(ProgressCapture::Closed) => Ok((None, true)),
+            None => Ok((None, false)),
         }
     }
 
@@ -1576,26 +1612,29 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
             }
         });
         let next_state = next_state.or_else(|| {
-            watch
-                .dependencies
-                .iter()
-                .all(|dependency| {
-                    if let WatchRequirement::ProgressAfter(after) = dependency.requirement {
-                        return watch.progress.contains_key(&(dependency.request, after));
-                    }
-                    state
-                        .requests
-                        .get(&dependency.request)
-                        .is_some_and(|record| match record.owner_state {
-                            OwnerState::Ready => true,
-                            OwnerState::Unavailable(_) | OwnerState::Abandoned => {
-                                dependency.requirement
-                                    == (WatchRequirement::Response {
-                                        allow_failure: true,
-                                    })
-                            }
-                            _ => false,
-                        })
+            (0..watch.group_count)
+                .all(|group| {
+                    watch.dependencies.iter().any(|dependency| {
+                        if dependency.group != group {
+                            return false;
+                        }
+                        if let WatchRequirement::ProgressAfter(after) = dependency.requirement {
+                            return watch.progress.contains_key(&(dependency.request, after));
+                        }
+                        state
+                            .requests
+                            .get(&dependency.request)
+                            .is_some_and(|record| match record.owner_state {
+                                OwnerState::Ready => true,
+                                OwnerState::Unavailable(_) | OwnerState::Abandoned => {
+                                    dependency.requirement
+                                        == (WatchRequirement::Response {
+                                            allow_failure: true,
+                                        })
+                                }
+                                _ => false,
+                            })
+                    })
                 })
                 .then_some(WatchState::Ready)
         });
@@ -1842,6 +1881,62 @@ mod tests {
         assert!(matches!(
             registry.observe_watch_progress(owner, late, request, 10),
             Ok((None, true))
+        ));
+    }
+
+    #[test]
+    fn progress_any_group_wakes_on_one_closure_and_freezes_other_as_pending() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let first_target = actor(2);
+        let second_target = actor(3);
+        let unrelated_target = actor(4);
+        let prepare = |target| {
+            let request = registry.reserve(owner, target);
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+            request
+        };
+        let first = prepare(first_target);
+        let second = prepare(second_target);
+        let unrelated = prepare(unrelated_target);
+        let (watch, initial) = registry
+            .register_watch_requirement_groups(
+                owner,
+                "any-progress".into(),
+                vec![vec![
+                    (first, WatchRequirement::ProgressAfter(0)),
+                    (second, WatchRequirement::ProgressAfter(0)),
+                ]],
+            )
+            .unwrap();
+        assert!(initial.is_empty());
+
+        registry.begin_reply(first_target, first).unwrap();
+        let notifications = registry.finish_reply(first);
+        assert_eq!(notifications.len(), 1);
+        assert!(matches!(
+            registry.observe_watch(owner, watch),
+            Ok(WatchObservation::Ready(_))
+        ));
+        assert!(matches!(
+            registry.observe_watch_progress(owner, watch, first, 0),
+            Ok((None, true))
+        ));
+        assert!(matches!(
+            registry.observe_watch_progress(owner, watch, second, 0),
+            Ok((None, false))
+        ));
+        assert!(matches!(
+            registry.observe_watch_progress(owner, watch, unrelated, 0),
+            Err(ReplyError::Unauthorized)
+        ));
+
+        registry.begin_reply(second_target, second).unwrap();
+        assert!(registry.finish_reply(second).is_empty());
+        assert!(matches!(
+            registry.observe_watch_progress(owner, watch, second, 0),
+            Ok((None, false))
         ));
     }
 

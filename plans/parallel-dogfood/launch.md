@@ -14,6 +14,11 @@ Launch preparation only; this file is not a claim of acceptance or deployment.
   evidence is historical. Record checks and identity for the actual new selection.
 - Use immutable Shoal/native/extractor executables containing the steering repair.
   Record package identity, native pin and checks in the actual launch record.
+  Put these separate identities at the top: live harness main revision and binary
+  hash; selected native Codex revision; each task branch and checkout HEAD. Each
+  worker's captured source remains in its existing fork receipt. Advancing main
+  changes none of those running instances. Rebase/update product branches between
+  runs; build the next harness from main, independently of those product candidates.
 - Launch a unique session with Astra High and the selected planner root prompt;
   leave Sol as the worker default. Never recreate or resume an unrelated run.
   Give the planner the exact launch record and next-wave/commission.md. It

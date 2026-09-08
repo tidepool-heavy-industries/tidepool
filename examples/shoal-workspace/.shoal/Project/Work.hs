@@ -7,14 +7,16 @@
 -- when it is useful; importing this module prescribes no worker tree.
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
-  , withDecision, raiseQuestion, resolveQuestion
+  , withDecision, updateDecision, designQuestion, raiseQuestion, resolveQuestion
   , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
-  , requestIncorporation, consultDesign, followAttention
+  , requestIncorporation, consultDesign, followAttention, followAttentionSources
+  , AttentionSource (..), AttentionStatus (..), normalizeAttention
   , settledValue
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Control.Monad (void, when)
+import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Shoal
@@ -66,15 +68,24 @@ raiseQuestion question current = filter (not . sameQuestion question) current ++
 resolveQuestion :: AcceptedDecision -> Attention -> Attention
 resolveQuestion decision = filter (/= decisionQuestion decision)
 
+-- Render only the actionable answer and its exact correlation. Detailed question
+-- evidence remains recoverable from the retained question and named source.
 decisionContext :: AcceptedDecision -> Text
 decisionContext decision = Text.unlines
-  [ "Accepted decision for " <> questionKey (decisionQuestion decision)
-      <> " at " <> questionSource (questionDetails (decisionQuestion decision))
-  , "Question: " <> shown (decisionQuestion decision)
+  [ questionKey question <> " @" <> questionSource details <> " " <> questionPlan details
+  , questionFinding details
   , decisionSummary decision
-  , "Incorporated source: " <> decisionSource decision
-  , "Evidence: " <> Text.intercalate "; " (decisionEvidence decision)
+  , "incorporated " <> decisionSource decision
+  , Text.intercalate "; " (decisionEvidence decision)
   ]
+  where
+    question = decisionQuestion decision
+    details = questionDetails question
+
+updateDecision
+  :: Member Replies effects
+  => Response result -> AcceptedDecision -> Eff effects (Either ReplyError RequestUpdate)
+updateDecision response = updateRequest response . decisionContext
 
 solTask :: BranchLabel -> Task -> Branch CodingEffects Task result
 solTask label = solTaskFrom label boundHead
@@ -117,7 +128,7 @@ reviewAgain
   :: Member Replies effects
   => AgentRef -> RequestLabel -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress Attention)
 reviewAgain actor label task = requestWithProgress @Attention @(Outcome ReviewDecision) actor $
-  withRequestGuidance (projectPrompt "review" <> "\n" <> reviewContext task) $
+  withRequestGuidance (projectPrompt "review") $
   requestOptions label task
 
 -- Left is the useful verdict to return to the implementing owner; Right is a
@@ -129,36 +140,94 @@ repair
 repair label task candidate findings = case repairOwner task of
   OwnerRepairs -> pure (Left (Repair candidate findings))
   RetainedImplementer actor -> Right <$> requestWith actor
-    (withRequestGuidance (Text.unlines
-      [ projectPrompt "repair", taskContext (reviewAssignment task)
-      , "Repair candidate: " <> candidateCommit candidate
-      , "Findings: " <> Text.intercalate "; " findings
-      , "Preserved gates: " <> Text.intercalate "; " (remainingGates candidate)
-      ]) $
+    (withRequestGuidance (projectPrompt "repair") $
       requestOptions label (RepairTask (reviewAssignment task) candidate findings))
 
 requestIncorporation
   :: Member Replies effects
   => AgentRef -> RequestLabel -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
 requestIncorporation recipient label assignment amendment = requestWith recipient $
-  withRequestGuidance (projectPrompt "incorporate" <> "\n" <> taskContext assignment) $
+  withRequestGuidance (projectPrompt "incorporate") $
   requestOptions label (IncorporationTask assignment amendment)
 
--- Observe one cumulative question source, forwarding meaningful changes only.
--- The sink owns its scope: combining several sources needs their cumulative union,
--- not publication of each source as if it were the entire component's attention.
+-- Build a complete packet from evidence already bound in the workbench. Record
+-- updates add alternatives or narrow the unblocked obligation when needed.
+designQuestion :: Task -> Candidate -> Text -> DesignQuestion
+designQuestion task candidate finding = DesignQuestion
+  { questionPlan = planPath task
+  , questionSource = candidateCommit candidate
+  , questionFinding = finding
+  , questionEvidence = checkedCommands candidate
+  , questionAlternatives = []
+  , questionUnblocks = [obligation task]
+  }
+
+normalizeAttention :: Attention -> Attention
+normalizeAttention = nub . sort
+
+-- The single-source convenience preserves its existing payload contract.
+-- Use followAttentionSources when terminal status and source attribution matter.
 followAttention
   :: Member Watches effects
   => Progress Attention -> ProgressCursor -> (Attention -> Eff effects ()) -> Eff effects Route
 followAttention updates cursor sink = follow cursor []
   where
     follow after previous = route (awaitProgressAfter updates after) $ \state -> case state of
-      ProgressUpdate next current -> do
+      ProgressUpdate next questions -> do
+        let current = normalizeAttention questions
         when (current /= previous) (sink current)
         void (follow next current)
       ProgressClosed -> pure ()
       ProgressRejected failure -> error (show failure)
       ProgressPending -> error "attention dependency became ready without an observation"
+
+-- One snapshot per named input; equal question keys in different sources cannot
+-- overwrite each other. Closing/rejecting a source retains its unresolved facts.
+data AttentionStatus = AttentionOpen | AttentionClosed | AttentionRejected ReplyError
+  deriving (Show, Eq)
+
+data AttentionSource = AttentionSource
+  { attentionSource :: Text
+  , attentionQuestions :: Attention
+  , attentionStatus :: AttentionStatus
+  } deriving (Show, Eq)
+
+-- The sink chooses policy in Haskell: publish retained state to a Sol owner,
+-- project a meaningful change, or invoke another known continuation. Merely
+-- collecting state does not notify or commission any model.
+followAttentionSources
+  :: Member Watches effects
+  => [(Text, Progress Attention)]
+  -> ([AttentionSource] -> Eff effects ())
+  -> Eff effects Route
+followAttentionSources sources sink
+  | length names /= length (nub names) = error "attention source names must be unique"
+  | otherwise = follow initial
+  where
+    names = map fst sources
+    initial = [(handle, ProgressCursor 0, AttentionSource name [] AttentionOpen) | (name, handle) <- sources]
+    follow current =
+      let active = [(handle, cursor) | (handle, cursor, entry) <- current, attentionStatus entry == AttentionOpen]
+      in route (awaitAnyProgress active) $ \updates -> do
+        let next = advance current updates
+            previousView = [entry | (_, _, entry) <- current]
+            nextView = [entry | (_, _, entry) <- next]
+        when (nextView /= previousView) (sink nextView)
+        when (any ((== AttentionOpen) . attentionStatus) nextView) (void (follow next))
+    advance [] [] = []
+    advance ((handle, cursor, entry) : rest) updates
+      | attentionStatus entry /= AttentionOpen = (handle, cursor, entry) : advance rest updates
+      | otherwise = case updates of
+          state : remaining -> case state of
+            ProgressUpdate next questions ->
+              (handle, next, entry { attentionQuestions = normalizeAttention questions }) : advance rest remaining
+            ProgressClosed ->
+              (handle, cursor, entry { attentionStatus = AttentionClosed }) : advance rest remaining
+            ProgressRejected failure ->
+              (handle, cursor, entry { attentionStatus = AttentionRejected failure }) : advance rest remaining
+            ProgressPending -> (handle, cursor, entry) : advance rest remaining
+          [] -> error "attention observation omitted a source"
+    advance [] (_ : _) = error "attention observation added a source"
 
 consultDesign
   :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)
@@ -181,7 +250,3 @@ designContext slot question = Text.unlines
   , "Alternatives: " <> Text.intercalate "; " (questionAlternatives question)
   , "Unblocks: " <> Text.intercalate "; " (questionUnblocks question)
   ]
-
-settledValue :: Settlement result -> Either ResponseFailure result
-settledValue (ReplyAvailable answer) = Right (responseValue answer)
-settledValue (ReplyUnavailable failure) = Left failure

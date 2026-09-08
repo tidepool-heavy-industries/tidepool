@@ -224,10 +224,12 @@ module Tidepool.Actors.Shoal
   , WatchFailure (..)
   , WatchState (..)
   , Settlement (..)
+  , settledValue
   , awaitResponse
   , awaitValue
   , awaitSettled
   , awaitProgressAfter
+  , awaitAnyProgress
   , watch
   , pollWatch
   , Route

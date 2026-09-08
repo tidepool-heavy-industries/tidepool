@@ -16,11 +16,13 @@ module Tidepool.Agent.Watch.Internal
   , WatchFailure (..)
   , WatchState (..)
   , Settlement (..)
+  , settledValue
   , RawWatchObservation (..)
   , awaitResponse
   , awaitValue
   , awaitSettled
   , awaitProgressAfter
+  , awaitAnyProgress
   , watch
   , Route
   , RouteState (..)
@@ -55,7 +57,9 @@ import Tidepool.Agent.Reply.Internal
 data AwaitDependency = AwaitDependency RequestId Bool | AwaitProgress RequestId ProgressCursor
   deriving (Eq)
 
-data Await result = Await [AwaitDependency]
+-- Each inner list is an any-of group; every group must become ready.
+-- Ordinary awaits use singleton groups, retaining Applicative all-of behavior.
+data Await result = Await [[AwaitDependency]]
   (forall effs. Member Watches effs => Int -> [(RequestId, ResponseFailure)] -> Eff effs (Maybe result))
 
 instance Functor Await where
@@ -119,7 +123,9 @@ data RawWatchObservation
 
 data Watches a where
   RegisterWatchWith :: Text -> [AwaitDependency] -> Watches Int
+  RegisterWatchGroupsWith :: Text -> [[AwaitDependency]] -> Watches Int
   RegisterRouteWith :: Text -> (Int -> Eff effs ()) -> [AwaitDependency] -> Watches Int
+  RegisterRouteGroupsWith :: Text -> (Int -> Eff effs ()) -> [[AwaitDependency]] -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
   ListRoutesWith :: Watches [Int]
   ObserveWatchProgressWith :: Int -> Int -> Int -> Watches (ProgressState progress)
@@ -137,16 +143,20 @@ data Settlement result
   | ReplyUnavailable ResponseFailure
   deriving (Show, Eq)
 
+settledValue :: Settlement result -> Either ResponseFailure result
+settledValue (ReplyAvailable result) = Right (responseValue result)
+settledValue (ReplyUnavailable failure) = Left failure
+
 awaitResponse :: Response result -> Await (ResponseResult result)
 awaitResponse response =
-  Await [AwaitDependency (responseRequestId response) False] (\_ _ -> pure (readResponse response))
+  Await [[AwaitDependency (responseRequestId response) False]] (\_ _ -> pure (readResponse response))
 
 awaitValue :: Response result -> Await result
 awaitValue = fmap responseValue . awaitResponse
 
 awaitSettled :: Response result -> Await (Settlement result)
 awaitSettled response =
-  Await [AwaitDependency request True] $ \_ failures ->
+  Await [[AwaitDependency request True]] $ \_ failures ->
     pure $ case readResponse response of
       Just result -> Just (ReplyAvailable result)
       Nothing -> ReplyUnavailable <$> lookup request failures
@@ -155,12 +165,27 @@ awaitSettled response =
 
 awaitProgressAfter :: Progress progress -> ProgressCursor -> Await (ProgressState progress)
 awaitProgressAfter (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
-  Await [AwaitProgress request cursor] $ \watchId _ ->
+  Await [[AwaitProgress request cursor]] $ \watchId _ ->
     Just <$> send (ObserveWatchProgressWith watchId requestId revision)
 
+-- | Wait until any supplied progress stream advances or closes. Results retain
+-- input order and are captured at the wake; unchanged sources are
+-- 'ProgressPending'.
+awaitAnyProgress :: [(Progress progress, ProgressCursor)] -> Await [ProgressState progress]
+awaitAnyProgress [] = pure []
+awaitAnyProgress sources =
+  Await [map dependency sources] $ \watchId _ ->
+    Just <$> mapM (observe watchId) sources
+  where
+    dependency (Progress request, cursor) = AwaitProgress request cursor
+    observe watchId (Progress (RequestId requestId), ProgressCursor revision) =
+      send (ObserveWatchProgressWith watchId requestId revision)
+
 watch :: Member Watches effs => WatchLabel -> Await result -> Eff effs (Watch result)
-watch (WatchLabel label) awaiting@(Await dependencies _) = do
-  watchId <- send (RegisterWatchWith label dependencies)
+watch (WatchLabel label) awaiting@(Await groups _) = do
+  watchId <- case flattenSingletons groups of
+    Just dependencies -> send (RegisterWatchWith label dependencies)
+    Nothing -> send (RegisterWatchGroupsWith label groups)
   pure (Watch (WatchId watchId) awaiting)
 
 pollWatch
@@ -183,7 +208,7 @@ pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
 forgetWatch :: Member Watches effs => Watch result -> Eff effs ForgetWatchOutcome
 forgetWatch (Watch (WatchId watchId) _) = send (ForgetWatchWith watchId)
 
-deduplicate :: [AwaitDependency] -> [AwaitDependency]
+deduplicate :: [[AwaitDependency]] -> [[AwaitDependency]]
 deduplicate = foldr add []
   where
     add dependency rest
@@ -200,14 +225,22 @@ route
   => Await result
   -> (result -> Eff effs ())
   -> Eff effs Route
-route awaiting@(Await dependencies _) callback = do
+route awaiting@(Await groups _) callback = do
   let entry watchId = do
         observed <- pollWatch (Watch (WatchId watchId) awaiting)
         case observed of
           WatchReady result -> callback result
           WatchUnavailable failure -> error (show failure)
           WatchPending -> error "route ran before its dependency was ready"
-  Route <$> send (RegisterRouteWith "route" entry dependencies)
+  Route <$> case flattenSingletons groups of
+    Just dependencies -> send (RegisterRouteWith "route" entry dependencies)
+    Nothing -> send (RegisterRouteGroupsWith "route" entry groups)
+
+flattenSingletons :: [[dependency]] -> Maybe [dependency]
+flattenSingletons = mapM singleton
+  where
+    singleton [dependency] = Just dependency
+    singleton _ = Nothing
 
 pollRoute :: Member Watches effs => Route -> Eff effs RouteState
 pollRoute (Route watchId) = send (ObserveRouteWith watchId)

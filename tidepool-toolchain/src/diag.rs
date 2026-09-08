@@ -134,8 +134,8 @@ pub struct RenderOpts<'a> {
 /// in `opts.source`, and that line isn't itself wrapper-template scaffold),
 /// joined by a blank line, with a wrapper-fallout footer appended when the
 /// `user_lines` partition dropped anything — UNLESS every surviving
-/// diagnostic was wrapper-origin fallout, in which case this renders one
-/// synthetic, plain-language framing line PLUS the cleaned underlying
+/// diagnostic was reported only on generated wrapper lines, in which case
+/// this renders one synthetic, plain-language framing line PLUS the cleaned underlying
 /// diagnostic(s) (raw `file:line:col` header, no snippet — the model never
 /// wrote those lines, so a coordinate remapped against user code would be
 /// misleading) instead of the ordinary per-diagnostic blocks. The recipient
@@ -166,16 +166,14 @@ pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> Strin
         None => (after_gen_drop.clone(), Vec::new()),
     };
 
-    // Every surviving diagnostic is wrapper-origin fallout: there is nothing
-    // in the user's own code to show, so lead with the plain-language framing
-    // — then include the underlying diagnostic(s) so the recipient can still
-    // act, instead of suppressing them outright.
+    // Every surviving diagnostic points at generated wrapper text. That span
+    // does not identify the root cause, so describe only the known location
+    // and retain the underlying diagnostics for diagnosis.
     if kept.is_empty() && !fallout.is_empty() {
         let mut out = format!(
-            "{} error(s) arose in the harness's result-display wrapper, not in your block's \
-             own code — this usually means the block's result type doesn't satisfy the \
-             wrapper (e.g. no Show/ToJSON instance, or an unresolved type at the result \
-             position). Underlying GHC diagnostic(s):",
+            "GHC reported {} error(s) only on generated workbench wrapper lines. Those \
+             locations do not identify whether the root cause is in the authored input or \
+             generated framing. Underlying GHC diagnostic(s):",
             fallout.len()
         );
         for d in &fallout {
@@ -188,8 +186,8 @@ pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> Strin
     let mut blocks: Vec<String> = kept.iter().map(|d| render_one(d, opts)).collect();
     if !fallout.is_empty() {
         blocks.push(format!(
-            "({} further error(s) suppressed: fallout in the result-display wrapper from the \
-             error(s) above)",
+            "({} further error(s) reported on generated workbench wrapper lines; locations \
+             suppressed)",
             fallout.len()
         ));
     }
@@ -790,12 +788,14 @@ mod tests {
         assert!(got.contains("Ambiguous type variable"), "{got}");
         assert!(!got.contains("Overlapping instances"), "{got}");
         assert!(
-            got.contains("1 further error(s) suppressed: fallout in the result-display wrapper"),
+            got.contains(
+                "1 further error(s) reported on generated workbench wrapper lines; locations suppressed"
+            ),
             "{got}"
         );
     }
 
-    /// A batch that is ENTIRELY wrapper-origin fallout (dropping it all would
+    /// A batch reported entirely on generated wrapper lines (dropping it all would
     /// leave zero survivors) renders the synthetic plain-language framing
     /// line PLUS the cleaned underlying diagnostic — never bare suppression,
     /// since the recipient must still get something actionable.
@@ -824,9 +824,14 @@ mod tests {
             },
         );
         assert!(
-            got.contains("arose in the harness's result-display wrapper"),
+            got.contains("GHC reported 1 error(s) only on generated workbench wrapper lines"),
             "{got}"
         );
+        assert!(
+            got.contains("do not identify whether the root cause is in the authored input"),
+            "{got}"
+        );
+        assert!(!got.contains("not in your block's own code"), "{got}");
         assert!(got.contains("1 error(s)"), "{got}");
         // The underlying diagnostic is now INCLUDED, raw (never remapped to
         // `<item>` coordinates — it isn't in the user's own code), never
@@ -1149,7 +1154,7 @@ mod tests {
         );
         assert!(got.contains("(!!) is partial"), "{got}");
         assert!(
-            !got.contains("arose in the harness's result-display wrapper"),
+            !got.contains("only on generated workbench wrapper lines"),
             "a genuinely kept diagnostic must never fall into the all-wrapper synthetic path: {got}"
         );
     }
@@ -1183,7 +1188,7 @@ mod tests {
         );
         assert!(got.contains("Could not find module"), "{got}");
         assert!(
-            !got.contains("arose in the harness's result-display wrapper"),
+            !got.contains("only on generated workbench wrapper lines"),
             "{got}"
         );
     }

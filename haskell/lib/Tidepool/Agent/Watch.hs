@@ -12,10 +12,12 @@ module Tidepool.Agent.Watch
   , WatchFailure (..)
   , WatchState (..)
   , Settlement (..)
+  , settledValue
   , awaitResponse
   , awaitValue
   , awaitSettled
   , awaitProgressAfter
+  , awaitAnyProgress
   , watch
   , Route
   , RouteState (..)
@@ -38,10 +40,12 @@ import Tidepool.Agent.Watch.Internal
   , WatchFailure (..)
   , WatchState (..)
   , Settlement (..)
+  , settledValue
   , awaitResponse
   , awaitValue
   , awaitSettled
   , awaitProgressAfter
+  , awaitAnyProgress
   , pollWatch
   , ForgetWatchOutcome (..)
   , forgetWatch

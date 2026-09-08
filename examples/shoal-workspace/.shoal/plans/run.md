@@ -14,7 +14,8 @@ a new swarm or validating a package change.
 
 `solTask` and `componentLead` inherit the current completed reasoning and use
 `boundHead`. `implement` uses `solTask`. They suit recursive implementation from
-an allocated checkout. Original-root callers use `solTaskFrom label projectHead`
+an allocated checkout. Component leads explicitly select Medium; solTask/implement retain Low for bounded
+work (override for substantial implementation). Original-root callers use `solTaskFrom label projectHead`
 or `componentLeadFrom label projectHead`. A Task's source hash records provenance;
 it does not override that live checkout selection. Commit coherent work for Git
 integration and restart recovery, even though ordinary unfold inherits working files.
@@ -128,12 +129,12 @@ reportProgress updatedQuestions
 A stable questionKey is local to its plan; source and finding distinguish revisions
 of that question. Publish the whole unresolved set so coalescing loses no unanswered
 question. Publish on meaningful changes, not every tool step. Keep this request
-pending and continue unrelated useful work. The owner inspects the question watch
-and rearms `awaitProgressAfter questions cursor` at the returned ProgressCursor.
-The ordinary watch alerts the owning model; followAttention can instead connect
-that source directly to a Haskell consumer when a relay would add no judgment.
-Its sink receives changes to one cumulative source. Combining sources requires
-preserving their union, not overwriting all attention with whichever source changed.
+pending and continue unrelated useful work. The Sol owner handles the question; this is not a planner notification.
+Use followAttention for a single cumulative source, or followAttentionSources for
+independently advancing sources and explicit terminal status. Neither needs a
+model to poll, concatenate lists and invent another watch label on every update.
+The sink chooses what deserves action; publishing status is not an Astra request.
+See [coordination.md](coordination.md) for complete routing and consultation examples.
 
 After an owning decision, bind `decision :: AcceptedDecision` to the resolved
 question, checked incorporation source, supported summary and evidence, as in operating.md. On the
@@ -143,14 +144,33 @@ request owner's retained response, for example the initial review:
 delivery <- updateRequest (forkedResponse reviewer) (decisionContext decision)
 ```
 
-Handle Left explicitly; on Right bind and poll the RequestUpdate handle.
+Handle Left explicitly; on Right retain the RequestUpdate handle and poll when
+its state affects your next action. Do not spend turns repeatedly checking
+presentation while independent work or checked incorporation already answers it.
 UpdatePresented means the steering was presented, not that code was incorporated.
 UpdateUnconfirmed/UpdateNotPresented/UpdateTooLate require examining that receipt
 and current work before intervention; do not silently enqueue a replacement request.
 For the retained attempt use attempt itself instead of forkedResponse reviewer.
-Forward through each response owner where an intermediate lead owns the review.
+Send through the response owner that can act; do not relay the same packet up and
+down the tree merely to keep ancestors informed.
 
 The recipient reads that supported steering, verifies incorporation and records
 the typed decision in its current Task. It can then publish `resolveQuestion
 decision open`; an answer to an older version cannot clear a newer finding. Review
 with the updated assignment, not the original sessionInput after its contract changed.
+
+## Find the owning helper
+
+Project.Work owns solTask, implement, reviewCandidate, reviewAgain, repair,
+designQuestion, consultDesign, withDecision and progress routes. Project.Plan owns
+componentLead/componentLeadFrom and the optional graph allocation. These qualified
+module names work; unqualified imports do not move a definition to another module.
+Source integration uses native git merge/cherry-pick/rebase and focused checks;
+there is no integrateFork or integrateCandidate Haskell operation. settledValue
+is the shared public Settlement projection; retain the original receipt for evidence.
+
+When checking several cases in one target, combine nextest filters in one owning
+just invocation. Avoid restarting toolchain setup for each test or running broad
+batteries after scaffolding. Compile affected targets and test the changed boundary;
+run broader acceptance at integration. Never share a writable target directory
+between concurrently building nodes; ordinary unfold inherits its build snapshot.

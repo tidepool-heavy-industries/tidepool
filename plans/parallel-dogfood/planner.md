@@ -52,6 +52,8 @@ concrete corrections and instructions to proceed through `updateRequest` on its 
 response handle. Check presentation; require incorporation before dependent forks.
 Do not request a second delivery behind the still-open first one.
 
-After handoff, yield to watches. Sol owns routine execution and review. Stay
-available for consequential amendments, human steering and final product intent;
-receive selected evidence rather than descendant transcripts.
+After handoff, stop progress subscriptions and remain idle for human steering or
+explicit planning work. Sol owns ordinary decisions, execution and integration.
+Hard technical questions go directly from their Sol owner to a fresh selected
+Astra with a compact evidence packet, returning to that owner. Do not keep this
+planner active by forwarding routine candidate, cursor or gate updates.

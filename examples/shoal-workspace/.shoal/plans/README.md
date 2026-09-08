@@ -40,7 +40,9 @@ awkward consumer example, concrete interfaces, dependency/fork structure, checks
 assumptions, objections and questions. The original planner reviews coupled choices
 and returns explicit corrections and release scope. Incorporate those decisions
 before dependent implementation. Later local work within the agreement proceeds
-without repeating this initial interview or inventing more approval stages.
+without repeating this initial interview or inventing more approval stages. The
+planner becomes idle without execution subscriptions. Sol owns integration and
+routine cross-lane decisions; fresh Astra specialists handle explicit hard questions.
 
 ## Use the workbench
 
@@ -48,6 +50,7 @@ without repeating this initial interview or inventing more approval stages.
   checked integration and a continuation at every substantial node.
 - [operating.md](operating.md): readback progress, source-bearing decisions, parallel
   branch expressions and the actual asynchronous control boundaries.
+- [coordination.md](coordination.md): compact progress routing and fresh consultations.
 - [run.md](run.md): concrete admission, watch, review and retained repair recipes.
 - [launch.md](launch.md): operator-only launch and package validation.
 - [language.md](language.md): compact shared distinctions; add project vocabulary

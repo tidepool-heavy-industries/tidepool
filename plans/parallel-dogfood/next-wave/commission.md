@@ -13,6 +13,9 @@ independent child outcomes, the engineering each parent retains, and dependency
 joins that unlock later forks. Refine against the saved source, reuse completed
 work, and ask both Sol leads to explain/challenge their execution understanding
 once. Correct material misunderstandings, then delegate routine execution.
+After that checkpoint, leave the initial planner idle without routine progress
+subscriptions. Sol owns ordinary decisions and integration. Hard questions go
+directly to fresh selected Astra consultations with compact evidence packets.
 
 Related implementation inherits the useful completed reasoning and current bound
 checkout; original-root calls select projectHead. Fresh context is deliberate for
@@ -29,3 +32,11 @@ reopen historical operator holds as new questions: this launch authorizes the ne
 wave, while newly requested holds still take effect. Ask the human about changed
 consequential product decisions, not routine engineering. Begin the execution plan
 and commission the Sol coordinator.
+
+The runner is built from the launch-recorded main revision. Main carries tested
+orchestration/tooling and the curated prompt package. Product implementations stay
+on their applications/engine branches; update those branches from main between
+runs while preserving their committed checkpoints. Do not merge unfinished engine
+or applications code into main to obtain a new harness. Read
+.shoal/plans/coordination.md: Haskell owns mechanical routing and cursors; model
+turns own engineering. Routine evidence is not an unresolved question.

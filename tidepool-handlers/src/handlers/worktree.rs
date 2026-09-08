@@ -262,7 +262,7 @@ impl ActorWorktreeHandler {
                 }
                 WorktreeSource::CurrentRepository => {
                     return Err(WorktreeError::WorktreeAuthorityDenied(
-                                "repository working-tree seeds require repository authority; use a bound checkout or committed ref"
+                                "projectHead requires repository authority. In a bound actor use boundHead (or solTask/componentLead without From); use atRef (GitRef commit) for exact committed source."
                                     .into(),
                             ));
                 }
