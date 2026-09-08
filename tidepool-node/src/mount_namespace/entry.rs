@@ -38,7 +38,7 @@ impl MountNamespace {
             version: 1,
             boot: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?,
             holder,
-            start_ticks: start_ticks(&directory)?,
+            start_ticks: process_status(&directory)?.start_ticks,
             descriptors: [
                 self.descriptors.user.as_raw_fd(),
                 self.descriptors.mount.as_raw_fd(),
@@ -70,7 +70,7 @@ impl NamespaceEntry {
         )?;
         let process = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
         // Read after pinning the process, relative to the original proc inode.
-        if start_ticks(&proc)? != self.start_ticks {
+        if process_status(&proc)?.start_ticks != self.start_ticks {
             return Err(io::Error::other("namespace holder incarnation changed"));
         }
         let open = |fd, flags| {
@@ -97,7 +97,12 @@ impl NamespaceEntry {
     }
 }
 
-pub(super) fn start_ticks(directory: &impl std::os::fd::AsFd) -> io::Result<u64> {
+pub(super) struct ProcessStatus {
+    pub start_ticks: u64,
+    pub parent: u32,
+}
+
+pub(super) fn process_status(directory: &impl std::os::fd::AsFd) -> io::Result<ProcessStatus> {
     let fd = rustix::fs::openat(
         directory,
         "stat",
@@ -106,9 +111,18 @@ pub(super) fn start_ticks(directory: &impl std::os::fd::AsFd) -> io::Result<u64>
     )?;
     let mut text = String::new();
     std::fs::File::from(fd).read_to_string(&mut text)?;
-    text.rsplit_once(')')
-        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
-        .ok_or_else(|| io::Error::other("namespace holder start time unavailable"))?
-        .parse()
-        .map_err(io::Error::other)
+    let fields = text
+        .rsplit_once(')')
+        .ok_or_else(|| io::Error::other("process stat fields unavailable"))?
+        .1;
+    let field = |index| {
+        fields
+            .split_whitespace()
+            .nth(index)
+            .ok_or_else(|| io::Error::other("process stat field unavailable"))
+    };
+    Ok(ProcessStatus {
+        start_ticks: field(19)?.parse().map_err(io::Error::other)?,
+        parent: field(1)?.parse().map_err(io::Error::other)?,
+    })
 }

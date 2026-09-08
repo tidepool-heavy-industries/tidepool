@@ -1,17 +1,9 @@
 //! Exercise the actual pre-runtime entry executable without a provider or TUI.
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
-use tidepool_node::{MountNamespace, ProcessInvocation, ProcessMountBoundary};
-
-struct Bootstrap(Child);
-impl Drop for Bootstrap {
-    fn drop(&mut self) {
-        drop(self.0.stdin.take());
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+use tidepool_node::ProcessMountBoundary;
 
 #[test]
 fn executable_enters_retained_view_without_runtime_or_mount_privileges() {
@@ -31,33 +23,42 @@ fn executable_enters_retained_view_without_runtime_or_mount_privileges() {
             &view,
         )
         .unwrap();
-    let invocation = boundary.wrap(
-        "bwrap",
-        ProcessInvocation {
-            program: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "printf '%s\n' \"$$\"; read line || exit 0".into(),
-            ],
-        },
-    );
-    let mut bootstrap = Bootstrap(
-        Command::new(invocation.program)
-            .args(invocation.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
-    );
-    let mut pid = String::new();
-    BufReader::new(bootstrap.0.stdout.take().unwrap())
-        .read_line(&mut pid)
+    let namespace = boundary
+        .prepare_view("bwrap", Instant::now() + Duration::from_secs(10))
         .unwrap();
-    let namespace = MountNamespace::capture(pid.trim().parse().unwrap()).unwrap();
+    assert!(namespace.require_live_owner().is_err());
+    assert_eq!(
+        boundary
+            .prepare_view("false", Instant::now() + Duration::from_secs(10))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+    assert_eq!(
+        boundary
+            .prepare_view("/no-bootstrap-should-spawn", Instant::now())
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    let wrong_owner = root.join("wrong-owner");
+    std::fs::write(
+        &wrong_owner,
+        "#!/bin/sh\nprintf '%s\\n' \"$PPID\"; read release\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrong_owner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        boundary
+            .prepare_view(
+                wrong_owner.to_string_lossy().into_owned(),
+                Instant::now() + Duration::from_secs(10)
+            )
+            .unwrap_err()
+            .to_string(),
+        "view bootstrap is not the owned monitor's child"
+    );
     let entry = namespace.entry().unwrap();
-    drop(bootstrap.0.stdin.take());
-    assert!(bootstrap.0.wait().unwrap().success());
     let run = |entry: &str, script: &str| {
         Command::new(env!("CARGO_BIN_EXE_shoal"))
             .args(["enter-view", "--view", entry, "--cwd"])

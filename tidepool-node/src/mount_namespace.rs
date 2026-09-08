@@ -75,7 +75,7 @@ impl MountNamespace {
     /// Capture namespaces through a pinned proc directory and confirm that the
     /// process is still live. The caller must already own the supplied process.
     pub fn capture(pid: u32) -> io::Result<Self> {
-        Self::capture_inner(pid, None)
+        Self::capture_inner(pid, None, None)
     }
 
     /// Match a native receipt against pinned kernel process and namespace state.
@@ -84,10 +84,18 @@ impl MountNamespace {
         start_ticks: u64,
         mount_namespace_inode: u64,
     ) -> io::Result<Self> {
-        Self::capture_inner(pid, Some((start_ticks, mount_namespace_inode)))
+        Self::capture_inner(pid, Some((start_ticks, mount_namespace_inode)), None)
     }
 
-    fn capture_inner(pid: u32, expected: Option<(u64, u64)>) -> io::Result<Self> {
+    pub(crate) fn capture_bootstrap(pid: u32, monitor: u32) -> io::Result<Self> {
+        Self::capture_inner(pid, None, (pid != monitor).then_some(monitor))
+    }
+
+    fn capture_inner(
+        pid: u32,
+        expected: Option<(u64, u64)>,
+        parent: Option<u32>,
+    ) -> io::Result<Self> {
         let pid = i32::try_from(pid)
             .ok()
             .and_then(rustix::process::Pid::from_raw)
@@ -106,10 +114,17 @@ impl MountNamespace {
             OFlags::RDONLY | OFlags::CLOEXEC,
             Mode::empty(),
         )?;
+        if let Some(parent) = parent {
+            if entry::process_status(&directory)?.parent != parent {
+                return Err(io::Error::other(
+                    "view bootstrap is not the owned monitor's child",
+                ));
+            }
+        }
         // The workload may occupy a nested user namespace that does not own
         // its mount namespace. Ask the kernel for the actual mount owner.
         if let Some((start_ticks, mount_namespace_inode)) = expected {
-            let observed = entry::start_ticks(&directory)?;
+            let observed = entry::process_status(&directory)?.start_ticks;
             if observed != start_ticks || rustix::fs::fstat(&mount)?.st_ino != mount_namespace_inode
             {
                 return Err(io::Error::other(

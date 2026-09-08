@@ -96,8 +96,16 @@ mechanism, not a durable namespace record or a new model-facing command.
 passed against the real executable without a TUI/provider: the original bootstrap
 exits before entry, inherited content remains readable, writes reach only the
 mounted upper, capabilities are empty, and an expired reference runs no command.
-Node Clippy and Shoal compilation passed. Actor launch does not select this path
-yet; admission still needs to prepare and retain the complete source/build view.
+`ProcessMountBoundary::prepare_view` now materializes that complete view with a
+fixed, short bootstrap, bounded readiness/exit waits, and retained namespace
+handles; it leaves no keeper process on success. The executable check also covers
+bootstrap exit before readiness, an already-expired preparation deadline, and
+a receipt naming an unrelated process rather than the owned bootstrap. The
+combined source/Git/Cargo fixture now uses this owner to prepare and finalize the
+child checkout before any continuing worker is started, then enters that same
+view and confirms warm reuse and correct invalidation. Both checks passed. Node
+Clippy passed. Actor launch does not select this path yet; admission still needs
+to own and transfer the complete source/build state to launch.
 
 ## Next decisive implementation checkpoint
 

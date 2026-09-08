@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 #[path = "process_scope.rs"]
 pub mod service_scope;
 
+#[path = "process_boundary/view.rs"]
+mod view;
+
 pub const BUBBLEWRAP_PROGRAM: &str = "bwrap";
 
 /// An exact executable plus argv, ready for a process launcher.

@@ -393,7 +393,7 @@ impl ServiceScopeCleanup {
     }
 }
 
-fn wait_readable(fd: &OwnedFd, deadline: Instant) -> std::io::Result<()> {
+pub(crate) fn wait_readable(fd: &OwnedFd, deadline: Instant) -> std::io::Result<()> {
     loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())

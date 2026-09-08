@@ -31,9 +31,14 @@ fn launch(boundary: ProcessMountBoundary) -> (Owner, MountNamespace, u32) {
             args: vec!["-c".into(), "echo $$; read finished".into()],
         },
     );
+    let mut process = Command::new(command.program);
+    process.args(command.args);
+    capture_worker(process)
+}
+
+fn capture_worker(mut process: Command) -> (Owner, MountNamespace, u32) {
     let mut owner = Owner(
-        Command::new(command.program)
-            .args(command.args)
+        process
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -281,14 +286,20 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         original_index
     );
     std::fs::copy(prepared.git_file(), root.join("source-uc/.git")).unwrap();
-    let (_child, child, child_pid) = launch(boundary(
+    let child = boundary(
         source_layers,
         "source-uc",
         "source-wc",
         build_layers,
         "build-uc",
         "build-wc",
-    ));
+    )
+    .prepare_view(
+        "bwrap",
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    )
+    .unwrap();
+    assert!(child.require_live_owner().is_err());
     let host_manager = WorktreeManager::new(
         tidepool_worktree::GitCli::new(),
         manager.registry().clone(),
@@ -323,6 +334,20 @@ fn source_and_build_fork_preserves_git_state_and_cargo_freshness() {
         ),
         "lost view descriptors cannot expose the Git-only host directory"
     );
+    // Bootstrap inspection/finalization precedes any continuing worker. Its
+    // command acquires the same view, without remounting the writable overlay.
+    let mut process = child
+        .entry()
+        .unwrap()
+        .command(&view, "/bin/sh".as_ref())
+        .unwrap();
+    process.args(["-c", "echo $$; read finished"]);
+    let (_child, live_child, child_pid) = capture_worker(process);
+    assert!(child.same_view_as(&live_child).unwrap());
+    host_manager
+        .restore_mounted_source(handle.id(), live_child.clone(), &view)
+        .unwrap();
+    let child = live_child;
     let child_git = git.with_mount_namespace(child.clone());
     assert_eq!(
         child_git
