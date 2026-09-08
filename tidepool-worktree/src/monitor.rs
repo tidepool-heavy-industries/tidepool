@@ -187,7 +187,7 @@ impl WorktreeMonitor {
         self.journal.ensure_writable()?;
         let (mut head, mut branch) = self.last_observed(&worktree);
         if head.is_none() {
-            if !crate::registry::worktree_present(&path) {
+            if !crate::registry::worktree_present(&self.git, &path)? {
                 return Err(WorktreeError::WorktreeLost(worktree));
             }
             head = Some(read_head(&self.git, &path)?);
@@ -248,7 +248,7 @@ impl WorktreeMonitor {
             .baselines
             .get(worktree)
             .ok_or_else(|| WorktreeError::WorktreeNotRegistered(worktree.clone()))?;
-        if !crate::registry::worktree_present(&baseline.path) {
+        if !crate::registry::worktree_present(&self.git, &baseline.path)? {
             return Err(WorktreeError::WorktreeLost(worktree.clone()));
         }
         let path = baseline.path.clone();

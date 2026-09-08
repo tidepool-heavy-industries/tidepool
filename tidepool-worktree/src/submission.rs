@@ -97,7 +97,7 @@ pub(crate) fn observe(
     git: &GitCli,
     handle: &WorktreeHandle,
 ) -> Result<SubmissionObservation, WorktreeError> {
-    if !handle.cwd().join(".git").exists() {
+    if !git.try_exists(&handle.cwd().join(".git"))? {
         return Err(WorktreeError::WorktreeLost(handle.id().clone()));
     }
 

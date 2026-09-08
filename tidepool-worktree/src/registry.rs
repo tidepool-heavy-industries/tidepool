@@ -33,8 +33,8 @@ const RECORDS_DIR: &str = "records";
 /// Whether the recorded `cwd` still holds a real git working tree. A plain
 /// `Path::exists` would be fooled by a directory left behind with its `.git`
 /// file removed; this reconciles like everything else in this crate.
-pub(crate) fn worktree_present(cwd: &Path) -> bool {
-    cwd.exists() && inspect::work_tree(&GitCli::new(), cwd).is_ok()
+pub(crate) fn worktree_present(git: &GitCli, cwd: &Path) -> Result<bool, WorktreeError> {
+    Ok(git.try_exists(&cwd.join(".git"))? && inspect::work_tree(git, cwd).is_ok())
 }
 
 /// How a managed worktree came to exist. Recorded because "what was this seeded
@@ -209,6 +209,13 @@ impl WorktreeRegistry {
     /// make a retained worktree quietly disappear, which is the exact failure
     /// retain-first exists to prevent. See `L6-storage-errors-receipt.md`.
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
+        self.list_with_git(&GitCli::new())
+    }
+
+    pub(crate) fn list_with_git(
+        &self,
+        git: &GitCli,
+    ) -> Result<Vec<WorktreeSummary>, WorktreeError> {
         let mut receipts = Vec::new();
         for (path, bytes) in self.records.read_all()? {
             let receipt: WorktreeReceipt =
@@ -220,13 +227,13 @@ impl WorktreeRegistry {
                 .cmp(&b.created_at_ms)
                 .then_with(|| a.worktree_id.cmp(&b.worktree_id))
         });
-        Ok(receipts
+        receipts
             .into_iter()
             .map(|receipt| {
-                let present = worktree_present(&receipt.cwd);
-                WorktreeSummary { receipt, present }
+                let present = worktree_present(git, &receipt.cwd)?;
+                Ok(WorktreeSummary { receipt, present })
             })
-            .collect())
+            .collect()
     }
 
     /// Mint a fresh, unused worktree id: `wt-<uuid v4>`. A v4 UUID's 122 bits

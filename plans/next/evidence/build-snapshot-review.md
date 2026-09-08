@@ -25,10 +25,13 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
    canonical `.shoal`, and rollback after failed assembly. Actual source allocation
    must supply this layout from its owner; it is not yet connected to unfolding.
 
-2. **Namespace-aware Git is necessary but insufficient.** Worktree registry
-   presence checks instantiate a fresh `GitCli`; submission checks `.git` directly
-   on the host; inspection and creation contain host `exists`/`canonicalize` calls.
-   Those paths must use the same owned view as the native actor. Distinguish the
+2. **Namespace-aware Git is necessary but insufficient.** Manager lookup/list,
+   monitor presence, submission and operation-marker inspection now use the owning
+   Git client's filesystem view. The focused namespace test verifies a checkout
+   whose `.git` exists only in its mounted view and private merge metadata hidden
+   from the host. Unavailable filesystem access fails rather than reporting a
+   missing checkout. Creation still contains host `canonicalize` calls, and actor
+   composition does not yet bind each checkout to its namespace. Distinguish the
    registered checkout identity from its stable namespace-visible path once, at
    the worktree owner, rather than patching each caller with another path rewrite.
 
@@ -78,6 +81,13 @@ mounts, independent child Git changes, unchanged-build reuse, and correct rebuil
 for changed inputs. Include a busy parent: it remains usable and the child receives
 the documented fallback. This is the next priority before broader consolidation,
 recovery and telemetry work; those remain required for full completion.
+
+Focused verification of the inspection changes: the namespace Git integration
+test passed, including manager lookup/list/submission against mounted-only state;
+three lost-worktree cases and the in-progress rebase refusal passed in
+`worktree_core`. `cargo clippy -p tidepool-node --lib -- -D warnings` and
+`cargo check -p tidepool --bin shoal` passed. These are boundary checks, not
+managed-unfold acceptance.
 
 ## Alternative substrate
 

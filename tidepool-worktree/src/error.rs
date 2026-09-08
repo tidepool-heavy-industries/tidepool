@@ -63,7 +63,9 @@ pub enum WorktreeError {
     /// loudly and commits are never silently dropped — but loud means an error
     /// the caller must handle, not a crash it cannot.
     ///
-    /// This is for genuine I/O failure against runtime-owned storage. Failures
+    /// Also used when checkout filesystem inspection fails (rather than finding
+    /// a missing path). This preserves unavailable-view and permission failures.
+    /// This is for genuine I/O failure against storage. Failures
     /// that are unreachable-by-construction (serializing our own types) or that
     /// indicate the machine is broken in a way no caller can act on (a system
     /// clock before the Unix epoch) stay panics — a `Result` a caller can only

@@ -116,6 +116,47 @@ impl MountNamespace {
         unsafe { self.command_with_setup(directory, program, || Ok(())) }
     }
 
+    /// Inspect a path in this view, including symlinks resolved within its root.
+    /// Missing paths are distinct from inaccessible or unavailable views.
+    pub fn try_exists(&self, path: &Path) -> io::Result<bool> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected absolute view path",
+            ));
+        }
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let mut command = self.host_command(Path::new("/"), "/bin/sh".as_ref())?;
+        // Run after namespace entry and capability dropping, matching Git access.
+        // SAFETY: the callback uses only syscalls and preallocated arguments.
+        // Its one-byte stdout receipt cannot fill the pipe while exec waits.
+        unsafe {
+            command.pre_exec(move || {
+                let exists = match rustix::fs::stat(path.as_c_str()) {
+                    Ok(_) => true,
+                    Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => false,
+                    Err(error) => return Err(error.into()),
+                };
+                let receipt = [u8::from(exists)];
+                loop {
+                    match rustix::io::write(rustix::stdio::stdout(), &receipt) {
+                        Ok(1) => return Ok(()),
+                        Err(rustix::io::Errno::INTR) => continue,
+                        Err(error) => return Err(error.into()),
+                        Ok(_) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                    }
+                }
+            });
+        }
+        let output = command.args(["-c", ":"]).output()?;
+        match (output.status.success(), output.stdout.as_slice()) {
+            (true, [0]) => Ok(false),
+            (true, [1]) => Ok(true),
+            _ => Err(io::Error::other("unconfirmed namespace path inspection")),
+        }
+    }
+
     /// # Safety
     /// `setup` runs after fork and must use only async-signal-safe operations
     /// with preconstructed arguments. It must not allocate or acquire locks.

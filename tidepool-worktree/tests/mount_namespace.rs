@@ -4,7 +4,13 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 use tidepool_node::MountNamespace;
+use tidepool_worktree::git::inspect;
 use tidepool_worktree::testing::TestRepo;
+use tidepool_worktree::InProgressKind;
+use tidepool_worktree::{
+    BranchName, GitOid, WorktreeId, WorktreeManager, WorktreeOrigin, WorktreeReceipt,
+    WorktreeRecordStatus, WorktreeRegistry,
+};
 
 struct Owner(Child);
 
@@ -50,6 +56,31 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
     )
     .unwrap();
     std::fs::copy(view.join(".git"), upper.join(".git")).unwrap();
+    let git_dir = inspect::git_dir(git, &view).unwrap();
+    std::fs::remove_file(view.join(".git")).unwrap();
+    let registry = WorktreeRegistry::open(storage.path().join("registry")).unwrap();
+    let id = WorktreeId::from_raw("mounted-child");
+    registry
+        .put(&WorktreeReceipt {
+            worktree_id: id.clone(),
+            cwd: view.clone(),
+            branch: BranchName::from_raw("child"),
+            source_head: GitOid::from_raw(original_head.trimmed()),
+            snapshot_ref: None,
+            origin: WorktreeOrigin::CurrentRepository,
+            source_repository: repository.path().into(),
+            created_at_ms: 0,
+            status: WorktreeRecordStatus::Finalized,
+        })
+        .unwrap();
+    let private_admin = storage.path().join("git-admin");
+    assert!(Command::new("cp")
+        .arg("-a")
+        .arg(&git_dir)
+        .arg(&private_admin)
+        .status()
+        .unwrap()
+        .success());
     let mut owner = Owner(
         Command::new("bwrap")
             .args([
@@ -66,6 +97,9 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
             .arg(&upper)
             .arg(&work)
             .arg(&view)
+            .arg("--bind")
+            .arg(&private_admin)
+            .arg(&git_dir)
             .args([
                 "--die-with-parent",
                 "--",
@@ -102,7 +136,28 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
     }
     assert!(status.lines().any(|line| line == "NoNewPrivs:\t1"));
     let mounted_git = git.with_mount_namespace(namespace.clone());
+    let manager = WorktreeManager::new(
+        mounted_git.clone(),
+        registry,
+        storage.path(),
+        repository.path(),
+    );
+    let handle = manager.lookup(&id).unwrap().unwrap();
+    assert!(manager.list().unwrap()[0].present);
+    assert!(namespace.try_exists(&view.join("file")).unwrap());
+    assert!(!namespace.try_exists(&view.join("missing")).unwrap());
+    std::fs::write(private_admin.join("MERGE_HEAD"), original_head.trimmed()).unwrap();
+    assert!(!git_dir.join("MERGE_HEAD").exists());
+    assert_eq!(
+        inspect::in_progress(&mounted_git, &view).unwrap(),
+        Some(InProgressKind::Merge)
+    );
+    std::fs::remove_file(private_admin.join("MERGE_HEAD")).unwrap();
+    assert_eq!(inspect::in_progress(&mounted_git, &view).unwrap(), None);
     mounted_git.try_run(&view, &["read-tree", "HEAD"]).unwrap();
+    let observed = manager.observe_submission(&handle).unwrap();
+    assert!(observed.working_state.changes.staged.is_empty());
+    assert!(observed.working_state.changes.unstaged.is_empty());
     assert_eq!(
         mounted_git
             .try_run(&view, &["status", "--porcelain"])
@@ -152,5 +207,9 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
     assert_eq!(
         namespace.require_live_owner().unwrap_err().kind(),
         std::io::ErrorKind::NotFound
+    );
+    assert!(
+        manager.list().is_err(),
+        "unavailable namespace is not a missing checkout"
     );
 }

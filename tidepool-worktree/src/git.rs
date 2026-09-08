@@ -94,6 +94,18 @@ impl GitCli {
         Ok(command)
     }
 
+    /// Filesystem inspection uses the same view as Git, never its host alias.
+    pub(crate) fn try_exists(&self, path: &Path) -> Result<bool, WorktreeError> {
+        #[cfg(target_os = "linux")]
+        let result = match &self.namespace {
+            Some(namespace) => namespace.try_exists(path),
+            None => path.try_exists(),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let result = path.try_exists();
+        result.map_err(|error| crate::storage::storage_failure(path, error))
+    }
+
     /// Run git in `cwd`. `Err` only for a nonzero exit or a spawn failure; a
     /// command that succeeds with output on stderr is still `Ok`.
     pub fn run<S: AsRef<OsStr>>(
@@ -179,9 +191,6 @@ pub mod inspect {
     /// per-worktree one, not the common dir. In-progress-operation markers live
     /// here, so a rebase in one worktree does not look like a rebase in another.
     pub fn git_dir(git: &GitCli, cwd: &Path) -> Result<PathBuf, WorktreeError> {
-        if !cwd.exists() {
-            return Err(WorktreeError::NotARepository(cwd.to_path_buf()));
-        }
         let out = git
             .run(cwd, &["rev-parse", "--absolute-git-dir"])
             .map_err(|_| WorktreeError::NotARepository(cwd.to_path_buf()))?;
@@ -341,16 +350,16 @@ pub mod inspect {
     /// status output format changes.
     pub fn in_progress(git: &GitCli, cwd: &Path) -> Result<Option<InProgressKind>, WorktreeError> {
         let dir = git_dir(git, cwd)?;
-        let has = |name: &str| dir.join(name).exists();
-        Ok(if has("MERGE_HEAD") {
+        let has = |name: &str| git.try_exists(&dir.join(name));
+        Ok(if has("MERGE_HEAD")? {
             Some(InProgressKind::Merge)
-        } else if has("rebase-merge") || has("rebase-apply") || has("REBASE_HEAD") {
+        } else if has("rebase-merge")? || has("rebase-apply")? || has("REBASE_HEAD")? {
             Some(InProgressKind::Rebase)
-        } else if has("CHERRY_PICK_HEAD") {
+        } else if has("CHERRY_PICK_HEAD")? {
             Some(InProgressKind::CherryPick)
-        } else if has("REVERT_HEAD") {
+        } else if has("REVERT_HEAD")? {
             Some(InProgressKind::Revert)
-        } else if has("BISECT_LOG") {
+        } else if has("BISECT_LOG")? {
             Some(InProgressKind::Bisect)
         } else {
             None

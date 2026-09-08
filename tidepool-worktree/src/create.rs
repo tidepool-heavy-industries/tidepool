@@ -189,11 +189,16 @@ impl WorktreeManager {
                     path: source.clone(),
                     detail: error.to_string(),
                 })?;
-        if let Some(receipt) = self.registry.list()?.into_iter().find_map(|summary| {
-            (summary.receipt.origin == WorktreeOrigin::SourceCheckout
-                && summary.receipt.cwd.canonicalize().ok().as_ref() == Some(&canonical_source))
-            .then_some(summary.receipt)
-        }) {
+        if let Some(receipt) = self
+            .registry
+            .list_with_git(&self.git)?
+            .into_iter()
+            .find_map(|summary| {
+                (summary.receipt.origin == WorktreeOrigin::SourceCheckout
+                    && summary.receipt.cwd.canonicalize().ok().as_ref() == Some(&canonical_source))
+                .then_some(summary.receipt)
+            })
+        {
             return Ok(WorktreeHandle::from_receipt(receipt));
         }
 
@@ -405,7 +410,7 @@ impl WorktreeManager {
         match self.registry.get(id)? {
             None => Ok(None),
             Some(receipt) => {
-                if worktree_present(&receipt.cwd) {
+                if worktree_present(&self.git, &receipt.cwd)? {
                     Ok(Some(WorktreeHandle::from_receipt(receipt)))
                 } else {
                     Err(WorktreeError::WorktreeLost(id.clone()))
@@ -415,7 +420,7 @@ impl WorktreeManager {
     }
 
     pub fn list(&self) -> Result<Vec<WorktreeSummary>, WorktreeError> {
-        self.registry.list()
+        self.registry.list_with_git(&self.git)
     }
 
     /// Fresh read of `handle`'s CURRENT git `HEAD`, performed at call time.
@@ -433,7 +438,7 @@ impl WorktreeManager {
     /// is on a normal branch checkout or detached, so no special-casing is
     /// needed for detached HEAD.
     pub fn worktree_head(&self, handle: &WorktreeHandle) -> Result<GitOid, WorktreeError> {
-        if !worktree_present(handle.cwd()) {
+        if !worktree_present(&self.git, handle.cwd())? {
             return Err(WorktreeError::WorktreeLost(handle.id().clone()));
         }
         let out = self.git.try_run(handle.cwd(), &["rev-parse", "HEAD"])?;
