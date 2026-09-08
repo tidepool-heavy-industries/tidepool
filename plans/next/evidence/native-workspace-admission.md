@@ -1,6 +1,6 @@
 # Native workspace admission checkpoint
 
-Codex branch `work/build-snapshot-admission`, commit `0a202c95df`, in
+Codex branch `work/build-snapshot-admission`, commit `f81e9886a8`, in
 `/tmp/tidepool-build-snapshot-codex`, based on pinned `d760c5cb8c`.
 The Tidepool runner pin and launch environment are unchanged. This is not yet
 an enabled or complete native snapshot protocol.
@@ -12,7 +12,9 @@ created Linux writer cgroup. Executor commands enter that group before exec in
 both pipe and PTY paths. A task-local scope includes actual executor commands;
 ordinary infrastructure process launches are unchanged. `codex-sandboxing` applies
 the scope at its common local spawn entry point. The shared patch runtime holds
-a mutation guard, including shell-intercepted patches.
+a mutation guard, including shell-intercepted patches. Hook commands and shell
+snapshot initialization use the same owner's direct-command spawn entry point;
+their existing output, waiting, and cancellation owners remain in place.
 
 Snapshot admission requires the exclusive gate and kernel `populated = 0` on an
 opened cgroup events file. It does not infer completion from shell exit, process
@@ -25,23 +27,24 @@ admission while preserving normal native execution.
 
 - This host permits creating writer groups in its delegated cgroup v2 hierarchy,
   including migration from the Bubblewrap user namespace.
-- The focused native regression passed for pipe and PTY processes: publication
+- The focused native regression passed for pipe, PTY, and direct commands: publication
   excludes new mutations; a detached child with closed standard streams keeps
   publication busy after its leader exits; descendant exit permits publication.
-- `just test -p codex-utils-pty`: 27 existing tests passed. The additional kernel
+- `just test -p codex-hooks -p codex-utils-pty`: 202 tests passed. The additional kernel
   regression passed with `--run-ignored all -E 'test(writer_admission)'`; it is
-  explicitly ignored by default because it requires writable delegation.
-- `cargo check -p codex-core -p codex-sandboxing --lib` passed using Rust 1.95.0.
+  explicitly ignored by default because it requires writable delegation. Direct
+  launch waits for publication to finish; failed exec releases admission.
+- `cargo check -p codex-core -p codex-hooks --lib` passed using Rust 1.95.0.
   Ambient Rust 1.93 cannot compile this fork's SQLx 0.9 dependencies.
-- `just fix -p codex-utils-pty`, `just fmt`, and diff whitespace checks passed.
+- `just fix -p codex-utils-pty -p codex-hooks`, `just fmt`, and diff whitespace checks passed.
   Unrelated formatter-only changes to the native justfile were excluded.
 
 ## Before enabling
 
-1. Cover remaining process writers, particularly hook commands and shell-snapshot
-   initialization, through their owning launch paths. Audit native filesystem
-   mutations and unsupported executor environments. Hosted coordination itself
-   must not hold the mutation gate.
+1. Audit remaining native filesystem writers and unsupported executor environments.
+   Git helpers still launch outside admission (`git-utils/src/git_process.rs`,
+   `operations.rs`, and `apply.rs`); trace their production consumers before
+   claiming coverage. Hosted coordination itself must not hold the mutation gate.
 2. Expose exact admission custody through the native controller/request owner.
    Keep the publication guard until the host finishes; reconcile disconnects and
    uncertain completion without a timer silently reopening writes mid-transition.
