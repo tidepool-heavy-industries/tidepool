@@ -1,6 +1,6 @@
 # Native workspace admission checkpoint
 
-Codex branch `work/build-snapshot-admission`, commit `f81e9886a8`, in
+Codex branch `work/build-snapshot-admission`, commit `5428ae8538`, in
 `/tmp/tidepool-build-snapshot-codex`, based on pinned `d760c5cb8c`.
 The Tidepool runner pin and launch environment are unchanged. This is not yet
 an enabled or complete native snapshot protocol.
@@ -15,6 +15,9 @@ the scope at its common local spawn entry point. The shared patch runtime holds
 a mutation guard, including shell-intercepted patches. Hook commands and shell
 snapshot initialization use the same owner's direct-command spawn entry point;
 their existing output, waiting, and cancellation owners remain in place.
+The older `core::spawn` executor, asynchronous Git commands, and configured
+PowerShell version probes also use that entry point. Captured commands share
+Tokio-compatible output handling in the admission owner.
 
 Snapshot admission requires the exclusive gate and kernel `populated = 0` on an
 opened cgroup events file. It does not infer completion from shell exit, process
@@ -36,15 +39,24 @@ admission while preserving normal native execution.
   launch waits for publication to finish; failed exec releases admission.
 - `cargo check -p codex-core -p codex-hooks --lib` passed using Rust 1.95.0.
   Ambient Rust 1.93 cannot compile this fork's SQLx 0.9 dependencies.
+- The subsequent Git/executor pass ran all 41 `codex-git-utils` tests and all
+  28 `codex-utils-pty` tests (including delegated-cgroup coverage): passed.
+- The core library compiled and 86 tests selected by
+  `test(exec::tests) or test(shell_snapshot::tests)` ran: 81 passed initially.
+  This Nix host lacks `/bin/bash`. A private Bubblewrap view with `/dev` device
+  binding and Bash mounted at `/bin/bash` and `/bin/sh` allowed four of the five
+  failed tests to pass, including grandchild timeout cleanup and startup stdin
+  isolation. `linux_bash_snapshot_includes_sections` still fails its PATH-export
+  assertion. This is unresolved; no claim of a fully passing core selection.
 - `just fix -p codex-utils-pty -p codex-hooks`, `just fmt`, and diff whitespace checks passed.
+  The subsequent Git/executor pass also passed focused Git/PTY Clippy and formatting.
   Unrelated formatter-only changes to the native justfile were excluded.
 
 ## Before enabling
 
 1. Audit remaining native filesystem writers and unsupported executor environments.
-   Git helpers still launch outside admission (`git-utils/src/git_process.rs`,
-   `operations.rs`, and `apply.rs`); trace their production consumers before
-   claiming coverage. Hosted coordination itself must not hold the mutation gate.
+   Hosted coordination itself must not hold the mutation gate. See the consumer
+   audit below for the remaining Git paths and native state-directory boundary.
 2. Expose exact admission custody through the native controller/request owner.
    Keep the publication guard until the host finishes; reconcile disconnects and
    uncertain completion without a timer silently reopening writes mid-transition.
@@ -56,7 +68,36 @@ admission while preserving normal native execution.
    are not implemented. Never adopt a stale group merely because a PID repeats.
 5. Run native controller and managed-unfold acceptance before updating the runner
    pin or enabling the opt-in. Core integration tests and the full native suite
-   have not run for this checkpoint.
+   have not run for this checkpoint; retain the unresolved shell assertion above.
 
 Kernel contract: [cgroup v2 populated notifications](https://docs.kernel.org/admin-guide/cgroup-v2.html#un-populated-notification)
 include live processes throughout the group's descendant hierarchy.
+
+## Consumer audit
+
+The next implementation checkpoint is one complete managed parent/child unfold:
+bind admission to the native controller, capture source/Git and build views, and
+prove unchanged Cargo reuse. Drive additional writer work from that path rather
+than extending the audit to unrelated native subsystems. Recovery, retirement,
+fallback, and storage acceptance remain required by the full implementation plan.
+
+- `core/src/spawn.rs` still serves `core/src/exec.rs`; it is a separate local shell
+  launch entry from `codex-sandboxing`. Both must participate in admission.
+- `git-utils/src/git_process.rs` owns asynchronous metadata commands, including
+  fsmonitor probes and queries from `info.rs`. Preserve its existing process-tree
+  cleanup while routing process creation through admission.
+- `core/src/context/world_state/environment.rs` launches the configured PowerShell
+  executable for a version probe. Even this short probe belongs to command custody.
+- `git-utils/src/apply.rs` synchronous patch/staging consumers are the separate
+  `codex apply` and cloud-task CLI paths, plus tests; the interactive core patch
+  tool uses its own already-guarded patch runtime. A CLI invoked by an admitted
+  shell remains a descendant of that shell's writer group.
+- `operations.rs` synchronous mutations serve the memory baseline in
+  `CODEX_HOME/memories`; other callers in `branch.rs` query revision metadata.
+  Managed publication must keep native state outside the snapshotted source/build
+  roots. Confirm this at launch rather than assuming arbitrary `CODEX_HOME` paths
+  are disjoint. The memory service also writes files directly outside Git.
+- The TUI's normal app-server client has an in-process implementation sharing the
+  native admission singleton. The remote-client variant does not establish local
+  execution custody. Snapshot control must bind the actual execution owner and
+  reject unsupported remote execution, not infer it from the visible pane.
