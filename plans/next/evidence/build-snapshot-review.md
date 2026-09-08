@@ -260,6 +260,17 @@ warnings in hosted retirement, launch custody and prompt hashing (and a dependen
 warning in rollout usage without `--no-deps`); the new excessive-argument warning
 was fixed by grouping the two independent inheritance inputs.
 
+## Fork admission awaits preparation
+
+`ForkWorkspaceAdmission::admit` is asynchronous. The resident actor awaits it
+before allocating and bootstrapping the child; the host adapter keeps blocking Git
+operations on the blocking pool. This is the insertion point for the common
+native source/index/build transaction, not an additional launch-time capture.
+Admission still creates the legacy Git worktree until that transaction is wired.
+
+The focused current-thread admission test and existing sibling custody ordering
+and failed-custody publication tests passed (3 tests). The Shoal binary compiled.
+
 ## Alternative substrate
 
 A dedicated filesystem with native subvolume snapshots could remove much of the

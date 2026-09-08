@@ -119,7 +119,7 @@ type ShoalHandlerStack = HCons<
 type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 
 struct ActorForkWorkspaceAdmission {
-    worktrees: Mutex<ActorWorktreeHandler>,
+    worktrees: Arc<Mutex<ActorWorktreeHandler>>,
     manager: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
@@ -220,22 +220,31 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
     fn admit(
         &self,
         owner: ActorRef,
-        actor_path: &str,
+        actor_path: String,
         seed: ForkWorkspaceSeed,
-    ) -> Result<tidepool_bridge_effects::WtWorktreeHandle, ForkWorkspaceAdmissionError> {
-        let (spec, dirty_policy) = match seed {
-            ForkWorkspaceSeed::Explicit(spec) => {
-                let dirty_policy = spec.spec_dirty_policy;
-                (Some(spec), dirty_policy)
-            }
-            ForkWorkspaceSeed::BoundHead(dirty_policy) => (None, dirty_policy),
-        };
-        self.worktrees
-            .lock()
-            .admit_fork_workspace(owner.into(), actor_path.to_owned(), spec, dirty_policy)
-            .map_err(|error| ForkWorkspaceAdmissionError {
-                detail: format!("{error:?}"),
+    ) -> tidepool_actor::ForkWorkspaceAdmissionFuture<'_> {
+        let worktrees = self.worktrees.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let (spec, dirty_policy) = match seed {
+                    ForkWorkspaceSeed::Explicit(spec) => {
+                        let dirty_policy = spec.spec_dirty_policy;
+                        (Some(spec), dirty_policy)
+                    }
+                    ForkWorkspaceSeed::BoundHead(dirty_policy) => (None, dirty_policy),
+                };
+                worktrees
+                    .lock()
+                    .admit_fork_workspace(owner.into(), actor_path, spec, dirty_policy)
+                    .map_err(|error| ForkWorkspaceAdmissionError {
+                        detail: format!("{error:?}"),
+                    })
             })
+            .await
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: format!("workspace preparation task failed: {error}"),
+            })?
+        })
     }
 }
 
@@ -244,15 +253,15 @@ fn fork_workspace_admission(
     authority: ActorWorktreeAuthority,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
-) -> Arc<dyn ForkWorkspaceAdmission> {
+) -> Arc<ActorForkWorkspaceAdmission> {
     Arc::new(ActorForkWorkspaceAdmission {
         bindings,
         runtime,
         manager: worktrees.clone(),
-        worktrees: Mutex::new(ActorWorktreeHandler::new(
+        worktrees: Arc::new(Mutex::new(ActorWorktreeHandler::new(
             WorktreeHandler::from_manager(worktrees),
             authority,
-        )),
+        ))),
     })
 }
 

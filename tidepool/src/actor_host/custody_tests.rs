@@ -6,7 +6,7 @@ fn custody_fixture() -> (
     tempfile::TempDir,
     WorktreeHandle,
     Arc<Mutex<BindingTable>>,
-    Arc<dyn ForkWorkspaceAdmission>,
+    Arc<ActorForkWorkspaceAdmission>,
 ) {
     let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
     repository
@@ -26,6 +26,50 @@ fn custody_fixture() -> (
     let admission =
         fork_workspace_admission(manager, authority, bindings.clone(), "custody-test".into());
     (repository, runtime, tree, bindings, admission)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
+    let (_repo, _runtime, tree, _bindings, admission) = custody_fixture();
+    let owner = ActorRef::first(tidepool_actor::ActorId(7));
+    let _custody = admission
+        .install_custody(owner, tree.id().as_str())
+        .unwrap();
+    let (entered, ready) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let worktrees = admission.worktrees.clone();
+    let holder = std::thread::spawn(move || {
+        let _guard = worktrees.lock();
+        entered.send(()).unwrap();
+        released.blocking_recv().unwrap();
+    });
+    ready.await.unwrap();
+    let mut preparation = admission.admit(
+        owner,
+        "root/async-child".into(),
+        ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
+    );
+    std::future::poll_fn(|cx| {
+        assert!(preparation.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    let prepared = tokio::time::timeout(Duration::from_secs(10), preparation)
+        .await
+        .unwrap()
+        .unwrap();
+    holder.join().unwrap();
+    let handle = admission
+        .manager
+        .lookup(&WorktreeId::from_raw(&prepared.handle_receipt.tree_id.raw))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(handle.cwd().join("README.md")).unwrap(),
+        "seed"
+    );
+    assert_ne!(handle.id(), tree.id());
 }
 
 #[test]
@@ -105,9 +149,9 @@ impl ForkWorkspaceAdmission for DelayedCustody {
     fn admit(
         &self,
         owner: ActorRef,
-        path: &str,
+        path: String,
         seed: ForkWorkspaceSeed,
-    ) -> Result<tidepool_bridge_effects::WtWorktreeHandle, ForkWorkspaceAdmissionError> {
+    ) -> tidepool_actor::ForkWorkspaceAdmissionFuture<'_> {
         self.inner.admit(owner, path, seed)
     }
     fn install_custody(

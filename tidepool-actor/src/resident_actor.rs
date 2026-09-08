@@ -1174,17 +1174,16 @@ where
             })?;
             let owner = context.actor;
             let actor_path = descriptor.label().to_owned();
-            let admitted =
-                tokio::task::spawn_blocking(move || admission.admit(owner, &actor_path, seed))
-                    .await
-                    .map_err(ResidentActorWorkbenchError::Join)?
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "worktree admission for `{}` failed: {}",
-                            descriptor.label(),
-                            error
-                        ))
-                    })?;
+            let admitted = admission
+                .admit(owner, actor_path, seed)
+                .await
+                .map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "worktree admission for `{}` failed: {}",
+                        descriptor.label(),
+                        error
+                    ))
+                })?;
             launch_worktrees = vec![admitted.handle_receipt.tree_id.raw.clone()];
             Some(admitted)
         } else {

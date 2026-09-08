@@ -5,6 +5,8 @@
 //! owner. This capability is intentionally not the general model-facing
 //! allocation effect.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tidepool_bridge_effects::{WtDirtyPolicy, WtWorktreeHandle, WtWorktreeSpec};
@@ -35,6 +37,10 @@ pub trait ForkWorkspaceCustody: Send + Sync + 'static {
     fn process_may_exist(&self);
 }
 
+pub type ForkWorkspaceAdmissionFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<WtWorktreeHandle, ForkWorkspaceAdmissionError>> + Send + 'a>,
+>;
+
 pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
     /// Install custody before executing the child entry. This is separate from
     /// provider readiness; implementations must fail closed on stale ownership.
@@ -44,12 +50,14 @@ pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
         worktree: &str,
     ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>;
 
+    /// Prepare the workspace before child bootstrap. Async native admission
+    /// stays on the runtime; implementations isolate blocking Git work themselves.
     fn admit(
         &self,
         owner: ActorRef,
-        actor_path: &str,
+        actor_path: String,
         seed: ForkWorkspaceSeed,
-    ) -> Result<WtWorktreeHandle, ForkWorkspaceAdmissionError>;
+    ) -> ForkWorkspaceAdmissionFuture<'_>;
 }
 
 pub(crate) type SharedForkWorkspaceAdmission = Arc<dyn ForkWorkspaceAdmission>;
