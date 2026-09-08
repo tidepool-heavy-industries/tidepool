@@ -101,11 +101,26 @@ Changed agent and host test targets compiled; formatting and whitespace checks
 passed. Unrelated codegen formatter churn was excluded.
 
 Automatic publication remains disabled by the native opt-in. Before enabling:
-complete retryable unknown-mount reconciliation and host-restart reconstruction,
+complete host-restart reconstruction of mount-transition evidence,
 and keep publication recovery from
 blocking the fleet health loop on transport timeouts. A dead host can still leave
 native admission held until ownership is recovered; the native lease alone is not
 a completed recovery design.
+
+Unknown mount outcomes now retain an `OverlayRecovery` handle in the build
+resource owner. Preparing captures the original namespace and mount evidence;
+applying consumes the prepared rotation. The retained handle can reconcile or
+thaw the original transition but cannot start another rotation. The existing
+native-publication retry path uses it before attempting new preparation.
+The handle remains in memory: durable reconstitution after losing the host is
+still outstanding. Preparation uses a temporary generation directory, retained
+only when invoking the mount transition, so repeated pre-mount failures do not
+accumulate unused directories.
+
+Checks passed: three owning mount-recovery tests, including delayed/repeated
+reconciliation without another mount switch; four build-resource tests, including
+preparation-failure cleanup and native finish-reply recovery. Changed host and
+node targets compiled; formatting and whitespace checks passed.
 
 ## Before enabling
 
