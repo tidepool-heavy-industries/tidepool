@@ -32,16 +32,32 @@ pub struct ProcessMountBoundary {
     writable_roots: Vec<PathBuf>,
     read_only_overlays: Vec<(PathBuf, PathBuf)>,
     writable_overlays: Vec<(PathBuf, PathBuf)>,
-    build_overlays: Vec<BuildOverlay>,
+    overlay_views: Vec<OverlayView>,
 }
 
 /// Immutable layers are ordered oldest first, matching Bubblewrap's source order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BuildOverlay {
+struct OverlayView {
     layers: Vec<PathBuf>,
     upper: PathBuf,
     work: PathBuf,
     target: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+enum ViewMount<'a> {
+    ReadOnly(&'a Path, &'a Path),
+    Writable(&'a Path, &'a Path),
+    Overlay(&'a OverlayView),
+}
+
+impl ViewMount<'_> {
+    fn target(&self) -> &Path {
+        match self {
+            Self::ReadOnly(_, target) | Self::Writable(_, target) => target,
+            Self::Overlay(view) => &view.target,
+        }
+    }
 }
 
 impl ProcessMountBoundary {
@@ -105,7 +121,7 @@ impl ProcessMountBoundary {
             writable_roots,
             read_only_overlays: Vec::new(),
             writable_overlays: Vec::new(),
-            build_overlays: Vec::new(),
+            overlay_views: Vec::new(),
         })
     }
 
@@ -119,18 +135,25 @@ impl ProcessMountBoundary {
         Ok(self)
     }
 
-    /// Overlay one process-private directory at an existing host directory.
+    /// Overlay one process-private directory at a namespace-visible path.
     ///
     /// This is used for launch policy assembled outside the checkout. The
-    /// source and target are both resolved before launch, and the overlay is
-    /// read-only inside the actor mount namespace.
+    /// source is resolved on the host; the destination may be inside a view
+    /// created during launch. The mount is read-only inside the actor namespace.
     pub fn with_read_only_overlay(
         mut self,
         source: impl AsRef<Path>,
         target: impl AsRef<Path>,
     ) -> Result<Self, ProcessBoundaryError> {
         let source = canonicalize("read-only overlay source", source.as_ref())?;
-        let target = canonicalize("read-only overlay target", target.as_ref())?;
+        let target = target.as_ref().to_path_buf();
+        if !target.is_absolute()
+            || target
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(ProcessBoundaryError::InvalidMountTarget { path: target });
+        }
         self.read_only_overlays.push((source, target));
         self.read_only_overlays.sort();
         self.read_only_overlays.dedup();
@@ -155,12 +178,12 @@ impl ProcessMountBoundary {
         Ok(self)
     }
 
-    /// Mount a private writable build view over retained immutable layers.
+    /// Mount a private writable filesystem view over retained immutable layers.
     ///
     /// The resource owner retains all backing directories until process cleanup
     /// is confirmed. This boundary protects their ordinary aliases in the worker
     /// namespace; it cannot freeze other processes' aliases to the same files.
-    pub fn with_build_overlay(
+    pub fn with_overlay_view(
         mut self,
         layers: impl IntoIterator<Item = PathBuf>,
         upper: impl AsRef<Path>,
@@ -169,13 +192,12 @@ impl ProcessMountBoundary {
     ) -> Result<Self, ProcessBoundaryError> {
         let layers = layers
             .into_iter()
-            .map(|path| canonicalize("build snapshot layer", &path))
+            .map(|path| canonicalize("snapshot layer", &path))
             .collect::<Result<Vec<_>, _>>()?;
-        let upper = canonicalize("build upper directory", upper.as_ref())?;
-        let work = canonicalize("build work directory", work.as_ref())?;
+        let upper = canonicalize("overlay upper directory", upper.as_ref())?;
+        let work = canonicalize("overlay work directory", work.as_ref())?;
         let target = target.as_ref().to_path_buf();
         if !target.starts_with(&self.project_root)
-            || target == self.project_root
             || target
                 .components()
                 .any(|part| matches!(part, std::path::Component::ParentDir))
@@ -195,9 +217,9 @@ impl ProcessMountBoundary {
                     .any(|b| a.starts_with(b) || b.starts_with(a))
             })
         {
-            return Err(ProcessBoundaryError::InvalidBuildOverlay);
+            return Err(ProcessBoundaryError::InvalidOverlayView);
         }
-        self.build_overlays.push(BuildOverlay {
+        self.overlay_views.push(OverlayView {
             layers,
             upper,
             work,
@@ -248,34 +270,53 @@ impl ProcessMountBoundary {
             args.push(self.cwd.to_string_lossy().into_owned());
             args.push(self.project_root.to_string_lossy().into_owned());
         }
+        let mut mounts = Vec::new();
         for (source, target) in &self.read_only_overlays {
-            args.extend([
-                "--ro-bind".into(),
-                source.to_string_lossy().into_owned(),
-                target.to_string_lossy().into_owned(),
-            ]);
+            mounts.push(ViewMount::ReadOnly(source, target));
         }
         for (source, target) in &self.writable_overlays {
-            args.extend([
-                "--bind".into(),
-                source.to_string_lossy().into_owned(),
-                target.to_string_lossy().into_owned(),
-            ]);
+            mounts.push(ViewMount::Writable(source, target));
         }
-        for overlay in &self.build_overlays {
+        for overlay in &self.overlay_views {
             for path in overlay.layers.iter().chain([&overlay.upper, &overlay.work]) {
-                let path = path.to_string_lossy().into_owned();
-                args.extend(["--ro-bind".into(), path.clone(), path]);
+                mounts.push(ViewMount::ReadOnly(path, path));
             }
-            for layer in &overlay.layers {
-                args.extend(["--overlay-src".into(), layer.to_string_lossy().into_owned()]);
+            mounts.push(ViewMount::Overlay(overlay));
+        }
+        // Parent views precede every nested mount regardless of builder order.
+        mounts.sort_by(|a, b| {
+            a.target()
+                .components()
+                .count()
+                .cmp(&b.target().components().count())
+                .then_with(|| a.target().cmp(b.target()))
+        });
+        for mount in mounts {
+            match mount {
+                ViewMount::ReadOnly(source, target) | ViewMount::Writable(source, target) => {
+                    args.extend([
+                        if matches!(mount, ViewMount::ReadOnly(..)) {
+                            "--ro-bind"
+                        } else {
+                            "--bind"
+                        }
+                        .into(),
+                        source.to_string_lossy().into_owned(),
+                        target.to_string_lossy().into_owned(),
+                    ]);
+                }
+                ViewMount::Overlay(overlay) => {
+                    for layer in &overlay.layers {
+                        args.extend(["--overlay-src".into(), layer.to_string_lossy().into_owned()]);
+                    }
+                    args.extend([
+                        "--overlay".into(),
+                        overlay.upper.to_string_lossy().into_owned(),
+                        overlay.work.to_string_lossy().into_owned(),
+                        overlay.target.to_string_lossy().into_owned(),
+                    ]);
+                }
             }
-            args.extend([
-                "--overlay".into(),
-                overlay.upper.to_string_lossy().into_owned(),
-                overlay.work.to_string_lossy().into_owned(),
-                overlay.target.to_string_lossy().into_owned(),
-            ]);
         }
         args.extend_from_slice(options);
         args.extend([
@@ -304,8 +345,10 @@ fn canonicalize(kind: &'static str, path: &Path) -> Result<PathBuf, ProcessBound
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessBoundaryError {
-    #[error("build overlay requires nonempty immutable layers and disjoint backing directories")]
-    InvalidBuildOverlay,
+    #[error("mount target must be absolute and contain no parent traversal: {}", .path.display())]
+    InvalidMountTarget { path: PathBuf },
+    #[error("overlay view requires nonempty immutable layers and disjoint backing directories")]
+    InvalidOverlayView,
     #[error("cannot resolve {kind} {}: {source}", .path.display())]
     InvalidPath {
         kind: &'static str,

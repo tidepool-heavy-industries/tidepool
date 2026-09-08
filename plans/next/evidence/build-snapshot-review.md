@@ -19,11 +19,11 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
 ## Consequential findings
 
 1. **Source rotation must preserve the complete mount tree.** The checked
-   `OverlayRotation` replaces one mount. Applied directly to the project root, it
-   does not carry the separately mounted build view, canonical `.shoal` or other
-   owned nested mounts into the replacement. Stage the complete replacement tree
-   in the helper's private namespace and attach it at the owning boundary. Prove
-   nested-mount preservation before using the current primitive for source.
+   current working implementation stages the replacement with explicitly owned
+   nested mounts in a private helper namespace and publishes the tree in one
+   graft. The production mount builder and focused test cover a live build FD,
+   canonical `.shoal`, and rollback after failed assembly. Actual source allocation
+   must supply this layout from its owner; it is not yet connected to unfolding.
 
 2. **Namespace-aware Git is necessary but insufficient.** Worktree registry
    presence checks instantiate a fresh `GitCli`; submission checks `.git` directly
@@ -33,9 +33,10 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
    the worktree owner, rather than patching each caller with another path rewrite.
 
 3. **Cache continuity needs metadata and path checks.** Empty replacement upper
-   directories currently receive allocation-time metadata. Overlay directory
-   metadata comes from the upper directory, so source-root metadata must be
-   intentionally inherited. Preserve source contents/timestamps and visible
+   directories receive allocation-time metadata unless explicitly initialized.
+   Rotation now copies visible root ownership, mode, xattrs and timestamps, with
+   focused coverage. Initial child-view allocation still needs that invariant.
+   Preserve source contents/timestamps and visible
    source/target paths; leave Cargo's validity checks intact. Acceptance must
    include a build script and a changed local crate, not just an unchanged tiny
    build. Incremental-cache hard links can trigger file copy-up; measure changed
@@ -55,6 +56,12 @@ models to coordinate. Ordinary `unfold` remains the only normal surface.
    and uncertain cleanup. Bound both lower-layer depth and retained old mount
    trees; a flat lower list alone does not retire covered mounts or stale cwd
    references. Native cwd refresh belongs at the execution boundary.
+
+   Filesystem custody must also outlive worker execution. `MountNamespace` retains
+   namespace/root descriptors but currently requires a live original process for
+   host commands. Finished checkouts must remain inspectable through their retained
+   view. Separate that authority from native process liveness within the resource
+   owner; do not simply remove the current check without replacing its contract.
 
 6. **Make root import and root Git ownership explicit.** The original ext4
    checkout cannot be treated as an immutable lower layer while ordinary host

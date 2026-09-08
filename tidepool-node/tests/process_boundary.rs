@@ -186,7 +186,7 @@ fn build_overlay_shares_layers_and_isolates_writes() {
         let boundary =
             ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()])
                 .unwrap()
-                .with_build_overlay(
+                .with_overlay_view(
                     [base.clone(), newer.clone()],
                     &upper,
                     root.path().join(format!("work-{suffix}")),
@@ -233,9 +233,9 @@ fn build_overlay_rejects_escape_and_overlapping_backing_directories() {
     let workspace = root.path().join("workspace");
     let boundary =
         ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()]).unwrap();
-    for target in [workspace.clone(), workspace.join("../escape")] {
+    for target in [root.path().join("outside"), workspace.join("../escape")] {
         assert!(matches!(
-            boundary.clone().with_build_overlay(
+            boundary.clone().with_overlay_view(
                 [root.path().join("base")],
                 root.path().join("upper"),
                 root.path().join("work"),
@@ -245,12 +245,12 @@ fn build_overlay_rejects_escape_and_overlapping_backing_directories() {
         ));
     }
     assert!(matches!(
-        boundary.with_build_overlay(
+        boundary.with_overlay_view(
             [root.path().join("base")],
             root.path().join("upper"),
             root.path().join("upper"),
             workspace.join("target"),
         ),
-        Err(tidepool_node::ProcessBoundaryError::InvalidBuildOverlay)
+        Err(tidepool_node::ProcessBoundaryError::InvalidOverlayView)
     ));
 }

@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 use std::io;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -10,6 +11,9 @@ use rustix::io::Errno;
 use rustix::mount::MountFlags;
 
 use super::MountNamespace;
+
+mod root_metadata;
+use root_metadata::RootMetadata;
 
 /// A prepared replacement over retained layers, ordered oldest first.
 ///
@@ -23,6 +27,7 @@ pub struct OverlayRotation {
     upper: CString,
     work: CString,
     backing_target: CString,
+    preserved_mounts: Vec<CString>,
 }
 
 #[derive(Debug)]
@@ -126,10 +131,45 @@ impl OverlayRotation {
             upper: aliases[layers.len()].clone(),
             work: aliases[layers.len() + 1].clone(),
             backing_target,
+            preserved_mounts: Vec::new(),
         })
     }
 
-    fn mount_next(&self, namespace: &super::Descriptors) -> rustix::io::Result<()> {
+    /// Preserve independently owned mount trees below this view. The caller
+    /// supplies the mount layout already owned by the process boundary.
+    pub fn preserving_mounts(mut self, paths: &[PathBuf]) -> io::Result<Self> {
+        let target = Path::new(std::ffi::OsStr::from_bytes(self.target.as_bytes()));
+        if paths.iter().any(|path| {
+            path == target
+                || !path.starts_with(target)
+                || path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+        }) || paths.iter().enumerate().any(|(i, a)| {
+            paths
+                .iter()
+                .skip(i + 1)
+                .any(|b| a.starts_with(b) || b.starts_with(a))
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid preserved mount layout",
+            ));
+        }
+        self.preserved_mounts = paths
+            .iter()
+            .map(|path| CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other))
+            .collect::<io::Result<_>>()?;
+        Ok(self)
+    }
+
+    fn mount_next(
+        &self,
+        namespace: &super::Descriptors,
+        preserved: &[Option<OwnedFd>],
+        source_root: BorrowedFd<'_>,
+        root_metadata: &mut RootMetadata,
+    ) -> rustix::io::Result<()> {
         use rustix::mount::*;
         // Only the helper receives writable backing aliases. The detached
         // overlay can then be attached to the original workload namespace.
@@ -146,6 +186,14 @@ impl OverlayRotation {
             self.backing_target.as_c_str(),
         )?;
         mount_remount(self.backing_target.as_c_str(), MountFlags::BIND, c"")?;
+        let upper = rustix::fs::open(
+            self.upper.as_c_str(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )?;
+        root_metadata.copy(source_root, upper.as_fd())?;
         let context = fsopen(c"overlay", FsOpenFlags::FSOPEN_CLOEXEC)?;
         for lower in &self.lower {
             fsconfig_set_string(&context, c"lowerdir+", lower.as_c_str())?;
@@ -159,9 +207,34 @@ impl OverlayRotation {
             FsMountFlags::FSMOUNT_CLOEXEC,
             MountAttrFlags::empty(),
         )?;
-        namespace.enter_mount_root()?;
+        // Assemble the full view privately, then publish it with one graft.
         move_mount(
             &mount,
+            c"",
+            rustix::fs::CWD,
+            self.target.as_c_str(),
+            MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+        )?;
+        for (path, saved) in self.preserved_mounts.iter().zip(preserved) {
+            let saved = saved.as_ref().ok_or(Errno::IO)?;
+            move_mount(
+                saved,
+                c"",
+                rustix::fs::CWD,
+                path.as_c_str(),
+                MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+            )?;
+        }
+        let tree = open_tree(
+            rustix::fs::CWD,
+            self.target.as_c_str(),
+            OpenTreeFlags::OPEN_TREE_CLONE
+                | OpenTreeFlags::OPEN_TREE_CLOEXEC
+                | OpenTreeFlags::AT_RECURSIVE,
+        )?;
+        namespace.enter_mount_root()?;
+        move_mount(
+            &tree,
             c"",
             rustix::fs::CWD,
             self.target.as_c_str(),
@@ -170,7 +243,12 @@ impl OverlayRotation {
     }
 
     // Called after fork: syscall wrappers and stack-only data, no allocation.
-    fn apply(&self, namespace: &super::Descriptors) -> Transition {
+    fn apply(
+        &self,
+        namespace: &super::Descriptors,
+        preserved: &mut [Option<OwnedFd>],
+        metadata: &mut RootMetadata,
+    ) -> Transition {
         let target = self.target.as_c_str();
         // Linux UAPI OVERLAYFS_SUPER_MAGIC. Never remount an ordinary source
         // filesystem, or turn an already frozen view writable during rollback.
@@ -185,12 +263,34 @@ impl OverlayRotation {
             Ok(_) => return Transition::Unchanged(Errno::ROFS),
             Err(error) => return Transition::Unchanged(error),
         }
+        let source_root = match rustix::fs::open(
+            target,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(source_root) => source_root,
+            Err(error) => return Transition::Unchanged(error),
+        };
+        for (path, saved) in self.preserved_mounts.iter().zip(preserved.iter_mut()) {
+            *saved = match rustix::mount::open_tree(
+                rustix::fs::CWD,
+                path.as_c_str(),
+                rustix::mount::OpenTreeFlags::OPEN_TREE_CLONE
+                    | rustix::mount::OpenTreeFlags::OPEN_TREE_CLOEXEC
+                    | rustix::mount::OpenTreeFlags::AT_RECURSIVE,
+            ) {
+                Ok(mount) => Some(mount),
+                Err(error) => return Transition::Unchanged(error),
+            };
+        }
         match rustix::mount::mount_remount(target, MountFlags::RDONLY, c"") {
             Err(Errno::BUSY) => return Transition::Busy,
             Err(error) => return Transition::Unchanged(error),
             Ok(()) => {}
         }
-        match self.mount_next(namespace) {
+        match self.mount_next(namespace, preserved, source_root.as_fd(), metadata) {
             Ok(()) => Transition::Rotated,
             Err(error) => match namespace
                 .enter_mount_root()
@@ -229,11 +329,17 @@ impl MountNamespace {
         // Command owns/reaps the short helper. All mount work happens in its
         // pre-exec syscall phase; the shell only exits after capabilities drop.
         let descriptors = self.descriptors.clone();
+        let mut preserved = std::iter::repeat_with(|| None)
+            .take(rotation.preserved_mounts.len())
+            .collect::<Vec<Option<OwnedFd>>>();
+        let mut metadata = RootMetadata::new();
         // SAFETY: apply and receipt encoding use syscall wrappers and
         // preconstructed or stack-only arguments, with no allocation or locks.
         let mut command = unsafe {
             self.command_with_setup(Path::new("/"), "/bin/sh".as_ref(), move || {
-                let result = rotation.apply(&descriptors).encode();
+                let result = rotation
+                    .apply(&descriptors, &mut preserved, &mut metadata)
+                    .encode();
                 let mut frame = [0u8; 12];
                 for (word, bytes) in result.iter().zip(frame.chunks_exact_mut(4)) {
                     bytes.copy_from_slice(&word.to_le_bytes());

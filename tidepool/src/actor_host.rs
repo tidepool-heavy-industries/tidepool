@@ -2493,7 +2493,7 @@ async fn launch_prepared_interactive_application(
             .map_err(|error| {
                 application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
             })?
-            .with_build_overlay(
+            .with_overlay_view(
                 [lease.path().join("base")],
                 lease.path().join("upper"),
                 lease.path().join("work"),

@@ -123,7 +123,7 @@ impl MountNamespace {
         &self,
         directory: &Path,
         program: &std::ffi::OsStr,
-        setup: impl Fn() -> io::Result<()> + Send + Sync + 'static,
+        mut setup: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
     ) -> io::Result<Command> {
         if !directory.is_absolute() {
             return Err(io::Error::new(
