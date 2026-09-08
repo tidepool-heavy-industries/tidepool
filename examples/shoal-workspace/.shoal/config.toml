@@ -12,6 +12,7 @@ root = "prompts/owner.md"
 core = "prompts/core.md"
 
 [prompts.files]
+planner = "prompts/planner.md"
 lead = "prompts/lead.md"
 specialist = "prompts/specialist.md"
 task = "prompts/task.md"

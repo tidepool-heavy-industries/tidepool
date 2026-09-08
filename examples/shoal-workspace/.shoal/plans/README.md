@@ -1,67 +1,67 @@
-# Graph relationships: execution plan
+# Plan the current goal, then execute it
 
-This is the next application wave for `shoal-repl`, using a fixed Shoal build.
-The product should let a user understand who created an actor, who supervises
-its lifetime, and whose context it inherited. Those relationships can differ.
-Keep the normal Workbench composer, graph polling and all submission guarantees.
+This package supplies an operating style, typed Haskell tools and worked examples.
+The human's current task and the target repository determine the product. No
+example component, old run name or imported module is an assignment to build it.
+The same model applies to a standalone application or an explicitly chosen
+Tidepool dogfood task; obey the current source scope and concurrent owners.
 
-Astra has authored this plan and its Haskell vocabulary. A Sol integration owner
-pilots it, and Sol component leads own delivery. One tagged Astra specialist
-resolves the difficult relation/forest contract. Further Astra placements require
-a consequential need surfaced to the human. Do not stop an active expert at a
-token target. The human steers any worker through its normal Codex TUI.
+Start from an existing agreed goal/plan when one is supplied. Otherwise, the
+initial Astra planner collaborates with the human to establish the intended
+outcome, important examples and acceptance. A Sol execution owner can orient the
+current project and collect concrete questions, but should not treat a missing
+planner decision as permission for broad implementation. Use normal Codex TUI
+conversations; selecting an actor's model does not select its planner instructions.
+The on-demand [planner prompt](../prompts/planner.md) supplies that behavior.
 
-Read the relevant component below with [the shared language](language.md).
-`Project.Plan` supplies `component`, `componentLead` and the
-one `relationDesign` slot. These are ordinary editable functions. No import runs
-work, Markdown is not parsed into a scheduler, and the plan tree is not required
-to mirror supervision or context ancestry.
+## A plan that can be executed
 
-## Delivery tree and dependencies
+Put the current goal in a focused Markdown tree, following this shape where useful:
 
-1. Sol contract lead owns [the shared contract](graph/contract/README.md).
-   It first consults the [tagged Astra design leaf](graph/contract/design.md),
-   incorporates the supported decision, then implements and commissions independent
-   review, repairing locally when needed. The result is a buildable, reviewed contract commit.
-2. The Sol integration owner incorporates that exact result into its integration
-   checkout and verifies it. Only then launch independent Sol leads for
-   [projection](graph/projection/README.md) and [controls](graph/controls/README.md)
-   from that accepted commit. Both implement against the same contract. They do
-   not queue requests to each other to compensate for an incomplete scaffold.
-3. Each lead owns implementation by default. Its reviewer returns findings for
-   local repair and can be reused for the revised candidate. With useful delegated
-   implementation, the reviewer can request repairs directly from that retained
-   implementer. Each component returns its checked delivery independently. The integration
-   owner incorporates each coherent result while the other lane continues, then
-   runs the final combined checks. Keep partial product gates visible.
-4. On the human's “RSI time”, provide the outcome/snapshot packet to an ordinary
-   Astra engagement. It edits and checks .shoal source for the next explicit
-   swarm restart. See [the run and improvement guide](run.md).
+```text
+goal/
+  README.md              # Human intent, finished walkthrough, overall acceptance
+  shared.md              # Shared contracts, language, source/decision basis
+  component-a/
+    README.md            # Owned outcome, next frontier, later local waves
+    hard-question.md     # Declared Astra task and its release condition, if needed
+  component-b/
+    README.md            # Another substantial Sol-owned outcome
+```
 
-The initial source is the app checkout after this .shoal package is committed.
-Resolve and record the exact commit before launch. `component campaign part
-(GitRef exactCommit)` constructs a Task with source, scope, rationale and acceptance.
-Attach relevant checked decisions with withDecision before selecting fresh workers.
-The integration owner owns the final app branch; a component delivery publishes
-evidence-bearing commits and does not silently update that branch.
+Each substantive branch needs its scope, current source, shared prerequisites,
+next independently useful children, integration owner and acceptance evidence.
+Describe later waves by the behavior they unlock, refining details as results land.
+A child can recursively own several such waves. Keep current intent concise;
+retain older evidence by reference instead of appending every conversation here.
 
-## Authority and discretion
+Before broad execution, Sol owners write their interpretation with a normal and
+awkward consumer example, concrete interfaces, dependency/fork structure, checks,
+assumptions, objections and questions. The original planner reviews coupled choices
+and returns explicit corrections and release scope. Incorporate those decisions
+before dependent implementation. Later local work within the agreement proceeds
+without repeating this initial interview or inventing more approval stages.
 
-Worker behavior/model placement follows this plan even where historical app
-notes describe an older Astra tree or inherited-context dogfood run. App source
-ownership and verification guidance still apply. This wave changes the app;
-harness diagnosis, deployment and runtime migration are separate engineering work.
-Do not browse Tidepool implementation merely to learn the Haskell interface.
-Use the shipped guide, `:doc` and these modules; report a missing usage contract.
+## Use the workbench
 
-Sol may refactor within owned scope and improve tests/idioms without changing
-acceptance. Exact semantics, interface corrections and scope discoveries should
-be expressed as a supported decision or PlanAmendment. Within-contract fixes are
-local. Structural/product changes need the owning human decision through normal
-TUI steering. Preserve the waiting request during that discussion. Never queue
-back to an actor already waiting on your reply.
+- [composition.md](composition.md): paired source/context forks, dependency frontiers,
+  checked integration and a continuation at every substantial node.
+- [operating.md](operating.md): readback progress, source-bearing decisions, parallel
+  branch expressions and the actual asynchronous control boundaries.
+- [run.md](run.md): concrete admission, watch, review, retained repair and RSI examples.
+- [language.md](language.md): compact shared distinctions; add project vocabulary
+  where it helps collaborators make the same consequential choices.
+- [graph/README.md](graph/README.md): a worked graph-view feature allocation using
+  Project.Plan. It is an example, not the default goal or next-run instruction.
 
-Do not start live providers merely by checking this package. Deterministic
-resident checks establish executable recipes; they do not establish that a
-fresh Sol team used the guidance successfully. The actual application run and
-human-requested RSI remain distinct acceptance evidence.
+Project.Types, Project.Work and Project.Observe support ordinary project Tasks.
+Project.Plan includes the checked graph allocation and a reusable componentLead;
+its example constructors do not restrict which project can use the workbench.
+Use the actual task/result contracts and callable signatures. Importing a module
+or binding a composition starts no worker.
+
+There is one original-root runtime .shoal and one frozen selection per swarm.
+Follow the assigned authoring owner for customization; current package development
+lives in Tidepool and is copied during next-run preparation. A changed prompt,
+completed check or watch notification does not release an explicit operator hold.
+Preserve remaining obligations when handing off across a new swarm.

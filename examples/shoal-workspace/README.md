@@ -1,12 +1,29 @@
 # A project-specific Shoal workbench
 
-This authored .shoal package prepares a concrete shoal-repl wave: selectable
-creation, supervision and context relationship views. Start with the
-[plan tree](.shoal/plans/README.md) and [invocation guide](.shoal/plans/run.md).
-Astra supplies architecture, shared language and selected expert placements. Sol
-owners do substantive engineering, use independent review and delegate useful
-implementation frontiers. An ordinary human-requested Astra engagement improves
-the next wave. No worker is created merely because a pipeline names a stage.
+For current development, this repository's `examples/shoal-workspace/.shoal` is
+the single authoring location for the curated prompts, helpers and usage guides.
+Iterate and check them here. Next-run preparation must copy the selected canonical
+package into the target workspace automatically before startup; do not hand-edit
+the installed copy to curate another variant. The target's original-root `.shoal`
+is the runtime materialization selected for that swarm. This source ownership is
+separate from its frozen runtime authority. No copy or activation is needed during
+prompt review, and updating this package does not authorize a paused run to resume.
+
+This authored .shoal package supplies a programmable working style for the current
+project, with a separate relationship-view example for shoal-repl. Begin with the human and
+[initial Astra planner](.shoal/prompts/planner.md), then the
+[plan tree](.shoal/plans/README.md), [working pattern](.shoal/plans/operating.md)
+and relevant [invocation examples](.shoal/plans/run.md).
+Astra interviews the human and owns the finished feature across waves. Sol leads
+write their own execution plans for planner review, then own substantial recursive
+scaffold/fork/integrate waves and independent review. An ordinary human-requested
+Astra engagement improves the next wave. No worker is created merely because a
+pipeline names a stage.
+
+The [composition model](.shoal/plans/composition.md) explains the what and why:
+recursive fork/join inside local integration loops. Shared scaffolds make child
+results fit together, context forks share their reasoning, and checked integration
+produces source and understanding for the next ready frontier.
 
 The Haskell modules are tools for resident GHCi use. Bind a Task, apply an operation,
 keep its real handles, inspect a useful projection and compose the next action.
@@ -21,7 +38,8 @@ entire workflow to be useful.
   OwnerRepairs avoids queuing work behind the owner's pending delivery. A separate
   retained implementer can receive direct repairs after its original reply.
 - Project.Plan declares the concrete components, source constructors and Astra slot.
-  Leads normally implement directly. Each delivery retains its remaining gates.
+  Leads implement and integrate substantial work while opening useful parallel
+  subtrees through multiple local waves. Each delivery retains its remaining gates.
 - Project.Observe connects existing handles to outcomes, unresolved questions,
   identities, lifecycle/provider observations and usage with explicit coverage.
   RSI receives selected evidence, not a routinely summarized raw event stream.
@@ -32,12 +50,17 @@ ordinary authored names selected by Project.Work, not Rust workflow roles.
 Shoal.Workspace exposes the captured prompts, module names and definition identity.
 Every worker has the normal Codex TUI for engineering and direct human steering.
 
-The original repository root has one authoritative .shoal. A swarm captures it
-once. All later workers use that frozen selection even when a managed checkout
-contains newer source. Edit helpers/prompts/checks normally in a candidate checkout,
-incorporate checked changes into the original root and activate at an explicit
-next-swarm boundary. Preserve unfinished work and runtime artifacts. A nested Git
-repository is unnecessary; commit authored source with the application for now.
+The target's original repository root has one authoritative runtime .shoal. A swarm
+captures it once; later workers use that selection even when their checkout has
+newer files. For this package, incorporate changes in the Tidepool authoring source
+and let next-run preparation copy them before explicit swarm selection. More general
+project-owned customization uses the same source/frozen-runtime distinction with
+that project's chosen authoring owner. Preserve unfinished work and runtime artifacts.
+
+The planner prompt is a TOML-selected resource for a human-attached planning
+conversation or withInstructions on an ordinary actor; no new runtime role is
+needed. The original planner reviews readbacks and consequential amendments.
+An operator hold is not a failed continuation or permission to resume.
 
 The run guide shows first-turn and continuation expressions: commission a lead,
 transmit an accepted design, review/repair without a queue cycle, return a decision

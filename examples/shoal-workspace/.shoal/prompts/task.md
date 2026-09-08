@@ -1,25 +1,29 @@
-Own the supplied Task as an implementation obligation. Read its plan branch,
-relevant accepted decisions and owning source, then make the change in your bound
-checkout. Start useful work directly. Delegate only when the plan allows a
-meaningful independent split; a task does not need its own management hierarchy.
+Own the supplied implementation Task in your bound checkout. Start from its
+current accepted source, reasoning and selected plan. A planning-only assignment
+first returns understanding through its specified progress/result channel;
+implementation begins when its release condition is met.
 
-Check the behavior at its owning boundary, compile changed consumers and inspect
-the diff. Bind head :: Text to the exact resulting commit, checks :: [Text] to
-commands/evidence actually run there, and gates :: [Text] to remaining product
-limits. implement requests Outcome Candidate; for that result type:
+Build the real owning consumer and check behavior there. For substantial work,
+repeat committed scaffold, useful independent Sol branches, checked integration
+and the next local wave within the plan's discretion. Retain useful reasoning
+before forking; pass exact source and decision deltas. Keep small terminal tasks
+simple. Preserve the component's stated integration and acceptance boundaries.
+
+Compile changed consumers and run focused checks for important behavior and
+failure paths. If emitting code, verify its meaning and supported execution as well
+as its text. A mock or golden string establishes only its own boundary. Read your
+final diff for unused surface,
+misleading success, and accidental scope changes.
+
+Bind head to the exact checked commit, checks to actual commands/evidence there,
+and gates to remaining product limits. For implement's Outcome Candidate:
 
 ```haskell
 respond (Produced (Candidate head checks gates))
 ```
 
-Remain available for repair after replying. A later RepairTask is a new obligation
-against a particular candidate; it does not rewrite your original response.
-For a decision you cannot resolve within the task, publish the cumulative unresolved
-questions through the supplied reportProgress and keep this request pending.
-Include the source, evidence, alternatives and what the answer will unblock.
-The request owner watches that progress; do not queue a question behind its busy
-request. Apply supported steering to this obligation and verify incorporation.
-With Outcome Candidate, return Blocked reason evidence for a genuine blocker.
-A custom solTask composition may request another type: follow that actual reply
-contract and only use reportProgress when activation supplies it; do not manufacture a commit
-or silently treat incomplete acceptance as completion.
+Remain available for repair. Publish unresolved questions cumulatively when
+reportProgress is supplied; preserve the pending obligation while an owning
+answer is needed. A custom solTask may request another result type: follow that
+actual contract. Return Blocked with evidence when appropriate. A completed local
+wave or plan is not completion of an unfinished implementation assignment.

@@ -1,4 +1,9 @@
-# Run and improve this application wave
+# Compose and continue application work
+
+Read the current product plan and [working pattern](operating.md). Establish
+human intent and any requested Sol readback/release before implementation. The
+graph campaign below is an example allocation, not permission to rerun completed
+work or bypass an operator hold.
 
 Use a fixed checked Shoal executable. In the application checkout, first run
 `shoal check --workspace .` to compile the authored selection without models.
@@ -8,7 +13,7 @@ checkouts without native workers or providers. Compilation alone does not establ
 recipe behavior. Starting the paid wave is a subsequent operator action:
 
 ```sh
-shoal init --workspace /home/inanna/dev/shoal-repl --session shoal-repl-relations
+shoal init --workspace /path/to/project --session new-authorized-session
 ```
 
 Do not recreate an unfinished or unrelated session. All workers use normal Codex
@@ -16,7 +21,36 @@ TUIs; talk directly to the owner, lead or specialist for steering. The original
 root's .shoal is authoritative. Candidate files in managed checkouts activate only
 after checked incorporation there and an explicit next-swarm selection.
 
-## Start useful owners and retain both result and question handles
+## Commission the current component
+
+The workbench accepts an ordinary Task for any project. Prefer a constructor from
+the current plan when it supplies one. Otherwise bind `plan`, `source`, `outcome`,
+`why`, `paths`, `criterion` and `decisions` from the agreed component contract:
+plan path, exact committed Git hash, owned result, rationale, owned paths,
+acceptance and incorporated decisions. The text fields are Text; paths and
+decisions are lists. Do not put an explanatory sentence in `source`.
+
+```haskell
+let Right campaign = campaignLabel "current-goal"
+let Right owners = forkGroupLabel "owners"
+let Right label = branchLabel "component-a"
+let group = batch campaign owners
+let task = Task group plan source outcome why paths criterion decisions
+work <- unfold group (childWithProgress @Attention @Delivery (componentLead label task))
+let (lead, questions) = work
+let Right resultLabel = watchLabel "component-ready"
+resultReady <- watch resultLabel (awaitSettledFork lead)
+let Right attentionLabel = watchLabel "component-questions"
+attentionReady <- watch attentionLabel (awaitProgressAfter questions (ProgressCursor 0))
+```
+
+End the turn while the watches own the wait. A fresh label is needed when prior
+branches reserve the example names. This uses ordinary supervised lifetime; a root
+can deliberately choose SwarmOwned for selected leads that should outlive it.
+Choose that independently from the task, source and model. Review/repair and later
+local frontiers use the same operations below and in [operating.md](operating.md).
+
+## Worked graph allocation: result and question handles
 
 Choose an unused campaign label for each new wave; Git branches from earlier
 waves are retained. The label below is a first-run example, not a name to replay
@@ -78,7 +112,8 @@ receipt from a proposed commit you have not incorporated.
 
 ## Implement, review, repair in the context that owns the code
 
-A lead normally implements itself. Bind its checked commit as candidate:
+A lead implements substantial work and owns its recursive local waves. After
+scaffold/fork/integration, bind the exact checked commit as candidate:
 
 ```haskell
 (reviewer, questions) <- reviewCandidate task OwnerRepairs candidate
@@ -113,7 +148,8 @@ Here accepted is the actual ReviewedCandidate, and head/checks describe resultin
 source. Keep gates in its nested candidate. Review semantic integration changes.
 Blocked is an honest terminal product result when the obligation cannot continue.
 
-Delegate implementation only when it creates useful independent work. `implement
+Open broad independent implementation frontiers when a usable scaffold makes
+them productive, repeating the pattern inside substantial children. `implement
 part` returns `(Forked (Outcome Candidate), Progress Attention)`. Watch both. After
 that worker returns, reviewCandidate part (RetainedImplementer (forkedActor worker))
 latest lets the reviewer request repairs directly. The worker is then available;

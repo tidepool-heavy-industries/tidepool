@@ -1,5 +1,24 @@
 # Shared project language
 
+- **Obligation**: an owned outcome with scope and acceptance. A substantial node
+  can own it through several local waves; one completed plan or wave is not delivery.
+- **Fork point**: the chosen source revision and useful completed reasoning
+  boundary, or a selected focused context. Exact source and accepted decision
+  changes remain explicit; neither a context nor a worktree updates retroactively.
+- **Ready frontier**: independent obligations whose shared prerequisites are met.
+  Fork broadly there; a shared unresolved decision gates only its dependent work.
+- **Join / fold**: the owner's incorporation and checks of the needed results,
+  reconciliation of decisions, and retention of remaining work and evidence.
+  Source is integrated; transcripts are not merged. There is no separate join API.
+- **Local wave**: one node's scaffold/fork/integrate cycle over exact source and
+  decisions. Siblings can be on different waves. Its continuation carries the
+  remaining obligation, updated source/decisions and useful pending handles.
+- **Readback**: an owner's concrete execution interpretation, objections and
+  questions for planner review. It is progress while implementation Delivery is
+  pending; it does not itself finish the feature.
+- **Planner release**: the owning decision allowing identified work to proceed
+  after corrections. An external planner remains an explicit operator action.
+  An operator hold requires explicit release; watch notices do not provide it.
 - **Actor key**: exact `(id, incarnation)`. A later incarnation is a different
   actor. Labels are display text, not keys or authorization.
 - **Creator**: the actor which admitted this actor. Creation provenance survives
@@ -8,10 +27,6 @@
   supervisor. Never synthesize one from creator or context ancestry.
 - **Context parent**: the actor whose completed context boundary was inherited.
   A selected fresh context has none, even when another actor created it.
-- **Relation view**: a client-side projection choosing which observed relationship
-  supplies display edges. It grants no authority and does not mutate raw data.
-- **Presentation root**: a root of the currently selected display forest. A
-  missing parent or cycle break does not turn the actor into a runtime root.
 - **Candidate**: a committed source revision with checks and remaining gates.
   **ReviewedCandidate** retains exact reviewed head and review evidence.
 - **Delivered**: a reviewed candidate and the exact resulting commit checked by

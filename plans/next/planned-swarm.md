@@ -226,6 +226,21 @@ candidate can reach its consumer while unrelated work continues.
 
 ## One product plan can span multiple waves of context and work
 
+The model-facing explanation is **recursive fork/join inside local integration
+loops**. Going down the responsibility tree divides ownership; going around a
+local loop advances the same obligation. A coding fork pairs its Git source with
+useful reasoning. Integration joins checked artifacts and consequential evidence,
+while detailed debugging remains with retained workers. The next ready frontier
+starts from the new source and decisions. See the authored
+[composition guide](../../examples/shoal-workspace/.shoal/plans/composition.md).
+
+Use the familiar language of Git, dependency graphs and control flow in prompts.
+Distinguish responsibility, dependency, source ancestry, context ancestry and
+runtime supervision; they need not form identical trees. Fold/unfold remains a
+useful shorthand, without requiring a recursion-scheme taxonomy or new runtime
+workflow objects. The live workbench supplies ordinary typed admission, requests,
+watches and retained handles; code integration and acceptance remain engineering.
+
 Keep the overall feature obligation alive across wave completion, pauses,
 context turnover and explicit swarm restarts. A wave is a useful execution and
 learning boundary, not necessarily the product's endpoint. Plan enough of the
@@ -680,16 +695,18 @@ Frozen customization, model/context selectors, routes and basic snapshots have
 landed. [NEXT.md](../../NEXT.md) distinguishes that foundation from the remaining
 work. A compiled signature or illustrative handler is not a complete consumer.
 
-Use `shoal-repl` (the standalone TUI application) or another non-self-hosting
-project for the next live runs. A fixed Shoal build hosts fresh actors working
-on the target application. The Astra planner supplies the shared source contract,
+Use the project selected with the human: a standalone application or deliberate
+Tidepool dogfooding. The canonical operating package is project-neutral; the graph
+feature allocation is an optional worked example. A fixed Shoal build hosts actors
+working in their assigned source checkouts. The Astra planner supplies the shared source contract,
 language/types and declared model placements before independent execution.
 Include multiple Sol lanes, review/integration and a tagged Astra obligation.
 
 The application actors learn the orchestration surface from the authored prompts,
 guide, modules and selected plan documents. They inspect target-project source
-normally, but do not inherit the Shoal builder's conversation or need to read
-Shoal implementation code to learn how to operate it. Missing usage knowledge
+normally, including Tidepool source when that is the task, but need not inherit
+the builder's conversation or reverse-engineer runtime code to learn how to operate
+the workbench. Missing usage knowledge
 becomes an explicit prompt/helper/API improvement. This separates the quality of
 the supplied interface from incidental knowledge gained while building the harness.
 
@@ -716,6 +733,6 @@ The mode is working when:
 
 Verify these behaviors at their owning boundaries with focused checks, including
 execution of the actual recipes and their failure paths. Then establish live
-product acceptance on the separate application. Implementation readiness and live
+product acceptance on the chosen project. Implementation readiness and live
 acceptance are distinct milestones. This vision does not itself start a live run
 or authorize replacing unrelated services.

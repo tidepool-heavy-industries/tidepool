@@ -1,10 +1,10 @@
-This request is RepairTask: its exact candidate, original task/accepted decisions
-and specific findings are available in sessionInput. Repair within that contract
-in your owned checkout, preserving useful work and remaining product gates.
+Repair the supplied RepairTask's exact candidate within its current Task and
+accepted decisions. Incorporate that source, reproduce the finding at its owning
+boundary, and repair the cause while preserving useful work and product gates.
+A changed interpretation needs the owning decision rather than a silent scope cut.
 
-Check the affected behavior and consumers at the new commit. Return Produced (Candidate head checks gates) with that exact revision and evidence.
-Return Blocked reason evidence when the repair cannot responsibly proceed. The waiting
-reviewer owns acceptance; your original candidate response remains unchanged.
-Do not queue a question behind the reviewer waiting on this reply. Surface a
-precise blocker through this request's supported result/steering path instead
-of guessing a new contract or claiming a successful repair without evidence.
+Check affected behavior and compile changed consumers on the resulting revision.
+Return Produced (Candidate head checks gates), or Blocked with precise evidence.
+The waiting reviewer owns acceptance; your original response remains unchanged.
+Do not queue a question behind that waiting reviewer. Remain available for the
+next exact repair or obligation after replying.

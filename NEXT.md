@@ -18,9 +18,10 @@ the [workspace design](plans/next/workspace-pilot.md) owns customization and
 context packaging; the [Haskell reference](plans/next/sol-worker-routing.md)
 contains broader interface sketches. Exact implemented signatures belong in the
 [shipped API guide](prompts/shoal/api-guide.md) and checked source.
-The [workspace package](examples/shoal-workspace/README.md) contains executable
-GHCi examples and a concrete application plan tree, installed in
-`/home/inanna/dev/shoal-repl/.shoal`. The [curation review](plans/next/evidence/workbench-curation.md)
+The [workspace package](examples/shoal-workspace/README.md) is the single authoring
+location for the current curated prompts/helpers, GHCi examples and example plan
+tree. Next-run preparation copies its selected definitions into the target's
+original-root `.shoal`; do not hand-curate installed variants. The [curation review](plans/next/evidence/workbench-curation.md)
 records the responsibility audit and checks for the [workbench curation plan](plans/next/package-curation.md).
 
 Curation replaced the fixed worker procession with independent workbench
@@ -32,8 +33,22 @@ failed routing/steering and checked customization through an explicit new swarm.
 All seven curation steps are complete. The fixed build and installed package
 passed 43 recipe assertions using the packaged compiler daemon; the application
 readiness record pins the executable, source and definition identity. Cold standalone
-checking has substantial startup overhead, recorded in the review. Fresh-model
-application acceptance remains the subsequent operator action.
+checking has substantial startup overhead, recorded in the review. A live application
+run has since produced accepted preparation and is explicitly paused; finished
+feature acceptance and adoption of the next prompt package remain open.
+
+The current RSI work is prompt/document curation from `shoal-repl-live-20260907`,
+isolated in `/home/inanna/dev/shoal-repl-live-20260907`. Its integrated product source
+is `f6d90983e2ad34b7fed3e0bd0a3884b8c9a7299c`: contract and terminal regression,
+with four component readbacks awaiting correction/release. The human paused every
+active worker for a separately owned messaging fix. Do not restart it from this
+handoff. [Plan readback adoption](plans/next/plan-readback.md) tracks the outstanding
+release and candidate prompting. The [composition guide](examples/shoal-workspace/.shoal/plans/composition.md)
+teaches recursive fork/join and local integration loops through Git and graph
+concepts. The canonical prompt pass is checked; [its review](plans/next/evidence/prompt-rsi.md)
+records 43 passing assertions, compiled new examples and the remaining launch
+preparation for the proposed Tidepool dogfood tasks. The older
+`/home/inanna/dev/shoal-repl` session remains separate.
 
 ## Architecture and settled boundaries
 
@@ -152,11 +167,13 @@ The authored operating package composes this foundation:
   presentation seams; package Haskell chooses the workflow. Native actors do not
   receive that effect. The recipes check their own source fixtures, not app behavior.
 
-## Acceptance on a separate application
+## Use on the chosen project
 
-Use `shoal-repl` (the standalone TUI application) or another non-self-hosting
-project for the next live runs. The test team changes that application using a
-fixed Shoal build; it does not implement or repair the orchestrator running it.
+The next human-selected task may be a standalone application or deliberate
+Tidepool dogfooding. The canonical prompts are project-neutral; the new goal's
+plan supplies source scope, model placements, dependencies and acceptance. Use a
+fixed running Shoal selection and make changes in the assigned source checkout;
+source development does not hot-replace the harness or release a paused run.
 
 Fresh application actors receive the authored prompts/API guide, project modules,
 selected plan branches and relevant target-project source. They must not depend
@@ -168,8 +185,8 @@ use it is a guidance/API finding, not a successful substitute for the package.
 Distill discovered usage knowledge into the owning prompt, API or helper. Check
 it, then supply the revision through the explicit next-swarm boundary. Do not
 make an acceptance run succeed by privately tutoring it with implementation lore.
-Specific runtime diagnosis remains ordinary engineering work outside the
-application team's product obligation.
+Runtime diagnosis belongs to its explicit owner. In a deliberate Tidepool task,
+that can be part of the agreed goal; it was outside the paused application's scope.
 
 Product acceptance requires a useful multi-lane application change: Sol leads
 execute an Astra-authored plan, a tagged Astra specialist contributes hard work,
@@ -201,7 +218,9 @@ The installed application readiness record owns exact executable and definition
 identities. Earlier foundation checks cover committed-ref custody, independent
 lifetimes, native failure preservation and the frozen interface; their detailed
 historical reports do not substitute for current package acceptance.
-Fresh-model application acceptance remains deliberately unperformed.
+Fresh-model use has exposed guidance and substrate findings. Preparation is
+integrated; the finished application feature and next-package live use remain
+unaccepted. Candidate checks are separate from that product evidence.
 
 Snapshot comparison checks execute resumed-thread deduplication, model-selection
 groups, partial and missing observations, and counter/source discontinuities.
@@ -219,8 +238,8 @@ configuration, protocol and usage checks passed; production compilation and all
 host-tools contract passed. Codex's six focused completion tests and scoped
 Clippy passed; its full TUI suite had 20 failures out of 4,282 executed tests.
 Tidepool strict Clippy retained known pre-existing diagnostics. These are
-baseline results, not checks of future edits. No live planned-Sol application
-acceptance has run.
+baseline results, not checks of future edits or acceptance of the unfinished
+live planned-Sol application feature.
 
 The [previous-wave closeout](plans/next/evidence/wave-closeout.md) retains older
 source/check evidence. Its service migration, dispatch tree and observer goals

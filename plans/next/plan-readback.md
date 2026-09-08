@@ -30,23 +30,39 @@ planning, scaffolding and individual wave acceptance are intermediate milestones
   human clarification, transmit the review corrections, verify their incorporation
   in task packets and release dependent implementation. No implementation approval
   was sent before the hold.
-- [ ] Curate the initial Astra planner guidance to interview the human, establish
+- [x] Curate the initial Astra planner guidance to interview the human, establish
   feature-level acceptance, and carry a coherent plan across waves of context and
   execution. Keep technical uncertainty separate from a product choice needing
   human steering.
-- [ ] Curate the next workspace owner/lead prompts to request plans in the owners'
+- [x] Curate the next workspace owner/lead prompts to request plans in the owners'
   own words: examples, interfaces, ownership, fork/dependency tree, model placement,
   acceptance, assumptions, questions and feedback on the original plan.
-- [ ] Teach leads to execute successive local waves through fluent Haskell:
+- [x] Teach leads to execute successive local waves through fluent Haskell:
   committed scaffold, useful parallel subtrees, checked integration, updated
   context/source and the next scaffold. Preserve the encompassing delivery
   obligation and retain specialists across local waves where useful.
-- [ ] Provide a small useful Haskell composition for collecting interpretations
-  and delivering planner steering if the live use shows a reusable need. Reuse
-  Task, source-bearing decisions, retained requests and progress; do not introduce
-  a second workflow registry, Rust role or mandatory procession of actors.
-- [ ] Check the changed next-wave package and adopt at an explicit swarm boundary.
-  Preserve frozen prompts/modules for useful current workers.
+- [x] Supply existing Haskell expressions for readback progress, paired independent
+  branches, result/question watches and source-bearing decisions. No reusable need
+  currently justifies a new workflow helper, registry or Rust role.
+- [x] Check the changed candidate package without starting providers: final
+  selection compiles, all 43 coordination assertions pass, and the new Markdown
+  Haskell examples compile. See [the RSI review](evidence/prompt-rsi.md).
+- [ ] Adopt the checked package at an explicitly authorized swarm boundary and
+  observe live use. Preserve the current hold and pending obligations until then.
+
+Author this package only in `examples/shoal-workspace/.shoal` in Tidepool for now.
+Next-run preparation copies it to the target; installed application copies are
+not parallel authoring locations. The current application workspace stays clean
+and paused. [The retained batch review](evidence/live-workbench-review.md) records
+pending product corrections here without editing the installed plan.
+
+The next package teaches recursive fork/join inside local integration loops using
+Git, dependency graphs and control structure. The
+[composition guide](../../examples/shoal-workspace/.shoal/plans/composition.md)
+explains paired source/context forks, compact evidence returns and local waves;
+the [operating guide](../../examples/shoal-workspace/.shoal/plans/operating.md)
+connects that model to actual existing Haskell. The initial planner is an on-demand
+Markdown resource selected in TOML, not a new runtime role.
 
 ## Review quality
 
