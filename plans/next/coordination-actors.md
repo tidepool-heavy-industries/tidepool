@@ -87,7 +87,7 @@ turn reply loss into permission to repeat replacement.
   unbounded history for sources without subscribers.
 - [x] Implement ordinary `sendMessage` through the durable inbox and native
   active-input owner, preserving exact correlation and uncertain delivery.
-- [ ] Implement drain/stop and atomic typed replacement with queue/source transfer,
+- [x] Implement drain/stop and atomic typed replacement with queue/source transfer,
   explicit failed-input retention and honest failure cleanup.
 - [x] Replace `Project.Work` progress-route chains with persistent actor handlers;
   retain per-source identity, unresolved questions and completion independently.
@@ -126,10 +126,10 @@ integration boundary. Extractor/serialization changes require fixtures-check.
 
 The curated package identity is
 `2c96b731e77fabc9e7ee2a1a6aa464a7444442dd9c8b88a5a727afa7b29ac26b`.
-The prepared runner at `target/dogfood-routing-4f61f6d6/` compiles that exact
+The prepared runner at `target/dogfood-routing-2533b57a/` compiles that exact
 package; its selection manifest records executable and runtime dependency hashes.
-It is not a launched or fully accepted swarm. Full package execution and the
-shared API guide check remain pending.
+It is not a launched or fully accepted swarm. Full package execution remains
+pending. The shared API guide success/unavailable check passes.
 
 Focused resident checks prove failure-after-effect replacement without replay,
 retained owned children, fixed source transfer, lifecycle capture and subsequent
@@ -140,6 +140,10 @@ association assertion. All 17 local actor tests pass, including successor backlo
 ordering with inherited drain. The fixture boundary passes all 217 semantic tests;
 regeneration changes only its source fingerprint.
 
-Before closing replacement acceptance, review the unsuccessful cutover and lost
-caller paths against retained custody and exact successor observation. Component
-success checks do not establish those failure guarantees by themselves.
+Replacement failure review: staging rejects before source handoff; a failed
+mailbox fence restores workspace ownership through the existing binding owner.
+Custody commit precedes child supervision transfer. A lost caller reply does not
+cancel cutover: the old retained exit names the exact successor before the reply
+is sent, and old handles never forward. Uncertain failures retain custody rather
+than authorizing automatic retry. The resident owned-child check passes after the
+ordering repair at `2533b57a`; source handoff's five owning tests also pass.
