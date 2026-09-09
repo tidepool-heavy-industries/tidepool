@@ -92,10 +92,10 @@ turn reply loss into permission to repeat replacement.
 - [x] Replace `Project.Work` progress-route chains with persistent actor handlers;
   retain per-source identity, unresolved questions and completion independently.
   Lossless transport does not prevent explicit application-level deduplication.
-- [ ] Curate single-child, two-lane and failed-handler/v2 examples. Keep compact
+- [x] Curate single-child, two-lane and failed-handler/v2 examples. Keep compact
   Task/Candidate/review/decision vocabulary; avoid universal delta records,
   worker-stage taxonomies and mandatory receipt polling.
-- [ ] Rewrite existing prompts/examples: Sol owns ordinary engineering and
+- [x] Rewrite existing prompts/examples: Sol owns ordinary engineering and
   integration; initial Astra plans/reviews once, hard consultations use fresh
   compact evidence. Actor messages use minimum recoverable deltas. Keep watching
   through final handoff, and distinguish available from incorporated candidates.
@@ -121,3 +121,25 @@ for finite obligations; do not keep the old progress-rearm loop as a second
 recommended orchestration model. Run focused owning checks during development,
 compile all changed consumers, then validate the full curated package at the
 integration boundary. Extractor/serialization changes require fixtures-check.
+
+## Integration evidence
+
+The curated package identity is
+`2c96b731e77fabc9e7ee2a1a6aa464a7444442dd9c8b88a5a727afa7b29ac26b`.
+The prepared runner at `target/dogfood-routing-4f61f6d6/` compiles that exact
+package; its selection manifest records executable and runtime dependency hashes.
+It is not a launched or fully accepted swarm. Full package execution and the
+shared API guide check remain pending.
+
+Focused resident checks prove failure-after-effect replacement without replay,
+retained owned children, fixed source transfer, lifecycle capture and subsequent
+publication, and state/protocol mismatch rejection. The independent-source and
+two-lane recipes have each passed six assertions, including actual two-head Git
+integration. The final combined package run covers the strengthened exact lane
+association assertion. All 17 local actor tests pass, including successor backlog
+ordering with inherited drain. The fixture boundary passes all 217 semantic tests;
+regeneration changes only its source fingerprint.
+
+Before closing replacement acceptance, review the unsuccessful cutover and lost
+caller paths against retained custody and exact successor observation. Component
+success checks do not establish those failure guarantees by themselves.
