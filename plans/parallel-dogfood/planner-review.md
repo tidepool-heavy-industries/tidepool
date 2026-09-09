@@ -74,14 +74,12 @@ here. Independent work need not wait for those decisions.
    reconstruct independent tables. Include zero-width semantic arguments,
    oversaturation, mixed roots and a large result in the shared ABI examples.
 
-6. **Breaking migration direction accepted, external question retained.** The
-   existing design and current strict TPLR reader support one major cutover,
-   stale-artifact rejection and no automatic Core fallback. The root has asked
-   the human whether any external consumer requires a window; do not assume
-   absence as an observed fact. Continue M0–M2 and schema investigation. Resolve
-   that answer before finalizing the migration policy. M6 also needs the explicit
-   live-machine drain/replacement and lost-retained-value policy from design §13;
-   updating writer/reader/fingerprints alone does not complete migration.
+6. **Coordinated migration accepted; no external consumers.** The human confirmed
+   there are no external TPLR consumers. Change writer/reader/fingerprints together,
+   reject stale artifacts and use no automatic Core fallback. Protect main and
+   actual Shoal usage with matched candidate acceptance before integration.
+   M6 still needs the live-machine drain/replacement and lost-retained-value
+   policy from design §13; a version bump alone does not complete migration.
 
 7. **Gate scheduling accepted, closure not waived.** Focused deterministic/PTY
    checks may proceed. The human is the permission

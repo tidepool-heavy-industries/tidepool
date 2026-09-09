@@ -3839,7 +3839,7 @@ fn developer_instructions_selected(
 fn append_effective_role(mut instructions: String, role: &tidepool_actor::EffectiveRole) -> String {
     let descendants = role.descendants();
     instructions.push_str(&format!(
-        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
+        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={:?}. These are the effective runtime facts; effect membership alone is not authority.\n",
         role.prompt_profile(),
         role.role(),
         role.haskell_effects_type(),
@@ -4762,7 +4762,7 @@ mod tests {
         let scaffold = developer_instructions(
             &tidepool_actor::EffectiveRole::scaffolding(tidepool_actor::DescendantBudget {
                 maximum_depth: 2,
-                maximum_active_children: 3,
+                maximum_active_children: Some(3),
             }),
             &InteractiveLaunchMode::Fork {
                 parent: BackendThreadId("parent".into()),

@@ -59,6 +59,9 @@ Use the copied runner for acceptance; a rebuild can replace a Cargo executable
 while later recipe sessions still need its exact path. Prompt/module changes
 activate only at the next authorized swarm boundary.
 
+Default concurrency is unbounded. Explicit finite widths still constrain whole
+subtrees; depth, authority, ownership and cleanup checks remain in force.
+
 ## Remaining mechanism work
 
 These are explicit follow-ups, not claims made by this package:
@@ -69,8 +72,6 @@ These are explicit follow-ups, not claims made by this package:
 - Presentation receipts: remove redundant model polling through the existing
   request/event machinery. Preserve uncertain delivery; do not silently retry or
   infer incorporation from presentation.
-- The live wave encountered the existing 32-active-descendant admission fence.
-  It must be addressed before claiming an uncapped next run; prose is not a grant.
 - Provider first-call cache misses and opt-in tracing for external native forks
   remain owned by the native completion/cache work. Package recipes prove resident
   behavior, not provider cache reuse or measured token savings.
@@ -81,21 +82,13 @@ The next run should expose whether repeated questions, routine cursor turns and
 planner activations decrease while integrated engineering progresses. External
 RSI observes compact evidence; development owners retain product acceptance.
 
-## Saved work while the current run winds down
+## Saved work for the next run
 
-The coherent partial coordinator checkpoint is
-`6411304153def9e41d7dfc187e0538821923d695`. Newer lane handoffs are
-applications `326255bc32f589f9352c181d3245812f9e630862` and engine
-`1aabf25cb9393817c0c11d34595b92c96d669b8b`; they were not yet incorporated
-by that coordinator checkpoint. Read `applications-checkpoint.md` and
-`engine-lane-checkpoint.md` under `plans/parallel-dogfood/next-wave/` at those
-respective commits. The committed external Codex bridge candidate is
-`72f7b60008452a1f63c5cb92f42c731dc67fbb49`, distinct from the live runner's
-native `06d99357becc4d870f5b5141ba7626daf68e819a`.
-
-These are resume inputs, not main integration candidates or full acceptance.
-Owners of resident safety, process supervision and the native bridge reached
-committed partial stopping points. Full native failure-path acceptance, M1
-process/corpus and M2 wrapper-complete reclamation remain open. Later committed
-handoffs supersede these pins; preserve retained custody under their actual receipts.
-Do not restart the whole product effort or overwrite the current live package.
+The final coordinator checkpoint is `e0c37ff398def968e57350f8538b7990a8f7ee87`,
+combining applications `326255bc32f589f9352c181d3245812f9e630862` and engine
+`1aabf25cb9393817c0c11d34595b92c96d669b8b`. External Codex product source is
+`72f7b60008452a1f63c5cb92f42c731dc67fbb49`, distinct from the runner's main pin.
+All three engineering requests settled partial/Blocked. The
+[next resume plan](../parallel-dogfood/next-wave/resume.md) owns source rebasing,
+first work and settled migration decisions. Use the consolidated lane commits,
+not a list of leaf candidates, and preserve separately retained uncertain custody.

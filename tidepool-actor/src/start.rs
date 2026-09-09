@@ -426,7 +426,7 @@ impl ActorLaunchRoleWire {
             ActorLaunchRoleWire::ActorScaffoldingRole => {
                 crate::EffectiveRole::scaffolding(crate::DescendantBudget {
                     maximum_depth: 0,
-                    maximum_active_children: 0,
+                    maximum_active_children: Some(0),
                 })
             }
             ActorLaunchRoleWire::ActorIntegrationRole => crate::EffectiveRole::integration(),

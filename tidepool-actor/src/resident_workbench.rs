@@ -3293,7 +3293,10 @@ where
                     usage_summary_value(table, runtime.provider_usage_summary.as_ref())?,
                     usage_summary_value(table, runtime.latest_turn_usage_summary.as_ref())?,
                     i64::from(descendants.maximum_depth).to_value(table)?,
-                    i64::from(descendants.maximum_active_children).to_value(table)?,
+                    descendants
+                        .maximum_active_children
+                        .map(i64::from)
+                        .to_value(table)?,
                     descriptor
                         .effective_role()
                         .prompt_profile()

@@ -1,7 +1,8 @@
-# Applications: grow the implementation tree from checked A0
+# Applications: grow the remaining implementation tree
 
-Read the final A0 handoff and applications design README. Use numbered mechanism
-plans as needed. The tree below is an initial allocation to refine, not a claim
+Start with [resume.md](resume.md) and its consolidated applications handoff, then
+the applications design README. Existing A1–A4 foundations are starting assets;
+use numbered mechanism plans for the remaining joins. The tree below is an initial allocation to refine, not a claim
 that every branch is ready or requires a separate actor.
 
 ```mermaid

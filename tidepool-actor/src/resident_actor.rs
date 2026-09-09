@@ -784,7 +784,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let current = if view == StatusView::Concise {
             format!(
-                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
+                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={:?} bound_worktree={:?} workbench={:?}{}",
                 self.descriptor.label(), actor.id.0, actor.incarnation.0,
                 runtime.activation_kind, if self.policy_installed { "attached" } else { "detached" }, requests.ready_responses, unavailable_responses,
                 requests.pending_responses, requests.ready_watches, unavailable_watches,
@@ -1971,7 +1971,7 @@ where
                                     (
                                         row,
                                         i64::from(budget.maximum_depth),
-                                        i64::from(budget.maximum_active_children),
+                                        budget.maximum_active_children.map(i64::from),
                                     ),
                                     launch,
                                 )
@@ -2018,7 +2018,7 @@ where
                             context.actor,
                             group,
                             branches,
-                            usize::from(budget.maximum_active_children),
+                            budget.maximum_active_children.map(usize::from),
                         )
                         .map_err(|error| error.to_string())?;
                     Ok::<_, String>((group_id, group_path, reservations))

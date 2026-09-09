@@ -52,6 +52,7 @@ module Tidepool.Actors.Unfold
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , ForkBudget (..)
+  , ForkAllowance (..)
   , WorkerLaunchPreview (..)
   , ForkContext (..)
   , BranchPreview (..)
@@ -267,6 +268,10 @@ defaultBranchOptions = BranchOptions Nothing Nothing Nothing Nothing Nothing Inh
 data ForkBudget = ForkBudget { forkDepth :: Int, forkWidth :: Int }
   deriving (Show, Eq)
 
+-- | Effective authority. Nothing width means no concurrency ceiling.
+data ForkAllowance = ForkAllowance { allowanceDepth :: Int, allowanceWidth :: Maybe Int }
+  deriving (Show, Eq)
+
 data DelegationAuthority = ForksOmitted | BudgetExhausted | CanFork
   deriving (Show, Eq)
 
@@ -275,7 +280,7 @@ data BranchPreview = BranchPreview
   , previewWorkspace :: ForkWorkspaceAccess
   , previewSource :: WorktreeSeed
   , previewRequestedBudget :: Maybe ForkBudget
-  , previewEffectiveBudget :: ForkBudget
+  , previewEffectiveBudget :: ForkAllowance
   , previewEffects :: Text
   , previewContext :: ForkContext
   , previewLifetime :: WorkerLifetime
@@ -308,14 +313,14 @@ previewBranch (Branch _ role seed effects options _) = do
       , previewWorkspace = accessFor role
       , previewSource = seed
       , previewRequestedBudget = branchBudget options
-      , previewEffectiveBudget = ForkBudget depth width
+      , previewEffectiveBudget = ForkAllowance depth width
       , previewEffects = row
       , previewContext = branchContext options
       , previewLifetime = branchLifetime options
       , previewGuidance = branchGuidance options
       , previewLaunch = launch
       , previewDelegation = if not (includesForks keys) then ForksOmitted
-          else if depth == 0 || width == 0 then BudgetExhausted else CanFork
+          else if depth == 0 || width == Just 0 then BudgetExhausted else CanFork
       }
   where
     includesForks [] = False

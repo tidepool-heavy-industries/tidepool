@@ -1,8 +1,8 @@
 # Next wave: two recursive engineering trees
 
-Start after the current wave has saved its final lane/coordinator checkpoints and
-an explicit new launch selects the candidate package. The current wind-down stays
-in force. Existing A0–A8 and M0–M7 designs own product semantics and acceptance.
+The previous wave has finished. [resume.md](resume.md) supplies the consolidated
+inputs, required rebase onto main, current first work and settled human decisions.
+Existing A0–A8 and M0–M7 designs own product semantics and acceptance.
 This directory owns execution shape; it does not waive unverified product gates.
 
 Each run uses an exact runner built from main, including the selected curated
@@ -18,15 +18,12 @@ Read this page, then your branch: [applications](applications.md) or
 assigned subtree and the relevant mechanism sections. The launch prompt is
 [commission.md](commission.md).
 
-## What this wave taught us
+## Carry the useful tree forward
 
-The tree used inherited first-generation implementation forks after steering,
-then substantial workers mostly worked serially until spawning a reviewer.
-Reviews found useful defects, but review fan-out is not implementation fan-out.
-Repeated planning amendments and copied permission history consumed attention.
-The next plan must describe useful grandchildren, not just two leads and their
-milestone-sized assignments. Small work still finishes directly; avoid actors
-whose only job is forwarding another actor's messages.
+Both prior trees consolidated coherent work into lane checkpoints. Continue recursive
+implementation, keeping each parent's integration substantial. The new typed routing
+package removes routine collection/rearming and forwarding from model turns.
+Do not rebuild completed foundations or keep the initial Astra doing coordination.
 
 ## Planner output: a tree that can execute
 
@@ -110,5 +107,5 @@ run product checks with the supplied toolchain and explicit candidate selection;
 they do not start environment archaeology or hot-patch the running harness.
 Keep ordinary TUIs, one frozen canonical .shoal and fixed running tools. Native
 aarch64 has no available runner; x86_64 work proceeds, with unsupported native
-acceptance reported honestly. The external TPLR transition question remains a
-separate product decision until answered.
+acceptance reported honestly. There are no external TPLR consumers; use a coordinated format cutover and
+validate our Shoal usage before changing main or the running package.

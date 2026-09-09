@@ -43,7 +43,6 @@ effort = "low"
 [research]
 default_depth = 1
 maximum_depth = 8
-maximum_active_children = 32
 "#;
 const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
 const ENV_NIX_STORE_BIN: &str = "TIDEPOOL_SHOAL_NIX_STORE_BIN";
@@ -1384,7 +1383,7 @@ mod tests {
             ensure_project_config(workspace.path()).unwrap().research,
             tidepool_actor::ResearchPolicy {
                 maximum_depth: 3,
-                maximum_active_children: 2,
+                maximum_active_children: Some(2),
                 default_depth: 1
             }
         );

@@ -161,7 +161,7 @@ impl ActorRuntimeObservation {
         let role = self.launch_role.as_ref()?;
         let budget = role.descendants();
         let mut text = format!(
-            "Actor authority: role={:?}; native_tools={:?}; workspace={:?}; descendant_depth={}; max_active_children={}.",
+            "Actor authority: role={:?}; native_tools={:?}; workspace={:?}; descendant_depth={}; max_active_children={:?}.",
             role.role(), role.native_tools(), role.workspace(),
             budget.maximum_depth, budget.maximum_active_children,
         );

@@ -1,6 +1,7 @@
 # Engine: recursive implementation around real GHC and ABI contracts
 
-Read the final M1/M2 handoffs, then design §1, §11 and §14. Completed M0 evidence
+Read [resume.md](resume.md) and its consolidated M1/M2 handoff, then design §1,
+§11 and §14. Completed M0 evidence
 and reviewed M2 repairs are starting assets. Finish only their documented remaining
 joins/checks. The first work is the actual remaining M1 boundary, not replaying M0.
 

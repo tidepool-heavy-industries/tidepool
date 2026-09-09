@@ -1,7 +1,7 @@
 # Parallel dogfood wave
 
-Status: the current wave is winding down at committed lane checkpoints. For the
-next authorized wave start with [the execution tree](next-wave/README.md).
+Status: the previous wave has finished at consolidated lane checkpoints. Start
+with [the current resume plan](next-wave/resume.md), then [the execution tree](next-wave/README.md).
 [restart.md](restart.md) and [saved-work.md](saved-work.md) describe the previous
 launch and older saved work; final current handoffs take precedence.
 

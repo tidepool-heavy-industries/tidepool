@@ -28,7 +28,8 @@ pub enum WorkspaceAccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DescendantBudget {
     pub maximum_depth: u16,
-    pub maximum_active_children: u16,
+    /// None leaves concurrency unbounded; Some(0) forbids descendants.
+    pub maximum_active_children: Option<u16>,
 }
 
 /// Host-configured ceiling on research subtrees, additionally bounded by the parent.
@@ -37,7 +38,7 @@ pub struct DescendantBudget {
 pub struct ResearchPolicy {
     pub default_depth: u16,
     pub maximum_depth: u16,
-    pub maximum_active_children: u16,
+    pub maximum_active_children: Option<u16>,
 }
 
 impl Default for ResearchPolicy {
@@ -45,7 +46,7 @@ impl Default for ResearchPolicy {
         Self {
             default_depth: 1,
             maximum_depth: 8,
-            maximum_active_children: 32,
+            maximum_active_children: None,
         }
     }
 }
@@ -107,7 +108,7 @@ impl EffectiveRole {
             WorkspaceAccess::WritableBound,
             DescendantBudget {
                 maximum_depth: 8,
-                maximum_active_children: 32,
+                maximum_active_children: None,
             },
             "root-v1",
             vec![
@@ -136,7 +137,7 @@ impl EffectiveRole {
             WorkspaceAccess::InspectOnly,
             DescendantBudget {
                 maximum_depth: 0,
-                maximum_active_children: 0,
+                maximum_active_children: Some(0),
             },
             "research-v2",
             vec![
@@ -161,7 +162,7 @@ impl EffectiveRole {
             WorkspaceAccess::WritableBound,
             DescendantBudget {
                 maximum_depth: 0,
-                maximum_active_children: 0,
+                maximum_active_children: Some(0),
             },
             "coding-v2",
             vec![
@@ -199,7 +200,7 @@ impl EffectiveRole {
             WorkspaceAccess::WritableBound,
             DescendantBudget {
                 maximum_depth: 0,
-                maximum_active_children: 0,
+                maximum_active_children: Some(0),
             },
             "integration-v1",
             vec![
@@ -270,15 +271,16 @@ impl EffectiveRole {
                 Ok::<_, String>(DescendantBudget {
                     maximum_depth: u16::try_from(depth)
                         .map_err(|_| "fork depth must be in 0..65535")?,
-                    maximum_active_children: u16::try_from(width)
-                        .map_err(|_| "fork width must be in 0..65535")?,
+                    maximum_active_children: Some(
+                        u16::try_from(width).map_err(|_| "fork width must be in 0..65535")?,
+                    ),
                 })
             })
             .transpose()?;
         child.research_policy = self.research_policy;
         child.descendants = DescendantBudget {
             maximum_depth: 0,
-            maximum_active_children: 0,
+            maximum_active_children: Some(0),
         };
         if child.effect_keys.contains(&ActorEffectKey::Forks) {
             child.descendants = DescendantBudget {
@@ -291,7 +293,9 @@ impl EffectiveRole {
                 child.descendants.maximum_active_children = child
                     .descendants
                     .maximum_active_children
-                    .min(requested.maximum_active_children);
+                    .into_iter()
+                    .chain(requested.maximum_active_children)
+                    .min();
             } else if child.role == ActorRole::Research && self.role != ActorRole::Research {
                 child.descendants.maximum_depth = child
                     .descendants
@@ -306,7 +310,9 @@ impl EffectiveRole {
                 child.descendants.maximum_active_children = child
                     .descendants
                     .maximum_active_children
-                    .min(self.research_policy.maximum_active_children);
+                    .into_iter()
+                    .chain(self.research_policy.maximum_active_children)
+                    .min();
             }
         }
         Ok(child)
@@ -388,7 +394,15 @@ impl EffectiveRole {
     #[must_use]
     pub fn permits_child(&self, child: &Self) -> bool {
         child.descendants.maximum_depth < self.descendants.maximum_depth
-            && child.descendants.maximum_active_children <= self.descendants.maximum_active_children
+            && self
+                .descendants
+                .maximum_active_children
+                .is_none_or(|limit| {
+                    child
+                        .descendants
+                        .maximum_active_children
+                        .is_some_and(|child_limit| child_limit <= limit)
+                })
             && native_rank(child.native_tools) <= native_rank(self.native_tools)
             && workspace_rank(child.workspace) <= workspace_rank(self.workspace)
             && self.accepts_effect_keys(&child.effect_keys)
@@ -416,13 +430,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unlimited_concurrency_inherits_without_escaping_finite_authority() {
+        let root = EffectiveRole::root();
+        let child = root.preview_child(EffectiveRole::coding(), None).unwrap();
+        assert_eq!(child.descendants().maximum_active_children, None);
+        let research = root.preview_child(EffectiveRole::research(), None).unwrap();
+        assert_eq!(research.descendants().maximum_active_children, None);
+        let limited = root
+            .preview_child(EffectiveRole::coding(), Some((4, 2)))
+            .unwrap();
+        let grandchild = limited
+            .preview_child(EffectiveRole::coding(), None)
+            .unwrap();
+        assert_eq!(grandchild.descendants().maximum_active_children, Some(2));
+        assert!(
+            !limited.permits_child(
+                &grandchild.clone().with_descendant_budget(DescendantBudget {
+                    maximum_depth: 1,
+                    maximum_active_children: None,
+                })
+            )
+        );
+        assert!(root.permits_child(&child));
+    }
+
+    #[test]
     fn accepted_role_is_monotone_across_all_projected_dimensions() {
         let root = EffectiveRole::root();
         assert!(root.permits_child(&EffectiveRole::research()));
         assert!(root.permits_child(&EffectiveRole::coding()));
         let scaffold = EffectiveRole::scaffolding(DescendantBudget {
             maximum_depth: 3,
-            maximum_active_children: 4,
+            maximum_active_children: Some(4),
         });
         assert!(root.permits_child(&scaffold));
         assert!(scaffold.permits_child(&EffectiveRole::coding()));
@@ -445,11 +484,11 @@ mod tests {
     fn coding_recursion_requires_budget_and_preserves_narrowing() {
         let coding = EffectiveRole::coding().with_descendant_budget(DescendantBudget {
             maximum_depth: 2,
-            maximum_active_children: 3,
+            maximum_active_children: Some(3),
         });
         let child = EffectiveRole::coding().with_descendant_budget(DescendantBudget {
             maximum_depth: 1,
-            maximum_active_children: 3,
+            maximum_active_children: Some(3),
         });
         assert!(coding.respects_role_ceiling());
         assert!(coding.permits_child(&child));
@@ -473,7 +512,7 @@ mod tests {
     fn research_policy_caps_subtrees_and_never_refreshes_spent_depth() {
         let root = EffectiveRole::root().with_research_policy(ResearchPolicy {
             maximum_depth: 2,
-            maximum_active_children: 3,
+            maximum_active_children: Some(3),
             ..ResearchPolicy::default()
         });
         let coding = root.attenuate_child(EffectiveRole::coding());
@@ -484,7 +523,7 @@ mod tests {
             research.descendants(),
             DescendantBudget {
                 maximum_depth: 2,
-                maximum_active_children: 3
+                maximum_active_children: Some(3)
             }
         );
         assert_eq!(research.native_tools(), NativeToolClass::InspectionOnly);
@@ -517,7 +556,7 @@ mod tests {
         );
         let limited = root.clone().with_descendant_budget(DescendantBudget {
             maximum_depth: 1,
-            maximum_active_children: 2,
+            maximum_active_children: Some(2),
         });
         assert_eq!(
             limited
@@ -525,12 +564,12 @@ mod tests {
                 .descendants(),
             DescendantBudget {
                 maximum_depth: 0,
-                maximum_active_children: 2
+                maximum_active_children: Some(2)
             }
         );
         let disabled = root.with_research_policy(ResearchPolicy {
             maximum_depth: 0,
-            maximum_active_children: 0,
+            maximum_active_children: Some(0),
             ..ResearchPolicy::default()
         });
         assert_eq!(
@@ -539,7 +578,7 @@ mod tests {
                 .descendants(),
             DescendantBudget {
                 maximum_depth: 0,
-                maximum_active_children: 0
+                maximum_active_children: Some(0)
             }
         );
         let explicit_leaf = EffectiveRole::research().with_effect_keys(vec![
@@ -552,7 +591,7 @@ mod tests {
             research.attenuate_child(explicit_leaf).descendants(),
             DescendantBudget {
                 maximum_depth: 0,
-                maximum_active_children: 0
+                maximum_active_children: Some(0)
             }
         );
     }
@@ -562,7 +601,7 @@ mod tests {
         let root = EffectiveRole::root().with_research_policy(ResearchPolicy {
             default_depth: 1,
             maximum_depth: 3,
-            maximum_active_children: 4,
+            maximum_active_children: Some(4),
         });
         assert_eq!(
             root.preview_child(EffectiveRole::research(), None)
@@ -578,7 +617,7 @@ mod tests {
             coordinator.descendants(),
             DescendantBudget {
                 maximum_depth: 3,
-                maximum_active_children: 4
+                maximum_active_children: Some(4)
             }
         );
         let specialist = coordinator
@@ -608,12 +647,12 @@ mod tests {
     fn attenuating_descendants_preserves_every_other_role_dimension() {
         let narrow = EffectiveRole::scaffolding(DescendantBudget {
             maximum_depth: 3,
-            maximum_active_children: 4,
+            maximum_active_children: Some(4),
         })
         .with_effect_keys(vec![ActorEffectKey::Replies, ActorEffectKey::Forks]);
         let attenuated = narrow.clone().with_descendant_budget(DescendantBudget {
             maximum_depth: 2,
-            maximum_active_children: 4,
+            maximum_active_children: Some(4),
         });
 
         assert_eq!(attenuated.role(), narrow.role());

@@ -182,7 +182,7 @@ fn type_defs() -> Vec<TypeDef> {
                     field("contextUsageSummary", HsType::maybe(HsType::Named("ProviderUsageSummary"))),
                     field("contextLatestTurnUsage", HsType::maybe(HsType::Named("ProviderUsageSummary"))),
                     field("contextMaximumDepth", HsType::Int),
-                    field("contextMaximumActiveChildren", HsType::Int),
+                    field("contextMaximumActiveChildren", HsType::maybe(HsType::Int)),
                     field("contextPromptProfile", HsType::Text),
                 ],
             },

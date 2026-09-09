@@ -283,7 +283,7 @@ pub fn forks() -> Effect {
                     Arg { name: "instructions", ty: HsType::maybe(HsType::Text), rust: RustBinding::Path("Option<String>") },
                     Arg { name: "lifetime", ty: HsType::Named("WorkerLifetime"), rust: RustBinding::Path("crate::WorkerLifetime") },
                 ],
-                ret: fallible(HsType::Tuple(vec![HsType::Tuple(vec![HsType::Text, HsType::Int, HsType::Int]), HsType::maybe(HsType::Named("WorkerLaunchPreview"))])),
+                ret: fallible(HsType::Tuple(vec![HsType::Tuple(vec![HsType::Text, HsType::Int, HsType::maybe(HsType::Int)]), HsType::maybe(HsType::Named("WorkerLaunchPreview"))])),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

@@ -341,17 +341,19 @@ impl ForkGroupRegistry {
         owner: ActorRef,
         group: ActorPath,
         children: Vec<ActorPathSegment>,
-        maximum_active_descendants: usize,
+        maximum_active_descendants: impl Into<Option<usize>>,
     ) -> Result<(ForkGroupId, Vec<ActorPathReservation>), ForkGroupError> {
         let mut state = self.state.lock();
         if state.cleaning.contains(&owner) {
             return Err(ForkGroupError::Cleaning(owner));
         }
-        state
-            .descendant_limits
-            .entry(owner)
-            .and_modify(|limit| *limit = (*limit).min(maximum_active_descendants))
-            .or_insert(maximum_active_descendants);
+        if let Some(maximum) = maximum_active_descendants.into() {
+            state
+                .descendant_limits
+                .entry(owner)
+                .and_modify(|limit| *limit = (*limit).min(maximum))
+                .or_insert(maximum);
+        }
         // Each coordinator owns its subtree ceiling. Ancestor ceilings still count
         // the whole enclosing subtree, including siblings and staged reservations.
         let mut ancestor = Some(owner);
@@ -1050,6 +1052,36 @@ mod tests {
     }
 
     #[test]
+    fn unbounded_groups_exceed_32_without_erasing_a_registered_limit() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(ActorId(1));
+        let children = || (0..40).map(|i| segment(&format!("child-{i}"))).collect();
+        for path in ["first", "second"] {
+            groups
+                .begin(owner, ActorPath::parse(path).unwrap(), children(), None)
+                .unwrap();
+        }
+        let limited = ActorRef::first(ActorId(2));
+        groups
+            .begin(
+                limited,
+                ActorPath::parse("limited").unwrap(),
+                vec![segment("leaf")],
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            groups.begin(
+                limited,
+                ActorPath::parse("extra").unwrap(),
+                vec![segment("leaf")],
+                None
+            ),
+            Err(ForkGroupError::DescendantBudgetExceeded { maximum: 1, .. })
+        ));
+    }
+
+    #[test]
     fn published_group_is_not_reopened_by_late_startup_observations() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let owner = ActorRef::first(ActorId(1));
@@ -1237,7 +1269,7 @@ mod tests {
                 children[0],
                 ActorPath::parse("compiler/inner").unwrap(),
                 vec![segment("leaf")],
-                2,
+                None,
             ),
             Err(ForkGroupError::DescendantBudgetExceeded {
                 active: 2,
@@ -1252,7 +1284,7 @@ mod tests {
                 children[0],
                 ActorPath::parse("compiler/inner").unwrap(),
                 vec![segment("leaf")],
-                2,
+                None,
             )
             .is_ok());
     }

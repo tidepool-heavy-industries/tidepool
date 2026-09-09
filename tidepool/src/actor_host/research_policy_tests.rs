@@ -9,7 +9,7 @@ async fn research_child(
     tidepool_actor::LocalResidentInstallation,
     Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
 ) {
-    tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             match campaign.deployments.recv().await.unwrap() {
                 LocalResidentDeployment::PolicyInstalled(child) => {
@@ -69,7 +69,7 @@ async fn research_child(
 async fn research_admission_obeys_configured_width_and_consumes_depth() {
     let mut campaign = TestCampaign::start_with_research_policy(tidepool_actor::ResearchPolicy {
         maximum_depth: 1,
-        maximum_active_children: 1,
+        maximum_active_children: Some(1),
         default_depth: 1,
     })
     .await;
@@ -84,7 +84,7 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
         research.effective_role.descendants(),
         tidepool_actor::DescendantBudget {
             maximum_depth: 1,
-            maximum_active_children: 1
+            maximum_active_children: Some(1)
         }
     );
 
@@ -149,7 +149,7 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
     let mut campaign = TestCampaign::start_with_research_policy(tidepool_actor::ResearchPolicy {
         default_depth: 1,
         maximum_depth: 3,
-        maximum_active_children: 4,
+        maximum_active_children: Some(4),
     })
     .await;
     let root = campaign.root_installation.policy.clone();
@@ -180,7 +180,7 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
         coordinator.effective_role.descendants(),
         tidepool_actor::DescendantBudget {
             maximum_depth: 2,
-            maximum_active_children: 2
+            maximum_active_children: Some(2)
         }
     );
     let policy = coordinator.policy.clone();

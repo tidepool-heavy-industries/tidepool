@@ -5,13 +5,13 @@ Launch preparation only; this file is not a claim of acceptance or deployment.
 - Record final current-wave coordinator/lane checkpoints, separate native source,
   unmerged candidates and exact remaining failures. Select the new source including
   these plans; do not recycle an earlier commission hash or old actor identity.
-- Finish saving and settling the winding-down wave before replacing its canonical
-  package. Preserve its committed handoffs and runtime evidence.
+- The previous wave has settled at the consolidated refs in next-wave/resume.md.
+  Preserve its worktrees/runtime evidence; use a new main-based root checkout and
+  a distinct tmux session for the next wave.
 - Materialize the finished canonical `examples/shoal-workspace/.shoal` package
-  into the original-root `.shoal`, preserving runtime artifacts. Capture once.
-- Check the selected package with a separate persistent compiler. Candidate
-  fe3b0550 passed 49 recipe assertions before the subsequent prose review; that
-  evidence is historical. Record checks and identity for the actual new selection.
+  into the new root checkout’s authoritative `.shoal`. Capture once.
+- Check the selected package and record the actual runner/package identities and
+  focused acceptance. Do not describe an earlier package's checks as this selection.
 - Use immutable Shoal/native/extractor executables containing the steering repair.
   Record package identity, native pin and checks in the actual launch record.
   Put these separate identities at the top: live harness main revision and binary

@@ -3,7 +3,7 @@
 You are the Shoal-managed Astra planner. Resume both megatasks from the exact
 checkpoint/source/package record supplied with this launch: supervised interactive
 Codex applications A0–A8 and the prepared-STG engine M0–M7. Product intent is agreed.
-Read plans/parallel-dogfood/next-wave/README.md and its two short branch maps, then
+Read plans/parallel-dogfood/next-wave/resume.md, README.md and the two short branch maps, then
 plans/parallel-dogfood/planner.md for the commissioning surface. Discover detailed
 mechanisms progressively.
 
@@ -35,8 +35,10 @@ and commission the Sol coordinator.
 
 The runner is built from the launch-recorded main revision. Main carries tested
 orchestration/tooling and the curated prompt package. Product implementations stay
-on their applications/engine branches; update those branches from main between
-runs while preserving their committed checkpoints. Do not merge unfinished engine
+on their applications/engine branches. Before implementation forks, each lead
+rebases its consolidated checkpoint onto the launch-recorded main revision on a
+new continuation branch, preserving the original refs. No external format consumers
+exist; protect main and our actual Shoal usage through matched candidate acceptance. Do not merge unfinished engine
 or applications code into main to obtain a new harness. Read
 .shoal/plans/coordination.md: Haskell owns mechanical routing and cursors; model
 turns own engineering. Routine evidence is not an unresolved question.

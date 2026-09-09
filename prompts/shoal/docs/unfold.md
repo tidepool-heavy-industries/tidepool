@@ -67,7 +67,8 @@ capabilities. Use a coding reviewer when review includes running checks.
 `researchingLeaf` omits `Forks` and actor control. Research cannot escalate into
 coding, integration, or build/test execution. Host `[research]` configuration in
 `.shoal/config.toml` defaults to `default_depth = 1`, `maximum_depth = 8`, and
-`maximum_active_children = 32`. The first researcher defaults to one generation;
+no concurrency ceiling. Set `maximum_active_children` only for an explicit finite
+research limit. The first researcher defaults to one generation;
 research descendants inherit remaining depth. Every child consumes a generation.
 
 For a deeper coordinator, select and inspect a proposal before admission:
@@ -77,7 +78,11 @@ let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel 
 previewBranch proposal
 ```
 
-Requested depth/width are capped by config and parent allowance. Preview reports
+Requested depth/width are capped by config and parent allowance. Effective
+`ForkAllowance` has `allowanceDepth` and `allowanceWidth :: Maybe Int`; Nothing
+means no concurrency ceiling, Just 0 means no descendants. Actor context uses the
+same optional width. Explicit finite limits count the entire subtree, including
+staged reservations; descendants cannot evade an ancestor's limit. Preview reports
 role, workspace access, effects, requested/effective budgets, and `CanFork`,
 `ForksOmitted`, or `BudgetExhausted`. `previewSource`, `previewContext`,
 `previewLifetime` and `previewGuidance` expose the branch selection. The optional

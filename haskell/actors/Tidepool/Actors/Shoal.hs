@@ -92,6 +92,7 @@ module Tidepool.Actors.Shoal
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , ForkBudget (..)
+  , ForkAllowance (..)
   , WorkerLaunchPreview (..)
   , ForkContext (..)
   , BranchPreview (..)
