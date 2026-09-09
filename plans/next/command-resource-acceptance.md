@@ -101,10 +101,25 @@ fixture passed against its packaged Shoal and native Codex executables (1 test,
 - Exact source, binary hashes and test result: `selection.json` in the receipt
   directory below; execution output: `checks/packaged-tui.log`.
 
-## Remaining acceptance
+## Release decision
 
-- The complete native workspace `just test` suite was approved and is running
-  against `fe15831c`; final results remain pending.
+The operator stopped the full workspace suite and selected targeted mechanism
+and adjacent-consumer coverage instead. The interrupted run completed over 1,000
+tests without a reported failure, including app-server command-execution cases;
+it is not a full-suite pass. Four stale state fixtures were repaired and compiled
+before further execution; native test-only commit `240d323124` preserves that fix.
+The installed runtime remains `fe15831c` (no production code changed in that fix).
+
+The adjacent selection executed 714 tests: 703 passed, 11 failed. Eight failures
+passed after supplying conventional shell paths in an isolated NixOS test view.
+Three remote shell-snapshot/sandbox cases remain unverified. The temporary shell
+wrapper also broke custom argv0 in an extra recheck; that is not product evidence.
+The operator explicitly accepted carrying these fixture issues into a standalone
+worker in the next wave rather than blocking launch. Diagnose them with focused
+checks; do not call them passed or assume all share the missing-sleep cause.
+
+The command-resource slice is accepted for the next dogfood run with these
+recorded test limitations. Full A0–A8 product acceptance remains separate.
 
 The native slice is committed and published, main selects its exact pin, and
 scoped formatting/lints and consumer checks are complete. Recovered dirty files
