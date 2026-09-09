@@ -32,6 +32,9 @@ archive).
   complete option A implementation plans for full worker TUIs, exact native
   session binding, durable delivery, process custody, hosted completion and
   recovery, with staged integration and acceptance across Tidepool and its Codex fork.
+- [Haskell command workbench](next/haskell-command-workbench.md): in-progress
+  design for inspectable bash values, memory-weighted execution, typed process
+  interaction and gradual migration from native shell orchestration.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers

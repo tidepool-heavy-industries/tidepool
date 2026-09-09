@@ -28,12 +28,17 @@ proposal <- prepareEdit source edit
 inspectFull (editDiff proposal)
 ```
 
-After inspecting and accepting the proposed change, in a separate call:
+Preview is optional. A caller that needs it can apply the retained proposal:
 
 ```haskell
 receipt <- applyEdit proposal
 inspectFull receipt
 ```
+
+The [command workbench design](next/haskell-command-workbench.md) adds the desired
+`edit path $ do ...` convenience: sequential in-memory operations with one
+all-or-none single-file application, without a mandatory preview/approval turn.
+Both surfaces should share the same mutation owner and preconditions.
 
 Collections use the same operations, for example `traverse prepareReplacement
 inputs`, where the parent defines `prepareReplacement` for the task. A bespoke

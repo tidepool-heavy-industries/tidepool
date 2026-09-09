@@ -35,7 +35,7 @@ The working checkout is `/tmp/tidepool-rsi-main-20260908`.
 Native: `fe15831c8a22c0d1b8d78d5ce55b7aa5fc3fa666`, published on
 `inanna-malick/codex:shoal-command-resources` and selected by the flake pin.
 The applications supervisor source was selected from `978029124`; its unrelated
-native input changes were not imported. Final packaged acceptance is pending.
+native input changes were not imported. Final packaged acceptance passed at runtime source `2b27c3f21474998fe764f87a8ce539290bdeb81c`.
 
 - Twelve host scoped-custody tests passed, including actual supervisor release,
   exact retirement, cancellation/lost results and retained ownership.
@@ -88,13 +88,23 @@ through `systemd-run --user --scope -p Delegate=yes`. Native sandbox tests also
 require Bubblewrap on PATH and conventional `/bin` paths; use an isolated mount
 view on NixOS rather than changing the host filesystem.
 
+## Packaged release
+
+The corrected Nix package built successfully and explicitly supplies systemd
+launch tooling on PATH. The full supervised TUI OOM/steering/subsequent-command
+fixture passed against its packaged Shoal and native Codex executables (1 test,
+1.89 seconds, local scripted provider; no paid inference).
+
+- Runner GC root: `/home/inanna/dev/tidepool/target/resource-runner-final-20260909`.
+- Shoal: `/nix/store/ky3y97hfl7f7fp6w0s0w04zhzxw9c3wv-shoal`.
+- Native: `/nix/store/wi783qwgz4nrwc014sxn36lxbmj2gh7y-codex-rs-0.0.0-dev+fe15831`.
+- Exact source, binary hashes and test result: `selection.json` in the receipt
+  directory below; execution output: `checks/packaged-tui.log`.
+
 ## Remaining acceptance
 
-- Finish the Nix package build and its queued full-TUI acceptance against the
-  packaged executables. The development full-TUI, CoW and host-launch checks passed.
 - The native contributor guide requires approval for the complete workspace
   `just test` suite. Approval was requested; that suite has not run.
-- Record the final package receipt and close this acceptance record.
 
 The native slice is committed and published, main selects its exact pin, and
 scoped formatting/lints and consumer checks are complete. Recovered dirty files
