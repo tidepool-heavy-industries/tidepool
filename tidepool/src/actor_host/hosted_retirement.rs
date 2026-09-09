@@ -78,6 +78,7 @@ pub(super) struct HostedRetirement {
 
 /// Construct the canonical policy from this exact actor inside the owning entry.
 /// No independently supplied endpoint can authorize the terminal cleanup path.
+#[cfg(test)]
 pub(super) fn start(
     slot: &HostedSlot,
     actor: LocalActorRef,
@@ -92,6 +93,7 @@ pub(super) fn start(
         expected_resume,
         listener,
         EndpointSource::Canonical,
+        None,
     )
 }
 
@@ -112,6 +114,7 @@ fn start_untrusted(
         None,
         listener,
         EndpointSource::Untrusted(endpoint),
+        None,
     )
 }
 
@@ -124,6 +127,10 @@ fn start_endpoint(
     expected_resume: Option<BackendThreadId>,
     listener: tokio::net::UnixListener,
     endpoint_source: EndpointSource,
+    resources: Option<(
+        Arc<tidepool_node::command_resources::CommandResources>,
+        String,
+    )>,
 ) -> Result<HostedOwner, String> {
     let endpoint: Arc<dyn tidepool_actor::ResidentToolEndpoint> = match &endpoint_source {
         EndpointSource::Canonical => Arc::new(tidepool_actor::ResidentInteractivePolicy::local(
@@ -132,7 +139,8 @@ fn start_endpoint(
         #[cfg(test)]
         EndpointSource::Untrusted(endpoint) => endpoint.clone(),
     };
-    let server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)?;
+    let server = HostDynamicToolService::new(endpoint, binding_path, expected_resume)?
+        .with_command_resources(resources);
     let mut entry = slot.lock();
     if entry.is_some() {
         return Err("host service already installed".into());
@@ -315,3 +323,25 @@ impl HostedRetirement {
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn start_with_resources(
+    slot: &HostedSlot,
+    actor: LocalActorRef,
+    binding_path: PathBuf,
+    expected_resume: Option<BackendThreadId>,
+    listener: tokio::net::UnixListener,
+    resources: Option<(
+        Arc<tidepool_node::command_resources::CommandResources>,
+        String,
+    )>,
+) -> Result<HostedOwner, String> {
+    start_endpoint(
+        slot,
+        actor,
+        binding_path,
+        expected_resume,
+        listener,
+        EndpointSource::Canonical,
+        resources,
+    )
+}

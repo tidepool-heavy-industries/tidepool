@@ -1,8 +1,9 @@
 # Implementation sequence and complete acceptance
 
-Status: planned. This checklist executes the contracts in
-[README.md](README.md) and files 01–05. Checkboxes describe work still to do;
-the existence of this plan is not evidence that any slice has passed.
+Status: partial implementation. The supervisor/resource slice is tracked in
+[command-resource acceptance](../next/command-resource-acceptance.md).
+This checklist executes the contracts in [README.md](README.md) and files 01–05;
+checked implementation items do not imply complete A0–A8 acceptance.
 
 ## Delivery approach
 
@@ -49,7 +50,7 @@ to add parallel workers or run concurrent build batteries.
 | A1 | Extend the owning-TUI relay with application/generation identity, handshake, typed operations and native observations; retain existing writer-lock enforcement | Live backend session, wire ownership, readiness and fleet health |
 | A2 | Extend native queue/store and input dispatch with durable deduplication, retained outcomes, withdrawal/seal, presentation evidence and restart quarantine | Consumer prepared by A1; full inbox integration in A3 |
 | A3 | No separate native mechanism beyond A1/A2; integrated protocol tests may expose repairs | Stable inbox operations, bootstrap, updates, notifications and request reconciliation |
-| A4–A5 | No planned Codex runtime change; full-TUI PTY acceptance may expose a native terminal defect | Supervisor, scoped launch, exact custody and retirement |
+| A4–A5 | Command admission and cgroup receipts in `codex-utils-pty`, including direct child consumers | Supervisor and command limits implemented; finish native admission sealing and resource settlement |
 | A6 | Retain completion state with the native session, account for bounded accepted work, preserve ordered callbacks, expose coordination failure and reconcile persisted results | Accepted hosted work, idempotent fork gate and retirement integration |
 | A7 | Exercise the reconnect and old-producer fencing supplied by A1/A2/A6; no native Haskell-state restoration | Host recovery, new incarnations, source recovery, status and operator actions |
 | A8 | Native integration tests, relevant API/schema documentation and a reviewed fork commit | Pin, packaged behavior check, migrations and final acceptance |
@@ -71,9 +72,9 @@ a new execution/controller architecture in Codex.
 - [ ] Reserve protocol/storage revisions for the coordinated release. Confirm
   that hosted protocol 4 and binding storage 6 remain available; identify the
   next inbox checkpoint and native store migration numbers from source.
-- [ ] Add a reusable integration fixture in Tidepool's test owner that starts a
-  real packaged full TUI on an isolated PTY with a controllable local provider and
-  hosted Haskell endpoint. Use a fresh temporary run root and test repository.
+- [ ] Extend the existing full-TUI fixture with the actual hosted Haskell
+  endpoint and the remaining input/completion contracts. Keep its isolated
+  temporary run root, repository and local provider.
 - [ ] Add fixture controls for disconnecting a socket, delaying/dropping a reply,
   stopping a specific child and holding a tool result at its actual boundary.
   Keep them in test infrastructure; do not add production magic strings or
@@ -82,10 +83,12 @@ a new execution/controller architecture in Codex.
   real completed-call fork history, terminal interactivity, process counts and
   memory. No default app-server daemon may be running in the routing fixture.
 
-Initial fixture target: `tidepool/tests/interactive_applications.rs`, with
-substantial Haskell programs and provider scripts in an adjacent
-`interactive_applications/` fixture directory. Register it according to current
-suite conventions. This target is proposed, not currently implemented.
+Existing fixture: `tidepool/src/host_dynamic_tools/tui_resource_tests.rs` starts
+an isolated supervised native TUI with a local scripted provider. It verifies
+command OOM, ordinary steering and subsequent execution without paid inference.
+Extend this fixture and the owning scoped-custody tests for the remaining native
+input/completion gates; do not create a competing launcher just to match the
+original proposed test filename.
 
 Exit evidence: exact repaired baseline, a working full-TUI fixture, reproducible
 relevant gaps, and no dependence on a developer's live session or credentials.
@@ -172,14 +175,18 @@ readiness. Legacy uncertain inboxes are not automatically replayed.
 Contract: launch/terminal half of
 [03-process-supervision.md](03-process-supervision.md).
 
-- [ ] Add typed inherited-terminal stdio to the existing scope implementation.
-- [ ] Implement the per-pane supervisor, private manifest/checkpoint, exact
+The process supervisor and bounded command execution now have production
+consumers. Extend these owners; do not reimplement the launch architecture.
+The remaining checks below include broader platform/terminal acceptance.
+
+- [x] Add typed inherited-terminal stdio to the existing scope implementation.
+- [x] Implement the per-pane supervisor, private manifest/checkpoint, exact
   pairing protocol and at-most-one blocked payload.
 - [ ] Preserve init pinning, gate retention, direct monitor wait and all current
   uncertainty behavior. Add the packaged platform conformance fixture.
-- [ ] Add the hidden supervisor entry point to the existing CLI parser; keep
+- [x] Add the hidden supervisor entry point to the existing CLI parser; keep
   subprocess mechanics in `tidepool-node`.
-- [ ] Replace the tmux payload command with the supervisor launch, retaining its
+- [x] Replace the tmux payload command with the supervisor launch, retaining its
   exact client in the preexisting host row before work may exist.
 - [ ] Prove real PTY foreground, resize, paste, interrupt and interactive-child
   behavior before enabling the production launch selector.
@@ -193,9 +200,9 @@ release leaves it usable; pre-release failure cannot accidentally execute it.
 Contract: retirement half of
 [03-process-supervision.md](03-process-supervision.md).
 
-- [ ] Adapt scoped custody to the supervisor consumer; remove obsolete staged
+- [x] Adapt scoped custody to the supervisor consumer; remove obsolete staged
   own-spawn wrappers without weakening original row anchoring.
-- [ ] Watch native scope lifetime after binding, independently of tmux and HTTP.
+- [x] Watch native scope lifetime after binding, independently of tmux and HTTP.
 - [ ] Implement admission seal, graceful interruption, exact scope stop,
   accepted-hosted-work cancellation/drain and final resource settlement through
   their existing owners.

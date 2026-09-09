@@ -1,5 +1,10 @@
 # Option A: supervised interactive Codex applications
 
+The supervisor/resource slice is tracked in
+[current acceptance](../next/command-resource-acceptance.md). Native input,
+completion and recovery candidates remain separate product work; this slice does
+not establish full A0–A8 acceptance.
+
 Status: partial implementation exists on retained branches. This design defines
 acceptance; use the final lane checkpoint for exact source and verified gates.
 [Recursive execution allocation](../parallel-dogfood/next-wave/applications.md)

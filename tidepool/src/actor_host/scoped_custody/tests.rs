@@ -1,7 +1,10 @@
 use super::*;
 use crate::actor_host::*;
 use tidepool_actor::ForkWorkspaceCustody;
-use tidepool_node::{ProcessInvocation, ProcessMountBoundary};
+use tidepool_node::{
+    run_process_supervisor, LaunchReservation, ProcessInvocation, ProcessMountBoundary,
+    ProcessSupervisorClient, ProcessSupervisorManifest,
+};
 
 struct Fixture {
     _repo: tidepool_worktree::testing::TestRepo,
@@ -114,12 +117,12 @@ impl Fixture {
                 bindings: Arc::new(Mutex::new(bindings)),
                 binding: Mutex::new(Some(binding)),
                 actor,
-                state: Mutex::new(CustodyState::default()),
+                state: Arc::new(Mutex::new(CustodyState::default())),
             }),
         }
     }
 
-    fn prepared(&self, executable: impl Into<PathBuf>) -> PreparedServiceScope {
+    fn prepared(&self, executable: impl Into<PathBuf>) -> LaunchReservation {
         ProcessMountBoundary::new(
             self.tree.cwd(),
             [self.tree.cwd().to_owned()],
@@ -215,6 +218,149 @@ fn owners() -> InteractiveOwners {
 }
 
 #[test]
+fn production_supervisor_row_drives_real_helper_and_finalizes_exact_launch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let boundary = ProcessMountBoundary::new(
+        directory.path(),
+        [directory.path().to_owned()],
+        [directory.path().to_owned()],
+    )
+    .unwrap();
+    let manifest = ProcessSupervisorManifest::new(
+        "production-row".into(),
+        "p".repeat(64),
+        "r".repeat(64),
+        directory.path().to_owned(),
+        bwrap(),
+        boundary,
+        ProcessInvocation {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo started > started; exec sleep 30".into()],
+        },
+        ServiceEnvironment::default(),
+    )
+    .unwrap();
+    let socket = manifest.socket_path();
+    let manifest_path = manifest.write_new().unwrap();
+    let slot = Arc::new(Mutex::new(ScopedProcessSlot::Reserved));
+    stage_supervisor(
+        &slot,
+        SupervisorRecoveryKey::new(socket.clone(), "production-row".into(), "r".repeat(64)),
+    )
+    .unwrap();
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| run_process_supervisor(&manifest_path).unwrap());
+        let socket_deadline = deadline();
+        while !socket.exists() {
+            assert!(
+                Instant::now() < socket_deadline,
+                "supervisor socket startup"
+            );
+            std::thread::yield_now();
+        }
+        let (client, observation) = ProcessSupervisorClient::pair(
+            socket,
+            "production-row".into(),
+            "p".repeat(64),
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        install_supervisor(&slot, client, observation).unwrap();
+        assert_eq!(
+            prepare_supervisor_slot(&slot, deadline()).unwrap(),
+            ScopedProcessObservation::Blocked
+        );
+        assert_eq!(
+            pin_supervisor_slot(&slot, deadline()).unwrap(),
+            ScopedProcessObservation::Pinned
+        );
+        assert!(!directory.path().join("started").exists());
+        assert_eq!(
+            release_supervisor_slot(&slot, deadline()).unwrap(),
+            ScopedProcessObservation::Released
+        );
+        let started_deadline = deadline();
+        while !directory.path().join("started").exists() {
+            assert!(
+                Instant::now() < started_deadline,
+                "released payload startup"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            stop_retained_slot(&slot, deadline()).unwrap(),
+            ScopedProcessObservation::ProcessStopped
+        );
+        assert!(matches!(*slot.lock(), ScopedProcessSlot::Finalized));
+        server.join().unwrap();
+    });
+}
+
+#[test]
+fn production_supervisor_row_finalizes_definitive_pre_spawn_stop() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let boundary = ProcessMountBoundary::new(
+        directory.path(),
+        [directory.path().to_owned()],
+        [directory.path().to_owned()],
+    )
+    .unwrap();
+    let manifest = ProcessSupervisorManifest::new(
+        "pre-spawn-stop".into(),
+        "p".repeat(64),
+        "r".repeat(64),
+        directory.path().to_owned(),
+        bwrap(),
+        boundary,
+        ProcessInvocation {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo forbidden > started".into()],
+        },
+        ServiceEnvironment::default(),
+    )
+    .unwrap();
+    let socket = manifest.socket_path();
+    let manifest_path = manifest.write_new().unwrap();
+    let slot = Arc::new(Mutex::new(ScopedProcessSlot::Reserved));
+    stage_supervisor(
+        &slot,
+        SupervisorRecoveryKey::new(socket.clone(), "pre-spawn-stop".into(), "r".repeat(64)),
+    )
+    .unwrap();
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| run_process_supervisor(&manifest_path).unwrap());
+        let limit = deadline();
+        while !socket.exists() {
+            assert!(Instant::now() < limit, "supervisor socket startup");
+            std::thread::yield_now();
+        }
+        let (client, observed) = ProcessSupervisorClient::pair(
+            socket,
+            "pre-spawn-stop".into(),
+            "p".repeat(64),
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        install_supervisor(&slot, client, observed).unwrap();
+        assert_eq!(
+            stop_retained_slot(&slot, deadline()).unwrap(),
+            ScopedProcessObservation::ProcessStopped
+        );
+        assert!(matches!(*slot.lock(), ScopedProcessSlot::Finalized));
+        server.join().unwrap();
+    });
+    assert!(!directory.path().join("started").exists());
+}
+
+#[test]
 fn scoped_custody_exact_claim_and_pre_spawn_failure() {
     let mut fixture = Fixture::new(1);
     let map = owners();
@@ -237,7 +383,10 @@ fn scoped_custody_exact_claim_and_pre_spawn_failure() {
         File::create(fixture.tree.cwd().join("scope.log")).unwrap(),
     )
     .unwrap();
-    assert!(matches!(*slot.lock(), ScopedProcessSlot::NotSpawned(_)));
+    assert!(
+        matches!(&*slot.lock(), ScopedProcessSlot::NotSpawned(ServiceScopeError::NotSpawned(error))
+        if error.kind() == std::io::ErrorKind::NotFound)
+    );
     assert!(matches!(
         fixture.claim(&map, fixture.custody.actor),
         Err(ScopedClaimError::AlreadyClaimed)
@@ -310,6 +459,18 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
     })
     .await
     .unwrap();
+    let retained_slot = {
+        map.lock()
+            .get(&fixture.custody.actor)
+            .unwrap()
+            .scoped_retention
+            .as_ref()
+            .map(|retention| retention.slot.clone())
+    };
+    let exact_outcome = retire_scoped_process(retained_slot, NativeRetirement::Terminate)
+        .await
+        .unwrap();
+    assert_eq!(exact_outcome, CleanupComponentOutcome::Completed);
     {
         let mut rows = map.lock();
         let row = rows.get_mut(&fixture.custody.actor).unwrap();
@@ -334,8 +495,17 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
             .stop(deadline())
             .unwrap()
         {
-            ScopedCleanupObservation::ProcessStoppedHostWorkPending { terminal, .. } => {
-                assert_eq!(terminal, cancelled())
+            ScopedCleanupObservation::ProcessStoppedHostWorkPending { terminal, status } => {
+                assert_eq!(terminal, cancelled());
+                let retention = row.scoped_retention.as_ref().unwrap();
+                let slot = retention.slot.lock();
+                let ScopedProcessSlot::Owned(scope) = &*slot else {
+                    panic!("retained exact scope")
+                };
+                assert!(
+                    matches!(scope.observation().unwrap(), tidepool_node::ScopeObservation::ProcessStopped(retained)
+                    if retained.monitor_status() == status.monitor_status())
+                );
             }
             _ => panic!("terminal observed"),
         }
@@ -380,6 +550,41 @@ async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
     fixture.retained(); // No successful binding settlement is claimed.
 }
 
+#[tokio::test]
+async fn scoped_retirement_preserve_keeps_exact_process_and_reports_uncertainty() {
+    let fixture = Fixture::new(1);
+    let map = owners();
+    fixture.register(&map);
+    let slot = fixture.spawn(&map);
+    map.lock()
+        .get_mut(&fixture.custody.actor)
+        .unwrap()
+        .scoped_retention
+        .as_mut()
+        .unwrap()
+        .pin(deadline())
+        .unwrap();
+
+    let outcome = retire_scoped_process(Some(slot), NativeRetirement::Preserve)
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        CleanupComponentOutcome::Failed { detail }
+            if detail.contains("intentionally preserved")
+    ));
+    fixture.retained();
+
+    map.lock()
+        .get_mut(&fixture.custody.actor)
+        .unwrap()
+        .scoped_retention
+        .as_mut()
+        .unwrap()
+        .stop(deadline())
+        .unwrap();
+}
+
 #[test]
 fn scoped_custody_concurrent_claim_sibling_timeout_and_legacy_fence() {
     let first = Fixture::new(1);
@@ -393,8 +598,8 @@ fn scoped_custody_concurrent_claim_sibling_timeout_and_legacy_fence() {
         first.claim(&map, first.custody.actor)
     };
     let slot = std::thread::scope(|scope| {
-        let a = scope.spawn(&claim);
-        let b = scope.spawn(&claim);
+        let a = scope.spawn(claim);
+        let b = scope.spawn(claim);
         match (a.join().unwrap(), b.join().unwrap()) {
             (Ok(slot), Err(ScopedClaimError::AlreadyClaimed))
             | (Err(ScopedClaimError::AlreadyClaimed), Ok(slot)) => slot,
@@ -572,7 +777,7 @@ async fn scoped_custody_production_handoff_recovers_completed_and_timed_out_flee
             .unwrap();
         assert_eq!(observed.actor, fixture.custody.actor);
         assert_eq!(observed.actor_terminal, Some(cancelled()));
-        assert!(matches!(observed.process, RetainedProcessState::Owned));
+        assert!(matches!(observed.process, RetainedProcessState::Blocked));
         assert!(matches!(
             carrier
                 .recover_process(

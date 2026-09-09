@@ -1,7 +1,9 @@
 # Full-TUI process supervision and custody
 
-Status: planned. Implements slices A4 and A5. The terminal and recovery decisions
-are part of option A, not a migration to a headless app-server.
+Status: supervisor and command-resource implementation present; full A5
+settlement remains open. See [current acceptance](../next/command-resource-acceptance.md)
+for checked behavior and the matched release. The contracts below continue to
+define A4/A5 acceptance.
 
 ## Result
 

@@ -146,6 +146,10 @@ impl HostToolControl {
 
 #[derive(Clone)]
 struct HostState {
+    command_resources: Option<(
+        Arc<tidepool_node::command_resources::CommandResources>,
+        String,
+    )>,
     control: HostToolControl,
     registration: Arc<Registration>,
     tools: Arc<HashMap<String, ToolKind>>,
@@ -215,6 +219,7 @@ impl HostDynamicToolService {
         };
         Ok(Self {
             state: HostState {
+                command_resources: None,
                 control: HostToolControl {
                     phase: tokio::sync::watch::channel(HostToolPhase::Serving).0,
                     bound_thread: Arc::new(Mutex::new(None)),
@@ -227,6 +232,17 @@ impl HostDynamicToolService {
                 expected_thread,
             },
         })
+    }
+
+    pub(crate) fn with_command_resources(
+        mut self,
+        resources: Option<(
+            Arc<tidepool_node::command_resources::CommandResources>,
+            String,
+        )>,
+    ) -> Self {
+        self.state.command_resources = resources;
+        self
     }
 
     /// Retain this control before moving the service into its server task.
@@ -257,6 +273,7 @@ impl HostDynamicToolService {
             }
         };
         let app = Router::new()
+            .route("/v1/commands/resources", post(command_resources))
             .route("/v1/dynamic-tools/registration", get(registration))
             .route("/v1/dynamic-tools/session", post(attach_session))
             .route("/v1/dynamic-tools/call", post(call))
@@ -1200,3 +1217,69 @@ mod drain_tests;
 
 #[cfg(test)]
 pub(crate) use tests::endpoint as test_endpoint;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandResourceRequest {
+    id: String,
+    operation: CommandResourceOperation,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CommandResourceOperation {
+    Acquire,
+    Started,
+    Status,
+    Finished,
+    Cancel,
+}
+async fn command_resources(
+    axum::extract::State(state): axum::extract::State<HostState>,
+    Json(request): Json<CommandResourceRequest>,
+) -> Result<
+    Json<tidepool_node::command_resources::CommandResourceStatus>,
+    (axum::http::StatusCode, String),
+> {
+    let (owner, actor) = state.command_resources.as_ref().ok_or((
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "command resources unavailable".into(),
+    ))?;
+    let result = match request.operation {
+        CommandResourceOperation::Acquire => {
+            let mut phase = state.control.phase.subscribe();
+            if *phase.borrow_and_update() != HostToolPhase::Serving {
+                owner.cancel(actor, &request.id)
+            } else {
+                tokio::select! {
+                    result = owner.acquire(actor, &request.id) => {
+                        if *phase.borrow() == HostToolPhase::Serving {
+                            result
+                        } else {
+                            let _ = owner.cancel(actor, &request.id);
+                            Err(std::io::Error::other("host quiescing; command not started"))
+                        }
+                    },
+                    _ = phase.changed() => owner.cancel(actor, &request.id),
+                }
+            }
+        }
+        CommandResourceOperation::Started => owner.started(actor, &request.id),
+        CommandResourceOperation::Status => owner.status(actor, &request.id),
+        CommandResourceOperation::Finished => owner
+            .started(actor, &request.id)
+            .and_then(|_| owner.status(actor, &request.id)),
+        CommandResourceOperation::Cancel => owner.cancel(actor, &request.id),
+    };
+    result.map(Json).map_err(|error| {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            error.to_string(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod resource_tests;
+
+#[cfg(test)]
+mod tui_resource_tests;

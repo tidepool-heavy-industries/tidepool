@@ -6,6 +6,7 @@ mod inbox;
 #[cfg(target_os = "linux")]
 mod mount_namespace;
 mod process_boundary;
+mod process_supervisor;
 mod tmux;
 
 pub use inbox::{
@@ -19,11 +20,20 @@ pub use mount_namespace::{
     OverlayRotationOutcome, PreparedOverlayRotation,
 };
 pub use process_boundary::service_scope::{
-    PreparedServiceScope, ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError,
+    LaunchRelease, LaunchReservation, PreparedServiceScope, ScopeCapability, ScopeObservation,
+    ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError, ServiceStdio,
 };
 pub use process_boundary::{
     ProcessBoundaryError, ProcessInvocation, ProcessMountBoundary, BUBBLEWRAP_PROGRAM,
 };
+pub use process_supervisor::{
+    run_process_supervisor, ProcessSupervisorClient, ProcessSupervisorError,
+    ProcessSupervisorManifest, ProcessSupervisorObservation, ProcessSupervisorRecovery,
+    PROCESS_SUPERVISOR_CHECKPOINT, PROCESS_SUPERVISOR_MANIFEST, PROCESS_SUPERVISOR_SOCKET,
+    PROCESS_SUPERVISOR_VERSION,
+};
 pub use tmux::{
     TmuxLaunch, TmuxNodeError, TmuxPaneId, TmuxPaneStatus, TmuxSession, TmuxSessionName,
 };
+
+pub mod command_resources;

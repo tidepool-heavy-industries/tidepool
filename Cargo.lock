@@ -4331,6 +4331,8 @@ version = "0.1.0"
 name = "tidepool-node"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "parking_lot",
  "rustix",
  "serde",
  "serde_json",

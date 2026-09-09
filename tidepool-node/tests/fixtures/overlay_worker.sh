@@ -5,6 +5,12 @@ count=0
 printf '%s\n' "$$"
 while IFS= read -r command; do
     case "$command" in
+        oom\ *)
+            if python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[2], "cgroup.procs").write_text("0"); f=open(sys.argv[1], "w"); f.write("before-oom"); f.flush(); a=bytearray(128*1024*1024)' "$view/oom-value" "${command#oom }"; then
+                printf 'unexpected-success\n'
+            else
+                printf 'command-failed\n'
+            fi ;;
         hold_build) exec 8>"$view/target/open"; printf 'held\n' ;;
         build_write) printf live >&8; printf 'wrote\n' ;;
         close_build) exec 8>&-; printf 'closed\n' ;;

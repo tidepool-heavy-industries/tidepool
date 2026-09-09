@@ -76,6 +76,81 @@ fn spawn_worker(invocation: ProcessInvocation) -> (Worker, MountNamespace) {
     (worker, namespace)
 }
 
+#[tokio::test]
+#[ignore = "requires a fresh delegated systemd cgroup scope"]
+async fn command_oom_releases_writers_for_cow_publication() {
+    use tidepool_node::command_resources::{
+        CommandResourcePolicy, CommandResourceStatus, CommandResources,
+    };
+    let owner = CommandResources::delegated(CommandResourcePolicy {
+        memory_high_bytes: None,
+        memory_max_bytes: 64 * 1024 * 1024,
+        swap_max_bytes: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let root = storage.path();
+    let (mut worker, namespace) = setup(root);
+    let CommandResourceStatus::Admitted { cgroup } = owner.acquire("overlay", "oom").await.unwrap()
+    else {
+        panic!("expected command admission");
+    };
+    owner.started("overlay", "oom").unwrap();
+    assert_eq!(
+        worker.exchange(&format!("oom {}", cgroup.display())),
+        "command-failed"
+    );
+    assert!(matches!(
+        owner.status("overlay", "oom").unwrap(),
+        CommandResourceStatus::ResourceExhausted
+    ));
+    let view = root.join("project/target");
+    let rotation = OverlayRotation::prepare(
+        &view,
+        &[root.join("base"), root.join("u0")],
+        &root.join("u1"),
+        &root.join("w1"),
+    )
+    .unwrap();
+    assert!(matches!(
+        namespace.rotate_overlay(rotation),
+        OverlayRotationOutcome::Rotated
+    ));
+    let child = Command::new("bwrap")
+        .args(["--bind", "/", "/", "--dev", "/dev", "--overlay-src"])
+        .arg(root.join("base"))
+        .arg("--overlay-src")
+        .arg(root.join("u0"))
+        .arg("--overlay")
+        .arg(root.join("uc"))
+        .arg(root.join("wc"))
+        .arg(&view)
+        .args([
+            "--",
+            "/bin/sh",
+            "-c",
+            "cat \"$1/oom-value\"; printf child >\"$1/oom-value\"",
+            "child",
+        ])
+        .arg(&view)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert_eq!(child.stdout, b"before-oom");
+    assert_eq!(
+        std::fs::read(root.join("u0/oom-value")).unwrap(),
+        b"before-oom"
+    );
+    assert_eq!(std::fs::read(root.join("uc/oom-value")).unwrap(), b"child");
+    assert_eq!(worker.exchange("write"), "wrote");
+    assert!(root.join("u1/value").exists());
+}
+
 #[test]
 fn busy_freeze_preserves_worker_then_publication_allows_independent_continuation() {
     let storage = tempfile::tempdir().unwrap();

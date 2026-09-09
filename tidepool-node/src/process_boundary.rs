@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 #[path = "process_scope.rs"]
 pub mod service_scope;
 
@@ -20,14 +22,14 @@ mod view;
 pub const BUBBLEWRAP_PROGRAM: &str = "bwrap";
 
 /// An exact executable plus argv, ready for a process launcher.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessInvocation {
     pub program: String,
     pub args: Vec<String>,
 }
 
 /// Validated repository mounts for one process incarnation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessMountBoundary {
     cwd: PathBuf,
     project_root: PathBuf,
@@ -40,7 +42,7 @@ pub struct ProcessMountBoundary {
 }
 
 /// Immutable layers are ordered oldest first, matching Bubblewrap's source order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OverlayView {
     layers: Vec<PathBuf>,
     upper: PathBuf,
@@ -73,12 +75,22 @@ impl ProcessMountBoundary {
     /// Path validation does not attest binary compatibility or kernel ordering;
     /// deployment must establish these prerequisites before using cleanup as
     /// evidence. See the prepared scope's spawn documentation.
+    pub fn reserve_service_scope(
+        &self,
+        bubblewrap: PathBuf,
+        command: ProcessInvocation,
+    ) -> Result<service_scope::LaunchReservation, service_scope::ServiceScopeError> {
+        service_scope::LaunchReservation::new(self.clone(), bubblewrap, command)
+    }
+
+    /// Compatibility spelling for existing host composition while it moves to
+    /// the explicit reservation vocabulary.
     pub fn prepare_service_scope(
         &self,
         bubblewrap: PathBuf,
         command: ProcessInvocation,
-    ) -> Result<service_scope::PreparedServiceScope, service_scope::ServiceScopeError> {
-        service_scope::PreparedServiceScope::new(self.clone(), bubblewrap, command)
+    ) -> Result<service_scope::LaunchReservation, service_scope::ServiceScopeError> {
+        self.reserve_service_scope(bubblewrap, command)
     }
 
     pub fn new(

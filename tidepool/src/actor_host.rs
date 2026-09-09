@@ -21,7 +21,8 @@ mod prompt_catalog;
 pub(crate) mod recipe_checks;
 #[cfg(test)]
 mod research_policy_tests;
-#[allow(dead_code)] // Staged owner; no launch switch before native/quiescence integration.
+#[cfg(test)]
+mod resource_tests;
 mod scoped_custody;
 mod socket_directory;
 #[cfg(test)]
@@ -59,7 +60,8 @@ use tidepool_handlers::{
 };
 use tidepool_mcp::CapturedOutput;
 use tidepool_node::{
-    DurableInbox, ProcessInvocation, ProcessMountBoundary, TmuxLaunch, TmuxPaneId, TmuxSession,
+    DurableInbox, ProcessInvocation, ProcessMountBoundary, ProcessSupervisorClient,
+    ProcessSupervisorManifest, ServiceEnvironment, TmuxLaunch, TmuxPaneId, TmuxSession,
     BUBBLEWRAP_PROGRAM,
 };
 use tidepool_repr::SessionId;
@@ -133,7 +135,7 @@ struct ActorWorkspaceCustody {
     bindings: Arc<Mutex<BindingTable>>,
     binding: Mutex<Option<ActiveBinding>>,
     actor: ActorRef,
-    state: Mutex<scoped_custody::CustodyState>,
+    state: Arc<Mutex<scoped_custody::CustodyState>>,
     workspace: Option<Arc<PreparedWorkspace>>,
     inheritance_notice: Option<String>,
 }
@@ -144,12 +146,14 @@ impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
         successor: ActorRef,
     ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         let state = self.state.lock();
-        if !matches!(
-            state.launch,
-            scoped_custody::LaunchCustody::Unclaimed
-                | scoped_custody::LaunchCustody::ScopedNotSpawned
-        ) || state.terminal.is_some()
-        {
+        let process_absent = match state.launch {
+            scoped_custody::LaunchCustody::Unclaimed => true,
+            #[cfg(test)]
+            scoped_custody::LaunchCustody::ScopedNotSpawned => true,
+            scoped_custody::LaunchCustody::ScopedClaimed
+            | scoped_custody::LaunchCustody::Legacy => false,
+        };
+        if !process_absent || state.terminal.is_some() {
             return Err(ForkWorkspaceAdmissionError {
                 detail: "workspace transfer requires a live actor with no possible native process"
                     .into(),
@@ -180,7 +184,7 @@ impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
             bindings: self.bindings.clone(),
             binding: Mutex::new(binding.take()),
             actor: successor,
-            state: Mutex::new(scoped_custody::CustodyState::default()),
+            state: Arc::new(Mutex::new(scoped_custody::CustodyState::default())),
             workspace: self.workspace.clone(),
             inheritance_notice: self.inheritance_notice.clone(),
         }))
@@ -200,7 +204,7 @@ impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
 
 impl Drop for ActorWorkspaceCustody {
     fn drop(&mut self) {
-        let state = self.state.get_mut();
+        let state = self.state.lock();
         if matches!(
             state.launch,
             scoped_custody::LaunchCustody::Legacy | scoped_custody::LaunchCustody::ScopedClaimed
@@ -268,7 +272,7 @@ impl ActorForkWorkspaceAdmission {
             bindings: self.bindings.clone(),
             binding: Mutex::new(Some(binding)),
             actor,
-            state: Mutex::new(scoped_custody::CustodyState::default()),
+            state: Arc::new(Mutex::new(scoped_custody::CustodyState::default())),
             workspace,
             inheritance_notice,
         }))
@@ -365,6 +369,7 @@ fn fork_workspace_admission(
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
+    pub command_resources: Option<Arc<tidepool_node::command_resources::CommandResources>>,
     /// This Shoal installation provides the internal namespace-entry executable.
     pub shoal_executable: PathBuf,
     pub workspace_inputs: Option<crate::shoal::workspace::FrozenWorkspace>,
@@ -615,6 +620,7 @@ impl DurableActorEvent {
 #[serde(rename_all = "camelCase")]
 enum CleanupComponent {
     Process,
+    Pane,
     ToolService,
     Delivery,
     Socket,
@@ -753,18 +759,16 @@ impl NativeForkAdmission {
 }
 
 impl InteractiveApplicationOwner {
-    #[allow(dead_code)] // Staged slot admission; production selection remains disabled.
     fn reserve_scope(
         &mut self,
-        custody: Arc<ActorWorkspaceCustody>,
+        custody: Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
         actor: ActorRef,
     ) -> Result<Arc<Mutex<scoped_custody::ScopedProcessSlot>>, scoped_custody::ScopedClaimError>
     {
-        let erased: Arc<dyn tidepool_actor::ForkWorkspaceCustody> = custody.clone();
         if !self
             .custody
             .as_ref()
-            .is_some_and(|installed| Arc::ptr_eq(installed, &erased))
+            .is_some_and(|installed| Arc::ptr_eq(installed, &custody))
         {
             return Err(scoped_custody::ScopedClaimError::WrongActor);
         }
@@ -842,6 +846,7 @@ pub(crate) enum RetainedHostedError {
 #[allow(dead_code)] // Available to the crate's host error consumer; not a model API.
 pub(crate) enum RetainedProcessOperation {
     Observe,
+    #[cfg(test)]
     Pin,
     Stop,
 }
@@ -850,11 +855,16 @@ pub(crate) enum RetainedProcessOperation {
 #[allow(dead_code)]
 pub(crate) enum RetainedProcessState {
     Reserved,
+    #[cfg(test)]
     Spawning,
+    #[cfg(test)]
     NotSpawned(String),
-    Owned,
+    Blocked,
     Pinned,
-    ProcessStopped(tidepool_node::ServiceScopeCleanup),
+    Released,
+    ReleaseUnconfirmed,
+    Stopping,
+    ProcessStopped(Option<tidepool_node::ServiceScopeCleanup>),
 }
 
 #[derive(Debug)]
@@ -873,6 +883,8 @@ pub(crate) enum RetainedProcessError {
     Deadline,
     #[error(transparent)]
     Scope(#[from] tidepool_node::ServiceScopeError),
+    #[error("retained process supervisor: {0}")]
+    Supervisor(String),
 }
 
 #[allow(dead_code)]
@@ -919,42 +931,74 @@ impl RetainedInteractiveFleet {
             .owners
             .try_lock_until(deadline)
             .ok_or(RetainedProcessError::Deadline)?;
-        let retention = rows
+        let slot = rows
             .get(&actor)
             .and_then(|row| row.scoped_retention.as_ref())
+            .map(|retention| retention.slot.clone())
             .ok_or(RetainedProcessError::NoScopedActor)?;
-        let mut slot = retention
-            .slot
-            .try_lock_until(deadline)
-            .ok_or(RetainedProcessError::Deadline)?;
-        use scoped_custody::ScopedProcessSlot;
-        let process = match (operation, &mut *slot) {
-            (RetainedProcessOperation::Observe, ScopedProcessSlot::Reserved) => {
-                RetainedProcessState::Reserved
+        let actor_terminal = rows.get(&actor).and_then(|row| row.terminal.clone());
+        drop(rows);
+        let map_observation = |observation| match observation {
+            scoped_custody::ScopedProcessObservation::Reserved => RetainedProcessState::Reserved,
+            scoped_custody::ScopedProcessObservation::Blocked => RetainedProcessState::Blocked,
+            scoped_custody::ScopedProcessObservation::Pinned => RetainedProcessState::Pinned,
+            scoped_custody::ScopedProcessObservation::Released => RetainedProcessState::Released,
+            scoped_custody::ScopedProcessObservation::ReleaseUnconfirmed => {
+                RetainedProcessState::ReleaseUnconfirmed
             }
-            (RetainedProcessOperation::Observe, ScopedProcessSlot::Spawning) => {
-                RetainedProcessState::Spawning
+            scoped_custody::ScopedProcessObservation::Stopping => RetainedProcessState::Stopping,
+            scoped_custody::ScopedProcessObservation::ProcessStopped => {
+                RetainedProcessState::ProcessStopped(None)
             }
-            (RetainedProcessOperation::Observe, ScopedProcessSlot::NotSpawned(error)) => {
-                RetainedProcessState::NotSpawned(error.to_string())
+        };
+        let process = match operation {
+            RetainedProcessOperation::Observe => map_observation(
+                scoped_custody::observe_slot(&slot, deadline)
+                    .map_err(|error| RetainedProcessError::Supervisor(error.to_string()))?,
+            ),
+            RetainedProcessOperation::Stop => {
+                #[cfg(test)]
+                {
+                    let mut direct = slot
+                        .try_lock_until(deadline)
+                        .ok_or(RetainedProcessError::Deadline)?;
+                    if let scoped_custody::ScopedProcessSlot::Owned(scope) = &mut *direct {
+                        let status = scope.terminate_and_wait(deadline)?;
+                        RetainedProcessState::ProcessStopped(Some(status))
+                    } else {
+                        drop(direct);
+                        map_observation(
+                            scoped_custody::stop_supervisor_slot(&slot, deadline).map_err(
+                                |error| RetainedProcessError::Supervisor(error.to_string()),
+                            )?,
+                        )
+                    }
+                }
+                #[cfg(not(test))]
+                {
+                    map_observation(
+                        scoped_custody::stop_supervisor_slot(&slot, deadline)
+                            .map_err(|error| RetainedProcessError::Supervisor(error.to_string()))?,
+                    )
+                }
             }
-            (RetainedProcessOperation::Observe, ScopedProcessSlot::Owned(_)) => {
-                RetainedProcessState::Owned
+            #[cfg(test)]
+            RetainedProcessOperation::Pin => {
+                let mut slot = slot
+                    .try_lock_until(deadline)
+                    .ok_or(RetainedProcessError::Deadline)?;
+                match &mut *slot {
+                    scoped_custody::ScopedProcessSlot::Owned(scope) => {
+                        scope.pin_init(deadline)?;
+                        RetainedProcessState::Pinned
+                    }
+                    _ => return Err(tidepool_node::ServiceScopeError::WrongPhase.into()),
+                }
             }
-            (RetainedProcessOperation::Pin, ScopedProcessSlot::Owned(scope)) => {
-                scope.pin_init(deadline)?;
-                RetainedProcessState::Pinned
-            }
-            (RetainedProcessOperation::Stop, ScopedProcessSlot::Owned(scope)) => {
-                RetainedProcessState::ProcessStopped(scope.terminate_and_wait(deadline)?)
-            }
-            _ => return Err(tidepool_node::ServiceScopeError::WrongPhase.into()),
         };
         Ok(RetainedProcessObservation {
             actor,
-            actor_terminal: retention
-                .terminal_until(deadline)
-                .ok_or(RetainedProcessError::Deadline)?,
+            actor_terminal,
             process,
         })
     }
@@ -1633,21 +1677,48 @@ fn spawn_undeployed_hosted_retirement(
     retirements: &mut JoinSet<InteractiveCleanupReceipt>,
     actor: ActorRef,
     owners: &InteractiveOwners,
+    tmux: &TmuxSession,
 ) {
     let retained = {
         let rows = owners.lock();
-        rows.get(&actor).and_then(|row| {
-            row.hosted
-                .lock()
-                .clone()
-                .map(|service| (service, row.retirement.clone()))
+        rows.get(&actor).map(|row| {
+            (
+                row.hosted.lock().clone(),
+                row.pane.lock().clone(),
+                row.scoped_retention
+                    .as_ref()
+                    .map(|retention| retention.slot.clone()),
+                row.retirement.clone(),
+                row.native_retirement,
+            )
         })
     };
-    let Some((mut service, receipt_slot)) = retained else {
+    let Some((service, pane, scope, receipt_slot, native_retirement)) = retained else {
         return;
     };
+    let tmux = tmux.clone();
     retirements.spawn(async move {
-        let http = stop_retired_tool_service(actor, &mut service).await;
+        let http = match service {
+            Some(mut service) => stop_retired_tool_service(actor, &mut service).await,
+            None => CleanupComponentOutcome::Completed,
+        };
+        let process = retire_scoped_process(scope, native_retirement)
+            .await
+            .unwrap_or_else(|| CleanupComponentOutcome::Failed {
+                detail: "undeployed launch has no exact native process row".into(),
+            });
+        let pane = match pane {
+            None => CleanupComponentOutcome::Completed,
+            Some(pane)
+                if native_retirement == NativeRetirement::Preserve
+                    || matches!(process, CleanupComponentOutcome::Completed) =>
+            {
+                retire_pane_artifact(&tmux, &pane, native_retirement).await
+            }
+            Some(_) => CleanupComponentOutcome::Failed {
+                detail: "pane retained because exact process termination is unconfirmed".into(),
+            },
+        };
         let receipt = InteractiveCleanupReceipt {
             actor,
             components: vec![
@@ -1657,10 +1728,11 @@ fn spawn_undeployed_hosted_retirement(
                 },
                 CleanupComponentReceipt {
                     component: CleanupComponent::Process,
-                    outcome: CleanupComponentOutcome::Failed {
-                        detail: "hosted retirement does not establish native/external cleanup"
-                            .into(),
-                    },
+                    outcome: process,
+                },
+                CleanupComponentReceipt {
+                    component: CleanupComponent::Pane,
+                    outcome: pane,
                 },
             ],
         };
@@ -1691,23 +1763,44 @@ fn spawn_owned_retirement(
     // Only slots cross the task boundary; neither owns a back-reference to its
     // map row. Namespace cleanup is status only and does not discharge host work.
     retirements.spawn(async move {
-        if let Some(scope) = scope.filter(|_| native_retirement == NativeRetirement::Terminate) {
-            let stopped = tokio::task::spawn_blocking(move || {
-                scoped_custody::stop_slot(
-                    &scope,
-                    std::time::Instant::now() + APPLICATION_SHUTDOWN_TIMEOUT,
-                )
-            })
-            .await;
-            if !matches!(stopped, Ok(Ok(_))) {
-                tracing::warn!("scoped process cleanup remains unconfirmed in retained owner");
-            }
-        }
+        let process = retire_scoped_process(scope, native_retirement).await;
         let receipt =
-            retire_interactive_application_guarded(deployment, &tmux, native_retirement).await;
+            retire_interactive_application_guarded(deployment, &tmux, native_retirement, process)
+                .await;
         receipt_slot.lock().get_or_insert_with(|| receipt.clone());
         receipt
     });
+}
+
+/// Consume the exact retained slot without moving it out of the lifecycle row.
+/// The returned outcome is reporting evidence only: the slot still owns the
+/// cleanup receipt and the caller must account for hosted work and leases.
+async fn retire_scoped_process(
+    scope: Option<Arc<Mutex<scoped_custody::ScopedProcessSlot>>>,
+    native_retirement: NativeRetirement,
+) -> Option<CleanupComponentOutcome> {
+    let scope = scope?;
+    if native_retirement == NativeRetirement::Preserve {
+        return Some(CleanupComponentOutcome::Failed {
+            detail: "native process intentionally preserved; exact scope remains retained".into(),
+        });
+    }
+    let stopped = tokio::task::spawn_blocking(move || {
+        scoped_custody::stop_retained_slot(
+            &scope,
+            std::time::Instant::now() + APPLICATION_SHUTDOWN_TIMEOUT,
+        )
+    })
+    .await;
+    Some(match stopped {
+        Ok(Ok(_)) => CleanupComponentOutcome::Completed,
+        Ok(Err(error)) => CleanupComponentOutcome::Failed {
+            detail: format!("exact scoped process cleanup remains unconfirmed: {error}"),
+        },
+        Err(error) => CleanupComponentOutcome::Failed {
+            detail: format!("scoped process cleanup task failed: {error}"),
+        },
+    })
 }
 
 async fn run_interactive_applications(
@@ -1754,6 +1847,7 @@ async fn run_interactive_applications(
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
     let mut publication_retries = JoinSet::new();
+    let mut process_observations = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
     let failure = loop {
         tokio::select! {
@@ -1763,6 +1857,29 @@ async fn run_interactive_applications(
                 if changed.is_ok() { launch_context.config = root_config.borrow_and_update().clone(); }
             }
             _ = health.tick() => {
+                if process_observations.is_empty() {
+                    let rows = application_owners.lock();
+                    for deployment in deployments.iter().filter(|deployment| {
+                        !deployment.failure_reported
+                            && deployment.local_actor.terminal().get().is_none()
+                    }) {
+                        let Some(slot) = rows
+                            .get(&deployment.actor)
+                            .and_then(|row| row.scoped_retention.as_ref())
+                            .map(|retention| retention.slot.clone())
+                        else {
+                            continue;
+                        };
+                        let actor = deployment.actor;
+                        process_observations.spawn_blocking(move || {
+                            let observed = scoped_custody::observe_slot(
+                                &slot,
+                                std::time::Instant::now() + Duration::from_millis(250),
+                            );
+                            (actor, observed)
+                        });
+                    }
+                }
                 for deployment in &deployments {
                     if let Some(thread) = &deployment.thread {
                         let workspace = deployment.prepared_workspace.clone();
@@ -1833,6 +1950,31 @@ async fn run_interactive_applications(
                     }
                 }
             }
+            Some(observed) = process_observations.join_next(), if !process_observations.is_empty() => {
+                let Ok((actor, Ok(scoped_custody::ScopedProcessObservation::ProcessStopped))) = observed else {
+                    continue;
+                };
+                let Some(index) = deployments.iter().position(|deployment| {
+                    deployment.actor == actor
+                        && !deployment.failure_reported
+                        && deployment.local_actor.terminal().get().is_none()
+                }) else {
+                    continue;
+                };
+                let local_actor = deployments[index].local_actor.clone();
+                deployments[index].failure_reported = true;
+                if let Err(error) = apply_application_failure(
+                    local_actor,
+                    ExternalApplicationFailure {
+                        class: ExternalApplicationFailureClass::UnexpectedExit,
+                        detail: "supervised native process exited before actor settlement".into(),
+                    },
+                )
+                .await
+                {
+                    break Some(error);
+                }
+            }
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
                 match event {
@@ -1875,20 +2017,35 @@ async fn run_interactive_applications(
                         }
                         let hosted_slot = Arc::new(Mutex::new(None));
                         let pane_slot = Arc::new(Mutex::new(None));
-                        owners.insert(actor, InteractiveApplicationOwner {
+                        let mut owner = InteractiveApplicationOwner {
                             creator_workspace: None,
                             cancel: Some(cancel),
                             native_retirement: NativeRetirement::Preserve,
                             pane: pane_slot.clone(),
                             fork_gate: installation.fork_gate.clone(),
                             custody: installation.worktree_custody.clone(),
-                            scoped_retention: None, // No scope launch selection before native pin.
+                            scoped_retention: None,
                             hosted: hosted_slot.clone(),
                             launch: HostLaunchState::Pending,
                             terminal: None,
                             retirement: Arc::new(Mutex::new(None)),
-                        });
+                        };
+                        let Some(custody) = installation.worktree_custody.clone() else {
+                            break Some(format!("actor {actor:?} has no exact launch custody"));
+                        };
+                        let scope_slot = match owner.reserve_scope(custody, actor) {
+                            Ok(slot) => slot,
+                            Err(error) => break Some(format!(
+                                "actor {actor:?} process-scope reservation failed: {error}"
+                            )),
+                        };
+                        owners.insert(actor, owner);
                         drop(owners);
+                        let retention = InteractiveLaunchRetention {
+                            hosted: hosted_slot,
+                            pane: pane_slot,
+                            process: scope_slot,
+                        };
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
                             let result = AssertUnwindSafe(async {
@@ -1903,8 +2060,7 @@ async fn run_interactive_applications(
                                     context,
                                     cancelled,
                                     InteractiveInheritance { thread: fork_parent_thread, build_snapshot },
-                                    hosted_slot,
-                                    pane_slot,
+                                    retention,
                                 ).await
                             })
                             .catch_unwind()
@@ -1961,7 +2117,12 @@ async fn run_interactive_applications(
                             let deployment = deployments.swap_remove(index);
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
                         } else {
-                            spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners);
+                            spawn_undeployed_hosted_retirement(
+                                &mut retirements,
+                                actor,
+                                &application_owners,
+                                &tmux,
+                            );
                         }
                     }
                     LocalResidentDeployment::NotificationSend(command) => {
@@ -2336,7 +2497,7 @@ async fn run_interactive_applications(
         })
         .collect::<Vec<_>>();
     for actor in undeployed {
-        spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners);
+        spawn_undeployed_hosted_retirement(&mut retirements, actor, &application_owners, &tmux);
     }
     for deployment in deployments {
         spawn_owned_retirement(
@@ -2473,13 +2634,18 @@ struct InteractiveInheritance {
     build_snapshot: Option<OverlaySnapshot>,
 }
 
+struct InteractiveLaunchRetention {
+    hosted: hosted_retirement::HostedSlot,
+    pane: Arc<Mutex<Option<TmuxPaneId>>>,
+    process: Arc<Mutex<scoped_custody::ScopedProcessSlot>>,
+}
+
 async fn launch_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
     cancelled: oneshot::Receiver<NativeRetirement>,
     inherited: InteractiveInheritance,
-    hosted_slot: hosted_retirement::HostedSlot,
-    pane_slot: Arc<Mutex<Option<TmuxPaneId>>>,
+    retention: InteractiveLaunchRetention,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let worktree = prepare_actor_worktree(&installation, &context)?;
     launch_prepared_interactive_application(
@@ -2488,8 +2654,7 @@ async fn launch_interactive_application(
         worktree,
         cancelled,
         inherited,
-        hosted_slot,
-        pane_slot,
+        retention,
     )
     .await
 }
@@ -2614,13 +2779,17 @@ async fn launch_prepared_interactive_application(
     worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<NativeRetirement>,
     inherited: InteractiveInheritance,
-    hosted_slot: hosted_retirement::HostedSlot,
-    pane_slot: Arc<Mutex<Option<TmuxPaneId>>>,
+    retention: InteractiveLaunchRetention,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let InteractiveInheritance {
         thread: fork_parent_thread,
         build_snapshot,
     } = inherited;
+    let InteractiveLaunchRetention {
+        hosted: hosted_slot,
+        pane: pane_slot,
+        process: scope_slot,
+    } = retention;
     let InteractiveLaunchContext {
         base_prompt,
         root,
@@ -2635,6 +2804,13 @@ async fn launch_prepared_interactive_application(
     let fork_gate = installation.fork_gate.clone();
     let runtime_observation = installation.runtime_observation.clone();
     let actor_identity = actor.identity();
+    let _resource_start = match &config.command_resources {
+        Some(owner) => Some(tokio::select! {
+            result = owner.admit_actor() => result.map_err(|error| application_error(actor_identity, InteractiveOperation::LaunchProcess, error.to_string()))?,
+            _ = &mut cancelled => return Ok(None),
+        }),
+        None => None,
+    };
     let workspace = worktree.as_ref().map_or_else(
         || config.workspace.clone(),
         |handle| handle.cwd().to_path_buf(),
@@ -2649,9 +2825,6 @@ async fn launch_prepared_interactive_application(
     let agent_workspace = PathBuf::from(ACTOR_PROJECT_ROOT);
     if cancelled.try_recv().is_ok() {
         return Ok(None);
-    }
-    if let Some(custody) = &installation.worktree_custody {
-        custody.process_may_exist();
     }
     let prepared_workspace = installation
         .worktree_custody
@@ -2851,7 +3024,7 @@ async fn launch_prepared_interactive_application(
         base_instructions_file: base_prompt.file().to_path_buf(),
         initial_prompt: installation.initial_user_message.clone(),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
-        host_tools_socket: endpoint,
+        host_tools_socket: endpoint.clone(),
     };
     let command = backend.render(&spec).map_err(|error| {
         application_error(actor_identity, InteractiveOperation::BuildCommand, error)
@@ -2881,12 +3054,18 @@ async fn launch_prepared_interactive_application(
     // Accepted hosted work may outlive listener cancellation. Retention starts
     // before either hosted submission or native process submission can occur.
     socket_directory.work_may_exist();
-    let service = hosted_retirement::start(
+    let service = hosted_retirement::start_with_resources(
         &hosted_slot,
         actor.clone(),
         binding_path.clone(),
         expected_resume.clone(),
         listener,
+        config.command_resources.clone().map(|r| {
+            (
+                r,
+                format!("{}-{}", actor_identity.id.0, actor_identity.incarnation.0),
+            )
+        }),
     )
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
@@ -2920,6 +3099,96 @@ async fn launch_prepared_interactive_application(
             .to_string_lossy()
             .into_owned(),
     );
+    if let Some(owner) = &config.command_resources {
+        let actor_key = format!("{}-{}", actor_identity.id.0, actor_identity.incarnation.0);
+        let directory = owner.actor_directory(&actor_key).map_err(|error| {
+            application_error(
+                actor_identity,
+                InteractiveOperation::LaunchProcess,
+                error.to_string(),
+            )
+        })?;
+        launch_environment.set.insert(
+            "CODEX_COMMAND_RESOURCE_SOCKET".into(),
+            endpoint.to_string_lossy().into_owned(),
+        );
+        launch_environment.set.insert(
+            "CODEX_COMMAND_WRITER_CGROUP".into(),
+            directory.to_string_lossy().into_owned(),
+        );
+    }
+    let supervisor_directory = socket_directory.path().join("process-supervisor");
+    std::fs::create_dir(&supervisor_directory).map_err(|error| {
+        application_error(
+            actor_identity,
+            InteractiveOperation::PrepareRuntime,
+            format!("cannot reserve private process supervisor directory: {error}"),
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &supervisor_directory,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .map_err(|error| {
+            application_error(
+                actor_identity,
+                InteractiveOperation::PrepareRuntime,
+                format!("cannot protect process supervisor directory: {error}"),
+            )
+        })?;
+    }
+    let supervisor_directory = std::fs::canonicalize(&supervisor_directory).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
+    let launch_id = format!(
+        "actor-{}-{}-{}",
+        actor_identity.id.0,
+        actor_identity.incarnation.0,
+        uuid::Uuid::new_v4().simple()
+    );
+    let pairing_secret = fresh_process_supervisor_secret();
+    let recovery_secret = fresh_process_supervisor_secret();
+    let bubblewrap = resolve_scope_bubblewrap(&launch_environment.set).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
+    let boundary = ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()])
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
+    let manifest = ProcessSupervisorManifest::new(
+        launch_id.clone(),
+        pairing_secret.clone(),
+        recovery_secret.clone(),
+        supervisor_directory,
+        bubblewrap,
+        boundary,
+        command,
+        ServiceEnvironment {
+            set: launch_environment.set.clone(),
+            unset: launch_environment.unset.clone(),
+        },
+    )
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
+    let supervisor_socket = manifest.socket_path();
+    let manifest_path = manifest.write_new().map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
+    scoped_custody::stage_supervisor(
+        &scope_slot,
+        scoped_custody::SupervisorRecoveryKey::new(
+            supervisor_socket.clone(),
+            launch_id.clone(),
+            recovery_secret,
+        ),
+    )
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
@@ -2934,8 +3203,12 @@ async fn launch_prepared_interactive_application(
                 actor_identity.incarnation.0
             ),
             cwd: workspace.clone(),
-            program: command.program,
-            args: command.args,
+            program: config.shoal_executable.to_string_lossy().into_owned(),
+            args: vec![
+                "process-supervisor".into(),
+                "--manifest".into(),
+                manifest_path.to_string_lossy().into_owned(),
+            ],
             environment: launch_environment.set,
             unset_environment: launch_environment.unset,
         }),
@@ -2974,6 +3247,116 @@ async fn launch_prepared_interactive_application(
     };
 
     *pane_slot.lock() = Some(pane.clone());
+    let activation_slot = scope_slot.clone();
+    let activation_socket = supervisor_socket.clone();
+    let activation_launch = launch_id.clone();
+    let activation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let activation_cancelled_worker = activation_cancelled.clone();
+    // Cancellation and release share one linearization point. If cancellation
+    // acquires it first, the worker cannot submit release; if release acquires
+    // it first, later cancellation is retirement of an already committed
+    // launch rather than a pre-release loss.
+    let release_gate = Arc::new(std::sync::Mutex::new(()));
+    let release_gate_worker = release_gate.clone();
+    let mut activation_task = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT;
+        while !activation_socket.exists() {
+            if std::time::Instant::now() >= deadline {
+                return Err(scoped_custody::ScopedProcessError::WrongPhase);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or(scoped_custody::ScopedProcessError::WrongPhase)?;
+        let (client, observation) = ProcessSupervisorClient::pair(
+            activation_socket,
+            activation_launch,
+            pairing_secret,
+            remaining,
+        )?;
+        scoped_custody::install_supervisor(&activation_slot, client, observation)?;
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if scoped_custody::prepare_supervisor_slot(&activation_slot, deadline)?
+            != scoped_custody::ScopedProcessObservation::Blocked
+        {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if scoped_custody::pin_supervisor_slot(&activation_slot, deadline)?
+            != scoped_custody::ScopedProcessObservation::Pinned
+        {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        let _release = release_gate_worker
+            .lock()
+            .map_err(|_| scoped_custody::ScopedProcessError::WrongPhase)?;
+        if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(scoped_custody::ScopedProcessError::WrongPhase);
+        }
+        match scoped_custody::release_supervisor_slot(&activation_slot, deadline)? {
+            scoped_custody::ScopedProcessObservation::Released => Ok(()),
+            // A committed but unconfirmed release is never retried. Retain the
+            // row for explicit recovery rather than publishing readiness.
+            scoped_custody::ScopedProcessObservation::ReleaseUnconfirmed => {
+                Err(scoped_custody::ScopedProcessError::WrongPhase)
+            }
+            _ => Err(scoped_custody::ScopedProcessError::WrongPhase),
+        }
+    });
+    let (activation, activation_retirement) = tokio::select! {
+        result = &mut activation_task => (result, None),
+        retirement = &mut cancelled => {
+            let _release = release_gate.lock().map_err(|_| {
+                application_error(
+                    actor_identity,
+                    InteractiveOperation::LaunchProcess,
+                    "process supervisor release gate poisoned",
+                )
+            })?;
+            activation_cancelled.store(true, std::sync::atomic::Ordering::Release);
+            let requested = retirement.unwrap_or(NativeRetirement::Preserve);
+            drop(_release);
+            let activation = activation_task.await;
+            (activation, Some(requested))
+        }
+    };
+    if let Some(native_retirement) = activation_retirement {
+        let process = retire_scoped_process(Some(scope_slot.clone()), native_retirement).await;
+        if matches!(process, Some(CleanupComponentOutcome::Completed)) {
+            let _ = retire_pane_artifact(&tmux, &pane, native_retirement).await;
+        }
+        let _ = hosted_retirement::observe(
+            &service,
+            hosted_retirement::CompletionBoundary::AbortForShutdown,
+            APPLICATION_TASK_GRACE_TIMEOUT,
+        )
+        .await;
+        return Err(socket_launch_failure(
+            actor_identity,
+            InteractiveOperation::LaunchProcess,
+            "launch cancelled during exact process activation",
+            socket_directory,
+        ));
+    }
+    activation
+        .map_err(|error| {
+            application_error(
+                actor_identity,
+                InteractiveOperation::LaunchProcess,
+                format!("process supervisor activation task failed: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::LaunchProcess, error)
+        })?;
     if let Err(error) = tmux.retain_pane_on_exit(&pane).await {
         tracing::warn!(actor = ?actor_identity, %error, "cannot retain actor pane for exit diagnosis; application remains active");
     }
@@ -2984,12 +3367,14 @@ async fn launch_prepared_interactive_application(
         }
     }
     if let Ok(native_retirement) = cancelled.try_recv() {
-        abandon_interactive_application(
-            &tmux,
-            &pane,
-            service,
-            socket_directory.path(),
-            native_retirement,
+        let process = retire_scoped_process(Some(scope_slot.clone()), native_retirement).await;
+        if matches!(process, Some(CleanupComponentOutcome::Completed)) {
+            let _ = retire_pane_artifact(&tmux, &pane, native_retirement).await;
+        }
+        let _ = hosted_retirement::observe(
+            &service,
+            hosted_retirement::CompletionBoundary::AbortForShutdown,
+            APPLICATION_TASK_GRACE_TIMEOUT,
         )
         .await;
         return Err(socket_launch_failure(
@@ -3174,6 +3559,42 @@ fn actor_launch_environment(
         set: inherited,
         unset,
     }
+}
+
+fn fresh_process_supervisor_secret() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Resolve the same bubblewrap selected by the already-frozen pane PATH. The
+/// absolute result is written into the immutable launch manifest so the helper
+/// never repeats executable selection after the row has been reserved.
+fn resolve_scope_bubblewrap(
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf, std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "PATH is unset"))?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(BUBBLEWRAP_PROGRAM);
+        let Ok(metadata) = candidate.metadata() else {
+            continue;
+        };
+        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+            return std::fs::canonicalize(candidate);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("{BUBBLEWRAP_PROGRAM} is not executable on the frozen pane PATH"),
+    ))
 }
 
 fn orient_launch_instructions(
@@ -3514,12 +3935,14 @@ async fn retire_interactive_application_guarded(
     deployment: InteractiveDeployment,
     tmux: &TmuxSession,
     native_retirement: NativeRetirement,
+    scoped_process: Option<CleanupComponentOutcome>,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
     match AssertUnwindSafe(retire_interactive_application(
         deployment,
         tmux,
         native_retirement,
+        scoped_process,
     ))
     .catch_unwind()
     .await
@@ -3541,6 +3964,7 @@ async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
     native_retirement: NativeRetirement,
+    scoped_process: Option<CleanupComponentOutcome>,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
     let mut components = Vec::with_capacity(6);
@@ -3555,10 +3979,30 @@ async fn retire_interactive_application(
             Some(delivery)
         }
     };
-    components.push(CleanupComponentReceipt {
-        component: CleanupComponent::Process,
-        outcome: retire_native_pane(tmux, &deployment.pane, native_retirement).await,
-    });
+    if let Some(process) = scoped_process {
+        let pane = if native_retirement == NativeRetirement::Preserve
+            || matches!(process, CleanupComponentOutcome::Completed)
+        {
+            retire_pane_artifact(tmux, &deployment.pane, native_retirement).await
+        } else {
+            CleanupComponentOutcome::Failed {
+                detail: "pane retained because exact process termination is unconfirmed".into(),
+            }
+        };
+        components.push(CleanupComponentReceipt {
+            component: CleanupComponent::Process,
+            outcome: process,
+        });
+        components.push(CleanupComponentReceipt {
+            component: CleanupComponent::Pane,
+            outcome: pane,
+        });
+    } else {
+        components.push(CleanupComponentReceipt {
+            component: CleanupComponent::Process,
+            outcome: retire_native_pane(tmux, &deployment.pane, native_retirement).await,
+        });
+    }
     let (service_outcome, delivery_outcome) = tokio::join!(
         stop_retired_tool_service(deployment.actor, &mut deployment.service),
         async {
@@ -3653,23 +4097,6 @@ async fn stop_retired_delivery(
     }
 }
 
-async fn abandon_interactive_application(
-    tmux: &TmuxSession,
-    pane: &TmuxPaneId,
-    service: hosted_retirement::HostedOwner,
-    socket_root: &Path,
-    native_retirement: NativeRetirement,
-) {
-    let outcome = retire_native_pane(tmux, pane, native_retirement).await;
-    tracing::warn!(path = %socket_root.display(), ?outcome, "abandoned socket directory retained: exact process and accepted hosted work cleanup unconfirmed");
-    let _ = hosted_retirement::observe(
-        &service,
-        hosted_retirement::CompletionBoundary::AbortForShutdown,
-        APPLICATION_TASK_GRACE_TIMEOUT,
-    )
-    .await;
-}
-
 async fn retire_native_pane(
     tmux: &TmuxSession,
     pane: &TmuxPaneId,
@@ -3687,6 +4114,24 @@ async fn retire_native_pane(
         },
     };
     CleanupComponentOutcome::Failed { detail }
+}
+
+/// Once an exact scope owner accounted for the process, tmux is only a UI
+/// artifact. Its disappearance cannot strengthen the process observation.
+async fn retire_pane_artifact(
+    tmux: &TmuxSession,
+    pane: &TmuxPaneId,
+    disposition: NativeRetirement,
+) -> CleanupComponentOutcome {
+    match disposition {
+        NativeRetirement::Preserve => CleanupComponentOutcome::Completed,
+        NativeRetirement::Terminate => match tmux.kill_pane(pane).await {
+            Ok(()) => CleanupComponentOutcome::Completed,
+            Err(error) => CleanupComponentOutcome::Failed {
+                detail: error.to_string(),
+            },
+        },
+    }
 }
 
 async fn discover_interactive_binding(

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::{Errno, FdFlags};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{ProcessInvocation, ProcessMountBoundary};
 
@@ -32,6 +32,8 @@ pub enum ServiceScopeError {
     IdentityUnconfirmed(String),
     #[error("service scope operation is invalid in its current phase")]
     WrongPhase,
+    #[error("service payload release is unconfirmed: {0}")]
+    ReleaseUnconfirmed(String),
     #[error("service scope cleanup is unconfirmed: {0}")]
     CleanupUnconfirmed(String),
     #[error("service scope io: {0}")]
@@ -45,13 +47,16 @@ impl From<Errno> for ServiceScopeError {
 }
 
 /// Host-resolved changes; explicit unsets take precedence over supplied sets.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ServiceEnvironment {
     pub set: BTreeMap<String, String>,
     pub unset: BTreeSet<String>,
 }
 
-pub struct PreparedServiceScope {
+/// One-shot reservation for a process launch. It deliberately is not Clone:
+/// spawning consumes the reservation, so no second caller can launch the same
+/// command under a copied claim.
+pub struct LaunchReservation {
     boundary: ProcessMountBoundary,
     bubblewrap: PathBuf,
     command: ProcessInvocation,
@@ -59,7 +64,7 @@ pub struct PreparedServiceScope {
     omit_sync_hold: bool,
 }
 
-impl PreparedServiceScope {
+impl LaunchReservation {
     pub(super) fn new(
         boundary: ProcessMountBoundary,
         bubblewrap: PathBuf,
@@ -92,7 +97,17 @@ impl PreparedServiceScope {
         self,
         environment: ServiceEnvironment,
         output: File,
-    ) -> Result<ServiceScope, ServiceScopeError> {
+    ) -> Result<ScopeCapability, ServiceScopeError> {
+        self.spawn_with_stdio(environment, ServiceStdio::Captured(output))
+    }
+
+    /// Spawn using either an owned diagnostic file or the helper's inherited
+    /// terminal. The latter keeps the supervisor out of the TUI byte stream.
+    pub fn spawn_with_stdio(
+        self,
+        environment: ServiceEnvironment,
+        stdio: ServiceStdio,
+    ) -> Result<ScopeCapability, ServiceScopeError> {
         let proc = checked_proc()?;
         let (gate_read, gate_write) = private_pipe()?;
         let gate_hold = rustix::io::fcntl_dupfd_cloexec(&gate_write, 3)?;
@@ -129,29 +144,52 @@ impl PreparedServiceScope {
             self.command,
             &options,
         );
+        let terminal = match stdio {
+            ServiceStdio::InheritedTerminal => TerminalCustody::acquire()?,
+            ServiceStdio::Captured(_) => None,
+        };
         let mut command = Command::new(invocation.program);
-        command
-            .args(invocation.args)
-            .envs(environment.set)
-            .stdin(Stdio::null())
-            .stdout(output.try_clone()?)
-            .stderr(output);
+        command.args(invocation.args).envs(environment.set);
+        match stdio {
+            ServiceStdio::Captured(output) => {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(output.try_clone()?)
+                    .stderr(output);
+            }
+            ServiceStdio::InheritedTerminal => {
+                command
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit());
+                // The helper keeps its original process group while the exact
+                // payload gets the foreground group. Terminal-generated
+                // signals therefore reach the application, never its owner.
+                command.process_group(0);
+            }
+        }
         for name in environment.unset {
             command.env_remove(name);
         }
+        let terminal_handoff = terminal.is_some();
         // SAFETY: no allocation/locking after fork. FDs are owned by this stack
         // until spawn returns; only the three distinct intended child ends lose
         // CLOEXEC. Their numbers are above stdio and cannot be concurrently reused.
+        // process_group(0) runs before this closure; an interactive child then
+        // installs that new group as foreground before exec can start bwrap.
         unsafe {
             command.pre_exec(move || {
                 for &raw in &inherited {
                     rustix::io::fcntl_setfd(BorrowedFd::borrow_raw(raw), FdFlags::empty())?;
                 }
+                if terminal_handoff {
+                    child_take_terminal()?;
+                }
                 Ok(())
             });
         }
         let monitor = command.spawn().map_err(ServiceScopeError::NotSpawned)?;
-        Ok(ServiceScope {
+        Ok(ScopeCapability {
             monitor,
             proc,
             info: info_read,
@@ -162,7 +200,92 @@ impl PreparedServiceScope {
             init: None,
             monitor_status: None,
             cleanup: None,
+            terminal,
         })
+    }
+}
+
+/// The only supported stdio policies. Interactive supervision inherits the
+/// pane terminal directly; no broker reads or rewrites terminal traffic.
+pub enum ServiceStdio {
+    Captured(File),
+    InheritedTerminal,
+}
+
+/// Retained terminal state for the helper's inherited pane. The duplicated
+/// descriptor is never passed to the payload. Foreground restoration is part
+/// of exact cleanup, after namespace drain and direct monitor wait.
+struct TerminalCustody {
+    terminal: OwnedFd,
+    owner_group: rustix::process::Pid,
+    attributes: rustix::termios::Termios,
+    restored: bool,
+}
+
+impl TerminalCustody {
+    fn acquire() -> Result<Option<Self>, ServiceScopeError> {
+        // Unit/marker consumers may deliberately have no controlling terminal;
+        // the production tmux path always does. In that case stdio is still
+        // inherited, but there is no terminal authority to transfer.
+        let stdin = unsafe { BorrowedFd::borrow_raw(0) };
+        let attributes = match rustix::termios::tcgetattr(stdin) {
+            Ok(attributes) => attributes,
+            Err(Errno::NOTTY) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let owner_group = rustix::termios::tcgetpgrp(stdin)?;
+        let terminal = rustix::io::fcntl_dupfd_cloexec(stdin, 3)?;
+        Ok(Some(Self {
+            terminal,
+            owner_group,
+            attributes,
+            restored: false,
+        }))
+    }
+
+    fn restore(&mut self) -> Result<(), ServiceScopeError> {
+        if self.restored {
+            return Ok(());
+        }
+        with_sigttou_blocked(|| {
+            rustix::termios::tcsetpgrp(&self.terminal, self.owner_group)?;
+            rustix::termios::tcsetattr(
+                &self.terminal,
+                rustix::termios::OptionalActions::Now,
+                &self.attributes,
+            )
+        })?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+/// Called only from Command::pre_exec after process_group(0). All operations
+/// are async-signal-safe and use stack-owned sigset_t storage.
+unsafe fn child_take_terminal() -> std::io::Result<()> {
+    let mut blocked = rustix::runtime::KernelSigSet::empty();
+    blocked.insert(rustix::process::Signal::TTOU);
+    let previous =
+        rustix::runtime::kernel_sigprocmask(rustix::runtime::How::BLOCK, Some(&blocked))?;
+    let stdin = BorrowedFd::borrow_raw(0);
+    let handoff = rustix::termios::tcsetpgrp(stdin, rustix::process::getpgrp());
+    let restore =
+        rustix::runtime::kernel_sigprocmask(rustix::runtime::How::SETMASK, Some(&previous));
+    restore?;
+    handoff.map_err(Into::into)
+}
+
+fn with_sigttou_blocked<T>(operation: impl FnOnce() -> Result<T, Errno>) -> Result<T, Errno> {
+    let mut blocked = rustix::runtime::KernelSigSet::empty();
+    blocked.insert(rustix::process::Signal::TTOU);
+    // SAFETY: this changes only the calling thread's mask, includes no
+    // libc-reserved signal, and restores the exact previous mask.
+    unsafe {
+        let previous =
+            rustix::runtime::kernel_sigprocmask(rustix::runtime::How::BLOCK, Some(&blocked))?;
+        let result = operation();
+        rustix::runtime::kernel_sigprocmask(rustix::runtime::How::SETMASK, Some(&previous))?;
+        result
     }
 }
 
@@ -201,7 +324,7 @@ struct InitWitness {
 /// an uncertain owner attempts identity-safe termination but yields no receipt;
 /// before pinning it may leave a blocked init. Its self-held sync writer prevents
 /// host gate closure from accidentally launching the payload in that case.
-pub struct ServiceScope {
+pub struct ScopeCapability {
     monitor: Child,
     proc: OwnedFd,
     info: OwnedFd,
@@ -212,9 +335,10 @@ pub struct ServiceScope {
     init: Option<InitWitness>,
     monitor_status: Option<ExitStatus>,
     cleanup: Option<ServiceScopeCleanup>,
+    terminal: Option<TerminalCustody>,
 }
 
-impl ServiceScope {
+impl ScopeCapability {
     pub fn pin_init(&mut self, deadline: Instant) -> Result<(), ServiceScopeError> {
         if self.phase == Phase::Pinned {
             return Ok(());
@@ -297,24 +421,81 @@ impl ServiceScope {
         Ok(())
     }
 
-    pub fn release_command(&mut self) -> Result<(), ServiceScopeError> {
+    /// Commit the launch exactly once. The receipt proves that the release byte
+    /// entered the private blocking pipe; it does not claim that the payload
+    /// started, remained alive, or later stopped.
+    pub fn release_command(&mut self) -> Result<LaunchRelease, ServiceScopeError> {
         if self.phase != Phase::Pinned {
             return Err(ServiceScopeError::WrongPhase);
         }
         // Commit intent before the write; an error is not automatically retried.
         self.phase = Phase::ReleaseUnconfirmed;
-        let gate = self.gate.as_ref().ok_or(ServiceScopeError::WrongPhase)?;
+        let gate = self.gate.as_ref().ok_or_else(|| {
+            ServiceScopeError::ReleaseUnconfirmed("private release gate is unavailable".into())
+        })?;
         match rustix::io::write(gate, b"R") {
             Ok(1) => {
                 self.phase = Phase::Released;
                 self.gate.take();
-                Ok(())
+                let receipt = LaunchRelease { _private: () };
+                Ok(receipt)
             }
-            Ok(_) => Err(ServiceScopeError::Io(std::io::Error::other(
-                "short gate write",
-            ))),
-            Err(error) => Err(error.into()),
+            Ok(_) => Err(ServiceScopeError::ReleaseUnconfirmed(
+                "private release gate accepted a short write".into(),
+            )),
+            Err(error) => Err(ServiceScopeError::ReleaseUnconfirmed(error.to_string())),
         }
+    }
+
+    /// Report facts retained by this exact owner without changing lifecycle.
+    /// These observations never authorize release, retry, or resource cleanup.
+    pub fn observation(&self) -> Result<ScopeObservation, ServiceScopeError> {
+        Ok(match self.phase {
+            Phase::Blocked => ScopeObservation::Blocked,
+            Phase::Pinned => ScopeObservation::Pinned,
+            Phase::Released => ScopeObservation::Released,
+            Phase::ReleaseUnconfirmed => ScopeObservation::ReleaseUnconfirmed,
+            Phase::Stopping => ScopeObservation::Stopping,
+            Phase::Cleaned => ScopeObservation::ProcessStopped(self.cleanup.ok_or_else(|| {
+                ServiceScopeError::CleanupUnconfirmed(
+                    "cleaned scope lost its terminal receipt; owner retained".into(),
+                )
+            })?),
+        })
+    }
+
+    /// Nonblocking exact-exit refresh for an already released/stopping scope.
+    /// A terminal receipt is still issued only after namespace-init readiness
+    /// and direct monitor wait have both been observed.
+    pub fn refresh_terminal(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Option<ServiceScopeCleanup>, ServiceScopeError> {
+        if let Some(receipt) = self.cleanup {
+            return Ok(Some(receipt));
+        }
+        if !matches!(self.phase, Phase::Released | Phase::Stopping) {
+            return Ok(None);
+        }
+        let Some(init) = &self.init else {
+            return Ok(None);
+        };
+        let mut polls = [PollFd::new(&init.pidfd, PollFlags::IN)];
+        let ready = rustix::event::poll(
+            &mut polls,
+            Some(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
+        )?;
+        if ready == 0
+            || !polls[0]
+                .revents()
+                .intersects(PollFlags::IN | PollFlags::HUP)
+        {
+            return Ok(None);
+        }
+        self.terminate_and_wait(deadline).map(Some)
     }
 
     pub fn terminate_and_wait(
@@ -344,9 +525,14 @@ impl ServiceScope {
                 let receipt = ServiceScopeCleanup {
                     monitor_status: status,
                 };
+                self.gate.take();
+                if let Some(terminal) = &mut self.terminal {
+                    terminal.restore().map_err(|error| {
+                        ServiceScopeError::CleanupUnconfirmed(error.to_string())
+                    })?;
+                }
                 self.cleanup = Some(receipt);
                 self.phase = Phase::Cleaned;
-                self.gate.take();
                 return Ok(receipt);
             }
             self.monitor_status = self
@@ -368,7 +554,7 @@ impl ServiceScope {
     }
 }
 
-impl Drop for ServiceScope {
+impl Drop for ScopeCapability {
     fn drop(&mut self) {
         if self.cleanup.is_some() {
             return;
@@ -380,13 +566,41 @@ impl Drop for ServiceScope {
         // PID. This is emergency best effort, not a cleanup receipt.
         let _ = self.monitor.kill();
         let _ = self.monitor.try_wait();
+        if let Some(terminal) = &mut self.terminal {
+            let _ = terminal.restore();
+        }
     }
+}
+
+/// Evidence that the private launch gate accepted its unique release byte.
+/// This is status, not authority: only the retained ScopeCapability owns the
+/// process and can establish terminal cleanup.
+#[derive(Debug)]
+pub struct LaunchRelease {
+    _private: (),
+}
+
+/// Typed reporting view of the exact capability's process facts.
+#[derive(Debug, Clone, Copy)]
+pub enum ScopeObservation {
+    Blocked,
+    Pinned,
+    Released,
+    ReleaseUnconfirmed,
+    Stopping,
+    ProcessStopped(ServiceScopeCleanup),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceScopeCleanup {
     monitor_status: ExitStatus,
 }
+
+// Compatibility spellings for current host consumers. The concrete owners are
+// the explicitly named reservation and capability types above; aliases cannot
+// add cloning or a second launch path.
+pub type PreparedServiceScope = LaunchReservation;
+pub type ServiceScope = ScopeCapability;
 impl ServiceScopeCleanup {
     pub fn monitor_status(&self) -> ExitStatus {
         self.monitor_status

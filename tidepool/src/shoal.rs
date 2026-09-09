@@ -1,7 +1,7 @@
 //! Shoal process composition and one-command tmux bootstrap.
 //!
 //! One host process owns every resident Haskell actor. Interactive actors are
-//! ordinary interactive-agent TUIs launched directly in tmux panes. Each actor
+//! ordinary interactive-agent TUIs launched through exact supervisors in tmux panes. Each actor
 //! receives its resident tools through an actor-scoped Unix socket.
 
 use std::path::{Path, PathBuf};
@@ -26,7 +26,8 @@ use tracing_subscriber::Layer;
 use crate::actor_host::ACTOR_PROJECT_ROOT;
 
 const STATUS_VERSION: u32 = 4;
-const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
+// Root startup includes up to five minutes of resource admission before launch.
+const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 pub mod workspace;
 
 const SHOAL_EXCLUDES: &[&str] = &[
@@ -128,6 +129,8 @@ impl std::fmt::Display for ShoalEffort {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ShoalConfig {
+    #[serde(default)]
+    pub(crate) resources: tidepool_node::command_resources::CommandResourcePolicy,
     pub(crate) defaults: ShoalAgentDefaults,
     #[serde(default)]
     pub(crate) research: tidepool_actor::ResearchPolicy,
@@ -219,6 +222,12 @@ fn read_project_config(
     let mut config: ShoalConfig = toml::from_str(&text).map_err(|error| {
         runtime_error(format!(
             "invalid Shoal configuration {}: {error}",
+            path.display()
+        ))
+    })?;
+    config.resources.validate().map_err(|error| {
+        runtime_error(format!(
+            "invalid command resources in {}: {error}",
             path.display()
         ))
     })?;
@@ -486,11 +495,22 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
     args.extend(["--model".into(), agent.model.clone()]);
     args.extend(["--effort".into(), agent.effort.to_string()]);
+    args.splice(
+        0..0,
+        [
+            "--user".into(),
+            "--scope".into(),
+            "--quiet".into(),
+            "--property=Delegate=yes".into(),
+            format!("--unit=shoal-host-{run_id}"),
+            executable,
+        ],
+    );
     let launch = tmux
         .spawn_window(&TmuxLaunch {
             window_name: "Host".into(),
             cwd: workspace.clone(),
-            program: executable,
+            program: "systemd-run".into(),
             args,
             environment: host_environment(&compiler_socket),
             unset_environment: std::collections::BTreeSet::new(),
@@ -786,10 +806,14 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
 
     let haskell_root = crate::haskell_sources::ensure_shoal_haskell()?;
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
-    let research_policy = workspace_inputs.config()?.research;
+    let configuration = workspace_inputs.config()?;
+    let research_policy = configuration.research;
+    let command_resources =
+        tidepool_node::command_resources::CommandResources::delegated(configuration.resources)?;
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
+            command_resources: Some(command_resources),
             shoal_executable: std::env::current_exe()?,
             workspace: options.workspace.clone(),
             haskell_root,
@@ -1229,6 +1253,10 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
 
 fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     Box::new(std::io::Error::other(message.into()))
+}
+
+pub fn process_supervisor(manifest: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    tidepool_node::run_process_supervisor(&manifest).map_err(Into::into)
 }
 
 #[cfg(test)]

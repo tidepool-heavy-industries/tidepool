@@ -12,6 +12,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the private process-scope supervisor for one prepared launch.
+    #[command(hide = true)]
+    ProcessSupervisor {
+        #[arg(long)]
+        manifest: PathBuf,
+    },
     /// Enter a host-retained workspace view before replacing this process.
     #[command(hide = true)]
     EnterView {
@@ -126,6 +132,11 @@ impl From<Effort> for ShoalEffort {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = Cli::parse().command;
+    if let Command::ProcessSupervisor { manifest } = command {
+        // Like namespace entry, the scope supervisor must run before Tokio,
+        // compiler discovery, provider construction, or host initialization.
+        return tidepool::shoal::process_supervisor(manifest);
+    }
     if let Command::EnterView { view, cwd, command } = command {
         use std::os::unix::process::CommandExt;
         let entry: tidepool_node::NamespaceEntry = serde_json::from_str(&view)?;
@@ -142,6 +153,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::ProcessSupervisor { .. } => {
+            unreachable!("handled before runtime construction")
+        }
         Command::EnterView { .. } => unreachable!("handled before runtime construction"),
         Command::RunMap {
             run_dir,
@@ -258,6 +272,18 @@ mod tests {
 
     #[test]
     fn clap_exposes_the_user_commands_and_process_boundaries() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "shoal",
+                "process-supervisor",
+                "--manifest",
+                "/private/launch.json"
+            ])
+            .unwrap()
+            .command,
+            Command::ProcessSupervisor { manifest }
+                if manifest == std::path::Path::new("/private/launch.json")
+        ));
         assert!(matches!(
             Cli::try_parse_from(["shoal", "new", "/tmp/project"])
                 .unwrap()

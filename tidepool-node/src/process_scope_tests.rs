@@ -108,6 +108,18 @@ fn scope_gate_writer_close_does_not_release() {
     fixture.pin();
     fixture.absent();
     fixture.scope.gate.take();
+    assert!(matches!(
+        fixture.scope.release_command(),
+        Err(ServiceScopeError::ReleaseUnconfirmed(_))
+    ));
+    assert!(matches!(
+        fixture.scope.observation().unwrap(),
+        ScopeObservation::ReleaseUnconfirmed
+    ));
+    assert!(matches!(
+        fixture.scope.release_command(),
+        Err(ServiceScopeError::WrongPhase)
+    ));
     fixture.observe_still_blocked();
     fixture.scope.terminate_and_wait(deadline()).unwrap();
     fixture.absent();
@@ -174,11 +186,20 @@ fn scope_timeout_retains_owner_then_confirms_both_facts() {
     assert!(fixture.scope.init.is_some());
     assert!(fixture.scope.cleanup.is_none());
     assert!(matches!(
+        fixture.scope.observation().unwrap(),
+        ScopeObservation::Stopping
+    ));
+    assert!(matches!(
         fixture.scope.release_command(),
         Err(ServiceScopeError::WrongPhase)
     ));
-    fixture.scope.terminate_and_wait(deadline()).unwrap();
+    let cleanup = fixture.scope.terminate_and_wait(deadline()).unwrap();
     assert!(fixture.scope.monitor_status.is_some());
+    assert!(matches!(
+        fixture.scope.observation().unwrap(),
+        ScopeObservation::ProcessStopped(observed)
+            if observed.monitor_status() == cleanup.monitor_status()
+    ));
     fixture.absent();
 }
 
@@ -208,7 +229,15 @@ fn released_descendants(kill_monitor: bool) {
     let listener = UnixListener::bind(socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     fixture.pin();
-    fixture.scope.release_command().unwrap();
+    assert!(matches!(
+        fixture.scope.observation().unwrap(),
+        ScopeObservation::Pinned
+    ));
+    let _release = fixture.scope.release_command().unwrap();
+    assert!(matches!(
+        fixture.scope.observation().unwrap(),
+        ScopeObservation::Released
+    ));
     let limit = deadline();
     let stream = loop {
         match listener.accept() {
@@ -358,4 +387,77 @@ fn scope_omitted_sync_hold_mutation_releases_payload_on_writer_close() {
         std::thread::yield_now();
     }
     fixture.scope.terminate_and_wait(deadline()).unwrap();
+}
+
+#[test]
+fn scope_inherited_terminal_job_control_survives_interrupt_and_restores_terminal() {
+    const CHILD: &str = "TIDEPOOL_SCOPE_PTY_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        inherited_terminal_child();
+        return;
+    }
+
+    let executable = std::env::current_exe().unwrap();
+    let test = "process_boundary::service_scope::tests::scope_inherited_terminal_job_control_survives_interrupt_and_restores_terminal";
+    let command = format!(
+        "{}=1 '{}' --exact '{}' --nocapture",
+        CHILD,
+        executable.display().to_string().replace('\'', "'\\''"),
+        test
+    );
+    let status = Command::new("script")
+        .args(["-qefc", &command, "/dev/null"])
+        .status()
+        .expect("util-linux script supplies an actual PTY");
+    assert!(status.success(), "PTY child failed with {status}");
+}
+
+fn inherited_terminal_child() {
+    let stdin = unsafe { BorrowedFd::borrow_raw(0) };
+    let owner_group = rustix::termios::tcgetpgrp(stdin).expect("PTY foreground owner");
+    let directory = tempfile::tempdir().unwrap();
+    let boundary = ProcessMountBoundary::new(
+        directory.path(),
+        [directory.path().to_owned()],
+        [directory.path().to_owned()],
+    )
+    .unwrap();
+    let bwrap = std::env::var_os("SERVICE_SCOPE_BWRAP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from("/nix/store/dqzmpjz70l4lzg7lmc3x8wih74nh5bpc-bubblewrap-0.11.0/bin/bwrap")
+        });
+    let mut scope = boundary
+        .reserve_service_scope(
+            bwrap,
+            ProcessInvocation {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "trap 'exit 0' INT; echo ready > started; while :; do sleep 1; done".into(),
+                ],
+            },
+        )
+        .unwrap()
+        .spawn_with_stdio(
+            ServiceEnvironment::default(),
+            ServiceStdio::InheritedTerminal,
+        )
+        .unwrap();
+    scope.pin_init(deadline()).unwrap();
+    let child_group = rustix::process::Pid::from_raw(scope.monitor.id() as i32).unwrap();
+    assert_ne!(child_group, owner_group);
+    assert_eq!(rustix::termios::tcgetpgrp(stdin).unwrap(), child_group);
+    scope.release_command().unwrap();
+    let limit = deadline();
+    while !directory.path().join("started").exists() {
+        assert!(Instant::now() < limit, "PTY payload did not start");
+        std::thread::yield_now();
+    }
+
+    rustix::process::kill_process_group(child_group, rustix::process::Signal::INT).unwrap();
+    // Reaching exact cleanup proves the terminal interrupt did not target the
+    // helper/test process that owns the ScopeCapability.
+    scope.terminate_and_wait(deadline()).unwrap();
+    assert_eq!(rustix::termios::tcgetpgrp(stdin).unwrap(), owner_group);
 }
