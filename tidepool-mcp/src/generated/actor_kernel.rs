@@ -14,6 +14,7 @@ pub fn actor_kernel_decl() -> crate::EffectDecl {
             "ActorContinueWith :: Int -> next -> ActorKernel ()",
             "ActorInstallProgressSourceWith :: Int -> (Int -> Eff sourceEffs ()) -> ActorKernel ()",
             "ActorInstallSettlementSourceWith :: Int -> (Int -> Eff sourceEffs ()) -> ActorKernel ()",
+            "ActorInstallLifecycleSourceWith :: (Int, Int) -> (Int -> Eff sourceEffs ()) -> ActorKernel ()",
             "ActorSourceInputWith :: ActorKernel event",
         ],
         type_defs: &[],

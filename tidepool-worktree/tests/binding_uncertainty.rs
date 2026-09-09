@@ -32,11 +32,19 @@ fn binding_fault_child() {
         return;
     }
     let prior = table.bind(&other, &agent, 1).unwrap();
+    let mut transferred = None;
     if operation == "bind" {
         fs::write(&arm, "armed").unwrap();
         table
             .bind(&id, &agent, 2)
             .expect_err("uncertain bind returns no lease");
+    } else if operation == "transfer" {
+        let mut lease = table.bind(&id, &agent, 2).unwrap();
+        fs::write(&arm, "armed").unwrap();
+        table
+            .transfer(&mut lease, &AgentRef::from_raw("agent-two"), 3)
+            .expect_err("uncertain transfer retains custody without granting authority");
+        transferred = Some(lease);
     } else {
         let lease = table.bind(&id, &agent, 2).unwrap();
         fs::write(&arm, "armed").unwrap();
@@ -62,6 +70,16 @@ fn binding_fault_child() {
     );
     assert!(table.current(&other).is_none(), "whole table is fenced");
     assert!(table.active_for_agent(&agent).is_none());
+    if let Some(lease) = &mut transferred {
+        assert_eq!(rows[1]["state"], "Active");
+        assert_eq!(rows[1]["agent"], "agent-two");
+        assert!(table
+            .active_for_agent(&AgentRef::from_raw("agent-two"))
+            .is_none());
+        table
+            .transfer(lease, &agent, 4)
+            .expect_err("uncertain transfer cannot be retried");
+    }
     assert!(matches!(
         table.bind(&id, &agent, 3),
         Err(WorktreeError::StorageFailure { .. })
@@ -77,7 +95,7 @@ fn binding_fault_child() {
     );
     drop(table);
     let mut table = BindingTable::open(&root).unwrap();
-    if operation == "bind" {
+    if operation == "bind" || operation == "transfer" {
         assert!(table.current(&id).is_some());
         assert!(matches!(
             table.bind(&id, &agent, 4),
@@ -89,6 +107,15 @@ fn binding_fault_child() {
         lease.complete(&mut table).unwrap();
         let lease = table.bind(&id, &agent, 5).unwrap();
         lease.release(&mut table).unwrap();
+    }
+    if let Some(lease) = transferred {
+        assert_eq!(
+            table.current(&id).unwrap().agent(),
+            &AgentRef::from_raw("agent-two")
+        );
+        lease
+            .release(&mut table)
+            .expect_err("reopen cannot revive a transfer receipt");
     }
     // Another previously active row is retained; no lease is manufactured on reopen.
     assert!(matches!(
@@ -113,7 +140,7 @@ fn binding_public_paths_fence_uncertain_custody_until_reopen() {
         .status()
         .unwrap()
         .success());
-    for operation in ["bind", "settle", "reopen"] {
+    for operation in ["bind", "settle", "transfer", "reopen"] {
         for kind in ["open", "sync"] {
             let root = temp.path().join(format!("{operation}-{kind}/new/deep"));
             let log = temp.path().join(format!("{operation}-{kind}.hits"));

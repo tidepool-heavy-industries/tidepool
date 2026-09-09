@@ -50,11 +50,38 @@ Failed replacement preserves old custody. To change sources, drain/stop and crea
 a fresh actor. Whole-Shoal crash recovery remains Git checkpoints, not replay of
 arbitrary Haskell heaps.
 
+## Replacement transaction
+
+Stage the new entry against borrowed committed state in an isolated realm. Accept
+only its kernel bootstrap, checkpoint and receiver installation; no initializer,
+source attachment or user effects run during staging. A staging failure releases
+the candidate and leaves the old actor's state, input queue and subscriptions intact.
+
+Start the staged successor under the original supervision/lifetime owner. Keep
+its mailbox execution closed until cutover. Transfer child supervision and resource
+custody through their existing owners; historical creator identity must not stand
+in for the current custodian. Starting an ordinary child and stopping its parent
+would destroy the very resources replacement must preserve.
+
+Fixed source connections share a destination owned by their connection guard.
+While holding that destination, fence the old mailbox and redirect subsequent
+publications to the staged successor. The old fence collects all previously
+admitted inputs. Install that backlog ahead of the successor's post-fence events,
+then enable its handler. Source connections never detach or recapture current
+values. This internal source destination is not a forwarding alias for old public
+actor handles.
+
+Commit transfers the source guard, queued inputs and resource custody. Preserve
+the failed input as evidence and skip its execution. Transfer an existing drain
+intent as well, so repair can finish the already-admitted queue. Retain the exact
+successor in the old actor's terminal observation for a lost caller reply; do not
+turn reply loss into permission to repeat replacement.
+
 ## Implementation and usage together
 
 - [x] Extend existing actor/mailbox execution with explicit state custody,
   successful settlement, paused handler failure and supervisor notification.
-- [ ] Attach fixed typed sources atomically at their owning registries. Preserve
+- [x] Attach fixed typed sources atomically at their owning registries. Preserve
   each published live value for active recipients before replacing latest state.
   Existing observations can still return latest state. No second scheduler or
   unbounded history for sources without subscribers.

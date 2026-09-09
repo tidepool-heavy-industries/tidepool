@@ -426,6 +426,47 @@ pub fn actor() -> Effect {
                 handling: HandlingClass::Actor,
                 extract: None,
             },
+            Verb {
+                ctor: "ActorReplaceWith",
+                method: "actor_replace_with",
+                args: vec![
+                    Arg {
+                        name: "actor",
+                        ty: address_type(),
+                        rust: RustBinding::Path("(i64, i64)"),
+                    },
+                    Arg {
+                        name: "entry",
+                        ty: HsType::func(
+                            HsType::Var("state"),
+                            HsType::app(
+                                HsType::app(HsType::Named("Eff"), HsType::Var("childEffs")),
+                                HsType::Unit,
+                            ),
+                        ),
+                        rust: RustBinding::CoreValue,
+                    },
+                    Arg {
+                        name: "label",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
+                        name: "profile",
+                        ty: HsType::Named("ActorEffectProfile"),
+                        rust: RustBinding::Path("crate::ActorEffectProfileWire"),
+                    },
+                    Arg {
+                        name: "launchWorktrees",
+                        ty: HsType::List(Box::new(HsType::Text)),
+                        rust: RustBinding::Derived,
+                    },
+                ],
+                ret: address_type(),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
         ],
         // The public wrapper needs the managed cell carried by `ActorRef`, so
         // it is authored in Tidepool.Actor rather than emitted as a second,
@@ -443,7 +484,7 @@ mod tests {
     #[test]
     fn actor_entries_remain_the_field_one_live_payload() {
         let effect = actor();
-        for constructor in ["ActorStartWith", "ActorForkWith"] {
+        for constructor in ["ActorStartWith", "ActorForkWith", "ActorReplaceWith"] {
             let verb = effect
                 .verbs
                 .iter()

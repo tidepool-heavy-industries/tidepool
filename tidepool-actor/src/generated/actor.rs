@@ -37,4 +37,11 @@ pub enum ActorReq {
     ActorTryCallWith((i64, i64), tidepool_eval::value::Value),
     ActorCastWith((i64, i64), tidepool_eval::value::Value),
     ActorDrainWith((i64, i64)),
+    ActorReplaceWith(
+        (i64, i64),
+        tidepool_eval::value::Value,
+        String,
+        crate::ActorEffectProfileWire,
+        Vec<String>,
+    ),
 }

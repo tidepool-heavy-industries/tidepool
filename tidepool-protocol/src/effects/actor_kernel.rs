@@ -5,7 +5,7 @@
 //! phases of hidden mailbox settlement cross here. Authored actor rows and
 //! model workbenches never contain `ActorKernel`.
 
-use crate::schema::{Effect, HandlingClass, Polymorphism, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 use crate::HsType;
 
 /// The private control effect used by the trusted actor wrappers.
@@ -109,10 +109,29 @@ pub fn actor_kernel() -> Effect {
             source_install(
                 "ActorInstallProgressSourceWith",
                 "actor_install_progress_source_with",
+                Arg {
+                    name: "request",
+                    ty: HsType::Int,
+                    rust: RustBinding::Derived,
+                },
             ),
             source_install(
                 "ActorInstallSettlementSourceWith",
                 "actor_install_settlement_source_with",
+                Arg {
+                    name: "request",
+                    ty: HsType::Int,
+                    rust: RustBinding::Derived,
+                },
+            ),
+            source_install(
+                "ActorInstallLifecycleSourceWith",
+                "actor_install_lifecycle_source_with",
+                Arg {
+                    name: "target",
+                    ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                    rust: RustBinding::Path("(i64, i64)"),
+                },
             ),
             Verb {
                 ctor: "ActorSourceInputWith",
@@ -130,17 +149,12 @@ pub fn actor_kernel() -> Effect {
     }
 }
 
-fn source_install(ctor: &'static str, method: &'static str) -> Verb {
-    use crate::schema::{Arg, RustBinding};
+fn source_install(ctor: &'static str, method: &'static str, target: Arg) -> Verb {
     Verb {
         ctor,
         method,
         args: vec![
-            Arg {
-                name: "request",
-                ty: HsType::Int,
-                rust: RustBinding::Derived,
-            },
+            target,
             Arg {
                 name: "entry",
                 ty: HsType::func(

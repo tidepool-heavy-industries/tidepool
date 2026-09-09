@@ -12,9 +12,14 @@ pub(crate) enum RequestSourceKind {
     Settlement,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceTarget {
+    Request(RequestId, RequestSourceKind),
+    Lifecycle(ActorRef),
+}
+
 pub(crate) struct SourceBinding {
-    pub request: RequestId,
-    pub kind: RequestSourceKind,
+    pub target: SourceTarget,
     pub entry: Arc<tidepool_runtime::session::RootCustody>,
 }
 
@@ -23,6 +28,7 @@ pub(crate) enum SourceEvent {
     Progress(ProgressSnapshot),
     ProgressClosed,
     Settled(Result<(), ResponseFailure>),
+    Lifecycle(crate::ActorLifecycle),
 }
 
 /// A source publication owns its captured value until the receiving mailbox
@@ -30,7 +36,7 @@ pub(crate) enum SourceEvent {
 #[derive(Debug, Clone)]
 pub struct SourceDelivery {
     pub(crate) slot: usize,
-    pub(crate) request: RequestId,
+    pub(crate) target: SourceTarget,
     pub(crate) event: SourceEvent,
 }
 
@@ -68,7 +74,7 @@ impl RequestSourceConnection {
                 .recipient
                 .send(SourceDelivery {
                     slot: self.slot,
-                    request: self.request,
+                    target: SourceTarget::Request(self.request, self.kind),
                     event,
                 })
                 .is_err()
@@ -78,12 +84,44 @@ impl RequestSourceConnection {
     }
 }
 
-pub(crate) struct RequestSources {
+pub(crate) struct ActorSourceConnections {
     registry: Arc<RequestRegistry>,
+    lifecycle: Vec<crate::ActorLifecycleConnection>,
     recipient: SourceDestination,
 }
 
-impl Drop for RequestSources {
+impl ActorSourceConnections {
+    pub(crate) fn attach_lifecycle(&mut self, slot: usize, actor: &LocalActorRef) {
+        let recipient = self.recipient.clone();
+        let target = SourceTarget::Lifecycle(actor.identity());
+        self.lifecycle
+            .push(actor.terminal().connect_lifecycle(move |event| {
+                recipient
+                    .send(SourceDelivery {
+                        slot,
+                        target,
+                        event: SourceEvent::Lifecycle(event),
+                    })
+                    .is_ok()
+            }));
+    }
+
+    /// Fence the old mailbox before later publications can reach the successor.
+    /// The fence must not acquire the request registry: publishers lock that
+    /// registry before this destination. Failure leaves the destination intact.
+    pub(crate) fn handoff<E>(
+        &mut self,
+        successor: LocalActorRef,
+        fence: impl FnOnce(&LocalActorRef) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut recipient = self.recipient.0.lock();
+        fence(&recipient)?;
+        *recipient = successor;
+        Ok(())
+    }
+}
+
+impl Drop for ActorSourceConnections {
     fn drop(&mut self) {
         let mut state = self.registry.state.lock();
         for record in state.requests.values_mut() {
@@ -102,7 +140,7 @@ impl RequestRegistry {
         owner: ActorRef,
         recipient: LocalActorRef,
         sources: &[(usize, RequestId, RequestSourceKind)],
-    ) -> Result<RequestSources, ReplyError> {
+    ) -> Result<ActorSourceConnections, ReplyError> {
         let mut state = self.state.lock();
         if state.cleaning.contains(&owner) || state.cleaning.contains(&recipient.identity()) {
             return Err(ReplyError::Stale);
@@ -139,8 +177,9 @@ impl RequestRegistry {
             record.sources.push(connection);
             record.publish_source_closure();
         }
-        Ok(RequestSources {
+        Ok(ActorSourceConnections {
             registry: Arc::clone(self),
+            lifecycle: Vec::new(),
             recipient,
         })
     }
@@ -233,6 +272,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_handoff_preserves_connection_without_recapturing_current_state() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (old_send, mut old_events) = mpsc::unbounded_channel();
+        let (old_address, old_task) = Collector::spawn(None, Collector, old_send).await.unwrap();
+        let old = LocalActorRef::new(old_address.clone(), crate::RetainedActorExit::new());
+        let (new_send, mut new_events) = mpsc::unbounded_channel();
+        let (new_address, new_task) = Collector::spawn(None, Collector, new_send).await.unwrap();
+        let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
+        let mut sources = registry
+            .attach_sources(actor(100), old.clone(), &[])
+            .unwrap();
+        sources.attach_lifecycle(0, &old);
+        assert!(matches!(
+            receive(&mut old_events).await.event,
+            SourceEvent::Lifecycle(crate::ActorLifecycle::Live)
+        ));
+        sources.handoff(successor, |_| Ok::<_, ()>(())).unwrap();
+        old.terminal().publish_paused("failed".into());
+        let paused = receive(&mut new_events).await;
+        assert_eq!(paused.target, SourceTarget::Lifecycle(old.identity()));
+        assert!(
+            matches!(paused.event, SourceEvent::Lifecycle(crate::ActorLifecycle::Paused(detail)) if detail == "failed")
+        );
+        drop(sources);
+        old.terminal()
+            .publish(crate::ActorTerminal {
+                kind: crate::ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .unwrap();
+        old_address.stop(None);
+        new_address.stop(None);
+        old_task.await.unwrap();
+        new_task.await.unwrap();
+        assert!(old_events.try_recv().is_err());
+        assert!(new_events.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn sources_close_once_in_order_and_detach_without_discarding_sent_events() {
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
@@ -266,6 +344,118 @@ mod tests {
         task.await.unwrap();
         assert!(events.try_recv().is_err());
         assert!(registry.state.lock().requests[&request].sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replacement_moves_request_and_watch_authority_without_changing_target() {
+        let registry = RequestRegistry::default();
+        let (send, _) = mpsc::unbounded_channel();
+        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let successor = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let predecessor = actor(100);
+        let target = actor(101);
+        let request = registry.reserve(predecessor, target);
+        registry.mark_queued(predecessor, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(predecessor, vec![request]).unwrap();
+        registry.transfer_owner(predecessor, &successor);
+        assert_eq!(
+            registry.observe_response(predecessor, request),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(
+            registry.observe_watch(predecessor, watch),
+            Err(ReplyError::Unauthorized)
+        );
+        assert_eq!(registry.state.lock().requests[&request].target, target);
+        registry.begin_reply(target, request).unwrap();
+        let notices = registry.finish_reply(request);
+        assert!(notices
+            .iter()
+            .all(|notice| notice.owner == successor.identity()));
+        assert_eq!(
+            registry.observe_response(successor.identity(), request),
+            Ok(super::super::ResponseObservation::Ready)
+        );
+        assert!(matches!(
+            registry.observe_watch(successor.identity(), watch),
+            Ok(super::super::WatchObservation::Ready(_))
+        ));
+        address.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_handoff_preserves_connections_and_never_recaptures_settlements() {
+        let registry = Arc::new(RequestRegistry::default());
+        let (old_send, mut old_events) = mpsc::unbounded_channel();
+        let (old_address, old_task) = Collector::spawn(None, Collector, old_send).await.unwrap();
+        let old = LocalActorRef::new(old_address.clone(), crate::RetainedActorExit::new());
+        let (new_send, mut new_events) = mpsc::unbounded_channel();
+        let (new_address, new_task) = Collector::spawn(None, Collector, new_send).await.unwrap();
+        let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
+        let requests = (0..3)
+            .map(|_| {
+                let request = registry.reserve(actor(100), actor(101));
+                registry
+                    .mark_queued(actor(100), actor(101), request)
+                    .unwrap();
+                registry.present(actor(101), request).unwrap();
+                request
+            })
+            .collect::<Vec<_>>();
+        let bindings = requests
+            .iter()
+            .enumerate()
+            .map(|(slot, request)| (slot, *request, RequestSourceKind::Settlement))
+            .collect::<Vec<_>>();
+        let mut sources = registry
+            .attach_sources(actor(100), old.clone(), &bindings)
+            .unwrap();
+        let settle = |request| {
+            registry.begin_reply(actor(101), request).unwrap();
+            registry.finish_reply(request);
+        };
+        settle(requests[0]);
+        assert_eq!(receive(&mut old_events).await.slot, 0);
+        assert_eq!(
+            sources.handoff(successor.clone(), |_| Err("fence rejected")),
+            Err("fence rejected")
+        );
+        settle(requests[1]);
+        assert_eq!(receive(&mut old_events).await.slot, 1);
+        let destination = sources.recipient.clone();
+        sources
+            .handoff(successor.clone(), |recipient| {
+                assert_eq!(recipient.identity(), old.identity());
+                assert!(destination.0.try_lock().is_none());
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        settle(requests[2]);
+        assert_eq!(receive(&mut new_events).await.slot, 2);
+        assert_eq!(old.identity().id.0, old_address.get_id().pid());
+        {
+            let state = registry.state.lock();
+            for request in &requests {
+                let connections = &state.requests[request].sources;
+                assert_eq!(connections.len(), 1);
+                assert_eq!(connections[0].recipient.identity(), successor.identity());
+            }
+        }
+        drop(sources);
+        assert!(registry
+            .state
+            .lock()
+            .requests
+            .values()
+            .all(|record| record.sources.is_empty()));
+        old_address.stop(None);
+        new_address.stop(None);
+        old_task.await.unwrap();
+        new_task.await.unwrap();
+        assert!(old_events.try_recv().is_err());
+        assert!(new_events.try_recv().is_err());
     }
 
     #[tokio::test]

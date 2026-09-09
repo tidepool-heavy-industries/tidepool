@@ -153,8 +153,8 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn with_supervisor_parent(mut self, parent: ActorRef) -> Self {
-        self.supervisor_parent = Some(parent);
+    pub fn with_supervisor_parent(mut self, parent: impl Into<Option<ActorRef>>) -> Self {
+        self.supervisor_parent = parent.into();
         self
     }
 

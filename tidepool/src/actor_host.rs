@@ -129,8 +129,9 @@ struct ActorForkWorkspaceAdmission {
 }
 
 struct ActorWorkspaceCustody {
+    runtime: String,
     bindings: Arc<Mutex<BindingTable>>,
-    binding: Option<ActiveBinding>,
+    binding: Mutex<Option<ActiveBinding>>,
     actor: ActorRef,
     state: Mutex<scoped_custody::CustodyState>,
     workspace: Option<Arc<PreparedWorkspace>>,
@@ -138,6 +139,52 @@ struct ActorWorkspaceCustody {
 }
 
 impl tidepool_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
+    fn transfer_to(
+        &self,
+        successor: ActorRef,
+    ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        let state = self.state.lock();
+        if !matches!(
+            state.launch,
+            scoped_custody::LaunchCustody::Unclaimed
+                | scoped_custody::LaunchCustody::ScopedNotSpawned
+        ) || state.terminal.is_some()
+        {
+            return Err(ForkWorkspaceAdmissionError {
+                detail: "workspace transfer requires a live actor with no possible native process"
+                    .into(),
+            });
+        }
+        let mut binding = self.binding.lock();
+        let lease = binding
+            .as_mut()
+            .ok_or_else(|| ForkWorkspaceAdmissionError {
+                detail: "workspace custody was already transferred".into(),
+            })?;
+        self.bindings
+            .lock()
+            .transfer(
+                lease,
+                &WorktreePrincipal::exact_actor(
+                    &self.runtime,
+                    successor.id.0,
+                    successor.incarnation.0,
+                ),
+                current_time_ms(),
+            )
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: error.to_string(),
+            })?;
+        Ok(Arc::new(Self {
+            runtime: self.runtime.clone(),
+            bindings: self.bindings.clone(),
+            binding: Mutex::new(binding.take()),
+            actor: successor,
+            state: Mutex::new(scoped_custody::CustodyState::default()),
+            workspace: self.workspace.clone(),
+            inheritance_notice: self.inheritance_notice.clone(),
+        }))
+    }
     fn actor_stopped(&self, terminal: &tidepool_actor::ActorTerminal) {
         // Observation is monotonic: duplicate notifications cannot replace the
         // first exact terminal or confuse "not completed" with "still active".
@@ -161,7 +208,7 @@ impl Drop for ActorWorkspaceCustody {
             tracing::error!(actor = ?self.actor, "retaining worktree custody: process or host cleanup is unconfirmed");
             return;
         }
-        if let Some(binding) = self.binding.take() {
+        if let Some(binding) = self.binding.get_mut().take() {
             let result = if state
                 .terminal
                 .as_ref()
@@ -217,8 +264,9 @@ impl ActorForkWorkspaceAdmission {
                 detail: error.to_string(),
             })?;
         Ok(Arc::new(ActorWorkspaceCustody {
+            runtime: self.runtime.clone(),
             bindings: self.bindings.clone(),
-            binding: Some(binding),
+            binding: Mutex::new(Some(binding)),
             actor,
             state: Mutex::new(scoped_custody::CustodyState::default()),
             workspace,
@@ -4069,6 +4117,24 @@ mod tests {
         for item in installed["items"].as_array().unwrap() {
             assert_eq!(item["status"], "committed", "{installed:?}");
         }
+        let rejected = dispatch_haskell_script_result(
+            root.as_ref(),
+            include_str!("actor_host/source_replacement_rejected.hs"),
+        )
+        .await
+        .expect_err("replacement cannot change the source graph");
+        assert!(
+            rejected
+                .to_string()
+                .contains("replacement removed a source"),
+            "{rejected:?}"
+        );
+        let replaced = dispatch_haskell_script(
+            root.as_ref(),
+            "collector2 <- replaceActor collector collectorDefinition",
+        )
+        .await;
+        assert_eq!(replaced["status"], "committed", "{replaced:?}");
         let published = dispatch_haskell_script(child.policy.as_ref(), "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)").await;
         assert_eq!(published["status"], "replied", "{published:?}");
         let settled = dispatch_haskell_script(root.as_ref(), "settled <- watch (case watchLabel \"source-settled\" of { Right label -> label; Left _ -> error \"fixture label\" }) (awaitResponse answer)").await;
@@ -4076,7 +4142,7 @@ mod tests {
         campaign.await_watch_ready().await;
         let collected = dispatch_haskell_script(
             root.as_ref(),
-            "drainActor collector\nresult <- awaitExit collector\ncase result of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False }",
+            "drainActor collector2\nresult <- awaitExit collector2\ncase result of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False }",
         )
         .await;
         assert_eq!(collected["status"], "committed", "{collected:?}");
@@ -5603,6 +5669,105 @@ mod tests {
         assert!(
             campaign.deployments.try_recv().is_err(),
             "duplicate failure notice"
+        );
+        let repaired = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/stateful_replacement.hs"),
+        )
+        .await;
+        assert_eq!(repaired["status"], "committed", "{repaired:?}");
+        for item in repaired["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{repaired:?}");
+        }
+        assert!(!repaired.to_string().contains("False"), "{repaired:?}");
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_sources_follow_replacement_and_capture_retained_exit() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        for (stage, source) in include_str!("actor_host/lifecycle_source.hs")
+            .split("-- STAGE --\n")
+            .enumerate()
+        {
+            eprintln!("lifecycle fixture stage {stage} starting");
+            let root = campaign.root_installation.policy.clone();
+            let run = dispatch_haskell_script(root.as_ref(), source);
+            tokio::pin!(run);
+            let result = tokio::time::timeout(Duration::from_secs(180), async {
+                loop {
+                    tokio::select! {
+                        result = &mut run => break result,
+                        deployment = campaign.deployments.recv() => {
+                            if let Some(LocalResidentDeployment::NotificationSend(command)) = deployment {
+                                panic!("stage {stage}: {}", command.message());
+                            }
+                        }
+                    }
+                }
+            }).await.expect("lifecycle fixture stage did not settle");
+            assert_eq!(result["status"], "committed", "stage {stage}: {result:?}");
+            for item in result["items"].as_array().unwrap() {
+                assert_eq!(item["status"], "committed", "stage {stage}: {result:?}");
+            }
+            assert!(
+                !result.to_string().contains("False"),
+                "stage {stage}: {result:?}"
+            );
+            eprintln!("lifecycle fixture stage {stage} completed");
+        }
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stateful_replacement_rejects_changed_state_and_protocol_types() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let imports = dispatch_haskell_script(root.as_ref(), "import Tidepool.Actor").await;
+        assert_eq!(imports["status"], "committed", "{imports:?}");
+        for (script, expected_types) in [
+            (
+                "invalidReplacement <- replaceActor (undefined :: ActorRef ((,) Int) Int) (stateful \"wrong-state\" ReadOnly (\\state (_, reply) -> pure (reply, state)) :: ActorDefinition Bool ((,) Int) Bool)",
+                ["Int", "Bool"],
+            ),
+            (
+                "invalidReplacement <- replaceActor (undefined :: ActorRef ((,) Int) Int) (stateful \"wrong-protocol\" ReadOnly (\\state (_, reply) -> pure (reply, state)) :: ActorDefinition Int ((,) Bool) Int)",
+                ["Int", "Bool"],
+            ),
+        ] {
+            let result = dispatch_haskell_script_result(root.as_ref(), script).await;
+            let diagnostic = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => error.to_string(),
+            };
+            assert!(diagnostic.contains("Couldn't match"), "{diagnostic}");
+            for ty in expected_types {
+                assert!(diagnostic.contains(ty), "{diagnostic}");
+            }
+            assert!(!diagnostic.contains("Variable not in scope"), "{diagnostic}");
+        }
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stateful_replacement_preserves_owned_children() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let ownership = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/stateful_replacement_tree.hs"),
+        )
+        .await;
+        assert_eq!(ownership["status"], "committed", "{ownership:?}");
+        for item in ownership["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{ownership:?}");
+        }
+        assert!(
+            ownership.to_string().contains("True") && !ownership.to_string().contains("False"),
+            "{ownership:?}"
         );
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();

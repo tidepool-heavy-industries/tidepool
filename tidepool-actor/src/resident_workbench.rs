@@ -749,6 +749,10 @@ fn cleanup_step_value(
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    Replace {
+        target: crate::ActorRef,
+        candidate: crate::ResidentActorStart,
+    },
     Drain {
         continuation: ResidentHole,
         target: crate::ActorRef,
@@ -902,6 +906,7 @@ impl ResidentActorBoundary {
             Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Cleanup { .. }) => "cleanup context-fork group",
             Self::Start(_) => "startActor",
+            Self::Replace { .. } => "replaceActor",
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
@@ -944,6 +949,12 @@ impl ResidentActorBoundary {
             Self::WatchForget(_) => "forgetWatch",
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum BoundaryCapture {
+    Execution,
+    Replacement,
 }
 
 /// The one nominal roster for requests interpreted at actor execution
@@ -1103,6 +1114,7 @@ impl ResidentRequest {
             Self::Actor(crate::generated::actor::ActorReq::ActorTryCallWith(..)) => "tryCall",
             Self::Actor(crate::generated::actor::ActorReq::ActorCastWith(..)) => "cast",
             Self::Actor(crate::generated::actor::ActorReq::ActorDrainWith(..)) => "drainActor",
+            Self::Actor(crate::generated::actor::ActorReq::ActorReplaceWith(..)) => "replaceActor",
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(..),
             ) => "installShutdown",
@@ -1114,6 +1126,9 @@ impl ResidentRequest {
                     ..,
                 ),
             ) => "install settlement source",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..),
+            ) => "install lifecycle source",
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith,
             ) => "source input",
@@ -2069,6 +2084,27 @@ where
         outcome: ResidentOutcome,
         actor_realm: RealmId,
     ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
+        self.capture_boundary_mode(context, outcome, actor_realm, BoundaryCapture::Execution)
+            .await
+    }
+
+    pub(crate) async fn capture_replacement_boundary(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+        actor_realm: RealmId,
+    ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
+        self.capture_boundary_mode(context, outcome, actor_realm, BoundaryCapture::Replacement)
+            .await
+    }
+
+    async fn capture_boundary_mode(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+        actor_realm: RealmId,
+        mode: BoundaryCapture,
+    ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
         let (hole, request) = match outcome {
             ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. } => {
                 return Ok(ResidentActorBoundary::Completed);
@@ -2079,6 +2115,16 @@ where
         self.access
             .with_machine(context, move |session, context, _| {
                 let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
+                if matches!(mode, BoundaryCapture::Replacement)
+                    && !matches!(&decoded, ResidentRequest::ActorLocal(
+                        crate::generated::actor_local::ActorLocalReq::ActorCheckpointWith(..)
+                        | crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(..)
+                    ))
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "replacement staging cannot execute `{}`", decoded.operation()
+                    )));
+                }
                 match decoded {
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
@@ -2346,6 +2392,20 @@ where
                         OutboundKind::Cast,
                         actor_realm,
                     ),
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorReplaceWith(target, ..)) => {
+                        let target = crate::wait::decode_address(target.0, target.1)?;
+                        let table = session.data_con_table().clone();
+                        crate::ResidentActorStart::capture(
+                            session,
+                            hole,
+                            &request,
+                            &table,
+                            context.placement.session,
+                            context.actor,
+                        )
+                        .map(|candidate| ResidentActorBoundary::Replace { target, candidate })
+                        .map_err(ResidentActorWorkbenchError::StartCapture)
+                    }
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorDrainWith(target)) => {
                         Ok(ResidentActorBoundary::Drain {
                             continuation: hole,
@@ -2722,20 +2782,24 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let request_kind = ResidentRequest::decode(&request, session.data_con_table())?;
+                use crate::request::sources::{SourceTarget, RequestSourceKind};
                 let source = match &request_kind {
-                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(request, _)) => Some((*request, crate::request::sources::RequestSourceKind::Progress)),
-                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(request, _)) => Some((*request, crate::request::sources::RequestSourceKind::Settlement)),
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(request, _)) => Some(SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Progress)),
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(request, _)) => Some(SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Settlement)),
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith((id, incarnation), _)) => Some(SourceTarget::Lifecycle(crate::ActorRef {
+                        id: crate::ActorId(u64::try_from(*id).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid lifecycle actor id".into()))?),
+                        incarnation: crate::Incarnation(u64::try_from(*incarnation).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid lifecycle incarnation".into()))?),
+                    })),
                     _ => None,
                 };
-                if let Some((request, kind)) = source {
+                if let Some(target) = source {
                     if session.parked_realm(&hole) != Some(actor_realm) {
                         return Err(ResidentActorWorkbenchError::ActorProtocol("source installation crossed actor realm".into()));
                     }
-                    let request = u64::try_from(request).map(crate::RequestId).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid source request".into()))?;
                     let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm).ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("source has no live mapping closure".into()))?;
                     return Ok(ResidentActorStartupStep::InstallSource {
                         continuation: hole,
-                        source: crate::request::sources::SourceBinding { request, kind, entry: Arc::new(entry) },
+                        source: crate::request::sources::SourceBinding { target, entry: Arc::new(entry) },
                     });
                 }
                 match request_kind {
@@ -2838,7 +2902,7 @@ where
             .await
     }
 
-    pub(crate) async fn run_mailbox_handler(
+    pub(crate) async fn run_rooted_application(
         &self,
         context: crate::ActorSessionContext,
         handler: RootCustody,
@@ -2849,7 +2913,7 @@ where
             .with_machine(context, move |session, _context, _| {
                 session
                     .run_rooted_application(
-                        "actor_mailbox_handler",
+                        "actor_application",
                         &handler,
                         &request,
                         handler_realm,
@@ -2894,6 +2958,32 @@ where
                 .await?;
         use crate::request::sources::SourceEvent;
         let outcome = match event {
+            SourceEvent::Lifecycle(event) => {
+                self.access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        let table = session.data_con_table();
+                        let (name, fields) = match event {
+                            crate::ActorLifecycle::Live => ("ActorLive", vec![]),
+                            crate::ActorLifecycle::Paused(detail) => {
+                                ("ActorPaused", vec![detail.to_value(table)?])
+                            }
+                            crate::ActorLifecycle::Exited(terminal) => {
+                                let name = match terminal.kind {
+                                    crate::ActorExitKind::Completed => "ActorFinished",
+                                    crate::ActorExitKind::Failed => "ActorFailed",
+                                    crate::ActorExitKind::Cancelled => "ActorCancelled",
+                                };
+                                (name, vec![terminal.summary.to_value(table)?])
+                            }
+                        };
+                        let value =
+                            qualified_constructor(table, "Tidepool.Actor.Source", name, fields)?;
+                        session
+                            .resume(hole, value)
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    })
+                    .await?
+            }
             SourceEvent::Progress(snapshot) => {
                 self.resume_progress_observation(context.clone(), hole, Ok((Some(snapshot), false)))
                     .await?
@@ -2989,6 +3079,7 @@ where
                     }
                     crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
                         return Err(ResidentActorWorkbenchError::ActorProtocol("source boundary escaped its mapping or installation".into()));
                     }
@@ -3054,6 +3145,7 @@ where
                     | crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
                         return Ok(None)
                     }
@@ -4072,6 +4164,12 @@ where
     }
 }
 
+fn source_request_id(value: i64) -> Result<crate::RequestId, ResidentActorWorkbenchError> {
+    u64::try_from(value)
+        .map(crate::RequestId)
+        .map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid source request".into()))
+}
+
 fn actor_int(value: u64) -> Result<i64, ResidentActorWorkbenchError> {
     i64::try_from(value).map_err(|_| {
         ResidentActorWorkbenchError::ActorProtocol(
@@ -4093,7 +4191,16 @@ fn actor_context_constructor(
     name: &str,
     fields: Vec<Value>,
 ) -> Result<Value, tidepool_bridge::BridgeError> {
-    let qualified = format!("Tidepool.Effects.Core.{name}");
+    qualified_constructor(table, "Tidepool.Effects.Core", name, fields)
+}
+
+fn qualified_constructor(
+    table: &DataConTable,
+    module: &str,
+    name: &str,
+    fields: Vec<Value>,
+) -> Result<Value, tidepool_bridge::BridgeError> {
+    let qualified = format!("{module}.{name}");
     let constructor = table
         .get_by_qualified_name(&qualified)
         .ok_or(tidepool_bridge::BridgeError::UnknownDataConName(qualified))?;

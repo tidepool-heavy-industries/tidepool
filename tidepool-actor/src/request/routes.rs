@@ -22,6 +22,22 @@ pub(crate) struct WatchRoute {
 }
 
 impl WatchRoute {
+    pub(super) fn transfer_owner(&mut self, successor: LocalActorRef, watch: WatchId) {
+        self.owner = successor;
+        // A queued old notice cannot run after its owner retires. Requeue the
+        // still-owned entry; take_route settles duplicate notices without
+        // invoking the handler twice.
+        if self.state == RouteState::Running && self.entry.is_some() {
+            if let Err(error) = self
+                .owner
+                .address()
+                .send_message(crate::KernelMessage::RouteReady { watch })
+            {
+                self.state =
+                    RouteState::Failed(format!("replacement route owner is unavailable: {error}"));
+            }
+        }
+    }
     pub(crate) fn new(owner: LocalActorRef, entry: RootCustody) -> Self {
         Self {
             owner,

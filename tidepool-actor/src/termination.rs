@@ -23,6 +23,41 @@ pub struct ActorTerminal {
     pub summary: String,
 }
 
+/// Runtime lifecycle facts; `Live` does not claim application readiness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActorLifecycle {
+    Live,
+    Paused(String),
+    Exited(ActorTerminal),
+}
+
+type LifecycleSink = dyn Fn(ActorLifecycle) -> bool + Send + Sync;
+
+/// Retaining the connection keeps publications attached. Its sink must only
+/// admit a mailbox message: publication holds the lifecycle owner's lock.
+pub struct ActorLifecycleConnection {
+    _sink: Arc<LifecycleSink>,
+}
+
+struct LifecycleState {
+    current: ActorLifecycle,
+    connections: Vec<std::sync::Weak<LifecycleSink>>,
+}
+
+impl LifecycleState {
+    fn publish(&mut self, current: ActorLifecycle) {
+        self.current = current;
+        self.connections.retain(|connection| {
+            connection
+                .upgrade()
+                .is_some_and(|sink| sink(self.current.clone()))
+        });
+        if matches!(self.current, ActorLifecycle::Exited(_)) {
+            self.connections.clear();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("actor exit was already published as {existing:?}")]
 pub struct ActorExitAlreadyPublished {
@@ -30,7 +65,8 @@ pub struct ActorExitAlreadyPublished {
 }
 
 struct ExitState {
-    terminal: Mutex<Option<ActorTerminal>>,
+    successor: Mutex<Option<crate::ActorRef>>,
+    lifecycle: Mutex<LifecycleState>,
     cleanup: Mutex<Option<crate::ResidentCleanupOutcome>>,
     requested_shutdown: Mutex<Option<ActorTerminal>>,
     acknowledged_retirement: Mutex<Option<crate::ActorRef>>,
@@ -63,6 +99,40 @@ impl Default for RetainedActorExit {
 }
 
 impl RetainedActorExit {
+    /// Capture the current state and attach under the publication lock. Every
+    /// later transition is delivered in order until exit, detach, or rejection.
+    pub fn connect_lifecycle(
+        &self,
+        sink: impl Fn(ActorLifecycle) -> bool + Send + Sync + 'static,
+    ) -> ActorLifecycleConnection {
+        let sink: Arc<LifecycleSink> = Arc::new(sink);
+        let mut lifecycle = self.state.lifecycle.lock();
+        let admitted = sink(lifecycle.current.clone());
+        if admitted && !matches!(lifecycle.current, ActorLifecycle::Exited(_)) {
+            lifecycle
+                .connections
+                .retain(|connection| connection.strong_count() != 0);
+            lifecycle.connections.push(Arc::downgrade(&sink));
+        }
+        ActorLifecycleConnection { _sink: sink }
+    }
+
+    pub(crate) fn publish_paused(&self, detail: String) {
+        let mut lifecycle = self.state.lifecycle.lock();
+        if !matches!(lifecycle.current, ActorLifecycle::Exited(_)) {
+            lifecycle.publish(ActorLifecycle::Paused(detail));
+        }
+    }
+
+    /// Exact replacement identity retained even if the controlling RPC loses
+    /// its waiter. This is observation metadata, never an address alias.
+    pub fn successor(&self) -> Option<crate::ActorRef> {
+        *self.state.successor.lock()
+    }
+
+    pub(crate) fn retain_successor(&self, successor: crate::ActorRef) {
+        self.state.successor.lock().get_or_insert(successor);
+    }
     /// Terminal-only legacy/forced exits deliberately have no cleanup proof.
     pub fn cleanup(&self) -> Option<crate::ResidentCleanupOutcome> {
         self.state.cleanup.lock().clone()
@@ -100,7 +170,11 @@ impl RetainedActorExit {
         let (changed, _) = watch::channel(0);
         Self {
             state: Arc::new(ExitState {
-                terminal: Mutex::new(None),
+                successor: Mutex::new(None),
+                lifecycle: Mutex::new(LifecycleState {
+                    current: ActorLifecycle::Live,
+                    connections: Vec::new(),
+                }),
                 cleanup: Mutex::new(None),
                 requested_shutdown: Mutex::new(None),
                 acknowledged_retirement: Mutex::new(None),
@@ -116,13 +190,13 @@ impl RetainedActorExit {
     /// explicit invariant violation while preserving the first result.
     pub fn publish(&self, terminal: ActorTerminal) -> Result<(), ActorExitAlreadyPublished> {
         {
-            let mut retained = self.state.terminal.lock();
-            if let Some(existing) = retained.as_ref() {
+            let mut retained = self.state.lifecycle.lock();
+            if let ActorLifecycle::Exited(existing) = &retained.current {
                 return Err(ActorExitAlreadyPublished {
                     existing: existing.clone(),
                 });
             }
-            *retained = Some(terminal);
+            retained.publish(ActorLifecycle::Exited(terminal));
         }
         self.state
             .changed
@@ -133,7 +207,10 @@ impl RetainedActorExit {
     /// Return the immutable result without consuming it.
     #[must_use]
     pub fn get(&self) -> Option<ActorTerminal> {
-        self.state.terminal.lock().clone()
+        match &self.state.lifecycle.lock().current {
+            ActorLifecycle::Exited(terminal) => Some(terminal.clone()),
+            _ => None,
+        }
     }
 
     /// Wait for publication, then clone the immutable result.
@@ -162,6 +239,71 @@ mod tests {
         ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: summary.into(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_retains_current_and_delivers_each_transition_until_detached() {
+        let retained = RetainedActorExit::new();
+        let (send, receive) = std::sync::mpsc::channel();
+        let connection = retained.connect_lifecycle(move |event| send.send(event).is_ok());
+        retained.publish_paused("failed input retained".into());
+        assert_eq!(
+            receive.try_iter().collect::<Vec<_>>(),
+            vec![
+                ActorLifecycle::Live,
+                ActorLifecycle::Paused("failed input retained".into())
+            ]
+        );
+        assert_eq!(retained.get(), None);
+        let (late_send, late_receive) = std::sync::mpsc::channel();
+        let _late = retained.connect_lifecycle(move |event| late_send.send(event).is_ok());
+        drop(connection);
+        retained.publish(completed("done")).unwrap();
+        assert!(receive.try_iter().next().is_none());
+        assert_eq!(
+            late_receive.try_iter().collect::<Vec<_>>(),
+            vec![
+                ActorLifecycle::Paused("failed input retained".into()),
+                ActorLifecycle::Exited(completed("done"))
+            ]
+        );
+        retained.publish_paused("too late".into());
+        assert_eq!(retained.get(), Some(completed("done")));
+        assert!(late_receive.try_iter().next().is_none());
+        let (final_send, final_receive) = std::sync::mpsc::channel();
+        let _terminal = retained.connect_lifecycle(move |event| final_send.send(event).is_ok());
+        assert_eq!(
+            final_receive.try_iter().collect::<Vec<_>>(),
+            vec![ActorLifecycle::Exited(completed("done"))]
+        );
+        assert!(retained.state.lifecycle.lock().connections.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_attachment_racing_publication_never_misses_or_duplicates_exit() {
+        for _ in 0..32 {
+            let retained = RetainedActorExit::new();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let publisher = retained.clone();
+            let publish_barrier = barrier.clone();
+            let task = std::thread::spawn(move || {
+                publish_barrier.wait();
+                publisher.publish_paused("paused".into());
+                publisher.publish(completed("done")).unwrap();
+            });
+            let (send, receive) = std::sync::mpsc::channel();
+            barrier.wait();
+            let _connection = retained.connect_lifecycle(move |event| send.send(event).is_ok());
+            task.join().unwrap();
+            let events: Vec<_> = receive.try_iter().collect();
+            let expected = [
+                ActorLifecycle::Live,
+                ActorLifecycle::Paused("paused".into()),
+                ActorLifecycle::Exited(completed("done")),
+            ];
+            assert!(!events.is_empty());
+            assert!(expected.ends_with(&events), "{events:?}");
         }
     }
 

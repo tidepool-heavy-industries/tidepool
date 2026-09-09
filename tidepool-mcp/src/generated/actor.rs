@@ -19,6 +19,7 @@ pub fn actor_decl() -> crate::EffectDecl {
             "ActorTryCallWith :: (Int, Int) -> protocol () -> Actor ActorCallStatus",
             "ActorCastWith :: (Int, Int) -> protocol () -> Actor ()",
             "ActorDrainWith :: (Int, Int) -> Actor ()",
+            "ActorReplaceWith :: (Int, Int) -> (state -> Eff childEffs ()) -> Text -> ActorEffectProfile -> [Text] -> Actor (Int, Int)",
         ],
         type_defs: &[
             "data ActorLaunchRole = ActorRootRole | ActorResearchRole | ActorCodingRole | ActorScaffoldingRole | ActorIntegrationRole | ActorInheritedRole deriving (Show, Eq)",

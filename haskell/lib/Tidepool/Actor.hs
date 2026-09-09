@@ -30,6 +30,8 @@ module Tidepool.Actor
   , Source
   , progressSource
   , settlementSource
+  , ActorLifecycle (..)
+  , lifecycleSource
   , withSources
   , stateful
   , EffectProfile (..)
@@ -46,6 +48,7 @@ module Tidepool.Actor
   , call
   , cast
   , drainActor
+  , replaceActor
   , receive
   , serve
   , ActorExit (..)
@@ -58,10 +61,17 @@ module Tidepool.Actor
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
 import Prelude
-import Tidepool.Actor.Source (Source, progressSource, settlementSource, installSource)
+import Tidepool.Actor.Source
+  ( Source
+  , progressSource
+  , settlementSource
+  , ActorLifecycle (..)
+  , lifecycleSource
+  , installSource
+  )
 
 import Tidepool.Actor.Internal
-  ( ActorDefinition
+  ( ActorDefinition (..)
   , pattern ActorDefinition
   , label
   , effectProfile
@@ -149,6 +159,37 @@ startActor definition@ActorDefinition
   (actorId, incarnation, _) <- send
     (ActorStartWith actorLabel entry ActorInheritedRole (profileCode profile) (actorLaunchWorktrees definition))
   pure (ActorRef actorId incarnation cell)
+
+-- | Replace a stateful handler using its committed state. The runtime retains
+-- queued inputs and source positions; initialization is never rerun.
+{-# NOINLINE replaceActor #-}
+replaceActor
+  :: Member Actor effs
+  => ActorRef protocol state
+  -> ActorDefinition state protocol state
+  -> Eff effs (ActorRef protocol state)
+replaceActor previous@(ActorRef previousId previousIncarnation _) definition@ActorDefinitionInternal
+  { internalLabel = actorLabel
+  , internalEffectProfile = profile
+  , internalOnShutdown = shutdownAction
+  , internalReplacement = replacement
+  } = case replacement of
+    Nothing -> error "replaceActor requires a stateful definition"
+    Just install -> do
+      let cell = newExitCell previous
+          shutdownEntry reasonCode =
+            raiseKernel (shutdownAction (decodeShutdownReason reasonCode))
+          entry committed = do
+            send (ActorInstallShutdownWith 0 shutdownEntry)
+            mapM_ installSource (actorSources definition)
+            send ActorReadyWith
+            result <- raiseKernel (install committed)
+            case fillExitCell cell result of
+              () -> pure ()
+      (actorId, incarnation) <- send (ActorReplaceWith
+        (previousId, previousIncarnation) entry actorLabel (profileCode profile)
+        (actorLaunchWorktrees definition))
+      pure (ActorRef actorId incarnation cell)
 
 -- | Trusted context-fork launch. The runtime snapshots the caller's lexical
 -- environment and the host forks its provider conversation at the active
@@ -323,12 +364,15 @@ stateful
   -> EffectProfile protocol effs
   -> (forall result. state -> protocol result -> Eff effs (result, state))
   -> ActorDefinition state protocol state
-stateful actorLabel profile step = ActorDefinition
-  { label = actorLabel
-  , effectProfile = profile
-  , initialization = pure
-  , behavior = \_ -> statefulLoop step
-  , onShutdown = const (pure ())
+stateful actorLabel profile step = ActorDefinitionInternal
+  { internalLabel = actorLabel
+  , internalEffectProfile = profile
+  , internalInitialization = pure
+  , internalBehavior = \_ -> statefulLoop step
+  , internalOnShutdown = const (pure ())
+  , internalLaunchWorktrees = []
+  , internalSources = []
+  , internalReplacement = Just (statefulLoop step)
   }
 
 statefulLoop

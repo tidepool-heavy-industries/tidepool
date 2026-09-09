@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+mod replacement;
+
 use parking_lot::Mutex;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
@@ -156,7 +158,9 @@ fn actor_can_control(
     {
         return true;
     }
-    actor_in_creation_tree(owner, candidate, records)
+    actor_in_tree(owner, candidate, records, |descriptor| {
+        descriptor.supervisor_parent().or(descriptor.creator())
+    })
 }
 
 fn actor_can_observe(
@@ -178,17 +182,26 @@ fn actor_in_creation_tree(
     candidate: ActorRef,
     records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
 ) -> bool {
+    actor_in_tree(owner, candidate, records, |descriptor| {
+        descriptor.creator().or(descriptor.supervisor_parent())
+    })
+}
+
+fn actor_in_tree(
+    owner: ActorRef,
+    candidate: ActorRef,
+    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
+    parent: impl Fn(&ActorDescriptor) -> Option<ActorRef>,
+) -> bool {
     let mut cursor = candidate;
     for _ in 0..=records.len() {
         if cursor == owner {
             return true;
         }
-        let Some(parent) = records.get(&cursor).and_then(|record| {
-            record
-                .descriptor
-                .creator()
-                .or(record.descriptor.supervisor_parent())
-        }) else {
+        let Some(parent) = records
+            .get(&cursor)
+            .and_then(|record| parent(&record.descriptor))
+        else {
             return false;
         };
         cursor = parent;
@@ -216,6 +229,7 @@ enum ResidentBoot {
     Workbench,
     Prepared(Box<ResidentOutcome>),
     Entry(RootCustody),
+    Replacement(Box<replacement::PreparedSuccessor>),
 }
 
 enum ResidentStanding {
@@ -405,6 +419,8 @@ impl ChildExitObservations {
 /// All actor-local resident state. No field mirrors runnable/parked lifecycle;
 /// `standing` is the actual Haskell continuation currently owned by the actor.
 pub struct ResidentKernelBehavior<H, O> {
+    replacement_transfer: Option<replacement::ReplacementTransfer>,
+    retained_replacements: Vec<replacement::RetainedHandler>,
     descriptor: ActorDescriptor,
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
@@ -414,7 +430,7 @@ pub struct ResidentKernelBehavior<H, O> {
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
     sources: Vec<crate::request::sources::SourceBinding>,
-    source_connections: Option<crate::request::sources::RequestSources>,
+    source_connections: Option<crate::request::sources::ActorSourceConnections>,
     launch_worktrees: Vec<String>,
     prepared_workspace: Option<crate::PreparedForkWorkspace>,
     worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
@@ -516,6 +532,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         launch_worktrees: Vec<String>,
     ) -> Self {
         Self {
+            replacement_transfer: None,
+            retained_replacements: Vec::new(),
             descriptor,
             environment,
             boot: Some(boot),
@@ -2153,6 +2171,66 @@ where
                 self.resolve_outbound(kernel, context, ancestry, outbound)
                     .await
             }),
+            ResidentActorBoundary::Replace { target, candidate } => Box::pin(async move {
+                let authorized = target != context.actor
+                    && actor_can_control(context.actor, target, &self.environment.actors.lock());
+                let actor = authorized
+                    .then(|| kernel.resolve(target))
+                    .flatten()
+                    .filter(|actor| actor.terminal().get().is_none());
+                let Some(actor) = actor else {
+                    let placement = candidate.child.descriptor.placement();
+                    drop(candidate);
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        if authorized {
+                            "replacement target is unavailable"
+                        } else {
+                            "actor replacement is not authorized"
+                        }
+                        .into(),
+                    ));
+                };
+                let crate::ResidentActorStart { parent_hole, child } = candidate;
+                let placement = child.descriptor.placement();
+                let successor = match actor
+                    .replace(crate::ActorReplacementDefinition { child })
+                    .await
+                {
+                    Ok(successor) => successor,
+                    Err(error) => {
+                        // A failed send never transferred the candidate. A lost
+                        // reply may follow cutover and must retain its custody.
+                        if matches!(error, crate::KernelInvocationFailure::ActorExited(_)) {
+                            if let Err(cleanup) = self
+                                .environment
+                                .runner
+                                .retire_root_placement(placement)
+                                .await
+                            {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "{error}; replacement candidate cleanup failed: {cleanup}"
+                                )));
+                            }
+                        }
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            error.to_string(),
+                        ));
+                    }
+                };
+                let identity = successor.identity();
+                self.environment
+                    .runner
+                    .resume_value(
+                        context.clone(),
+                        parent_hole,
+                        (identity.id.0 as i64, identity.incarnation.0 as i64),
+                    )
+                    .await
+            }),
             ResidentActorBoundary::Drain {
                 continuation,
                 target,
@@ -2934,6 +3012,13 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        let boot = match boot {
+            ResidentBoot::Replacement(prepared) => {
+                self.boot = Some(ResidentBoot::Replacement(prepared));
+                return Ok(KernelStep::Continue(()));
+            }
+            boot => boot,
+        };
         if let Some(terminal) = kernel.requested_shutdown() {
             return Ok(KernelStep::Stop {
                 output: (),
@@ -2990,6 +3075,9 @@ where
             });
         }
         let outcome = match boot {
+            ResidentBoot::Replacement(_) => {
+                unreachable!("replacement bootstrap parks before initialization")
+            }
             ResidentBoot::Workbench => {
                 self.standing = ResidentStanding::Workbench;
                 self.policy_installed = true;
@@ -3077,8 +3165,39 @@ where
                                     .sources
                                     .iter()
                                     .enumerate()
-                                    .map(|(slot, source)| (slot, source.request, source.kind))
+                                    .filter_map(|(slot, source)| match source.target {
+                                        crate::request::sources::SourceTarget::Request(
+                                            request,
+                                            kind,
+                                        ) => Some((slot, request, kind)),
+                                        crate::request::sources::SourceTarget::Lifecycle(_) => None,
+                                    })
                                     .collect::<Vec<_>>();
+                                let mut lifecycle = Vec::new();
+                                for (slot, source) in self.sources.iter().enumerate() {
+                                    if let crate::request::sources::SourceTarget::Lifecycle(
+                                        target,
+                                    ) = source.target
+                                    {
+                                        if !actor_can_observe(
+                                            owner,
+                                            target,
+                                            &self.environment.actors.lock(),
+                                        ) {
+                                            return Err(
+                                                ResidentActorWorkbenchError::ActorProtocol(
+                                                    "lifecycle source is not authorized".into(),
+                                                ),
+                                            );
+                                        }
+                                        let actor = kernel.resolve(target).ok_or_else(|| {
+                                            ResidentActorWorkbenchError::ActorProtocol(
+                                                "lifecycle source target is unavailable".into(),
+                                            )
+                                        })?;
+                                        lifecycle.push((slot, actor));
+                                    }
+                                }
                                 self.source_connections = Some(
                                     self.environment
                                         .requests
@@ -3089,6 +3208,12 @@ where
                                             ))
                                         })?,
                                 );
+                                for (slot, actor) in lifecycle {
+                                    self.source_connections
+                                        .as_mut()
+                                        .expect("attached source set")
+                                        .attach_lifecycle(slot, &actor);
+                                }
                             }
                             break self
                                 .environment
@@ -3146,11 +3271,31 @@ where
             self.active_input = Some(RetainedActorInput::Mailbox(Arc::clone(&request)));
         }
         let handler_realm = RealmId::fresh();
-        let outcome = self
+        let mut outcome = self
             .environment
             .runner
-            .run_mailbox_handler(context.clone(), handler, request, handler_realm)
+            .run_rooted_application(context.clone(), handler, request, handler_realm)
             .await?;
+        if caller.is_some() {
+            // The synchronous RPC remains owned while the handler performs
+            // effects. Its first suspension need not be the eventual reply.
+            while self
+                .environment
+                .runner
+                .kernel_boundary(context.clone(), &outcome)
+                .await?
+                .is_none()
+            {
+                let boundary = self
+                    .environment
+                    .runner
+                    .capture_boundary(context.clone(), outcome, handler_realm)
+                    .await?;
+                outcome = self
+                    .resolve_effect(kernel, context, ancestry, boundary)
+                    .await?;
+            }
+        }
         if caller.is_none()
             && self
                 .environment
@@ -4105,6 +4250,55 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    fn replacement_staged(&self) -> bool {
+        matches!(self.boot, Some(ResidentBoot::Replacement(_)))
+    }
+    fn discard_replacement<'a>(
+        &'a mut self,
+        definition: crate::ActorReplacementDefinition,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async move {
+            let placement = definition.child.descriptor.placement();
+            drop(definition);
+            self.environment
+                .runner
+                .retire_root_placement(placement)
+                .await
+                .map_err(Self::failure)
+        })
+    }
+    fn replace<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        definition: crate::ActorReplacementDefinition,
+    ) -> futures_util::future::BoxFuture<'a, Result<LocalActorRef, KernelBehaviorError>> {
+        Box::pin(async move {
+            self.prepare_successor(kernel, definition)
+                .await
+                .map_err(Self::failure)
+        })
+    }
+
+    fn commit_replacement(
+        &mut self,
+        predecessor: &KernelContext,
+        successor: &KernelContext,
+    ) -> Result<(), KernelBehaviorError> {
+        self.transfer_replacement(predecessor, successor)
+            .map_err(Self::failure)
+    }
+
+    fn replacement_retired(&mut self, context: &KernelContext, terminal: &ActorTerminal) {
+        self.publish_retired(context.identity(), terminal.clone());
+    }
+
+    fn activate_replacement<'a>(
+        &'a mut self,
+        _kernel: &'a KernelContext,
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async move { self.activate_successor().map_err(Self::failure) })
+    }
+
     fn source<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
@@ -4115,7 +4309,7 @@ where
             let source = self
                 .sources
                 .get(delivery.slot)
-                .filter(|source| source.request == delivery.request)
+                .filter(|source| source.target == delivery.target)
                 .ok_or_else(|| KernelBehaviorError {
                     detail: "source delivery does not match an installed connection".into(),
                 })?;
@@ -4221,7 +4415,10 @@ where
             "retaining paused handler custody"
         );
         self.standing = ResidentStanding::Paused(failure);
-        if let Some(supervisor) = self.descriptor.supervisor_parent() {
+        if let Some(actor) = kernel.resolve(kernel.identity()) {
+            actor.terminal().publish_paused(detail.to_owned());
+        }
+        if let Some(supervisor) = kernel.supervisor_identity() {
             let (command, admission) = crate::NotificationSend::new(
                 kernel.identity(),
                 supervisor,
@@ -4921,6 +5118,7 @@ where
     > {
         Box::pin(async move {
             use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
+            let staged_replacement = self.replacement_staged();
             self.source_connections.take();
             self.sources.clear();
             let context = self.context(kernel.identity());
@@ -4958,22 +5156,42 @@ where
             self.pending_checkpoint = None;
             self.checkpoint = None;
             self.standing = ResidentStanding::Terminal;
+            self.boot = None;
+            self.sources.clear();
+            let mut retained_errors = Vec::new();
+            for retained in std::mem::take(&mut self.retained_replacements) {
+                let placement = retained.placement;
+                drop(retained);
+                if let Err(error) = self
+                    .environment
+                    .runner
+                    .retire_root_placement(placement)
+                    .await
+                {
+                    retained_errors.push(error.to_string());
+                }
+            }
             // Realm retirement obtains its own exclusive checkout. A failed hook
             // does not skip this safe cleanup; it also never becomes success.
-            let realm_result = if self.descriptor.supervisor_parent().is_none() {
-                self.environment
-                    .runner
-                    .retire_root_placement(self.descriptor.placement())
-                    .await
+            let realm_result =
+                if staged_replacement || self.descriptor.supervisor_parent().is_none() {
+                    self.environment
+                        .runner
+                        .retire_root_placement(self.descriptor.placement())
+                        .await
+                } else {
+                    self.environment
+                        .runner
+                        .close_realm(context, self.descriptor.placement().resource_scope)
+                        .await
+                };
+            if let Err(error) = realm_result {
+                retained_errors.push(error.to_string());
+            }
+            let realm = if retained_errors.is_empty() {
+                Confirmed
             } else {
-                self.environment
-                    .runner
-                    .close_realm(context, self.descriptor.placement().resource_scope)
-                    .await
-            };
-            let realm = match realm_result {
-                Ok(()) => Confirmed,
-                Err(error) => Unconfirmed(error.to_string()),
+                Unconfirmed(retained_errors.join("; "))
             };
             (hook, realm)
         })

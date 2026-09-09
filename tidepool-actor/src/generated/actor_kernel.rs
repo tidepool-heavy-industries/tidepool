@@ -19,5 +19,6 @@ pub enum ActorKernelReq {
     ActorContinueWith(i64, tidepool_eval::value::Value),
     ActorInstallProgressSourceWith(i64, tidepool_eval::value::Value),
     ActorInstallSettlementSourceWith(i64, tidepool_eval::value::Value),
+    ActorInstallLifecycleSourceWith((i64, i64), tidepool_eval::value::Value),
     ActorSourceInputWith,
 }

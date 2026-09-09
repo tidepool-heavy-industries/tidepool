@@ -7,11 +7,14 @@ module Tidepool.Actor.Source
   ( Source
   , progressSource
   , settlementSource
+  , ActorLifecycle (..)
+  , lifecycleSource
   , installSource
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Kind (Type)
+import Data.Text (Text)
 import Tidepool.Agent.Reply.Internal
   ( Progress (..)
   , ProgressState
@@ -23,6 +26,17 @@ import Tidepool.Agent.Reply.Internal
   , readResponse
   )
 import Tidepool.Effects.Core (ActorKernel (..))
+import Tidepool.Internal.ActorRef (ActorRef (..))
+
+-- | Runtime lifecycle facts. Live does not imply application readiness;
+-- completion does not assert resource cleanup or acceptance of delivered work.
+data ActorLifecycle
+  = ActorLive
+  | ActorPaused Text
+  | ActorFinished Text
+  | ActorFailed Text
+  | ActorCancelled Text
+  deriving (Eq, Show)
 
 data Source (protocol :: Type -> Type) where
   ProgressSource
@@ -32,6 +46,10 @@ data Source (protocol :: Type -> Type) where
   SettlementSource
     :: Response result
     -> (Either ResponseFailure (ResponseResult result) -> protocol ())
+    -> Source protocol
+  LifecycleSource
+    :: ActorRef api exit
+    -> (ActorLifecycle -> protocol ())
     -> Source protocol
 
 -- | Capture current progress and every subsequent publication, including closure.
@@ -47,12 +65,20 @@ settlementSource
   -> Source protocol
 settlementSource = SettlementSource
 
+lifecycleSource
+  :: ActorRef api exit
+  -> (ActorLifecycle -> protocol ())
+  -> Source protocol
+lifecycleSource = LifecycleSource
+
 installSource :: Member ActorKernel effs => Source protocol -> Eff effs ()
 installSource (ProgressSource (Progress (RequestId request)) project) =
   send (ActorInstallProgressSourceWith request (sourceEntry project))
 installSource (SettlementSource response@(Response (RequestId request) _) project) =
   send (ActorInstallSettlementSourceWith request
     (sourceEntry (project . settledResponse response)))
+installSource (LifecycleSource (ActorRef actor incarnation _) project) =
+  send (ActorInstallLifecycleSourceWith (actor, incarnation) (sourceEntry project))
 
 sourceEntry :: (event -> protocol ()) -> Int -> Eff '[ActorKernel] ()
 sourceEntry project _ = do

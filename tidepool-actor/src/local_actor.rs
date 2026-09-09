@@ -77,14 +77,24 @@ pub struct KernelContext {
 /// number of late `wait` operations can observe its retained result.
 #[derive(Clone, Default)]
 pub struct LocalActorDirectory {
-    actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, LocalActorRef>>>,
+    actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, DirectoryEntry>>>,
     sessions: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, crate::ActorSessionContext>>>,
+}
+
+struct DirectoryEntry {
+    actor: LocalActorRef,
+    // Retaining an exit must not keep its execution context (and thus this
+    // directory) alive. Ractor's actor state owns the strong context reference.
+    context: std::sync::Weak<KernelContext>,
 }
 
 impl LocalActorDirectory {
     #[must_use]
     pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
-        self.actors.read().get(&actor).cloned()
+        self.actors
+            .read()
+            .get(&actor)
+            .map(|entry| entry.actor.clone())
     }
 
     #[must_use]
@@ -92,15 +102,21 @@ impl LocalActorDirectory {
         self.sessions.read().get(&actor).cloned()
     }
 
-    fn insert(&self, actor: LocalActorRef) {
-        self.actors.write().insert(actor.identity(), actor);
+    fn insert(&self, actor: LocalActorRef, context: std::sync::Weak<KernelContext>) {
+        self.actors
+            .write()
+            .insert(actor.identity(), DirectoryEntry { actor, context });
+    }
+
+    fn context(&self, actor: ActorRef) -> Option<std::sync::Arc<KernelContext>> {
+        self.actors.read().get(&actor)?.context.upgrade()
     }
 
     fn forget_terminal(&self, actor: ActorRef) -> bool {
         let mut actors = self.actors.write();
         let terminal = actors
             .get(&actor)
-            .is_some_and(|actor| actor.terminal().get().is_some());
+            .is_some_and(|entry| entry.actor.terminal().get().is_some());
         if terminal {
             actors.remove(&actor);
             self.sessions.write().remove(&actor);
@@ -110,6 +126,48 @@ impl LocalActorDirectory {
 }
 
 impl KernelContext {
+    pub(crate) fn supervisor_identity(&self) -> Option<ActorRef> {
+        self.myself
+            .get_cell()
+            .try_get_supervisor()
+            .map(|supervisor| ActorRef {
+                id: crate::ActorId(supervisor.get_id().pid()),
+                incarnation: self.identity.incarnation,
+            })
+    }
+    pub(crate) async fn spawn_successor<B: KernelBehavior>(
+        &self,
+        behavior: B,
+    ) -> Result<
+        (
+            LocalActorRef,
+            Option<tokio::sync::OwnedRwLockReadGuard<bool>>,
+        ),
+        ractor::SpawnErr,
+    > {
+        if let Some(parent) = self.supervisor_identity() {
+            let context = self.directory.context(parent).ok_or_else(|| {
+                ractor::SpawnErr::StartupFailed(
+                    std::io::Error::other("replacement supervisor is no longer running").into(),
+                )
+            })?;
+            context
+                .spawn_worker_retained(None, behavior, crate::WorkerLifetime::ParentOwned)
+                .await
+                .map(|(actor, admission)| (actor, Some(admission)))
+        } else {
+            let (actor, task) = spawn_local_actor_in_directory(
+                None,
+                behavior,
+                self.identity.incarnation,
+                self.directory.clone(),
+            )
+            .await?;
+            drop(task);
+            Ok((actor, None))
+        }
+    }
+
     pub(crate) fn requested_shutdown(&self) -> Option<ActorTerminal> {
         self.directory
             .resolve(self.identity)?
@@ -211,9 +269,20 @@ impl KernelContext {
     where
         C: KernelBehavior,
     {
+        self.spawn_worker_retained(name, behavior, lifetime)
+            .await
+            .map(|(actor, _)| actor)
+    }
+
+    async fn spawn_worker_retained<C: KernelBehavior>(
+        &self,
+        name: Option<String>,
+        behavior: C,
+        lifetime: crate::WorkerLifetime,
+    ) -> Result<(LocalActorRef, tokio::sync::OwnedRwLockReadGuard<bool>), ractor::SpawnErr> {
         // Hold admission through registration so retirement cannot miss a
         // child whose startup is already in flight.
-        let admission = self.child_admission_closed.read().await;
+        let admission = self.child_admission_closed.clone().read_owned().await;
         if *admission {
             return Err(ractor::SpawnErr::StartupFailed(
                 std::io::Error::other("actor child admission is closed").into(),
@@ -269,7 +338,7 @@ impl KernelContext {
                 .insert(child.address().get_id(), child.clone());
         }
         custody.accounted = true;
-        Ok(child)
+        Ok((child, admission))
     }
 }
 
@@ -279,6 +348,57 @@ impl KernelContext {
 /// owns Haskell/provider/tool execution and returns domain results without
 /// gaining access to Ractor's scheduler internals.
 pub trait KernelBehavior: Send + 'static {
+    fn replacement_staged(&self) -> bool {
+        false
+    }
+    /// Release an unadmitted recipe through the owner of its captured scope.
+    fn discard_replacement<'a>(
+        &'a mut self,
+        _definition: crate::ActorReplacementDefinition,
+    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor cannot confirm replacement recipe cleanup".into(),
+            })
+        })
+    }
+    fn replace<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _definition: crate::ActorReplacementDefinition,
+    ) -> BoxFuture<'a, Result<LocalActorRef, KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor does not support stateful replacement".into(),
+            })
+        })
+    }
+
+    /// A prepared successor is mailbox-inert until its predecessor's fence
+    /// transfers the accepted backlog and supervised children.
+    fn activate_replacement<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor has no prepared replacement".into(),
+            })
+        })
+    }
+
+    fn commit_replacement(
+        &mut self,
+        _predecessor: &KernelContext,
+        _successor: &KernelContext,
+    ) -> Result<(), KernelBehaviorError> {
+        Err(KernelBehaviorError {
+            detail: "actor has no replacement custody".into(),
+        })
+    }
+
+    fn replacement_retired(&mut self, _context: &KernelContext, _terminal: &ActorTerminal) {}
+
     fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
         Err(KernelBehaviorError {
             detail: "actor does not support draining".into(),
@@ -482,14 +602,21 @@ enum HostedAdmission {
 }
 
 pub struct LocalActorState<B> {
+    replacement: Option<PendingReplacement>,
     drain: DrainState,
     mailbox_admission: crate::kernel::MailboxAdmission,
     hosted_admission: HostedAdmission,
-    context: KernelContext,
+    context: std::sync::Arc<KernelContext>,
     behavior: B,
     terminal: RetainedActorExit,
     deferred_mailbox: VecDeque<KernelMessage>,
     mailbox_drain_scheduled: bool,
+}
+
+struct PendingReplacement {
+    successor: LocalActorRef,
+    reply: Option<ractor::RpcReplyPort<Result<LocalActorRef, crate::KernelInvocationFailure>>>,
+    shutdown_waiters: Vec<ractor::RpcReplyPort<ActorTerminal>>,
 }
 
 #[derive(Default)]
@@ -517,7 +644,7 @@ where
             id: crate::ActorId(myself.get_id().pid()),
             incarnation: arguments.incarnation,
         };
-        let context = KernelContext {
+        let context = std::sync::Arc::new(KernelContext {
             identity,
             myself,
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -526,8 +653,9 @@ where
             forgotten_children: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::CleanupComponentOutcome::Confirmed,
             )),
-        };
+        });
         let mut state = LocalActorState {
+            replacement: None,
             drain: DrainState::Open,
             mailbox_admission: arguments.mailbox_admission,
             context,
@@ -537,15 +665,15 @@ where
             mailbox_drain_scheduled: false,
             hosted_admission: HostedAdmission::Open,
         };
-        state
-            .context
-            .directory
-            .insert(LocalActorRef::with_admission(
+        state.context.directory.insert(
+            LocalActorRef::with_admission(
                 state.context.myself.clone(),
                 state.terminal.clone(),
                 state.context.identity.incarnation,
                 state.mailbox_admission.clone(),
-            ));
+            ),
+            std::sync::Arc::downgrade(&state.context),
+        );
         match state.behavior.start(&state.context).await {
             Ok(KernelStep::Continue(())) => {}
             Ok(KernelStep::ContinueLater(())) => {
@@ -570,10 +698,22 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let message = match message {
+            message @ KernelMessage::Shutdown { .. } if state.behavior.replacement_staged() => {
+                state.deferred_mailbox.push_back(message);
+                return Ok(());
+            }
+            message @ KernelMessage::RouteReady { .. }
+                if state.replacement.is_some() || state.behavior.replacement_staged() =>
+            {
+                state.deferred_mailbox.push_back(message);
+                return Ok(());
+            }
             message @ (KernelMessage::Cast { .. }
             | KernelMessage::Call { .. }
             | KernelMessage::Source(_))
-                if !state.deferred_mailbox.is_empty() || !state.behavior.accepts_mailbox() =>
+                if state.replacement.is_some()
+                    || !state.deferred_mailbox.is_empty()
+                    || !state.behavior.accepts_mailbox() =>
             {
                 state.deferred_mailbox.push_back(message);
                 schedule_deferred_mailbox(&myself, state)?;
@@ -581,7 +721,7 @@ where
             }
             KernelMessage::DrainMailbox => {
                 state.mailbox_drain_scheduled = false;
-                if !state.behavior.accepts_mailbox() {
+                if state.replacement.is_some() || !state.behavior.accepts_mailbox() {
                     return Ok(());
                 }
                 let Some(message) = state.deferred_mailbox.pop_front() else {
@@ -592,7 +732,174 @@ where
             message => message,
         };
         match message {
+            KernelMessage::AbortReplacement { reply } => {
+                if !state.behavior.replacement_staged() {
+                    let _ = reply.send(Err(KernelBehaviorError {
+                        detail: "actor is not a prepared replacement".into(),
+                    }));
+                    return Ok(());
+                }
+                let terminal = finish_actor(
+                    &myself,
+                    state,
+                    ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: "replacement preparation aborted".into(),
+                    },
+                )
+                .await;
+                let result = if state
+                    .terminal
+                    .cleanup()
+                    .is_some_and(|cleanup| cleanup.is_confirmed())
+                {
+                    Ok(())
+                } else {
+                    Err(KernelBehaviorError {
+                        detail: format!("prepared actor cleanup unconfirmed: {}", terminal.summary),
+                    })
+                };
+                let _ = reply.send(result);
+            }
+            KernelMessage::Replace { definition, reply } => {
+                if state.replacement.is_some() {
+                    let failure = match state.behavior.discard_replacement(definition).await {
+                        Ok(()) => crate::KernelInvocationFailure::Rejected {
+                            actor: state.context.identity,
+                            detail: "actor replacement is already in progress".into(),
+                        },
+                        Err(error) => crate::KernelInvocationFailure::Failed {
+                            actor: state.context.identity,
+                            detail: format!(
+                                "actor replacement is already in progress; rejected recipe cleanup unconfirmed: {error}"
+                            ),
+                        },
+                    };
+                    let _ = reply.send(Err(failure));
+                } else {
+                    match state.behavior.replace(&state.context, definition).await {
+                        Ok(successor) => {
+                            state.replacement = Some(PendingReplacement {
+                                successor,
+                                reply: Some(reply),
+                                shutdown_waiters: Vec::new(),
+                            })
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(crate::KernelInvocationFailure::Rejected {
+                                actor: state.context.identity,
+                                detail: error.detail,
+                            }));
+                        }
+                    }
+                }
+            }
+            KernelMessage::ReplacementFence => {
+                let Some(mut pending) = state.replacement.take() else {
+                    return Err(std::io::Error::other(
+                        "replacement fence has no prepared successor",
+                    )
+                    .into());
+                };
+                let successor_context = state
+                    .context
+                    .directory
+                    .context(pending.successor.identity())
+                    .ok_or_else(|| {
+                        std::io::Error::other("prepared successor lost its execution context")
+                    })?;
+                *state.context.child_admission_closed.write().await = true;
+                let mut children = state.context.children.lock();
+                let mut inherited = successor_context.children.lock();
+                for (id, child) in children.drain() {
+                    child
+                        .address()
+                        .get_cell()
+                        .link(successor_context.myself.get_cell());
+                    inherited.insert(id, child);
+                }
+                drop(inherited);
+                drop(children);
+                {
+                    let mut inherited = successor_context.forgotten_children.lock();
+                    *inherited = combine_cleanup(
+                        inherited.clone(),
+                        std::mem::replace(
+                            &mut *state.context.forgotten_children.lock(),
+                            crate::CleanupComponentOutcome::Confirmed,
+                        ),
+                    );
+                }
+                if let Err(error) = state
+                    .behavior
+                    .commit_replacement(&state.context, &successor_context)
+                {
+                    if let Some(reply) = pending.reply.take() {
+                        let _ = reply.send(Err(crate::KernelInvocationFailure::Failed {
+                            actor: state.context.identity,
+                            detail: error.detail,
+                        }));
+                    }
+                    state.replacement = Some(pending);
+                    return Ok(());
+                }
+                state
+                    .terminal
+                    .retain_successor(pending.successor.identity());
+                pending
+                    .successor
+                    .address()
+                    .send_message(KernelMessage::ActivateReplacement {
+                        backlog: std::mem::take(&mut state.deferred_mailbox),
+                        draining: !matches!(state.drain, DrainState::Open),
+                    })?;
+                let terminal = ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: format!("replaced by {:?}", pending.successor.identity()),
+                };
+                if let Some(parent) = state
+                    .context
+                    .supervisor_identity()
+                    .and_then(|parent| state.context.directory.context(parent))
+                {
+                    parent.children.lock().remove(&myself.get_id());
+                    myself.get_cell().unlink(parent.myself.get_cell());
+                }
+                publish_terminal(&state.terminal, &terminal);
+                state
+                    .behavior
+                    .replacement_retired(&state.context, &terminal);
+                for reply in pending.shutdown_waiters {
+                    let _ = reply.send(terminal.clone());
+                }
+                if let Some(reply) = pending.reply {
+                    let _ = reply.send(Ok(pending.successor));
+                }
+                myself.stop(Some(terminal.summary));
+                return Ok(());
+            }
+            KernelMessage::ActivateReplacement {
+                mut backlog,
+                draining,
+            } => {
+                backlog.append(&mut state.deferred_mailbox);
+                state.deferred_mailbox = backlog;
+                if draining {
+                    state.mailbox_admission.close();
+                    state.drain = DrainState::Draining;
+                }
+                match state.behavior.activate_replacement(&state.context).await {
+                    Ok(step) => finish_after_step(&myself, state, step).await,
+                    Err(error) => fail_actor(&myself, state, error.to_string()).await,
+                }
+            }
             KernelMessage::Drain { reply } => {
+                if state.replacement.is_some() {
+                    let _ = reply.send(Err(KernelBehaviorError {
+                        detail: "actor replacement is in progress".into(),
+                    }));
+                    return Ok(());
+                }
                 let result = state.behavior.begin_drain().and_then(|()| {
                     if !matches!(state.drain, DrainState::Open) {
                         return Ok(());
@@ -798,11 +1105,16 @@ where
                 }
             }
             KernelMessage::Shutdown { terminal, reply } => {
+                if let Some(replacement) = &mut state.replacement {
+                    replacement.shutdown_waiters.push(reply);
+                    return Ok(());
+                }
                 let terminal = finish_actor(&myself, state, terminal).await;
                 let _ = reply.send(terminal);
             }
         }
-        if matches!(state.drain, DrainState::Draining)
+        if state.replacement.is_none()
+            && matches!(state.drain, DrainState::Draining)
             && state.deferred_mailbox.is_empty()
             && state.behavior.accepts_mailbox()
             && state.terminal.get().is_none()
@@ -869,7 +1181,8 @@ fn schedule_deferred_mailbox<B>(
 where
     B: KernelBehavior,
 {
-    if state.terminal.get().is_none()
+    if state.replacement.is_none()
+        && state.terminal.get().is_none()
         && state.behavior.accepts_mailbox()
         && !state.deferred_mailbox.is_empty()
         && !state.mailbox_drain_scheduled
@@ -1169,6 +1482,7 @@ mod tests {
     }
 
     struct ProbeBehavior {
+        replacement_staged: bool,
         startup_gate: Option<(Arc<Notify>, Arc<Notify>)>,
         calls: Arc<Mutex<Vec<&'static str>>>,
         release_first: Arc<Notify>,
@@ -1179,6 +1493,25 @@ mod tests {
     }
 
     impl KernelBehavior for ProbeBehavior {
+        fn replacement_staged(&self) -> bool {
+            self.replacement_staged
+        }
+
+        fn activate_replacement<'a>(
+            &'a mut self,
+            _context: &'a KernelContext,
+        ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+            Box::pin(async move {
+                if !self.replacement_staged {
+                    return Err(KernelBehaviorError {
+                        detail: "probe is not staged".into(),
+                    });
+                }
+                self.replacement_staged = false;
+                self.mailbox_ready = true;
+                Ok(KernelStep::Continue(()))
+            })
+        }
         fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
             Ok(())
         }
@@ -1451,6 +1784,7 @@ mod tests {
         let child_exits = Arc::new(Mutex::new(Vec::new()));
         ProbeFixture {
             behavior: ProbeBehavior {
+                replacement_staged: false,
                 startup_gate: None,
                 calls: Arc::clone(&calls),
                 release_first: Arc::clone(&release),
@@ -1464,6 +1798,72 @@ mod tests {
             spawned_child,
             child_exits,
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_replacement_defers_shutdown_until_activation() {
+        let mut probe = behavior(false);
+        probe.behavior.replacement_staged = true;
+        probe.behavior.mailbox_ready = false;
+        let (actor, task) = spawn_local_actor(None, probe.behavior).await.unwrap();
+        let (reply, receive) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Shutdown {
+                terminal: ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "queued shutdown".into(),
+                },
+                reply: reply.into(),
+            })
+            .unwrap();
+        actor
+            .address()
+            .send_message(KernelMessage::ActivateReplacement {
+                backlog: VecDeque::new(),
+                draining: false,
+            })
+            .unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(2), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.kind, ActorExitKind::Cancelled);
+        task.await.unwrap();
+        assert!(matches!(
+            actor.terminal().cleanup().unwrap().realm,
+            crate::CleanupComponentOutcome::Unsupported
+        ));
+    }
+
+    #[tokio::test]
+    async fn prepared_replacement_abort_cleans_only_an_unactivated_actor() {
+        let (active, active_task) = spawn_local_actor(None, behavior(false).behavior)
+            .await
+            .unwrap();
+        assert!(active.abort_prepared_replacement().await.is_err());
+        assert!(active.terminal().get().is_none());
+        let mut probe = behavior(false).behavior;
+        probe.replacement_staged = true;
+        probe.mailbox_ready = false;
+        let (prepared, task) = spawn_local_actor(None, probe).await.unwrap();
+        prepared
+            .abort_prepared_replacement()
+            .await
+            .expect_err("generic probe cannot attest resident realm cleanup");
+        task.await.unwrap();
+        assert!(matches!(
+            prepared.terminal().cleanup().unwrap().realm,
+            crate::CleanupComponentOutcome::Unsupported
+        ));
+        active
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "test finished".into(),
+            })
+            .await
+            .unwrap();
+        active_task.await.unwrap();
     }
 
     #[tokio::test]
@@ -1895,6 +2295,10 @@ mod tests {
         .expect("second root");
         assert!(directory.resolve(owner.identity()).is_some());
         assert!(directory.resolve(sibling.identity()).is_some());
+        assert_eq!(
+            directory.context(owner.identity()).unwrap().identity(),
+            owner.identity()
+        );
         assert!(directory
             .resolve(crate::ActorRef {
                 incarnation: crate::Incarnation(42),
@@ -1915,6 +2319,10 @@ mod tests {
             .expect("spawn result");
         let child = first.spawned_child.lock().clone().expect("child");
         assert!(directory.resolve(child.identity()).is_some());
+        assert!(directory
+            .context(owner.identity())
+            .unwrap()
+            .owns_child(child.identity()));
         owner
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
@@ -1923,6 +2331,8 @@ mod tests {
             .await
             .expect("retire first");
         owner_task.await.expect("first task");
+        assert!(directory.context(owner.identity()).is_none());
+        assert!(directory.context(sibling.identity()).is_some());
         assert!(child.terminal().get().is_some());
         assert!(sibling.terminal().get().is_none());
         // Exact retired addresses retain their exits for late observers.
@@ -2095,7 +2505,9 @@ mod tests {
             .unwrap();
         assert!(!observed.cleanup.is_confirmed());
         assert_eq!(observed.cleanup.actor(), actor.identity());
-        context.directory.insert(actor.clone());
+        context
+            .directory
+            .insert(actor.clone(), std::sync::Weak::new());
         assert!(context.forget_terminal_actor(actor.identity()));
         assert!(context.children.lock().is_empty());
         assert!(

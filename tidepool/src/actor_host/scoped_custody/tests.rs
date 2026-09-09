@@ -10,6 +10,77 @@ struct Fixture {
     custody: Arc<ActorWorkspaceCustody>,
 }
 
+#[test]
+fn replacement_transfers_unlaunched_workspace_without_old_guard_release() {
+    let fixture = Fixture::new(901);
+    let successor = ActorRef::first(tidepool_actor::ActorId(902));
+    let bindings = fixture.custody.bindings.clone();
+    let principal = WorktreePrincipal::exact_actor("scope-test", 902, 1);
+    let transferred = fixture.custody.transfer_to(successor).unwrap();
+    assert!(fixture.custody.binding.lock().is_none());
+    assert!(fixture.custody.transfer_to(successor).is_err());
+    assert_eq!(
+        bindings.lock().active_for_agent(&principal),
+        Some(fixture.tree.id())
+    );
+    drop(fixture.custody);
+    assert_eq!(
+        bindings.lock().active_for_agent(&principal),
+        Some(fixture.tree.id())
+    );
+    transferred.actor_stopped(&ActorTerminal {
+        kind: ActorExitKind::Completed,
+        summary: "replacement finished".into(),
+    });
+    drop(transferred);
+    assert!(bindings.lock().current(fixture.tree.id()).is_none());
+}
+
+#[test]
+fn replacement_can_restore_original_workspace_owner_before_cutover() {
+    let fixture = Fixture::new(905);
+    let original = ActorRef::first(tidepool_actor::ActorId(905));
+    let successor = ActorRef::first(tidepool_actor::ActorId(906));
+    let bindings = fixture.custody.bindings.clone();
+    let transferred = fixture.custody.transfer_to(successor).unwrap();
+    let restored = transferred.transfer_to(original).unwrap();
+    drop(transferred);
+    drop(fixture.custody);
+    assert_eq!(
+        bindings.lock().current(fixture.tree.id()).unwrap().agent(),
+        &WorktreePrincipal::exact_actor("scope-test", 905, 1)
+    );
+    assert!(bindings
+        .lock()
+        .active_for_agent(&WorktreePrincipal::exact_actor("scope-test", 906, 1))
+        .is_none());
+    restored.actor_stopped(&ActorTerminal {
+        kind: ActorExitKind::Completed,
+        summary: "original owner finished".into(),
+    });
+    drop(restored);
+    assert!(bindings.lock().current(fixture.tree.id()).is_none());
+}
+
+#[test]
+fn replacement_cannot_transfer_workspace_with_uncertain_process_custody() {
+    let fixture = Fixture::new(903);
+    fixture.custody.process_may_exist();
+    let successor = ActorRef::first(tidepool_actor::ActorId(904));
+    assert!(fixture.custody.transfer_to(successor).is_err());
+    assert!(fixture.custody.binding.lock().is_some());
+    assert_eq!(
+        fixture
+            .custody
+            .bindings
+            .lock()
+            .current(fixture.tree.id())
+            .unwrap()
+            .agent(),
+        &WorktreePrincipal::exact_actor("scope-test", 903, 1)
+    );
+}
+
 impl Fixture {
     fn new(id: u64) -> Self {
         let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
@@ -37,10 +108,11 @@ impl Fixture {
             _runtime: runtime,
             tree,
             custody: Arc::new(ActorWorkspaceCustody {
+                runtime: "scope-test".into(),
                 workspace: None,
                 inheritance_notice: None,
                 bindings: Arc::new(Mutex::new(bindings)),
-                binding: Some(binding),
+                binding: Mutex::new(Some(binding)),
                 actor,
                 state: Mutex::new(CustodyState::default()),
             }),
@@ -183,6 +255,7 @@ fn scoped_custody_exact_claim_and_pre_spawn_failure() {
     let lease = Arc::get_mut(&mut fixture.custody)
         .unwrap()
         .binding
+        .get_mut()
         .take()
         .unwrap();
     lease.release(&mut fixture.custody.bindings.lock()).unwrap();

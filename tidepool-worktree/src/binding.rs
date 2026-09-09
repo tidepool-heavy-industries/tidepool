@@ -130,24 +130,12 @@ impl Binding {
     }
 }
 
-/// A non-`Clone` lease for exactly one `Active` row, returned by
-/// [`BindingTable::bind`] and consumed by [`Self::complete`]/[`Self::release`].
+/// Move-only custody of one active binding generation. Settlement consumes
+/// the receipt; transfer updates it to the successor's generation. A stale
+/// receipt cannot settle a later occupant of the same worktree.
 ///
-/// This is the whole fix for "`settle` accepts any `BindingState` as the
-/// requested terminal": there is no longer a way to settle a binding without
-/// first holding the receipt `bind` handed out for THAT row, and the receipt
-/// is consumed by value, so it can be spent at most once. It carries the
-/// worktree id and this bind's own in-memory GENERATION (never persisted —
-/// see [`BindingTable`]'s `generations` field) so a stale receipt from a
-/// settled binding can never be replayed against whatever occupies that
-/// worktree after a rebind: [`BindingTable::settle`] checks the generation
-/// still matches the CURRENT active row before mutating anything.
-///
-/// Deliberately has no `Drop` impl: a dropped-without-settling receipt leaves
-/// the row `Active` forever (until some later process notices and can never
-/// settle it either, for want of a receipt) rather than quietly recording a
-/// released binding. A panic must not falsely report a clean release — that
-/// is the lease principle this type exists to enforce.
+/// Dropping this receipt leaves its row active. Only explicit settlement can
+/// attest release; a panic or lost owner cannot manufacture cleanup evidence.
 #[derive(Debug)]
 pub struct ActiveBinding {
     worktree: WorktreeId,
@@ -213,6 +201,34 @@ pub struct BindingTable {
 }
 
 impl BindingTable {
+    /// Move a live lease to a replacement actor without opening an unbound
+    /// interval. Both history rows are published in the same atomic file write.
+    /// An uncertain write retains the receipt but fences all table authority.
+    pub fn transfer(
+        &mut self,
+        lease: &mut ActiveBinding,
+        successor: &AgentRef,
+        now_ms: i64,
+    ) -> Result<(), WorktreeError> {
+        let previous = self.active_index(lease)?;
+        let generation = self.next_generation;
+        self.next_generation += 1;
+        self.bindings[previous].state = BindingState::Released;
+        self.bindings.push(Binding::new(
+            lease.worktree.clone(),
+            successor.clone(),
+            BindingState::Active,
+            now_ms,
+        ));
+        self.generations.push(Some(generation));
+        lease.generation = generation;
+        if let Err(error) = self.persist(&lease.worktree) {
+            self.write_uncertain = true;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// The exact worktree currently owned by `agent`, if any. Actor admission
     /// uses this to resolve the typed `boundHead` placement without exposing
     /// filesystem paths or asking Haskell to rediscover custody. An uncertain
@@ -371,28 +387,9 @@ impl BindingTable {
     /// settling the NEW occupant. That case is a genuine invariant violation
     /// rather than a normal outcome (a live `ActiveBinding` is, by
     /// construction, the only receipt for its worktree until consumed — see
-    /// the type's docs) — reported via the existing `StorageFailure` variant
-    /// rather than a new one (`error.rs` is frozen).
+    /// the type's docs), reported as a storage invariant failure.
     fn settle(&mut self, lease: ActiveBinding, to: BindingTerminal) -> Result<(), WorktreeError> {
-        self.ensure_writable()?;
-        let idx = {
-            let generations = &self.generations;
-            self.bindings.iter().enumerate().rposition(|(i, b)| {
-                b.worktree() == &lease.worktree
-                    && b.state() == BindingState::Active
-                    && generations[i] == Some(lease.generation)
-            })
-        };
-        let Some(i) = idx else {
-            return Err(WorktreeError::StorageFailure {
-                path: self.path_for(&lease.worktree),
-                detail: format!(
-                    "settle: no Active binding for worktree {} matches bind-generation {} — \
-                     this receipt is stale (already settled, or superseded by a rebind)",
-                    lease.worktree, lease.generation
-                ),
-            });
-        };
+        let i = self.active_index(&lease)?;
         let previous = self.bindings[i].state();
         self.bindings[i].state = to.into();
         // Retain the previous Active diagnostic snapshot conservatively. This
@@ -404,6 +401,18 @@ impl BindingTable {
             return Err(e);
         }
         Ok(())
+    }
+
+    fn active_index(&self, lease: &ActiveBinding) -> Result<usize, WorktreeError> {
+        self.ensure_writable()?;
+        self.bindings.iter().enumerate().rposition(|(i, binding)| {
+            binding.worktree() == &lease.worktree
+                && binding.state() == BindingState::Active
+                && self.generations[i] == Some(lease.generation)
+        }).ok_or_else(|| WorktreeError::StorageFailure {
+            path: self.path_for(&lease.worktree),
+            detail: format!("no Active binding for worktree {} matches bind-generation {}; receipt is stale", lease.worktree, lease.generation),
+        })
     }
 
     fn ensure_writable(&self) -> Result<(), WorktreeError> {

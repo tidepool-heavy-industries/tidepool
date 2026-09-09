@@ -147,10 +147,22 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    Replace {
+        definition: crate::ActorReplacementDefinition,
+        reply: RpcReplyPort<Result<LocalActorRef, KernelInvocationFailure>>,
+    },
     Drain {
         reply: RpcReplyPort<Result<(), KernelBehaviorError>>,
     },
     DrainFence,
+    ReplacementFence,
+    AbortReplacement {
+        reply: RpcReplyPort<Result<(), KernelBehaviorError>>,
+    },
+    ActivateReplacement {
+        backlog: std::collections::VecDeque<KernelMessage>,
+        draining: bool,
+    },
     Source(crate::SourceDelivery),
     RouteReady {
         watch: crate::WatchId,
@@ -204,8 +216,16 @@ pub enum KernelMessage {
 impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Replace { .. } => formatter.write_str("Replace"),
             Self::Drain { .. } => formatter.write_str("Drain"),
             Self::DrainFence => formatter.write_str("DrainFence"),
+            Self::ReplacementFence => formatter.write_str("ReplacementFence"),
+            Self::AbortReplacement { .. } => formatter.write_str("AbortReplacement"),
+            Self::ActivateReplacement { backlog, draining } => formatter
+                .debug_struct("ActivateReplacement")
+                .field("backlog", &backlog.len())
+                .field("draining", draining)
+                .finish(),
             Self::Source(delivery) => formatter.debug_tuple("Source").field(delivery).finish(),
             Self::RouteReady { watch } => formatter.debug_tuple("RouteReady").field(watch).finish(),
             Self::SealHostedWork { .. } => formatter.write_str("SealHostedWork"),
@@ -287,9 +307,18 @@ impl MailboxAdmission {
         &self,
         address: &RactorRef<KernelMessage>,
     ) -> Result<(), ractor::MessagingErr<KernelMessage>> {
+        self.fence(address, KernelMessage::DrainFence)
+    }
+
+    fn fence(
+        &self,
+        address: &RactorRef<KernelMessage>,
+        fence: KernelMessage,
+    ) -> Result<(), ractor::MessagingErr<KernelMessage>> {
         let mut admission = self.0.lock();
+        address.send_message(fence)?;
         *admission = AdmissionState::Closed;
-        address.send_message(KernelMessage::DrainFence)
+        Ok(())
     }
 }
 
@@ -305,6 +334,29 @@ impl std::fmt::Debug for LocalActorRef {
 }
 
 impl LocalActorRef {
+    pub(crate) async fn abort_prepared_replacement(&self) -> Result<(), KernelBehaviorError> {
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::AbortReplacement {
+                reply: reply.into(),
+            })
+            .map_err(|error| KernelBehaviorError {
+                detail: format!("prepared actor {:?}: {error}", self.identity),
+            })?;
+        receive.await.map_err(|_| KernelBehaviorError {
+            detail: format!(
+                "prepared actor {:?} cleanup outcome unavailable",
+                self.identity
+            ),
+        })?
+    }
+    pub(crate) fn fence_replacement(&self) -> Result<(), KernelBehaviorError> {
+        self.admission
+            .fence(&self.address, KernelMessage::ReplacementFence)
+            .map_err(|error| KernelBehaviorError {
+                detail: error.to_string(),
+            })
+    }
     /// Close admission after behavior validation. This acknowledges the fence;
     /// the retained terminal reports completion after accepted work is handled.
     pub async fn drain(&self) -> Result<(), KernelInvocationFailure> {
@@ -316,6 +368,23 @@ impl LocalActorRef {
             return Ok(());
         }
         result
+    }
+
+    pub(crate) async fn replace(
+        &self,
+        definition: crate::ActorReplacementDefinition,
+    ) -> Result<Self, KernelInvocationFailure> {
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::Replace {
+                definition,
+                reply: reply.into(),
+            })
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+        receive.await.map_err(|_| KernelInvocationFailure::Failed {
+            actor: self.identity,
+            detail: "replacement outcome unavailable; inspect retained actor state before further action".into(),
+        })?
     }
 
     async fn request_drain(&self) -> Result<(), KernelInvocationFailure> {

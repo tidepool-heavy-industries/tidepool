@@ -1,4 +1,4 @@
-//! Capture of one public Haskell `startActor` suspension.
+//! Capture of a public Haskell actor launch or replacement entry.
 //!
 //! The child entry is an existentially row-typed Haskell closure. Rust never
 //! decodes that row: it claims the request's field-1 live payload and later
@@ -125,6 +125,11 @@ pub struct ResidentActorStart {
     pub(crate) child: CapturedChildLaunch,
 }
 
+/// Rooted replacement recipe admitted by the controlling resident actor.
+pub struct ActorReplacementDefinition {
+    pub(crate) child: CapturedChildLaunch,
+}
+
 pub(crate) struct CapturedChildLaunch {
     pub descriptor: ActorDescriptor,
     pub entry: RootCustody,
@@ -197,6 +202,13 @@ impl ResidentActorStart {
                         Some(crate::ForkGroupId(group)),
                     )
                 }
+                ActorReq::ActorReplaceWith(_, _, label, profile, worktrees) => (
+                    label,
+                    ActorLaunchRoleWire::ActorInheritedRole,
+                    profile,
+                    worktrees,
+                    None,
+                ),
                 _ => return Err(ActorStartCaptureError::UnexpectedRequest),
             };
         Self::capture_decoded(

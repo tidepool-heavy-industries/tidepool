@@ -433,6 +433,28 @@ impl Drop for RequestCleanupGuard {
 }
 
 impl RequestRegistry {
+    /// Replacement moves request/watch custody, not the immutable actor a
+    /// request was originally submitted to. Existing handles keep their IDs.
+    pub(crate) fn transfer_owner(&self, predecessor: ActorRef, successor: &crate::LocalActorRef) {
+        let mut state = self.state.lock();
+        for record in state
+            .requests
+            .values_mut()
+            .filter(|record| record.owner == predecessor)
+        {
+            record.owner = successor.identity();
+        }
+        for (id, watch) in state
+            .watches
+            .iter_mut()
+            .filter(|(_, watch)| watch.owner == predecessor)
+        {
+            watch.owner = successor.identity();
+            if let Some(route) = &mut watch.route {
+                route.transfer_owner(successor.clone(), *id);
+            }
+        }
+    }
     pub(crate) fn publish_progress(
         &self,
         target: ActorRef,

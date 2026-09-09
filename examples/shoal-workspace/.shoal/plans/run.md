@@ -33,6 +33,9 @@ the current plan when it supplies one. Otherwise bind `plan`, `source`, `outcome
 plan path, exact committed Git hash, owned result, rationale, owned paths,
 acceptance and incorporated decisions. The text fields are Text; paths and
 decisions are lists. Do not put an explanatory sentence in `source`.
+Bind `onQuestions` to the small routing policy from
+[coordination.md](coordination.md#independent-progress-without-relay-turns): it
+handles changed questions locally or sends consequential deltas to the Sol owner.
 
 ```haskell
 let Right campaign = campaignLabel "current-goal"
@@ -44,11 +47,11 @@ work <- unfold group (childWithProgress @Attention @Delivery (withContext (selec
 let (lead, questions) = work
 let Right resultLabel = watchLabel "component-ready"
 resultReady <- watch resultLabel (awaitSettledFork lead)
-let Right attentionLabel = watchLabel "component-questions"
-attentionReady <- watch attentionLabel (awaitProgressAfter questions (ProgressCursor 0))
+attention <- followAttention questions onQuestions
 ```
 
-Continue the parent's independent engineering after registering watches. End the
+Continue the parent's independent engineering after attaching the collector and
+the finite result watch. End the
 turn when progress depends on their results. A fresh label is needed when prior
 branches reserve the example names. This uses ordinary supervised lifetime; a root
 can deliberately choose SwarmOwned for selected leads that should outlive it.

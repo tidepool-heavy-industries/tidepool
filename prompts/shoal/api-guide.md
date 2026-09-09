@@ -200,6 +200,10 @@ one committed state and one message, returning `(reply, nextState)` in `Eff`.
 Attach fixed sources with `Actor.withSources`: `Actor.progressSource updates onProgress`
 captures current progress and follows every later publication and closure;
 `Actor.settlementSource response onSettlement` delivers the retained terminal outcome.
+`Actor.lifecycleSource handle onLifecycle` captures the actor's current lifecycle
+and follows later transitions: `ActorLive`, `ActorPaused detail`, `ActorFinished detail`,
+`ActorFailed detail`, or `ActorCancelled detail` (qualified with `Actor`). Live is
+not application readiness; exit is not cleanup proof or product acceptance.
 Each pure mapping constructs a message of the actor's protocol. Source messages,
 `Actor.cast handle message`, and `Actor.call handle message` share one sequential
 mailbox. `call` returns the protocol's result type. No model rearming or batching.
@@ -212,7 +216,12 @@ Keep application deduplication and wake decisions in Haskell. The curated
 streams, with `AttentionSnapshot` for deliberate inspection.
 
 Handler failure pauses execution, retains committed state/input/queued work, and
-messages the supervisor. Do not recreate and replay an uncertain effect.
+messages the supervisor. Repair with `Actor.replaceActor handle newDefinition`:
+the definition must have the same state and protocol types. It receives committed
+state and queued work, keeping source positions and skipping the failed input.
+Initialization does not rerun; the returned handle names the successor and the
+old handle stays stale. To change sources, finish/stop the actor and create another.
+Do not recreate and replay an uncertain effect.
 Source completion leaves the actor alive. `Actor.drainActor handle` closes
 admission and lets accepted messages finish; `Actor.awaitExit handle` explicitly
 waits for its final state. Whole-run recovery is from Git checkpoints.

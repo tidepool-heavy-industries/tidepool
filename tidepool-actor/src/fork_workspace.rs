@@ -38,6 +38,14 @@ pub struct ForkWorkspaceAdmissionError {
 /// Legacy tmux cannot prove exact termination. A service namespace witness
 /// alone also cannot establish host HTTP/resident-work quiescence.
 pub trait ForkWorkspaceCustody: std::any::Any + Send + Sync {
+    fn transfer_to(
+        &self,
+        _successor: ActorRef,
+    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        Err(ForkWorkspaceAdmissionError {
+            detail: "workspace owner does not support custody transfer".into(),
+        })
+    }
     /// Observe the first terminal; not-completed must not mean still active.
     fn actor_stopped(&self, terminal: &crate::ActorTerminal);
     /// Irreversibly fence release before process launch may have external effects.

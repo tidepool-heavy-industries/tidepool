@@ -123,11 +123,14 @@ pub use runtime_observation::{
     ProviderUsageSample,
 };
 pub use start::{
-    ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError,
-    ForkContext, ForkEffort, ResidentActorStart, WorkerLaunchPreview, WorkerLaunchRequest,
-    WorkerLaunchResolver, WorkerLifetime,
+    ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
+    ActorStartCaptureError, ForkContext, ForkEffort, ResidentActorStart, WorkerLaunchPreview,
+    WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime,
 };
-pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
+pub use termination::{
+    ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,
+    ActorTerminal, RetainedActorExit,
+};
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};
 pub use wait::{actor_terminal_value, ActorWaitError};

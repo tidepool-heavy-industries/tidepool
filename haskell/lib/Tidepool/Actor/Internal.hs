@@ -16,7 +16,7 @@ module Tidepool.Actor.Internal
   , ReadOnlyEffects
   , ReadWriteEffects
   , ShutdownReason (..)
-  , ActorDefinition
+  , ActorDefinition (..)
   , pattern ActorDefinition
   , label
   , effectProfile
@@ -89,6 +89,7 @@ data ActorDefinition startup (protocol :: Type -> Type) exit where
        , internalOnShutdown :: ShutdownReason -> Eff actorEffs ()
        , internalLaunchWorktrees :: [Text]
        , internalSources :: [Source protocol]
+       , internalReplacement :: Maybe (exit -> Eff actorEffs exit)
        }
     -> ActorDefinition startup protocol exit
 
@@ -125,6 +126,7 @@ pattern ActorDefinition
         , internalOnShutdown = onShutdown
         , internalLaunchWorktrees = []
         , internalSources = []
+        , internalReplacement = Nothing
         }
 
 {-# COMPLETE ActorDefinition #-}

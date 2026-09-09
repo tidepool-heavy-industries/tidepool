@@ -62,7 +62,7 @@ pub(super) fn reserve(
         if custody.actor != actor {
             return Err(ScopedClaimError::WrongActor);
         }
-        if custody.binding.is_none() {
+        if custody.binding.lock().is_none() {
             return Err(ScopedClaimError::MissingLease);
         }
         if !matches!(state.launch, LaunchCustody::Unclaimed) {

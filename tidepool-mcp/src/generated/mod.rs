@@ -141,6 +141,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorTryCallWith",
             "ActorCastWith",
             "ActorDrainWith",
+            "ActorReplaceWith",
         ],
     ),
     (
@@ -152,6 +153,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorContinueWith",
             "ActorInstallProgressSourceWith",
             "ActorInstallSettlementSourceWith",
+            "ActorInstallLifecycleSourceWith",
             "ActorSourceInputWith",
         ],
     ),
