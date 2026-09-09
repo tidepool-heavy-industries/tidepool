@@ -1,31 +1,48 @@
 # Next run: resume the consolidated trees on main
 
-The previous coordinator finished wind-down. Both lane requests and its own request
-settled partial/Blocked; no engineering request needs to be kept alive to recover
-committed work. The latest coordinator scrollback confirms the final state, which
-supersedes older in-progress sentences inside the saved handoffs.
+The September 9 routing run ended in a machine OOM. Its committed checkpoints
+and recovered dirty files are preserved below. Live TUI/Haskell state is not
+recoverable from these commits. Select the checked resource-isolating runner
+before the next run.
 
 ## Starting source
 
 | Input | Commit |
 |---|---|
-| Applications checkpoint | `326255bc32f589f9352c181d3245812f9e630862` |
-| Engine checkpoint | `1aabf25cb9393817c0c11d34595b92c96d669b8b` |
-| Combined coordinator handoff | `e0c37ff398def968e57350f8538b7990a8f7ee87` |
-| Applications' external Codex candidate | `72f7b60008452a1f63c5cb92f42c731dc67fbb49` |
+| Latest coordinator/engine checkpoint | `b1056582cf2be5be1bd6f2d976cf55a82d62ec41` |
+| Applications checkpoint | `97802912488b3aa90efcd15ce29a2033aa5972bb` |
+| Recovered applications working files, parented to that checkpoint | `3bed6d67e6a352cd14eda4b99c3e5320f2758f73` |
+| Recovered external Codex working files | `d73bdc83e0f6b67caa8184d1ded70a0deb043f43` (parent `3fc507260a16dc46feb9816f2f062e8cd2d85348`) |
+| Retained M2 root integration | `44518ae3b3dc794be57d7684926c835e8c32b718` |
+| Retained major-collector candidate | `03418804c15d54714f37ebc75ed950257e20cdb4` |
+| Retained A7 repair candidate | `78a77c3c3412904bd05bd81e809ae3f8bcf4be16` |
 
-Read `plans/parallel-dogfood/next-wave/coordinator-partial-checkpoint.md` and the two
-lane handoffs at the combined commit using `git show`. These consolidated commits
-are the integration inputs; leaf hashes are provenance, not a reconstruction list.
-Retained failed/uncertain resources remain separate from accepted product source.
+Recovery branches in the owning repositories are
+`recovery/resource-restart-20260909/applications` and
+`recovery/resource-restart-20260909/codex`. These preserve bytes, not acceptance.
+Inspect the handoffs at the named commits; incorporate candidates only after
+checking their actual owning defects and integration requirements. The earlier
+`e0c37ff3` wave is an ancestor/provenance record, not the next run's baseline.
+
+The local evidence archive is
+`/home/inanna/dev/tidepool/target/dogfood-routing-20260909/`: `crash-panes/`,
+`oom-kernel.log`, and `recovery/` retain the terminal capture, patches, original
+files and `committed-recovery.json`. Original dirty checkouts remain untouched.
+
+Main `61d6c0b41` imports the supervisor/resource slice and pins native
+`fe15831c8a22c0d1b8d78d5ce55b7aa5fc3fa666`. Preserve those owners during
+reconciliation; do not reintroduce the old direct pane launch or omit command
+admission. Full A5 settlement, native delivery/completion and engine changes
+remain product-branch work. See [slice acceptance](../../next/command-resource-acceptance.md).
 
 The launch record selects current **main** for the running harness and its frozen
 prompt/Haskell package. It includes the routing improvements from `6b502116` and
-explicitly unbounded default concurrency. The running native Codex remains the
+no actor-count cap; memory headroom gates actor starts and two bounded command
+allocations gate builds/tests. The running native Codex remains the
 main pin, independently of the applications candidate above.
 
 Before implementation forks, each Sol lead creates a new continuation branch from
-its lane checkpoint and **rebases it onto the launch-recorded main commit**. Preserve
+its recovered lane checkpoint and **rebases it onto the launch-recorded main commit**. Preserve
 the original checkpoint refs and existing worktrees. Preserve meaningful merges;
 resolve conflicts against current owners and keep main's orchestration package.
 Record the resulting head and check the affected integration seams. Do the same

@@ -1,7 +1,8 @@
 # Next wave: two recursive engineering trees
 
-The previous wave has finished. [resume.md](resume.md) supplies the consolidated
-inputs, required rebase onto main, current first work and settled human decisions.
+The previous run ended in an OOM. [resume.md](resume.md) supplies the preserved
+inputs, resource-isolating main baseline, required rebase, first work and settled
+human decisions.
 Existing A0–A8 and M0–M7 designs own product semantics and acceptance.
 This directory owns execution shape; it does not waive unverified product gates.
 
