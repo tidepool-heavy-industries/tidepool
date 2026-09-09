@@ -59,6 +59,8 @@ pub enum KernelCallFailure {
     TargetExited(ActorRef),
     #[error("target actor {0:?} is unavailable")]
     TargetUnavailable(ActorRef),
+    #[error("target actor {0:?} has closed mailbox admission")]
+    MailboxClosed(ActorRef),
     #[error(
         "call from {caller:?} in session {caller_session} to {target:?} in session {target_session} crosses a machine boundary"
     )]
@@ -257,6 +259,23 @@ pub struct LocalActorRef {
     identity: ActorRef,
     address: RactorRef<KernelMessage>,
     terminal: RetainedActorExit,
+    admission: MailboxAdmission,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MailboxAdmission(std::sync::Arc<parking_lot::Mutex<AdmissionState>>);
+
+#[derive(Default)]
+enum AdmissionState {
+    #[default]
+    Open,
+    Closed,
+}
+
+impl MailboxAdmission {
+    pub(crate) fn close(&self) {
+        *self.0.lock() = AdmissionState::Closed;
+    }
 }
 
 impl std::fmt::Debug for LocalActorRef {
@@ -282,6 +301,15 @@ impl LocalActorRef {
         terminal: RetainedActorExit,
         incarnation: crate::Incarnation,
     ) -> Self {
+        Self::with_admission(address, terminal, incarnation, MailboxAdmission::default())
+    }
+
+    pub(crate) fn with_admission(
+        address: RactorRef<KernelMessage>,
+        terminal: RetainedActorExit,
+        incarnation: crate::Incarnation,
+        admission: MailboxAdmission,
+    ) -> Self {
         Self {
             identity: ActorRef {
                 id: crate::ActorId(address.get_id().pid()),
@@ -289,7 +317,46 @@ impl LocalActorRef {
             },
             address,
             terminal,
+            admission,
         }
+    }
+
+    /// Admission and queue insertion share the close fence. Accepted payloads
+    /// belong to the existing Ractor mailbox even while execution is paused.
+    fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
+        let admission = self.admission.0.lock();
+        if matches!(*admission, AdmissionState::Closed) {
+            return Err(KernelCallFailure::MailboxClosed(self.identity));
+        }
+        self.address
+            .send_message(message)
+            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+    }
+
+    pub fn cast(&self, sender: ActorRef, request: MailboxValue) -> Result<(), KernelCallFailure> {
+        self.admit_mailbox(KernelMessage::Cast { sender, request })
+    }
+
+    pub(crate) fn source(&self, delivery: crate::SourceDelivery) -> Result<(), KernelCallFailure> {
+        self.admit_mailbox(KernelMessage::Source(delivery))
+    }
+
+    pub async fn call(
+        &self,
+        caller: ActorRef,
+        ancestry: CallAncestry,
+        request: MailboxValue,
+    ) -> KernelCallReply {
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.admit_mailbox(KernelMessage::Call {
+            caller,
+            ancestry,
+            request,
+            reply: reply.into(),
+        })?;
+        receive
+            .await
+            .map_err(|_| KernelCallFailure::TargetExited(self.identity))?
     }
 
     #[must_use]

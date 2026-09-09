@@ -1004,20 +1004,8 @@ where
             .await
             .map_err(ResidentCallError::Runtime)?;
         target_ref
-            .address()
-            .call(
-                |reply| KernelMessage::Call {
-                    caller: context.actor,
-                    ancestry: ancestry.clone(),
-                    request,
-                    reply,
-                },
-                None,
-            )
+            .call(context.actor, ancestry.clone(), request)
             .await
-            .map_err(|_| ResidentCallError::Call(KernelCallFailure::TargetExited(target)))?
-            .success_or_else(|| KernelCallFailure::TargetExited(target))
-            .map_err(ResidentCallError::Call)?
             .map_err(ResidentCallError::Call)
     }
 
@@ -1298,17 +1286,9 @@ where
                         target_context.placement.resource_scope,
                     )
                     .await?;
-                target_ref
-                    .address()
-                    .send_message(KernelMessage::Cast {
-                        sender: context.actor,
-                        request,
-                    })
-                    .map_err(|_| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            KernelCallFailure::TargetExited(target).to_string(),
-                        )
-                    })?;
+                target_ref.cast(context.actor, request).map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                })?;
                 self.environment
                     .runner
                     .resume_unit(context.clone(), continuation)

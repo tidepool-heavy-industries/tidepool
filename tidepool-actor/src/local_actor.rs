@@ -224,11 +224,13 @@ impl KernelContext {
             accounted: false,
         };
         let terminal = RetainedActorExit::new();
+        let mailbox_admission = crate::kernel::MailboxAdmission::default();
         let arguments = LocalActorArguments {
             behavior,
             terminal: terminal.clone(),
             directory: self.directory.clone(),
             incarnation: self.identity.incarnation,
+            mailbox_admission: mailbox_admission.clone(),
         };
         let spawned = match lifetime {
             crate::WorkerLifetime::ParentOwned => {
@@ -255,7 +257,12 @@ impl KernelContext {
             }
         };
         drop(task);
-        let child = LocalActorRef::new_in_incarnation(address, terminal, self.identity.incarnation);
+        let child = LocalActorRef::with_admission(
+            address,
+            terminal,
+            self.identity.incarnation,
+            mailbox_admission,
+        );
         if lifetime == crate::WorkerLifetime::ParentOwned {
             self.children
                 .lock()
@@ -445,6 +452,7 @@ pub struct LocalActorArguments<B> {
     /// with the host epoch prevents an old exact handle from addressing a new
     /// actor that happens to receive the same process ID.
     pub incarnation: crate::Incarnation,
+    pub(crate) mailbox_admission: crate::kernel::MailboxAdmission,
 }
 
 #[derive(Default)]
@@ -456,6 +464,7 @@ enum HostedAdmission {
 }
 
 pub struct LocalActorState<B> {
+    mailbox_admission: crate::kernel::MailboxAdmission,
     hosted_admission: HostedAdmission,
     context: KernelContext,
     behavior: B,
@@ -492,6 +501,7 @@ where
             )),
         };
         let mut state = LocalActorState {
+            mailbox_admission: arguments.mailbox_admission,
             context,
             behavior: arguments.behavior,
             terminal: arguments.terminal,
@@ -502,10 +512,11 @@ where
         state
             .context
             .directory
-            .insert(LocalActorRef::new_in_incarnation(
+            .insert(LocalActorRef::with_admission(
                 state.context.myself.clone(),
                 state.terminal.clone(),
                 state.context.identity.incarnation,
+                state.mailbox_admission.clone(),
             ));
         match state.behavior.start(&state.context).await {
             Ok(KernelStep::Continue(())) => {}
@@ -852,6 +863,7 @@ where
     B: KernelBehavior,
 {
     let terminal = RetainedActorExit::new();
+    let mailbox_admission = crate::kernel::MailboxAdmission::default();
     let (address, task) = Actor::spawn(
         name,
         LocalActor::<B>(PhantomData),
@@ -860,11 +872,12 @@ where
             terminal: terminal.clone(),
             directory,
             incarnation,
+            mailbox_admission: mailbox_admission.clone(),
         },
     )
     .await?;
     Ok((
-        LocalActorRef::new_in_incarnation(address, terminal, incarnation),
+        LocalActorRef::with_admission(address, terminal, incarnation, mailbox_admission),
         task,
     ))
 }
@@ -942,6 +955,7 @@ where
     // Serialized mailbox execution closes completion admission here: queued
     // completion cannot run across this snapshot or after stopping the actor.
     state.hosted_admission = HostedAdmission::Closing;
+    state.mailbox_admission.close();
     // Wait for admitted startup to register, then permanently reject creation,
     // including through cloned contexts and shutdown hooks.
     *state.context.child_admission_closed.write().await = true;
@@ -1421,6 +1435,45 @@ mod tests {
         assert_eq!(shutdown_rx.await.expect("shutdown reply"), terminal);
         task.await.expect("actor task");
         assert_eq!(actor.terminal().wait().await, terminal);
+    }
+
+    #[tokio::test]
+    async fn mailbox_admission_is_shared_with_shutdown_and_releases_rejected_inputs() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let handle = actor.clone();
+        let caller = ActorRef::first(crate::ActorId(99));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let reply = handle
+            .call(
+                caller,
+                crate::CallAncestry::begin(caller),
+                MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+            )
+            .await
+            .unwrap();
+        drop(reply);
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert_eq!(
+            handle.cast(
+                caller,
+                MailboxValue::probe(SessionId(1), Arc::clone(&dropped))
+            ),
+            Err(KernelCallFailure::MailboxClosed(actor.identity()))
+        );
+        assert!(matches!(handle.call(
+            caller,
+            crate::CallAncestry::begin(caller),
+            MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+        ).await, Err(KernelCallFailure::MailboxClosed(target)) if target == actor.identity()));
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

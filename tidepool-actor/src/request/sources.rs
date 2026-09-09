@@ -4,7 +4,7 @@ use super::{
     OwnerState, ProgressSnapshot, ReplyError, RequestId, RequestRecord, RequestRegistry,
     ResponseFailure, TargetState,
 };
-use crate::{ActorRef, KernelMessage, LocalActorRef};
+use crate::{ActorRef, LocalActorRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestSourceKind {
@@ -47,12 +47,11 @@ impl RequestSourceConnection {
         if !self.closed
             && self
                 .recipient
-                .address()
-                .send_message(KernelMessage::Source(SourceDelivery {
+                .source(SourceDelivery {
                     slot: self.slot,
                     request: self.request,
                     event,
-                }))
+                })
                 .is_err()
         {
             self.closed = true;
@@ -170,6 +169,7 @@ impl RequestRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KernelMessage;
     use ractor::{Actor, ActorProcessingErr};
     use tokio::sync::mpsc;
 
