@@ -5,6 +5,27 @@ Read [resume.md](resume.md) and its consolidated M1/M2 handoff, then design §1,
 and reviewed M2 repairs are starting assets. Finish only their documented remaining
 joins/checks. The first work is the actual remaining M1 boundary, not replaying M0.
 
+## Required starting-source reconciliation
+
+Before implementation children fork, create a new engine continuation branch from
+its preserved checkpoint in [resume.md](resume.md) and rebase it onto the **exact
+latest main commit selected for this launch**, the same baseline used by the
+applications lane. Preserve original checkpoint refs, meaningful merges and dirty
+checkouts; do not continue implementation from the old swarm baseline.
+
+Retain main's supervisor/resource mechanisms and current prompts/Haskell helpers.
+Inventory the separate M2 root and major-collector candidates before incorporating
+them; the recovered combined checkpoint is not proof that every candidate landed.
+Record the rebased head, verify launch main is its ancestor, and run the first
+focused owning check before publishing a completed warm build snapshot for forks.
+
+Keep engine implementation on the product branch and the running swarm on the
+checked main package. Coordinate the recovery/session contract with applications;
+its A7 candidate must consume checked engine disposition rather than overwrite
+engine-owned lifecycle semantics. The coordinator owns shared locks, fingerprints,
+generated artifacts and candidate pins. Rebase once for this launch baseline;
+subsequent main advances require explicit reconciliation, not mid-wave tool reload.
+
 ```mermaid
 flowchart TD
     L[Sol engine lead: semantic joins and production cutover]
