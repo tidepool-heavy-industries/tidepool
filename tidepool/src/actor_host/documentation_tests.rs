@@ -1118,7 +1118,7 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
 }
 
 #[tokio::test]
-async fn attention_actor_consumes_later_progress_without_rearming() {
+async fn work_actor_consumes_later_progress_without_rearming() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".shoal").unwrap();
     campaign
@@ -1150,21 +1150,18 @@ async fn attention_actor_consumes_later_progress_without_rearming() {
     ] {
         committed(
             producer.policy.as_ref(),
-            &format!("reportProgress {questions}\npollReply sessionReply"),
+            &format!("reportProgress (WorkProgress [] {questions})\npollReply sessionReply"),
         )
         .await;
-        let observed = committed(root.as_ref(), "view <- Actor.call forwarding AttentionSnapshot\ninspectFull (map (map questionKey . attentionQuestions) view)\nActor.call wakes (RoutingCount 0 id)").await;
+        let observed = committed(root.as_ref(), "view <- Actor.call forwarding WorkSnapshot\ninspectFull (map (map questionKey . workQuestions . sourceProgress) (collectedWork view))\nActor.call wakes (RoutingCount 0 id)").await;
         assert_eq!(observed["items"][1]["output"], expected, "{observed}");
         assert_eq!(observed["items"][2]["output"], effects, "{observed}");
     }
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let closed = committed(root.as_ref(), "view <- Actor.call forwarding AttentionSnapshot\ninspectFull (map attentionStatus view)\nActor.drainActor forwarding\nActor.awaitExit forwarding").await;
-    assert_eq!(
-        closed["items"][1]["output"], "[AttentionClosed]",
-        "{closed}"
-    );
+    let closed = committed(root.as_ref(), "view <- Actor.call forwarding WorkSnapshot\ninspectFull (map sourceStatus (collectedWork view))\nActor.drainActor forwarding\nActor.awaitExit forwarding").await;
+    assert_eq!(closed["items"][1]["output"], "[WorkClosed]", "{closed}");
     assert!(
         closed["items"][3]["output"]
             .as_str()
@@ -1221,7 +1218,7 @@ async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() 
 async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     let campaign = workspace_campaign().await;
     let policy = campaign.root_installation.policy.as_ref();
-    let result = committed(policy, "observed <- snapshot\ninspectFull (swarmUsage observed)\n:type (implement, reviewCandidate, reviewAgain, repair, withDecision, followAttention)").await;
+    let result = committed(policy, "observed <- snapshot\ninspectFull (swarmUsage observed)\n:type (implement, reviewCandidate, reviewAgain, repair, withDecision, followWork)").await;
     assert!(
         result["items"][1]["output"]
             .as_str()
@@ -2436,4 +2433,116 @@ async fn attention_actor_recipe_retains_independent_sources_through_closure() {
     crate::shoal::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn work_router_queries_receipts_as_the_issuing_actor() {
+    let mut campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("examples/shoal-workspace");
+            crate::shoal::workspace::copy_authored(&package, &config.workspace).unwrap();
+            config.workspace_inputs = Some(
+                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                    .unwrap(),
+            );
+        },
+    )
+    .await;
+    let root = campaign.root_installation.policy.clone();
+    committed(root.as_ref(), include_str!("work_notification.hs")).await;
+    let source = match campaign.deployments.recv().await.unwrap() {
+        LocalResidentDeployment::PolicyInstalled(source) => source,
+        _ => panic!("expected the progress source"),
+    };
+    match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        LocalResidentDeployment::SessionReady { .. } => {}
+        _ => panic!("expected the source request activation"),
+    }
+    let publisher = source.policy.clone();
+    let publication = tokio::spawn(async move {
+        committed(publisher.as_ref(),
+            "reportProgress (WorkProgress [] [Question \"decision\" (DesignQuestion \"plans/test.md\" \"candidate\" \"choose the boundary\" [] [] [])])"
+        ).await
+    });
+    let message = match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        LocalResidentDeployment::NotificationSend(message) => message,
+        _ => panic!("expected the router's native message"),
+    };
+    let sender = message.owner();
+    assert_ne!(sender, campaign.actor.identity());
+    assert_eq!(message.target(), campaign.actor.identity());
+    let directory = tempfile::tempdir().unwrap();
+    let inbox = ActorInbox::open(
+        directory.path().join("rows"),
+        directory.path().join("cursor"),
+    )
+    .unwrap();
+    let key = "work-router-inbox";
+    admit_notification(&message, key.into(), &inbox);
+    publication.await.unwrap();
+    let wrong_owner = committed(root.as_ref(),
+        "view <- Actor.call collector WorkSnapshot\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\npollNotification receipt"
+    ).await;
+    assert!(
+        wrong_owner.to_string().contains("NotificationUnauthorized"),
+        "{wrong_owner}"
+    );
+    let policy = root.clone();
+    let query = tokio::spawn(async move {
+        committed(
+            policy.as_ref(),
+            "Actor.call collector (WorkNotification receipt)",
+        )
+        .await
+    });
+    let poll = match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        LocalResidentDeployment::NotificationPoll(poll) => poll,
+        _ => panic!("expected a receipt query without another message"),
+    };
+    assert_eq!(poll.owner(), sender);
+    let observed = observe_notification_receipt(&poll, campaign.actor.identity(), key, &inbox);
+    assert_eq!(observed, Ok(tidepool_actor::NotificationState::Accepted));
+    poll.observed(observed);
+    let result = query.await.unwrap();
+    assert!(
+        result.to_string().contains("NotificationAccepted"),
+        "{result}"
+    );
+    let replaced = committed(root.as_ref(),
+        "collector <- Actor.replaceActor collector (workDefinition sources (notifyWork owner (workMessage id)))\nActor.call collector (WorkNotification receipt)"
+    ).await;
+    assert!(
+        replaced.to_string().contains("NotificationUnauthorized"),
+        "{replaced}"
+    );
+    let retained = committed(
+        root.as_ref(),
+        "inspectFull . length . workNotices <$> Actor.call collector WorkSnapshot",
+    )
+    .await;
+    assert_eq!(retained["items"][0]["output"], "1", "{retained}");
+    committed(
+        root.as_ref(),
+        "Actor.drainActor collector\nActor.awaitExit collector",
+    )
+    .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }

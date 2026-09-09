@@ -10,17 +10,17 @@ joined <- watch joinLabel $
 ```
 
 A combined watch is appropriate when the next decision needs both results.
-For independently integrable work, register one watch per branch so a ready
-candidate does not wait behind its sibling.
+For independently integrable work, a wave router can consume each settlement
+as it arrives; a finite single-result watch also suits an isolated obligation.
 
 End the model response normally. When the watch becomes terminal, Tidepool
 reactivates the actor. `pollWatch joined` returns its retained typed observation.
 
 For ongoing progress, use a persistent Haskell actor with `progressSource`.
 It captures current state and then receives every publication and closure in
-order. The curated `Project.Work.followAttentionSources` collects named streams,
-retains unresolved questions independently and invokes an authored sink on changed
-state. The sink chooses meaningful messages; no model rearms watches or relays
+order. The curated `Project.Routing.followWork` collects named progress/response pairs, retains
+evidence, per-source questions and terminal receipts, and invokes an authored sink
+on meaningful changes. The sink chooses meaningful messages; no model rearms watches or relays
 routine progress. Source completion does not terminate the collector.
 
 `Await a` is the pure dependency description; `Watch a` is its registered

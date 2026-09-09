@@ -19,8 +19,8 @@ Bind checked decisions to your resulting integration source before withDecision;
 otherwise its taskSource replacement can launch a child from the older branch.
 Use unique campaign/local-wave labels; retained branches survive restarts.
 
-Commission substantial leads with childWithProgress @Attention @Delivery and
-register result and question watches. Each lead owns a component and its local
+Commission substantial leads with childWithProgress @WorkProgress @Delivery and
+attach their response/progress pairs to one followWork router. Each lead owns a component and its local
 integration loops, including implementation, acceptance and repairs. Favor broad
 ready frontiers after their shared prerequisites are met. Let unrelated branches
 advance at different rates; dependency edges determine joins. Establish root-owned
@@ -34,8 +34,8 @@ restart. Preparation can be accepted as preparation; it does not close the overa
 feature. Run the final combined boundaries on integrated source; each leaf needs
 its focused checks, not repeated broad batteries.
 
-On watch wake, poll the named retained handle and act on new information. Rearm
-question watches from the observed cursor. Resolve ordinary cross-lane choices;
+On a message, inspect the local wave snapshot and act on the changed information.
+The router follows progress and results without rearming. Resolve ordinary cross-lane choices;
 consult a fresh Astra for a bounded hard technical question. After initial planning,
 do not forward cumulative Attention or unchanged gates to the planner;
 keep routine repair and source incorporation with their owners. Inspect failed

@@ -161,7 +161,7 @@ An explicit operator pause retains this work; it is an intentional suspension.
 
 The existing `unfold` composes and admits branches and returns typed handles.
 It does not recursively solve those branches or integrate their code. Bind the
-handles, register result/question watches, then end the turn: newly admitted
+handles, attach progress/result sources to the local router, then end the turn: newly admitted
 children start after that tool block returns. On wake, inspect the retained result
 and run the next useful continuation. Never wait for a just-admitted child inside
 its admitting tool block.

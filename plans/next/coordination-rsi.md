@@ -15,11 +15,12 @@ checklist for replacing progress rearming with typed sources and Haskell handler
 - Sol owners implement shared contracts, allocate substantial independent trees,
   review and integrate real consumers. Hard questions use fresh selected Astra
   contexts with compact evidence, returning directly to the requesting Sol.
-- Haskell handles known continuations. `awaitAnyProgress` composes independently
-  advancing streams with existing all-of joins. `followAttentionSources` retains
-  per-source state, advances cursors, suppresses identical/reordered questions and
-  preserves unresolved questions on closure. Its sink chooses local policy.
-- Evidence is not Attention. `Candidate` and optional `WorkProgress` carry source,
+- Haskell handles known continuations. `Project.Routing.followWork` retains
+  evidence, per-source questions and terminal receipts in one local wave actor.
+  Its sink selects actionable deltas; normal closure is quiet and preserves
+  unresolved questions. Typed casts compose subtrees without model relay turns.
+  Retire incorporated wave collectors after handing off remaining obligations.
+- Evidence is not Attention. `Candidate` and `WorkProgress` carry source,
   checks and known gates; questions require a recipient's action. Compact
   projections retain access to the original evidence. No universal message schema.
 - Agent messages optimize recoverable information per token. Examples model refs,
@@ -42,12 +43,17 @@ was added. Prompt/module changes activate only at the next swarm boundary.
 
 ## Acceptance
 
-The accepted copied runner and package are recorded in
-[coordination-actors.md](coordination-actors.md#integration-evidence). All 64
-model-free resident assertions pass in one fixed-executable run: workbench 11,
-collaboration 20 and routing 33. These checks cover independent source progress,
-retained questions through closure, persistent delivery without rearming and exact
-Git integration of both later lane handoffs. They do not claim live model behavior.
+Current usage fixes and focused acceptance are recorded in
+[the routing review](evidence/routing-usage-review.md). This replaces the previous
+attention-only package: local collectors retain full terminal receipts and failed
+notification attempts, typed subtree handoffs preserve actual Delivery values,
+and an authorized review can start without a model relay turn. Amended questions
+produce an update without falsely resolving the same question.
+
+The underlying actor implementation's earlier boundary acceptance remains in
+[coordination-actors.md](coordination-actors.md#integration-evidence). Its recorded
+64-assertion run describes that earlier package, not the current usage revision.
+Neither set of model-free checks claims live efficiency or provider cache reuse.
 
 Use the copied runner for acceptance; a rebuild can replace a Cargo executable
 while later recipe sessions still need its exact path. Prompt/module changes

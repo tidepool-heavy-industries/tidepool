@@ -1,11 +1,10 @@
 # Curate a useful Shoal workbench before the first application wave
 
-Status: all seven implementation steps complete. The curated package is installed
-in shoal-repl, the fixed build passed, and its installed executable passed all 43
-recipe assertions using the packaged compiler daemon. The
-[curation review](evidence/workbench-curation.md) records the responsibility audit,
-exact evidence and cold-check performance finding. Live application acceptance
-is the subsequent operator run.
+Status: all seven implementation steps complete. Current package behavior and
+verification are recorded in [coordination RSI](coordination-rsi.md). The original
+[curation review](evidence/workbench-curation.md) records the responsibility audit
+and cold-check performance finding. Live application acceptance remains distinct
+from the model-free package checks.
 
 The [vision](planned-swarm.md) still owns the operating model: Astra prepares
 the architecture and project language, Sol executes substantial components,
@@ -135,7 +134,7 @@ Owners: project review/attention helpers and prompts; existing watch/update owne
   owning decision. Publish unresolved questions with source, evidence, affected
   obligation and a stable local reference. Keep them until resolved; progress
   coalescing must not lose an outstanding question.
-- Supply a concrete subscription/rearm helper so the owning Sol is alerted to
+- Supply a persistent local wave router so the owning Sol is alerted to
   consequential questions. Routine successful forwarding stays in Haskell;
   routine tool steps do not become a progress-reporting ritual.
 - Generalize the existing `route` from `Await (Settlement a)` to `Await a` so
@@ -254,11 +253,12 @@ The checked operations now live in Project.Work; the package's
 [run guide](../../examples/shoal-workspace/.shoal/plans/run.md) owns complete
 first-turn and continuation examples. component constructs a source-bearing Task;
 componentLead does substantive engineering. reviewCandidate returns a fork and
-its question progress; reviewAgain reuses an available reviewer. implement returns
-a candidate fork with question progress when delegation is useful.
+its WorkProgress; reviewAgain reuses an available reviewer. implement returns
+a candidate fork with WorkProgress when delegation is useful.
 
-withDecision carries a checked accepted choice into the next Task. followAttention
-routes changes in cumulative questions; it does not choose the owning answer.
+withDecision carries a checked accepted choice into the next Task.
+Project.Routing.followWork collects progress and results in one local actor; its
+sink routes actionable changes without choosing the owning answer.
 observeWork takes the existing Task and work/progress pair, retaining detailed
 observations behind workSummary. The ordinary rsiBranch returns Outcome Candidate.
 

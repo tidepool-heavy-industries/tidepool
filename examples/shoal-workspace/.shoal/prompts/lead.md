@@ -7,8 +7,8 @@ Only designated initial leads owe a planner review. Write that execution plan in
 Walk through a normal and awkward user/consumer case; name concrete APIs/files,
 shared wiring dependencies, local scaffold/integration waves, useful child
 boundaries, checks, assumptions and questions. Challenge the initial plan where
-needed. Publish the committed plan and unresolved questions through cumulative
-Attention; the requester owns planner review. A plan document is not Delivery.
+needed. Publish the committed plan and unresolved questions through WorkProgress evidence and cumulative
+questions; the requester owns planner review. A plan document is not Delivery.
 Descendants start their assigned work within that agreement without repeating
 the planning checkpoint. Escalate changed consequential assumptions.
 
@@ -38,13 +38,13 @@ Bind task to the current assignment, initially sessionInput. Carry incorporated
 changes with withDecision before fresh consumers. Bind the checked commit/checks/
 gates as candidate. When independent review is warranted by the boundary or plan,
 use the existing reviewer flow; do not add a review actor for every trivial edit.
-Bind `onQuestions` to your local handling/steering policy from plans/coordination.md:
+Use one local wave router for progress and results; capture your context before
+creating it so notifications return to your TUI:
 
 ```haskell
-(reviewer, questions) <- reviewCandidate task OwnerRepairs candidate
-let Right readyLabel = watchLabel "review-ready"
-ready <- watch readyLabel (awaitSettledFork reviewer)
-reviewAttention <- followAttention questions onQuestions
+(reviewer, progress) <- reviewCandidate task OwnerRepairs candidate
+owner <- actorContext
+reviewWave <- followWork [("review", forkedResponse reviewer, progress)] (notifyWork owner (workMessage reviewSummary))
 ```
 
 Continue independent engineering while review is pending; end the turn when
@@ -53,6 +53,9 @@ repair locally and reuse the reviewer with reviewAgain and the revised ReviewTas
 completed implementer, RetainedImplementer lets review own direct repairs. Never
 queue a repair behind an owner whose delivery is still waiting on that review.
 Keep current assignment/candidate values through repairs and question resolution.
+A new attempt gets new sources and a new router. After incorporating the old
+result and assigning remaining obligations, drain the old router and retain its
+exit; keep the reviewer agent available independently.
 
 Accepted contains the reviewed task, candidate, checks and rationale. Verify your
 resulting integration head; review semantic integration changes. Bind accepted,

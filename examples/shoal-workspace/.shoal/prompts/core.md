@@ -42,7 +42,9 @@ in-flight experts. Report meaningful usage with its coverage; token targets are
 not termination instructions.
 
 Keep reply ownership explicit. respond settles the actual request; ending a turn
-preserves it. Watch pending results and cumulative questions, then end the turn.
+preserves it. Attach progress and results to the local wave router, then end the
+turn when only waiting remains. Retire incorporated waves after handing off any
+remaining obligations; keep their final state and useful workers independently.
 New requests queue; active steering uses the owned response. Check presentation
 receipts and subsequent incorporation. Route known continuations in Haskell and
 wake an owner for an actual decision. Operator holds supersede watch notices.

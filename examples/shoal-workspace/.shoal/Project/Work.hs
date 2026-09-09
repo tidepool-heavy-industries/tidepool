@@ -8,22 +8,17 @@
 -- when it is useful; importing this module prescribes no worker tree.
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
-  , withDecision, updateDecision, designQuestion, raiseQuestion, resolveQuestion
+  , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
   , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
-  , requestIncorporation, consultDesign, followAttention, followAttentionSources
-  , attentionDefinition
-  , AttentionSource (..), AttentionStatus (..), AttentionInput (AttentionSnapshot), normalizeAttention
+  , requestIncorporation, consultDesign
   , settledValue
   ) where
 
 import Control.Monad.Freer (Eff, Member)
-import Control.Monad (when)
-import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Tidepool.Actor as Actor
 import Tidepool.Actors.Shoal
-import Tidepool.Effects.Core (Actor, AgentInspection, Forks, GitRef (..))
+import Tidepool.Effects.Core (AgentInspection, Forks, GitRef (..))
 import Project.Types
 import Shoal.Workspace (workspacePrompt)
 
@@ -102,9 +97,9 @@ solTaskFrom label source task = withInstructions (projectPrompt "task") $
 
 implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Task -> Eff effects (Forked (Outcome Candidate), Progress Attention)
+  => Task -> Eff effects (Forked (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @Attention @(Outcome Candidate) (solTask (named "implement") task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (solTask (named "implement") task)
 
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
@@ -120,8 +115,8 @@ reviewContext task = Text.unlines
 
 reviewCandidate
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Task -> RepairOwner -> Candidate -> Eff effects (Forked (Outcome ReviewDecision), Progress Attention)
-reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @Attention @(Outcome ReviewDecision) $
+  => Task -> RepairOwner -> Candidate -> Eff effects (Forked (Outcome ReviewDecision), Progress WorkProgress)
+reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
   withModel "gpt-5.6-sol" $ withEffort Low $
   coding (named "review") (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
@@ -129,8 +124,8 @@ reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgre
 -- A completed review attempt leaves its actor available for the revised candidate.
 reviewAgain
   :: Member Replies effects
-  => AgentRef -> RequestLabel -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress Attention)
-reviewAgain actor label task = requestWithProgress @Attention @(Outcome ReviewDecision) actor $
+  => AgentRef -> RequestLabel -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewAgain actor label task = requestWithProgress @WorkProgress @(Outcome ReviewDecision) actor $
   withRequestGuidance (projectPrompt "review") $
   requestOptions label task
 
@@ -164,74 +159,6 @@ designQuestion task candidate finding = DesignQuestion
   , questionAlternatives = []
   , questionUnblocks = [obligation task]
   }
-
-normalizeAttention :: Attention -> Attention
-normalizeAttention = nub . sort
-
--- Each source owns its unresolved set. Closure preserves that set until an
--- explicit application decision changes it; equal keys across lanes stay distinct.
-data AttentionStatus = AttentionOpen | AttentionClosed | AttentionRejected ReplyError
-  deriving (Show, Eq)
-
-data AttentionSource = AttentionSource
-  { attentionSource :: Text
-  , attentionQuestions :: Attention
-  , attentionStatus :: AttentionStatus
-  } deriving (Show, Eq)
-
-data AttentionInput result where
-  AttentionUpdate :: Text -> ProgressState Attention -> AttentionInput ()
-  AttentionSnapshot :: AttentionInput [AttentionSource]
-
--- Source publications and explicit snapshot calls share the actor's FIFO.
--- The sink runs with this actor's authority, not its creator's reply ownership.
-followAttentionSources
-  :: Member Actor effects
-  => [(Text, Progress Attention)]
-  -> ([AttentionSource] -> Eff (Actor.ReadOnlyEffects AttentionInput) ())
-  -> Eff effects (Actor.ActorRef AttentionInput [AttentionSource])
-followAttentionSources sources sink = Actor.startActor
-  (attentionDefinition sources sink)
-  [AttentionSource name [] AttentionOpen | (name, _) <- sources]
-
--- Keep the same named sources when replacing a handler; initialization belongs
--- to startActor, so replacement preserves the existing committed view.
-attentionDefinition
-  :: [(Text, Progress Attention)]
-  -> ([AttentionSource] -> Eff (Actor.ReadOnlyEffects AttentionInput) ())
-  -> Actor.ActorDefinition [AttentionSource] AttentionInput [AttentionSource]
-attentionDefinition sources sink
-  | length names /= length (nub names) = error "attention source names must be unique"
-  | otherwise = Actor.withSources
-      [Actor.progressSource handle (AttentionUpdate name) | (name, handle) <- sources] $
-      Actor.stateful "attention" Actor.ReadOnly step
-  where
-    names = map fst sources
-    step
-      :: [AttentionSource] -> AttentionInput result
-      -> Eff (Actor.ReadOnlyEffects AttentionInput) (result, [AttentionSource])
-    step current AttentionSnapshot = pure (current, current)
-    step current (AttentionUpdate name observation) = do
-      let next = map (advance name observation) current
-      when (next /= current) (sink next)
-      pure ((), next)
-    advance name observation entry
-      | attentionSource entry /= name = entry
-      | otherwise = case observation of
-          ProgressUpdate _ questions -> entry { attentionQuestions = normalizeAttention questions }
-          ProgressClosed -> entry { attentionStatus = AttentionClosed }
-          ProgressRejected failure -> entry { attentionStatus = AttentionRejected failure }
-          ProgressPending -> entry
-
-followAttention
-  :: Member Actor effects
-  => Progress Attention
-  -> (Attention -> Eff (Actor.ReadOnlyEffects AttentionInput) ())
-  -> Eff effects (Actor.ActorRef AttentionInput [AttentionSource])
-followAttention updates sink = followAttentionSources [("source", updates)] $ \sources ->
-  case sources of
-    [source] | attentionStatus source == AttentionOpen -> sink (attentionQuestions source)
-    _ -> pure ()
 
 consultDesign
   :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)

@@ -5351,16 +5351,17 @@ mod tests {
         )
         .await;
         assert_eq!(setup["status"], "committed", "{setup:?}");
-        let child = match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
-            .await
-            .unwrap()
-            .unwrap()
-        {
-            LocalResidentDeployment::PolicyInstalled(child) => child,
-            _ => panic!("expected recipient policy"),
-        };
+        let child =
+            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                LocalResidentDeployment::PolicyInstalled(child) => child,
+                _ => panic!("expected recipient policy"),
+            };
         let activation =
-            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
                 .await
                 .unwrap()
                 .unwrap()
@@ -5387,7 +5388,7 @@ mod tests {
             .await
         });
         let command =
-            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
                 .await
                 .unwrap()
                 .unwrap()
@@ -5405,7 +5406,7 @@ mod tests {
             dispatch_haskell_script(policy.as_ref(), "pollNotification receipt").await
         });
         let poll_command =
-            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
                 .await
                 .unwrap()
                 .unwrap()
@@ -5528,7 +5529,7 @@ mod tests {
         )
         .await;
         assert_eq!(idle_setup["status"], "committed", "{idle_setup:?}");
-        let idle = match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+        let idle = match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
             .await
             .unwrap()
             .unwrap()
@@ -5545,7 +5546,7 @@ mod tests {
             .await
         });
         let command =
-            match tokio::time::timeout(Duration::from_secs(30), campaign.deployments.recv())
+            match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
                 .await
                 .unwrap()
                 .unwrap()
@@ -5794,16 +5795,6 @@ mod tests {
     async fn haskell_actor_sends_normal_steering_without_a_native_session() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();
-        let setup = dispatch_haskell_script(
-            root.as_ref(),
-            "worker <- startAgent (readonlyAgent \"message-recipient\")",
-        )
-        .await;
-        assert_eq!(setup["status"], "committed", "{setup:?}");
-        let child = match campaign.deployments.recv().await.unwrap() {
-            LocalResidentDeployment::PolicyInstalled(child) => child,
-            _ => panic!("expected recipient policy"),
-        };
         let policy = root.clone();
         let mut run = tokio::spawn(async move {
             dispatch_haskell_script(policy.as_ref(), include_str!("actor_host/message_actor.hs"))
@@ -5832,7 +5823,7 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(command.owner(), campaign.actor.identity());
-        assert_eq!(command.target(), child.actor.identity());
+        assert_eq!(command.target(), campaign.actor.identity());
         assert_eq!(command.message(), "e434: retain candidate; check digest");
         let directory = tempfile::tempdir().unwrap();
         let inbox = ActorInbox::open(

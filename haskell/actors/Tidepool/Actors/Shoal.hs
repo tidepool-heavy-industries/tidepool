@@ -33,6 +33,7 @@ module Tidepool.Actors.Shoal
   , AgentControl
   , Notifications
   , Actor
+  , MessageRecipient
   , sendMessage
   , notify
   , pollNotification
@@ -325,6 +326,7 @@ import Tidepool.Actors.Internal.Agent
   , StopOutcome (..)
   , startAgent
   , stopAgent
+  , MessageRecipient
   , sendMessage
   , notify
   , pollNotification

@@ -212,9 +212,10 @@ Capture bindings in ordinary Haskell closures. Effects run with the receiving
 actor's authority. A handler can cast to another typed actor or use `sendMessage`
 for consequential steering; it does not inherit its creator's reply ownership.
 Keep application deduplication and wake decisions in Haskell. The curated
-`Project.Work.followAttentionSources` supplies this pattern for named question
-streams, with `AttentionSnapshot` for deliberate inspection and
-`attentionDefinition sources sink` for replacing its handler with the same sources.
+`Project.Routing.followWork` collects named progress/response pairs. It retains
+evidence, questions, terminal receipts and notification failures; `WorkSnapshot`
+queries its state and `workDefinition sources sink` replaces behavior for the same
+sources. Its default messages contain actionable deltas, not the whole snapshot.
 
 Handler failure pauses execution, retains committed state/input/queued work, and
 messages the supervisor. Repair with `Actor.replaceActor handle newDefinition`:
@@ -236,8 +237,8 @@ updateRequest :: Member Replies effects
               => Response result -> Text -> Eff effects (Either ReplyError RequestUpdate)
 pollRequestUpdate :: Member Replies effects
                   => RequestUpdate -> Eff effects (Either ReplyError RequestUpdateState)
-sendMessage :: Member Notifications effects
-            => AgentRef -> Text -> Eff effects (Either NotificationError NotificationReceipt)
+sendMessage :: (MessageRecipient recipient, Member Notifications effects)
+            => recipient -> Text -> Eff effects (Either NotificationError NotificationReceipt)
 pollNotification :: Member Notifications effects
                  => NotificationReceipt -> Eff effects (Either NotificationError NotificationState)
 stopAgent :: Member AgentControl effects => AgentRef -> Eff effects StopOutcome
@@ -246,6 +247,12 @@ data RequestUpdateState
   = UpdateQueued | UpdatePresented | UpdateTooLate
   | UpdateUnconfirmed Text | UpdateNotPresented Text
 ```
+
+`sendMessage` accepts an AgentRef or a captured ActorContextInfo. To have a
+router message your TUI, bind `owner <- actorContext` in your model turn and capture
+owner in the handler's `sendMessage owner ...`. The handler runs as the router,
+not the capturing model. Both forms use the same authority-checked inbox;
+a context observation grants no extra permissions.
 
 Use `request @Report actor label assignment` for a new assignment to a retained
 specialist; it queues when busy. `updateRequest` clarifies the exact owned,

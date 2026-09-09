@@ -66,7 +66,10 @@ The run guide shows general first-turn and continuation expressions: commission 
 lead, review/repair without a queue cycle and return a decision to pending work.
 The optional graph walkthrough adds a concrete allocation and requested RSI.
 Typed results distinguish product blockers from execution unavailability. Progress
-is cumulative unresolved state. Callback failures retain evidence; inspect routes
+uses WorkProgress for candidate evidence and current unresolved questions. One
+Project.Routing.followWork actor retains progress, terminal receipts and notification
+outcomes for each local wave. Its default messages contain actionable deltas;
+typed casts connect subtrees without a model relay. Callback failures retain evidence; inspect routes
 and effects before replaying a launch that may already have admitted useful work.
 
 Validate a candidate selection without providers or a swarm restart:
@@ -83,7 +86,9 @@ workflow; Rust knows neither its project roles nor its stage sequence.
 
 The prepared checks cover direct/reused review, delegated repair, expert plan
 incorporation, cumulative questions and owning steering, independent progress,
-callback success/cancellation/unavailability, and explicit next-swarm customization.
+callback success/cancellation/unavailability, typed subtree handoff of later final
+heads, retained notification failures, automatic review by an available specialist,
+and explicit next-swarm customization.
 They use temporary repositories seeded with authored .shoal files and their own
 source fixtures. These are executable coordination examples, not application tests
 or evidence of live model usability and savings. Run the application's own checks

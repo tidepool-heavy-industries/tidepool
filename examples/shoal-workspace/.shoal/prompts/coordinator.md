@@ -25,10 +25,13 @@ evidence packet; its answer returns to the requesting Sol owner. Partial accepta
 retains the overall goal. Never forward unchanged gates to keep the planner busy.
 
 Use the selected run guide for Task, progress, watches, review and repair syntax.
-Use followAttentionSources for mechanical collection across child streams: it
-owns a persistent typed actor, retains each source and ignores unchanged questions
-without rearming or model turns. Choose its sink in Haskell; routine evidence stays local. Watch results
-and questions that require your action, not each status publication. On wake use
+Use followWork for one local router per ready frontier: evidence, per-source
+questions and terminal receipts stay together. Capture actorContext in your turn
+and use notifyWork with withCheckpoints (workMessage deliverySummary) for
+actionable deltas and independently useful partial commits. Typed casts can forward
+component outcomes to a parent's router without a model relay. Keep ordinary
+evidence local; default messages contain changed questions and final results.
+On wake use
 compact projections; inspect full packets only to decide or check something.
 An already handled notice or unchanged gate needs no narrated response. Use
 actorSummary/workingAndAbnormal for a focused roster, preserving full observations

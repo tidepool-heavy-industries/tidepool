@@ -4,7 +4,7 @@
 
 module Project.Observe
   ( WorkObservation (..), observeWork, workSummary, deliverySummary
-  , attentionSummary, progressSummary
+  , candidateSummary, reviewSummary, attentionSummary, progressSummary
   , workingAndAbnormal, actorSummary
   , RsiInput (..), rsiContext, rsiBranch
   ) where
@@ -27,33 +27,51 @@ data WorkObservation = WorkObservation
   , observedOwnerVisible :: Bool
   , observedTree :: SwarmSnapshot
   , observedResult :: ResponseState Delivery
-  , observedAttention :: ProgressState Attention
+  , observedProgress :: ProgressState WorkProgress
   } deriving (Show)
 
 observeWork
   :: (Member AgentInspection effects, Member Replies effects)
-  => Task -> (Forked Delivery, Progress Attention) -> Eff effects WorkObservation
-observeWork task (worker, questions) = do
+  => Task -> (Forked Delivery, Progress WorkProgress) -> Eff effects WorkObservation
+observeWork task (worker, progress) = do
   current <- snapshot
   result <- pollResponse (forkedResponse worker)
-  attention <- pollProgress questions
+  observation <- pollProgress progress
   let owner = agentIdentity (forkedActor worker)
   let scope = creationTree owner current
   pure $ WorkObservation task workspaceIdentity owner
     (any (\actor -> (rosterActorId actor, rosterActorIncarnation actor) == owner) (snapshotActors scope))
-    scope result attention
+    scope result observation
 
 shown :: Show value => value -> Text
 shown = Text.pack . show
 
+candidateSummary :: Outcome Candidate -> Text
+candidateSummary (Blocked reason evidence) = blockedSummary reason evidence
+candidateSummary (Produced candidate) = candidateRef candidate
+
+reviewSummary :: Outcome ReviewDecision -> Text
+reviewSummary (Blocked reason evidence) = blockedSummary reason evidence
+reviewSummary (Produced (Repair candidate findings)) =
+  "repair " <> candidateCommit candidate <> ": " <> Text.intercalate "; " findings
+reviewSummary (Produced (Accepted accepted)) =
+  "accepted " <> candidateRef (reviewedCandidate accepted)
+    <> "; review " <> Text.intercalate "; " (reviewChecks accepted)
+
 deliverySummary :: Delivery -> Text
-deliverySummary (Blocked reason evidence) = "Blocked: " <> reason <> "; evidence: " <> Text.intercalate "; " evidence
-deliverySummary (Produced (Delivered accepted head checks)) = Text.unlines
-  [ "Reviewed: " <> candidateCommit (reviewedCandidate accepted)
-  , "Checked resulting head: " <> head
-  , "Checks: " <> Text.intercalate "; " checks
-  , "Remaining gates: " <> shown (remainingGates (reviewedCandidate accepted))
-  ]
+deliverySummary (Blocked reason evidence) = blockedSummary reason evidence
+deliverySummary (Produced (Delivered accepted head checks)) =
+  head <> "; reviewed " <> candidateRef (reviewedCandidate accepted)
+    <> "; integration " <> Text.intercalate "; " checks
+
+candidateRef :: Candidate -> Text
+candidateRef candidate = candidateCommit candidate
+  <> "; checks " <> Text.intercalate "; " (checkedCommands candidate)
+  <> (if null (remainingGates candidate) then ""
+      else "; gates " <> Text.intercalate "; " (remainingGates candidate))
+
+blockedSummary :: Text -> [Text] -> Text
+blockedSummary reason evidence = "blocked " <> reason <> "; " <> Text.intercalate "; " evidence
 
 workSummary :: WorkObservation -> Text
 workSummary observed = Text.unlines
@@ -65,10 +83,10 @@ workSummary observed = Text.unlines
       ResponseCancellationPending reason -> "cancellation pending: " <> shown reason
       ResponseUnavailable failure -> "unavailable: " <> shown failure
       ResponseReady result -> deliverySummary (responseValue result)
-  , "Questions: " <> case observedAttention observed of
+  , "Progress: " <> case observedProgress observed of
       ProgressPending -> "no publication observed"
-      ProgressUpdate _ questions -> shown [(questionKey q, questionPlan (questionDetails q), questionSource (questionDetails q), questionFinding (questionDetails q)) | q <- questions]
-      ProgressClosed -> "progress closed; retained outcomes/watches carry earlier evidence"
+      ProgressUpdate _ progress -> shown (progressSummary progress)
+      ProgressClosed -> "progress closed; wave router retains earlier evidence"
       ProgressRejected failure -> "unavailable: " <> shown failure
   , "Requested-model usage (coverage retained): " <> shown (usageByRequestedModel (observedTree observed))
   , "Working/abnormal actors (identity, label, lifecycle, provider, stale, current/queued): "

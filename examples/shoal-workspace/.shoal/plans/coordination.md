@@ -28,11 +28,12 @@ There is no fixed report format or required shorthand dictionary.
 ## Work and questions
 
 `Candidate` already names source, actual checks and remaining gates. Successful
-incorporation is evidence, not a `Question`. Use `WorkProgress` when a caller wants
-both evidence and unresolved decisions; select that type with
+incorporation is evidence, not a `Question`. The supplied work/review helpers use `WorkProgress` for
+both evidence and unresolved decisions; select that type explicitly with
 `childWithProgress @WorkProgress @Delivery`. The worker can then publish:
 
 ```haskell
+import qualified Tidepool.Actor as Actor
 reportProgress (WorkProgress [candidate] open)
 ```
 
@@ -88,73 +89,102 @@ update must not become a new queued assignment. An already checked
 correction <- updateDecision response decision
 ```
 
-## Independent progress without relay turns
+## One local router per wave
 
-`followAttentionSources` starts one persistent typed Haskell actor. It captures
-the current values, consumes every later publication without rearming, and keeps
-each named source's questions and closure separately. Equal keys across sources
-remain distinct; source names must be unique. Order-only and duplicate questions
-do not invoke the sink again. Source closure preserves unresolved questions.
-
-The sink runs inside the collector with its own authority. It can cast to another
-typed actor or send normal steering to a bound `solOwner :: AgentRef`. For example,
-this policy messages unresolved question keys when the retained view changes:
+`followWork` consumes each fixed response/progress pair in one typed actor. It
+retains candidate evidence, the current questions per source, closure and the full
+terminal response receipt. Publications arrive in order without rearming. Same
+question keys in different sources stay distinct. Closing progress does not clear
+questions or substitute for the later terminal response.
 
 ```haskell
-import qualified Data.Text as Text
-collection <- followAttentionSources [("api", apiQuestions), ("ui", uiQuestions)] $ \state ->
-  case [attentionSource source <> ":" <> questionKey q | source <- state, q <- attentionQuestions source] of
-    [] -> pure ()
-    keys -> do
-      sent <- sendMessage solOwner (Text.intercalate ";" keys)
-      either (error . show) (const (pure ())) sent
+owner <- actorContext
+let sources = [("api", forkedResponse api, apiProgress), ("ui", forkedResponse ui, uiProgress)]
+wave <- followWork sources (notifyWork owner (withCheckpoints (workMessage deliverySummary)))
 ```
 
-Choose the projection for the task; routine evidence need not wake a model.
-A collector cannot call its creator's `reportProgress` using inherited reply
-ownership. `followAttention` is the single-source convenience without a cursor.
-For deliberate inspection, query the same retained actor:
+Here both workers return Delivery. A wave of `Outcome Candidate` or review results
+uses that result type and its own concise rendering. `workMessage` sends only new
+or changed questions, resolved questions, source failures and final outcomes.
+Adding one question does not repeat the others. Closing a source is quiet; resolving
+the final question still messages its delta. The component policy above adds withCheckpoints: a new usable partial commit
+wakes its integration owner before terminal delivery, while repeated evidence is
+quiet. Simultaneous question changes remain in the same message. Local review
+routers omit this decorator when candidate progress is only evidence for the
+ongoing review. Publish checkpoints that the recipient can use, not every build
+observation. All evidence remains queryable.
+No mandatory report format: change the renderer to suit this recipient.
 
 ```haskell
-import qualified Tidepool.Actor as Actor
-view <- Actor.call collection AttentionSnapshot
-inspectFull view
+view <- Actor.call wave WorkSnapshot
+inspectFull [(sourceName s, progressSummary (sourceProgress s), sourceStatus s) | s <- collectedWork view]
 ```
 
-A failed sink pauses the collector and notifies its supervisor; later messages
-remain queued. Keep its source bindings and define a corrected sink, then use
-the same primitive as for any stateful actor:
+Expand a relevant sourceResult for its actual response, execution and worktree
+receipt. Notification attempts are retained in workNotices. Right contains the
+admission receipt; Left contains the typed send failure. Receipt polling belongs
+to the issuing actor, so when presentation affects a decision, use
+`Actor.call wave (WorkNotification receipt)` while that sender is live. Calling
+pollNotification directly in the parent does not acquire that authority. After
+replacement, old receipts remain evidence; querying them through the new
+incarnation can return NotificationUnauthorized. Use actual incorporation or the
+owning inbox evidence instead of retrying an uncertain message.
+A failed or unconfirmed send never erases the newly collected questions, and the
+router does not retry it when the same questions arrive again. Replacing the
+handler retains these outcomes. A lost notification is not proof that the worker
+stopped: inspect retained state and actual delivery before choosing an intervention.
+
+## Route typed values up the tree
+
+A subtree can use a different sink: `WorkEvent Delivery -> Eff ...` is ordinary
+Haskell, so forward checked component results to the parent's typed mailbox while
+keeping partial evidence local. The parent can receive other event types in its
+own protocol and select only relevant engineering decisions for its Sol owner.
+The [executable handoff](../checks/handoff-router.hs) builds that parent mailbox,
+casts the original WorkFinished value with its full response receipt, and retains
+partial evidence in the child collector. Its [recipe](../Project/RoutingChecks.hs)
+checks both later final heads and merges their real Git source. No Text encoding
+or model wake sits between the two Haskell actors.
+
+Choose sinks for all consequential outcomes: unresolved child questions need their
+local owner, and unavailable/Blocked results need an action owner. The handoff
+example's terminal-only sink is for a subtree whose local Sol already owns its
+questions; it must not be copied as a policy that ignores every question.
+
+Known already-authorized continuations can use a finite `route` to submit a
+request when its prerequisite settles. The [review continuation](continuation.md)
+combines that operation with typed actors, including retention of callback-created
+handles. No callback awaits a busy model or confuses a candidate with acceptance.
+
+## Retire a wave deliberately
+
+Keep the collector through partial checkpoints and wind-down: later final results
+still matter. Source closure does not imply that unresolved questions, uncertain
+notifications or resource custody can be discarded. Incorporate the useful results
+and put remaining obligations with a concrete owner, then:
 
 ```haskell
-collection2 <- Actor.replaceActor collection
-  (attentionDefinition [("api", apiQuestions), ("ui", uiQuestions)] correctedSink)
-view <- Actor.call collection2 AttentionSnapshot
+Actor.drainActor wave
+finishedWave <- Actor.awaitExit wave
 ```
 
-The successor retains committed questions and queued events. The failed event is
-kept as evidence and skipped; an uncertain send is not replayed. Keep source names,
-order and handles unchanged. `correctedSink` is an ordinary Haskell function with
-the same effect row as the original sink. Use the returned handle thereafter.
-When all sources close, the collector remains available for inspection.
-When finished with the current handle, `Actor.drainActor collection2` closes
-admission; `Actor.awaitExit collection2`
-explicitly waits for the retained final state.
+Drain closes admission and processes accepted messages; finishedWave retains the
+exit and its state. New source handles belong to a new wave router. Retain useful
+native workers independently for follow-up. Do not accumulate a live collector for
+every completed review attempt.
 
-Use independent result watches when each candidate can advance integration.
-For coupled results, an applicative join is useful. Source integration is native
-git followed by focused checks; it is not `integrateFork`, an acknowledgment, or
-concatenation of worker reports.
+For a behavior bug, keep the same ordered source names and handles and replace:
 
-For multi-lane handoffs, attach progress and settlement sources to one small
-protocol after commissioning the lanes. Retain evidence locally and wake for
-independently useful candidates, including partial ones. Later terminal results
-must still reach the owner. Consuming a partial checkpoint
-does not detach the collector or finish the coordinator's obligation. Keep the
-collector until final heads are incorporated or remaining custody has an owner.
-The executable [handoff router](../checks/handoff-router.hs) demonstrates this with
-commit refs; [twoLaneHandoff](../Project/RoutingChecks.hs) consumes a partial update,
-receives both later final heads and merges their real Git commits. Substitute the
-task's `Delivery`/`Candidate` values and meaningful wake policy in your own protocol.
+```haskell
+wave <- Actor.replaceActor wave (workDefinition sources correctedSink)
+```
+
+Expected notification failures are retained values, not handler exceptions.
+An arbitrary exception in custom code still pauses the actor: the runtime retains
+the failed event, last committed state and queued work and alerts the supervisor.
+Inspect that failed event when reconciling: replacement skips it, so an effectful
+handler must not assume its failed update committed or replay an uncertain send.
+Use total source projections and return sendMessage's Either through the sink.
 
 ## Spend model turns on decisions
 
@@ -174,10 +204,10 @@ is an inspection convenience, not proof that omitted resources are safe to retir
 Write the continuation once: collect streams, normalize repeated state, project
 what this recipient needs, and route the known next action. Let Haskell execute
 that logic between turns. Do not reproduce it as a cycle of polling, merging
-lists, inventing watch labels and narrating unchanged gates. Use a finite result watch
-for an engineering join and a persistent collector for ongoing questions.
+lists, inventing watch labels and narrating unchanged gates. Use one persistent local wave router for progress and results. A finite watch
+still suits an isolated consultation or a join whose decision requires all results.
 
-The source collector retains the current questions; it does not resolve them or
+The wave router retains the current questions; it does not resolve them or
 invent issue identities. The source's owner publishes its updated cumulative set.
 Candidates, checks and known product gates remain evidence, not synthetic questions.
 Use compact projections at the decision boundary, preserving original evidence.

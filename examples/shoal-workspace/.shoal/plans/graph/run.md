@@ -12,27 +12,27 @@ waves are retained. The label below is a first-run example, not a name to replay
 on every restart. Use subgroup for work scoped under an existing actor.
 
 In native tools resolve `git rev-parse HEAD`, then bind `baseline :: GitRef` to that
-exact app commit. Bind `onQuestions` to the Sol owner's handling/steering policy
-from [coordination.md](../coordination.md#independent-progress-without-relay-turns).
+exact app commit. Capture the Sol owner with actorContext before creating its wave router.
 These expressions run in the Sol root's resident environment:
 
 ```haskell
+import qualified Tidepool.Actor as Actor
 let Right campaign = campaignLabel "graph-relations"
 let Right leads = forkGroupLabel "leads"
 let Right contractLabel = branchLabel "contract"
 let Right contractTask = component campaign RelationContract baseline
 before <- snapshot
-contractWork <- unfold (batch campaign leads) (childWithProgress @Attention @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom contractLabel projectHead contractTask))))
+contractWork <- unfold (batch campaign leads) (childWithProgress @WorkProgress @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom contractLabel projectHead contractTask))))
 let (contract, contractQuestions) = contractWork
-let Right contractReadyLabel = watchLabel "contract-ready"
-contractReady <- watch contractReadyLabel (awaitSettledFork contract)
-contractAttention <- followAttention contractQuestions onQuestions
+owner <- actorContext
+contractWave <- followWork [("contract", forkedResponse contract, contractQuestions)] (notifyWork owner (withCheckpoints (workMessage deliverySummary)))
 ```
 
 The owner can now end its turn. SwarmOwned selected leads have independent
 lifetimes; only a root can admit that lifetime. Their descendants normally remain
 supervised. Neither a parent waiting nor a model turn ending settles its request.
-On wake, bind `state <- pollWatch contractReady` and inspect `inspectFull state`.
+On wake, bind `state <- Actor.call contractWave WorkSnapshot` and inspect the
+contract source's retained response in collectedWork.
 Handle unavailable execution separately from the typed `Blocked reason evidence`
 or `Produced (Delivered reviewed head checks)`. No notification proves success.
 
@@ -81,10 +81,10 @@ let controlsTask = withDecision contractDecision controlsBase
 let Right products = forkGroupLabel "product"
 let Right projectionLabel = branchLabel "projection"
 let Right controlsLabel = branchLabel "controls"
-(projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @Attention @Delivery (componentLeadFrom projectionLabel projectHead projectionTask) <*> childWithProgress @Attention @Delivery (componentLeadFrom controlsLabel projectHead controlsTask))
+(projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @WorkProgress @Delivery (componentLeadFrom projectionLabel projectHead projectionTask) <*> childWithProgress @WorkProgress @Delivery (componentLeadFrom controlsLabel projectHead controlsTask))
 ```
 
-Register independent result and question watches as for contractWork; either
+Attach both response/progress pairs to one followWork router; either
 component can progress or deliver while the other awaits a decision. Integrate
 coherent deliveries independently. The owner runs combined all-target checks,
 graph/control regressions, formatting and isolated terminal proof before claiming

@@ -49,7 +49,7 @@ are open:
 let details = DesignQuestion (planPath task) source summary evidence alternatives consumers
 let question = Question "execution-plan" details
 let waiting = raiseQuestion question openQuestions
-reportProgress waiting
+reportProgress (WorkProgress [Candidate source evidence []] waiting)
 ```
 
 Keep `waiting` as the cumulative set for later publications. The requester watches
@@ -105,12 +105,12 @@ let rightBranch = solTask rightLabel right :: Branch CodingEffects Task (Outcome
 When their prerequisites and any release condition are met, admit them together:
 
 ```haskell
-work <- unfold group ((,) <$> childWithProgress @Attention @(Outcome Candidate) leftBranch <*> childWithProgress @Attention @(Outcome Candidate) rightBranch)
+work <- unfold group ((,) <$> childWithProgress @WorkProgress @(Outcome Candidate) leftBranch <*> childWithProgress @WorkProgress @(Outcome Candidate) rightBranch)
 let ((leftWork, leftQuestions), (rightWork, rightQuestions)) = work
 ```
 
 The applicative pair expresses independent admission and preserves the shape of
-the returned handles. Register each result/question watch as in run.md, then
+the returned handles. Attach both response/progress pairs to one followWork router as in run.md, then
 continue the parent's independent engineering. End the turn when further progress
 depends on results. On wake, inspect the ready handle: admission was not the join.
 The join is the owner's subsequent incorporation/checks of the actual candidates;

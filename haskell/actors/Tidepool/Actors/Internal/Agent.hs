@@ -48,6 +48,7 @@ module Tidepool.Actors.Internal.Agent
   , forgetAgent
   , StopOutcome (..)
   , stopAgent
+  , MessageRecipient
   , sendMessage
   , notify
   , pollNotification
@@ -87,7 +88,8 @@ import Tidepool.Agent.Session
   , requestSessionSited
   )
 import Tidepool.Effects.Core
-  ( ActorEffectKey
+  ( ActorContextInfo (..)
+  , ActorEffectKey
   , ForkEffort
   , ForkContext
   , WorkerLifetime
@@ -636,13 +638,30 @@ agentRole (IntegrationAgent _) = Actor.IntegrationRole
 -- | Observation locator only. Rust checks the caller and exact inbox row.
 newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))
 
+-- | An address observation, not a grant. Rust checks the sending principal and
+-- exact recipient. Capture actorContext in the model's turn before using it in
+-- a child router. The handler runs as the router, not the capturing model.
+class MessageRecipient recipient where
+  messageAddress :: recipient -> (Int, Int)
+
+instance MessageRecipient AgentRef where
+  messageAddress = agentIdentity
+
+instance MessageRecipient ActorContextInfo where
+  messageAddress context = (contextActorId context, contextActorIncarnation context)
+
 -- | Admit normal steering into the existing TUI conversation. The receipt is
 -- admission evidence, not incorporation or successful execution. No response
 -- obligation is created, and uncertain presentation must not be retried blindly.
-sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)
-sendMessage (AgentRef target _) message = fmap (fmap NotificationReceipt) (send (NotifyWith (actorAddress target) message))
+sendMessage
+  :: (MessageRecipient recipient, Member Notifications effs)
+  => recipient -> Text -> Eff effs (Either NotificationError NotificationReceipt)
+sendMessage recipient message =
+  fmap (fmap NotificationReceipt) (send (NotifyWith (messageAddress recipient) message))
 
-notify :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)
+notify
+  :: (MessageRecipient recipient, Member Notifications effs)
+  => recipient -> Text -> Eff effs (Either NotificationError NotificationReceipt)
 notify = sendMessage
 
 pollNotification :: Member Notifications effs => NotificationReceipt -> Eff effs (Either NotificationError NotificationState)

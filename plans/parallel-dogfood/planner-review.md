@@ -15,7 +15,8 @@ Delivery response. Incorporate both proposals and this review, correct the lane
 plans, check the resulting committed revision, then steer the two pending lead
 responses. Verify presentation AND incorporation before dependent forks. Publish
 one compact incorporation record with accepted head, lead evidence and remaining
-questions. Do not queue replacement assignments. Root retains both watches.
+questions. Do not queue replacement assignments. The Sol coordinator retains both response/progress pairs in its local wave
+router; the planner receives the selected initial checkpoint once.
 
 ## Verdict and release scope
 

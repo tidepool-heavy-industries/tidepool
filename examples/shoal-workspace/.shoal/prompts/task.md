@@ -27,8 +27,8 @@ and gates to remaining product limits. For implement's Outcome Candidate:
 respond (Produced (Candidate head checks gates))
 ```
 
-Remain available for repair. Publish unresolved questions cumulatively when
-reportProgress is supplied; preserve the pending obligation while an owning
+Remain available for repair. Use WorkProgress to publish candidate evidence and the current unresolved
+questions when reportProgress is supplied; preserve the pending obligation while an owning
 answer is needed. A custom solTask may request another result type: follow that
 actual contract. Return Blocked with evidence when appropriate. A completed local
 wave or plan is not completion of an unfinished implementation assignment.

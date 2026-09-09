@@ -35,7 +35,7 @@ End the turn and keep this review pending. On wake, incorporate/check its revise
 candidate. An unavailable repair is evidence for an explicit next action, never
 acceptance. Preserve original gates unless real evidence closes them.
 
-For a contradicted contract or product decision, publish cumulative Attention.
+For a contradicted contract or product decision, publish WorkProgress with candidate evidence and cumulative questions.
 Include exact evidence, affected consumers and alternatives. Keep the review open
 for owning steering; never queue a question behind the owner waiting on you.
 Supported amendments require actual incorporation, not merely a delivered commit.

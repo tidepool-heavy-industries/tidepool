@@ -1,7 +1,7 @@
 # Coordinator: execution plans and integration
 
 Use generic `Task` / `componentLead` with
-`childWithProgress @Attention @Delivery`; the selected `.shoal/plans/run.md`
+`childWithProgress @WorkProgress @Delivery`; the selected `.shoal/plans/run.md`
 contains invocation and watch syntax. Graph task constructors are unrelated
 examples. Every task names its source baseline, relevant plan path, owned outcome
 and acceptance. Related forks continue from the parent's current bound checkout;
@@ -56,7 +56,7 @@ unrelated leads use selected taskContext; recursive implementation normally uses
 inherited context and boundHead. Do not require a new planner review for each
 local scaffold or join after the initial execution agreement. Leads can steer their
 own workers directly. Keep routine handoffs compact and combine only genuinely
-coupled hard questions for a fresh Astra. Let followAttentionSources handle
-mechanical collection and cursor advancement; inspect compact projections when
+coupled hard questions for a fresh Astra. Let Project.Routing.followWork retain progress and terminal receipts together
+without rearming; inspect compact projections when
 action is required. Candidates and known gates are evidence, not questions.
 Monitor delivered engineering, not actor counts.

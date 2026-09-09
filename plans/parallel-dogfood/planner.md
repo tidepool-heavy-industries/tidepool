@@ -45,7 +45,7 @@ withInstructions (projectPrompt "coordinator") $
   componentLeadFrom coordinatorLabel projectHead task
 ```
 
-Use `childWithProgress @Attention @Delivery`; retain its result and progress watches
+Use `childWithProgress @WorkProgress @Delivery`; attach its response and progress to the local wave router
 as shown in the selected run guide. It commissions both Sol leads.
 Wait on consolidated Attention, read the exact committed artifacts, then return
 concrete corrections and instructions to proceed through `updateRequest` on its pending
