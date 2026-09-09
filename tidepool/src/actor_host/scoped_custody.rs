@@ -147,10 +147,21 @@ fn remaining(deadline: Instant) -> Result<std::time::Duration, ScopedProcessErro
 pub(super) struct ScopedHostRetention {
     // Keep the exact installed lease owner alive without requiring production
     // callers to reconstruct its concrete Arc from the erased kernel handle.
-    _custody: Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
+    _custody: Option<Arc<dyn tidepool_actor::ForkWorkspaceCustody>>,
     #[cfg(test)]
     state: Arc<parking_lot::Mutex<CustodyState>>,
     pub(super) slot: Arc<parking_lot::Mutex<ScopedProcessSlot>>,
+}
+
+/// Source-checkout applications have process custody but no managed-worktree lease.
+/// The existing lifecycle row still retains their exact supervisor capability.
+pub(super) fn reserve_source_checkout() -> ScopedHostRetention {
+    ScopedHostRetention {
+        _custody: None,
+        #[cfg(test)]
+        state: Arc::new(parking_lot::Mutex::new(CustodyState::default())),
+        slot: Arc::new(parking_lot::Mutex::new(ScopedProcessSlot::Reserved)),
+    }
 }
 
 pub(super) fn reserve(
@@ -181,7 +192,7 @@ pub(super) fn reserve(
         exact.state.clone()
     };
     Ok(ScopedHostRetention {
-        _custody: custody,
+        _custody: Some(custody),
         #[cfg(test)]
         state: _state,
         slot: Arc::new(parking_lot::Mutex::new(ScopedProcessSlot::Reserved)),

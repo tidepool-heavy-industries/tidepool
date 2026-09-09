@@ -761,21 +761,22 @@ impl NativeForkAdmission {
 impl InteractiveApplicationOwner {
     fn reserve_scope(
         &mut self,
-        custody: Arc<dyn tidepool_actor::ForkWorkspaceCustody>,
+        workspace: ActorWorkspaceRequest<'_>,
         actor: ActorRef,
     ) -> Result<Arc<Mutex<scoped_custody::ScopedProcessSlot>>, scoped_custody::ScopedClaimError>
     {
-        if !self
-            .custody
-            .as_ref()
-            .is_some_and(|installed| Arc::ptr_eq(installed, &custody))
-        {
-            return Err(scoped_custody::ScopedClaimError::WrongActor);
-        }
         if self.scoped_retention.is_some() {
             return Err(scoped_custody::ScopedClaimError::AlreadyClaimed);
         }
-        let retention = scoped_custody::reserve(custody, actor)?;
+        let retention = match (workspace, self.custody.as_ref()) {
+            (_, Some(custody)) => scoped_custody::reserve(custody.clone(), actor)?,
+            (ActorWorkspaceRequest::SourceCheckout, None) => {
+                scoped_custody::reserve_source_checkout()
+            }
+            (ActorWorkspaceRequest::Worktree(_), None) => {
+                return Err(scoped_custody::ScopedClaimError::MissingLease);
+            }
+        };
         let slot = retention.slot.clone();
         self.scoped_retention = Some(retention);
         Ok(slot)
@@ -2030,10 +2031,13 @@ async fn run_interactive_applications(
                             terminal: None,
                             retirement: Arc::new(Mutex::new(None)),
                         };
-                        let Some(custody) = installation.worktree_custody.clone() else {
-                            break Some(format!("actor {actor:?} has no exact launch custody"));
+                        let workspace = match actor_workspace_request(
+                            actor == root_identity, &installation.launch_worktrees,
+                        ) {
+                            Ok(workspace) => workspace,
+                            Err(error) => break Some(error),
                         };
-                        let scope_slot = match owner.reserve_scope(custody, actor) {
+                        let scope_slot = match owner.reserve_scope(workspace, actor) {
                             Ok(slot) => slot,
                             Err(error) => break Some(format!(
                                 "actor {actor:?} process-scope reservation failed: {error}"

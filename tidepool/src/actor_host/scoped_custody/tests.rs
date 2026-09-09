@@ -167,7 +167,7 @@ impl Fixture {
             .lock()
             .get_mut(&self.custody.actor)
             .unwrap()
-            .reserve_scope(self.custody.clone(), actor)
+            .reserve_scope(ActorWorkspaceRequest::Worktree("bound"), actor)
     }
 
     fn spawn(&self, owners: &InteractiveOwners) -> Arc<Mutex<ScopedProcessSlot>> {
@@ -610,7 +610,10 @@ fn scoped_custody_concurrent_claim_sibling_timeout_and_legacy_fence() {
         map.lock()
             .get_mut(&second.custody.actor)
             .unwrap()
-            .reserve_scope(first.custody.clone(), second.custody.actor),
+            .reserve_scope(
+                ActorWorkspaceRequest::Worktree("bound"),
+                first.custody.actor
+            ),
         Err(ScopedClaimError::WrongActor)
     ));
     spawn_into(
