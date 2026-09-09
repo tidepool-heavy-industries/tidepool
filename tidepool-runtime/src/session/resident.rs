@@ -2186,15 +2186,14 @@ where
     ///
     /// This is the value-to-code counterpart of [`Self::run_rooted_entry`]. It
     /// exists for boundaries such as actor mailboxes where both the handler
-    /// and its protocol-indexed request are live Haskell values. Custody is
-    /// transferred into the running computation only after both handles have
-    /// been validated against this exact resident session. A rejected call
-    /// still drops the by-value custody arguments normally.
+    /// and its protocol-indexed request are live Haskell values. The caller
+    /// retains both roots across success or failure. A suspended computation
+    /// owns its reachable values independently of these borrowed roots.
     pub fn run_rooted_application(
         &mut self,
         name_hint: &str,
-        function: RootCustody,
-        argument: RootCustody,
+        function: &RootCustody,
+        argument: &RootCustody,
         realm: RealmId,
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
@@ -2242,8 +2241,6 @@ where
 
         let mut provenance = (*function.provenance).clone();
         provenance.merge(&argument.provenance)?;
-        let function = function.into_transfer();
-        let argument = argument.into_transfer();
 
         const ROOTED_FUNCTION_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0003);
         const ROOTED_ARGUMENT_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0004);
@@ -2262,8 +2259,6 @@ where
 
         let outcome =
             self.run_rooted_fragment(name_hint, &expression, &environment, realm, run_table)?;
-        function.commit();
-        argument.commit();
         Ok(self.classify_parked(outcome, None, HoleSeed::Plain, Arc::new(provenance)))
     }
 

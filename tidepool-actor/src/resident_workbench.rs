@@ -2778,8 +2778,8 @@ where
                 session
                     .run_rooted_application(
                         "actor_mailbox_handler",
-                        handler,
-                        request,
+                        &handler,
+                        &request,
                         handler_realm,
                         None,
                     )

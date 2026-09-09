@@ -163,6 +163,7 @@ fn build_wrap_suspend(wrap_tag: u64, dummy: i64, body_tag: u64) -> CoreExpr {
 
 enum RootedOperand {
     IdentityEff,
+    SuspendingIdentityEff,
     ThreadResult(i64),
 }
 
@@ -183,6 +184,33 @@ fn build_operand_suspend(wrap_tag: u64, operand: RootedOperand) -> CoreExpr {
                 binder: ARG,
                 body: value,
             })
+        }
+        RootedOperand::SuspendingIdentityEff => {
+            const ARG: VarId = VarId(23);
+            const RESUME: VarId = VarId(24);
+            let argument = builder.push(CoreFrame::Var(ARG));
+            let tag = builder.push(CoreFrame::Lit(Literal::LitWord(92)));
+            let union = builder.push(CoreFrame::Con {
+                tag: UNION_ID,
+                fields: vec![tag, argument],
+            });
+            let value = builder.push(CoreFrame::Con {
+                tag: VAL_ID,
+                fields: vec![argument],
+            });
+            let continuation = builder.push(CoreFrame::Lam {
+                binder: RESUME,
+                body: value,
+            });
+            let queue = builder.push(CoreFrame::Con {
+                tag: LEAF_ID,
+                fields: vec![continuation],
+            });
+            let body = builder.push(CoreFrame::Con {
+                tag: E_ID,
+                fields: vec![union, queue],
+            });
+            builder.push(CoreFrame::Lam { binder: ARG, body })
         }
         RootedOperand::ThreadResult(value) => {
             let value = builder.push(CoreFrame::Lit(Literal::LitInt(value)));
@@ -320,21 +348,119 @@ fn rooted_application_passes_an_opaque_live_value_to_opaque_live_code() {
         RootedOperand::ThreadResult(41),
     );
 
+    let roots = session.value_handle_count();
+    for realm in [RealmId(12), RealmId(13)] {
+        let outcome = session
+            .run_rooted_application(
+                "rooted_application",
+                &function,
+                &argument,
+                realm,
+                Some(&table),
+            )
+            .expect("rooted application");
+        match outcome {
+            ResidentOutcome::Completed { result, .. } => {
+                assert_eq!(expect_thread_result(&result.into_value()), 41);
+            }
+            other => panic!("identity handler must complete, got {other:?}"),
+        }
+        session.close_realm(realm);
+        assert_eq!(session.value_handle_count(), roots);
+    }
+    drop((function, argument));
+    assert_eq!(session.value_handle_count(), roots - 2);
+}
+
+#[test]
+fn rooted_application_suspensions_retain_borrowed_values_after_owner_release() {
+    let table = table();
+    let mut session = fresh_session();
+    let function = capture_operand(
+        &mut session,
+        &table,
+        "suspending_function",
+        90,
+        RootedOperand::SuspendingIdentityEff,
+    );
+    let argument = capture_operand(
+        &mut session,
+        &table,
+        "retained_argument",
+        91,
+        RootedOperand::ThreadResult(73),
+    );
+    let roots = session.value_handle_count();
+    let mut holes = Vec::new();
+    for realm in [RealmId(12), RealmId(13)] {
+        let outcome = session
+            .run_rooted_application(
+                "borrowed_suspend",
+                &function,
+                &argument,
+                realm,
+                Some(&table),
+            )
+            .expect("suspend borrowed application");
+        let ResidentOutcome::Suspended { hole, .. } = outcome else {
+            panic!("expected suspension, got {outcome:?}");
+        };
+        holes.push(hole);
+    }
+    drop((function, argument));
+    assert_eq!(session.value_handle_count(), roots - 2);
+    session.close_realm(RealmId(12));
     let outcome = session
+        .resume(
+            holes.pop().expect("second handler"),
+            Value::Lit(Literal::LitInt(0)),
+        )
+        .expect("resume with owner roots released and sibling retired");
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("expected completion, got {outcome:?}");
+    };
+    assert_eq!(expect_thread_result(&result.into_value()), 73);
+}
+
+#[test]
+fn rooted_application_rejects_foreign_custody_without_consuming_inputs() {
+    let table = table();
+    let mut session = fresh_session();
+    let mut foreign = fresh_session();
+    let function = capture_operand(
+        &mut session,
+        &table,
+        "local_function",
+        90,
+        RootedOperand::IdentityEff,
+    );
+    let argument = capture_operand(
+        &mut foreign,
+        &table,
+        "foreign_argument",
+        91,
+        RootedOperand::ThreadResult(41),
+    );
+    let local_roots = session.value_handle_count();
+    let foreign_roots = foreign.value_handle_count();
+    let error = session
         .run_rooted_application(
-            "rooted_application",
-            function,
-            argument,
+            "foreign_application",
+            &function,
+            &argument,
             RealmId(12),
             Some(&table),
         )
-        .expect("rooted application");
-    match outcome {
-        ResidentOutcome::Completed { result, .. } => {
-            assert_eq!(expect_thread_result(&result.into_value()), 41);
-        }
-        other => panic!("identity handler must complete, got {other:?}"),
-    }
+        .expect_err("cross-session input");
+    assert!(matches!(
+        error,
+        tidepool_runtime::session::ResidentError::ForeignCustody
+    ));
+    assert_eq!(session.value_handle_count(), local_roots);
+    assert_eq!(foreign.value_handle_count(), foreign_roots);
+    drop((function, argument));
+    assert_eq!(session.value_handle_count(), local_roots - 1);
+    assert_eq!(foreign.value_handle_count(), foreign_roots - 1);
 }
 
 /// Fork one green thread: run the scratch wrapper suspension, take its
