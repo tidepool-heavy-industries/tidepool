@@ -254,7 +254,11 @@ fn resolve_agent_defaults(
 }
 
 fn install_local_exclude(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let exclude = workspace.join(".git/info/exclude");
+    let exclude = tidepool_worktree::git::inspect::git_common_dir(
+        &tidepool_worktree::GitCli::new(),
+        workspace,
+    )?
+    .join("info/exclude");
     let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
     let mut updated = existing
         .lines()
@@ -1306,6 +1310,32 @@ mod tests {
             git_stdout(&workspace, &["ls-tree", "--name-only", "HEAD"]).await,
             ".shoal\n"
         );
+    }
+
+    #[tokio::test]
+    async fn local_excludes_work_in_linked_worktrees() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("project");
+        new(NewOptions {
+            path: Some(workspace.clone()),
+        })
+        .await
+        .unwrap();
+        let linked = parent.path().join("linked");
+        git_stdout(
+            &workspace,
+            &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
+        )
+        .await;
+        let exclude = workspace.join(".git/info/exclude");
+        std::fs::write(&exclude, "/user-local-file\n").unwrap();
+        install_local_exclude(&linked).unwrap();
+        let first = std::fs::read_to_string(&exclude).unwrap();
+        assert!(first.contains("/user-local-file\n"));
+        assert!(first.lines().any(|line| line == SHOAL_EXCLUDES[0]));
+        install_local_exclude(&linked).unwrap();
+        assert_eq!(first, std::fs::read_to_string(&exclude).unwrap());
+        assert!(linked.join(".git").is_file());
     }
 
     #[tokio::test]
