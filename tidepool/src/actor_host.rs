@@ -5544,7 +5544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stateful_handler_failure_pauses_without_closing_mailbox() {
+    async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_mailbox() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();
         let setup = dispatch_haskell_script(
@@ -5590,7 +5590,7 @@ mod tests {
                 .contains("replace a failed handler first"),
             "{rejected:?}"
         );
-        let queued = dispatch_haskell_script(root.as_ref(), "cast server (Counter 5 (const ()))\npaused <- pollExit server\ncase paused of { Nothing -> True; _ -> False }").await;
+        let queued = dispatch_haskell_script(root.as_ref(), "cast server (Counter 5 (const ()))\npaused <- pollExit server\neffects <- call sink (Counter 0 id)\ncase paused of { Nothing -> effects == 1; _ -> False }").await;
         assert_eq!(queued["status"], "committed", "{queued:?}");
         for item in queued["items"].as_array().unwrap() {
             assert_eq!(item["status"], "committed", "{queued:?}");
