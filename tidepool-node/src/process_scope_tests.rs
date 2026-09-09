@@ -179,10 +179,12 @@ fn scope_rejects_stale_and_sibling_info_retains_exact_cleanup() {
 fn scope_timeout_retains_owner_then_confirms_both_facts() {
     let mut fixture = Fixture::new("echo started > started");
     fixture.pin();
-    assert!(fixture
-        .scope
-        .terminate_and_wait(Instant::now() - Duration::from_secs(1))
-        .is_err());
+    assert!(
+        fixture
+            .scope
+            .terminate_and_wait(Instant::now() - Duration::from_secs(1))
+            .is_err()
+    );
     assert!(fixture.scope.init.is_some());
     assert!(fixture.scope.cleanup.is_none());
     assert!(matches!(
@@ -288,12 +290,16 @@ fn released_descendants(kill_monitor: bool) {
 fn scope_private_gate_is_blocking_cloexec_and_above_stdio() {
     let (read, write) = private_pipe().unwrap();
     assert!(read.as_raw_fd() > 2 && write.as_raw_fd() > 2);
-    assert!(!rustix::fs::fcntl_getfl(&read)
-        .unwrap()
-        .contains(OFlags::NONBLOCK));
-    assert!(rustix::io::fcntl_getfd(&read)
-        .unwrap()
-        .contains(FdFlags::CLOEXEC));
+    assert!(
+        !rustix::fs::fcntl_getfl(&read)
+            .unwrap()
+            .contains(OFlags::NONBLOCK)
+    );
+    assert!(
+        rustix::io::fcntl_getfd(&read)
+            .unwrap()
+            .contains(FdFlags::CLOEXEC)
+    );
     assert!(wait_readable(&read, Instant::now()).is_err());
 }
 
@@ -493,7 +499,10 @@ fn retained_workspace_is_entered_before_pid_scope() {
             bwrap,
             ProcessInvocation {
                 program: "/bin/sh".into(),
-                args: vec!["-c".into(), "cat marker; printf child > child".into()],
+                args: vec![
+                    "-c".into(),
+                    "set -e; cat marker; /bin/sh -c 'printf child' </dev/null > child; exec 3<>/dev/ptmx; printf ready > ready".into(),
+                ],
             },
         )
         .unwrap()
@@ -511,7 +520,7 @@ fn retained_workspace_is_entered_before_pid_scope() {
     fixture.pin();
     fixture.scope.release_command().unwrap();
     let limit = deadline();
-    while !fixture.directory.path().join("upper/child").exists() {
+    while !fixture.directory.path().join("upper/ready").exists() {
         assert!(
             Instant::now() < limit,
             "{}",

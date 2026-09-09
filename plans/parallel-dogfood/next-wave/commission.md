@@ -19,8 +19,8 @@ directly to fresh selected Astra consultations with compact evidence packets.
 
 Related implementation inherits the useful completed reasoning and current bound
 checkout; original-root calls select projectHead. Fresh context is deliberate for
-unrelated leads and independent review. Verify the selected package's actual
-helper signatures rather than assuming an old recipe. Sol nodes recursively
+unrelated leads and independent review. Use the launch-supplied commissioning recipe and the selected package guide;
+query types only for a concrete missing fact, not as a startup inventory. Sol nodes recursively
 implement, fork and integrate; a milestone-sized task is not automatically a leaf.
 Targeted Astra engagements own hard semantic decisions or repairs. No agent quota,
 mandatory worker-stage zoo, or return to root for each local cycle.

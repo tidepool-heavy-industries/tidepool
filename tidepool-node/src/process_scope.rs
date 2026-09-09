@@ -169,6 +169,9 @@ impl LaunchReservation {
                     .entry
                     .command(&view.directory, self.bubblewrap.as_os_str())?;
                 command.args(["--bind", "/", "/"]);
+                // A normal bind marks device mounts nodev. Native subprocess
+                // setup opens /dev/null and PTYs even with inherited TUI stdio.
+                command.args(["--dev-bind", "/dev", "/dev"]);
                 command.args(&options).arg("--chdir").arg(&view.directory);
                 command
                     .arg("--")
@@ -671,7 +674,7 @@ pub(crate) fn wait_readable(fd: &OwnedFd, deadline: Instant) -> std::io::Result<
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "scope observation timed out",
-                ))
+                ));
             }
             Ok(_) => {
                 let events = polls[0].revents();

@@ -125,7 +125,13 @@ The native slice is committed and published, main selects its exact pin, and
 scoped formatting/lints and consumer checks are complete. Recovered dirty files
 now have exact Git commits; [resume guidance](../parallel-dogfood/next-wave/resume.md)
 requires source reconciliation onto the next launch's main before implementation.
-No swarm has been launched by this acceptance pass.
+Launch acceptance also covers source-checkout process custody and entering the
+retained workspace before PID isolation. The retained-view supervisor preserves
+device access explicitly: a normal root bind makes `/dev` nodev, so it needs the
+same device bind as ordinary launches. All 14 process-scope tests pass, including
+a child launched with `/dev/null` stdin and opening a PTY in the retained view.
+The initial live planner exposed that device-mount defect before any workers
+were commissioned; the replacement runner includes the repair.
 
 Local release receipts and checked logs are retained under
 `/home/inanna/dev/tidepool/target/resource-acceptance-20260909/`.

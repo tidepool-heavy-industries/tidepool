@@ -27,7 +27,10 @@ Launch preparation only; this file is not a claim of acceptance or deployment.
   runs; build the next harness from main, independently of those product candidates.
 - Launch a unique session with Astra High and the selected planner root prompt;
   leave Sol as the worker default. Never recreate or resume an unrelated run.
-  Give the planner the exact launch record and next-wave/commission.md. It
+  Give the planner the exact launch record and next-wave/commission.md, followed
+  by the checked "Commission and review inside Shoal" recipe from planner.md.
+  This supplies the selected imports, coordinator expression and review collector
+  lifecycle directly; keep the detailed implementation plans in files. It
   commissions the Sol tree; implementation starts after it checks the Sol execution plans.
 - Preserve run identity, tmux panes, existing run-map observations and opt-in
   bounded private traces for later visualization. Track actual models, forks,
