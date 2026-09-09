@@ -809,6 +809,19 @@ where
                         std::io::Error::other("prepared successor lost its execution context")
                     })?;
                 *state.context.child_admission_closed.write().await = true;
+                if let Err(error) = state
+                    .behavior
+                    .commit_replacement(&state.context, &successor_context)
+                {
+                    if let Some(reply) = pending.reply.take() {
+                        let _ = reply.send(Err(crate::KernelInvocationFailure::Failed {
+                            actor: state.context.identity,
+                            detail: error.detail,
+                        }));
+                    }
+                    state.replacement = Some(pending);
+                    return Ok(());
+                }
                 let mut children = state.context.children.lock();
                 let mut inherited = successor_context.children.lock();
                 for (id, child) in children.drain() {
@@ -829,19 +842,6 @@ where
                             crate::CleanupComponentOutcome::Confirmed,
                         ),
                     );
-                }
-                if let Err(error) = state
-                    .behavior
-                    .commit_replacement(&state.context, &successor_context)
-                {
-                    if let Some(reply) = pending.reply.take() {
-                        let _ = reply.send(Err(crate::KernelInvocationFailure::Failed {
-                            actor: state.context.identity,
-                            detail: error.detail,
-                        }));
-                    }
-                    state.replacement = Some(pending);
-                    return Ok(());
                 }
                 state
                     .terminal
