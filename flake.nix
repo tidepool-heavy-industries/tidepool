@@ -193,7 +193,7 @@
           packages = [
             pkgs.git
             pkgs.tmux
-          ];
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
           TIDEPOOL_INTERACTIVE_CODEX_BIN = "${interactiveCodex}/bin/codex";
           TIDEPOOL_SHOAL_CODEX_CLOSURE = "${interactiveCodex}";
           TIDEPOOL_SHOAL_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
@@ -271,13 +271,13 @@
           postBuild = ''
             wrapProgram "$out/bin/shoal" \
               --prefix PATH : ${
-                pkgs.lib.makeBinPath [
+                pkgs.lib.makeBinPath ([
                   self.packages.${system}.tidepool-extract
                   pkgs.bubblewrap
                   pkgs.coreutils
                   pkgs.git
                   pkgs.tmux
-                ]
+                ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ])
               } \
               --set TIDEPOOL_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
               --set TIDEPOOL_SHOAL_CODEX_CLOSURE "${interactiveCodex}" \

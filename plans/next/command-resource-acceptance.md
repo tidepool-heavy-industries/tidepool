@@ -1,14 +1,16 @@
 # Command resource isolation acceptance
 
 This slice brings the applications lane's process supervisor onto main and adds
-bounded command execution. It does not complete applications A0–A8. After this
-slice is accepted, revise that checklist against main and the retained lane
-checkpoints rather than treating the supervisor as future work.
+bounded command execution. It does not complete applications A0–A8. The revised
+applications checklist separates the implemented supervisor from remaining
+delivery, hosted completion, recovery and full resource-settlement work.
 
 ## Required behavior
 
 - Full native TUIs, Shoal host and shared compiler remain outside the constrained
   command subtree. Each authored command and its descendants share one allocation.
+  External service work, such as builds executed by the Nix daemon, is not a
+  descendant of the requesting command and remains outside this allocation.
 - TOML defaults: two command allocations; each has 8 GiB memory.max
   and 1 GiB swap.max; aggregate limits are 16 GiB memory and 2 GiB swap. There is
   no default memory.high throttle; an explicit optional override remains available.
@@ -26,9 +28,10 @@ checkpoints rather than treating the supervisor as future work.
 - Exact supervisor custody remains in the host lifecycle row. Failed process
   retirement must retain the pane and cleanup capability.
 
-## Current evidence (development checkouts, not a release)
+## Checked implementation and release evidence
 
-Tidepool: `/tmp/tidepool-rsi-main-20260908`, based on main `fbe9ce4b`.
+Tidepool implementation: main `61d6c0b41`; recovery guidance: `bf8bf18f`.
+The working checkout is `/tmp/tidepool-rsi-main-20260908`.
 Native: `fe15831c8a22c0d1b8d78d5ce55b7aa5fc3fa666`, published on
 `inanna-malick/codex:shoal-command-resources` and selected by the flake pin.
 The applications supervisor source was selected from `978029124`; its unrelated
@@ -87,13 +90,17 @@ view on NixOS rather than changing the host filesystem.
 
 ## Remaining acceptance
 
-- Freeze the matched runner and verify its actual packaged executables. The
-  development full-TUI, CoW and host-launch fixtures have passed.
-- Complete scoped consumer compilation, formatting/lints and dependency lockfile
-  updates; review the final production diff for duplicate ownership and stale paths.
-- Commit the checked native and Tidepool slices, update the pin, freeze a runner,
-  and record exact revisions and remaining recovered product branches.
-- Preserve recovered dirty work and prepare next-wave branch advancement. Do not
-  launch a swarm as part of acceptance.
+- Finish the Nix package build and its queued full-TUI acceptance against the
+  packaged executables. The development full-TUI, CoW and host-launch checks passed.
+- The native contributor guide requires approval for the complete workspace
+  `just test` suite. Approval was requested; that suite has not run.
+- Record the final package receipt and close this acceptance record.
 
-No helper test or compile-only result proves these remaining items complete.
+The native slice is committed and published, main selects its exact pin, and
+scoped formatting/lints and consumer checks are complete. Recovered dirty files
+now have exact Git commits; [resume guidance](../parallel-dogfood/next-wave/resume.md)
+requires source reconciliation onto the next launch's main before implementation.
+No swarm has been launched by this acceptance pass.
+
+Local release receipts and checked logs are retained under
+`/home/inanna/dev/tidepool/target/resource-acceptance-20260909/`.
