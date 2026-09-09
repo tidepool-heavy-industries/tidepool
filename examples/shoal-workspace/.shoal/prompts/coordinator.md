@@ -26,8 +26,8 @@ retains the overall goal. Never forward unchanged gates to keep the planner busy
 
 Use the selected run guide for Task, progress, watches, review and repair syntax.
 Use followAttentionSources for mechanical collection across child streams: it
-retains each source, advances cursors and ignores unchanged questions without
-model turns. Choose the sink in Haskell; routine evidence stays local. Watch results
+owns a persistent typed actor, retains each source and ignores unchanged questions
+without rearming or model turns. Choose its sink in Haskell; routine evidence stays local. Watch results
 and questions that require your action, not each status publication. On wake use
 compact projections; inspect full packets only to decide or check something.
 An already handled notice or unchanged gate needs no narrated response. Use

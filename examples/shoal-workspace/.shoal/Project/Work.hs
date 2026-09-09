@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
@@ -10,17 +11,18 @@ module Project.Work
   , withDecision, updateDecision, designQuestion, raiseQuestion, resolveQuestion
   , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
   , requestIncorporation, consultDesign, followAttention, followAttentionSources
-  , AttentionSource (..), AttentionStatus (..), normalizeAttention
+  , AttentionSource (..), AttentionStatus (..), AttentionInput (AttentionSnapshot), normalizeAttention
   , settledValue
   ) where
 
 import Control.Monad.Freer (Eff, Member)
-import Control.Monad (void, when)
+import Control.Monad (when)
 import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Tidepool.Actor as Actor
 import Tidepool.Actors.Shoal
-import Tidepool.Effects.Core (AgentInspection, Forks, GitRef (..))
+import Tidepool.Effects.Core (Actor, AgentInspection, Forks, GitRef (..))
 import Project.Types
 import Shoal.Workspace (workspacePrompt)
 
@@ -165,24 +167,8 @@ designQuestion task candidate finding = DesignQuestion
 normalizeAttention :: Attention -> Attention
 normalizeAttention = nub . sort
 
--- The single-source convenience preserves its existing payload contract.
--- Use followAttentionSources when terminal status and source attribution matter.
-followAttention
-  :: Member Watches effects
-  => Progress Attention -> ProgressCursor -> (Attention -> Eff effects ()) -> Eff effects Route
-followAttention updates cursor sink = follow cursor []
-  where
-    follow after previous = route (awaitProgressAfter updates after) $ \state -> case state of
-      ProgressUpdate next questions -> do
-        let current = normalizeAttention questions
-        when (current /= previous) (sink current)
-        void (follow next current)
-      ProgressClosed -> pure ()
-      ProgressRejected failure -> error (show failure)
-      ProgressPending -> error "attention dependency became ready without an observation"
-
--- One snapshot per named input; equal question keys in different sources cannot
--- overwrite each other. Closing/rejecting a source retains its unresolved facts.
+-- Each source owns its unresolved set. Closure preserves that set until an
+-- explicit application decision changes it; equal keys across lanes stay distinct.
 data AttentionStatus = AttentionOpen | AttentionClosed | AttentionRejected ReplyError
   deriving (Show, Eq)
 
@@ -192,42 +178,51 @@ data AttentionSource = AttentionSource
   , attentionStatus :: AttentionStatus
   } deriving (Show, Eq)
 
--- The sink chooses policy in Haskell: publish retained state to a Sol owner,
--- project a meaningful change, or invoke another known continuation. Merely
--- collecting state does not notify or commission any model.
+data AttentionInput result where
+  AttentionUpdate :: Text -> ProgressState Attention -> AttentionInput ()
+  AttentionSnapshot :: AttentionInput [AttentionSource]
+
+-- Source publications and explicit snapshot calls share the actor's FIFO.
+-- The sink runs with this actor's authority, not its creator's reply ownership.
 followAttentionSources
-  :: Member Watches effects
+  :: Member Actor effects
   => [(Text, Progress Attention)]
-  -> ([AttentionSource] -> Eff effects ())
-  -> Eff effects Route
+  -> ([AttentionSource] -> Eff (Actor.ReadOnlyEffects AttentionInput) ())
+  -> Eff effects (Actor.ActorRef AttentionInput [AttentionSource])
 followAttentionSources sources sink
   | length names /= length (nub names) = error "attention source names must be unique"
-  | otherwise = follow initial
+  | otherwise = Actor.startActor definition initial
   where
     names = map fst sources
-    initial = [(handle, ProgressCursor 0, AttentionSource name [] AttentionOpen) | (name, handle) <- sources]
-    follow current =
-      let active = [(handle, cursor) | (handle, cursor, entry) <- current, attentionStatus entry == AttentionOpen]
-      in route (awaitAnyProgress active) $ \updates -> do
-        let next = advance current updates
-            previousView = [entry | (_, _, entry) <- current]
-            nextView = [entry | (_, _, entry) <- next]
-        when (nextView /= previousView) (sink nextView)
-        when (any ((== AttentionOpen) . attentionStatus) nextView) (void (follow next))
-    advance [] [] = []
-    advance ((handle, cursor, entry) : rest) updates
-      | attentionStatus entry /= AttentionOpen = (handle, cursor, entry) : advance rest updates
-      | otherwise = case updates of
-          state : remaining -> case state of
-            ProgressUpdate next questions ->
-              (handle, next, entry { attentionQuestions = normalizeAttention questions }) : advance rest remaining
-            ProgressClosed ->
-              (handle, cursor, entry { attentionStatus = AttentionClosed }) : advance rest remaining
-            ProgressRejected failure ->
-              (handle, cursor, entry { attentionStatus = AttentionRejected failure }) : advance rest remaining
-            ProgressPending -> (handle, cursor, entry) : advance rest remaining
-          [] -> error "attention observation omitted a source"
-    advance [] (_ : _) = error "attention observation added a source"
+    initial = [AttentionSource name [] AttentionOpen | name <- names]
+    definition = Actor.withSources
+      [Actor.progressSource handle (AttentionUpdate name) | (name, handle) <- sources] $
+      Actor.stateful "attention" Actor.ReadOnly step
+    step
+      :: [AttentionSource] -> AttentionInput result
+      -> Eff (Actor.ReadOnlyEffects AttentionInput) (result, [AttentionSource])
+    step current AttentionSnapshot = pure (current, current)
+    step current (AttentionUpdate name observation) = do
+      let next = map (advance name observation) current
+      when (next /= current) (sink next)
+      pure ((), next)
+    advance name observation entry
+      | attentionSource entry /= name = entry
+      | otherwise = case observation of
+          ProgressUpdate _ questions -> entry { attentionQuestions = normalizeAttention questions }
+          ProgressClosed -> entry { attentionStatus = AttentionClosed }
+          ProgressRejected failure -> entry { attentionStatus = AttentionRejected failure }
+          ProgressPending -> entry
+
+followAttention
+  :: Member Actor effects
+  => Progress Attention
+  -> (Attention -> Eff (Actor.ReadOnlyEffects AttentionInput) ())
+  -> Eff effects (Actor.ActorRef AttentionInput [AttentionSource])
+followAttention updates sink = followAttentionSources [("source", updates)] $ \sources ->
+  case sources of
+    [source] | attentionStatus source == AttentionOpen -> sink (attentionQuestions source)
+    _ -> pure ()
 
 consultDesign
   :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)

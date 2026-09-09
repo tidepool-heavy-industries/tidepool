@@ -189,6 +189,34 @@ Bind the observation, then apply a projection or `inspectFull` to that saved
 value. Full inspection does not poll again. `:info ResponseFailure` or
 `:info WatchFailure` supplies detailed constructors only when needed.
 
+## Persistent typed coordination
+
+Use finite watches for finite obligations. For ongoing routing, import
+`Tidepool.Actor` qualified as `Actor` and define a small mailbox protocol.
+`Actor.stateful label Actor.ReadOnly step` builds a definition whose handler takes
+one committed state and one message, returning `(reply, nextState)` in `Eff`.
+`Actor.startActor definition initialState` returns its exact typed handle.
+
+Attach fixed sources with `Actor.withSources`: `Actor.progressSource updates onProgress`
+captures current progress and follows every later publication and closure;
+`Actor.settlementSource response onSettlement` delivers the retained terminal outcome.
+Each pure mapping constructs a message of the actor's protocol. Source messages,
+`Actor.cast handle message`, and `Actor.call handle message` share one sequential
+mailbox. `call` returns the protocol's result type. No model rearming or batching.
+
+Capture bindings in ordinary Haskell closures. Effects run with the receiving
+actor's authority. A handler can cast to another typed actor or use `sendMessage`
+for consequential steering; it does not inherit its creator's reply ownership.
+Keep application deduplication and wake decisions in Haskell. The curated
+`Project.Work.followAttentionSources` supplies this pattern for named question
+streams, with `AttentionSnapshot` for deliberate inspection.
+
+Handler failure pauses execution, retains committed state/input/queued work, and
+messages the supervisor. Do not recreate and replay an uncertain effect.
+Source completion leaves the actor alive. `Actor.drainActor handle` closes
+admission and lets accepted messages finish; `Actor.awaitExit handle` explicitly
+waits for its final state. Whole-run recovery is from Git checkpoints.
+
 ## Requests and replies
 
 ```text

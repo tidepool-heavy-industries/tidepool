@@ -90,24 +90,42 @@ correction <- updateDecision response decision
 
 ## Independent progress without relay turns
 
-`followAttentionSources` follows named streams using `awaitAnyProgress`. It keeps
-their cursors and last questions separately, ignores order-only/identical updates,
-and retains questions when a source closes or rejects observation. Equal question
-keys in different sources remain distinct. Source names must be unique.
+`followAttentionSources` starts one persistent typed Haskell actor. It captures
+the current values, consumes every later publication without rearming, and keeps
+each named source's questions and closure separately. Equal keys across sources
+remain distinct; source names must be unique. Order-only and duplicate questions
+do not invoke the sink again. Source closure preserves unresolved questions.
 
-For an owner activated with progress type `[AttentionSource]`, and two bound child
-progress handles, this forwards retained execution state to its Sol requester:
+The sink runs inside the collector with its own authority. It can cast to another
+typed actor or send normal steering to a bound `solOwner :: AgentRef`. For example,
+this policy messages unresolved question keys when the retained view changes:
 
 ```haskell
-collection <- followAttentionSources [("api", apiQuestions), ("ui", uiQuestions)] reportProgress
+import qualified Data.Text as Text
+collection <- followAttentionSources [("api", apiQuestions), ("ui", uiQuestions)] $ \state ->
+  case [attentionSource source <> ":" <> questionKey q | source <- state, q <- attentionQuestions source] of
+    [] -> pure ()
+    keys -> do
+      sent <- sendMessage solOwner (Text.intercalate ";" keys)
+      either (error . show) (const (pure ())) sent
 ```
 
-It does not wait for the slower source, construct a model message or notify Astra.
-The sink is ordinary Haskell: choose a projection, another known continuation or
-publication to the appropriate owner. Sink failure remains a failed retained route;
-inspect `listRoutes`/`pollRoute` before attempting recovery. `followAttention` is
-the single-source convenience. Do not mistake completion of its first route for
-completion of subscriptions subsequently installed by callbacks.
+Choose the projection for the task; routine evidence need not wake a model.
+A collector cannot call its creator's `reportProgress` using inherited reply
+ownership. `followAttention` is the single-source convenience without a cursor.
+For deliberate inspection, query the same retained actor:
+
+```haskell
+import qualified Tidepool.Actor as Actor
+view <- Actor.call collection AttentionSnapshot
+inspectFull view
+```
+
+A failed sink pauses the collector and notifies its supervisor; later messages
+remain queued. Do not recreate it and replay an uncertain send. All sources
+closing leaves the collector available for inspection. When finished with it,
+`Actor.drainActor collection` closes admission; `Actor.awaitExit collection`
+explicitly waits for the retained final state.
 
 Use independent result watches when each candidate can advance integration.
 For coupled results, an applicative join is useful. Source integration is native

@@ -30,30 +30,26 @@ routing = do
   script owner "progress-route"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress [first]"
-  first <- activation
-  firstValue <- turn (checkActor first) "inspectFull (map questionKey sessionInput)"
-  check "the cumulative question route reaches its intended consumer" (checkActor first == checkActor consumer && output firstValue == "[\"question-a\"]")
-  void $ turn (checkActor consumer) "respond (\"received\" :: Text)"
+  first <- turn owner "inspectFull . map (map questionKey . attentionQuestions) <$> Actor.call forwarding AttentionSnapshot"
+  check "the persistent actor consumes the first publication" (output first == "[[\"question-a\"]]")
   void $ turn (checkActor producer) "reportProgress [first]"
-  void $ awaitOutput owner "inspectFull . length <$> listRoutes" (== "3")
-  counts <- turn owner "(\\current -> inspectFull [rosterReceivedRequests actor | actor <- snapshotActors current, (rosterActorId actor, rosterActorIncarnation actor) == agentIdentity (forkedActor consumer)]) <$> snapshot"
-  check "identical attention does not create another request" (output counts == "[2]")
+  void $ turn owner "Actor.call forwarding AttentionSnapshot"
+  counts <- turn owner "Actor.call wakes (RoutingCount 0 id)"
+  check "identical attention does not invoke the sink again" (output counts == "1")
   void $ turn (checkActor producer) "reportProgress [first,second]"
-  second <- activation
-  secondValue <- turn (checkActor second) "inspectFull (map questionKey sessionInput)"
-  check "the later publication retains the unanswered question" (checkActor second == checkActor consumer && output secondValue == "[\"question-a\",\"question-b\"]")
-  void $ turn (checkActor consumer) "respond (\"received\" :: Text)"
+  second <- turn owner "inspectFull . map (map questionKey . attentionQuestions) <$> Actor.call forwarding AttentionSnapshot"
+  check "later publications arrive without rearming" (output second == "[[\"question-a\",\"question-b\"]]")
   pending <- turn (checkActor producer) "pollReply sessionReply"
   check "publishing progress preserves the original reply" (output pending == "ReplyOpen")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  completed <- awaitOutput owner "inspectFull <$> (listRoutes >>= traverse pollRoute)" (\state -> not ("RouteWaiting" `Text.isInfixOf` state || "RouteRunning" `Text.isInfixOf` state))
-  check "closing progress finishes all routed subscriptions" (completed == "[RouteCompleted,RouteCompleted,RouteCompleted,RouteCompleted]")
-
+  closed <- turn owner "inspectFull . map attentionStatus <$> Actor.call forwarding AttentionSnapshot"
+  check "source closure leaves the actor's retained state queryable" (output closed == "[AttentionClosed]")
+  void $ turn owner "Actor.drainActor forwarding\nActor.awaitExit forwarding"
   void restart
   independentSources
 
--- Drive real retained routes: one source cannot block another, erase its facts,
--- or change the identity of a same-key finding in another lane.
+-- Source publications and explicit queries use the same mailbox. A snapshot
+-- call after publication is a barrier; the test never rearms a progress watch.
 independentSources :: Member RecipeCheck effects => Eff effects ()
 independentSources = do
   owner <- root
@@ -61,42 +57,29 @@ independentSources = do
   left <- activation
   void $ turn owner "(right, rightProgress) <- unfold (batch campaign wave) (childWithProgress @Attention @Text (coding rightLabel projectHead (\"right\" :: Text)))"
   right <- activation
-  void $ turn owner "consumer <- unfold (batch campaign wave) (child (coding @Text consumerLabel projectHead ([] :: [AttentionSource])))"
-  consumer <- activation
-  void $ turn (checkActor consumer) "respond (\"ready\" :: Text)"
   script owner "attention-sources-route"
   script (checkActor left) "attention-sources-question"
   script (checkActor right) "attention-sources-question"
   void $ turn (checkActor left) "reportProgress [first,second]"
-  first <- activation
-  firstView <- turn (checkActor first) "inspectFull [(attentionSource s, map questionKey (attentionQuestions s), attentionStatus s) | s <- sessionInput]"
-  check "left progress routes while right is silent" (checkActor first == checkActor consumer && "[\"same-key\",\"second\"]" `Text.isInfixOf` output firstView && "(\"right\",[],AttentionOpen)" `Text.isInfixOf` output firstView)
-  void $ turn (checkActor consumer) "respond (\"received\" :: Text)"
+  first <- turn owner "(\\view -> inspectFull [(attentionSource s, map questionKey (attentionQuestions s), attentionStatus s) | s <- view]) <$> Actor.call collection AttentionSnapshot"
+  check "left progresses while right is silent" ("[\"same-key\",\"second\"]" `Text.isInfixOf` output first && "(\"right\",[],AttentionOpen)" `Text.isInfixOf` output first)
   void $ turn (checkActor left) "reportProgress [second,first,first]"
-  void $ awaitOutput owner "inspectFull . length <$> listRoutes" (== "3")
-  counts <- turn owner "(\\s -> inspectFull [rosterReceivedRequests a | a <- snapshotActors s, (rosterActorId a, rosterActorIncarnation a) == agentIdentity (forkedActor consumer)]) <$> snapshot"
-  check "reordered duplicate facts do not enqueue another status" (output counts == "[2]")
+  void $ turn owner "Actor.call collection AttentionSnapshot"
+  count <- turn owner "Actor.call wakes (RoutingCount 0 id)"
+  check "reordered duplicate facts do not invoke the sink" (output count == "1")
   void $ turn (checkActor right) "reportProgress [first]"
-  both <- activation
-  bothView <- turn (checkActor both) "inspectFull [(attentionSource s, map questionKey (attentionQuestions s)) | s <- sessionInput]"
-  check "same-key questions retain both source identities" (output bothView == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])]")
-  void $ turn (checkActor consumer) "respond (\"received\" :: Text)"
+  both <- turn owner "(\\view -> inspectFull [(attentionSource s, map questionKey (attentionQuestions s)) | s <- view]) <$> Actor.call collection AttentionSnapshot"
+  check "same-key questions retain both source identities" (output both == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])]")
   void $ turn (checkActor left) "respond (\"finished\" :: Text)"
-  closed <- activation
-  closedView <- turn (checkActor closed) "inspectFull [(attentionSource s, map questionKey (attentionQuestions s), attentionStatus s) | s <- sessionInput]"
-  check "closing a source retains its unanswered questions" ("(\"left\",[\"same-key\",\"second\"],AttentionClosed)" `Text.isInfixOf` output closedView)
-  void $ turn (checkActor consumer) "respond (\"received\" :: Text)"
+  closed <- turn owner "(\\view -> inspectFull [(attentionSource s, map questionKey (attentionQuestions s), attentionStatus s) | s <- view]) <$> Actor.call collection AttentionSnapshot"
+  check "closure retains unanswered questions" ("(\"left\",[\"same-key\",\"second\"],AttentionClosed)" `Text.isInfixOf` output closed)
   void $ turn (checkActor right) "reportProgress []"
-  resolved <- activation
-  resolvedView <- turn (checkActor resolved) "inspectFull [(attentionSource s, map questionKey (attentionQuestions s)) | s <- sessionInput]"
-  check "one source resolution does not erase another's retained questions" (output resolvedView == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[])]")
-  void $ turn (checkActor consumer) "respond (\"received\" :: Text)"
+  resolved <- turn owner "(\\view -> inspectFull [(attentionSource s, map questionKey (attentionQuestions s)) | s <- view]) <$> Actor.call collection AttentionSnapshot"
+  check "one resolution cannot erase another source's questions" (output resolved == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[])]")
   void $ turn (checkActor right) "respond (\"finished\" :: Text)"
-  final <- activation
-  finalView <- turn (checkActor final) "inspectFull (map attentionStatus sessionInput)"
-  check "all sources close without a polling model" (output finalView == "[AttentionClosed,AttentionClosed]")
-  void $ turn (checkActor consumer) "respond (\"received\" :: Text)"
-  void $ awaitOutput owner "inspectFull <$> (listRoutes >>= traverse pollRoute)" (\value -> not ("RouteWaiting" `Text.isInfixOf` value || "RouteRunning" `Text.isInfixOf` value))
+  final <- turn owner "inspectFull . map attentionStatus <$> Actor.call collection AttentionSnapshot"
+  check "both sources close without rearming" (output final == "[AttentionClosed,AttentionClosed]")
+  void $ turn owner "Actor.drainActor collection\nActor.awaitExit collection"
 
 data RouteCase = Forward | CancelDestination | LoseProducer deriving (Eq)
 

@@ -1118,7 +1118,7 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
 }
 
 #[tokio::test]
-async fn routes_forward_cumulative_progress_and_rearm_without_model_relay() {
+async fn attention_actor_consumes_later_progress_without_rearming() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".shoal").unwrap();
     campaign
@@ -1135,100 +1135,42 @@ async fn routes_forward_cumulative_progress_and_rearm_without_model_relay() {
     let (producer, _producer_binding) = next_project_worker(&mut campaign).await;
     committed(
         root.as_ref(),
-        include_str!("../../../examples/shoal-workspace/.shoal/checks/progress-route-consumer.hs"),
-    )
-    .await;
-    let (consumer, _consumer_binding) = next_project_worker(&mut campaign).await;
-    let result =
-        dispatch_haskell_script(consumer.policy.as_ref(), "respond (\"ready\" :: Text)").await;
-    assert_eq!(result["status"], "replied", "{result}");
-    committed(
-        root.as_ref(),
         include_str!("../../../examples/shoal-workspace/.shoal/checks/progress-route.hs"),
     )
     .await;
-
     committed(
         producer.policy.as_ref(),
         include_str!("../../../examples/shoal-workspace/.shoal/checks/progress-route-questions.hs"),
     )
     .await;
-    for (questions, expected) in [
-        ("[first]", "[\"question-a\"]"),
-        ("[first,second]", "[\"question-a\",\"question-b\"]"),
+    for (questions, expected, effects) in [
+        ("[first]", "[[\"question-a\"]]", "1"),
+        ("[first]", "[[\"question-a\"]]", "1"),
+        ("[first,second]", "[[\"question-a\",\"question-b\"]]", "2"),
     ] {
         committed(
             producer.policy.as_ref(),
             &format!("reportProgress {questions}\npollReply sessionReply"),
         )
         .await;
-        tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                match campaign.deployments.recv().await.unwrap() {
-                    LocalResidentDeployment::SessionReady { activation }
-                        if activation.id.actor() == consumer.actor.identity() =>
-                    {
-                        break
-                    }
-                    LocalResidentDeployment::WatchChanged { notification }
-                        if notification.owner == campaign.actor.identity() =>
-                    {
-                        panic!("automatic progress route woke its model owner: {notification:?}");
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .unwrap();
-        let observed = committed(
-            consumer.policy.as_ref(),
-            "inspectFull (map questionKey sessionInput)",
-        )
-        .await;
-        assert_eq!(observed["items"][0]["output"], expected, "{observed}");
-        let replied =
-            dispatch_haskell_script(consumer.policy.as_ref(), "respond (\"received\" :: Text)")
-                .await;
-        assert_eq!(replied["status"], "replied", "{replied}");
-        if questions == "[first]" {
-            committed(producer.policy.as_ref(), "reportProgress [first]").await;
-            tokio::time::timeout(Duration::from_secs(120), async {
-                loop {
-                    let observation = committed(
-                        root.as_ref(),
-                        "routes <- listRoutes\ninspectFull (length routes)",
-                    )
-                    .await;
-                    if observation["items"][1]["output"] == "3" {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            })
-            .await
-            .unwrap();
-            let observation = committed(root.as_ref(), "current <- snapshot\ninspectFull [rosterReceivedRequests actor | actor <- snapshotActors current, (rosterActorId actor, rosterActorIncarnation actor) == agentIdentity (forkedActor consumer)]").await;
-            assert_eq!(
-                observation["items"][1]["output"], "[2]",
-                "duplicate attention queued a request: {observation}"
-            );
-        }
+        let observed = committed(root.as_ref(), "view <- Actor.call forwarding AttentionSnapshot\ninspectFull (map (map questionKey . attentionQuestions) view)\nActor.call wakes (RoutingCount 0 id)").await;
+        assert_eq!(observed["items"][1]["output"], expected, "{observed}");
+        assert_eq!(observed["items"][2]["output"], effects, "{observed}");
     }
-    let pending = committed(producer.policy.as_ref(), "pollReply sessionReply").await;
-    assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let routes = committed(
-        root.as_ref(),
-        "ownedRoutes <- listRoutes\nstates <- traverse pollRoute ownedRoutes\ninspectFull states",
-    )
-    .await;
+    let closed = committed(root.as_ref(), "view <- Actor.call forwarding AttentionSnapshot\ninspectFull (map attentionStatus view)\nActor.drainActor forwarding\nActor.awaitExit forwarding").await;
     assert_eq!(
-        routes["items"][2]["output"],
-        "[RouteCompleted,RouteCompleted,RouteCompleted,RouteCompleted]",
-        "{routes}"
+        closed["items"][1]["output"], "[AttentionClosed]",
+        "{closed}"
+    );
+    assert!(
+        closed["items"][3]["output"]
+            .as_str()
+            .unwrap()
+            .starts_with("Completed"),
+        "{closed}"
     );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -2475,6 +2417,14 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
 #[tokio::test(flavor = "multi_thread")]
 async fn candidate_routing_recipes_exercise_failure_and_attention() {
     let repository = recipe_workspace(Some(&["Project.RoutingChecks.routing"]));
+    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attention_actor_recipe_retains_independent_sources_through_closure() {
+    let repository = recipe_workspace(Some(&["Project.RoutingChecks.independentSources"]));
     crate::shoal::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();

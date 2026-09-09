@@ -127,8 +127,8 @@ reportProgress updatedQuestions
 ```
 
 A stable questionKey is local to its plan; source and finding distinguish revisions
-of that question. Publish the whole unresolved set so coalescing loses no unanswered
-question. Publish on meaningful changes, not every tool step. Keep this request
+of that question. Publish the whole unresolved set so a newly attached collector receives the
+current questions. Attached actors receive every subsequent publication. Publish on meaningful changes, not every tool step. Keep this request
 pending and continue unrelated useful work. The Sol owner handles the question; this is not a planner notification.
 Use followAttention for a single cumulative source, or followAttentionSources for
 independently advancing sources and explicit terminal status. Neither needs a

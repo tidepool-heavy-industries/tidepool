@@ -14,15 +14,14 @@ For independently integrable work, register one watch per branch so a ready
 candidate does not wait behind its sibling.
 
 End the model response normally. When the watch becomes terminal, Tidepool
-reactivates the actor and For independently advancing progress sources, `awaitAnyProgress [(left, leftCursor),
-(right, rightCursor)]` captures a list in the same order when any input advances or
-closes. Unchanged inputs remain ProgressPending in that captured observation.
-Keep each source's cursor and previous value when rearming; closure does not mean
-its earlier unresolved facts disappeared. `route` can own that continuation
-without another model turn. The curated Project.Work.followAttentionSources
-implements this policy with named sources; it is not a core role requirement.
+reactivates the actor. `pollWatch joined` returns its retained typed observation.
 
-`pollWatch joined` returns its typed observation.
+For ongoing progress, use a persistent Haskell actor with `progressSource`.
+It captures current state and then receives every publication and closure in
+order. The curated `Project.Work.followAttentionSources` collects named streams,
+retains unresolved questions independently and invokes an authored sink on changed
+state. The sink chooses meaningful messages; no model rearms watches or relays
+routine progress. Source completion does not terminate the collector.
 
 `Await a` is the pure dependency description; `Watch a` is its registered
 subscription. `ReplyAvailable` carries a typed result and its evidence;
@@ -91,17 +90,17 @@ reportReady <- watch reportLabel (awaitSettled leadResponse)
 Choose progress at assignment creation when a lead's intermediate findings matter.
 It does not change or amend an already active assignment. The lead can publish
 `reportProgress ["finding"]` while keeping its final reply pending. End the turn
-when waiting; on wake, bind and inspect `pollWatch findingsReady`, then rearm with
-the returned update cursor. Inspect the separate final-report watch on its wake.
+when waiting. This finite watch captures the first finding; ongoing following uses
+a persistent source actor. Inspect the separate final-report watch on its wake.
 Progress is one-way observation, not a return steering channel: it does not repair
 failed amendments or provide a root handle. A queued follow-up still cannot
 unblock a lead waiting synchronously for it; avoid circular waits.
 
 `pollProgress updates` observes the latest update. Register
 `watch label (awaitProgressAfter updates (ProgressCursor 0))` to wait for the
-first update or closure, and rearm with the revision from `ProgressUpdate`.
-Each observer has its own cursor. Updates can coalesce; this is latest-value
-progress, not a message queue. A watch retains its qualifying snapshot, so
+first update or closure. These finite observations have independent cursors and
+can coalesce updates. For lossless ongoing delivery, attach `progressSource`
+to a persistent actor instead of building a rearming loop. A watch retains its qualifying snapshot, so
 later publications cannot change the value obtained by polling that watch.
 Mixed response/progress watches retain each qualifying progress snapshot while
 waiting for their remaining dependencies. `ProgressClosed` ends a wait with
