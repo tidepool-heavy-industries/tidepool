@@ -225,7 +225,13 @@ enum ResidentStanding {
     Tools(crate::resident_tools::ResidentToolAwait),
     Interactive(crate::interactive_session::ResidentInteractiveAwait),
     Terminal,
-    Paused,
+    Paused(PausedHandler),
+}
+
+struct PausedHandler {
+    checkpoint: StateCheckpoint,
+    input: RetainedActorInput,
+    detail: String,
 }
 
 struct StateCheckpoint {
@@ -407,7 +413,6 @@ pub struct ResidentKernelBehavior<H, O> {
     checkpoint: Option<StateCheckpoint>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
-    handler_failure: Option<String>,
     sources: Vec<crate::request::sources::SourceBinding>,
     source_connections: Option<crate::request::sources::RequestSources>,
     launch_worktrees: Vec<String>,
@@ -519,7 +524,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             checkpoint: None,
             pending_checkpoint: None,
             active_input: None,
-            handler_failure: None,
             sources: Vec::new(),
             source_connections: None,
             launch_worktrees,
@@ -616,7 +620,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 ("request-active", Some(awaiting.request.request))
             }
             ResidentStanding::Terminal => ("terminal", None),
-            ResidentStanding::Paused => ("handler-paused", None),
+            ResidentStanding::Paused(_) => ("handler-paused", None),
         };
         let requests = self.environment.requests.status_for(actor);
         let records = self.environment.actors.lock();
@@ -822,8 +826,21 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             || "workspace mapping: unavailable (no hosted launch observation)".to_owned(),
             crate::ActorWorkspaceObservation::orientation,
         );
+        let failure = match &self.standing {
+            ResidentStanding::Paused(failure) => {
+                let input = match &failure.input {
+                    RetainedActorInput::Mailbox(_) => "mailbox",
+                    RetainedActorInput::Source(_) => "source",
+                };
+                format!(
+                    "\n  handler failure: {}; retained state site={} input={input}",
+                    failure.detail, failure.checkpoint.site,
+                )
+            }
+            _ => String::new(),
+        };
         let status = format!(
-            "{current}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
+            "{current}{failure}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
             requests
                 .deadlines
                 .iter()
@@ -4133,7 +4150,7 @@ where
         if self.checkpoint.is_none()
             || matches!(
                 self.standing,
-                ResidentStanding::Paused | ResidentStanding::Terminal
+                ResidentStanding::Paused(_) | ResidentStanding::Terminal
             )
         {
             return Err(KernelBehaviorError {
@@ -4179,21 +4196,31 @@ where
     }
 
     fn pause_failed_handler(&mut self, kernel: &KernelContext, detail: &str) -> bool {
-        if self.checkpoint.is_none() || self.active_input.is_none() {
-            return false;
-        }
-        self.pending_checkpoint = None;
-        self.standing = ResidentStanding::Paused;
-        if self.handler_failure.is_some() {
+        if matches!(self.standing, ResidentStanding::Paused(_)) {
             return true;
         }
-        self.handler_failure = Some(detail.to_owned());
+        let (checkpoint, input) = match (self.checkpoint.take(), self.active_input.take()) {
+            (Some(checkpoint), Some(input)) => (checkpoint, input),
+            (checkpoint, input) => {
+                self.checkpoint = checkpoint;
+                self.active_input = input;
+                return false;
+            }
+        };
+        self.pending_checkpoint = None;
+        let failure = PausedHandler {
+            checkpoint,
+            input,
+            detail: detail.to_owned(),
+        };
         tracing::debug!(
             actor = ?kernel.identity(),
-            committed_state = ?self.checkpoint.as_ref().map(|checkpoint| &checkpoint.value),
-            failed_input = ?self.active_input,
+            committed_state = ?failure.checkpoint.value,
+            failed_input = ?failure.input,
+            detail = %failure.detail,
             "retaining paused handler custody"
         );
+        self.standing = ResidentStanding::Paused(failure);
         if let Some(supervisor) = self.descriptor.supervisor_parent() {
             let (command, admission) = crate::NotificationSend::new(
                 kernel.identity(),
@@ -4789,7 +4816,7 @@ where
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
-            if matches!(self.standing, ResidentStanding::Paused) {
+            if matches!(self.standing, ResidentStanding::Paused(_)) {
                 return Ok(KernelStep::Continue(()));
             }
             let context = self.context(kernel.identity());
@@ -4930,6 +4957,7 @@ where
             self.active_input = None;
             self.pending_checkpoint = None;
             self.checkpoint = None;
+            self.standing = ResidentStanding::Terminal;
             // Realm retirement obtains its own exclusive checkout. A failed hook
             // does not skip this safe cleanup; it also never becomes success.
             let realm_result = if self.descriptor.supervisor_parent().is_none() {
@@ -4947,7 +4975,6 @@ where
                 Ok(()) => Confirmed,
                 Err(error) => Unconfirmed(error.to_string()),
             };
-            self.standing = ResidentStanding::Terminal;
             (hook, realm)
         })
     }

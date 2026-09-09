@@ -52,7 +52,7 @@ arbitrary Haskell heaps.
 
 ## Implementation and usage together
 
-- [ ] Extend existing actor/mailbox execution with explicit state custody,
+- [x] Extend existing actor/mailbox execution with explicit state custody,
   successful settlement, paused handler failure and supervisor notification.
 - [ ] Attach fixed typed sources atomically at their owning registries. Preserve
   each published live value for active recipients before replacing latest state.
@@ -62,7 +62,7 @@ arbitrary Haskell heaps.
   active-input owner, preserving exact correlation and uncertain delivery.
 - [ ] Implement drain/stop and atomic typed replacement with queue/source transfer,
   explicit failed-input retention and honest failure cleanup.
-- [ ] Replace `Project.Work` progress-route chains with persistent actor handlers;
+- [x] Replace `Project.Work` progress-route chains with persistent actor handlers;
   retain per-source identity, unresolved questions and completion independently.
   Lossless transport does not prevent explicit application-level deduplication.
 - [ ] Curate single-child, two-lane and failed-handler/v2 examples. Keep compact
