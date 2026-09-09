@@ -42,3 +42,7 @@ exist; protect main and our actual Shoal usage through matched candidate accepta
 or applications code into main to obtain a new harness. Read
 .shoal/plans/coordination.md: Haskell owns mechanical routing and cursors; model
 turns own engineering. Routine evidence is not an unresolved question.
+
+The shared developer prompt contains this project's targeted-verification policy.
+Plan decisive checks for each mechanism and integration join, not full workspace
+suites. See verification-prompt.md; this applies to both lanes and the coordinator.

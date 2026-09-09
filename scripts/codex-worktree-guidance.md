@@ -29,8 +29,9 @@ Before committing:
    not the complete target map.
 2. Compile every changed or directly affected build/test target, even when
    executing it would be too expensive. For Rust integration tests, use the
-   narrow equivalent of `cargo test -p PACKAGE --test TARGET --no-run` when
-   execution is excluded. Compile one named downstream target rather than
+   owning compile-only recipe when execution is excluded. In the Codex fork,
+   `cargo nextest list -p PACKAGE --test TARGET` builds/enumerates without running;
+   its `just test` wrapper adds `--no-fail-fast`, which conflicts with `--no-run`. Compile one named downstream target rather than
    substituting an unrelated workspace-wide check.
 3. Run the smallest exact tests that exercise each changed behavior and each
    important failure/recovery branch. A unit test in a neighboring target does
@@ -39,7 +40,11 @@ Before committing:
    toolchain environment and run one targeted test when resource limits permit.
    Do not silently treat a missing ambient variable as proof that the test is
    unavailable.
-5. Run formatting or the narrow crate check needed for warnings, plus
+5. Reuse existing exact-source checks unless source changes invalidate them.
+   Integrated revisions need checks of the changed joins, not automatic replay of
+   every child check. Investigate failures with the smallest reproducer; after a
+   repair rerun that case and affected consumers rather than the whole suite.
+6. Run formatting or the narrow crate check needed for warnings, plus
    `git diff --check`.
 
 Never run a prohibited workspace battery, broad suite, background test, or

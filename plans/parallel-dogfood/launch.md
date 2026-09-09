@@ -5,11 +5,17 @@ Launch preparation only; this file is not a claim of acceptance or deployment.
 - Record final current-wave coordinator/lane checkpoints, separate native source,
   unmerged candidates and exact remaining failures. Select the new source including
   these plans; do not recycle an earlier commission hash or old actor identity.
-- The previous wave has settled at the consolidated refs in next-wave/resume.md.
+- The previous wave ended in an OOM; preserved refs are in next-wave/resume.md.
   Preserve its worktrees/runtime evidence; use a new main-based root checkout and
   a distinct tmux session for the next wave.
 - Materialize the finished canonical `examples/shoal-workspace/.shoal` package
-  into the new root checkout’s authoritative `.shoal`. Capture once.
+  into the new root checkout’s authoritative `.shoal`. Before capture, append the
+  launch-main `next-wave/verification-prompt.md` content to that materialized
+  `.shoal/prompts/core.md` exactly once. Keep the canonical example project-neutral.
+  `[prompts].core` selects this combined text for the shared developer instructions
+  of every root/worker, including fresh-context children; an initial message or a
+  plan reference alone is insufficient. Record the combined prompt hash with the
+  frozen package, then capture once. Never inject it into a running wave.
 - Check the selected package and record the actual runner/package identities and
   focused acceptance. Do not describe an earlier package's checks as this selection.
 - Use immutable Shoal/native/extractor executables containing the steering repair.
