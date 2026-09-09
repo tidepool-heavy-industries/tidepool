@@ -213,7 +213,8 @@ actor's authority. A handler can cast to another typed actor or use `sendMessage
 for consequential steering; it does not inherit its creator's reply ownership.
 Keep application deduplication and wake decisions in Haskell. The curated
 `Project.Work.followAttentionSources` supplies this pattern for named question
-streams, with `AttentionSnapshot` for deliberate inspection.
+streams, with `AttentionSnapshot` for deliberate inspection and
+`attentionDefinition sources sink` for replacing its handler with the same sources.
 
 Handler failure pauses execution, retains committed state/input/queued work, and
 messages the supervisor. Repair with `Actor.replaceActor handle newDefinition`:
@@ -278,10 +279,11 @@ past. A root outside a request has no `sessionInput`, `sessionReply`, or
 
 When progress was requested, activation also supplies `reportProgress`; call
 it with the declared progress type to publish while retaining the reply.
-Progress is cumulative latest-value state, not a lossless message stream.
-To request/watch progress, use `:doc watch` for
-`childWithProgress @Progress @Report`, `requestWithProgress`, and
-`awaitProgressAfter`. Do not guess a progress type or create a duplicate store.
+Publish cumulative state for current-state capture. An attached `progressSource`
+receives every subsequent publication; polling and finite watches observe
+snapshots. Use `:doc watch` for `childWithProgress @Progress @Report`,
+`requestWithProgress`, and source/watch choices. Do not guess a progress type or
+create a duplicate store.
 
 ## Targeted discovery and cleanup
 

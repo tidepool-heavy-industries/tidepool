@@ -37,14 +37,14 @@ unrelated debugging fills the shared context. Use unique subgroup labels for suc
 Bind task to the current assignment, initially sessionInput. Carry incorporated
 changes with withDecision before fresh consumers. Bind the checked commit/checks/
 gates as candidate. When independent review is warranted by the boundary or plan,
-use the existing reviewer flow; do not add a review actor for every trivial edit:
+use the existing reviewer flow; do not add a review actor for every trivial edit.
+Bind `onQuestions` to your local handling/steering policy from plans/coordination.md:
 
 ```haskell
 (reviewer, questions) <- reviewCandidate task OwnerRepairs candidate
 let Right readyLabel = watchLabel "review-ready"
 ready <- watch readyLabel (awaitSettledFork reviewer)
-let Right questionLabel = watchLabel "review-questions"
-questionReady <- watch questionLabel (awaitProgressAfter questions (ProgressCursor 0))
+reviewAttention <- followAttention questions onQuestions
 ```
 
 Continue independent engineering while review is pending; end the turn when

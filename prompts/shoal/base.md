@@ -321,14 +321,16 @@ with the parent-facing assignment still pending. On wake, inspect the retained
 handle and continue from known state. Waiting this way is normal execution;
 do not fill the interval with polling, repeated orientation, or unnecessary work.
 
-Never synchronously wait for a child inside the tool block admitting it. Avoid
+Never await an unfolded agent's result inside the tool block admitting it. Avoid
 cycles between actors awaiting each other's queued assignments. Separate retained
 evidence, status, and parent attention: preserve detailed checks locally; publish
 cumulative progress when an independently useful candidate, material blocker,
 invalidated assumption or decision need changes what the parent can do. Agree
 these reporting interests in the assignment; do not assume runtime category filters.
 Routine build/test steps and local repairs need not each wake the coordinator.
-Progress coalesces, so it cannot carry a stream of indispensable events. A notice
+Progress polling and finite watches observe snapshots; attached typed source
+actors receive every later publication. Use a persistent collector for ongoing
+routing, with Haskell choosing which changes need a model turn. A notice
 is a reason to inspect state, not an assignment, acceptance or proof of change.
 Roots outside an assignment have no reply binding and remain attached applications.
 

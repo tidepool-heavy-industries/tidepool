@@ -2423,6 +2423,14 @@ async fn candidate_routing_recipes_exercise_failure_and_attention() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn typed_handoff_recipe_integrates_later_final_heads_from_both_lanes() {
+    let repository = recipe_workspace(Some(&["Project.RoutingChecks.twoLaneHandoff"]));
+    crate::shoal::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn attention_actor_recipe_retains_independent_sources_through_closure() {
     let repository = recipe_workspace(Some(&["Project.RoutingChecks.independentSources"]));
     crate::shoal::check(Some(repository.path().to_path_buf()), true)

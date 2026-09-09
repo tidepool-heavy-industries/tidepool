@@ -44,7 +44,7 @@ The implementer returns a revised candidate or a typed clarification/decision
 need in its repair reply. The reviewer can answer in the next request. Do not
 make a circular wait: the reviewer already has an active request while it waits
 for repair, so a new request back to it would queue behind that work. Progress
-updates can coalesce and are not a substitute for this request/reply protocol.
+publication does not settle that request or change its reply ownership.
 
 Keep code ownership with the implementer and review in the reviewer's own
 permitted checkout. A reviewer who runs checks needs coding authority, not an

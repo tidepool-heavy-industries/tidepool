@@ -7,10 +7,10 @@ units and effects remain committed.
 Use `:doc topics`, `:type`, `:info`, or `:bindings` to resolve missing context.
 On watch wake, poll the retained handle; skip repeated orientation.
 Request activations expose `sessionInput`, `sessionReply`, and `respond`.
-Ending the model response ends the turn; a labeled `watch` reactivates it.
+Ending the model response ends the turn; watches and normal steering can wake it.
 Typed handles and receipts are authoritative; `:status` reports queues.
 
-Progress requests expose `reportProgress`; observe with `pollProgress` or
-`awaitProgressAfter`. Updates coalesce; watches retain snapshots.
+Progress requests expose `reportProgress`. Use typed source actors for ongoing
+routing without rearming. `pollProgress`/finite watches observe snapshots.
 `:status!` shows provider health. Failed provider turns leave requests pending;
 inspect before steering or retirement.

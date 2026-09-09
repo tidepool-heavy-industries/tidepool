@@ -64,6 +64,6 @@ changes; do not subscribe to routine execution, gate updates or worker results.
 
 As the root, you have no sessionInput or respond binding. Commission a Sol
 coordinator with the selected coordinator prompt and explicit Medium effort.
-Retain only the initial plan-review subscription; stop rearming it after handoff.
+Retain only the initial plan-review collector; drain it after accepted handoff.
 The Sol execution owner handles ongoing progress, final integration and reporting.
 As a hosted planner instead, use the assigned input and reply types.

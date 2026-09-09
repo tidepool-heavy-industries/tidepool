@@ -11,6 +11,7 @@ module Project.Work
   , withDecision, updateDecision, designQuestion, raiseQuestion, resolveQuestion
   , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
   , requestIncorporation, consultDesign, followAttention, followAttentionSources
+  , attentionDefinition
   , AttentionSource (..), AttentionStatus (..), AttentionInput (AttentionSnapshot), normalizeAttention
   , settledValue
   ) where
@@ -189,15 +190,23 @@ followAttentionSources
   => [(Text, Progress Attention)]
   -> ([AttentionSource] -> Eff (Actor.ReadOnlyEffects AttentionInput) ())
   -> Eff effects (Actor.ActorRef AttentionInput [AttentionSource])
-followAttentionSources sources sink
+followAttentionSources sources sink = Actor.startActor
+  (attentionDefinition sources sink)
+  [AttentionSource name [] AttentionOpen | (name, _) <- sources]
+
+-- Keep the same named sources when replacing a handler; initialization belongs
+-- to startActor, so replacement preserves the existing committed view.
+attentionDefinition
+  :: [(Text, Progress Attention)]
+  -> ([AttentionSource] -> Eff (Actor.ReadOnlyEffects AttentionInput) ())
+  -> Actor.ActorDefinition [AttentionSource] AttentionInput [AttentionSource]
+attentionDefinition sources sink
   | length names /= length (nub names) = error "attention source names must be unique"
-  | otherwise = Actor.startActor definition initial
-  where
-    names = map fst sources
-    initial = [AttentionSource name [] AttentionOpen | name <- names]
-    definition = Actor.withSources
+  | otherwise = Actor.withSources
       [Actor.progressSource handle (AttentionUpdate name) | (name, handle) <- sources] $
       Actor.stateful "attention" Actor.ReadOnly step
+  where
+    names = map fst sources
     step
       :: [AttentionSource] -> AttentionInput result
       -> Eff (Actor.ReadOnlyEffects AttentionInput) (result, [AttentionSource])

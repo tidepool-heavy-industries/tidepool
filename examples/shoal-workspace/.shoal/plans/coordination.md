@@ -38,8 +38,8 @@ reportProgress (WorkProgress [candidate] open)
 
 `open :: Attention` contains only decisions/blockers needing this Sol recipient's
 action. Do not invent questions to announce activity or repeat a known gate.
-State is cumulative because intermediate publications may coalesce. Bound values
-make cumulative publication small; use `progressSummary` or `attentionSummary`
+Publish the current unresolved set so a newly attached collector can capture it;
+attached collectors receive every later publication. Bound values keep this small; use `progressSummary` or `attentionSummary`
 when inspecting rather than expanding every field. Keep original values for checks.
 
 The Sol owner resolves ordinary interfaces and ownership. A reservation without
@@ -122,15 +122,39 @@ inspectFull view
 ```
 
 A failed sink pauses the collector and notifies its supervisor; later messages
-remain queued. Do not recreate it and replay an uncertain send. All sources
-closing leaves the collector available for inspection. When finished with it,
-`Actor.drainActor collection` closes admission; `Actor.awaitExit collection`
+remain queued. Keep its source bindings and define a corrected sink, then use
+the same primitive as for any stateful actor:
+
+```haskell
+collection2 <- Actor.replaceActor collection
+  (attentionDefinition [("api", apiQuestions), ("ui", uiQuestions)] correctedSink)
+view <- Actor.call collection2 AttentionSnapshot
+```
+
+The successor retains committed questions and queued events. The failed event is
+kept as evidence and skipped; an uncertain send is not replayed. Keep source names,
+order and handles unchanged. `correctedSink` is an ordinary Haskell function with
+the same effect row as the original sink. Use the returned handle thereafter.
+When all sources close, the collector remains available for inspection.
+When finished with the current handle, `Actor.drainActor collection2` closes
+admission; `Actor.awaitExit collection2`
 explicitly waits for the retained final state.
 
 Use independent result watches when each candidate can advance integration.
 For coupled results, an applicative join is useful. Source integration is native
 git followed by focused checks; it is not `integrateFork`, an acknowledgment, or
 concatenation of worker reports.
+
+For multi-lane handoffs, attach progress and settlement sources to one small
+protocol after commissioning the lanes. Retain evidence locally and wake for
+independently useful candidates, including partial ones. Later terminal results
+must still reach the owner. Consuming a partial checkpoint
+does not detach the collector or finish the coordinator's obligation. Keep the
+collector until final heads are incorporated or remaining custody has an owner.
+The executable [handoff router](../checks/handoff-router.hs) demonstrates this with
+commit refs; [twoLaneHandoff](../Project/RoutingChecks.hs) consumes a partial update,
+receives both later final heads and merges their real Git commits. Substitute the
+task's `Delivery`/`Candidate` values and meaningful wake policy in your own protocol.
 
 ## Spend model turns on decisions
 
@@ -150,8 +174,8 @@ is an inspection convenience, not proof that omitted resources are safe to retir
 Write the continuation once: collect streams, normalize repeated state, project
 what this recipient needs, and route the known next action. Let Haskell execute
 that logic between turns. Do not reproduce it as a cycle of polling, merging
-lists, inventing watch labels and narrating unchanged gates. Use a result watch
-for an engineering join, and question watches only for unresolved action.
+lists, inventing watch labels and narrating unchanged gates. Use a finite result watch
+for an engineering join and a persistent collector for ongoing questions.
 
 The source collector retains the current questions; it does not resolve them or
 invent issue identities. The source's owner publishes its updated cumulative set.

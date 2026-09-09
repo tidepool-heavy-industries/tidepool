@@ -1,5 +1,5 @@
 Polling is authoritative and never wakes an idle model by itself. A labeled
-`Watch a` is the explicit durable subscription for one applicative fold.
+`Watch a` retains one finite applicative observation.
 
 ```haskell
 let Right joinLabel = watchLabel "first-wave-results"
@@ -24,7 +24,7 @@ state. The sink chooses meaningful messages; no model rearms watches or relays
 routine progress. Source completion does not terminate the collector.
 
 `Await a` is the pure dependency description; `Watch a` is its registered
-subscription. `ReplyAvailable` carries a typed result and its evidence;
+finite observation. `ReplyAvailable` carries a typed result and its evidence;
 `ReplyUnavailable` carries a typed failure. Use `awaitFork` instead when every
 dependency must succeed. Polling a settled watch repeatedly returns its state
 without consuming it. Compose dependencies before registration.

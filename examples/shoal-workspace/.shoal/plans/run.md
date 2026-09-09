@@ -67,8 +67,7 @@ scaffold/fork/integration, bind the exact checked commit as candidate:
 (reviewer, questions) <- reviewCandidate task OwnerRepairs candidate
 let Right reviewReadyLabel = watchLabel "review-ready"
 ready <- watch reviewReadyLabel (awaitSettledFork reviewer)
-let Right reviewQuestionsLabel = watchLabel "review-questions"
-questionReady <- watch reviewQuestionsLabel (awaitProgressAfter questions (ProgressCursor 0))
+reviewAttention <- followAttention questions onQuestions
 ```
 
 The reviewer returns Produced (Repair latest findings) for defects the lead must
@@ -80,8 +79,7 @@ let Right retryLabel = requestLabel "review-repaired"
 (attempt, retryQuestions) <- reviewAgain (forkedActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
 let Right retryReadyLabel = watchLabel "review-repaired-ready"
 retryReady <- watch retryReadyLabel (awaitSettled attempt)
-let Right retryQuestionsLabel = watchLabel "review-repaired-questions"
-retryQuestionReady <- watch retryQuestionsLabel (awaitProgressAfter retryQuestions (ProgressCursor 0))
+retryAttention <- followAttention retryQuestions onQuestions
 ```
 
 The reviewer incorporates that revision before checking it. Keep its latest

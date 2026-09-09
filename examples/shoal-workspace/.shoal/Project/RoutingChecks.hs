@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (routing, independentSources) where
+module Project.RoutingChecks (routing, independentSources, twoLaneHandoff) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -47,6 +47,44 @@ routing = do
   void $ turn owner "Actor.drainActor forwarding\nActor.awaitExit forwarding"
   void restart
   independentSources
+  void restart
+  twoLaneHandoff
+
+twoLaneHandoff :: Member RecipeCheck effects => Eff effects ()
+twoLaneHandoff = do
+  owner <- root
+  script owner "handoff-setup"
+  left <- activation
+  void $ turn owner "(right, rightProgress) <- unfold (batch campaign wave) (childWithProgress @Text @Text (coding rightLabel projectHead (\"right\" :: Text)))"
+  right <- activation
+  script owner "handoff-router"
+  partial <- checkpoint (checkActor left) "left.txt" "partial\n" "left partial checkpoint"
+  void $ turn (checkActor left) ("reportProgress (" <> literal partial <> " :: Text)")
+  initial <- turn owner "view <- Actor.call handoff (HandoffSnapshot id)\ninspectFull view"
+  check "partial checkpoint is retained before final publication" (partial `Text.isInfixOf` output initial)
+  before <- turn owner "Actor.call wakes (WakeCount 0 id)"
+  check "partial progress does not wake integration" (output before == "0")
+  leftFinal <- checkpoint (checkActor left) "left.txt" "left final\n" "left final checkpoint"
+  rightFinal <- checkpoint (checkActor right) "right.txt" "right final\n" "right final checkpoint"
+  void $ turn (checkActor left) ("respond (" <> literal leftFinal <> " :: Text)")
+  void $ turn (checkActor right) ("respond (" <> literal rightFinal <> " :: Text)")
+  final <- turn owner "view <- Actor.call handoff (HandoffSnapshot id)\ninspectFull view"
+  check "both later final heads arrive without rearming" (all (`Text.isInfixOf` output final) [partial, leftFinal, rightFinal])
+  identities <- turn owner ("inspectFull (lookup \"left\" (snd view) == Just " <> literal leftFinal <> " && lookup \"right\" (snd view) == Just " <> literal rightFinal <> " && length (snd view) == 2)")
+  check "each final head retains its lane identity exactly once" (output identities == "True")
+  wakes <- turn owner "Actor.call wakes (WakeCount 0 id)"
+  check "each final result selects one integration wake" (output wakes == "2")
+  leftSource <- readFile (checkActor left) "left.txt"
+  rightSource <- readFile (checkActor right) "right.txt"
+  check "both final candidates have source evidence" (leftSource == "left final\n" && rightSource == "right final\n")
+  void $ git owner ["merge", "--ff-only", leftFinal]
+  void $ git owner ["merge", "--no-edit", rightFinal]
+  integratedLeft <- readFile owner "left.txt"
+  integratedRight <- readFile owner "right.txt"
+  check "coordinator integrates both exact final candidates" (integratedLeft == leftSource && integratedRight == rightSource)
+  void $ git owner ["merge-base", "--is-ancestor", leftFinal, "HEAD"]
+  void $ git owner ["merge-base", "--is-ancestor", rightFinal, "HEAD"]
+  void $ turn owner "Actor.drainActor handoff\nActor.awaitExit handoff"
 
 -- Source publications and explicit queries use the same mailbox. A snapshot
 -- call after publication is a barrier; the test never rearms a progress watch.
@@ -63,6 +101,7 @@ independentSources = do
   void $ turn (checkActor left) "reportProgress [first,second]"
   first <- turn owner "(\\view -> inspectFull [(attentionSource s, map questionKey (attentionQuestions s), attentionStatus s) | s <- view]) <$> Actor.call collection AttentionSnapshot"
   check "left progresses while right is silent" ("[\"same-key\",\"second\"]" `Text.isInfixOf` output first && "(\"right\",[],AttentionOpen)" `Text.isInfixOf` output first)
+  void $ turn owner "collection <- Actor.replaceActor collection (attentionDefinition [(\"left\", leftProgress), (\"right\", rightProgress)] (\\_ -> Actor.cast wakes (RoutingCount 1 (const ()))))"
   void $ turn (checkActor left) "reportProgress [second,first,first]"
   void $ turn owner "Actor.call collection AttentionSnapshot"
   count <- turn owner "Actor.call wakes (RoutingCount 0 id)"

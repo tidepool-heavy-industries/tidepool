@@ -12,7 +12,9 @@ waves are retained. The label below is a first-run example, not a name to replay
 on every restart. Use subgroup for work scoped under an existing actor.
 
 In native tools resolve `git rev-parse HEAD`, then bind `baseline :: GitRef` to that
-exact app commit. These expressions run in the Sol root's resident environment:
+exact app commit. Bind `onQuestions` to the Sol owner's handling/steering policy
+from [coordination.md](../coordination.md#independent-progress-without-relay-turns).
+These expressions run in the Sol root's resident environment:
 
 ```haskell
 let Right campaign = campaignLabel "graph-relations"
@@ -24,8 +26,7 @@ contractWork <- unfold (batch campaign leads) (childWithProgress @Attention @Del
 let (contract, contractQuestions) = contractWork
 let Right contractReadyLabel = watchLabel "contract-ready"
 contractReady <- watch contractReadyLabel (awaitSettledFork contract)
-let Right contractQuestionLabel = watchLabel "contract-questions"
-contractQuestionReady <- watch contractQuestionLabel (awaitProgressAfter contractQuestions (ProgressCursor 0))
+contractAttention <- followAttention contractQuestions onQuestions
 ```
 
 The owner can now end its turn. SwarmOwned selected leads have independent

@@ -120,7 +120,7 @@ data WorkProgress = WorkProgress
 
 -- Only unresolved decisions/blockers needing the recipient's action. Successful
 -- incorporation and unchanged standing gates belong to evidence, not questions.
--- Retain questions until a supported resolution; coalescing is not a delta log.
+-- Retain questions until a supported resolution, including across source closure.
 data Question = Question
   { questionKey :: Text
   , questionDetails :: DesignQuestion
