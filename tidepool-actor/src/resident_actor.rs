@@ -384,6 +384,8 @@ pub struct ResidentKernelBehavior<H, O> {
     boot: Option<ResidentBoot>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
+    sources: Vec<crate::request::sources::SourceBinding>,
+    source_connections: Option<crate::request::sources::RequestSources>,
     launch_worktrees: Vec<String>,
     prepared_workspace: Option<crate::PreparedForkWorkspace>,
     worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
@@ -490,6 +492,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             boot: Some(boot),
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
+            sources: Vec::new(),
+            source_connections: None,
             launch_worktrees,
             prepared_workspace: None,
             worktree_custody: None,
@@ -2937,6 +2941,17 @@ where
                         });
                     }
                     match startup_step {
+                        ResidentActorStartupStep::InstallSource {
+                            continuation,
+                            source,
+                        } => {
+                            self.sources.push(source);
+                            outcome = self
+                                .environment
+                                .runner
+                                .resume_unit(context.clone(), continuation)
+                                .await?;
+                        }
                         ResidentActorStartupStep::InstallShutdown(shutdown) => {
                             if self.shutdown_hook.is_some() {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -2969,6 +2984,34 @@ where
                                 .await?;
                         }
                         ResidentActorStartupStep::Ready(readiness) => {
+                            if !self.sources.is_empty() {
+                                let owner = self.descriptor.creator().ok_or_else(|| {
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "source actor has no creator".into(),
+                                    )
+                                })?;
+                                let recipient = kernel.resolve(context.actor).ok_or_else(|| {
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "source actor is absent from its directory".into(),
+                                    )
+                                })?;
+                                let sources = self
+                                    .sources
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(slot, source)| (slot, source.request, source.kind))
+                                    .collect::<Vec<_>>();
+                                self.source_connections = Some(
+                                    self.environment
+                                        .requests
+                                        .attach_sources(owner, recipient, &sources)
+                                        .map_err(|error| {
+                                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                                "source attachment rejected: {error:?}"
+                                            ))
+                                        })?,
+                                );
+                            }
                             break self
                                 .environment
                                 .runner
@@ -3985,6 +4028,40 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    fn source<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        delivery: crate::SourceDelivery,
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async move {
+            let context = self.context(kernel.identity());
+            let source = self
+                .sources
+                .get(delivery.slot)
+                .filter(|source| source.request == delivery.request)
+                .ok_or_else(|| KernelBehaviorError {
+                    detail: "source delivery does not match an installed connection".into(),
+                })?;
+            let message = self
+                .environment
+                .runner
+                .map_source(context.clone(), Arc::clone(&source.entry), delivery.event)
+                .await
+                .map_err(Self::failure)?;
+            let (_, step) = self
+                .run_receiver(
+                    kernel,
+                    &context,
+                    None,
+                    &crate::CallAncestry::begin(context.actor),
+                    message,
+                )
+                .await
+                .map_err(Self::failure)?;
+            Ok(step)
+        })
+    }
+
     fn accepts_mailbox(&self) -> bool {
         matches!(self.standing, ResidentStanding::Receiving(_))
     }
@@ -4665,6 +4742,8 @@ where
     > {
         Box::pin(async move {
             use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
+            self.source_connections.take();
+            self.sources.clear();
             let context = self.context(kernel.identity());
             let notifications = self
                 .environment

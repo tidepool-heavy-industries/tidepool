@@ -1,4 +1,5 @@
 pub(crate) mod routes;
+pub(crate) mod sources;
 mod updates;
 pub use updates::{
     RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation, RequestUpdateState,
@@ -226,6 +227,7 @@ enum OwnerState {
 }
 
 struct RequestRecord {
+    sources: Vec<sources::RequestSourceConnection>,
     updates: Vec<updates::UpdateRecord>,
     owner: ActorRef,
     target: ActorRef,
@@ -238,7 +240,7 @@ struct RequestRecord {
 
 /// Snapshots share custody, not a consumption cursor. Replacing the latest
 /// publication drops only the registry's reference; an observer can retain it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ProgressSnapshot {
     pub revision: u64,
     pub value: std::sync::Arc<tidepool_runtime::session::RootCustody>,
@@ -450,6 +452,7 @@ impl RequestRegistry {
             revision,
             value: std::sync::Arc::new(value),
         });
+        record.publish_source_progress();
         Ok((revision, reevaluate_watches(&mut state)))
     }
 
@@ -732,6 +735,7 @@ impl RequestRegistry {
         state.requests.insert(
             id,
             RequestRecord {
+                sources: Vec::new(),
                 updates: Vec::new(),
                 owner,
                 target,
@@ -874,6 +878,7 @@ impl RequestRegistry {
                     return Err(ReplyError::UpdatePending);
                 }
                 record.target_state = TargetState::Settling;
+                record.publish_source_closure();
                 record.progress = None;
                 Ok(())
             }
@@ -1548,6 +1553,7 @@ fn identity_error(expected: ActorRef, actual: ActorRef) -> ReplyError {
 
 fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
     for record in state.requests.values_mut() {
+        record.publish_source_closure();
         if record.owner_state != OwnerState::Observing || record.target_state == TargetState::Closed
         {
             record.progress = None;

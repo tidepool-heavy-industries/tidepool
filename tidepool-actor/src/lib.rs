@@ -38,6 +38,7 @@ mod notification;
 mod profile;
 mod prompt_catalog;
 mod request;
+pub use request::sources::SourceDelivery;
 mod request_effect;
 mod resident_actor;
 mod resident_interactive;

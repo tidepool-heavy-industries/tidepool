@@ -62,6 +62,7 @@ import Prelude
 
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Internal as ActorInternal
+import Tidepool.Actor.Source (installSource)
 import Tidepool.Actors.Role (AgentControl, AgentInspection, AgentLaunch, Forks)
 import Tidepool.Agent.Reply.Internal
   ( Reply
@@ -465,6 +466,7 @@ launchFreshActor definition@Actor.ActorDefinition
       entry _ = do
         send (ActorInstallShutdownWith 0 shutdownEntry)
         initial <- raiseActorKernel (startupAction startup)
+        mapM_ installSource (ActorInternal.actorSources definition)
         send ActorReadyWith
         result <- raiseActorKernel (install startup initial)
         case fillExitCell cell result of
@@ -508,6 +510,7 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
       entry _ = do
         send (ActorInstallShutdownWith 0 shutdownEntry)
         initial <- raiseActorKernel (startupAction startup)
+        mapM_ installSource (ActorInternal.actorSources definition)
         send ActorReadyWith
         result <- raiseActorKernel (install startup initial)
         case fillExitCell cell result of

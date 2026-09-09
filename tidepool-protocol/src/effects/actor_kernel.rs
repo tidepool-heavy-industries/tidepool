@@ -106,9 +106,56 @@ pub fn actor_kernel() -> Effect {
                 handling: HandlingClass::Actor,
                 extract: None,
             },
+            source_install(
+                "ActorInstallProgressSourceWith",
+                "actor_install_progress_source_with",
+            ),
+            source_install(
+                "ActorInstallSettlementSourceWith",
+                "actor_install_settlement_source_with",
+            ),
+            Verb {
+                ctor: "ActorSourceInputWith",
+                method: "actor_source_input_with",
+                args: vec![],
+                ret: HsType::Var("event"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
         ],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,
+    }
+}
+
+fn source_install(ctor: &'static str, method: &'static str) -> Verb {
+    use crate::schema::{Arg, RustBinding};
+    Verb {
+        ctor,
+        method,
+        args: vec![
+            Arg {
+                name: "request",
+                ty: HsType::Int,
+                rust: RustBinding::Derived,
+            },
+            Arg {
+                name: "entry",
+                ty: HsType::func(
+                    HsType::Int,
+                    HsType::app(
+                        HsType::app(HsType::Named("Eff"), HsType::Var("sourceEffs")),
+                        HsType::Unit,
+                    ),
+                ),
+                rust: RustBinding::CoreValue,
+            },
+        ],
+        ret: HsType::Unit,
+        errors: None,
+        handling: HandlingClass::Actor,
+        extract: None,
     }
 }

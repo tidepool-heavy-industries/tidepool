@@ -4042,6 +4042,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actor_sources_capture_current_then_deliver_every_publication_and_settlement() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup =
+            dispatch_haskell_script(root.as_ref(), include_str!("actor_host/source_setup.hs"))
+                .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let child = loop {
+            if let Some(LocalResidentDeployment::PolicyInstalled(child)) =
+                campaign.deployments.recv().await
+            {
+                break child;
+            }
+        };
+        let first = dispatch_haskell_script(
+            child.policy.as_ref(),
+            "reportProgress (ProgressNote 1 (+ sessionInput))",
+        )
+        .await;
+        assert_eq!(first["status"], "committed", "{first:?}");
+        let installed =
+            dispatch_haskell_script(root.as_ref(), include_str!("actor_host/source_actor.hs"))
+                .await;
+        assert_eq!(installed["status"], "committed", "{installed:?}");
+        for item in installed["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{installed:?}");
+        }
+        let published = dispatch_haskell_script(child.policy.as_ref(), "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)").await;
+        assert_eq!(published["status"], "replied", "{published:?}");
+        let collected = dispatch_haskell_script(
+            root.as_ref(),
+            "result <- awaitExit collector\nresult == Completed [13, 30, -7, -1, 42]",
+        )
+        .await;
+        assert_eq!(collected["status"], "committed", "{collected:?}");
+        assert!(collected.to_string().contains("True"), "{collected:?}");
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn progress_retains_closures_and_watch_snapshots_across_calls() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();

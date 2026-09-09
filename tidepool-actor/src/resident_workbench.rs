@@ -238,10 +238,12 @@ impl ResidentActorShutdown {
     }
 }
 
-/// The only suspensions the trusted V0 initialization driver settles.
-/// Other nominal effects will join this classifier when their actor-local
-/// interpreters land; they must never be mistaken for readiness.
+/// Suspensions admitted while installing the trusted actor entry.
 pub(crate) enum ResidentActorStartupStep {
+    InstallSource {
+        continuation: ResidentHole,
+        source: crate::request::sources::SourceBinding,
+    },
     InstallShutdown(ResidentActorShutdown),
     Attach(ResidentAgentAttachment),
     Ready(ResidentActorReadiness),
@@ -1092,6 +1094,17 @@ impl ResidentRequest {
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(..),
             ) => "installShutdown",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..),
+            ) => "install progress source",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(
+                    ..,
+                ),
+            ) => "install settlement source",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith,
+            ) => "source input",
             Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith) => {
                 "ready"
             }
@@ -2666,6 +2679,22 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let request_kind = ResidentRequest::decode(&request, session.data_con_table())?;
+                let source = match &request_kind {
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(request, _)) => Some((*request, crate::request::sources::RequestSourceKind::Progress)),
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(request, _)) => Some((*request, crate::request::sources::RequestSourceKind::Settlement)),
+                    _ => None,
+                };
+                if let Some((request, kind)) = source {
+                    if session.parked_realm(&hole) != Some(actor_realm) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol("source installation crossed actor realm".into()));
+                    }
+                    let request = u64::try_from(request).map(crate::RequestId).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid source request".into()))?;
+                    let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm).ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("source has no live mapping closure".into()))?;
+                    return Ok(ResidentActorStartupStep::InstallSource {
+                        continuation: hole,
+                        source: crate::request::sources::SourceBinding { request, kind, entry: Arc::new(entry) },
+                    });
+                }
                 match request_kind {
                     ResidentRequest::ActorKernel(
                         crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
@@ -2788,6 +2817,85 @@ where
             .await
     }
 
+    pub(crate) async fn map_source(
+        &self,
+        context: crate::ActorSessionContext,
+        entry: Arc<RootCustody>,
+        event: crate::request::sources::SourceEvent,
+    ) -> Result<crate::MailboxValue, ResidentActorWorkbenchError> {
+        let realm = RealmId::fresh();
+        let hole =
+            self.access
+                .with_machine(context.clone(), move |session, _, _| {
+                    let outcome = session
+                        .run_rooted_entry_borrowed("actor_source", &entry, 0, realm, None)
+                        .map_err(ResidentActorWorkbenchError::Resident)?;
+                    let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "source mapper did not request its input".into(),
+                        ));
+                    };
+                    if session.parked_realm(&hole) != Some(realm)
+                        || !matches!(
+                        ResidentRequest::decode(&request, session.data_con_table())?,
+                        ResidentRequest::ActorKernel(
+                            crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith
+                        )
+                    ) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "source mapper crossed an unexpected boundary".into(),
+                        ));
+                    }
+                    Ok(hole)
+                })
+                .await?;
+        use crate::request::sources::SourceEvent;
+        let outcome = match event {
+            SourceEvent::Progress(snapshot) => {
+                self.resume_progress_observation(context.clone(), hole, Ok((Some(snapshot), false)))
+                    .await?
+            }
+            SourceEvent::ProgressClosed => {
+                self.resume_progress_observation(context.clone(), hole, Ok((None, true)))
+                    .await?
+            }
+            SourceEvent::Settled(result) => {
+                self.resume_response_observation(
+                    context.clone(),
+                    hole,
+                    Ok(match result {
+                        Ok(()) => crate::ResponseObservation::Ready,
+                        Err(failure) => crate::ResponseObservation::Unavailable(failure),
+                    }),
+                )
+                .await?
+            }
+        };
+        let message = self
+            .capture_kernel_value(
+                context.clone(),
+                outcome,
+                ResidentKernelBoundary::Reply,
+                0,
+                realm,
+                context.placement.resource_scope,
+            )
+            .await?;
+        let finished = self
+            .resume_unit(context.clone(), message.continuation)
+            .await?;
+        if !matches!(finished, ResidentOutcome::Completed { .. }) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "source mapper continued after returning its message".into(),
+            ));
+        }
+        self.close_realm(context.clone(), realm).await?;
+        Ok(crate::MailboxValue::new(
+            context.placement.session,
+            message.value,
+        ))
+    }
+
     pub(crate) async fn capture_kernel_value(
         &self,
         context: crate::ActorSessionContext,
@@ -2835,6 +2943,11 @@ where
                             "expected `{}`, got `ready`",
                             expected.operation()
                         )));
+                    }
+                    crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol("source boundary escaped its mapping or installation".into()));
                     }
                 };
                 let site = u64::try_from(site).map_err(|_| {
@@ -2895,7 +3008,10 @@ where
                     crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
                         ..,
                     )
-                    | crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith => {
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
                         return Ok(None)
                     }
                 };

@@ -2135,15 +2135,29 @@ where
         realm: RealmId,
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        let outcome =
+            self.run_rooted_entry_borrowed(name_hint, &entry, argument, realm, run_table)?;
+        entry.into_transfer().commit();
+        Ok(outcome)
+    }
+
+    /// Invoke retained code without transferring its root to the execution.
+    pub fn run_rooted_entry_borrowed(
+        &mut self,
+        name_hint: &str,
+        entry: &RootCustody,
+        argument: i64,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+    ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&entry.cleanup, &self.custody_cleanup) {
             return Err(ResidentError::ForeignCustody);
         }
         let provenance = Arc::clone(&entry.provenance);
-        // Entry consumes custody: the computation that runs it is the handle's
-        // new owner, with no second consumer.
-        let transfer = entry.into_transfer();
-        let entry = transfer.handle;
+        let Some(entry) = entry.handle else {
+            unreachable!("live custody contains its handle");
+        };
         let slot = self
             .core
             .machine_mut()
@@ -2175,7 +2189,6 @@ where
         env.insert(ROOTED_ENTRY_VAR, slot.addr());
 
         let outcome = self.run_rooted_fragment(name_hint, &expr, &env, realm, run_table)?;
-        transfer.commit();
         Ok(self.classify_parked(outcome, None, HoleSeed::Plain, provenance))
     }
 

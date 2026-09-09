@@ -24,6 +24,8 @@ module Tidepool.Actor.Internal
   , behavior
   , onShutdown
   , actorLaunchWorktrees
+  , actorSources
+  , withSources
   , withLaunchWorktree
   , tryCallUnit
   ) where
@@ -45,6 +47,7 @@ import Tidepool.Effects.Core
   , Worktree
   )
 import Tidepool.Internal.ActorRef (ActorRef (..))
+import Tidepool.Actor.Source (Source)
 
 -- | Experimental named profiles for resident Haskell effect rows. The witness
 -- fixes the child row, while Rust independently validates spawn attenuation
@@ -85,6 +88,7 @@ data ActorDefinition startup (protocol :: Type -> Type) exit where
        , internalBehavior :: startup -> initial -> Eff actorEffs exit
        , internalOnShutdown :: ShutdownReason -> Eff actorEffs ()
        , internalLaunchWorktrees :: [Text]
+       , internalSources :: [Source protocol]
        }
     -> ActorDefinition startup protocol exit
 
@@ -105,26 +109,46 @@ pattern ActorDefinition
   , behavior
   , onShutdown
   } <- ActorDefinitionInternal
-    label effectProfile initialization behavior onShutdown _
+    { internalLabel = label
+    , internalEffectProfile = effectProfile
+    , internalInitialization = initialization
+    , internalBehavior = behavior
+    , internalOnShutdown = onShutdown
+    }
   where
     ActorDefinition label effectProfile initialization behavior onShutdown =
       ActorDefinitionInternal
-        label effectProfile initialization behavior onShutdown []
+        { internalLabel = label
+        , internalEffectProfile = effectProfile
+        , internalInitialization = initialization
+        , internalBehavior = behavior
+        , internalOnShutdown = onShutdown
+        , internalLaunchWorktrees = []
+        , internalSources = []
+        }
 
 {-# COMPLETE ActorDefinition #-}
 
 actorLaunchWorktrees :: ActorDefinition startup protocol exit -> [Text]
 actorLaunchWorktrees
-  (ActorDefinitionInternal _ _ _ _ _ worktrees) = worktrees
+  ActorDefinitionInternal { internalLaunchWorktrees = worktrees } = worktrees
+
+actorSources :: ActorDefinition startup protocol exit -> [Source protocol]
+actorSources ActorDefinitionInternal { internalSources = sources } = sources
+
+withSources
+  :: [Source protocol]
+  -> ActorDefinition startup protocol exit
+  -> ActorDefinition startup protocol exit
+withSources sources definition = definition { internalSources = sources }
 
 withLaunchWorktree
   :: Text
   -> ActorDefinition startup protocol exit
   -> ActorDefinition startup protocol exit
 withLaunchWorktree treeId
-  (ActorDefinitionInternal l p initialize install shutdown worktrees) =
-    ActorDefinitionInternal
-      l p initialize install shutdown (worktrees <> [treeId])
+  definition@ActorDefinitionInternal { internalLaunchWorktrees = worktrees } =
+    definition { internalLaunchWorktrees = worktrees <> [treeId] }
 
 -- | Internal unit-call boundary for protocols that can turn target lifecycle
 -- failure into their own typed control flow.

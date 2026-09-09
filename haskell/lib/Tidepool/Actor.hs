@@ -27,6 +27,10 @@ module Tidepool.Actor
   , initialization
   , behavior
   , onShutdown
+  , Source
+  , progressSource
+  , settlementSource
+  , withSources
   , EffectProfile (..)
   , LaunchRole (..)
   , ReadOnlyEffects
@@ -52,6 +56,7 @@ module Tidepool.Actor
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
 import Prelude
+import Tidepool.Actor.Source (Source, progressSource, settlementSource, installSource)
 
 import Tidepool.Actor.Internal
   ( ActorDefinition
@@ -62,6 +67,8 @@ import Tidepool.Actor.Internal
   , behavior
   , onShutdown
   , actorLaunchWorktrees
+  , actorSources
+  , withSources
   , ActorRef (..)
   , EffectProfile (..)
   , ReadOnlyEffects
@@ -132,6 +139,7 @@ startActor definition@ActorDefinition
       entry _ = do
         send (ActorInstallShutdownWith 0 shutdownEntry)
         initial <- raiseKernel (startupAction startup)
+        mapM_ installSource (actorSources definition)
         send ActorReadyWith
         result <- raiseKernel (install startup initial)
         case fillExitCell cell result of
@@ -174,6 +182,7 @@ startActorFork launchRole forkGroup definition@ActorDefinition
       entry _ = do
         send (ActorInstallShutdownWith 0 shutdownEntry)
         initial <- raiseKernel (startupAction startup)
+        mapM_ installSource (actorSources definition)
         send ActorReadyWith
         result <- raiseKernel (install startup initial)
         case fillExitCell cell result of

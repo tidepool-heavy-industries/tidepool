@@ -272,6 +272,18 @@ impl KernelContext {
 /// owns Haskell/provider/tool execution and returns domain results without
 /// gaining access to Ractor's scheduler internals.
 pub trait KernelBehavior: Send + 'static {
+    fn source<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _delivery: crate::SourceDelivery,
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor has no installed source handler".into(),
+            })
+        })
+    }
+
     /// Execute one ready watch continuation on this actor's ordinary turn queue.
     fn route<'a>(
         &'a mut self,
@@ -513,7 +525,9 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let message = match message {
-            message @ (KernelMessage::Cast { .. } | KernelMessage::Call { .. })
+            message @ (KernelMessage::Cast { .. }
+            | KernelMessage::Call { .. }
+            | KernelMessage::Source(_))
                 if !state.deferred_mailbox.is_empty() || !state.behavior.accepts_mailbox() =>
             {
                 state.deferred_mailbox.push_back(message);
@@ -533,6 +547,14 @@ where
             message => message,
         };
         match message {
+            KernelMessage::Source(delivery) => {
+                match state.behavior.source(&state.context, delivery).await {
+                    Ok(step) => finish_after_step(&myself, state, step).await,
+                    Err(error) => {
+                        fail_actor(&myself, state, format!("source handler failed: {error}")).await
+                    }
+                }
+            }
             KernelMessage::SealHostedWork { reply } => {
                 if matches!(state.hosted_admission, HostedAdmission::Closing) {
                     drop(reply);
