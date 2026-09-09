@@ -103,8 +103,8 @@ fixture passed against its packaged Shoal and native Codex executables (1 test,
 
 ## Remaining acceptance
 
-- The native contributor guide requires approval for the complete workspace
-  `just test` suite. Approval was requested; that suite has not run.
+- The complete native workspace `just test` suite was approved and is running
+  against `fe15831c`; final results remain pending.
 
 The native slice is committed and published, main selects its exact pin, and
 scoped formatting/lints and consumer checks are complete. Recovered dirty files

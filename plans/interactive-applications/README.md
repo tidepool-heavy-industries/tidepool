@@ -21,6 +21,9 @@ execution to a dedicated app-server service, replace TUIs with observers, or sha
 one app-server across actors. Those are different architectures. Nothing in this
 plan requires them as an intermediate step.
 
+Use the [current-state review](current-state-review.md) to distinguish main,
+retained swarm candidates and missing acceptance before assigning implementation.
+
 ## Read shared decisions, then assigned mechanisms
 
 | File | Implementation obligation |

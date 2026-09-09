@@ -5,6 +5,9 @@ Status: partial implementation. The supervisor/resource slice is tracked in
 This checklist executes the contracts in [README.md](README.md) and files 01–05;
 checked implementation items do not imply complete A0–A8 acceptance.
 
+Use the [current-state review](current-state-review.md) to distinguish main,
+retained swarm candidates and missing acceptance before assigning implementation.
+
 ## Delivery approach
 
 The operator selected parallel dogfooding with frozen running tools. Use
