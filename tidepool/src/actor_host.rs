@@ -1917,9 +1917,23 @@ async fn run_interactive_applications(
                         }
                     }
                     LocalResidentDeployment::NotificationSend(command) => {
-                        // No correlated notification controller is installed yet.
-                        // Reject before publication rather than route through legacy push.
-                        command.rejected(tidepool_actor::NotificationError::Unavailable);
+                        let target = command.target();
+                        let Some(application) = deployments.iter().find(|app| app.actor == target) else {
+                            command.rejected(tidepool_actor::NotificationError::Unavailable);
+                            continue;
+                        };
+                        if !application.thread.as_ref().is_some_and(QueueReadyThread::supports_active_input) {
+                            command.rejected(tidepool_actor::NotificationError::Unavailable);
+                            continue;
+                        }
+                        let inbox = Arc::clone(&application.inbox);
+                        let key = application.notification_inbox_key.clone();
+                        notifications.spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                admit_notification(&command, key, &inbox);
+                            }).await.map_err(|error| error.to_string());
+                            (target, result)
+                        });
                     }
                     LocalResidentDeployment::NotificationPoll(command) => {
                         let result = deployments.iter()
@@ -3124,6 +3138,26 @@ fn orient_launch_instructions(
     }
 }
 
+fn admit_notification(command: &tidepool_actor::NotificationSend, key: String, inbox: &ActorInbox) {
+    match inbox.publish_tracked(
+        DurableActorEvent::Text(command.message().to_owned()),
+        NotificationProvenance {
+            sender: command.owner(),
+            target: command.target(),
+        },
+    ) {
+        Ok(row) => command.admitted(key, row.sequence),
+        Err(error @ tidepool_node::InboxError::UncertainWrite { .. }) => {
+            command.rejected(tidepool_actor::NotificationError::Unconfirmed(
+                error.to_string(),
+            ));
+        }
+        Err(error) => command.rejected(tidepool_actor::NotificationError::StorageFailure(
+            error.to_string(),
+        )),
+    }
+}
+
 fn observe_notification_receipt(
     command: &tidepool_actor::NotificationPoll,
     target: ActorRef,
@@ -3179,7 +3213,15 @@ async fn deliver_pending(
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
     let Some(last) = pending.last() else {
-        return Ok(());
+        return deliver_tracked_message(
+            actor,
+            inbox,
+            thread,
+            backend,
+            workspace,
+            runtime_observation,
+        )
+        .await;
     };
     let inbox_watermark = inbox.watermark();
     let inbox_sequence = last.sequence;
@@ -3235,6 +3277,74 @@ async fn deliver_pending(
     Ok(())
 }
 
+/// The existing inbox pump is the sole sender for tracked actor messages.
+/// Its durable attempt fence prevents a cancelled or uncertain submission from
+/// being sent again, and prevents later rows from overtaking it.
+async fn deliver_tracked_message(
+    actor: ActorRef,
+    inbox: &ActorInbox,
+    thread: &QueueReadyThread,
+    backend: &dyn InteractiveAgentBackend,
+    workspace: &Path,
+    observation: &tidepool_actor::ActorRuntimeObservationHandle,
+) -> Result<(), String> {
+    use tidepool_node::{DeliveryPhase, ReceiptLookup};
+    let sequence = inbox
+        .cursor()
+        .checked_add(1)
+        .ok_or("inbox sequence exhausted")?;
+    let ReceiptLookup::Retained(evidence) =
+        inbox.observe_receipt(sequence).map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    if evidence.phase != DeliveryPhase::Accepted {
+        return Err(format!(
+            "message {sequence} retains {:?}; delivery requires reconciliation",
+            evidence.phase
+        ));
+    }
+    if evidence.context.target != actor {
+        return Err(format!(
+            "message {sequence} targets another actor incarnation"
+        ));
+    }
+    let attempt = inbox
+        .begin_tracked_delivery(sequence)
+        .map_err(|e| e.to_string())?;
+    let key = format!(
+        "shoal-message-{}-{}-{}-{sequence}",
+        thread.id().0,
+        actor.id.0,
+        actor.incarnation.0
+    );
+    let message = attempt
+        .envelope()
+        .payload
+        .render(observation.snapshot().launched_at_unix_ms);
+    match backend
+        .present_update(&workspace.to_string_lossy(), thread, &key, &message)
+        .await
+    {
+        Ok(()) => {
+            attempt.submitted().map_err(|e| e.to_string())?;
+            inbox
+                .confirm_presented(sequence)
+                .map_err(|e| e.to_string())?;
+            observation.publish_event_activation(vec![sequence], inbox.watermark());
+            Ok(())
+        }
+        Err(tidepool_agent::UpdatePresentationError::NotSubmitted(error)) => {
+            attempt.not_submitted().map_err(|e| e.to_string())?;
+            Err(error)
+        }
+        Err(tidepool_agent::UpdatePresentationError::Unconfirmed(error)) => {
+            attempt.unconfirmed().map_err(|e| e.to_string())?;
+            Err(error)
+        }
+    }
+}
+
 async fn run_delivery_pump(
     actor: ActorRef,
     inbox: Arc<ActorInbox>,
@@ -3267,7 +3377,7 @@ async fn run_delivery_pump(
                     }
                     Err(error) => {
                         if last_error.as_deref() != Some(error.as_str()) {
-                            tracing::warn!(actor = ?actor, %error, "actor inbox delivery is pending retry");
+                            tracing::warn!(actor = ?actor, %error, "actor inbox delivery remains pending");
                         }
                         last_error = Some(error);
                     }
@@ -4805,6 +4915,135 @@ mod tests {
         }
     }
 
+    struct ScriptedSteering(ScriptedPush);
+
+    impl InteractiveAgentBackend for ScriptedSteering {
+        fn prepare_native_tool_policy(
+            &self,
+            policy: InteractiveNativeToolPolicy,
+            root: &Path,
+        ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+            self.0.prepare_native_tool_policy(policy, root)
+        }
+        fn render(
+            &self,
+            spec: &InteractiveAgentSpec,
+        ) -> Result<InteractiveAgentCommand, AgentBackendError> {
+            self.0.render(spec)
+        }
+        fn push<'a>(
+            &'a self,
+            cwd: &'a str,
+            thread: &'a QueueReadyThread,
+            message: &'a str,
+        ) -> InteractiveFuture<'a, ()> {
+            self.0.push(cwd, thread, message)
+        }
+        fn archive<'a>(
+            &'a self,
+            cwd: &'a str,
+            thread: &'a QueueReadyThread,
+        ) -> InteractiveFuture<'a, ()> {
+            self.0.archive(cwd, thread)
+        }
+        fn present_update<'a>(
+            &'a self,
+            _cwd: &'a str,
+            _thread: &'a QueueReadyThread,
+            key: &'a str,
+            message: &'a str,
+        ) -> tidepool_agent::UpdatePresentationFuture<'a> {
+            Box::pin(async move {
+                self.0
+                    .messages
+                    .lock()
+                    .unwrap()
+                    .push(format!("{key}:{message}"));
+                if self.0.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(tidepool_agent::UpdatePresentationError::Unconfirmed(
+                        "lost confirmation".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_steering_preserves_order_and_never_retries_uncertain_input() {
+        use tidepool_node::{DeliveryPhase, ReceiptLookup};
+        for uncertain in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let inbox = Arc::new(
+                ActorInbox::open(root.path().join("rows"), root.path().join("cursor")).unwrap(),
+            );
+            let actor = ActorRef::first(tidepool_actor::ActorId(7));
+            for message in ["A", "B"] {
+                inbox
+                    .publish_tracked(
+                        DurableActorEvent::Text(message.into()),
+                        NotificationProvenance {
+                            sender: ActorRef::first(tidepool_actor::ActorId(8)),
+                            target: actor,
+                        },
+                    )
+                    .unwrap();
+            }
+            let backend = ScriptedSteering(ScriptedPush {
+                fail: std::sync::atomic::AtomicBool::new(uncertain),
+                messages: std::sync::Mutex::new(Vec::new()),
+            });
+            let binding = root.path().join("binding.json");
+            tidepool_agent::accept_interactive_session_binding(
+                &binding,
+                tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+                BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into()),
+                None,
+            )
+            .await
+            .unwrap();
+            let thread = tidepool_agent::read_interactive_binding(&binding)
+                .await
+                .unwrap();
+            let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
+            for _ in 0..3 {
+                let outcome =
+                    deliver_pending(actor, &inbox, &thread, &backend, root.path(), &observation)
+                        .await;
+                assert_eq!(outcome.is_err(), uncertain);
+            }
+            let messages = backend.0.messages.lock().unwrap();
+            if uncertain {
+                assert_eq!(
+                    &*messages,
+                    &["shoal-message-019fe92a-1a66-7820-9481-c0a2d108aba1-7-1-1:A"]
+                );
+                assert_eq!(inbox.cursor(), 0);
+                assert!(
+                    matches!(inbox.observe_receipt(1).unwrap(), ReceiptLookup::Retained(e) if e.phase == DeliveryPhase::Unconfirmed)
+                );
+                assert!(
+                    matches!(inbox.observe_receipt(2).unwrap(), ReceiptLookup::Retained(e) if e.phase == DeliveryPhase::Accepted)
+                );
+            } else {
+                assert_eq!(
+                    &*messages,
+                    &[
+                        "shoal-message-019fe92a-1a66-7820-9481-c0a2d108aba1-7-1-1:A",
+                        "shoal-message-019fe92a-1a66-7820-9481-c0a2d108aba1-7-1-2:B"
+                    ]
+                );
+                assert_eq!(inbox.cursor(), 2);
+                for sequence in [1, 2] {
+                    assert!(
+                        matches!(inbox.observe_receipt(sequence).unwrap(), ReceiptLookup::Retained(e) if e.phase == DeliveryPhase::Presented)
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn launch_shutdown_preserves_socket_error_and_completed_results() {
         let root = tempfile::tempdir().unwrap();
@@ -5025,7 +5264,7 @@ mod tests {
         let send = tokio::spawn(async move {
             dispatch_haskell_script(
                 policy.as_ref(),
-                "Right receipt <- notify worker \"one-way notice\"",
+                "Right receipt <- sendMessage worker \"one-way notice\"",
             )
             .await
         });
@@ -5040,18 +5279,7 @@ mod tests {
             };
         assert_eq!(command.owner(), campaign.actor.identity());
         assert_eq!(command.target(), child.actor.identity());
-        // This is real durable admission through the interpreter handoff, not a
-        // native presentation fixture. Production send remains unavailable.
-        let envelope = inbox
-            .publish_tracked(
-                DurableActorEvent::Text(command.message().to_owned()),
-                NotificationProvenance {
-                    sender: command.owner(),
-                    target: command.target(),
-                },
-            )
-            .unwrap();
-        command.admitted(inbox_key.into(), envelope.sequence);
+        admit_notification(&command, inbox_key.into(), &inbox);
         let sent = send.await.unwrap();
         assert_eq!(sent["status"], "committed", "{sent:?}");
         let policy = root.clone();
@@ -5132,7 +5360,7 @@ mod tests {
         );
         // Submitted transport acceptance is explicitly NOT model presentation.
         inbox
-            .begin_tracked_delivery(envelope.sequence)
+            .begin_tracked_delivery(poll_command.receipt().sequence())
             .unwrap()
             .submitted()
             .unwrap();
@@ -5243,6 +5471,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn haskell_actor_sends_normal_steering_without_a_native_session() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup = dispatch_haskell_script(
+            root.as_ref(),
+            "worker <- startAgent (readonlyAgent \"message-recipient\")",
+        )
+        .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let child = match campaign.deployments.recv().await.unwrap() {
+            LocalResidentDeployment::PolicyInstalled(child) => child,
+            _ => panic!("expected recipient policy"),
+        };
+        let policy = root.clone();
+        let mut run = tokio::spawn(async move {
+            dispatch_haskell_script(policy.as_ref(), include_str!("actor_host/message_actor.hs"))
+                .await
+        });
+        let mut launched = None;
+        let command = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                tokio::select! {
+                    result = &mut run, if launched.is_none() => {
+                        let result = result.unwrap();
+                        assert_eq!(result["status"], "committed", "{result:?}");
+                        for item in result["items"].as_array().unwrap() {
+                            assert_eq!(item["status"], "committed", "{result:?}");
+                        }
+                        launched = Some(result);
+                    }
+                    event = campaign.deployments.recv() => match event.unwrap() {
+                        LocalResidentDeployment::NotificationSend(command) => break command,
+                        LocalResidentDeployment::PolicyInstalled(_) => panic!("Haskell sender acquired a model session"),
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_ne!(command.owner(), campaign.actor.identity());
+        assert_eq!(command.target(), child.actor.identity());
+        assert_eq!(command.message(), "e434: retain candidate; check digest");
+        let directory = tempfile::tempdir().unwrap();
+        let inbox = ActorInbox::open(
+            directory.path().join("rows"),
+            directory.path().join("cursor"),
+        )
+        .unwrap();
+        admit_notification(&command, "actor-message-inbox".into(), &inbox);
+        let launched = match launched {
+            Some(result) => result,
+            None => run.await.unwrap(),
+        };
+        assert_eq!(launched["status"], "committed", "{launched:?}");
+        let finished = dispatch_haskell_script(root.as_ref(), "finished <- awaitExit relay\ncase finished of { Completed (Right _) -> True; _ -> False }").await;
+        assert_eq!(finished["status"], "committed", "{finished:?}");
+        assert!(finished.to_string().contains("True"), "{finished:?}");
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn notification_barrier_never_enters_legacy_push_or_batch_ack() {
         let root = tempfile::tempdir().unwrap();
         let inbox = Arc::new(
@@ -5297,11 +5588,16 @@ mod tests {
             .await
             .unwrap();
         let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
-        for _ in 0..2 {
+        deliver_pending(target, &inbox, &thread, &backend, root.path(), &observation)
+            .await
+            .unwrap();
+        // Unsupported normal steering remains a tracked barrier; it never
+        // falls through to legacy push or acknowledges the suffix.
+        assert!(
             deliver_pending(target, &inbox, &thread, &backend, root.path(), &observation)
                 .await
-                .unwrap();
-        }
+                .is_err()
+        );
         assert_eq!(*backend.messages.lock().unwrap(), vec!["ordinary prefix"]);
         assert_eq!(inbox.cursor(), 1);
         assert_eq!(inbox.watermark(), 3);

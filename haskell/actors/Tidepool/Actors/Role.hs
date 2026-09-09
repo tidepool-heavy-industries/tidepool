@@ -19,6 +19,7 @@ module Tidepool.Actors.Role
   , AgentInspection
   , AgentControl
   , Notifications
+  , Actor
   , BoundWorktree
   , WorktreeRegistry
   , WorktreeAllocation
@@ -48,6 +49,7 @@ import Tidepool.Effects.Core
   ( ActorContext
   , AgentControl
   , Notifications
+  , Actor
   , AgentInspection
   , AgentLaunch
   , BoundWorktree
@@ -59,8 +61,8 @@ import Tidepool.Effects.Core
   )
 
 -- These nominal capabilities are the public residual row. Their operations
--- are supplied by their owner modules; they are not aliases for the broad
--- legacy Actor or Worktree effects.
+-- are supplied by their owner modules. Actor supplies typed Haskell actor
+-- execution; workspace operations retain their separate capabilities.
 
 data EffectWitness (effect :: Type -> Type) = EffectWitness ActorEffectKey
 
@@ -104,27 +106,28 @@ instance KnownEffect WorktreeAllocation where effectWitness = EffectWitness Effe
 instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness EffectWorktreeIntegration
 instance KnownEffect Forks where effectWitness = EffectWitness EffectForks
 instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
+instance KnownEffect Actor where effectWitness = EffectWitness EffectActor
 
-type CoreEffects = '[Replies, Watches, ActorContext, Notifications]
-type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications]
+type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Actor]
+type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Actor]
 type ResearchEffects = ResearchCoordinatorEffects
 type ResearchCoordinatorEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree, Notifications
+   , AgentInspection, AgentControl, BoundWorktree, Notifications, Actor
    ]
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeIntegration, Notifications
+   , WorktreeIntegration, Notifications, Actor
    ]
 type ScaffoldEffects = CodingEffects
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
-   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications
+   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Actor
    ]
 type RootEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Notifications
+   , WorktreeIntegration, Notifications, Actor
    ]

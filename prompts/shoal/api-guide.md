@@ -198,6 +198,10 @@ updateRequest :: Member Replies effects
               => Response result -> Text -> Eff effects (Either ReplyError RequestUpdate)
 pollRequestUpdate :: Member Replies effects
                   => RequestUpdate -> Eff effects (Either ReplyError RequestUpdateState)
+sendMessage :: Member Notifications effects
+            => AgentRef -> Text -> Eff effects (Either NotificationError NotificationReceipt)
+pollNotification :: Member Notifications effects
+                 => NotificationReceipt -> Eff effects (Either NotificationError NotificationState)
 stopAgent :: Member AgentControl effects => AgentRef -> Eff effects StopOutcome
 
 data RequestUpdateState
@@ -208,9 +212,18 @@ data RequestUpdateState
 Use `request @Report actor label assignment` for a new assignment to a retained
 specialist; it queues when busy. `updateRequest` clarifies the exact owned,
 active response without replacing its reply obligation. Handle its `Left` and
-poll a returned `Right` handle. Presentation is not incorporation. Queued work
+retain a returned `Right` handle; poll when delivery affects the next decision.
+Presentation is not incorporation. Queued work
 is not yet steerable; unconfirmed delivery can fence settlement. See
 `:doc request` for delivery/recovery policy, and `:doc refinement` for review.
+
+Use `sendMessage actor "e434: digest mutable; privatize fields; reject mismatch"`
+for ordinary steering without a new reply obligation. It reaches the existing TUI
+at its normal input boundary, waking it if idle. `Right receipt` means durable
+admission; it does not mean incorporation. Keep the receipt; inspect delivery only
+when that distinction affects the next action. Unconfirmed delivery must be
+reconciled before retrying. `updateRequest` remains the request-bound operation
+when the correction must participate in that request's settlement fence.
 
 Actor messages are machine coordination: use fragments, exact refs and established
 names. Send only post-fork changes, ambiguous constraints and the next needed

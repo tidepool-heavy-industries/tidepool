@@ -48,6 +48,7 @@ module Tidepool.Actors.Internal.Agent
   , forgetAgent
   , StopOutcome (..)
   , stopAgent
+  , sendMessage
   , notify
   , pollNotification
   , NotificationReceipt
@@ -632,8 +633,14 @@ agentRole (IntegrationAgent _) = Actor.IntegrationRole
 -- | Observation locator only. Rust checks the caller and exact inbox row.
 newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))
 
+-- | Admit normal steering into the existing TUI conversation. The receipt is
+-- admission evidence, not incorporation or successful execution. No response
+-- obligation is created, and uncertain presentation must not be retried blindly.
+sendMessage :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)
+sendMessage (AgentRef target _) message = fmap (fmap NotificationReceipt) (send (NotifyWith (actorAddress target) message))
+
 notify :: Member Notifications effs => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)
-notify (AgentRef target _) message = fmap (fmap NotificationReceipt) (send (NotifyWith (actorAddress target) message))
+notify = sendMessage
 
 pollNotification :: Member Notifications effs => NotificationReceipt -> Eff effs (Either NotificationError NotificationState)
 pollNotification (NotificationReceipt receipt) = send (PollNotificationWith receipt)

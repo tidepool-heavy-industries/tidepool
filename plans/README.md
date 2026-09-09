@@ -24,6 +24,10 @@ archive).
   Live acceptance uses fresh actors on `shoal-repl` (the standalone TUI app) or
   another non-self-hosting project, using authored guidance rather than knowledge
   inherited from implementing Shoal. Keep normal Codex TUIs for worker interaction.
+- [Persistent coordination actors](next/coordination-actors.md): replace progress
+  watch rearming with typed sources and owned Haskell handlers, normal TUI steering,
+  recoverable handler failure and atomic typed replacement; migrate the curated
+  dogfood helpers and prompts alongside the runtime.
 - [Supervised interactive Codex applications](interactive-applications/README.md):
   complete option A implementation plans for full worker TUIs, exact native
   session binding, durable delivery, process custody, hosted completion and

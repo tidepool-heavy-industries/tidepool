@@ -41,6 +41,12 @@ impl QueueReadyThread {
         self.input_control_socket.as_deref()
     }
 
+    /// Whether this exact TUI binding advertises normal active-input delivery.
+    #[must_use]
+    pub fn supports_active_input(&self) -> bool {
+        self.input_control_socket.is_some()
+    }
+
     #[must_use]
     pub fn id(&self) -> &BackendThreadId {
         &self.thread

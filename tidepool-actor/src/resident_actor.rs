@@ -1395,8 +1395,14 @@ where
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        match boundary {
-            ResidentActorBoundary::ActorContext(continuation) => {
+        // Keep each interpreter branch in its own future. A child can execute
+        // an effect during Ractor startup on the caller's poll stack; embedding
+        // every branch here makes that ordinary nesting exhaust a debug stack.
+        let operation: futures_util::future::BoxFuture<
+            '_,
+            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        > = match boundary {
+            ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
                 self.environment
                     .runner
                     .resume_actor_context(
@@ -1407,8 +1413,8 @@ where
                         self.runtime_observation.snapshot(),
                     )
                     .await
-            }
-            ResidentActorBoundary::AgentInspect(inspection) => {
+            }),
+            ResidentActorBoundary::AgentInspect(inspection) => Box::pin(async move {
                 let records = self.environment.actors.lock().clone();
                 let observation = records.get(&inspection.target).and_then(|record| {
                     actor_can_observe(context.actor, inspection.target, &records).then(|| {
@@ -1431,8 +1437,8 @@ where
                     .runner
                     .resume_agent_observation(context.clone(), inspection.continuation, observation)
                     .await
-            }
-            ResidentActorBoundary::AgentList(continuation) => {
+            }),
+            ResidentActorBoundary::AgentList(continuation) => Box::pin(async move {
                 let records = self.environment.actors.lock().clone();
                 let mut roster = records
                     .iter()
@@ -1458,12 +1464,12 @@ where
                     .runner
                     .resume_agent_roster(context.clone(), continuation, roster)
                     .await
-            }
+            }),
             ResidentActorBoundary::AgentShareObservation {
                 continuation,
                 recipient,
                 scope,
-            } => {
+            } => Box::pin(async move {
                 let outcome = {
                     let mut records = self.environment.actors.lock();
                     if records
@@ -1491,11 +1497,11 @@ where
                     .runner
                     .resume_value(context.clone(), continuation, outcome)
                     .await
-            }
+            }),
             ResidentActorBoundary::AgentGroupList {
                 continuation,
                 group,
-            } => {
+            } => Box::pin(async move {
                 // Membership comes from exact admission ancestry, never a
                 // display label or Git branch prefix. Unavailable/unauthorized
                 // groups follow the existing optional inspection convention.
@@ -1530,8 +1536,8 @@ where
                     .runner
                     .resume_group_roster(context.clone(), continuation, roster)
                     .await
-            }
-            ResidentActorBoundary::AgentForget(forget) => {
+            }),
+            ResidentActorBoundary::AgentForget(forget) => Box::pin(async move {
                 let authorized_terminal = {
                     let records = self.environment.actors.lock();
                     records.get(&forget.target).and_then(|record| {
@@ -1579,8 +1585,8 @@ where
                     .runner
                     .resume_agent_forget(context.clone(), forget.continuation, outcome)
                     .await
-            }
-            ResidentActorBoundary::AgentStop(stop) => {
+            }),
+            ResidentActorBoundary::AgentStop(stop) => Box::pin(async move {
                 let (known, authorized) = {
                     let records = self.environment.actors.lock();
                     (
@@ -1630,22 +1636,22 @@ where
                     .runner
                     .resume_agent_stop(context.clone(), stop.continuation, outcome)
                     .await
-            }
+            }),
             ResidentActorBoundary::CleanupPlan {
                 continuation,
                 group,
-            } => {
+            } => Box::pin(async move {
                 let plan = self.cleanup_plan(kernel, context.actor, group);
                 self.environment
                     .runner
                     .resume_cleanup_plan(context.clone(), continuation, plan)
                     .await
-            }
+            }),
             ResidentActorBoundary::CleanupExecute {
                 continuation,
                 group,
                 inspected,
-            } => {
+            } => Box::pin(async move {
                 use crate::resident_workbench::{
                     AgentStopProjection, CleanupReceiptProjection, CleanupStepProjection,
                 };
@@ -1879,7 +1885,7 @@ where
                         },
                     )
                     .await
-            }
+            }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview {
                 continuation,
                 role,
@@ -1890,7 +1896,7 @@ where
                 context: fork_context,
                 instructions,
                 lifetime,
-            }) => {
+            }) => Box::pin(async move {
                 let preview = self
                     .validate_worker_context(lifetime, fork_context)
                     .and_then(|()| {
@@ -1927,13 +1933,13 @@ where
                     .runner
                     .resume_value(context.clone(), continuation, preview)
                     .await
-            }
+            }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
                 continuation,
                 relative,
                 group,
                 branches,
-            }) => {
+            }) => Box::pin(async move {
                 let admitted = (|| {
                     let group = if relative {
                         let parent = self.descriptor.actor_path().ok_or_else(|| {
@@ -1995,11 +2001,11 @@ where
                             .await
                     }
                 }
-            }
+            }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
                 continuation,
                 group,
-            }) => {
+            }) => Box::pin(async move {
                 let mut phase = match self
                     .environment
                     .fork_groups
@@ -2067,11 +2073,11 @@ where
                     .runner
                     .resume_fork_unit(context.clone(), continuation)
                     .await
-            }
+            }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
                 continuation,
                 group,
-            }) => {
+            }) => Box::pin(async move {
                 let children = match self.environment.fork_groups.abort(group, context.actor) {
                     Ok(children) => children,
                     Err(error) => {
@@ -2096,11 +2102,11 @@ where
                     .runner
                     .resume_unit(context.clone(), continuation)
                     .await
-            }
+            }),
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Cleanup {
                 continuation,
                 group,
-            }) => {
+            }) => Box::pin(async move {
                 let outcome = self
                     .environment
                     .fork_groups
@@ -2109,13 +2115,15 @@ where
                     .runner
                     .resume_fork_cleanup(context.clone(), continuation, outcome)
                     .await
+            }),
+            ResidentActorBoundary::Start(start) => {
+                Box::pin(self.start_child(kernel, context, start))
             }
-            ResidentActorBoundary::Start(start) => self.start_child(kernel, context, start).await,
-            ResidentActorBoundary::Outbound(outbound) => {
+            ResidentActorBoundary::Outbound(outbound) => Box::pin(async move {
                 self.resolve_outbound(kernel, context, ancestry, outbound)
                     .await
-            }
-            ResidentActorBoundary::Wait(wait) => {
+            }),
+            ResidentActorBoundary::Wait(wait) => Box::pin(async move {
                 if self.pending_in_tool_block(wait.target) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "child starts after this tool block completes; register a watch or wait in a later tool invocation".into(),
@@ -2142,8 +2150,8 @@ where
                     .runner
                     .resume_terminal(context.clone(), wait.continuation, terminal)
                     .await
-            }
-            ResidentActorBoundary::Poll(poll) => {
+            }),
+            ResidentActorBoundary::Poll(poll) => Box::pin(async move {
                 let terminal = kernel
                     .resolve(poll.target)
                     .and_then(|target| target.terminal().get());
@@ -2157,12 +2165,12 @@ where
                     self.record_child_observation(poll.target);
                 }
                 Ok(outcome)
-            }
+            }),
             ResidentActorBoundary::NotificationSend {
                 continuation,
                 target,
                 message,
-            } => {
+            } => Box::pin(async move {
                 let permitted = self
                     .descriptor
                     .effective_role()
@@ -2196,11 +2204,11 @@ where
                     .runner
                     .resume_value(context.clone(), continuation, outcome)
                     .await
-            }
+            }),
             ResidentActorBoundary::NotificationPoll {
                 continuation,
                 receipt,
-            } => {
+            } => Box::pin(async move {
                 let permitted = self
                     .descriptor
                     .effective_role()
@@ -2231,8 +2239,8 @@ where
                     .runner
                     .resume_value(context.clone(), continuation, outcome)
                     .await
-            }
-            ResidentActorBoundary::RequestReservation(reservation) => {
+            }),
+            ResidentActorBoundary::RequestReservation(reservation) => Box::pin(async move {
                 crate::ActorPathSegment::new(&reservation.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
                         "invalid request label: {error}"
@@ -2247,8 +2255,8 @@ where
                     .runner
                     .resume_int(context.clone(), reservation.continuation, request.0)
                     .await
-            }
-            ResidentActorBoundary::RequestSubmission(submission) => {
+            }),
+            ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
                 let request_deadline = submission
                     .deadline
                     .map(crate::request::ActiveRequestDeadline::start)
@@ -2324,8 +2332,8 @@ where
                     }
                     outcome
                 }
-            }
-            ResidentActorBoundary::ResponsePoll(poll) => {
+            }),
+            ResidentActorBoundary::ResponsePoll(poll) => Box::pin(async move {
                 let observation = self
                     .environment
                     .requests
@@ -2334,12 +2342,12 @@ where
                     .runner
                     .resume_response_observation(context.clone(), poll.continuation, observation)
                     .await
-            }
+            }),
             ResidentActorBoundary::ProgressPublication {
                 continuation,
                 request,
                 value,
-            } => {
+            } => Box::pin(async move {
                 let outcome = self
                     .environment
                     .requests
@@ -2352,8 +2360,8 @@ where
                     .runner
                     .resume_progress_publication(context.clone(), continuation, outcome)
                     .await
-            }
-            ResidentActorBoundary::ProgressPoll(poll) => {
+            }),
+            ResidentActorBoundary::ProgressPoll(poll) => Box::pin(async move {
                 let observation = self
                     .environment
                     .requests
@@ -2362,12 +2370,12 @@ where
                     .runner
                     .resume_progress_observation(context.clone(), poll.continuation, observation)
                     .await
-            }
+            }),
             ResidentActorBoundary::RequestUpdate {
                 continuation,
                 request,
                 message,
-            } => {
+            } => Box::pin(async move {
                 let outcome = self
                     .environment
                     .requests
@@ -2394,11 +2402,11 @@ where
                     .runner
                     .resume_request_update(context.clone(), continuation, outcome)
                     .await
-            }
+            }),
             ResidentActorBoundary::RequestUpdatePoll {
                 continuation,
                 update,
-            } => {
+            } => Box::pin(async move {
                 let outcome = self
                     .environment
                     .requests
@@ -2407,8 +2415,8 @@ where
                     .runner
                     .resume_request_update(context.clone(), continuation, outcome)
                     .await
-            }
-            ResidentActorBoundary::RequestCancellation(cancellation) => {
+            }),
+            ResidentActorBoundary::RequestCancellation(cancellation) => Box::pin(async move {
                 let projected = self
                     .environment
                     .requests
@@ -2425,8 +2433,8 @@ where
                     .runner
                     .resume_cancel_request(context.clone(), cancellation.continuation, projected)
                     .await
-            }
-            ResidentActorBoundary::ResponseAbandonment(abandonment) => {
+            }),
+            ResidentActorBoundary::ResponseAbandonment(abandonment) => Box::pin(async move {
                 let projected = self
                     .environment
                     .requests
@@ -2439,8 +2447,8 @@ where
                     .runner
                     .resume_abandonment(context.clone(), abandonment.continuation, projected)
                     .await
-            }
-            ResidentActorBoundary::ResponseForget(forget) => {
+            }),
+            ResidentActorBoundary::ResponseForget(forget) => Box::pin(async move {
                 let outcome = self
                     .environment
                     .requests
@@ -2449,8 +2457,8 @@ where
                     .runner
                     .resume_response_forget(context.clone(), forget.continuation, outcome)
                     .await
-            }
-            ResidentActorBoundary::ReplyPoll(poll) => {
+            }),
+            ResidentActorBoundary::ReplyPoll(poll) => Box::pin(async move {
                 let observation = self
                     .environment
                     .requests
@@ -2459,11 +2467,11 @@ where
                     .runner
                     .resume_reply_observation(context.clone(), poll.continuation, observation)
                     .await
-            }
+            }),
             ResidentActorBoundary::RouteRegistration {
                 registration,
                 entry,
-            } => {
+            } => Box::pin(async move {
                 let owner = kernel.resolve(context.actor).ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol("route owner is unavailable".into())
                 })?;
@@ -2486,8 +2494,8 @@ where
                     .runner
                     .resume_int(context.clone(), registration.continuation, watch.0)
                     .await
-            }
-            ResidentActorBoundary::RouteList(continuation) => {
+            }),
+            ResidentActorBoundary::RouteList(continuation) => Box::pin(async move {
                 let routes = self
                     .environment
                     .requests
@@ -2505,8 +2513,8 @@ where
                     .runner
                     .resume_value(context.clone(), continuation, routes)
                     .await
-            }
-            ResidentActorBoundary::RoutePoll(poll) => {
+            }),
+            ResidentActorBoundary::RoutePoll(poll) => Box::pin(async move {
                 let state = self
                     .environment
                     .requests
@@ -2515,8 +2523,8 @@ where
                     .runner
                     .resume_route_state(context.clone(), poll.continuation, state)
                     .await
-            }
-            ResidentActorBoundary::WatchRegistration(registration) => {
+            }),
+            ResidentActorBoundary::WatchRegistration(registration) => Box::pin(async move {
                 crate::ActorPathSegment::new(&registration.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
                         "invalid watch label: {error}"
@@ -2540,8 +2548,8 @@ where
                     .runner
                     .resume_int(context.clone(), registration.continuation, watch.0)
                     .await
-            }
-            ResidentActorBoundary::WatchPoll(poll) => {
+            }),
+            ResidentActorBoundary::WatchPoll(poll) => Box::pin(async move {
                 let observation = self
                     .environment
                     .requests
@@ -2550,13 +2558,13 @@ where
                     .runner
                     .resume_watch_observation(context.clone(), poll.continuation, observation)
                     .await
-            }
+            }),
             ResidentActorBoundary::WatchProgressPoll {
                 continuation,
                 watch,
                 request,
                 after,
-            } => {
+            } => Box::pin(async move {
                 let observation = self.environment.requests.observe_watch_progress(
                     context.actor,
                     watch,
@@ -2567,8 +2575,8 @@ where
                     .runner
                     .resume_progress_observation(context.clone(), continuation, observation)
                     .await
-            }
-            ResidentActorBoundary::WatchForget(forget) => {
+            }),
+            ResidentActorBoundary::WatchForget(forget) => Box::pin(async move {
                 let outcome = self
                     .environment
                     .requests
@@ -2577,12 +2585,15 @@ where
                     .runner
                     .resume_watch_forget(context.clone(), forget.continuation, outcome)
                     .await
-            }
-            other => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                "`{}` is not an active actor effect",
-                other.operation()
-            ))),
-        }
+            }),
+            other => Box::pin(async move {
+                Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "`{}` is not an active actor effect",
+                    other.operation()
+                )))
+            }),
+        };
+        operation.await
     }
 
     async fn stabilize_program(

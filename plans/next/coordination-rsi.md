@@ -5,6 +5,9 @@ implementations remain task branches, updated from main between runs. Build the
 harness from the exact recorded main revision, not a combined product candidate.
 Use committed partial handoffs to resume work; preserve remaining acceptance gates.
 
+[Persistent coordination actors](coordination-actors.md) is the implementation
+checklist for replacing progress rearming with typed sources and Haskell handlers.
+
 ## Selected behavior
 
 - Initial Astra plans the recursive engineering graph, then checks the first Sol

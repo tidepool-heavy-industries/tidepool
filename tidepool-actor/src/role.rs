@@ -64,6 +64,7 @@ pub enum ActorEffectKey {
     WorktreeAllocation,
     WorktreeIntegration,
     Notifications,
+    Actor,
 }
 
 impl ActorEffectKey {
@@ -81,6 +82,7 @@ impl ActorEffectKey {
             Self::WorktreeAllocation => "WorktreeAllocation",
             Self::WorktreeIntegration => "WorktreeIntegration",
             Self::Notifications => "Notifications",
+            Self::Actor => "Actor",
         }
     }
 }
@@ -121,6 +123,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeAllocation,
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Actor,
             ],
         )
     }
@@ -145,6 +148,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Actor,
             ],
         )
     }
@@ -170,6 +174,7 @@ impl EffectiveRole {
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Actor,
             ],
         )
     }
@@ -205,6 +210,7 @@ impl EffectiveRole {
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Actor,
             ],
         )
     }
@@ -428,7 +434,7 @@ mod tests {
     fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
             EffectiveRole::research().haskell_effects_type(),
-            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Notifications]"
+            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Notifications, Actor]"
         );
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");

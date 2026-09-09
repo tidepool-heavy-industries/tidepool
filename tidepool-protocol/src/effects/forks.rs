@@ -112,6 +112,7 @@ pub fn forks() -> Effect {
                         "EffectWorktreeAllocation",
                         "EffectWorktreeIntegration",
                         "EffectNotifications",
+                        "EffectActor",
                     ]
                     .into_iter()
                     .map(|ctor| SumVariant {

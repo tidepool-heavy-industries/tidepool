@@ -32,6 +32,8 @@ module Tidepool.Actors.Shoal
   , AgentInspection
   , AgentControl
   , Notifications
+  , Actor
+  , sendMessage
   , notify
   , pollNotification
   , NotificationReceipt
@@ -323,6 +325,7 @@ import Tidepool.Actors.Internal.Agent
   , StopOutcome (..)
   , startAgent
   , stopAgent
+  , sendMessage
   , notify
   , pollNotification
   , NotificationReceipt
@@ -375,7 +378,7 @@ type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Notifications
+   , WorktreeIntegration, Notifications, Actor
    ]
 
 type ResearchActorEffects = ResearchEffects
