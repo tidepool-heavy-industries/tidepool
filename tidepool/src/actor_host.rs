@@ -2749,34 +2749,6 @@ fn current_time_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
-fn retained_workspace_command(
-    executable: &Path,
-    view: &tidepool_node::MountNamespace,
-    cwd: &Path,
-    command: ProcessInvocation,
-) -> std::io::Result<ProcessInvocation> {
-    if !executable.is_absolute() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Shoal entry executable must be absolute",
-        ));
-    }
-    let mut args = vec![
-        "enter-view".into(),
-        "--view".into(),
-        serde_json::to_string(&view.entry()?).map_err(std::io::Error::other)?,
-        "--cwd".into(),
-        cwd.to_string_lossy().into_owned(),
-        "--".into(),
-        command.program,
-    ];
-    args.extend(command.args);
-    Ok(ProcessInvocation {
-        program: executable.to_string_lossy().into_owned(),
-        args,
-    })
-}
-
 async fn launch_prepared_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
@@ -3043,18 +3015,10 @@ async fn launch_prepared_interactive_application(
         spec.model.clone(),
         spec.effort.map(|effort| format!("{effort:?}")),
     );
-    let command = retained_workspace_command(
-        &config.shoal_executable,
-        &workspace_view,
-        &agent_workspace,
-        ProcessInvocation {
-            program: command.program,
-            args: command.args,
-        },
-    )
-    .map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::BuildCommand, error)
-    })?;
+    let command = ProcessInvocation {
+        program: command.program,
+        args: command.args,
+    };
     // Accepted hosted work may outlive listener cancellation. Retention starts
     // before either hosted submission or native process submission can occur.
     socket_directory.work_may_exist();
@@ -3162,7 +3126,7 @@ async fn launch_prepared_interactive_application(
         .map_err(|error| {
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?;
-    let manifest = ProcessSupervisorManifest::new(
+    let mut manifest = ProcessSupervisorManifest::new(
         launch_id.clone(),
         pairing_secret.clone(),
         recovery_secret.clone(),
@@ -3179,6 +3143,12 @@ async fn launch_prepared_interactive_application(
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
     let supervisor_socket = manifest.socket_path();
+    manifest.retained_view = Some(tidepool_node::RetainedProcessView {
+        entry: workspace_view.entry().map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::BuildCommand, error)
+        })?,
+        directory: agent_workspace.clone(),
+    });
     let manifest_path = manifest.write_new().map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;

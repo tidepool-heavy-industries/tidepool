@@ -461,3 +461,68 @@ fn inherited_terminal_child() {
     scope.terminate_and_wait(deadline()).unwrap();
     assert_eq!(rustix::termios::tcgetpgrp(stdin).unwrap(), owner_group);
 }
+
+#[test]
+fn retained_workspace_is_entered_before_pid_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for name in ["base", "upper", "work", "view"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    std::fs::write(root.join("base/marker"), "retained-view").unwrap();
+    let view = root.join("view");
+    let boundary = ProcessMountBoundary::new(&view, [root.to_owned()], [view.clone()])
+        .unwrap()
+        .with_overlay_view(
+            [root.join("base")],
+            root.join("upper"),
+            root.join("work"),
+            &view,
+        )
+        .unwrap();
+    let bwrap = std::env::var_os("SERVICE_SCOPE_BWRAP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from("/nix/store/dqzmpjz70l4lzg7lmc3x8wih74nh5bpc-bubblewrap-0.11.0/bin/bwrap")
+        });
+    let namespace = boundary
+        .prepare_view(bwrap.to_string_lossy().into_owned(), deadline())
+        .unwrap();
+    let scope = boundary
+        .reserve_service_scope(
+            bwrap,
+            ProcessInvocation {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "cat marker; printf child > child".into()],
+            },
+        )
+        .unwrap()
+        .in_view(RetainedProcessView {
+            entry: namespace.entry().unwrap(),
+            directory: view,
+        })
+        .unwrap()
+        .spawn(
+            ServiceEnvironment::default(),
+            File::create(root.join("output")).unwrap(),
+        )
+        .unwrap();
+    let mut fixture = Fixture { scope, directory };
+    fixture.pin();
+    fixture.scope.release_command().unwrap();
+    let limit = deadline();
+    while !fixture.directory.path().join("upper/child").exists() {
+        assert!(
+            Instant::now() < limit,
+            "{}",
+            std::fs::read_to_string(fixture.directory.path().join("output")).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fixture.scope.terminate_and_wait(deadline()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.directory.path().join("output")).unwrap(),
+        "retained-view"
+    );
+    assert!(!fixture.directory.path().join("base/child").exists());
+}

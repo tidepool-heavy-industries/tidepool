@@ -60,8 +60,16 @@ pub struct LaunchReservation {
     boundary: ProcessMountBoundary,
     bubblewrap: PathBuf,
     command: ProcessInvocation,
+    view: Option<RetainedProcessView>,
     #[cfg(test)]
     omit_sync_hold: bool,
+}
+
+/// An existing workspace view entered before the supervisor creates a PID scope.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RetainedProcessView {
+    pub entry: crate::NamespaceEntry,
+    pub directory: PathBuf,
 }
 
 impl LaunchReservation {
@@ -77,9 +85,23 @@ impl LaunchReservation {
             boundary,
             bubblewrap,
             command,
+            view: None,
             #[cfg(test)]
             omit_sync_hold: false,
         })
+    }
+
+    /// Keep the workspace's mount policy and add exact PID/process supervision.
+    pub fn in_view(mut self, view: RetainedProcessView) -> Result<Self, ServiceScopeError> {
+        if !view.directory.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "view directory must be absolute",
+            )
+            .into());
+        }
+        self.view = Some(view);
+        Ok(self)
     }
 
     /// Spawn only the blocked wrapper. Successful return immediately transfers
@@ -139,17 +161,37 @@ impl LaunchReservation {
             inherited.remove(1);
             options.drain(5..7);
         }
-        let invocation = self.boundary.wrap_with_options(
-            self.bubblewrap.to_string_lossy().into_owned(),
-            self.command,
-            &options,
-        );
+        let mut command = match self.view {
+            Some(view) => {
+                // Open the host's descriptors before PID isolation hides its PID.
+                // Preserve the already-prepared mounts, including read-only policy.
+                let mut command = view
+                    .entry
+                    .command(&view.directory, self.bubblewrap.as_os_str())?;
+                command.args(["--bind", "/", "/"]);
+                command.args(&options).arg("--chdir").arg(&view.directory);
+                command
+                    .arg("--")
+                    .arg(self.command.program)
+                    .args(self.command.args);
+                command
+            }
+            None => {
+                let invocation = self.boundary.wrap_with_options(
+                    self.bubblewrap.to_string_lossy().into_owned(),
+                    self.command,
+                    &options,
+                );
+                let mut command = Command::new(invocation.program);
+                command.args(invocation.args);
+                command
+            }
+        };
         let terminal = match stdio {
             ServiceStdio::InheritedTerminal => TerminalCustody::acquire()?,
             ServiceStdio::Captured(_) => None,
         };
-        let mut command = Command::new(invocation.program);
-        command.args(invocation.args).envs(environment.set);
+        command.envs(environment.set);
         match stdio {
             ServiceStdio::Captured(output) => {
                 command

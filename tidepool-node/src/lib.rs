@@ -20,8 +20,9 @@ pub use mount_namespace::{
     OverlayRotationOutcome, PreparedOverlayRotation,
 };
 pub use process_boundary::service_scope::{
-    LaunchRelease, LaunchReservation, PreparedServiceScope, ScopeCapability, ScopeObservation,
-    ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError, ServiceStdio,
+    LaunchRelease, LaunchReservation, PreparedServiceScope, RetainedProcessView, ScopeCapability,
+    ScopeObservation, ServiceEnvironment, ServiceScope, ServiceScopeCleanup, ServiceScopeError,
+    ServiceStdio,
 };
 pub use process_boundary::{
     ProcessBoundaryError, ProcessInvocation, ProcessMountBoundary, BUBBLEWRAP_PROGRAM,

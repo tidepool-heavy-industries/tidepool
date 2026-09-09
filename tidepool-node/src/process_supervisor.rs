@@ -36,6 +36,8 @@ pub struct ProcessSupervisorManifest {
     pub command: ProcessInvocation,
     #[serde(default)]
     pub environment: ServiceEnvironment,
+    #[serde(default)]
+    pub retained_view: Option<crate::RetainedProcessView>,
 }
 
 impl ProcessSupervisorManifest {
@@ -60,6 +62,7 @@ impl ProcessSupervisorManifest {
             boundary,
             command,
             environment,
+            retained_view: None,
         };
         validate_manifest(&manifest)?;
         Ok(manifest)
@@ -547,7 +550,7 @@ pub fn run_process_supervisor(path: &Path) -> Result<(), ProcessSupervisorError>
     {
         return Err(ProcessSupervisorError::UnsafeManifest);
     }
-    let manifest: ProcessSupervisorManifest = serde_json::from_reader(file)?;
+    let mut manifest: ProcessSupervisorManifest = serde_json::from_reader(file)?;
     validate_manifest(&manifest)?;
     if manifest.private_directory != parent {
         return Err(ProcessSupervisorError::UnsafePrivateDirectory);
@@ -564,6 +567,10 @@ pub fn run_process_supervisor(path: &Path) -> Result<(), ProcessSupervisorError>
     let reservation = manifest
         .boundary
         .reserve_service_scope(manifest.bubblewrap.clone(), manifest.command.clone())?;
+    let reservation = match manifest.retained_view.take() {
+        Some(view) => reservation.in_view(view)?,
+        None => reservation,
+    };
     let observed = std::sync::Arc::new(std::sync::Mutex::new(WorkerObservation {
         state: ProcessSupervisorObservation::Reserved,
         pending: false,
