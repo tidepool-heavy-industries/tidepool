@@ -1485,6 +1485,7 @@ mod tests {
         replacement_staged: bool,
         startup_gate: Option<(Arc<Notify>, Arc<Notify>)>,
         calls: Arc<Mutex<Vec<&'static str>>>,
+        mailbox_calls: Arc<Mutex<Vec<SessionId>>>,
         release_first: Arc<Notify>,
         fail_cast: bool,
         mailbox_ready: bool,
@@ -1575,6 +1576,7 @@ mod tests {
             request: MailboxValue,
         ) -> BoxFuture<'_, Result<KernelStep<MailboxValue>, KernelBehaviorError>> {
             self.calls.lock().push("call");
+            self.mailbox_calls.lock().push(request.session());
             Box::pin(async move { Ok(KernelStep::Continue(request)) })
         }
 
@@ -1772,6 +1774,7 @@ mod tests {
     struct ProbeFixture {
         behavior: ProbeBehavior,
         calls: Arc<Mutex<Vec<&'static str>>>,
+        mailbox_calls: Arc<Mutex<Vec<SessionId>>>,
         release: Arc<Notify>,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
@@ -1779,6 +1782,7 @@ mod tests {
 
     fn behavior(fail_cast: bool) -> ProbeFixture {
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let mailbox_calls = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(Notify::new());
         let spawned_child = Arc::new(Mutex::new(None));
         let child_exits = Arc::new(Mutex::new(Vec::new()));
@@ -1787,6 +1791,7 @@ mod tests {
                 replacement_staged: false,
                 startup_gate: None,
                 calls: Arc::clone(&calls),
+                mailbox_calls: Arc::clone(&mailbox_calls),
                 release_first: Arc::clone(&release),
                 fail_cast,
                 mailbox_ready: true,
@@ -1794,6 +1799,7 @@ mod tests {
                 child_exits: Arc::clone(&child_exits),
             },
             calls,
+            mailbox_calls,
             release,
             spawned_child,
             child_exits,
@@ -1834,6 +1840,55 @@ mod tests {
             actor.terminal().cleanup().unwrap().realm,
             crate::CleanupComponentOutcome::Unsupported
         ));
+    }
+
+    #[tokio::test]
+    async fn replacement_activation_preserves_backlog_order_and_drain_intent() {
+        let mut probe = behavior(false);
+        probe.behavior.replacement_staged = true;
+        probe.behavior.mailbox_ready = false;
+        let (actor, task) = spawn_local_actor(None, probe.behavior).await.unwrap();
+        let caller = ActorRef::first(crate::ActorId(99));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let make_call = |session| {
+            let (reply, receive) = oneshot::channel();
+            let message = KernelMessage::Call {
+                caller,
+                ancestry: crate::CallAncestry::begin(caller),
+                request: MailboxValue::probe(SessionId(session), Arc::clone(&dropped)),
+                reply: reply.into(),
+            };
+            (message, receive)
+        };
+        let (before_fence, before_reply) = make_call(1);
+        let (after_fence, after_reply) = make_call(2);
+        // New-source input can reach the quiet successor before activation.
+        actor.address().send_message(after_fence).unwrap();
+        actor
+            .address()
+            .send_message(KernelMessage::ActivateReplacement {
+                backlog: VecDeque::from([before_fence]),
+                draining: true,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            drop(before_reply.await.unwrap().unwrap());
+            drop(after_reply.await.unwrap().unwrap());
+            assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Completed);
+            task.await.unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(*probe.mailbox_calls.lock(), [SessionId(1), SessionId(2)]);
+        assert_eq!(*probe.calls.lock(), ["call", "call", "drain", "shutdown"]);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        assert!(actor
+            .cast(
+                caller,
+                MailboxValue::probe(SessionId(3), Arc::clone(&dropped))
+            )
+            .is_err());
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
