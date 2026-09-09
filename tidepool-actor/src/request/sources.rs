@@ -34,8 +34,27 @@ pub struct SourceDelivery {
     pub(crate) event: SourceEvent,
 }
 
+/// One destination shared by a fixed set of source connections. The guard owns
+/// the set independently of the actor identity currently receiving its events.
+#[derive(Clone)]
+struct SourceDestination(Arc<parking_lot::Mutex<LocalActorRef>>);
+
+impl SourceDestination {
+    fn identity(&self) -> ActorRef {
+        self.0.lock().identity()
+    }
+
+    fn same_connections(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn send(&self, delivery: SourceDelivery) -> Result<(), crate::KernelCallFailure> {
+        self.0.lock().source(delivery)
+    }
+}
+
 pub(crate) struct RequestSourceConnection {
-    recipient: LocalActorRef,
+    recipient: SourceDestination,
     slot: usize,
     request: RequestId,
     kind: RequestSourceKind,
@@ -47,7 +66,7 @@ impl RequestSourceConnection {
         if !self.closed
             && self
                 .recipient
-                .source(SourceDelivery {
+                .send(SourceDelivery {
                     slot: self.slot,
                     request: self.request,
                     event,
@@ -61,7 +80,7 @@ impl RequestSourceConnection {
 
 pub(crate) struct RequestSources {
     registry: Arc<RequestRegistry>,
-    recipient: ActorRef,
+    recipient: SourceDestination,
 }
 
 impl Drop for RequestSources {
@@ -70,7 +89,7 @@ impl Drop for RequestSources {
         for record in state.requests.values_mut() {
             record
                 .sources
-                .retain(|source| source.recipient.identity() != self.recipient);
+                .retain(|source| !source.recipient.same_connections(&self.recipient));
         }
     }
 }
@@ -100,6 +119,7 @@ impl RequestRegistry {
             let record = state.requests.get(request).ok_or(ReplyError::Stale)?;
             super::authorize_owner(record, owner)?;
         }
+        let recipient = SourceDestination(Arc::new(parking_lot::Mutex::new(recipient)));
         for (slot, request, kind) in sources {
             let Some(record) = state.requests.get_mut(request) else {
                 unreachable!("validated source remains under the publication lock");
@@ -121,7 +141,7 @@ impl RequestRegistry {
         }
         Ok(RequestSources {
             registry: Arc::clone(self),
-            recipient: recipient.identity(),
+            recipient,
         })
     }
 }
