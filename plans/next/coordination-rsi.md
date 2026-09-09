@@ -42,28 +42,16 @@ was added. Prompt/module changes activate only at the next swarm boundary.
 
 ## Acceptance
 
-The tooling-only baseline is `546fc000899c0325397f319fc2df16a08aafbec1`, with
-working source/build snapshot forks and isolated startup resources. Its engine
-sources match the previous main. The next runner must include this RSI change.
+The accepted copied runner and package are recorded in
+[coordination-actors.md](coordination-actors.md#integration-evidence). All 64
+model-free resident assertions pass in one fixed-executable run: workbench 11,
+collaboration 20 and routing 33. These checks cover independent source progress,
+retained questions through closure, persistent delivery without rearming and exact
+Git integration of both later lane handoffs. They do not claim live model behavior.
 
-Focused integration: 56 tests passed across tidepool, actor, runtime, toolchain,
-handlers and harness. This covers the guide/catalog, retained repair flow, grouped
-readiness, source authority, multiline parsing/sequencing and diagnostic consumers.
-Changed Rust packages pass formatting and `git diff --check`. Whole-workspace
-formatting reports an existing module-order difference in the unchanged codegen
-test suite; no unrelated engine formatting is included.
-
-Authored recipes verified 57 assertions across focused runs: workbench 11,
-collaboration 20, existing routing plus actual multiline reply 20, independent
-sources 6. The latter prove silent-sibling progress, duplicate/reorder suppression,
-source identity, retained questions after closure and independent resolution.
-Setup admits test actors individually so observation tests do not assume parallel
-activation order. Recipe values are inspected separately from binding receipts.
-These are model-free resident checks, not a claim about live model behavior.
-
-Record the final package identity with the immutable runner. Recipe runs must use
-a copied executable: rebuilding its Cargo path while a check is running invalidates
-the exact executable identity used at recipe restarts.
+Use the copied runner for acceptance; a rebuild can replace a Cargo executable
+while later recipe sessions still need its exact path. Prompt/module changes
+activate only at the next authorized swarm boundary.
 
 ## Remaining mechanism work
 

@@ -99,7 +99,7 @@ turn reply loss into permission to repeat replacement.
   integration; initial Astra plans/reviews once, hard consultations use fresh
   compact evidence. Actor messages use minimum recoverable deltas. Keep watching
   through final handoff, and distinguish available from incorporated candidates.
-- [ ] Validate and build an immutable main runner with its exact curated package.
+- [x] Validate and build an immutable main runner with its exact curated package.
 
 ## Acceptance
 
@@ -124,21 +124,26 @@ integration boundary. Extractor/serialization changes require fixtures-check.
 
 ## Integration evidence
 
-The curated package identity is
+Accepted runner: `target/dogfood-routing-2533b57a/`, built from main
+`2533b57a`. Its selection manifest records executable, native helper and runtime
+hashes; all were verified after acceptance. The curated package identity is
 `2c96b731e77fabc9e7ee2a1a6aa464a7444442dd9c8b88a5a727afa7b29ac26b`.
-The prepared runner at `target/dogfood-routing-2533b57a/` compiles that exact
-package; its selection manifest records executable and runtime dependency hashes.
-It is not a launched or fully accepted swarm. Full package execution remains
-pending. The shared API guide success/unavailable check passes.
+No native workers or providers were launched by these checks.
+
+The exact copied executable passed all 64 authored assertions in one run:
+workbench 11, collaboration 20, routing 33. This includes subsequent publications
+without rearming, independent source resolution and closure, replacement of the
+attention collector, and the two-lane partial-to-final handoff. Each later final
+head retains its lane identity exactly once; both actual Git heads are integrated.
+The runner retains the full log and its digest. The shared API guide's success and
+unavailable cases also pass.
 
 Focused resident checks prove failure-after-effect replacement without replay,
 retained owned children, fixed source transfer, lifecycle capture and subsequent
-publication, and state/protocol mismatch rejection. The independent-source and
-two-lane recipes have each passed six assertions, including actual two-head Git
-integration. The final combined package run covers the strengthened exact lane
-association assertion. All 17 local actor tests pass, including successor backlog
-ordering with inherited drain. The fixture boundary passes all 217 semantic tests;
-regeneration changes only its source fingerprint.
+publication, and state/protocol mismatch rejection. All 17 local actor tests pass,
+including successor backlog ordering with inherited drain. Source handoff's five
+owning tests pass. The fixture boundary passes all 217 semantic tests; regeneration
+changed only its source fingerprint.
 
 Replacement failure review: staging rejects before source handoff; a failed
 mailbox fence restores workspace ownership through the existing binding owner.
@@ -146,4 +151,8 @@ Custody commit precedes child supervision transfer. A lost caller reply does not
 cancel cutover: the old retained exit names the exact successor before the reply
 is sent, and old handles never forward. Uncertain failures retain custody rather
 than authorizing automatic retry. The resident owned-child check passes after the
-ordering repair at `2533b57a`; source handoff's five owning tests also pass.
+ordering repair at `2533b57a`.
+
+The next live dogfood wave requires separate launch authorization and selection of
+saved product branches. Those product candidates remain separate from main; these
+checks establish the coordination harness, not their product acceptance.
