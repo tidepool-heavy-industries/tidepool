@@ -1,7 +1,7 @@
 //! The actor-runtime suspension boundary.
 //!
 //! The public Haskell API lives in `Tidepool.Actor`; this schema owns only the
-//! outward requests needed by the first actor vertical. A start carries one
+//! outward runtime requests. A start carries one
 //! existentially row-typed child entry as its field-1 live payload. A wait
 //! carries an exact Rust routing identity and returns terminal metadata. The
 //! successful exit value never crosses either request: it remains in the
@@ -408,6 +408,19 @@ pub fn actor() -> Effect {
                         rust: RustBinding::CoreValue,
                     },
                 ],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ActorDrainWith",
+                method: "actor_drain_with",
+                args: vec![Arg {
+                    name: "actor",
+                    ty: address_type(),
+                    rust: RustBinding::Path("(i64, i64)"),
+                }],
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Actor,

@@ -34,9 +34,12 @@ of the failed handler. Never automatically replay uncertain effects.
 incorporated at its ordinary next boundary; idle input wakes the same conversation.
 No delivery-mode enum, generation killing or separate operator interface.
 
-One drain-and-stop operation detaches sources and closes admission atomically,
-then processes admitted messages and retains its terminal result. Failure during
-drain stays a failure. Existing supervision owns resource retirement.
+`drainActor` detaches sources and closes admission atomically, then returns while
+the actor finishes admitted messages. The existing exit handle retains its final
+state; callers can explicitly use `awaitExit`. A failure during drain pauses with
+remaining work retained and notifies the supervisor, which stays free to repair
+it. An already-paused actor rejects draining before closing admission. Existing
+supervision owns resource retirement.
 
 `replaceActor oldHandle newActorDefn` requires matching state and mailbox types.
 At a quiescent/paused boundary, atomically move last committed state, unprocessed

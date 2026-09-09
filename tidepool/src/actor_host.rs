@@ -4071,9 +4071,12 @@ mod tests {
         }
         let published = dispatch_haskell_script(child.policy.as_ref(), "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)").await;
         assert_eq!(published["status"], "replied", "{published:?}");
+        let settled = dispatch_haskell_script(root.as_ref(), "settled <- watch (case watchLabel \"source-settled\" of { Right label -> label; Left _ -> error \"fixture label\" }) (awaitResponse answer)").await;
+        assert_eq!(settled["status"], "committed", "{settled:?}");
+        campaign.await_watch_ready().await;
         let collected = dispatch_haskell_script(
             root.as_ref(),
-            "result <- awaitExit collector\nresult == Completed [13, 30, -7, -1, 42]",
+            "drainActor collector\nresult <- awaitExit collector\ncase result of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False }",
         )
         .await;
         assert_eq!(collected["status"], "committed", "{collected:?}");
@@ -4452,6 +4455,15 @@ mod tests {
         endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
         script: &str,
     ) -> serde_json::Value {
+        dispatch_haskell_script_result(endpoint, script)
+            .await
+            .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"))
+    }
+
+    async fn dispatch_haskell_script_result(
+        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        script: &str,
+    ) -> Result<serde_json::Value, tidepool_actor::ResidentToolError> {
         let call_id = uuid::Uuid::new_v4().simple().to_string();
         let result = endpoint
             .dispatch_boxed(ToolInvocation {
@@ -4465,8 +4477,7 @@ mod tests {
                 name: tidepool_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(script.into()),
             })
-            .await
-            .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"));
+            .await;
         endpoint
             .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
                 thread_id: "actor-host-vertical".into(),
@@ -5512,6 +5523,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stateful_actor_drains_accepted_messages_into_its_retained_exit() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let result = dispatch_haskell_script(
+            campaign.root_installation.policy.as_ref(),
+            include_str!("actor_host/stateful_drain.hs"),
+        )
+        .await;
+        assert_eq!(result["status"], "committed", "{result:?}");
+        for item in result["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{result:?}");
+        }
+        assert!(result.to_string().contains("True"), "{result:?}");
+        assert!(
+            !result.to_string().contains("preview unavailable"),
+            "{result:?}"
+        );
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stateful_handler_failure_pauses_without_closing_mailbox() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();
@@ -5548,6 +5580,15 @@ mod tests {
             notice.message().contains("handler-probe"),
             "{}",
             notice.message()
+        );
+        let rejected = dispatch_haskell_script_result(root.as_ref(), "drainActor server")
+            .await
+            .expect_err("paused drain must reject");
+        assert!(
+            rejected
+                .to_string()
+                .contains("replace a failed handler first"),
+            "{rejected:?}"
         );
         let queued = dispatch_haskell_script(root.as_ref(), "cast server (Counter 5 (const ()))\npaused <- pollExit server\ncase paused of { Nothing -> True; _ -> False }").await;
         assert_eq!(queued["status"], "committed", "{queued:?}");

@@ -749,6 +749,10 @@ fn cleanup_step_value(
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    Drain {
+        continuation: ResidentHole,
+        target: crate::ActorRef,
+    },
     NotificationSend {
         continuation: ResidentHole,
         target: crate::ActorRef,
@@ -901,6 +905,7 @@ impl ResidentActorBoundary {
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
+            Self::Drain { .. } => "drainActor",
             Self::Wait(_) => "awaitExit",
             Self::Poll(_) => "pollExit",
             Self::Receive(_) => "receive",
@@ -1097,6 +1102,7 @@ impl ResidentRequest {
             Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
             Self::Actor(crate::generated::actor::ActorReq::ActorTryCallWith(..)) => "tryCall",
             Self::Actor(crate::generated::actor::ActorReq::ActorCastWith(..)) => "cast",
+            Self::Actor(crate::generated::actor::ActorReq::ActorDrainWith(..)) => "drainActor",
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(..),
             ) => "installShutdown",
@@ -2340,6 +2346,12 @@ where
                         OutboundKind::Cast,
                         actor_realm,
                     ),
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorDrainWith(target)) => {
+                        Ok(ResidentActorBoundary::Drain {
+                            continuation: hole,
+                            target: crate::wait::decode_address(target.0, target.1)?,
+                        })
+                    }
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorWaitWith(
                         ..,
                     )) => {

@@ -9,8 +9,8 @@ use tidepool_repr::SessionId;
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 
 use crate::{
-    ActorRef, ActorTerminal, ExternalApplicationFailure, ExternalFailureDisposition, MailboxValue,
-    RetainedActorExit,
+    ActorRef, ActorTerminal, ExternalApplicationFailure, ExternalFailureDisposition,
+    KernelBehaviorError, MailboxValue, RetainedActorExit,
 };
 
 /// The exact synchronous-call path currently occupying a chain of actors.
@@ -147,6 +147,10 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    Drain {
+        reply: RpcReplyPort<Result<(), KernelBehaviorError>>,
+    },
+    DrainFence,
     Source(crate::SourceDelivery),
     RouteReady {
         watch: crate::WatchId,
@@ -200,6 +204,8 @@ pub enum KernelMessage {
 impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Drain { .. } => formatter.write_str("Drain"),
+            Self::DrainFence => formatter.write_str("DrainFence"),
             Self::Source(delivery) => formatter.debug_tuple("Source").field(delivery).finish(),
             Self::RouteReady { watch } => formatter.debug_tuple("RouteReady").field(watch).finish(),
             Self::SealHostedWork { .. } => formatter.write_str("SealHostedWork"),
@@ -276,6 +282,15 @@ impl MailboxAdmission {
     pub(crate) fn close(&self) {
         *self.0.lock() = AdmissionState::Closed;
     }
+
+    pub(crate) fn close_with_fence(
+        &self,
+        address: &RactorRef<KernelMessage>,
+    ) -> Result<(), ractor::MessagingErr<KernelMessage>> {
+        let mut admission = self.0.lock();
+        *admission = AdmissionState::Closed;
+        address.send_message(KernelMessage::DrainFence)
+    }
 }
 
 impl std::fmt::Debug for LocalActorRef {
@@ -290,6 +305,34 @@ impl std::fmt::Debug for LocalActorRef {
 }
 
 impl LocalActorRef {
+    /// Close admission after behavior validation. This acknowledges the fence;
+    /// the retained terminal reports completion after accepted work is handled.
+    pub async fn drain(&self) -> Result<(), KernelInvocationFailure> {
+        if self.terminal.get().is_some() {
+            return Ok(());
+        }
+        let result = self.request_drain().await;
+        if result.is_err() && self.terminal.get().is_some() {
+            return Ok(());
+        }
+        result
+    }
+
+    async fn request_drain(&self) -> Result<(), KernelInvocationFailure> {
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::Drain {
+                reply: reply.into(),
+            })
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+        receive
+            .await
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?
+            .map_err(|error| KernelInvocationFailure::Rejected {
+                actor: self.identity,
+                detail: error.detail,
+            })
+    }
     #[must_use]
     pub fn new(address: RactorRef<KernelMessage>, terminal: RetainedActorExit) -> Self {
         Self::new_in_incarnation(address, terminal, crate::Incarnation::FIRST)

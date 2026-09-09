@@ -140,6 +140,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorCallWith",
             "ActorTryCallWith",
             "ActorCastWith",
+            "ActorDrainWith",
         ],
     ),
     (

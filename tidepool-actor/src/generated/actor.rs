@@ -36,4 +36,5 @@ pub enum ActorReq {
     ActorCallWith((i64, i64), tidepool_eval::value::Value),
     ActorTryCallWith((i64, i64), tidepool_eval::value::Value),
     ActorCastWith((i64, i64), tidepool_eval::value::Value),
+    ActorDrainWith((i64, i64)),
 }

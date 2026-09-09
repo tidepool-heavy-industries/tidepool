@@ -279,6 +279,24 @@ impl KernelContext {
 /// owns Haskell/provider/tool execution and returns domain results without
 /// gaining access to Ractor's scheduler internals.
 pub trait KernelBehavior: Send + 'static {
+    fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
+        Err(KernelBehaviorError {
+            detail: "actor does not support draining".into(),
+        })
+    }
+
+    fn close_sources(&mut self) {}
+
+    fn drain<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor does not support draining".into(),
+            })
+        })
+    }
     /// Retain a failed input and its state instead of terminating this actor.
     /// Returning true requires closing execution while retaining mailbox admission.
     fn pause_failed_handler(&mut self, _context: &KernelContext, _detail: &str) -> bool {
@@ -464,6 +482,7 @@ enum HostedAdmission {
 }
 
 pub struct LocalActorState<B> {
+    drain: DrainState,
     mailbox_admission: crate::kernel::MailboxAdmission,
     hosted_admission: HostedAdmission,
     context: KernelContext,
@@ -471,6 +490,14 @@ pub struct LocalActorState<B> {
     terminal: RetainedActorExit,
     deferred_mailbox: VecDeque<KernelMessage>,
     mailbox_drain_scheduled: bool,
+}
+
+#[derive(Default)]
+enum DrainState {
+    #[default]
+    Open,
+    Fencing,
+    Draining,
 }
 
 impl<B> Actor for LocalActor<B>
@@ -501,6 +528,7 @@ where
             )),
         };
         let mut state = LocalActorState {
+            drain: DrainState::Open,
             mailbox_admission: arguments.mailbox_admission,
             context,
             behavior: arguments.behavior,
@@ -564,6 +592,26 @@ where
             message => message,
         };
         match message {
+            KernelMessage::Drain { reply } => {
+                let result = state.behavior.begin_drain().and_then(|()| {
+                    if !matches!(state.drain, DrainState::Open) {
+                        return Ok(());
+                    }
+                    state
+                        .mailbox_admission
+                        .close_with_fence(&myself)
+                        .map_err(|error| KernelBehaviorError {
+                            detail: error.to_string(),
+                        })?;
+                    state.behavior.close_sources();
+                    state.drain = DrainState::Fencing;
+                    Ok(())
+                });
+                let _ = reply.send(result);
+            }
+            KernelMessage::DrainFence => {
+                state.drain = DrainState::Draining;
+            }
             KernelMessage::Source(delivery) => {
                 match state.behavior.source(&state.context, delivery).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
@@ -752,6 +800,18 @@ where
             KernelMessage::Shutdown { terminal, reply } => {
                 let terminal = finish_actor(&myself, state, terminal).await;
                 let _ = reply.send(terminal);
+            }
+        }
+        if matches!(state.drain, DrainState::Draining)
+            && state.deferred_mailbox.is_empty()
+            && state.behavior.accepts_mailbox()
+            && state.terminal.get().is_none()
+        {
+            match state.behavior.drain(&state.context).await {
+                Ok(step) => finish_after_step(&myself, state, step).await,
+                Err(error) => {
+                    fail_handler(&myself, state, format!("actor drain failed: {error}")).await
+                }
             }
         }
         schedule_deferred_mailbox(&myself, state)?;
@@ -1119,6 +1179,25 @@ mod tests {
     }
 
     impl KernelBehavior for ProbeBehavior {
+        fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
+            Ok(())
+        }
+
+        fn drain<'a>(
+            &'a mut self,
+            _context: &'a KernelContext,
+        ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+            self.calls.lock().push("drain");
+            Box::pin(async {
+                Ok(KernelStep::Stop {
+                    output: (),
+                    terminal: ActorTerminal {
+                        kind: ActorExitKind::Completed,
+                        summary: "drained".into(),
+                    },
+                })
+            })
+        }
         fn accepts_mailbox(&self) -> bool {
             self.mailbox_ready
         }
@@ -1435,6 +1514,90 @@ mod tests {
         assert_eq!(shutdown_rx.await.expect("shutdown reply"), terminal);
         task.await.expect("actor task");
         assert_eq!(actor.terminal().wait().await, terminal);
+    }
+
+    #[tokio::test]
+    async fn drain_racing_shutdown_observes_the_exact_retained_terminal() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let (drained, shutdown) = tokio::join!(
+            actor.drain(),
+            actor.shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "owner stopped".into()
+            }),
+        );
+        drained.unwrap();
+        assert_eq!(shutdown.unwrap(), actor.terminal().wait().await);
+        task.await.unwrap();
+        actor.drain().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_fence_finishes_accepted_calls_before_stopping() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("park-mailbox"),
+                    reply,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let caller = ActorRef::first(crate::ActorId(99));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (reply, receive) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Call {
+                caller,
+                ancestry: crate::CallAncestry::begin(caller),
+                request: MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+                reply: reply.into(),
+            })
+            .unwrap();
+        actor.drain().await.unwrap();
+        assert!(actor.terminal().get().is_none());
+        assert_eq!(
+            actor.cast(
+                caller,
+                MailboxValue::probe(SessionId(1), Arc::clone(&dropped))
+            ),
+            Err(KernelCallFailure::MailboxClosed(actor.identity()))
+        );
+        actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("unpark-mailbox"),
+                    reply,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(receive.await.unwrap().unwrap());
+        assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Completed);
+        task.await.unwrap();
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &[
+                "park-mailbox",
+                "unpark-mailbox",
+                "call",
+                "drain",
+                "shutdown"
+            ]
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

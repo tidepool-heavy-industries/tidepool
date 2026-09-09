@@ -2136,6 +2136,28 @@ where
                 self.resolve_outbound(kernel, context, ancestry, outbound)
                     .await
             }),
+            ResidentActorBoundary::Drain {
+                continuation,
+                target,
+            } => Box::pin(async move {
+                let authorized = target != context.actor
+                    && actor_can_control(context.actor, target, &self.environment.actors.lock());
+                if !authorized {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "actor drain is not authorized".into(),
+                    ));
+                }
+                let actor = kernel.resolve(target).ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol("drain target is unavailable".into())
+                })?;
+                actor.drain().await.map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                })?;
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }),
             ResidentActorBoundary::Wait(wait) => Box::pin(async move {
                 if self.pending_in_tool_block(wait.target) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -4105,6 +4127,55 @@ where
 
     fn accepts_mailbox(&self) -> bool {
         matches!(self.standing, ResidentStanding::Receiving(_))
+    }
+
+    fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
+        if self.checkpoint.is_none()
+            || matches!(
+                self.standing,
+                ResidentStanding::Paused | ResidentStanding::Terminal
+            )
+        {
+            return Err(KernelBehaviorError {
+                detail: "drain requires a live stateful actor; replace a failed handler first"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn close_sources(&mut self) {
+        self.source_connections.take();
+    }
+
+    fn drain<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async move {
+            let ResidentStanding::Receiving(receiver) =
+                std::mem::replace(&mut self.standing, ResidentStanding::Boot)
+            else {
+                return Err(KernelBehaviorError {
+                    detail: "drain reached an actor without its receiver".into(),
+                });
+            };
+            let context = self.context(kernel.identity());
+            let outcome = self
+                .environment
+                .runner
+                .resume_value(context.clone(), receiver.continuation, None::<()>)
+                .await
+                .map_err(Self::failure)?;
+            self.stabilize_program(
+                kernel,
+                &context,
+                &crate::CallAncestry::begin(context.actor),
+                outcome,
+            )
+            .await
+            .map_err(Self::failure)
+        })
     }
 
     fn pause_failed_handler(&mut self, kernel: &KernelContext, detail: &str) -> bool {

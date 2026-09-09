@@ -45,6 +45,7 @@ module Tidepool.Actor
   , runActor
   , call
   , cast
+  , drainActor
   , receive
   , serve
   , ActorExit (..)
@@ -246,6 +247,16 @@ cast
   -> Eff effs ()
 cast (ActorRef actorId incarnation _) request =
   send (ActorCastWith (actorId, incarnation) request)
+
+-- | Close an owned stateful actor's sources and mailbox and request completion
+-- of accepted messages. Returns after admission closes; 'awaitExit' observes
+-- the final state. A paused handler needs repair before draining.
+drainActor
+  :: Member Actor effs
+  => ActorRef protocol state
+  -> Eff effs ()
+drainActor (ActorRef actorId incarnation _) =
+  send (ActorDrainWith (actorId, incarnation))
 
 -- | Handle one request of any result index and return the next actor state.
 -- Reply authority remains in the runtime; authored code returns an ordinary
