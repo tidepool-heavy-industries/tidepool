@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (routing) where
+module Project.RoutingChecks (routing, independentSources) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -24,7 +24,8 @@ routing = do
   script owner "progress-route-consumer"
   consumer <- activation
   script (checkActor consumer) "layout-reply"
-  layoutResult <- turn owner "pollResponse (forkedResponse consumer) >>= \\observed -> inspectFull (case observed of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
+  void $ turn owner "layoutReceipt <- pollResponse (forkedResponse consumer)"
+  layoutResult <- turn owner "inspectFull (case layoutReceipt of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
   check "an indented finding list reaches the actual reply" (output layoutResult == "Just \"ready; layout preserved\"")
   script owner "progress-route"
   script (checkActor producer) "progress-route-questions"
@@ -58,7 +59,9 @@ independentSources = do
   owner <- root
   script owner "attention-sources-setup"
   left <- activation
+  void $ turn owner "(right, rightProgress) <- unfold (batch campaign wave) (childWithProgress @Attention @Text (coding rightLabel projectHead (\"right\" :: Text)))"
   right <- activation
+  void $ turn owner "consumer <- unfold (batch campaign wave) (child (coding @Text consumerLabel projectHead ([] :: [AttentionSource])))"
   consumer <- activation
   void $ turn (checkActor consumer) "respond (\"ready\" :: Text)"
   script owner "attention-sources-route"

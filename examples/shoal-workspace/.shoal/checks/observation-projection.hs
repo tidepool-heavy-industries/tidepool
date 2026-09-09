@@ -1,5 +1,6 @@
 current <- snapshot
-let base = (head (snapshotActors current)) { rosterProviderObservationStale = False, rosterCurrentRequests = [], rosterQueuedRequests = [], rosterProviderHealth = ProviderSucceeded, rosterDisposition = Just IdleRetained }
+let baseRow = case snapshotActors current of { actor : _ -> actor; [] -> error "recipe root missing from snapshot" }
+let base = baseRow { rosterProviderObservationStale = False, rosterCurrentRequests = [], rosterQueuedRequests = [], rosterProviderHealth = ProviderSucceeded, rosterDisposition = Just IdleRetained }
 let rows =
       [ base { rosterActorId = 1, rosterState = RosterRunning, rosterDisposition = Just Working }
       , base { rosterActorId = 2, rosterState = RosterFailed "failed" }

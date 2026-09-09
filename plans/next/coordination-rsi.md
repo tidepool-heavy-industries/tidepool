@@ -50,10 +50,17 @@ Changed Rust packages pass formatting and `git diff --check`. Whole-workspace
 formatting reports an existing module-order difference in the unchanged codegen
 test suite; no unrelated engine formatting is included.
 
-Full authored-package recipes are the remaining gate before publication. Record
-their definition identity and actual assertion counts with the immutable runner.
-Recipe runs must use a copied executable: rebuilding its Cargo path while a check
-is running invalidates the exact executable identity used at recipe restarts.
+Authored recipes verified 57 assertions across focused runs: workbench 11,
+collaboration 20, existing routing plus actual multiline reply 20, independent
+sources 6. The latter prove silent-sibling progress, duplicate/reorder suppression,
+source identity, retained questions after closure and independent resolution.
+Setup admits test actors individually so observation tests do not assume parallel
+activation order. Recipe values are inspected separately from binding receipts.
+These are model-free resident checks, not a claim about live model behavior.
+
+Record the final package identity with the immutable runner. Recipe runs must use
+a copied executable: rebuilding its Cargo path while a check is running invalidates
+the exact executable identity used at recipe restarts.
 
 ## Remaining mechanism work
 
@@ -80,15 +87,18 @@ RSI observes compact evidence; development owners retain product acceptance.
 ## Saved work while the current run winds down
 
 The coherent partial coordinator checkpoint is
-`6411304153def9e41d7dfc187e0538821923d695`; read its
-`plans/parallel-dogfood/next-wave/coordinator-partial-checkpoint.md` from Git.
-It incorporates applications `e13c5b928e8603ad06c6b666672c6862fb3c5277` and
-engine `98c542446d5ef5b52c96e74a4d6a90fc47d4587f` handoffs. Their external
-Codex candidate is `550f9ab8bc00bc24c55e04b47c04447ceed23575`, distinct from
-the live runner's native `06d99357becc4d870f5b5141ba7626daf68e819a`.
+`6411304153def9e41d7dfc187e0538821923d695`. Newer lane handoffs are
+applications `326255bc32f589f9352c181d3245812f9e630862` and engine
+`1aabf25cb9393817c0c11d34595b92c96d669b8b`; they were not yet incorporated
+by that coordinator checkpoint. Read `applications-checkpoint.md` and
+`engine-lane-checkpoint.md` under `plans/parallel-dogfood/next-wave/` at those
+respective commits. The committed external Codex bridge candidate is
+`72f7b60008452a1f63c5cb92f42c731dc67fbb49`, distinct from the live runner's
+native `06d99357becc4d870f5b5141ba7626daf68e819a`.
 
 These are resume inputs, not main integration candidates or full acceptance.
-Owners of resident safety, process supervision and the native bridge remain
-authorized to reach their next clean stopping points. Later committed handoffs
-supersede these pins; preserve dirty retained work until its owner records it.
+Owners of resident safety, process supervision and the native bridge reached
+committed partial stopping points. Full native failure-path acceptance, M1
+process/corpus and M2 wrapper-complete reclamation remain open. Later committed
+handoffs supersede these pins; preserve retained custody under their actual receipts.
 Do not restart the whole product effort or overwrite the current live package.
