@@ -33,35 +33,57 @@ pub fn actor_local() -> Effect {
         type_defs: Vec::new(),
         foreign_types: &[],
         errors: None,
-        verbs: vec![Verb {
-            ctor: "ActorReceiveWith",
-            method: "actor_receive_with",
-            args: vec![
-                Arg {
-                    name: "site",
-                    ty: HsType::Int,
-                    rust: RustBinding::Derived,
-                },
-                Arg {
-                    name: "handler",
-                    ty: HsType::forall(
-                        vec!["result"],
-                        HsType::func(
-                            HsType::app(HsType::Var("api"), HsType::Var("result")),
-                            HsType::app(
-                                HsType::app(HsType::Named("Eff"), HsType::Var("handlerEffs")),
-                                HsType::Unit,
+        verbs: vec![
+            Verb {
+                ctor: "ActorReceiveWith",
+                method: "actor_receive_with",
+                args: vec![
+                    Arg {
+                        name: "site",
+                        ty: HsType::Int,
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
+                        name: "handler",
+                        ty: HsType::forall(
+                            vec!["result"],
+                            HsType::func(
+                                HsType::app(HsType::Var("api"), HsType::Var("result")),
+                                HsType::app(
+                                    HsType::app(HsType::Named("Eff"), HsType::Var("handlerEffs")),
+                                    HsType::Unit,
+                                ),
                             ),
                         ),
-                    ),
-                    rust: RustBinding::CoreValue,
-                },
-            ],
-            ret: HsType::Var("next"),
-            errors: None,
-            handling: HandlingClass::Actor,
-            extract: None,
-        }],
+                        rust: RustBinding::CoreValue,
+                    },
+                ],
+                ret: HsType::Var("next"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ActorCheckpointWith",
+                method: "actor_checkpoint_with",
+                args: vec![
+                    Arg {
+                        name: "site",
+                        ty: HsType::Int,
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
+                        name: "state",
+                        ty: HsType::Var("state"),
+                        rust: RustBinding::CoreValue,
+                    },
+                ],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+        ],
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,

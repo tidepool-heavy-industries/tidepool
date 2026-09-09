@@ -272,6 +272,12 @@ impl KernelContext {
 /// owns Haskell/provider/tool execution and returns domain results without
 /// gaining access to Ractor's scheduler internals.
 pub trait KernelBehavior: Send + 'static {
+    /// Retain a failed input and its state instead of terminating this actor.
+    /// Returning true requires closing execution while retaining mailbox admission.
+    fn pause_failed_handler(&mut self, _context: &KernelContext, _detail: &str) -> bool {
+        false
+    }
+
     fn source<'a>(
         &'a mut self,
         _context: &'a KernelContext,
@@ -551,7 +557,8 @@ where
                 match state.behavior.source(&state.context, delivery).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
                     Err(error) => {
-                        fail_actor(&myself, state, format!("source handler failed: {error}")).await
+                        fail_handler(&myself, state, format!("source handler failed: {error}"))
+                            .await
                     }
                 }
             }
@@ -569,7 +576,7 @@ where
                 match state.behavior.cast(&state.context, sender, request).await {
                     Ok(step) => finish_after_step(&myself, state, step).await,
                     Err(error) => {
-                        fail_actor(&myself, state, format!("actor cast failed: {error}")).await
+                        fail_handler(&myself, state, format!("actor cast failed: {error}")).await
                     }
                 }
             }
@@ -599,7 +606,7 @@ where
                             actor: state.context.identity,
                             detail: detail.clone(),
                         }));
-                        fail_actor(&myself, state, format!("actor call failed: {detail}")).await;
+                        fail_handler(&myself, state, format!("actor call failed: {detail}")).await;
                     }
                 },
             },
@@ -712,7 +719,7 @@ where
             KernelMessage::Resume => match state.behavior.resume(&state.context).await {
                 Ok(step) => finish_after_step(&myself, state, step).await,
                 Err(error) => {
-                    fail_actor(
+                    fail_handler(
                         &myself,
                         state,
                         format!("actor continuation failed: {error}"),
@@ -860,6 +867,18 @@ where
         LocalActorRef::new_in_incarnation(address, terminal, incarnation),
         task,
     ))
+}
+
+async fn fail_handler<B>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    detail: String,
+) where
+    B: KernelBehavior,
+{
+    if !state.behavior.pause_failed_handler(&state.context, &detail) {
+        fail_actor(myself, state, detail).await;
+    }
 }
 
 async fn fail_actor<B>(

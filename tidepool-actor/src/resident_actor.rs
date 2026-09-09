@@ -225,6 +225,26 @@ enum ResidentStanding {
     Tools(crate::resident_tools::ResidentToolAwait),
     Interactive(crate::interactive_session::ResidentInteractiveAwait),
     Terminal,
+    Paused,
+}
+
+struct StateCheckpoint {
+    site: u64,
+    value: Arc<RootCustody>,
+}
+
+enum RetainedActorInput {
+    Mailbox(Arc<RootCustody>),
+    Source(crate::SourceDelivery),
+}
+
+impl std::fmt::Debug for RetainedActorInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mailbox(value) => formatter.debug_tuple("Mailbox").field(value).finish(),
+            Self::Source(delivery) => formatter.debug_tuple("Source").field(delivery).finish(),
+        }
+    }
 }
 
 struct WorkbenchExecutionFailure {
@@ -384,6 +404,10 @@ pub struct ResidentKernelBehavior<H, O> {
     boot: Option<ResidentBoot>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
+    checkpoint: Option<StateCheckpoint>,
+    pending_checkpoint: Option<StateCheckpoint>,
+    active_input: Option<RetainedActorInput>,
+    handler_failure: Option<String>,
     sources: Vec<crate::request::sources::SourceBinding>,
     source_connections: Option<crate::request::sources::RequestSources>,
     launch_worktrees: Vec<String>,
@@ -492,6 +516,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             boot: Some(boot),
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
+            checkpoint: None,
+            pending_checkpoint: None,
+            active_input: None,
+            handler_failure: None,
             sources: Vec::new(),
             source_connections: None,
             launch_worktrees,
@@ -588,6 +616,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 ("request-active", Some(awaiting.request.request))
             }
             ResidentStanding::Terminal => ("terminal", None),
+            ResidentStanding::Paused => ("handler-paused", None),
         };
         let requests = self.environment.requests.status_for(actor);
         let records = self.environment.actors.lock();
@@ -1282,7 +1311,7 @@ where
                     })?;
                 self.environment
                     .runner
-                    .resume_fork_unit(context.clone(), continuation)
+                    .resume_unit(context.clone(), continuation)
                     .await
             }
             ResidentOutbound::Call {
@@ -2615,6 +2644,7 @@ where
                 .await?
             {
                 ResidentActorBoundary::Completed => {
+                    self.active_input = None;
                     self.standing = ResidentStanding::Terminal;
                     return Ok(KernelStep::Stop {
                         output: (),
@@ -2622,8 +2652,37 @@ where
                     });
                 }
                 ResidentActorBoundary::Receive(receiver) => {
+                    if let Some(checkpoint) = self.pending_checkpoint.take() {
+                        if checkpoint.site != receiver.site {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "checkpoint and receiver sites differ".into(),
+                            ));
+                        }
+                        self.checkpoint = Some(checkpoint);
+                    }
+                    self.active_input = None;
                     self.standing = ResidentStanding::Receiving(receiver);
                     return Ok(KernelStep::Continue(()));
+                }
+                ResidentActorBoundary::Checkpoint {
+                    continuation,
+                    site,
+                    value,
+                } => {
+                    if self.pending_checkpoint.is_some() {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "actor staged two states before installing its receiver".into(),
+                        ));
+                    }
+                    self.pending_checkpoint = Some(StateCheckpoint {
+                        site,
+                        value: Arc::new(value),
+                    });
+                    outcome = self
+                        .environment
+                        .runner
+                        .resume_unit(context.clone(), continuation)
+                        .await?;
                 }
                 ResidentActorBoundary::ToolAwait(awaiting) => {
                     if !self.policy_installed {
@@ -3063,16 +3122,15 @@ where
             continuation: receiver_continuation,
             handler,
         } = receiver;
+        let request = Arc::new(request.into_custody());
+        if self.checkpoint.is_some() && self.active_input.is_none() {
+            self.active_input = Some(RetainedActorInput::Mailbox(Arc::clone(&request)));
+        }
         let handler_realm = RealmId::fresh();
         let outcome = self
             .environment
             .runner
-            .run_mailbox_handler(
-                context.clone(),
-                handler,
-                request.into_custody(),
-                handler_realm,
-            )
+            .run_mailbox_handler(context.clone(), handler, request, handler_realm)
             .await?;
         if caller.is_none()
             && self
@@ -4042,6 +4100,9 @@ where
                 .ok_or_else(|| KernelBehaviorError {
                     detail: "source delivery does not match an installed connection".into(),
                 })?;
+            if self.checkpoint.is_some() {
+                self.active_input = Some(RetainedActorInput::Source(delivery.clone()));
+            }
             let message = self
                 .environment
                 .runner
@@ -4064,6 +4125,43 @@ where
 
     fn accepts_mailbox(&self) -> bool {
         matches!(self.standing, ResidentStanding::Receiving(_))
+    }
+
+    fn pause_failed_handler(&mut self, kernel: &KernelContext, detail: &str) -> bool {
+        if self.checkpoint.is_none() || self.active_input.is_none() {
+            return false;
+        }
+        self.pending_checkpoint = None;
+        self.standing = ResidentStanding::Paused;
+        if self.handler_failure.is_some() {
+            return true;
+        }
+        self.handler_failure = Some(detail.to_owned());
+        tracing::debug!(
+            actor = ?kernel.identity(),
+            committed_state = ?self.checkpoint.as_ref().map(|checkpoint| &checkpoint.value),
+            failed_input = ?self.active_input,
+            "retaining paused handler custody"
+        );
+        if let Some(supervisor) = self.descriptor.supervisor_parent() {
+            let (command, admission) = crate::NotificationSend::new(
+                kernel.identity(),
+                supervisor,
+                format!("{:?} handler paused: {detail}. State/input/queue retained; no replay. Replace actor or stop.", kernel.identity()),
+            );
+            // Runtime notices need no model-owned receipt. Dropping this waiter
+            // does not retract durable admission or authorize a second send.
+            drop(admission);
+            if self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
+                .is_err()
+            {
+                tracing::error!(actor = ?kernel.identity(), "paused-handler supervisor notice could not reach inbox owner");
+            }
+        }
+        true
     }
 
     fn start<'a>(
@@ -4640,6 +4738,9 @@ where
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
+            if matches!(self.standing, ResidentStanding::Paused) {
+                return Ok(KernelStep::Continue(()));
+            }
             let context = self.context(kernel.identity());
             let outcome = self
                 .pending_program
@@ -4775,6 +4876,9 @@ where
             } else {
                 Confirmed
             };
+            self.active_input = None;
+            self.pending_checkpoint = None;
+            self.checkpoint = None;
             // Realm retirement obtains its own exclusive checkout. A failed hook
             // does not skip this safe cleanup; it also never becomes success.
             let realm_result = if self.descriptor.supervisor_parent().is_none() {

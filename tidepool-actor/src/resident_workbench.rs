@@ -766,6 +766,11 @@ pub(crate) enum ResidentActorBoundary {
     Wait(ResidentWaitRequest),
     Poll(crate::wait::ResidentPollRequest),
     Receive(InstalledReceiver),
+    Checkpoint {
+        continuation: ResidentHole,
+        site: u64,
+        value: RootCustody,
+    },
     ToolAwait(crate::resident_tools::ResidentToolAwait),
     ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
@@ -899,6 +904,7 @@ impl ResidentActorBoundary {
             Self::Wait(_) => "awaitExit",
             Self::Poll(_) => "pollExit",
             Self::Receive(_) => "receive",
+            Self::Checkpoint { .. } => "state checkpoint",
             Self::ToolAwait(_) => "agent tool await",
             Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
@@ -1117,6 +1123,9 @@ impl ResidentRequest {
             Self::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(
                 ..,
             )) => "receive",
+            Self::ActorLocal(
+                crate::generated::actor_local::ActorLocalReq::ActorCheckpointWith(..),
+            ) => "state checkpoint",
             Self::AgentTools(
                 crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(..),
             ) => "agent tool await",
@@ -2356,6 +2365,28 @@ where
                     ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _),
                     ) => capture_receiver_boundary(session, hole, site, actor_realm),
+                    ResidentRequest::ActorLocal(
+                        crate::generated::actor_local::ActorLocalReq::ActorCheckpointWith(site, _),
+                    ) => {
+                        let site = u64::try_from(site).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol("negative checkpoint site".into())
+                        })?;
+                        if session.parked_realm(&hole) != Some(actor_realm) {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "checkpoint escaped its actor program".into(),
+                            ));
+                        }
+                        let value = session
+                            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol(
+                                "checkpoint carried no state".into(),
+                            ))?;
+                        Ok(ResidentActorBoundary::Checkpoint {
+                            continuation: hole,
+                            site,
+                            value,
+                        })
+                    }
                     ResidentRequest::AgentTools(
                         crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(
                             declarations,
@@ -2799,7 +2830,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         handler: RootCustody,
-        request: RootCustody,
+        request: Arc<RootCustody>,
         handler_realm: RealmId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access

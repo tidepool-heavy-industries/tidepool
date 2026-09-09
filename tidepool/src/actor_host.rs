@@ -5512,6 +5512,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stateful_handler_failure_pauses_without_closing_mailbox() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/stateful_failure.hs"),
+        )
+        .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        for item in setup["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{setup:?}");
+        }
+        assert!(setup.to_string().contains("True"), "{setup:?}");
+        let failed =
+            dispatch_haskell_script(root.as_ref(), "cast server (Counter (-1) (const ()))").await;
+        assert_eq!(failed["status"], "committed", "{failed:?}");
+        assert!(
+            !failed.to_string().contains("preview unavailable"),
+            "{failed:?}"
+        );
+        let notice = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                if let LocalResidentDeployment::NotificationSend(command) =
+                    campaign.deployments.recv().await.unwrap()
+                {
+                    break command;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(notice.target(), campaign.actor.identity());
+        assert!(
+            notice.message().contains("handler-probe"),
+            "{}",
+            notice.message()
+        );
+        let queued = dispatch_haskell_script(root.as_ref(), "cast server (Counter 5 (const ()))\npaused <- pollExit server\ncase paused of { Nothing -> True; _ -> False }").await;
+        assert_eq!(queued["status"], "committed", "{queued:?}");
+        for item in queued["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{queued:?}");
+        }
+        assert!(queued.to_string().contains("True"), "{queued:?}");
+        assert!(
+            !queued.to_string().contains("preview unavailable"),
+            "{queued:?}"
+        );
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "duplicate failure notice"
+        );
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn haskell_mailbox_preserves_state_and_opaque_replies_across_calls() {
         let campaign = test_campaign::TestCampaign::start().await;
         let result = dispatch_haskell_script(

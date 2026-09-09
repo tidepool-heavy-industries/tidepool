@@ -27,7 +27,7 @@ pub(crate) enum SourceEvent {
 
 /// A source publication owns its captured value until the receiving mailbox
 /// handles or retires it. Later publications cannot replace that value.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceDelivery {
     pub(crate) slot: usize,
     pub(crate) request: RequestId,

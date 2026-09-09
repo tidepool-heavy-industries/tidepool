@@ -9,6 +9,7 @@ pub fn actor_local_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next",
+            "ActorCheckpointWith :: Int -> state -> ActorLocal api ()",
         ],
         type_defs: &[],
         extra_imports: &[

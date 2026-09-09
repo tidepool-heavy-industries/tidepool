@@ -31,6 +31,7 @@ module Tidepool.Actor
   , progressSource
   , settlementSource
   , withSources
+  , stateful
   , EffectProfile (..)
   , LaunchRole (..)
   , ReadOnlyEffects
@@ -302,6 +303,37 @@ serveSited
   -> Eff effs exit
 serveSited site state step =
   receiveSited @state site (step state) >>= \next -> serveSited site next step
+
+-- | Define a mailbox actor with retained state. Each successful message commits
+-- its reply and next state together; a failed handler pauses for replacement.
+stateful
+  :: Member (ActorLocal protocol) effs
+  => Text
+  -> EffectProfile protocol effs
+  -> (forall result. state -> protocol result -> Eff effs (result, state))
+  -> ActorDefinition state protocol state
+stateful actorLabel profile step = ActorDefinition
+  { label = actorLabel
+  , effectProfile = profile
+  , initialization = pure
+  , behavior = \_ -> statefulLoop step
+  , onShutdown = const (pure ())
+  }
+
+statefulLoop
+  :: forall state protocol effs
+   . Member (ActorLocal protocol) effs
+  => (forall result. state -> protocol result -> Eff effs (result, state))
+  -> state
+  -> Eff effs state
+statefulLoop step state = do
+  send @(ActorLocal protocol) (ActorCheckpointWith 0 state)
+  next <- receiveSited @(Maybe state) 0 (\message -> do
+    (reply, nextState) <- step state message
+    pure (reply, Just nextState))
+  case next of
+    Nothing -> pure state
+    Just nextState -> statefulLoop step nextState
 
 -- | Observe this exact actor incarnation's retained terminal result.
 --
