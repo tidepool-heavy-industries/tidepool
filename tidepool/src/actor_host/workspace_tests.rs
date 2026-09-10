@@ -186,6 +186,7 @@ fn owner(
     native: &NativeProcess,
 ) -> InteractiveApplicationOwner {
     InteractiveApplicationOwner {
+        supervisor: None,
         creator_workspace: Some(BoundWorkspace {
             workspace: Arc::new(ActiveWorkspace {
                 view: tidepool_node::MountNamespace::capture(native.0.id()).unwrap(),
@@ -792,4 +793,51 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     .await
     .unwrap();
     assert_eq!(shell(child, "cat file"), "later-child");
+    // Exercise retirement through the same composed admission fixture: dirty
+    // source and the index survive, while descendants keep their warm layers.
+    shell(child, "printf preserved > retirement-untracked; printf '*.ignored\\n' > .gitignore; printf ignored > retirement.ignored; rm -f input.txt");
+    let status = shell(child, "git status --porcelain=v1 -- . ':!.shoal'");
+    let index = shell(child, "git show :file");
+    let child_head = shell(child, "git rev-parse HEAD");
+    drop(_child_native);
+    child.retire(&child.view).await.unwrap();
+    child.retire(&child.view).await.unwrap();
+    let receipt = admission
+        .manager
+        .registry()
+        .get(child.worktree.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(receipt.cwd.join("file")).unwrap(),
+        "later-child"
+    );
+    assert_eq!(
+        std::fs::read_to_string(receipt.cwd.join("retirement-untracked")).unwrap(),
+        "preserved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(receipt.cwd.join("retirement.ignored")).unwrap(),
+        "ignored"
+    );
+    assert!(!receipt.cwd.join("input.txt").exists());
+    for (arguments, expected) in [
+        (
+            vec!["status", "--porcelain=v1", "--", ".", ":!.shoal"],
+            status,
+        ),
+        (vec!["show", ":file"], index),
+        (vec!["rev-parse", "HEAD"], child_head),
+    ] {
+        assert_eq!(
+            admission
+                .manager
+                .git()
+                .run(&receipt.cwd, &arguments)
+                .unwrap()
+                .trimmed(),
+            expected.trim_end()
+        );
+    }
+    assert_eq!(shell(grandchild, "cat .shoal/build/cargo/artifact"), "warm");
 }

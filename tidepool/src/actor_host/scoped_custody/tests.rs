@@ -143,6 +143,7 @@ impl Fixture {
         owners.lock().insert(
             self.custody.actor,
             InteractiveApplicationOwner {
+                supervisor: None,
                 creator_workspace: None,
                 cancel: None,
                 native_retirement: Default::default(),

@@ -36,16 +36,14 @@ reconciliation capability. Restart-only native and overlay transaction loaders
 and serialized reconciliation capabilities were removed. `view.json` remains
 resource/dependency metadata; old transaction files are not adopted or migrated.
 
-Consolidation copies the logical contents of immutable lowers outside native
-admission, preserving whiteouts through the OverlayFS view. A failed manifest write leaves
-the previous snapshot usable. It starts at eight
-layers. Each resource permits at most eight consolidation attempts and 32 mount
-rotations; lower depth is also capped at 32. At capacity, source falls back and
-build keeps its completed generation. Covered dependencies remain retained.
-This bounds publication overhead; it does not bound how many retained actors or
-worktrees an operator creates.
+Publication shares flat immutable lowers; no automatic flattening, eight-layer
+threshold or 32-rotation policy remains. Actual kernel rejection leaves the
+previous snapshot usable. An unchanged empty upper can reuse its completed
+snapshot inside native write admission. Kernel-limit handling is not a disk quota.
 
-Unsubmitted exclusive storage and completed consolidation scratch are reclaimed.
+Unsubmitted storage and confirmed retired storage are reclaimed. Retirement
+preserves dirty working files and Git administrative state, detaches the exact
+views, then releases storage only after descendant dependencies settle.
 Used resources remain retained when exact process cleanup is unconfirmed. Ordinary
 host-backed checkouts no longer acquire a durable overlay requirement merely
 because launch routes Git through a namespace. A host crash ends the wave; committed

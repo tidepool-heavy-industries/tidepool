@@ -399,11 +399,13 @@ details when they could change acceptance. A display limit bounds output, not th
 evaluation cost of an arbitrary `Show` implementation.
 
 At accepted integration boundaries, retain specialists for named likely repairs
-or outstanding obligations, not indefinite possible usefulness: idle contexts can
-consume admission capacity. Once evidence is retained and no such work remains, use
+or outstanding obligations, not indefinite possible usefulness: idle workers retain
+processes and workspace storage. Once evidence is retained and no such work remains, use
 `stopAgent`; consult `:doc cleanup` for a finished group. Retirement is separate
 from accepting a candidate. Do not stop an actor that still owns work you need,
 and observe cleanup rather than inferring it from a reply or a vanished notice.
+Before returning, retire finished descendants and routers or explicitly transfer
+ownership of unfinished work. A completed reply alone does not retire a worker.
 Keep failures and evidence limits visible in the final outcome.
 
 # Collaborate with the user

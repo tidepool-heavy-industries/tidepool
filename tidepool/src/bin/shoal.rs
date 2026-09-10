@@ -12,6 +12,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Inspect unused build storage for a stopped run; preserve all source/Git state.
+    Cleanup {
+        #[arg(long)]
+        run_root: PathBuf,
+        /// Remove only storage whose mounts are confirmed unused.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Run the private process-scope supervisor for one prepared launch.
     #[command(hide = true)]
     ProcessSupervisor {
@@ -153,6 +161,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Cleanup { run_root, apply } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tidepool::actor_host::workspace_cleanup::cleanup(
+                    &run_root, apply
+                )?)?
+            );
+            Ok(())
+        }
         Command::ProcessSupervisor { .. } => {
             unreachable!("handled before runtime construction")
         }

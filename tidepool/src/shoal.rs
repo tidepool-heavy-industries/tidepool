@@ -423,9 +423,20 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         ),
     )?;
 
-    let executable = current_executable()?;
+    let executable = retain_run_executable(&run_root, "shoal", &std::env::current_exe()?)?;
     let compiler_socket = run_root.join("compiler.sock");
-    let compiler_bin = tidepool_extract_cmd::resolve_bin()?.path;
+    let compiler_source = tidepool_extract_cmd::resolve_bin()?.path.canonicalize()?;
+    let worker_source = tidepool_extract_cmd::frontend::worker_for_frontend(&compiler_source);
+    let compiler_bin = retain_run_executable(&run_root, "tidepool-extract", &compiler_source)?;
+    let mut selected_environment = std::collections::BTreeMap::from([(
+        "TIDEPOOL_EXTRACT".to_owned(),
+        compiler_bin.display().to_string(),
+    )]);
+    let worker = retain_run_executable(&run_root, "tidepool-extract-worker", &worker_source)?;
+    selected_environment.insert(
+        "TIDEPOOL_EXTRACT_WORKER".into(),
+        worker.display().to_string(),
+    );
     println!(
         "launch: agent={} version={} model={} effort={} extractor={}",
         interactive_agent.executable().display(),
@@ -438,15 +449,17 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .to_str()
         .ok_or_else(|| runtime_error("compiler executable path is not UTF-8"))?
         .to_owned();
-    let daemon_launch = tmux
-        .create(&compiler_daemon_launch(
-            &workspace,
-            &compiler_socket,
-            compiler_program,
-            &run_id,
-            &compiler_log_path,
-        ))
-        .await;
+    let mut compiler_launch = compiler_daemon_launch(
+        &workspace,
+        &compiler_socket,
+        compiler_program,
+        &run_id,
+        &compiler_log_path,
+    );
+    compiler_launch
+        .environment
+        .extend(selected_environment.clone());
+    let daemon_launch = tmux.create(&compiler_launch).await;
     if let Err(error) = daemon_launch {
         write_startup_failure(
             &status_path,
@@ -503,7 +516,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             "--quiet".into(),
             "--property=Delegate=yes".into(),
             format!("--unit=shoal-host-{run_id}"),
-            executable,
+            executable.display().to_string(),
         ],
     );
     let launch = tmux
@@ -512,7 +525,11 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             cwd: workspace.clone(),
             program: "systemd-run".into(),
             args,
-            environment: host_environment(&compiler_socket),
+            environment: {
+                let mut environment = host_environment(&compiler_socket);
+                environment.extend(selected_environment);
+                environment
+            },
             unset_environment: std::collections::BTreeSet::new(),
         })
         .await;
@@ -1200,12 +1217,25 @@ fn default_session_name(workspace: &Path) -> String {
     format!("shoal-{slug}")
 }
 
-fn current_executable() -> Result<String, Box<dyn std::error::Error>> {
-    let executable = std::env::current_exe()?;
-    executable
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| runtime_error("Shoal executable path is not UTF-8"))
+fn retain_run_executable(run_root: &Path, name: &str, source: &Path) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let directory = run_root.join("bin");
+    std::fs::create_dir_all(&directory)?;
+    let bytes = std::fs::read(source)?;
+    let destination = directory.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)?;
+    file.write_all(&bytes)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    file.sync_all()?;
+    tidepool_atomic_write::write_durable(
+        &directory.join(format!("{name}.blake3")),
+        blake3::hash(&bytes).to_hex().as_bytes(),
+    )?;
+    Ok(destination)
 }
 
 /// Variables whose current values must override a possibly older tmux server
@@ -1261,6 +1291,23 @@ pub fn process_supervisor(manifest: PathBuf) -> Result<(), Box<dyn std::error::E
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_runner_survives_disposable_target_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let source = target.join("runner");
+        std::fs::write(&source, b"#!/bin/sh\nexit 0\n").unwrap();
+        let run = directory.path().join("run");
+        let selected = super::retain_run_executable(&run, "runner", &source).unwrap();
+        std::fs::remove_dir_all(target).unwrap();
+        assert!(std::process::Command::new(selected)
+            .status()
+            .unwrap()
+            .success());
+        assert!(run.join("bin/runner.blake3").is_file());
+    }
+
     use super::*;
 
     fn test_agent_defaults() -> ShoalAgentDefaults {

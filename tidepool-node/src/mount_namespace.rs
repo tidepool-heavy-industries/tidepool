@@ -73,6 +73,45 @@ impl Descriptors {
 }
 
 impl MountNamespace {
+    /// Detach covered generations after the owning lifecycle has stopped all
+    /// users and preserved working files. This is not proof of process cleanup.
+    pub fn detach_retired_tree(&self, target: &Path) -> io::Result<()> {
+        if !target.is_absolute() || target.parent().is_none() || target == Path::new("/") {
+            return Err(io::Error::other("invalid retirement mount target"));
+        }
+        for descriptors in std::iter::once(&self.descriptors).chain(self.preparation.iter()) {
+            let view = Self {
+                descriptors: descriptors.clone(),
+                preparation: self.preparation.clone(),
+            };
+            let target = CString::new(target.as_os_str().as_bytes()).map_err(io::Error::other)?;
+            // SAFETY: only unmount syscalls with a preallocated path run after fork.
+            let mut command = unsafe {
+                view.command_with_setup(
+                    Path::new("/"),
+                    "/bin/sh".as_ref(),
+                    OwnerRequirement::RetainedView,
+                    move || loop {
+                        match rustix::mount::unmount(
+                            target.as_c_str(),
+                            rustix::mount::UnmountFlags::DETACH,
+                        ) {
+                            Ok(()) => {}
+                            Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOENT) => {
+                                return Ok(())
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    },
+                )?
+            };
+            if !command.args(["-c", ":"]).status()?.success() {
+                return Err(io::Error::other("namespace retirement did not complete"));
+            }
+        }
+        Ok(())
+    }
+
     /// Capture namespaces through a pinned proc directory and confirm that the
     /// process is still live. The caller must already own the supplied process.
     pub fn capture(pid: u32) -> io::Result<Self> {

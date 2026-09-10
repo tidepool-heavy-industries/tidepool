@@ -14,7 +14,7 @@ the user's go-ahead.
 ## Implementation checkpoint
 
 Production admission, recursive source/build inheritance, live-wave settlement,
-consolidation, capacity bounds and shared guidance are implemented. Read
+kernel-admitted flat layers and shared guidance are implemented. Read
 [evidence and remaining acceptance](evidence/workspace-fork-implementation.md).
 The matching native binaries are built and pinned. Real managed-TUI acceptance
 has not run; it requires the operator's go-ahead. The task exits below remain the
@@ -100,11 +100,10 @@ Do not claim recovery of uncommitted child files, old TUIs or live Haskell state
 - [x] Use the same production path for an unchanged build, changed local Rust
   source and a changed build-script input. Record actual fresh/rebuilt artifacts
   and distinguish seed-path invalidation from later snapshot reuse.
-- [x] Bound layers and covered mounts. Implement consolidation in the existing
-  resource owner over immutable logical contents, outside native write admission.
-  Include whiteouts, metadata, failed consolidation and a still-writing parent.
-  At capacity, degrade to committed source/previous build instead of unbounded
-  growth; no useful build is killed or awaited to satisfy snapshot capacity.
+- [x] Share immutable layers without automatic full-tree consolidation or arbitrary
+  depth/rotation caps. Preserve the last completed snapshot on kernel rejection;
+  skip redundant empty publications. Test beyond 32 generations, whiteouts and
+  a still-writing parent. No useful build is killed to satisfy snapshot capacity.
 - [x] Keep dependencies until all workspaces, operations, mounts and children
   release them. Reclaim proven unused preparation and releasable retired storage;
   report unknown custody as retained. Do not use tmux disappearance as proof or

@@ -55,7 +55,10 @@ queue a repair behind an owner whose delivery is still waiting on that review.
 Keep current assignment/candidate values through repairs and question resolution.
 A new attempt gets new sources and a new router. After incorporating the old
 result and assigning remaining obligations, drain the old router and retain its
-exit; keep the reviewer agent available independently.
+exit. Keep the reviewer only while a concrete repair or review remains; otherwise
+retire it and finished implementation children. Before returning, settle descendants
+or explicitly transfer unfinished ownership. A reply does not release their processes
+or workspace storage.
 
 Accepted contains the reviewed task, candidate, checks and rationale. Verify your
 resulting integration head; review semantic integration changes. Bind accepted,

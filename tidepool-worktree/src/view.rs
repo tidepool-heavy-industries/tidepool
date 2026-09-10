@@ -23,6 +23,22 @@ enum ViewAccess {
 pub(crate) struct WorktreeViews(Arc<RwLock<BTreeMap<PathBuf, ViewAccess>>>);
 
 impl WorktreeViews {
+    pub fn remove(&self, cwd: &Path, expected: &MountNamespace) -> io::Result<()> {
+        let mut views = self
+            .0
+            .write()
+            .map_err(|_| io::Error::other("worktree view lock poisoned"))?;
+        match views.get(cwd) {
+            Some(ViewAccess::Mounted(view)) if view.namespace.same_view_as(expected)? => {
+                views.remove(cwd);
+                Ok(())
+            }
+            _ => Err(io::Error::other(
+                "retirement does not name the installed worktree view",
+            )),
+        }
+    }
+
     pub fn require(&self, cwd: &Path) -> io::Result<()> {
         self.0
             .write()

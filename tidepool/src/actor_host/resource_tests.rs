@@ -88,6 +88,7 @@ fn source_checkout_launch_has_process_custody_without_a_worktree_lease() {
         incarnation: tidepool_actor::Incarnation(1),
     };
     let mut owner = InteractiveApplicationOwner {
+        supervisor: None,
         creator_workspace: None,
         cancel: None,
         native_retirement: Default::default(),

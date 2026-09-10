@@ -9,7 +9,11 @@ request. This policy overrides generic repository advice to run a full suite.
 Map changes to owning mechanisms and plausible directly affected consumers. When
 changing a shared type, search all constructors/callers and compile affected test
 targets before execution. Select actual target/test names; confirm the filter ran
-the intended tests. Use the repository's toolchain and focused test recipes.
+the intended tests. Use the repository's focused recipes or
+`bash scripts/dev-shell.sh COMMAND...`: committed flake inputs supply the environment,
+while the command operates in your checkout. Never use `nix develop path:.` on
+the mounted workspace; it copies warm artifacts into the Nix store. An inherited
+`IN_NIX_SHELL` marker alone does not prove that GHC packages are available.
 
 Prove changed behavior plus consequential failure, cancellation, cleanup and
 integration paths. Unit checks do not replace a necessary real consumer test.

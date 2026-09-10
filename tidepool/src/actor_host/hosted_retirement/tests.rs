@@ -88,6 +88,7 @@ impl HttpFixture {
         owners.lock().insert(
             exact,
             InteractiveApplicationOwner {
+                supervisor: None,
                 creator_workspace: None,
                 cancel: None,
                 native_retirement: Default::default(),
@@ -290,6 +291,10 @@ async fn hosted_terminal_path_uses_retained_cleanup_without_seal() {
     ));
     confirmed_http(observation, campaign.actor.identity());
     assert!(fixture.owner.lock().await.seal.is_none());
+    assert_eq!(
+        stop_retired_tool_service(campaign.actor.identity(), &mut fixture.owner.clone()).await,
+        CleanupComponentOutcome::Completed,
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

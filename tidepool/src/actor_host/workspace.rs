@@ -5,6 +5,7 @@ use super::*;
 use std::io;
 use tidepool_bridge_effects::WtWorktreeHandle;
 use tidepool_handlers::handlers::worktree::{handle_to_wire, AuthorizedForkWorkspace};
+use tidepool_node::MountNamespace;
 use tidepool_worktree::{PreparedSourceWorktree, WorktreeSource};
 use workspace_publication::Admission;
 
@@ -58,6 +59,7 @@ enum Activation {
 }
 
 pub(super) struct PreparedWorkspace {
+    manager: WorktreeManager,
     activation: Mutex<Activation>,
     pub(super) host_path: PathBuf,
     pub(super) worktree: Option<WorktreeId>,
@@ -81,6 +83,33 @@ impl std::ops::Deref for ActiveWorkspace {
 }
 
 impl PreparedWorkspace {
+    /// Called only with exact native/process and hosted cleanup established.
+    pub(super) async fn retire(&self, active: &MountNamespace) -> io::Result<()> {
+        let publication = self.publication.lock().await;
+        if publication.is_pending() {
+            return Err(io::Error::other("workspace publication remains pending"));
+        }
+        let manager = self.manager.clone();
+        let worktree = self.worktree.clone();
+        let active = active.clone();
+        let prepared = self.view.clone();
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            if let Some(id) = worktree {
+                manager
+                    .materialize_retired_view(&id, &active, Path::new(ACTOR_PROJECT_ROOT))
+                    .map_err(io::Error::other)?;
+            }
+            active.detach_retired_tree(Path::new(ACTOR_PROJECT_ROOT))?;
+            prepared.detach_retired_tree(Path::new(ACTOR_PROJECT_ROOT))
+        })
+        .await
+        .map_err(io::Error::other)??;
+        for resource in self.source.iter().chain(self.build.iter()) {
+            resource.retire().await?;
+        }
+        Ok(())
+    }
+
     pub(super) fn activate(
         self: Arc<Self>,
         worktrees: &WorktreeManager,
@@ -225,6 +254,7 @@ impl WorkspaceLayout {
             }
         }
         Ok(Arc::new(PreparedWorkspace {
+            manager: self.worktrees.clone(),
             activation: Mutex::new(Activation::Prepared),
             host_path,
             worktree,
@@ -303,17 +333,9 @@ impl NativeForkAdmission {
         let backend = self.backend.clone();
         tokio::spawn(async move {
             if publication.is_pending() {
-                parent.settle_publication(&mut publication, backend.as_ref()).await?;
-            }
-            // Consolidation reads completed generations only, outside native
-            // admission, so an active build can continue in its current upper.
-            for resource in parent.workspace.source.iter().chain(parent.workspace.build.iter()) {
-                let mut resource = resource.publication.clone().lock_owned().await;
-                tokio::task::spawn_blocking(move || {
-                    if let Err(error) = resource.consolidate() {
-                        tracing::debug!(%error, "retaining previous overlay layers after consolidation failure");
-                    }
-                }).await.map_err(io::Error::other)?;
+                parent
+                    .settle_publication(&mut publication, backend.as_ref())
+                    .await?;
             }
             let admission = publication.begin(backend.as_ref(), &parent.thread).await;
             let namespace = match admission {
@@ -321,21 +343,43 @@ impl NativeForkAdmission {
                     match parent.workspace.view.bind_live_view(namespace) {
                         Ok(namespace) => namespace,
                         Err(error) => {
-                            parent.settle_publication(&mut publication, backend.as_ref()).await?;
+                            parent
+                                .settle_publication(&mut publication, backend.as_ref())
+                                .await?;
                             return Err(error);
                         }
                     }
-                },
-                Ok(Admission::Busy) => return tokio::task::spawn_blocking(move || {
-                    layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy))
-                }).await.map_err(io::Error::other)?,
-                Ok(Admission::Unavailable(detail)) => return tokio::task::spawn_blocking(move || {
-                    layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Unavailable(detail)))
-                }).await.map_err(io::Error::other)?,
+                }
+                Ok(Admission::Busy) => {
+                    return tokio::task::spawn_blocking(move || {
+                        layout.prepare_committed(
+                            authorized,
+                            policy,
+                            build,
+                            Some(SourceFallback::Busy),
+                        )
+                    })
+                    .await
+                    .map_err(io::Error::other)?
+                }
+                Ok(Admission::Unavailable(detail)) => {
+                    return tokio::task::spawn_blocking(move || {
+                        layout.prepare_committed(
+                            authorized,
+                            policy,
+                            build,
+                            Some(SourceFallback::Unavailable(detail)),
+                        )
+                    })
+                    .await
+                    .map_err(io::Error::other)?
+                }
                 Err(error) => {
                     // If identity is known this may immediately finish; a lost
                     // begin reply remains owned for the fleet's next retry.
-                    let _ = parent.settle_publication(&mut publication, backend.as_ref()).await;
+                    let _ = parent
+                        .settle_publication(&mut publication, backend.as_ref())
+                        .await;
                     return Err(error);
                 }
             };
@@ -348,30 +392,58 @@ impl NativeForkAdmission {
                     Some(build) => Some(build.publication.clone().lock_owned().await),
                     None => None,
                 }
-            } else { None };
+            } else {
+                None
+            };
             let capture_layout = layout.clone();
             let host_path = parent.workspace.host_path.clone();
             let captured = tokio::task::spawn_blocking(move || {
-                let captured = capture_layout.worktrees.git().try_capture().map(|_admission| {
-                    capture_layout.capture(&authorized, &namespace, &host_path, source, cache)
-                });
+                let captured = capture_layout
+                    .worktrees
+                    .git()
+                    .try_capture()
+                    .map(|_admission| {
+                        capture_layout.capture(&authorized, &namespace, &host_path, source, cache)
+                    });
                 (authorized, captured)
-            }).await.map_err(io::Error::other);
-            parent.settle_publication(&mut publication, backend.as_ref()).await?;
+            })
+            .await
+            .map_err(io::Error::other);
+            parent
+                .settle_publication(&mut publication, backend.as_ref())
+                .await?;
             drop(publication);
             let (authorized, captured) = captured?;
-            let build = if source_owner == creator && policy.native_tools != tidepool_actor::NativeToolClass::InspectionOnly {
-                parent.workspace.build.as_ref().and_then(SharedOverlayResource::latest_snapshot).or(build)
-            } else { build };
+            let build = if source_owner == creator
+                && policy.native_tools != tidepool_actor::NativeToolClass::InspectionOnly
+            {
+                parent
+                    .workspace
+                    .build
+                    .as_ref()
+                    .and_then(SharedOverlayResource::latest_snapshot)
+                    .or(build)
+            } else {
+                build
+            };
             tokio::task::spawn_blocking(move || match captured {
                 Some(captured) => match captured? {
-                    SourceCapture::Ready(captured) => layout.prepare_captured(captured, policy, build),
-                    SourceCapture::Fallback(reason) => layout.prepare_committed(authorized, policy, build, Some(reason)),
+                    SourceCapture::Ready(captured) => {
+                        layout.prepare_captured(captured, policy, build)
+                    }
+                    SourceCapture::Fallback(reason) => {
+                        layout.prepare_committed(authorized, policy, build, Some(reason))
+                    }
                 },
-                None => layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy)),
+                None => {
+                    layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy))
+                }
             })
-                .await.map_err(io::Error::other)?
-        }).await.map_err(io::Error::other)?
+            .await
+            .map_err(io::Error::other)?
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 }
 
@@ -406,9 +478,14 @@ impl BoundWorkspace {
             .chain(self.workspace.build.iter())
         {
             let mut resource = resource.publication.clone().lock_owned().await;
-            tokio::task::spawn_blocking(move || resource.settle_pending())
-                .await
-                .map_err(io::Error::other)??;
+            tokio::task::spawn_blocking(move || {
+                resource
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("workspace retired"))?
+                    .settle_pending()
+            })
+            .await
+            .map_err(io::Error::other)??;
         }
         publication.finish(backend, &self.thread).await
     }
@@ -420,8 +497,8 @@ impl WorkspaceLayout {
         authorized: &AuthorizedForkWorkspace,
         namespace: &tidepool_node::MountNamespace,
         source_path: &Path,
-        mut parent_source: Option<tokio::sync::OwnedMutexGuard<OverlayResourceLease>>,
-        mut parent_build: Option<tokio::sync::OwnedMutexGuard<OverlayResourceLease>>,
+        mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
+        mut parent_build: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
     ) -> io::Result<SourceCapture> {
         let git = match authorized.prepare_source() {
             Ok(git) => git,
@@ -436,28 +513,38 @@ impl WorkspaceLayout {
             .resource_root(git.receipt().worktree_id.as_str())
             .join("source");
         let (source, fallback) = if let Some(parent_source) = &mut parent_source {
+            let parent_source = parent_source
+                .as_mut()
+                .ok_or_else(|| io::Error::other("source workspace retired"))?;
             let preserved = [PathBuf::from(ACTOR_PROJECT_ROOT).join(".shoal")];
-            match parent_source.publish(namespace, Path::new(ACTOR_PROJECT_ROOT), &preserved)? {
-                tidepool_node::OverlayRotationOutcome::Rotated => {
-                    let snapshot = parent_source.latest_snapshot().ok_or_else(|| {
-                        io::Error::other("source rotation published no generation")
-                    })?;
-                    (
-                        Some(OverlayResourceLease::allocate_path(
-                            source_pathname,
-                            Some(snapshot),
-                        )?),
-                        None,
-                    )
-                }
-                tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) => {
-                    return Err(io::Error::other(detail))
-                }
-                tidepool_node::OverlayRotationOutcome::Busy => (None, Some(SourceFallback::Busy)),
-                outcome => (
+            let snapshot = match parent_source.unchanged_snapshot()? {
+                Some(snapshot) => Ok(snapshot),
+                None => match parent_source.publish(
+                    namespace,
+                    Path::new(ACTOR_PROJECT_ROOT),
+                    &preserved,
+                )? {
+                    tidepool_node::OverlayRotationOutcome::Rotated => {
+                        Ok(parent_source.latest_snapshot().ok_or_else(|| {
+                            io::Error::other("source rotation published no generation")
+                        })?)
+                    }
+                    tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) => {
+                        return Err(io::Error::other(detail))
+                    }
+                    tidepool_node::OverlayRotationOutcome::Busy => Err(SourceFallback::Busy),
+                    outcome => Err(SourceFallback::Unavailable(format!("{outcome:?}"))),
+                },
+            };
+            match snapshot {
+                Ok(snapshot) => (
+                    Some(OverlayResourceLease::allocate_path(
+                        source_pathname,
+                        Some(snapshot),
+                    )?),
                     None,
-                    Some(SourceFallback::Unavailable(format!("{outcome:?}"))),
                 ),
+                Err(fallback) => (None, Some(fallback)),
             }
         } else {
             let source = OverlayResourceLease::allocate_path(source_pathname, None)?;
@@ -480,14 +567,19 @@ impl WorkspaceLayout {
             source.prepare_git_pointer(&git.git_file())?;
         }
         if let Some(build) = &mut parent_build {
-            let outcome = build.publish(
-                namespace,
-                &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
-                &[],
-            )?;
-            tracing::info!(?outcome, "workspace build snapshot publication");
-            if let tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) = outcome {
-                return Err(io::Error::other(detail));
+            let build = build
+                .as_mut()
+                .ok_or_else(|| io::Error::other("build workspace retired"))?;
+            if build.unchanged_snapshot()?.is_none() {
+                let outcome = build.publish(
+                    namespace,
+                    &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
+                    &[],
+                )?;
+                tracing::info!(?outcome, "workspace build snapshot publication");
+                if let tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) = outcome {
+                    return Err(io::Error::other(detail));
+                }
             }
         }
         Ok(SourceCapture::Ready(CapturedSource {

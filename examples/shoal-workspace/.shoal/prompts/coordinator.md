@@ -45,3 +45,6 @@ Incorporation evidence identifies resulting source and changed behavior without 
 administrative narrative. At an authorized wind-down, distinguish committed partial
 work, dirty retained work and open gates through exact artifacts. Otherwise, each
 partial candidate advances integration and the next useful frontier toward acceptance.
+At each checked integration, retire children and routers with no remaining assignment;
+retain specialists for concrete repairs. Before returning, settle descendants or transfer
+unfinished ownership explicitly. Keep this local; routine retirement needs no planner turn.

@@ -157,13 +157,12 @@ unused preparation and retired storage only after their existing owners prove it
 is unreferenced and no process/host work can use it. Retain uncertain old-wave
 storage; automatic crash-orphan garbage collection is outside this wave.
 
-Bound both layer depth and covered mount growth. Consolidate immutable logical
-views through the existing resource owner, preserving metadata and deletions;
-never flatten by copying raw whiteout files as ordinary project data. Consolidation
-has a real copy cost and runs outside the parent mutation gate. While capacity is
-unavailable, use the normal committed-source/previous-build fallbacks rather than
-growing without bound or stopping useful builds. Validate the kernel mount
-retirement mechanism before claiming old mounts or backing files reclaimed.
+Use flat immutable lower-layer lists and let actual kernel admission determine
+capacity. Do not automatically flatten or copy whole build trees at an arbitrary
+layer count. Skip publication when the existing owner can prove its upper is
+unchanged. A rejected publication preserves the last completed snapshot and uses
+the existing source/build fallback without killing useful work. Validate mount
+retirement before reclaiming backing files.
 
 ## Completion
 
@@ -171,7 +170,7 @@ The production admission-to-launch path handles original root, managed child,
 grandchild and busy-source fallback. Real managed TUIs remain interactive while
 forking warm workspaces, and changed inputs still rebuild correctly. Measurements
 show compilation reuse and physical storage growth, separating source import,
-copy-up and consolidation costs. Cleanup reports retained storage honestly.
+copy-up costs. Cleanup reports retained storage honestly.
 
 Compile/check the matched runner and update the short shipped guidance. Obtain
 the user's go-ahead before launching TUIs or a swarm. No live reconstruction

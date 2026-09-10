@@ -100,12 +100,15 @@ signal handling and daemon teardown. Do not introduce an alternative launcher.
 For the shell helper's mocked process boundary alone, a single existing test is:
 
 ```sh
-nix develop --command python3 scripts/tests/test_lib_extract.py ExtractHelpers.test_owned_daemon_keeps_endpoint_through_worker_rotation -v
+bash scripts/dev-shell.sh python3 scripts/tests/test_lib_extract.py ExtractHelpers.test_owned_daemon_keeps_endpoint_through_worker_rotation -v
 ```
 
 This executes a fixture frontend, not real GHC extraction or mounted service
-acceptance. Within an already active repository Nix shell, omit `nix develop
---command`. A missing inherited extractor variable is not proof that the real
+acceptance. Use `bash scripts/dev-shell.sh COMMAND...` for direct tools. It selects committed
+flake inputs while commands stay in the current checkout. Never use `nix develop
+path:.` on a mounted workspace: that imports the warm build tree into the Nix store.
+`IN_NIX_SHELL` alone does not identify the correct compiler environment. Commit
+intentional toolchain changes or select a revision-pinned `TIDEPOOL_DEV_FLAKE`. A missing inherited extractor variable is not proof that the real
 extractor is unavailable: the owning resolver discovers/builds it.
 
 Retain the command, source revision, resolved executable paths (prefer hashes),
@@ -123,3 +126,8 @@ portions instead of subtracting an unrelated command. State process reuse and
 cache conditions; a second invocation does not establish a controlled warm-cache
 benchmark. Do not clear shared caches to manufacture a cold run. No inference
 about serial-versus-tree cost follows from a focused recipe measurement.
+
+Reuse the same Cargo target directory for compatible validation commands; do not
+create a fresh target per test or diagnostic attempt. Retire obsolete validation
+caches after recording results. Selected launch binaries and recovery records
+belong to the run directory, not disposable build output.

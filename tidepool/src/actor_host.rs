@@ -13,6 +13,7 @@ mod host_incarnation;
 mod hosted_retirement;
 mod overlay_resource;
 mod workspace;
+pub mod workspace_cleanup;
 mod workspace_publication;
 pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
 use workspace::{ActiveWorkspace, PreparedWorkspace, WorkspaceLayout};
@@ -682,6 +683,7 @@ impl InteractiveCleanupReceipt {
 }
 
 struct InteractiveApplicationOwner {
+    supervisor: Option<ActorRef>,
     creator_workspace: Option<BoundWorkspace>,
     cancel: Option<oneshot::Sender<NativeRetirement>>,
     native_retirement: NativeRetirement,
@@ -2020,6 +2022,7 @@ async fn run_interactive_applications(
                         let hosted_slot = Arc::new(Mutex::new(None));
                         let pane_slot = Arc::new(Mutex::new(None));
                         let mut owner = InteractiveApplicationOwner {
+                            supervisor: installation.supervisor_parent,
                             creator_workspace: None,
                             cancel: Some(cancel),
                             native_retirement: NativeRetirement::Preserve,
@@ -2386,17 +2389,18 @@ async fn run_interactive_applications(
             retired = retirements.join_next(), if !retirements.is_empty() => {
                 match retired {
                     Some(Ok(receipt)) => {
-                        if let Some(owner) = application_owners.lock().get_mut(&receipt.actor) {
+                        let supervisor = application_owners.lock().get_mut(&receipt.actor).and_then(|owner| {
                             owner.retirement.lock().get_or_insert_with(|| receipt.clone());
-                        }
+                            owner.supervisor
+                        });
                         let degraded = receipt.degraded();
                         if degraded {
                             tracing::warn!(actor = ?receipt.actor, components = ?receipt.components, "interactive application cleanup degraded");
-                            if receipt.actor != root_identity {
-                                if let Some(root_application) = deployments.iter().find(|app| app.actor == root_identity) {
+                            if let Some(supervisor) = supervisor {
+                                if let Some(application) = deployments.iter().find(|app| app.actor == supervisor) {
                                     notifications.spawn(publish_inbox_event_for(
-                                        root_identity,
-                                        Arc::clone(&root_application.inbox),
+                                        supervisor,
+                                        Arc::clone(&application.inbox),
                                         DurableActorEvent::Typed(TypedActorEvent::CleanupFinished { receipt }),
                                     ));
                                 }
@@ -3981,6 +3985,10 @@ async fn retire_interactive_application(
     scoped_process: Option<CleanupComponentOutcome>,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
+    let exact_process_stopped = matches!(
+        scoped_process.as_ref(),
+        Some(CleanupComponentOutcome::Completed)
+    );
     let mut components = Vec::with_capacity(6);
     let mut delivery = match deployment.connection {
         InteractiveConnection::AwaitingBinding => None,
@@ -4040,26 +4048,76 @@ async fn retire_interactive_application(
         component: CleanupComponent::Socket,
         outcome: socket_cleanup_outcome(deployment.socket_directory),
     });
-    let build_outcome = deployment.active_workspace.build.clone().map_or(
-        CleanupComponentOutcome::Completed,
-        |lease| {
-            let released = lease.release();
-            match released {
-                Ok(()) => CleanupComponentOutcome::Completed,
-                Err(error) => CleanupComponentOutcome::Failed {
-                    detail: error.to_string(),
-                },
-            }
-        },
-    );
+    let quiescent = exact_process_stopped
+        && components
+            .iter()
+            .filter(|component| {
+                matches!(
+                    component.component,
+                    CleanupComponent::ToolService | CleanupComponent::Delivery
+                )
+            })
+            .all(|component| matches!(component.outcome, CleanupComponentOutcome::Completed));
+    let build_outcome = if quiescent {
+        match deployment
+            .active_workspace
+            .retire(&deployment.active_workspace.view)
+            .await
+        {
+            Ok(()) => CleanupComponentOutcome::Completed,
+            Err(error) => CleanupComponentOutcome::Failed {
+                detail: error.to_string(),
+            },
+        }
+    } else {
+        CleanupComponentOutcome::Failed {
+            detail: "workspace retained: exact process and hosted work must both settle".into(),
+        }
+    };
+    let workspace_retired = matches!(build_outcome, CleanupComponentOutcome::Completed);
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::BuildResource,
         outcome: build_outcome,
     });
-    let binding_outcome = if deployment.worktree_custody.take().is_some() {
-        // Pane removal (including an absent/non-owned pane) is not a process reap.
-        CleanupComponentOutcome::Failed {
-            detail: "custody retained: tmux cannot prove exact process termination".into(),
+    let binding_outcome = if let Some(custody) = deployment.worktree_custody.take() {
+        if workspace_retired {
+            if let Some(custody) =
+                (custody.as_ref() as &dyn std::any::Any).downcast_ref::<ActorWorkspaceCustody>()
+            {
+                let completed = {
+                    let mut state = custody.state.lock();
+                    state.launch = scoped_custody::LaunchCustody::Unclaimed;
+                    state
+                        .terminal
+                        .as_ref()
+                        .is_some_and(|exit| exit.kind == ActorExitKind::Completed)
+                };
+                let binding = custody.binding.lock().take();
+                match binding
+                    .map(|binding| {
+                        if completed {
+                            binding.complete(&mut custody.bindings.lock())
+                        } else {
+                            binding.release(&mut custody.bindings.lock())
+                        }
+                    })
+                    .transpose()
+                {
+                    Ok(_) => CleanupComponentOutcome::Completed,
+                    Err(error) => CleanupComponentOutcome::Failed {
+                        detail: error.to_string(),
+                    },
+                }
+            } else {
+                CleanupComponentOutcome::Failed {
+                    detail: "unknown workspace custody owner".into(),
+                }
+            }
+        } else {
+            // Pane removal (including an absent/non-owned pane) is not a process reap.
+            CleanupComponentOutcome::Failed {
+                detail: "custody retained: tmux cannot prove exact process termination".into(),
+            }
         }
     } else {
         CleanupComponentOutcome::Completed
@@ -4074,15 +4132,22 @@ async fn retire_interactive_application(
 /// Account for exact resident cleanup before draining the original HTTP task.
 /// Namespace/native and external-handler domains remain independently unknown.
 async fn stop_retired_tool_service(
-    _actor: ActorRef,
+    actor: ActorRef,
     service: &mut hosted_retirement::HostedOwner,
 ) -> CleanupComponentOutcome {
     match hosted_retirement::observe(service,
         hosted_retirement::CompletionBoundary::AbortForShutdown,
         APPLICATION_TASK_GRACE_TIMEOUT).await {
         hosted_retirement::HostedObservation::Observed {
-            http: hosted_retirement::HttpObservation::Drained, ..
-        } => CleanupComponentOutcome::Completed,
+            seal: hosted_retirement::SealObservation::Confirmed(seal),
+            resident: hosted_retirement::ResidentObservation::Accounted(cleanup),
+            http: hosted_retirement::HttpObservation::Drained,
+        } if seal.actor() == actor && cleanup.actor() == actor && cleanup.is_confirmed() => CleanupComponentOutcome::Completed,
+        hosted_retirement::HostedObservation::Observed {
+            seal: hosted_retirement::SealObservation::TerminalPath,
+            resident: hosted_retirement::ResidentObservation::Accounted(cleanup),
+            http: hosted_retirement::HttpObservation::Drained,
+        } if cleanup.actor() == actor && cleanup.is_confirmed() => CleanupComponentOutcome::Completed,
         observation => CleanupComponentOutcome::Failed {
             detail: format!("resident/HTTP cleanup retained: {observation:?}; native/external cleanup is not established"),
         },

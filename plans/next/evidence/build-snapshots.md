@@ -139,8 +139,8 @@ those capabilities or writable aliases to frozen backing directories. An overmou
 does not retarget existing cwd/directory descriptors; that needs explicit handling
 before this can operate safely around a persistent TUI.
 
-Use flat lower-layer lists, not recursively nested merged mounts. Bound layer
-growth and provide eventual consolidation: unlimited depth is not free. Ext4
+Use flat lower-layer lists, not recursively nested merged mounts. Actual kernel
+admission determines capacity; do not introduce automatic full-tree copying. Ext4
 OverlayFS copies up at file granularity, so modifying a large inherited file can
 still copy that file. Importing an existing ordinary ext4 target also has a real
 one-time cost and requires a stable source; a read-only alias does not freeze its
@@ -163,7 +163,7 @@ cache daemon's mount-namespace behavior is separately solved.
   eventually reclaim unused layers.
 - A representative repository build benefits across real managed checkouts while
   changed source, compiler options, and build-script inputs invalidate correctly.
-- Recursive generations and consolidation preserve deletions and bounded storage.
+- Recursive generations preserve deletions without whole-tree copy amplification.
 
 Coordinate changes to execution admission and process lifetime with the active
 interactive-applications work. The cache is an optimization: publication failure

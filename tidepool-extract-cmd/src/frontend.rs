@@ -100,12 +100,17 @@ fn worker_payload(args: &[OsString]) -> Result<Option<OsString>, FrontendError> 
     }
 }
 
-fn worker_bin() -> Result<PathBuf, FrontendError> {
+/// Resolve the worker paired with a selected frontend before relocating it.
+pub fn worker_for_frontend(frontend: &std::path::Path) -> PathBuf {
     if let Some(path) = std::env::var_os(WORKER_ENV) {
-        return Ok(path.into());
+        return path.into();
     }
+    frontend.with_file_name("tidepool-extract-bin")
+}
+
+fn worker_bin() -> Result<PathBuf, FrontendError> {
     let current = std::env::current_exe().map_err(FrontendError::Io)?;
-    Ok(current.with_file_name("tidepool-extract-bin"))
+    Ok(worker_for_frontend(&current))
 }
 
 pub(crate) struct PreparedWorker {
@@ -320,6 +325,26 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn relocation_resolves_worker_from_original_frontend() {
+        let _env = ENV.lock().unwrap();
+        let previous = std::env::var_os(WORKER_ENV);
+        std::env::remove_var(WORKER_ENV);
+        assert_eq!(
+            worker_for_frontend(std::path::Path::new("/selected/bin/tidepool-extract")),
+            PathBuf::from("/selected/bin/tidepool-extract-bin")
+        );
+        std::env::set_var(WORKER_ENV, "/explicit/worker");
+        assert_eq!(
+            worker_for_frontend(std::path::Path::new("/selected/bin/tidepool-extract")),
+            PathBuf::from("/explicit/worker")
+        );
+        match previous {
+            Some(value) => std::env::set_var(WORKER_ENV, value),
+            None => std::env::remove_var(WORKER_ENV),
+        }
+    }
 
     #[test]
     fn no_arguments_are_the_exact_usage_error() {

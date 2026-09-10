@@ -151,6 +151,132 @@ impl PreparedSourceWorktree {
 }
 
 impl WorktreeManager {
+    /// Preserve working files before the lifecycle owner retires their mounts.
+    /// The caller must have stopped writers and closed hosted-work admission.
+    /// Index, HEAD and objects already live in the shared Git administrative tree.
+    #[cfg(target_os = "linux")]
+    pub fn materialize_retired_view(
+        &self,
+        id: &WorktreeId,
+        namespace: &tidepool_node::MountNamespace,
+        visible: &Path,
+    ) -> Result<(), WorktreeError> {
+        let failure = |error: std::io::Error| WorktreeError::StorageFailure {
+            path: visible.to_owned(),
+            detail: error.to_string(),
+        };
+        let _capture = self.git.try_capture().ok_or_else(|| {
+            failure(std::io::Error::other(
+                "Git operation active during retirement",
+            ))
+        })?;
+        let mut receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        let view = match self.registry.views.resolve(&receipt.cwd).map_err(failure)? {
+            Some(view) => view,
+            None if receipt.status == WorktreeRecordStatus::Finalized => return Ok(()),
+            None => {
+                return Err(failure(std::io::Error::other(
+                    "worktree has no installed view",
+                )))
+            }
+        };
+        if !view.namespace.same_view_as(namespace).map_err(failure)? || view.root != visible {
+            return Err(failure(std::io::Error::other("retirement view mismatch")));
+        }
+        let stage = tempfile::tempdir_in(
+            receipt
+                .cwd
+                .parent()
+                .ok_or_else(|| failure(std::io::Error::other("worktree lacks parent")))?,
+        )
+        .map_err(failure)?;
+        let mut producer = namespace
+            .host_command(visible, "tar".as_ref())
+            .map_err(failure)?
+            .args([
+                "--acls",
+                "--xattrs",
+                "--sparse",
+                "--exclude=./.git",
+                "--exclude=./.shoal",
+                "-cf",
+                "-",
+                ".",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(failure)?;
+        let input = producer
+            .stdout
+            .take()
+            .ok_or_else(|| failure(std::io::Error::other("missing archive pipe")))?;
+        let consumer = std::process::Command::new("tar")
+            .args(["--acls", "--xattrs", "--sparse", "-xf", "-", "-C"])
+            .arg(stage.path())
+            .stdin(input)
+            .status();
+        if consumer.is_err() {
+            let _ = producer.kill();
+        }
+        let produced = producer.wait().map_err(failure)?;
+        if !consumer.map_err(failure)?.success() || !produced.success() {
+            return Err(failure(std::io::Error::other(
+                "working-file preservation failed",
+            )));
+        }
+        // Flush the independent copy before dropping any mount-backed source.
+        let mut pending = vec![stage.path().to_owned()];
+        let mut directories = Vec::new();
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).map_err(failure)?;
+            if metadata.is_dir() {
+                directories.push(path.clone());
+                for entry in std::fs::read_dir(path).map_err(failure)? {
+                    pending.push(entry.map_err(failure)?.path());
+                }
+            } else if metadata.is_file() {
+                std::fs::File::open(path)
+                    .and_then(|file| file.sync_all())
+                    .map_err(failure)?;
+            }
+        }
+        for directory in directories.into_iter().rev() {
+            std::fs::File::open(directory)
+                .and_then(|file| file.sync_all())
+                .map_err(failure)?;
+        }
+        // Original mounts remain authoritative until all files and the registry
+        // transition succeed. Failure retains them for a retry.
+        for entry in std::fs::read_dir(&receipt.cwd).map_err(failure)? {
+            let entry = entry.map_err(failure)?;
+            if entry.file_name() == ".git" || entry.file_name() == ".shoal" {
+                continue;
+            }
+            if entry.file_type().map_err(failure)?.is_dir() {
+                std::fs::remove_dir_all(entry.path()).map_err(failure)?;
+            } else {
+                std::fs::remove_file(entry.path()).map_err(failure)?;
+            }
+        }
+        for entry in std::fs::read_dir(stage.path()).map_err(failure)? {
+            let entry = entry.map_err(failure)?;
+            std::fs::rename(entry.path(), receipt.cwd.join(entry.file_name())).map_err(failure)?;
+        }
+        std::fs::File::open(&receipt.cwd)
+            .and_then(|file| file.sync_all())
+            .map_err(failure)?;
+        receipt.status = WorktreeRecordStatus::Finalized;
+        self.registry.put(&receipt)?;
+        self.registry
+            .views
+            .remove(&receipt.cwd, namespace)
+            .map_err(failure)?;
+        Ok(())
+    }
+
     pub fn new(
         git: GitCli,
         registry: WorktreeRegistry,

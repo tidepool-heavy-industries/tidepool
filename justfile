@@ -1,6 +1,6 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
-nix := if env_var_or_default("IN_NIX_SHELL", "") == "" { "nix develop --command" } else { "" }
-shoal_nix := "nix develop .#shoal --command"
+nix := "bash scripts/dev-shell.sh"
+shoal_nix := "bash scripts/dev-shell.sh --shoal"
 
 # Show the supported development workflow.
 default:

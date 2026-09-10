@@ -25,28 +25,47 @@ struct IncarnationState {
 #[derive(Debug)]
 pub(super) struct HostIncarnationLease {
     incarnation: Incarnation,
-    _owner_lock: File,
+    _owner_lock: HostRunLock,
+}
+
+/// Shared host/maintenance exclusion; maintenance never allocates an incarnation.
+#[derive(Debug)]
+pub(super) struct HostRunLock(File);
+impl HostRunLock {
+    pub(super) fn existing(run_root: &Path) -> io::Result<Self> {
+        Self::claim(run_root, false)
+    }
+
+    fn claim(run_root: &Path, create: bool) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .create(create)
+            .truncate(false)
+            .write(true)
+            .open(run_root.join("host-incarnation.owner.lock"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::other(format!(
+                "another Shoal host or maintenance operation already owns {}",
+                run_root.display()
+            ))),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+}
+impl Drop for HostRunLock {
+    fn drop(&mut self) {
+        // Concurrent fork may temporarily inherit the open description.
+        // Unlock ends ownership without waiting for that child to exec.
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "Shoal host owner unlock failed");
+        }
+    }
 }
 
 impl HostIncarnationLease {
     pub(super) fn claim(run_root: &Path) -> io::Result<Self> {
         fs::create_dir_all(run_root)?;
-        let lock_path = run_root.join("host-incarnation.owner.lock");
-        let owner_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)?;
-        match owner_lock.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                return Err(io::Error::other(format!(
-                    "another Shoal host already owns {}",
-                    run_root.display()
-                )));
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(error),
-        }
+        let owner_lock = HostRunLock::claim(run_root, true)?;
 
         let state_path = run_root.join("host-incarnation.json");
         let previous = read_previous(&state_path)?;
