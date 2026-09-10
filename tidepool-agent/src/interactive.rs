@@ -277,6 +277,8 @@ pub struct PublicationIdentity {
 #[derive(Debug)]
 pub enum PublicationReply {
     Ready {
+        /// Socket owner PID in the host's namespace; `pid` is native-local.
+        peer_pid: u32,
         pid: u32,
         start_ticks: u64,
         mount_namespace_inode: u64,

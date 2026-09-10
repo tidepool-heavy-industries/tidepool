@@ -133,5 +133,12 @@ a child launched with `/dev/null` stdin and opening a PTY in the retained view.
 The initial live planner exposed that device-mount defect before any workers
 were commissioned; the replacement runner includes the repair.
 
+Publication capture distinguishes the native-local PID used by begin/finish
+receipts from the kernel-authenticated socket peer PID visible to the host.
+Both come from the same publication connection; namespace capture still checks
+process start time and mount identity. Focused checks cover a real nested PID
+namespace, unchanged no-retry behavior after a lost reply, and source/build
+inheritance with distinct local and host identities.
+
 Local release receipts and checked logs are retained under
 `/home/inanna/dev/tidepool/target/resource-acceptance-20260909/`.

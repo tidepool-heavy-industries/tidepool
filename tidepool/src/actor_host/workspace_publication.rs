@@ -66,6 +66,7 @@ impl WorkspacePublication {
             .map_err(io::Error::other)?
         {
             PublicationReply::Ready {
+                peer_pid,
                 pid,
                 start_ticks,
                 mount_namespace_inode,
@@ -84,7 +85,7 @@ impl WorkspacePublication {
                 pending.identity = Some(identity);
                 // Retain identity even when descriptor capture fails: finish
                 // still has to release precisely this native admission.
-                MountNamespace::capture_matching(pid, start_ticks, mount_namespace_inode)
+                MountNamespace::capture_matching(peer_pid, start_ticks, mount_namespace_inode)
                     .map(Admission::Ready)
             }
             PublicationReply::Busy if pending.identity.is_none() => {

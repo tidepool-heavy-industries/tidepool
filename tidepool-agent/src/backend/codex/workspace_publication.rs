@@ -62,19 +62,33 @@ pub(super) async fn request(
             detail: "native controller socket is unavailable".into(),
         });
     };
-    let client = reqwest::Client::builder()
-        .unix_socket(socket)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .http1_only()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(unconfirmed)?;
-    let mut response = client
-        .post("http://localhost/v1/workspace/publication")
-        .json(&Request {
+    // Credentials belong to the same connection carrying the receipt. A PID
+    // serialized by the native process is local to its PID namespace.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let stream = tokio::net::UnixStream::connect(socket)
+            .await
+            .map_err(unconfirmed)?;
+        let peer_pid = stream
+            .peer_cred()
+            .map_err(unconfirmed)?
+            .pid()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| unconfirmed("native publication peer PID unavailable"))?;
+        let (mut client, connection) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .map_err(unconfirmed)?;
+        let driver = tokio::spawn(connection);
+        // Abort the driver if the request is cancelled or exceeds its deadline.
+        struct Driver(tokio::task::JoinHandle<Result<(), hyper::Error>>);
+        impl Drop for Driver {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _driver = Driver(driver);
+        let body = serde_json::to_vec(&Request {
             thread_id: &thread.id().0,
             sequence,
             operation: match operation {
@@ -91,42 +105,54 @@ pub(super) async fn request(
                 mount_namespace_inode: identity.mount_namespace_inode,
             }),
         })
-        .send()
-        .await
         .map_err(unconfirmed)?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(PublicationReply::Unavailable {
-            detail: "native controller has no publication support".into(),
-        });
-    }
-    response.error_for_status_ref().map_err(unconfirmed)?;
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(unconfirmed)? {
-        if body.len() + chunk.len() > 16 * 1024 {
-            return Err(unconfirmed("oversized publication reply"));
+        let request = hyper::Request::post("/v1/workspace/publication")
+            .header("Host", "localhost")
+            .header("Content-Type", "application/json")
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+            .map_err(unconfirmed)?;
+        let response = client.send_request(request).await.map_err(unconfirmed)?;
+        if response.status() == hyper::StatusCode::NOT_FOUND {
+            return Ok(PublicationReply::Unavailable {
+                detail: "native controller has no publication support".into(),
+            });
         }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(match serde_json::from_slice(&body).map_err(unconfirmed)? {
-        Reply::Ready {
-            pid,
-            start_ticks,
-            mount_namespace_inode,
-            cgroup_path,
-        } if pid > 0 && mount_namespace_inode > 0 && cgroup_path.is_absolute() => {
-            PublicationReply::Ready {
+        if !response.status().is_success() {
+            return Err(unconfirmed(format!(
+                "native publication HTTP {}",
+                response.status()
+            )));
+        }
+        use http_body_util::BodyExt;
+        let body = http_body_util::Limited::new(response.into_body(), 16 * 1024)
+            .collect()
+            .await
+            .map_err(unconfirmed)?
+            .to_bytes();
+        Ok(match serde_json::from_slice(&body).map_err(unconfirmed)? {
+            Reply::Ready {
                 pid,
                 start_ticks,
                 mount_namespace_inode,
                 cgroup_path,
+            } if pid > 0 && mount_namespace_inode > 0 && cgroup_path.is_absolute() => {
+                PublicationReply::Ready {
+                    peer_pid,
+                    pid,
+                    start_ticks,
+                    mount_namespace_inode,
+                    cgroup_path,
+                }
             }
-        }
-        Reply::Ready { .. } => return Err(unconfirmed("invalid native publication identity")),
-        Reply::Settled => PublicationReply::Settled,
-        Reply::Busy => PublicationReply::Busy,
-        Reply::Conflict => PublicationReply::Conflict,
-        Reply::Unavailable { reason } => PublicationReply::Unavailable { detail: reason },
+            Reply::Ready { .. } => return Err(unconfirmed("invalid native publication identity")),
+            Reply::Settled => PublicationReply::Settled,
+            Reply::Busy => PublicationReply::Busy,
+            Reply::Conflict => PublicationReply::Conflict,
+            Reply::Unavailable { reason } => PublicationReply::Unavailable { detail: reason },
+        })
     })
+    .await
+    .map_err(unconfirmed)?
 }
 
 fn unconfirmed(error: impl std::fmt::Display) -> AgentBackendError {

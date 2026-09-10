@@ -9,6 +9,7 @@ use tidepool_agent::{AgentBackendError, BackendThreadId};
 #[derive(Default)]
 struct Backend {
     identity: Mutex<Option<PublicationIdentity>>,
+    peer_pid: Mutex<Option<u32>>,
     busy: Mutex<bool>,
     calls: Mutex<Vec<(u64, PublicationOperation)>>,
     lose_finish: Mutex<bool>,
@@ -78,6 +79,7 @@ impl InteractiveAgentBackend for Backend {
                     let identity = self.identity.lock().unwrap();
                     assert!(expected.is_none_or(|expected| expected == identity));
                     Ok(PublicationReply::Ready {
+                        peer_pid: self.peer_pid.lock().unwrap_or(identity.pid),
                         pid: identity.pid,
                         start_ticks: identity.start_ticks,
                         mount_namespace_inode: identity.mount_namespace_inode,
@@ -132,8 +134,9 @@ impl NativeProcess {
         let mount_namespace_inode = std::fs::metadata(format!("/proc/{pid}/ns/mnt"))
             .unwrap()
             .ino();
+        *backend.peer_pid.lock() = Some(pid);
         *backend.identity.lock() = Some(PublicationIdentity {
-            pid,
+            pid: 2,
             start_ticks,
             mount_namespace_inode,
         });
@@ -324,6 +327,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap();
     assert!(build(&workspace).iter().any(|fresh| !fresh));
     let _native = NativeProcess::start(&workspace, &backend);
+
     let binding = runtime.path().join("binding.json");
     tidepool_agent::accept_interactive_session_binding(
         &binding,
