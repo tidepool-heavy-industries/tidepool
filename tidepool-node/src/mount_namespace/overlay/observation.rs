@@ -51,12 +51,23 @@ impl MountNamespace {
     pub(super) fn observe_overlay(&self, target: &CString) -> io::Result<Observation> {
         let target = target.clone();
         let expected_target = target.clone();
+        let proc =
+            crate::process_boundary::service_scope::checked_proc().map_err(io::Error::other)?;
         let mut command = self.host_command(Path::new("/"), "cat".as_ref())?;
         // SAFETY: runs after namespace entry with preallocated arguments and
         // syscalls only. The nine-byte header cannot fill the stdout pipe while
         // Command waits for exec; cat subsequently appends its own mountinfo.
         unsafe {
             command.pre_exec(move || {
+                // This helper retains its caller's PID namespace. The target's
+                // procfs may not contain it; resolve self through caller procfs.
+                let mountinfo = rustix::fs::openat(
+                    &proc,
+                    c"self/mountinfo",
+                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )?;
+                rustix::stdio::dup2_stdin(&mountinfo)?;
                 let id = mount_id(target.as_c_str())?;
                 let flags = rustix::fs::statvfs(target.as_c_str())?.f_flag;
                 let mut header = [0u8; 9];
@@ -72,9 +83,14 @@ impl MountNamespace {
                 }
             });
         }
-        let output = command.arg("/proc/self/mountinfo").output()?;
+        let output = command.output()?;
         if !output.status.success() || output.stdout.len() < 9 {
-            return Err(invalid("mount inspection did not complete"));
+            return Err(io::Error::other(format!(
+                "mount inspection failed: status={}; header_bytes={}; stderr={}",
+                output.status,
+                output.stdout.len().min(9),
+                String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(2048)])
+            )));
         }
         let id = u64::from_le_bytes(
             output.stdout[..8]

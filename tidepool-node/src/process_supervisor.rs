@@ -13,7 +13,7 @@ use crate::{
     ServiceScopeCleanup, ServiceScopeError, ServiceStdio,
 };
 
-pub const PROCESS_SUPERVISOR_VERSION: u32 = 1;
+pub const PROCESS_SUPERVISOR_VERSION: u32 = 2;
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_OPERATION_MS: u64 = 120_000;
 const UNAUTHENTICATED_READ_TIMEOUT: Duration = Duration::from_millis(250);
@@ -146,6 +146,8 @@ pub enum ProcessSupervisorObservation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessSupervisorResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_view: Option<crate::NamespaceEntry>,
     pub version: u32,
     pub launch_id: Option<String>,
     pub observation: ProcessSupervisorObservation,
@@ -215,6 +217,25 @@ impl ProcessSupervisorClient {
         self.execute_until(ProcessSupervisorCommand::Pin, deadline, |state| {
             state == ProcessSupervisorObservation::Pinned
         })
+    }
+
+    pub fn workspace_view(
+        &self,
+        deadline: Duration,
+    ) -> Result<crate::MountNamespace, ProcessSupervisorError> {
+        let reply = self.request(ProcessSupervisorCommand::Inspect, deadline)?;
+        if let Some(error) = reply.error {
+            return Err(ProcessSupervisorError::Remote(error));
+        }
+        if reply.operation_pending || reply.observation != ProcessSupervisorObservation::Pinned {
+            return Err(ProcessSupervisorError::Remote(
+                "workspace acquisition requires pinned init".into(),
+            ));
+        }
+        Ok(reply
+            .workspace_view
+            .ok_or_else(|| ProcessSupervisorError::Remote("pinned workspace unavailable".into()))?
+            .acquire()?)
     }
 
     pub fn release(
@@ -482,6 +503,7 @@ enum OwnedLaunch {
 
 #[derive(Clone)]
 struct WorkerObservation {
+    workspace_view: Option<crate::MountNamespace>,
     state: ProcessSupervisorObservation,
     pending: bool,
     error: Option<String>,
@@ -572,6 +594,7 @@ pub fn run_process_supervisor(path: &Path) -> Result<(), ProcessSupervisorError>
         None => reservation,
     };
     let observed = std::sync::Arc::new(std::sync::Mutex::new(WorkerObservation {
+        workspace_view: None,
         state: ProcessSupervisorObservation::Reserved,
         pending: false,
         error: None,
@@ -705,8 +728,19 @@ fn serve(
         if let Err(checkpoint_error) = publish_checkpoint(manifest, &observed) {
             error.get_or_insert_with(|| checkpoint_error.to_string());
         }
-        let response_written =
-            write_response(&mut stream, &response(manifest, &observed, error)).is_ok();
+        let mut reply = response(manifest, &observed, error);
+        if matches!(authority, Authority::Primary)
+            && !observed.pending
+            && observed.state == ProcessSupervisorObservation::Pinned
+        {
+            if let Some(view) = &observed.workspace_view {
+                match view.entry() {
+                    Ok(entry) => reply.workspace_view = Some(entry),
+                    Err(error) => reply.error = Some(error.to_string()),
+                }
+            }
+        }
+        let response_written = write_response(&mut stream, &reply).is_ok();
         // Lost operation replies leave the same helper and scope addressable.
         // Finalization exits only after its response was actually written.
         if finalize && response_written {
@@ -740,7 +774,7 @@ fn scope_worker(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         };
-        let error = match command {
+        let mut error = match command {
             Some(ScopeCommand::Prepare) => prepare(
                 &mut launch,
                 &environment,
@@ -771,6 +805,20 @@ fn scope_worker(
         .map(|error| error.to_string());
         if let Ok(mut state) = observed.lock() {
             state.state = observation(&launch, &stopped);
+            state.workspace_view = match &launch {
+                OwnedLaunch::Scope(scope)
+                    if state.state == ProcessSupervisorObservation::Pinned =>
+                {
+                    match scope.workspace_view() {
+                        Ok(view) => Some(view),
+                        Err(failure) => {
+                            error.get_or_insert_with(|| failure.to_string());
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
             state.pending = false;
             state.error = error;
         }
@@ -899,6 +947,7 @@ fn response(
     error: Option<String>,
 ) -> ProcessSupervisorResponse {
     ProcessSupervisorResponse {
+        workspace_view: None,
         version: PROCESS_SUPERVISOR_VERSION,
         launch_id: Some(manifest.launch_id.clone()),
         observation: observation.state,
@@ -909,6 +958,7 @@ fn response(
 
 fn unauthorized_response(error: Option<String>) -> ProcessSupervisorResponse {
     ProcessSupervisorResponse {
+        workspace_view: None,
         version: PROCESS_SUPERVISOR_VERSION,
         launch_id: None,
         observation: ProcessSupervisorObservation::Reserved,
@@ -1264,6 +1314,7 @@ mod tests {
     fn primary_loss_is_retried_after_pending_scope_operation() {
         let (commands, receive) = std::sync::mpsc::sync_channel(1);
         let observation = std::sync::Arc::new(std::sync::Mutex::new(WorkerObservation {
+            workspace_view: None,
             state: ProcessSupervisorObservation::Pinned,
             pending: true,
             error: None,

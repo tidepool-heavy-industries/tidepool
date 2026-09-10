@@ -37,38 +37,38 @@ fn completed_checkout_uses_its_launch_view_and_requires_reattachment_on_reopen()
         root.join("managed"),
         repository.path(),
     );
-    let handle = manager
-        .create(&WorktreeSpec::from_current_repository("child"))
+    let prepared = manager
+        .prepare_inherited_source(
+            &tidepool_worktree::WorktreeSource::CurrentRepository,
+            &tidepool_repr::ActorPath::parse("root/child").unwrap(),
+        )
         .unwrap();
+    let cwd = prepared.receipt().cwd.clone();
+    std::fs::write(cwd.join("file"), "before\n").unwrap();
     for name in ["upper", "work", "view"] {
         std::fs::create_dir(root.join(name)).unwrap();
     }
     let view = root.join("view");
     let common = inspect::git_common_dir(repository.git(), repository.path()).unwrap();
     let namespace = tidepool_node::ProcessMountBoundary::new(
-        handle.cwd(),
+        &cwd,
         [repository.path().to_owned(), root.join("managed")],
         [common],
     )
     .unwrap()
     .with_project_root(&view)
     .unwrap()
-    .with_overlay_view(
-        [handle.cwd().to_owned()],
-        root.join("upper"),
-        root.join("work"),
-        &view,
-    )
+    .with_overlay_view([cwd.clone()], root.join("upper"), root.join("work"), &view)
     .unwrap()
     .prepare_view(
         "bwrap",
         std::time::Instant::now() + std::time::Duration::from_secs(10),
     )
     .unwrap();
-    let mounted = manager
-        .mount_worktree(handle.id(), namespace.clone(), &view)
+    let handle = manager
+        .finish_inherited_source(prepared, namespace.clone(), &view)
         .unwrap();
-    assert_eq!(mounted.receipt().status, WorktreeRecordStatus::Mounted);
+    assert_eq!(handle.receipt().status, WorktreeRecordStatus::Mounted);
     let output = namespace
         .host_command(&view, "/bin/sh".as_ref())
         .unwrap()
@@ -338,4 +338,66 @@ fn host_git_observes_and_commits_the_actual_mounted_worktree() {
             .trimmed(),
         "inherited"
     );
+}
+
+#[test]
+fn activation_replaces_only_the_expected_preparation_view() {
+    let repository = TestRepo::init().unwrap();
+    repository
+        .writer()
+        .commit_file("file", "seed", "seed")
+        .unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let manager = WorktreeManager::new(
+        repository.git().clone(),
+        WorktreeRegistry::open(storage.path().join("registry")).unwrap(),
+        storage.path().join("managed"),
+        repository.path(),
+    );
+    let handle = manager
+        .create(&WorktreeSpec::from_current_repository("activation"))
+        .unwrap();
+    let visible = storage.path().join("visible");
+    std::fs::create_dir(&visible).unwrap();
+    let boundary = tidepool_node::ProcessMountBoundary::new(
+        handle.cwd(),
+        [repository.path().to_owned(), storage.path().join("managed")],
+        [inspect::git_common_dir(repository.git(), repository.path()).unwrap()],
+    )
+    .unwrap()
+    .with_project_root(&visible)
+    .unwrap();
+    let prepare = || {
+        boundary
+            .prepare_view(
+                "bwrap",
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .unwrap()
+    };
+    let prepared = prepare();
+    let active = prepare();
+    assert!(!prepared.same_view_as(&active).unwrap());
+    assert!(manager
+        .activate_worktree(handle.id(), &prepared, active.clone(), &visible)
+        .is_err());
+    manager
+        .mount_worktree(handle.id(), prepared.clone(), &visible)
+        .unwrap();
+    assert!(manager
+        .activate_worktree(handle.id(), &active, active.clone(), &visible)
+        .is_err());
+    manager
+        .activate_worktree(handle.id(), &prepared, active.clone(), &visible)
+        .unwrap();
+    assert!(manager
+        .activate_worktree(handle.id(), &prepared, prepared.clone(), &visible)
+        .is_err());
+    assert!(manager
+        .mount_worktree(handle.id(), prepared, &visible)
+        .is_err());
+    manager
+        .mount_worktree(handle.id(), active, &visible)
+        .unwrap();
+    manager.observe_submission(&handle).unwrap();
 }

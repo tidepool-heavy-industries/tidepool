@@ -98,6 +98,8 @@ impl SupervisorRecoveryKey {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ScopedProcessError {
+    #[error("workspace activation: {0}")]
+    Workspace(#[from] std::io::Error),
     #[error("scope operation is invalid in its current phase")]
     WrongPhase,
     #[error(transparent)]
@@ -278,6 +280,18 @@ pub(super) fn pin_supervisor_slot(
     match &mut *slot.lock() {
         ScopedProcessSlot::Supervisor { client, .. } => {
             Ok(supervisor_observation(client.pin(remaining(deadline)?)?))
+        }
+        _ => Err(ScopedProcessError::WrongPhase),
+    }
+}
+
+pub(super) fn supervisor_workspace(
+    slot: &parking_lot::Mutex<ScopedProcessSlot>,
+    deadline: Instant,
+) -> Result<tidepool_node::MountNamespace, ScopedProcessError> {
+    match &mut *slot.lock() {
+        ScopedProcessSlot::Supervisor { client, .. } => {
+            Ok(client.workspace_view(remaining(deadline)?)?)
         }
         _ => Err(ScopedProcessError::WrongPhase),
     }

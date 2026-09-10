@@ -161,18 +161,22 @@ impl LaunchReservation {
             inherited.remove(1);
             options.drain(5..7);
         }
-        let mut command = match self.view {
-            Some(view) => {
-                // Open the host's descriptors before PID isolation hides its PID.
-                // Preserve the already-prepared mounts, including read-only policy.
-                let mut command = view
-                    .entry
-                    .command(&view.directory, self.bubblewrap.as_os_str())?;
-                command.args(["--bind", "/", "/"]);
-                // A normal bind marks device mounts nodev. Native subprocess
-                // setup opens /dev/null and PTYs even with inherited TUI stdio.
-                command.args(["--dev-bind", "/dev", "/dev"]);
-                command.args(&options).arg("--chdir").arg(&view.directory);
+        let prepared = self
+            .view
+            .map(|view| {
+                view.entry
+                    .acquire()
+                    .map(|namespace| (namespace, view.directory))
+            })
+            .transpose()?;
+        let workspace_preparation = prepared.as_ref().map(|(namespace, _)| namespace.clone());
+        let mut command = match prepared {
+            Some((namespace, directory)) => {
+                let mut command =
+                    namespace.host_command(&directory, self.bubblewrap.as_os_str())?;
+                // Keep native device access when cloning the prepared root.
+                command.args(["--bind", "/", "/", "--dev-bind", "/dev", "/dev"]);
+                command.args(&options).arg("--chdir").arg(&directory);
                 command
                     .arg("--")
                     .arg(self.command.program)
@@ -235,6 +239,7 @@ impl LaunchReservation {
         }
         let monitor = command.spawn().map_err(ServiceScopeError::NotSpawned)?;
         Ok(ScopeCapability {
+            workspace_preparation,
             monitor,
             proc,
             info: info_read,
@@ -363,6 +368,7 @@ struct InitInfo {
 
 struct InitWitness {
     pidfd: OwnedFd,
+    workspace: crate::MountNamespace,
 }
 
 /// Noncloneable process owner. Errors borrow and retain its resources. Dropping
@@ -370,6 +376,7 @@ struct InitWitness {
 /// before pinning it may leave a blocked init. Its self-held sync writer prevents
 /// host gate closure from accidentally launching the payload in that case.
 pub struct ScopeCapability {
+    workspace_preparation: Option<crate::MountNamespace>,
     monitor: Child,
     proc: OwnedFd,
     info: OwnedFd,
@@ -395,6 +402,20 @@ impl ScopeCapability {
         self.pin_record(&info)?;
         self.phase = Phase::Pinned;
         Ok(())
+    }
+
+    /// The final workload view, retained while its exact init is still blocked.
+    pub fn workspace_view(&self) -> Result<crate::MountNamespace, ServiceScopeError> {
+        if self.phase != Phase::Pinned {
+            return Err(ServiceScopeError::WrongPhase);
+        }
+        let view = &self
+            .init
+            .as_ref()
+            .ok_or(ServiceScopeError::WrongPhase)?
+            .workspace;
+        view.require_live_owner()?;
+        Ok(view.clone())
     }
 
     fn read_info(&mut self, deadline: Instant) -> Result<InitInfo, ServiceScopeError> {
@@ -462,7 +483,21 @@ impl ScopeCapability {
                 "namespace inode mismatch".into(),
             ));
         }
-        self.init = Some(InitWitness { pidfd });
+        let workspace = crate::MountNamespace::capture(info.pid)?;
+        let workspace = match &self.workspace_preparation {
+            Some(prepared) => workspace.with_preparation(prepared),
+            None => workspace,
+        };
+        let mut exited = [rustix::event::PollFd::new(
+            &pidfd,
+            rustix::event::PollFlags::IN,
+        )];
+        if rustix::event::poll(&mut exited, Some(&rustix::event::Timespec::default()))? != 0 {
+            return Err(ServiceScopeError::IdentityUnconfirmed(
+                "init exited during workspace capture".into(),
+            ));
+        }
+        self.init = Some(InitWitness { pidfd, workspace });
         Ok(())
     }
 
@@ -726,7 +761,7 @@ fn read_status(directory: &OwnedFd) -> Result<ProcStatus, ServiceScopeError> {
             .collect::<Result<_, _>>()?,
     })
 }
-fn checked_proc() -> Result<OwnedFd, ServiceScopeError> {
+pub(crate) fn checked_proc() -> Result<OwnedFd, ServiceScopeError> {
     checked_proc_at("/proc")
 }
 

@@ -487,6 +487,32 @@ impl WorktreeManager {
         Ok(WorktreeHandle::from_receipt(mounted))
     }
 
+    /// Replace exactly the preparation view before native execution is released.
+    #[cfg(target_os = "linux")]
+    pub fn activate_worktree(
+        &self,
+        id: &WorktreeId,
+        expected: &tidepool_node::MountNamespace,
+        namespace: tidepool_node::MountNamespace,
+        visible_root: &Path,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        let receipt = self
+            .registry
+            .get(id)?
+            .ok_or_else(|| WorktreeError::WorktreeNotRegistered(id.clone()))?;
+        if receipt.status == WorktreeRecordStatus::Provisional {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "workspace activation requires completed preparation".into(),
+            ));
+        }
+        Ok(WorktreeHandle::from_receipt(self.registry.activate_view(
+            &receipt,
+            expected,
+            namespace,
+            visible_root,
+        )?))
+    }
+
     fn create_with_branch(
         &self,
         spec: &WorktreeSpec,

@@ -179,12 +179,10 @@ fn scope_rejects_stale_and_sibling_info_retains_exact_cleanup() {
 fn scope_timeout_retains_owner_then_confirms_both_facts() {
     let mut fixture = Fixture::new("echo started > started");
     fixture.pin();
-    assert!(
-        fixture
-            .scope
-            .terminate_and_wait(Instant::now() - Duration::from_secs(1))
-            .is_err()
-    );
+    assert!(fixture
+        .scope
+        .terminate_and_wait(Instant::now() - Duration::from_secs(1))
+        .is_err());
     assert!(fixture.scope.init.is_some());
     assert!(fixture.scope.cleanup.is_none());
     assert!(matches!(
@@ -290,16 +288,12 @@ fn released_descendants(kill_monitor: bool) {
 fn scope_private_gate_is_blocking_cloexec_and_above_stdio() {
     let (read, write) = private_pipe().unwrap();
     assert!(read.as_raw_fd() > 2 && write.as_raw_fd() > 2);
-    assert!(
-        !rustix::fs::fcntl_getfl(&read)
-            .unwrap()
-            .contains(OFlags::NONBLOCK)
-    );
-    assert!(
-        rustix::io::fcntl_getfd(&read)
-            .unwrap()
-            .contains(FdFlags::CLOEXEC)
-    );
+    assert!(!rustix::fs::fcntl_getfl(&read)
+        .unwrap()
+        .contains(OFlags::NONBLOCK));
+    assert!(rustix::io::fcntl_getfd(&read)
+        .unwrap()
+        .contains(FdFlags::CLOEXEC));
     assert!(wait_readable(&read, Instant::now()).is_err());
 }
 
@@ -472,7 +466,7 @@ fn inherited_terminal_child() {
 fn retained_workspace_is_entered_before_pid_scope() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    for name in ["base", "upper", "work", "view"] {
+    for name in ["base", "upper", "work", "view", "next-upper", "next-work"] {
         std::fs::create_dir(root.join(name)).unwrap();
     }
     std::fs::write(root.join("base/marker"), "retained-view").unwrap();
@@ -501,14 +495,16 @@ fn retained_workspace_is_entered_before_pid_scope() {
                 program: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    "set -e; cat marker; /bin/sh -c 'printf child' </dev/null > child; exec 3<>/dev/ptmx; printf ready > ready".into(),
+                    "set -e; cd \"$1\"; cat marker; /bin/sh -c 'printf child' </dev/null > child; exec 3<>/dev/ptmx; printf ready > ready".into(),
+                    "fixture".into(),
+                    view.to_str().unwrap().to_owned(),
                 ],
             },
         )
         .unwrap()
         .in_view(RetainedProcessView {
             entry: namespace.entry().unwrap(),
-            directory: view,
+            directory: view.clone(),
         })
         .unwrap()
         .spawn(
@@ -518,9 +514,32 @@ fn retained_workspace_is_entered_before_pid_scope() {
         .unwrap();
     let mut fixture = Fixture { scope, directory };
     fixture.pin();
+    let final_view = fixture.scope.workspace_view().unwrap();
+    assert!(!namespace.same_view_as(&final_view).unwrap());
+    let entry: crate::NamespaceEntry =
+        serde_json::from_slice(&serde_json::to_vec(&final_view.entry().unwrap()).unwrap()).unwrap();
+    let exported = entry.acquire().unwrap();
+    let final_view = exported.bind_live_view(final_view).unwrap();
+    let root = fixture.directory.path();
+    let (_, outcome) = final_view
+        .prepare_overlay_rotation(
+            crate::OverlayRotation::prepare(
+                &view,
+                &[root.join("base"), root.join("upper")],
+                &root.join("next-upper"),
+                &root.join("next-work"),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .apply();
+    assert!(
+        matches!(outcome, crate::OverlayRotationOutcome::Rotated),
+        "{outcome:?}"
+    );
     fixture.scope.release_command().unwrap();
     let limit = deadline();
-    while !fixture.directory.path().join("upper/ready").exists() {
+    while !fixture.directory.path().join("next-upper/ready").exists() {
         assert!(
             Instant::now() < limit,
             "{}",
@@ -534,4 +553,6 @@ fn retained_workspace_is_entered_before_pid_scope() {
         "retained-view"
     );
     assert!(!fixture.directory.path().join("base/child").exists());
+    assert!(final_view.require_live_owner().is_err());
+    exported.require_live_owner().unwrap();
 }

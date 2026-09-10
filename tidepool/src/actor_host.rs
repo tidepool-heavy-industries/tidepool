@@ -15,7 +15,7 @@ mod overlay_resource;
 mod workspace;
 mod workspace_publication;
 pub(crate) use hosted_retirement::{CompletionBoundary, HostedObservation};
-use workspace::{PreparedWorkspace, WorkspaceLayout};
+use workspace::{ActiveWorkspace, PreparedWorkspace, WorkspaceLayout};
 mod model_free;
 mod prompt_catalog;
 pub(crate) mod recipe_checks;
@@ -466,7 +466,7 @@ pub enum ActorHostReadiness {
 
 struct InteractiveDeployment {
     /// Retain the view independently of the bootstrap and native process lifetimes.
-    prepared_workspace: Arc<PreparedWorkspace>,
+    active_workspace: Arc<ActiveWorkspace>,
     supervisor: Option<ActorRef>,
     notified_provider_failures: std::collections::BTreeSet<(String, String)>,
     actor: ActorRef,
@@ -691,6 +691,7 @@ struct InteractiveApplicationOwner {
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
     hosted: hosted_retirement::HostedSlot,
     launch: HostLaunchState,
+    pending_activations: Vec<tidepool_actor::ResidentActivation>,
     terminal: Option<ActorTerminal>,
     retirement: Arc<Mutex<Option<InteractiveCleanupReceipt>>>,
 }
@@ -715,7 +716,7 @@ type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner
 
 #[derive(Clone)]
 struct BoundWorkspace {
-    workspace: Arc<PreparedWorkspace>,
+    workspace: Arc<ActiveWorkspace>,
     thread: QueueReadyThread,
 }
 
@@ -1883,7 +1884,7 @@ async fn run_interactive_applications(
                 }
                 for deployment in &deployments {
                     if let Some(thread) = &deployment.thread {
-                        let workspace = deployment.prepared_workspace.clone();
+                        let workspace = deployment.active_workspace.clone();
                         if let Ok(mut publication) = workspace.publication.clone().try_lock_owned() {
                             if publication.is_pending() {
                                 let backend = backend.clone();
@@ -2028,6 +2029,7 @@ async fn run_interactive_applications(
                             scoped_retention: None,
                             hosted: hosted_slot.clone(),
                             launch: HostLaunchState::Pending,
+                            pending_activations: Vec::new(),
                             terminal: None,
                             retirement: Arc::new(Mutex::new(None)),
                         };
@@ -2082,36 +2084,25 @@ async fn run_interactive_applications(
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
                         let Some(application) = deployments.iter_mut().find(|app| app.actor == actor) else {
+                            let mut owners = application_owners.lock();
+                            if let Some(owner) = owners.get_mut(&actor) {
+                                if owner.terminal.is_some() { continue; }
+                                match owner.launch {
+                                    HostLaunchState::Pending => {
+                                        owner.pending_activations.push(activation);
+                                        continue;
+                                    }
+                                    HostLaunchState::Failed | HostLaunchState::Abandoned => continue,
+                                    HostLaunchState::Published => {}
+                                }
+                            }
                             break Some(format!("resident actor {actor:?} requested a session activation without a deployed application"));
                         };
-                        if accepts_activation(application, &activation) {
-                            let sequence = activation.id.sequence();
-                            if let Err(error) = publish_inbox_event(
-                                Arc::clone(&application.inbox),
-                                DurableActorEvent::session(&activation),
-                            ).await {
-                                application.failure_reported = true;
-                                let local_actor = application.local_actor.clone();
-                                tracing::warn!(?actor, %error, "actor activation delivery degraded");
-                                if let Err(error) = apply_application_failure(
-                                    local_actor,
-                                    ExternalApplicationFailure {
-                                        class: ExternalApplicationFailureClass::ToolHostStartup,
-                                        detail: error,
-                                    },
-                                )
-                                .await
-                                {
-                                    break Some(error);
-                                }
-                                continue;
-                            }
-                            application
-                                .runtime_observation
-                                .publish_request_activation(activation.request, sequence);
-                            application.last_activation_sequence = sequence;
+                        if let Err(error) = deliver_session_activation(application, activation).await {
+                            break Some(error);
                         }
                     }
+
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         worktree_authority.remove_grant(actor.into());
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
@@ -2226,13 +2217,13 @@ async fn run_interactive_applications(
                 match launched {
                     Some(Ok((local_actor, Ok(Some(launched))))) => {
                         let actor = local_actor.identity();
-                        let already_retired = {
+                        let (already_retired, pending_activations) = {
                             let mut owners = application_owners.lock();
                             let owner = owners.get_mut(&actor).expect("registered launch owner");
                             owner.launch = HostLaunchState::Published;
-                            owner.terminal.is_some()
+                            (owner.terminal.is_some(), std::mem::take(&mut owner.pending_activations))
                         };
-                        let deployment = launched.deployment;
+                        let mut deployment = launched.deployment;
                         if already_retired {
                             spawn_owned_retirement(&mut retirements, deployment, tmux.clone(), &application_owners);
                             continue;
@@ -2290,7 +2281,15 @@ async fn run_interactive_applications(
                             };
                             (actor, result)
                         });
+                        let mut activation_error = None;
+                        for activation in pending_activations {
+                            if let Err(error) = deliver_session_activation(&mut deployment, activation).await {
+                                activation_error = Some(error);
+                                break;
+                            }
+                        }
                         deployments.push(deployment);
+                        if let Some(error) = activation_error { break Some(error); }
                     }
                     Some(Ok((local_actor, Ok(None)))) => {
                         let actor = local_actor.identity();
@@ -2345,7 +2344,7 @@ async fn run_interactive_applications(
                         deployment.thread = Some(thread.clone());
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
                             owner.creator_workspace = Some(BoundWorkspace {
-                                workspace: deployment.prepared_workspace.clone(), thread: thread.clone(),
+                                workspace: deployment.active_workspace.clone(), thread: thread.clone(),
                             });
                         }
                         if actor == root_identity {
@@ -3232,6 +3231,8 @@ async fn launch_prepared_interactive_application(
     // launch rather than a pre-release loss.
     let release_gate = Arc::new(std::sync::Mutex::new(()));
     let release_gate_worker = release_gate.clone();
+    let activation_workspace = prepared_workspace.clone();
+    let activation_worktrees = worktrees.clone();
     let mut activation_task = tokio::task::spawn_blocking(move || {
         let deadline = std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT;
         while !activation_socket.exists() {
@@ -3275,8 +3276,10 @@ async fn launch_prepared_interactive_application(
         if activation_cancelled_worker.load(std::sync::atomic::Ordering::Acquire) {
             return Err(scoped_custody::ScopedProcessError::WrongPhase);
         }
+        let view = scoped_custody::supervisor_workspace(&activation_slot, deadline)?;
+        let active = activation_workspace.activate(&activation_worktrees, view)?;
         match scoped_custody::release_supervisor_slot(&activation_slot, deadline)? {
-            scoped_custody::ScopedProcessObservation::Released => Ok(()),
+            scoped_custody::ScopedProcessObservation::Released => Ok(active),
             // A committed but unconfirmed release is never retried. Retain the
             // row for explicit recovery rather than publishing readiness.
             scoped_custody::ScopedProcessObservation::ReleaseUnconfirmed => {
@@ -3320,7 +3323,7 @@ async fn launch_prepared_interactive_application(
             socket_directory,
         ));
     }
-    activation
+    let active_workspace = activation
         .map_err(|error| {
             application_error(
                 actor_identity,
@@ -3370,7 +3373,7 @@ async fn launch_prepared_interactive_application(
     let binding_control = service.lock().await.control.clone();
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
-            prepared_workspace,
+            active_workspace,
             supervisor: installation.supervisor_parent,
             notified_provider_failures: Default::default(),
             actor: actor_identity,
@@ -3461,6 +3464,43 @@ fn socket_launch_failure(
         _ => cause.to_string(),
     };
     application_error(actor, operation, detail)
+}
+
+async fn deliver_session_activation(
+    application: &mut InteractiveDeployment,
+    activation: tidepool_actor::ResidentActivation,
+) -> Result<(), String> {
+    let actor = activation.id.actor();
+    if accepts_activation(application, &activation) {
+        let sequence = activation.id.sequence();
+        if let Err(error) = publish_inbox_event(
+            Arc::clone(&application.inbox),
+            DurableActorEvent::session(&activation),
+        )
+        .await
+        {
+            application.failure_reported = true;
+            let local_actor = application.local_actor.clone();
+            tracing::warn!(?actor, %error, "actor activation delivery degraded");
+            if let Err(error) = apply_application_failure(
+                local_actor,
+                ExternalApplicationFailure {
+                    class: ExternalApplicationFailureClass::ToolHostStartup,
+                    detail: error,
+                },
+            )
+            .await
+            {
+                return Err(error);
+            }
+            return Ok(());
+        }
+        application
+            .runtime_observation
+            .publish_request_activation(activation.request, sequence);
+        application.last_activation_sequence = sequence;
+    }
+    Ok(())
 }
 
 fn accepts_activation(
@@ -4000,7 +4040,7 @@ async fn retire_interactive_application(
         component: CleanupComponent::Socket,
         outcome: socket_cleanup_outcome(deployment.socket_directory),
     });
-    let build_outcome = deployment.prepared_workspace.build.clone().map_or(
+    let build_outcome = deployment.active_workspace.build.clone().map_or(
         CleanupComponentOutcome::Completed,
         |lease| {
             let released = lease.release();

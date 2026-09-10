@@ -183,9 +183,16 @@ fn build(workspace: &PreparedWorkspace) -> Vec<bool> {
 fn owner(
     workspace: Arc<PreparedWorkspace>,
     thread: QueueReadyThread,
+    native: &NativeProcess,
 ) -> InteractiveApplicationOwner {
     InteractiveApplicationOwner {
-        creator_workspace: Some(BoundWorkspace { workspace, thread }),
+        creator_workspace: Some(BoundWorkspace {
+            workspace: Arc::new(ActiveWorkspace {
+                view: tidepool_node::MountNamespace::capture(native.0.id()).unwrap(),
+                prepared: workspace,
+            }),
+            thread,
+        }),
         cancel: None,
         native_retirement: Default::default(),
         pane: Arc::new(Mutex::new(None)),
@@ -194,6 +201,7 @@ fn owner(
         scoped_retention: None,
         hosted: Arc::new(Mutex::new(None)),
         launch: HostLaunchState::Published,
+        pending_activations: Vec::new(),
         terminal: None,
         retirement: Arc::new(Mutex::new(None)),
     }
@@ -342,7 +350,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap();
     let owners = Arc::new(Mutex::new(std::collections::HashMap::from([(
         root,
-        owner(workspace.clone(), thread.clone()),
+        owner(workspace.clone(), thread.clone(), &_native),
     )])));
     let admission = fork_workspace_admission(
         manager,
@@ -509,7 +517,10 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert!(publication.finish(backend.as_ref(), &thread).await.is_err());
     assert!(publication.is_pending());
     BoundWorkspace {
-        workspace: workspace.clone(),
+        workspace: Arc::new(ActiveWorkspace {
+            view: workspace.view.clone(),
+            prepared: workspace.clone(),
+        }),
         thread,
     }
     .settle_publication(&mut publication, backend.as_ref())
@@ -532,6 +543,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             tidepool_agent::read_interactive_binding(&binding)
                 .await
                 .unwrap(),
+            &_child_native,
         ),
     );
     shell(child, "printf staged-child > file; git add file; printf dirty-child > file; printf warm > .shoal/build/cargo/artifact");

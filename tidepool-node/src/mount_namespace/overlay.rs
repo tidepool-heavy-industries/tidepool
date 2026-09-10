@@ -260,11 +260,13 @@ impl OverlayRotation {
     fn mount_next(
         &self,
         namespace: &super::Descriptors,
+        backing: &super::Descriptors,
         preserved: &[Option<OwnedFd>],
         source_root: BorrowedFd<'_>,
         root_metadata: &mut RootMetadata,
     ) -> rustix::io::Result<()> {
         use rustix::mount::*;
+        backing.enter_mount_root()?;
         // Only the helper receives writable backing aliases. The detached
         // overlay can then be attached to the original workload namespace.
         // SAFETY: the child is single-threaded and does not unshare its FD table.
@@ -340,6 +342,7 @@ impl OverlayRotation {
     fn apply(
         &self,
         namespace: &super::Descriptors,
+        backing: &super::Descriptors,
         preserved: &mut [Option<OwnedFd>],
         metadata: &mut RootMetadata,
     ) -> Transition {
@@ -384,7 +387,7 @@ impl OverlayRotation {
             Err(error) => return Transition::Unchanged(error),
             Ok(()) => {}
         }
-        match self.mount_next(namespace, preserved, source_root.as_fd(), metadata) {
+        match self.mount_next(namespace, backing, preserved, source_root.as_fd(), metadata) {
             Ok(()) => Transition::Rotated,
             Err(error) => match namespace
                 .enter_mount_root()
@@ -501,6 +504,10 @@ impl MountNamespace {
         // Command owns/reaps the short helper. All mount work happens in its
         // pre-exec syscall phase; the shell only exits after capabilities drop.
         let descriptors = self.descriptors.clone();
+        let backing = self
+            .preparation
+            .clone()
+            .unwrap_or_else(|| descriptors.clone());
         let mut preserved = std::iter::repeat_with(|| None)
             .take(rotation.preserved_mounts.len())
             .collect::<Vec<Option<OwnedFd>>>();
@@ -514,7 +521,7 @@ impl MountNamespace {
                 OwnerRequirement::LiveProcess,
                 move || {
                     let result = rotation
-                        .apply(&descriptors, &mut preserved, &mut metadata)
+                        .apply(&descriptors, &backing, &mut preserved, &mut metadata)
                         .encode();
                     let mut frame = [0u8; 12];
                     for (word, bytes) in result.iter().zip(frame.chunks_exact_mut(4)) {

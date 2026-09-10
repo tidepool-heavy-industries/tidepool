@@ -31,6 +31,7 @@ pub use overlay::{
 /// that its writable layers may be deleted.
 #[derive(Clone, Debug)]
 pub struct MountNamespace {
+    preparation: Option<Arc<Descriptors>>,
     descriptors: Arc<Descriptors>,
 }
 
@@ -141,6 +142,7 @@ impl MountNamespace {
             Mode::empty(),
         )?;
         let namespace = Self {
+            preparation: None,
             descriptors: Arc::new(Descriptors {
                 user,
                 mount,
@@ -167,6 +169,28 @@ impl MountNamespace {
     /// equal without relying on a PID or the allocation identity of this handle.
     pub fn same_view_as(&self, other: &Self) -> io::Result<bool> {
         Ok(self.view_identity()? == other.view_identity()?)
+    }
+
+    /// Bind a freshly captured live publisher to this retained filesystem
+    /// authority. Exporter liveness must not substitute for publisher liveness.
+    pub fn bind_live_view(&self, observed: Self) -> io::Result<Self> {
+        observed.require_live_owner()?;
+        if !self.same_view_as(&observed)? {
+            return Err(io::Error::other(
+                "publisher differs from the activated workspace view",
+            ));
+        }
+        Ok(Self {
+            descriptors: observed.descriptors,
+            preparation: self.preparation.clone(),
+        })
+    }
+
+    /// The supervisor alone relates its final view to the preparation whose
+    /// OverlayFS superblocks and backing mounts it inherited.
+    pub(crate) fn with_preparation(mut self, prepared: &Self) -> Self {
+        self.preparation = Some(prepared.descriptors.clone());
+        self
     }
 
     fn view_identity(&self) -> io::Result<ViewIdentity> {
@@ -275,6 +299,10 @@ impl MountNamespace {
         let directory = CString::new(directory.as_os_str().as_bytes())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let descriptors = self.descriptors.clone();
+        let authority = self
+            .preparation
+            .clone()
+            .unwrap_or_else(|| descriptors.clone());
         let mut command = Command::new(program);
         // SAFETY: only syscall wrappers with preconstructed arguments run
         // between fork and exec. The command retains every referenced FD.
@@ -286,7 +314,7 @@ impl MountNamespace {
                     ));
                 }
                 rustix::thread::move_into_link_name_space(
-                    descriptors.user.as_fd(),
+                    authority.user.as_fd(),
                     Some(LinkNameSpaceType::User),
                 )?;
                 descriptors.enter_mount_root()?;

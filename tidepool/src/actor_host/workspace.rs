@@ -52,7 +52,13 @@ pub(super) struct WorkspaceLayout {
     pub(super) backend: Arc<dyn InteractiveAgentBackend>,
 }
 
+enum Activation {
+    Prepared,
+    Activated,
+}
+
 pub(super) struct PreparedWorkspace {
+    activation: Mutex<Activation>,
     pub(super) host_path: PathBuf,
     pub(super) worktree: Option<WorktreeId>,
     pub(super) view: tidepool_node::MountNamespace,
@@ -60,6 +66,62 @@ pub(super) struct PreparedWorkspace {
     pub(super) build: Option<SharedOverlayResource>,
     pub(super) owns_source: bool,
     pub(super) publication: Arc<tokio::sync::Mutex<WorkspacePublication>>,
+}
+
+pub(super) struct ActiveWorkspace {
+    prepared: Arc<PreparedWorkspace>,
+    pub(super) view: tidepool_node::MountNamespace,
+}
+
+impl std::ops::Deref for ActiveWorkspace {
+    type Target = PreparedWorkspace;
+    fn deref(&self) -> &Self::Target {
+        &self.prepared
+    }
+}
+
+impl PreparedWorkspace {
+    pub(super) fn activate(
+        self: Arc<Self>,
+        worktrees: &WorktreeManager,
+        view: tidepool_node::MountNamespace,
+    ) -> io::Result<Arc<ActiveWorkspace>> {
+        let mut activation = self.activation.lock();
+        if !matches!(*activation, Activation::Prepared) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "workspace already activated",
+            ));
+        }
+        if let Some(id) = &self.worktree {
+            worktrees
+                .activate_worktree(id, &self.view, view.clone(), Path::new(ACTOR_PROJECT_ROOT))
+                .map_err(io::Error::other)?;
+        } else {
+            let git = worktrees.git();
+            let expected = tidepool_worktree::git::inspect::git_dir(
+                &git.with_mount_namespace(self.view.clone()),
+                Path::new(ACTOR_PROJECT_ROOT),
+            )
+            .map_err(io::Error::other)?;
+            let observed = tidepool_worktree::git::inspect::git_dir(
+                &git.with_mount_namespace(view.clone()),
+                Path::new(ACTOR_PROJECT_ROOT),
+            )
+            .map_err(io::Error::other)?;
+            if expected != observed {
+                return Err(io::Error::other(
+                    "activated root Git identity differs from preparation",
+                ));
+            }
+        }
+        *activation = Activation::Activated;
+        drop(activation);
+        Ok(Arc::new(ActiveWorkspace {
+            prepared: self,
+            view,
+        }))
+    }
 }
 
 impl WorkspaceLayout {
@@ -163,6 +225,7 @@ impl WorkspaceLayout {
             }
         }
         Ok(Arc::new(PreparedWorkspace {
+            activation: Mutex::new(Activation::Prepared),
             host_path,
             worktree,
             view,
@@ -254,7 +317,15 @@ impl NativeForkAdmission {
             }
             let admission = publication.begin(backend.as_ref(), &parent.thread).await;
             let namespace = match admission {
-                Ok(Admission::Ready(namespace)) => namespace,
+                Ok(Admission::Ready(namespace)) => {
+                    match parent.workspace.view.bind_live_view(namespace) {
+                        Ok(namespace) => namespace,
+                        Err(error) => {
+                            parent.settle_publication(&mut publication, backend.as_ref()).await?;
+                            return Err(error);
+                        }
+                    }
+                },
                 Ok(Admission::Busy) => return tokio::task::spawn_blocking(move || {
                     layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy))
                 }).await.map_err(io::Error::other)?,
@@ -409,11 +480,13 @@ impl WorkspaceLayout {
             source.prepare_git_pointer(&git.git_file())?;
         }
         if let Some(build) = &mut parent_build {
-            if let tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) = build.publish(
+            let outcome = build.publish(
                 namespace,
                 &PathBuf::from(ACTOR_PROJECT_ROOT).join(ACTOR_BUILD_TARGET),
                 &[],
-            )? {
+            )?;
+            tracing::info!(?outcome, "workspace build snapshot publication");
+            if let tidepool_node::OverlayRotationOutcome::Unconfirmed(detail) = outcome {
                 return Err(io::Error::other(detail));
             }
         }

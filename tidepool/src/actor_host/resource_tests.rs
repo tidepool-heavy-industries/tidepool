@@ -97,6 +97,7 @@ fn source_checkout_launch_has_process_custody_without_a_worktree_lease() {
         scoped_retention: None,
         hosted: Arc::new(Mutex::new(None)),
         launch: HostLaunchState::Pending,
+        pending_activations: Vec::new(),
         terminal: None,
         retirement: Arc::new(Mutex::new(None)),
     };

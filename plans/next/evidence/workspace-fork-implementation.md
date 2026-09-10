@@ -1,6 +1,9 @@
 # Workspace fork implementation — 2026-09-08
 
-Current implementation supersedes the composition and restart gaps recorded in
+Historical component checkpoint. Current supervised launch composition and its
+acceptance gate are tracked in [supervised workspace activation](supervised-workspace-activation.md).
+
+This implementation superseded the composition and restart gaps recorded in
 [the earlier review](build-snapshot-review.md). Native source is
 `06d99357becc4d870f5b5141ba7626daf68e819a`, pushed on
 `work/build-snapshot-admission` and pinned by `flake.nix`/`flake.lock`.

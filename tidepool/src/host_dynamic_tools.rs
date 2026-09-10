@@ -1283,3 +1283,6 @@ mod resource_tests;
 
 #[cfg(test)]
 mod tui_resource_tests;
+
+#[cfg(test)]
+mod tui_workspace_tests;

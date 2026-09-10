@@ -172,6 +172,26 @@ impl WorktreeRegistry {
         namespace: tidepool_node::MountNamespace,
         visible_root: &Path,
     ) -> Result<WorktreeReceipt, WorktreeError> {
+        self.install_view_checked(receipt, namespace, visible_root, None)
+    }
+
+    pub(crate) fn activate_view(
+        &self,
+        receipt: &WorktreeReceipt,
+        expected: &tidepool_node::MountNamespace,
+        namespace: tidepool_node::MountNamespace,
+        visible_root: &Path,
+    ) -> Result<WorktreeReceipt, WorktreeError> {
+        self.install_view_checked(receipt, namespace, visible_root, Some(expected))
+    }
+
+    fn install_view_checked(
+        &self,
+        receipt: &WorktreeReceipt,
+        namespace: tidepool_node::MountNamespace,
+        visible_root: &Path,
+        expected: Option<&tidepool_node::MountNamespace>,
+    ) -> Result<WorktreeReceipt, WorktreeError> {
         if !visible_root.is_absolute()
             || visible_root
                 .components()
@@ -182,9 +202,9 @@ impl WorktreeRegistry {
                 "invalid mounted worktree root",
             ));
         }
-        let expected = inspect::git_dir(&GitCli::new(), &receipt.cwd)?;
+        let expected_git = inspect::git_dir(&GitCli::new(), &receipt.cwd)?;
         let mounted_git = GitCli::new().with_mount_namespace(namespace.clone());
-        if inspect::git_dir(&mounted_git, visible_root)? != expected {
+        if inspect::git_dir(&mounted_git, visible_root)? != expected_git {
             return Err(WorktreeError::WorktreeAuthorityDenied(
                 "mounted source view belongs to a different Git worktree".into(),
             ));
@@ -210,15 +230,15 @@ impl WorktreeRegistry {
         };
         // Install access before publishing Mounted so concurrent readers never
         // observe a completed receipt without its retained filesystem view.
-        self.views
-            .install(
-                &receipt.cwd,
-                crate::view::MountedView {
-                    namespace,
-                    root: visible_root.to_owned(),
-                },
-            )
-            .map_err(|error| storage_failure(&receipt.cwd, error))?;
+        let view = crate::view::MountedView {
+            namespace,
+            root: visible_root.to_owned(),
+        };
+        match expected {
+            Some(expected) => self.views.activate(&receipt.cwd, expected, view),
+            None => self.views.install(&receipt.cwd, view),
+        }
+        .map_err(|error| storage_failure(&receipt.cwd, error))?;
         // Only inherited source depends on mounts for its working files.
         // Host-backed checkouts remain usable from Git after this wave ends.
         if receipt.status != mounted.status {

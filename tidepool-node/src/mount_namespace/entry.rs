@@ -19,6 +19,7 @@ use super::{Descriptors, MountNamespace, ViewIdentity};
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct NamespaceEntry {
     version: u32,
+    preparation: Option<Box<NamespaceEntry>>,
     boot: String,
     holder: u32,
     start_ticks: u64,
@@ -35,7 +36,19 @@ impl MountNamespace {
             Mode::empty(),
         )?;
         Ok(NamespaceEntry {
-            version: 1,
+            version: 2,
+            preparation: self
+                .preparation
+                .as_ref()
+                .map(|descriptors| {
+                    MountNamespace {
+                        descriptors: descriptors.clone(),
+                        preparation: None,
+                    }
+                    .entry()
+                    .map(Box::new)
+                })
+                .transpose()?,
             boot: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?,
             holder,
             start_ticks: process_status(&directory)?.start_ticks,
@@ -53,7 +66,12 @@ impl NamespaceEntry {
     /// Acquire independent descriptors before constructing the command. The
     /// resulting command keeps them alive through namespace entry and spawn.
     pub fn command(&self, directory: &Path, program: &std::ffi::OsStr) -> io::Result<Command> {
-        if self.version != 1
+        self.acquire()?.host_command(directory, program)
+    }
+
+    /// Acquire the retained view after checking the exporting process and FDs.
+    pub fn acquire(&self) -> io::Result<MountNamespace> {
+        if self.version != 2
             || self.boot != std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
             || self.descriptors.iter().any(|fd| *fd < 0)
         {
@@ -81,7 +99,13 @@ impl NamespaceEntry {
                 Mode::empty(),
             )
         };
+        let preparation = match &self.preparation {
+            Some(entry) if entry.preparation.is_none() => Some(entry.acquire()?.descriptors),
+            Some(_) => return Err(io::Error::other("nested preparation authority")),
+            None => None,
+        };
         let namespace = MountNamespace {
+            preparation,
             descriptors: Arc::new(Descriptors {
                 user: open(self.descriptors[0], OFlags::RDONLY)?,
                 mount: open(self.descriptors[1], OFlags::RDONLY)?,
@@ -93,7 +117,7 @@ impl NamespaceEntry {
         if namespace.view_identity()? != self.identity {
             return Err(io::Error::other("retained namespace descriptors changed"));
         }
-        namespace.host_command(directory, program)
+        Ok(namespace)
     }
 }
 
