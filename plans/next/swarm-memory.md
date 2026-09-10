@@ -47,15 +47,19 @@ budget probe checks child OOM with a finite swap allowance and an outside contro
 Run it only at an idle shared-service boundary. It cleans up only its exact test
 sessions/scopes and service; source and logs remain available.
 
-Final package recipe checks and the updated immutable Shoal build are separate
-release gates. Codex `7259e937` and the extractor are already built and reusable.
+Focused package checks passed: `Project.Checks.context` (one assertion) and
+`Project.RoutingChecks.twoLaneHandoff` (eight assertions). The broad recipe run
+was deliberately stopped; it is not claimed as passed. Clean-environment packaged
+bootstrap passed: two Ready TUIs, wrong-slice service rejection without disturbing
+the original service, and finite child OOM. Evidence:
+`target/slice-launch-final-20260910`. The final selected workspace also compiles. Codex `7259e937` and the extractor are built and reusable.
 Record their actual identities in the next launch selection; do not infer them
 from a product branch's checkout or old launch record.
 
 ## Next run
 
-The operator authorized preparation but is switching accounts: no paid inference
-until explicit confirmation. All Sol execution helpers and project guidance select
+The operator confirmed the account switch and authorized the next launch on
+2026-09-10. All Sol execution helpers and project guidance select
 Medium, including bounded workers and review. The next wave resumes the R7
 applications wrap-up and remaining engine implementation through the current
 [launch guidance](../parallel-dogfood/launch.md).
