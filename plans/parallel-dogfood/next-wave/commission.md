@@ -9,7 +9,10 @@ mechanisms progressively.
 Your deliverable is an executable plan for the remaining work: a focused Sol
 applications integration lane and a recursive Sol engine implementation tree.
 Applications A0–A7 are implemented and matched A8 passed on the retained R7 pair;
-use its wrap-up checklist, not the old milestone allocation. Shared-server
+use its wrap-up checklist, not the old milestone allocation. Select useful
+behavior rather than preserving every patch: simplify or omit redundant candidate
+machinery within existing guarantees. Escalate changes to guarantees, not routine
+refactoring. Shared-server
 migration is subsequent work, not a gate or an implementation assignment. Plan useful grandchildren as well as lane leads: shared contracts and context,
 independent child outcomes, the engineering each parent retains, and dependency
 joins that unlock later forks. Refine against the saved source, reuse completed

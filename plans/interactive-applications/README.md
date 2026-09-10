@@ -1,8 +1,9 @@
 # Finish the interactive Codex applications integration
 
 Deliver one reviewed Tidepool/Codex pair on the current main foundation. Consolidate
-retained applications work, repair remaining behavior, and close its acceptance
-checks. This is a wrap-up assignment, not a fresh implementation of A0–A8.
+the useful retained applications work, simplify conflicting or redundant
+machinery, and close its acceptance checks. Retained commits are source assets,
+not obligations to preserve every patch. This is a wrap-up assignment, not a fresh implementation of A0–A8.
 
 Keep ordinary interactive Codex TUIs. The current release uses their embedded
 native sessions. Shared-server execution is a [subsequent migration](shared-server.md),

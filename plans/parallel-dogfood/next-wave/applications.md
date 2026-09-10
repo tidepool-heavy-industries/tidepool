@@ -14,22 +14,41 @@ applications delta separately from unfinished engine work in the combined source
 Prepare one continuation on launch main; preserve originals and record squash
 provenance when consolidating. Do not repeat a prepared reconciliation.
 
-A native Sol integrator composes the full linear `d84cda697` candidate with the
-launch-pinned native revision. At inventory pin `7259e937`, the concrete conflicts
+A native Sol integrator inventories the linear `d84cda697` candidate against the
+launch-pinned native revision and selects its useful behavior. Reuse clean code;
+adapt or discard redundant machinery rather than mechanically replaying the stack. At inventory pin `7259e937`, the concrete conflicts
 are `tui/src/host_dynamic_tools.rs` and `tui/src/host_dynamic_tools/input_control.rs`:
 retain both command Jobs and durable binding/control routes. Older native R6 tips
 are provenance, not extra stacks to replay.
 
 While that proceeds, a bounded worker can extract the actual owning acceptance
 commands/fixtures and prepare targeted resulting-source checks. The lead reconciles
-host custody/recovery consumers. Fork repair work only where concrete independent
-failures justify it. This lane may be much smaller than the engine lane; do not
+host custody/recovery consumers. Fork repair or simplification work where concrete independent outcomes justify it. This lane may be much smaller than the engine lane; do not
 manufacture a broad tree or a standing review hierarchy.
 
 Once the paired source is usable, a fresh reviewer checks the conflict resolutions,
 admission/completion ordering and command-job cleanup. The integration owner runs
 the actual matched full-TUI/scripted-provider checks and recovery cases. Preserve
 exact source/evidence; do not infer acceptance from a package compiling.
+
+## Planner packet and first useful result
+
+The planner gives this lane the exact main/native source pair, R7 inventory and
+wrap-up checklist. Its first proposal is short: chosen current owners, useful
+candidate deltas, material omissions/adaptations, specific checks and any real
+engine coupling. Put detailed evidence in the owning file, not the root context.
+Review this understanding once, then let Sol integrate and simplify autonomously.
+
+For example, the native integrator can establish one combined tool/control owner,
+fork focused input and command-job failure checks from that shared source, and
+retain completion/custody integration. The Tidepool lead can wire its matching
+consumer concurrently. These are useful outcomes, not mandatory worker roles.
+Return an exact paired candidate plus changed behavior and failed/passed checks;
+route routine evidence locally. Raise only unresolved consequential choices.
+
+Use the [selection rules](../../interactive-applications/06-integration.md#select-behavior-not-a-patch-count).
+Dropping obsolete machinery is authorized; dropping a required human-facing
+guarantee needs a concrete decision. Main's newer resource owners remain intact.
 
 ## Engine join and stopping point
 
