@@ -13,6 +13,7 @@
 module Tidepool.Actor.Internal
   ( ActorRef (..)
   , EffectProfile (..)
+  , profileCode
   , ReadOnlyEffects
   , ReadWriteEffects
   , ShutdownReason (..)
@@ -37,6 +38,7 @@ import Prelude
 
 import Tidepool.Effects.Core
   ( Actor (..)
+  , ActorEffectProfile (..)
   , ActorCallStatus (..)
   , ActorLocal
   , AgentSession
@@ -48,6 +50,7 @@ import Tidepool.Effects.Core
   )
 import Tidepool.Internal.ActorRef (ActorRef (..))
 import Tidepool.Actor.Source (Source)
+import Tidepool.Effects.Row (Effects, effectKeys)
 
 -- | Experimental named profiles for resident Haskell effect rows. The witness
 -- fixes the child row, while Rust independently validates spawn attenuation
@@ -56,6 +59,12 @@ import Tidepool.Actor.Source (Source)
 data EffectProfile (protocol :: Type -> Type) effs where
   ReadOnly :: EffectProfile protocol (ReadOnlyEffects protocol)
   ReadWrite :: EffectProfile protocol (ReadWriteEffects protocol)
+  Selected :: Effects effects -> EffectProfile protocol (ActorLocal protocol ': effects)
+
+profileCode :: EffectProfile protocol effects -> ActorEffectProfile
+profileCode ReadWrite = ActorReadWriteProfile
+profileCode ReadOnly = ActorReadOnlyProfile
+profileCode (Selected effects) = ActorSelectedProfile (effectKeys effects)
 
 type ReadOnlyEffects protocol =
   '[ ActorLocal protocol

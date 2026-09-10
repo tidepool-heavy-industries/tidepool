@@ -57,6 +57,17 @@ library tidepool-extract-internal
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
+test-suite constructor-arity-test
+  type:             exitcode-stdio-1.0
+  main-is:          ConstructorArityTest.hs
+  hs-source-dirs:   test
+  build-depends:
+    base >= 4.20 && < 5,
+    ghc >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+
 -- The only default-built executable. `app/Main.hs`'s own import closure pulls
 -- in no lib/Tidepool/** module (the eval stdlib is a runtime GHC include
 -- path, not a host-compiled dependency — see haskell/CLAUDE.md), so

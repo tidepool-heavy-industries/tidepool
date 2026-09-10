@@ -26,6 +26,12 @@ skills = do
   void $ example owner "shoal-fork" 0
   worker <- activation
   check "skill launches a fresh Sol Medium worker" (checkModel worker == Just "gpt-5.6-sol" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)
+  early <- turn owner "cleanup <- releaseGroup (forkGroupHandle worker)\ninspectFull cleanup"
+  check "scoped release retains the pending worker instead of cancelling its request" ("CleanupBlocked" `Text.isInfixOf` lastOutput early)
+  joined <- example owner "shoal-define-actors" 0
+  check "record skill joins differently typed inputs" (lastOutput joined == "Just (\"abc123\",4)")
+  initialResults <- example owner "shoal-define-actors" 1
+  check "record skill attaches the exact pending request" (lastOutput initialResults == "0")
   void $ turn (checkActor worker) ("let candidate = Candidate " <> literal baseline <> " [\"example check\"] [\"product acceptance remains\"]")
   void $ example (checkActor worker) "shoal-coordinate" 0
   observed <- example owner "shoal-coordinate" 1
@@ -36,6 +42,10 @@ skills = do
   replied <- example (checkActor reviewer) "shoal-review" 1
   check "successful reply explicitly reports submission" ("Reply submitted." `Text.isInfixOf` output replied)
   void $ turn (checkActor worker) "respond (Produced candidate)"
-  final <- awaitOutput owner "state <- Actor.call router WorkSnapshot\ninspectFull (workSnapshotSummary candidateSummary state)" (not . Text.isInfixOf "result pending")
+  final <- awaitOutput owner "state <- readWork router\ninspectFull (workSnapshotSummary candidateSummary state)" (not . Text.isInfixOf "result pending")
   check "compact snapshot retains terminal candidate and gates" (baseline `Text.isInfixOf` final && "product acceptance remains" `Text.isInfixOf` final)
-  void $ turn owner "Actor.drainActor router\nActor.awaitExit router"
+  resultCount <- turn owner "R.call (resultCount (R.client results)) ()"
+  check "record skill receives the typed terminal source once" (output resultCount == "1")
+  void $ example owner "shoal-define-actors" 2
+  cleanup <- example owner "shoal-coordinate" 2
+  check "the coordinate skill retains its scoped cleanup receipt" ("CleanupReceipt" `Text.isInfixOf` lastOutput cleanup)

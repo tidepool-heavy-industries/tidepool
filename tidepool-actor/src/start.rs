@@ -69,6 +69,26 @@ pub(crate) struct ActorStartRequest {
 pub enum ActorEffectProfileWire {
     ActorReadWriteProfile,
     ActorReadOnlyProfile,
+    ActorSelectedProfile(Vec<ActorEffectKeyWire>),
+}
+
+impl ActorEffectProfileWire {
+    fn resolve(
+        self,
+        launch_keys: Option<Vec<ActorEffectKeyWire>>,
+    ) -> Result<(crate::ActorEffectProfile, Option<Vec<ActorEffectKeyWire>>), ActorStartCaptureError>
+    {
+        match (self, launch_keys) {
+            (Self::ActorSelectedProfile(_), Some(_)) => {
+                Err(ActorStartCaptureError::DuplicateEffectSelection)
+            }
+            (Self::ActorSelectedProfile(keys), None) => {
+                Ok((crate::ActorEffectProfile::ReadOnly, Some(keys)))
+            }
+            (Self::ActorReadOnlyProfile, keys) => Ok((crate::ActorEffectProfile::ReadOnly, keys)),
+            (Self::ActorReadWriteProfile, keys) => Ok((crate::ActorEffectProfile::ReadWrite, keys)),
+        }
+    }
 }
 
 #[derive(tidepool_bridge_derive::FromCore)]
@@ -167,6 +187,8 @@ pub enum ActorStartCaptureError {
     InvalidForkGroup(i64),
     #[error("requested model must be a nonempty model identifier")]
     InvalidModel,
+    #[error("select actor effects in its profile or launch options, not both")]
+    DuplicateEffectSelection,
 }
 
 impl ResidentActorStart {
@@ -266,15 +288,12 @@ impl ResidentActorStart {
         {
             return Err(ActorStartCaptureError::InvalidModel);
         }
+        let (profile, effect_keys) = profile.resolve(effect_keys)?;
         let context_fork = fork_group.is_some() && context == ForkContext::InheritedContext;
         let child_realm = RealmId::fresh();
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)
             .ok_or(ActorStartCaptureError::MissingEntry)?;
-        let profile = match profile {
-            ActorEffectProfileWire::ActorReadWriteProfile => crate::ActorEffectProfile::ReadWrite,
-            ActorEffectProfileWire::ActorReadOnlyProfile => crate::ActorEffectProfile::ReadOnly,
-        };
         let facade = materialize_entry_facade(session, &entry)?;
         let lexical_scope = if context_fork {
             session
@@ -444,6 +463,32 @@ impl ActorLaunchRoleWire {
 #[cfg(test)]
 mod tests {
     use super::facade_heads;
+
+    #[test]
+    fn selected_profile_preserves_exact_keys_and_rejects_a_second_selection() {
+        use super::{
+            ActorEffectKeyWire as Key, ActorEffectProfileWire as Profile, ActorStartCaptureError,
+        };
+        let (profile, keys) =
+            Profile::ActorSelectedProfile(vec![Key::EffectReplies, Key::EffectActor])
+                .resolve(None)
+                .unwrap();
+        assert_eq!(profile, crate::ActorEffectProfile::ReadOnly);
+        assert_eq!(
+            keys.unwrap()
+                .into_iter()
+                .map(crate::ActorEffectKey::from)
+                .collect::<Vec<_>>(),
+            vec![crate::ActorEffectKey::Replies, crate::ActorEffectKey::Actor]
+        );
+        assert!(matches!(
+            Profile::ActorSelectedProfile(vec![Key::EffectReplies])
+                .resolve(Some(vec![Key::EffectActor])),
+            Err(ActorStartCaptureError::DuplicateEffectSelection)
+        ));
+        let (_, empty) = Profile::ActorSelectedProfile(vec![]).resolve(None).unwrap();
+        assert!(empty.unwrap().is_empty());
+    }
 
     #[test]
     fn empty_provenance_requires_no_child_facade() {

@@ -1,9 +1,10 @@
 # Coordination RSI: make the real integration loop fluent
 
-Status: proposed next pass, based on the r6 historical audits and three rounds of
-feedback from its Astra planner, Sol coordinator and Sol engine lead. The operator
-has invited actor capability and DSL changes. This is a design, not an assertion
-that the proposed surface is already available.
+Status: implementation complete; release preparation in progress. The complete
+model-free package run passed 114 assertions. Focused checks cover request recovery,
+review/repair/integration, compact history, scoped release and nested supervision.
+Next-run readiness still requires committing/selecting main and reconciling the
+preserved product continuations below.
 
 Main is the working platform. Disk/custody fixes and executable skills are on main
 through `ee946b181`. Product applications/engine work stays on continuation
@@ -34,9 +35,19 @@ changes are needed. Keep API, examples and verification in one implementation.
 
 ## The actor surface
 
-Keep ordinary Haskell: a small result-indexed message type, explicit state, a
-handler using normal effects, and fixed typed sources. Keep `Actor.stateful`,
-`withSources`, `startActor`, `call` and `cast` recognizable.
+One generic record declares the actor shape, interpreted into definition, client
+and self views. Authors do not maintain a second mailbox GADT. A definition is the
+same record: its single `State s` field contains the initial value; `Call input
+NoReply` and `Call input (Reply output)` fields contain handlers; `Event event`
+fields contain `on source handler`. Event types determine handler input; values
+select the particular live source. All routes share one mailbox and lifetime.
+
+Handlers use ordinary `get`, `gets`, `put` and `modify'` within `Eff`. Each
+successful handler commits its reply and resulting state together. External
+effects are not rolled back on failure. Clients expose typed endpoint values;
+state and event fields confer no remote capabilities. `Self` exposes narrow
+send-only return addresses, never synchronous self-RPC. Runtime-supplied sender
+identity is distinct from original source provenance and conveys no extra grant.
 
 Generalize actor definitions to carry a typed effect row using the existing
 `KnownEffects`/`Subset` vocabulary. The immediate row needs `Replies`, `Actor`
@@ -49,7 +60,7 @@ Effect membership, a captured closure or a parent response handle does not trans
 request/resource authority. Extend existing authorization only for a demonstrated
 operation in this loop; do not turn an actor into an impersonated parent.
 
-Add a typed self mailbox that can be captured and passed to a forwarder. It names
+Add a typed self view that can supply a narrow endpoint to a forwarder. It names
 the actor whose address was obtained, even when used in another actor. It carries
 no fabricated terminal-result cell or authority. Existing actor refs should remain
 convenient call/cast targets.
@@ -142,19 +153,23 @@ replay an uncertain request or send.
 
 ## Implementation sequence
 
-- [ ] Add typed effect-row selection and a typed self mailbox, using the existing
+- [x] Derive the record definition/client/self views, single-state handler effect,
+  typed calls and fixed event bindings over the existing actor owner.
+- [x] Add typed effect-row selection and a typed self view, using the existing
   effect/authority owners. Compile an actor that submits a real typed review request.
-- [ ] Implement owned forwarding and replace the existing review-continuation
+- [x] Implement owned forwarding and replace the existing review-continuation
   workaround with one ordinary stateful actor plus finite source forwarding.
   Preserve exact request/result identities through failure before state commit.
-- [ ] Rewrite project collection around ordered changes, useful current views and
+- [x] Rewrite project collection around ordered changes, useful current views and
   direct typed joins. Make common request/progress handles consistent; remove
   duplicate settlement watches from this path.
-- [ ] Add one parent-facing finish/release composition over existing drain and
+- [x] Add one parent-facing finish/release composition over existing drain and
   cleanup owners. Keep integration actors through repairs, auto-finish finite
   forwarders, and return retained evidence/uncertainty explicitly.
-- [ ] Rewrite existing prompts and skills around this actual loop. Keep a short
-  collection recipe and a focused actor-composition recipe. Fix qualified exports,
+- [x] Rewrite existing prompts and skills around this actual loop. Keep the short
+  coordination skill and add `shoal-define-actors` for live record definitions,
+  stateful handlers, typed joins and known continuations. Ship useful actor
+  definitions in the project modules. Fix qualified exports,
   supplied signatures and opaque-handle displays that caused the observed errors;
   remove contradictory watch examples and expansive default summaries.
 - [ ] Execute the actual examples through focused owning checks, review the combined
@@ -199,3 +214,40 @@ Compile changed targets and use focused actor/source/request/cleanup/workbench a
 prompt/example checks. Run `fixtures-check` if extractor translation or serialization
 changes; do not run full workspace suites. Record executed versus compiled-only
 coverage. Live efficiency/cache claims require evidence from the next run.
+
+## Current acceptance checkpoint
+
+Implementation remains in progress on the main RSI checkout. The record actor
+resident tests pass for typed calls/state/self/sender/drain and for compile-time
+rejection of zero or multiple state fields. The latter required an explicit
+launch constraint: an unused type family alone did not force the custom error.
+
+The regenerated extractor corpus matched all 695 existing files byte-for-byte.
+The final canonical regeneration changed only its source fingerprint and all 217
+semantic tests passed again. No broader engine refactor was introduced.
+
+The request-recovery check now proves that failure after admission followed by
+replacement preserves the original handle and receives its review result without
+resubmission. The declared repair edge also ran through actual repair and review
+commits, finite-forwarder completion, and owner integration. The full declared-repair
+recipe passed 13 assertions, including blocked and
+source-mismatch outcomes. The finite-forwarding failure recipe passed three
+assertions: stale endpoints are not retargeted and failed exits remain inspectable.
+`requestWithProgressInto` transfers typed handles to the actor's mailbox before
+admission. The receiving handler creates its collector with the current self
+endpoint, rather than capturing a predecessor incarnation before replacement.
+
+The current three resident record tests passed, including lifecycle input origin,
+invalid state shapes and a nested handler failure reaching the interactive owner
+once while its machine-only manager remained usable.
+
+`shoal-define-actors` passes the standard skill format validator. SkillChecks ran
+the actual fenced examples and passed all nine assertions, including scoped release
+retaining pending work and returning its cleanup receipt. The five selected
+prompt-catalog/shared-guide checks and nine generated-bridge checks passed.
+The complete ten-recipe package passed 114 assertions against a frozen runner
+copy, including the two-lane final-source integration. The subsequent nine-assertion
+skill check adds pending-work retention and the executable scoped-release example.
+Independent cases use separate recipe repositories; a swarm restart intentionally
+preserves existing Git branches.
+Do not treat partial passing routing assertions as a completed recipe suite.

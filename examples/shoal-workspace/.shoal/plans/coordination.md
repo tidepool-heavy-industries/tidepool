@@ -116,7 +116,7 @@ observation. All evidence remains queryable.
 No mandatory report format: change the renderer to suit this recipient.
 
 ```haskell
-view <- Actor.call wave WorkSnapshot
+view <- readWork wave
 inspectFull [(sourceName s, progressSummary (sourceProgress s), sourceStatus s) | s <- collectedWork view]
 ```
 
@@ -124,7 +124,7 @@ Expand a relevant sourceResult for its actual response, execution and worktree
 receipt. Notification attempts are retained in workNotices. Right contains the
 admission receipt; Left contains the typed send failure. Receipt polling belongs
 to the issuing actor, so when presentation affects a decision, use
-`Actor.call wave (WorkNotification receipt)` while that sender is live. Calling
+`R.call (workNotification (R.client wave)) receipt` while that sender is live. Calling
 pollNotification directly in the parent does not acquire that authority. After
 replacement, old receipts remain evidence; querying them through the new
 incarnation can return NotificationUnauthorized. Use actual incorporation or the
@@ -151,10 +151,11 @@ local owner, and unavailable/Blocked results need an action owner. The handoff
 example's terminal-only sink is for a subtree whose local Sol already owns its
 questions; it must not be copied as a policy that ignores every question.
 
-Known already-authorized continuations can use a finite `route` to submit a
-request when its prerequisite settles. The [review continuation](continuation.md)
-combines that operation with typed actors, including retention of callback-created
-handles. No callback awaits a busy model or confuses a candidate with acceptance.
+Known continuations execute in typed actor handlers. The
+[review continuation](continuation.md) submits to an available retained reviewer,
+retains exact handles before admission, and receives the verdict in its mailbox.
+No model turn forwards the known next action; a candidate is still not acceptance.
+Load `shoal-define-actors` when defining a custom join or continuation.
 
 ## Retire a wave deliberately
 
@@ -164,8 +165,7 @@ notifications or resource custody can be discarded. Incorporate the useful resul
 and put remaining obligations with a concrete owner, then:
 
 ```haskell
-Actor.drainActor wave
-finishedWave <- Actor.awaitExit wave
+finishedWave <- finishWork wave
 ```
 
 Drain closes admission and processes accepted messages; finishedWave retains the
@@ -176,7 +176,7 @@ every completed review attempt.
 For a behavior bug, keep the same ordered source names and handles and replace:
 
 ```haskell
-wave <- Actor.replaceActor wave (workDefinition sources correctedSink)
+wave <- R.replace wave (workDefinition sources correctedSink)
 ```
 
 Expected notification failures are retained values, not handler exceptions.

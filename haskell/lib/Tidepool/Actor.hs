@@ -83,6 +83,7 @@ import Tidepool.Actor.Internal
   , withSources
   , ActorRef (..)
   , EffectProfile (..)
+  , profileCode
   , ReadOnlyEffects
   , ReadWriteEffects
   , ShutdownReason (..)
@@ -90,7 +91,6 @@ import Tidepool.Actor.Internal
 import Tidepool.Effects.Core
   ( Actor (..)
   , ActorLaunchRole (..)
-  , ActorEffectProfile (..)
   , ActorKernel (..)
   , ActorLocal (..)
   , ActorTerminalStatus (..)
@@ -247,10 +247,6 @@ roleCode CodingRole = ActorCodingRole
 roleCode ScaffoldingRole = ActorScaffoldingRole
 roleCode IntegrationRole = ActorIntegrationRole
 roleCode InheritedRole = ActorInheritedRole
-
-profileCode :: EffectProfile protocol effs -> ActorEffectProfile
-profileCode ReadWrite = ActorReadWriteProfile
-profileCode ReadOnly = ActorReadOnlyProfile
 
 decodeShutdownReason :: Int -> ShutdownReason
 decodeShutdownReason 0 = ShutdownCompleted

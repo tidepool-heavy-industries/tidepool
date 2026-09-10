@@ -52,7 +52,7 @@ wave <- followWork [("component-a", forkedResponse lead, progress)] (notifyWork 
 Continue the parent's independent engineering after attaching the wave router.
 It retains progress and the terminal receipt, and messages only actionable deltas.
 End the turn when progress depends on those results. On wake, query
-`view <- Actor.call wave WorkSnapshot`; inspect the relevant `collectedWork view`
+`view <- readWork wave`; inspect the relevant `collectedWork view`
 entry and its `sourceResult`, preserving the full receipt for checks. A fresh label is needed when prior
 branches reserve the example names. This uses ordinary supervised lifetime; a root
 can deliberately choose SwarmOwned for selected leads that should outlive it.
@@ -85,8 +85,7 @@ it with the next attempt. When the prior result is incorporated and every remain
 obligation has an owner, drain that old router:
 
 ```haskell
-Actor.drainActor reviewWave
-previousAttempt <- Actor.awaitExit reviewWave
+previousAttempt <- finishWork reviewWave
 ```
 
 The next attempt has new source handles, so it gets a new router. `replaceActor`

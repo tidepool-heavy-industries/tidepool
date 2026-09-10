@@ -31,7 +31,7 @@ contractWave <- followWork [("contract", forkedResponse contract, contractQuesti
 The owner can now end its turn. SwarmOwned selected leads have independent
 lifetimes; only a root can admit that lifetime. Their descendants normally remain
 supervised. Neither a parent waiting nor a model turn ending settles its request.
-On wake, bind `state <- Actor.call contractWave WorkSnapshot` and inspect the
+On wake, bind `state <- readWork contractWave` and inspect the
 contract source's retained response in collectedWork.
 Handle unavailable execution separately from the typed `Blocked reason evidence`
 or `Produced (Delivered reviewed head checks)`. No notification proves success.

@@ -23,7 +23,7 @@ handle, keep one local collector. The handler receives changes without rearming:
 import qualified Tidepool.Actor as Actor
 owner <- actorContext
 router <- followWork [("implementation", forkedResponse worker, progress)] (notifyWork owner (workMessage candidateSummary))
-state <- Actor.call router WorkSnapshot
+state <- readWork router
 inspectFull (workSnapshotSummary candidateSummary state)
 ```
 
@@ -39,5 +39,26 @@ for a correction that must fence that pending request. Inspect delivery when the
 next action depends on it. Neither admission nor presentation proves the requested
 change happened. Reply only with information needed for the next decision.
 
-When this collector's work is finished, `Actor.drainActor router` followed by
-`Actor.awaitExit router` closes it. Don't retire it merely because a model turn ends.
+Record handled candidates explicitly with
+`R.send (incorporatedWork (R.client router)) ("implementation", [candidate])`.
+The normal brief omits those exact entries; changed evidence at the same commit
+remains outstanding. Candidate event indices select the original publications in
+`workHistory state` (for example `take 1 (drop index (workHistory state))`).
+
+When the integration cycle is finished, `finishWork router` drains the collector
+and returns its retained final state. Keep it through repairs; a model turn ending
+is not a reason to retire it. `releaseGroup groupHandle` separately asks the existing
+cleanup owner to release workers you no longer need, retaining uncertain members:
+
+```haskell
+retiredWork <- finishWork router
+released <- releaseGroup (forkGroupHandle worker)
+inspectFull released
+```
+
+Retain the cleanup receipt; a blocked step leaves that work with its current owner.
+Do not turn it into a stop/retry loop.
+
+For custom typed joins or automatic request continuations, load
+`shoal-define-actors`. Routine routing stays in Haskell; wake the owning Sol only
+for engineering decisions, actionable failures or integration work.

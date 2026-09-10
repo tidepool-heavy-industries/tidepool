@@ -192,42 +192,47 @@ value. `inspectFull expression` is standalone workbench display syntax, not an
 
 ## Persistent typed coordination
 
-Use finite watches for finite obligations. For ongoing routing, import
-`Tidepool.Actor` qualified as `Actor` and define a small mailbox protocol.
-`Actor.stateful label Actor.ReadOnly step` builds a definition whose handler takes
-one committed state and one message, returning `(reply, nextState)` in `Eff`.
-`Actor.startActor definition initialState` returns its exact typed handle.
+Use finite watches for finite obligations. For ongoing routing, define one generic
+actor record: exactly one `mode :- State s`, typed `Call input NoReply` or
+`Call input (R.Reply output)` routes, and `Event input` source handlers. `R` is the
+preloaded `Tidepool.Actor.Record` alias; `Actor` names the lower-level actor API.
+Load the workspace's `shoal-define-actors` skill for executable definitions.
 
-Attach fixed sources with `Actor.withSources`: `Actor.progressSource updates onProgress`
-captures current progress and follows every later publication and closure;
-`Actor.settlementSource response onSettlement` delivers the retained terminal outcome.
-`Actor.lifecycleSource handle onLifecycle` captures the actor's current lifecycle
-and follows later transitions: `ActorLive`, `ActorPaused detail`, `ActorFinished detail`,
-`ActorFailed detail`, or `ActorCancelled detail` (qualified with `Actor`). Live is
-not application readiness; exit is not cleanup proof or product acceptance.
-Each pure mapping constructs a message of the actor's protocol. Source messages,
-`Actor.cast handle message`, and `Actor.call handle message` share one sequential
-mailbox. `call` returns the protocol's result type. No model rearming or batching.
+The same record supplies initial state and handlers. Handlers use ordinary
+`get`, `gets`, `put`, `modify'`. `R.start definition` returns an `ActorHandle api`;
+`R.client handle` supplies endpoint values for `R.send` and `R.call`. State and
+event fields expose no remote capability. `R.self @Api` supplies narrow send-only
+return endpoints; it cannot make synchronous calls to itself.
 
-Capture bindings in ordinary Haskell closures. Effects run with the receiving
-actor's authority. A handler can cast to another typed actor or use `sendMessage`
-for consequential steering; it does not inherit its creator's reply ownership.
-Keep application deduplication and wake decisions in Haskell. The curated
-`Project.Routing.followWork` collects named progress/response pairs. It retains
-evidence, questions, terminal receipts and notification failures; `WorkSnapshot`
-queries its state and `workDefinition sources sink` replaces behavior for the same
-sources. Its default messages contain actionable deltas, not the whole snapshot.
+An event field contains `R.on source handler`. `R.progress progressHandle`,
+`R.settlement response` and `R.lifecycle actorHandle` select actual sources;
+`fmap` and `(<>)` compose them. Fixed sources capture retained current state and
+follow later publications in mailbox order. Handlers receive one event at a time,
+without model rearming or batching. Cross-source order is acceptance order, not a
+claim of global causality. Original result/request evidence remains attached.
 
-Handler failure pauses execution, retains committed state/input/queued work, and
-messages the supervisor. Repair with `Actor.replaceActor handle newDefinition`:
-the definition must have the same state and protocol types. It receives committed
-state and queued work, keeping source positions and skipping the failed input.
-Initialization does not rerun; the returned handle names the successor and the
-old handle stays stale. To change sources, finish/stop the actor and create another.
-Do not recreate and replay an uncertain effect.
-Source completion leaves the actor alive. `Actor.drainActor handle` closes
-admission and lets accepted messages finish; `Actor.awaitExit handle` explicitly
-waits for its final state. Whole-run recovery is from Git checkpoints.
+Closures capture immutable values. Effects run under the receiving actor's
+principal, not its creator's authority. `R.sender @Api` identifies the current
+input origin; a forwarding actor is not the original result producer. The curated
+`coordinationActor` supplies the project's `Replies`, `Actor`, `Notifications` row.
+It does not impersonate the owner or grant captured worktree handles.
+
+Use `Project.Routing.followWork` for ordinary named request/progress collection.
+`readWork` obtains its retained state; `workSnapshotSummary` shows outstanding
+candidates, questions and outcomes. Full publications stay in `workHistory`;
+notices contain deltas and receipt references. Explicit `incorporatedWork` messages
+remove exactly the handled evidence from the brief, preserving history.
+
+A failed handler keeps committed state and queued work; its external effects are
+not rolled back. `R.replace handle newDefinition` preserves the state/schema and
+fixed source positions, skips the failed input, and returns the successor's exact
+handle. Old client endpoints remain stale. Retain request handles before admission
+when failure could otherwise strand them; never replay uncertain work.
+
+Source completion leaves the actor alive through useful repairs. `R.finish handle`
+drains accepted work and returns the retained exit/state (`finishWork` for project
+collectors). Release native workers separately through their existing cleanup
+owner. Whole-run recovery is from Git checkpoints.
 
 ## Requests and replies
 
@@ -292,6 +297,12 @@ receives every subsequent publication; polling and finite watches observe
 snapshots. Use `:doc watch` for `childWithProgress @Progress @Report`,
 `requestWithProgress`, and source/watch choices. Do not guess a progress type or
 create a duplicate store.
+
+Inside a stateful actor, use `requestWithProgressInto @Progress @Result agent options retain`
+when admission must survive a subsequent handler failure. Before submission,
+`retain` receives `(Response Result, Progress Progress)`; enqueue those exact handles
+to a typed `Self` route. That route can attach the result collector without repeating
+the request. The defining-actors skill and project continuation example show this flow.
 
 ## Targeted discovery and cleanup
 

@@ -8,10 +8,13 @@ pub fn actor_local_decl() -> crate::EffectDecl {
         description: "Private actor-local lifecycle and mailbox substrate. Authored code uses `Tidepool.Actor`; the protocol index ties requests to the installed program. The enclosing ActorDefinition separately fixes successful exit.",
         prompt_card: None,
         constructors: &[
+            "ActorLocalContextWith :: ActorLocal api ((Int, Int), ActorInputOrigin)",
             "ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next",
             "ActorCheckpointWith :: Int -> state -> ActorLocal api ()",
         ],
-        type_defs: &[],
+        type_defs: &[
+            "data ActorInputOrigin = ActorStartup | ActorMessageFrom (Int, Int) | ActorProgressFrom Int | ActorSettlementFrom Int | ActorLifecycleFrom (Int, Int) deriving (Show, Eq)",
+        ],
         extra_imports: &[
             "import Tidepool.Actor",
         ],

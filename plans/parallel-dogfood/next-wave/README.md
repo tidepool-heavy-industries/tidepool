@@ -1,8 +1,7 @@
 # Next wave: two recursive engineering trees
 
-The previous run ended in an OOM. [resume.md](resume.md) supplies the preserved
-inputs, resource-isolating main baseline, required rebase, first work and settled
-human decisions.
+[resume.md](resume.md) supplies the final r6 checkpoints, required reconciliation
+onto launch main, first remaining work and settled human decisions.
 Existing A0–A8 and M0–M7 designs own product semantics and acceptance.
 This directory owns execution shape; it does not waive unverified product gates.
 

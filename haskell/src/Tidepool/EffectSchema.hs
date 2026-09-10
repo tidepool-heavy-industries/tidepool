@@ -86,6 +86,9 @@ sitedVerbs =
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
       "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" 3 2 False True [2, 0])
       { vsAnswerSource = TypeArgument 1 }
+  , (verb "requestWithProgressInto" "Tidepool.Actors.Internal.Agent"
+      "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" 3 3 False True [2, 0])
+      { vsAnswerSource = TypeArgument 1 }
   , VerbSpec
       { vsName = "child"
       , vsModule = "Tidepool.Actors.Unfold"

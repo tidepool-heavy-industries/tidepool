@@ -8,6 +8,14 @@
 -- DevSwarm belong in separately loaded application modules.
 module Tidepool.Actors.Shoal
   ( ActorEffects
+  , (:-), State, Call, NoReply, Event
+  , Shape, Definition, Client, Self, Private
+  , ActorState, Handler, ActorSpec, ActorHandle
+  , Send, Request, EventHandler, EventSource
+  , get, gets, put, modify'
+  , definition, client, start, finish, progress, settlement, lifecycle, self, sender
+  , ActorInputOrigin (..)
+  , LocalEffects, Forwarding, forwardResult, forwardingExit
   , inspectFull
   , FullInspection
   , ResearchActorEffects
@@ -182,6 +190,7 @@ module Tidepool.Actors.Shoal
   , withRequestDeadline
   , requestWith
   , requestWithProgress
+  , requestWithProgressInto
   , Progress
   , ProgressCursor (..)
   , ProgressState (..)
@@ -297,6 +306,16 @@ import Prelude
 import Tidepool.Inspection (FullInspection, inspectFull)
 
 import Tidepool.Agent.Reply
+import Tidepool.Actor.Record
+  ( (:-), State, Call, NoReply, Event
+  , Shape, Definition, Client, Self, Private
+  , ActorState, Handler, ActorSpec, ActorHandle
+  , Send, Request, EventHandler, EventSource
+  , get, gets, put, modify'
+  , definition, client, start, finish, progress, settlement, lifecycle, self, sender
+  , ActorInputOrigin (..)
+  , LocalEffects, Forwarding, forwardResult, forwardingExit
+  )
 import Tidepool.Agent.Watch
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
@@ -324,6 +343,7 @@ import Tidepool.Actors.Internal.Agent
   , requestOptions
   , requestWith
   , requestWithProgress
+  , requestWithProgressInto
   , StopOutcome (..)
   , startAgent
   , stopAgent

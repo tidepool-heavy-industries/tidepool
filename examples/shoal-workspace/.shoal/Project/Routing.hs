@@ -1,3 +1,7 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
@@ -7,20 +11,23 @@
 -- Project policy for live waves. The kernel owns ordered delivery and lifetime;
 -- this actor retains engineering evidence and chooses which changes need judgment.
 module Project.Routing
-  ( WorkInput (WorkSnapshot, WorkNotification), WorkState (..), WorkSource (..), WorkStatus (..)
-  , WorkEvent (..), Notice (..), WorkSink
-  , followWork, workDefinition, keepWork
+  ( WorkActor (workSnapshot, workNotification, incorporatedWork), WorkState (..), WorkSource (..), WorkStatus (..)
+  , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink
+  , followWork, workDefinition, readWork, finishWork, keepWork, outstandingEvidence
   , notifyWork, workMessage, withCheckpoints
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.List (nub, sort, (\\))
+import GHC.Generics (Generic)
+import qualified Tidepool.Actor.Record as R
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Tidepool.Actor as Actor
 import Tidepool.Actors.Shoal
 import Tidepool.Effects.Core (Actor)
 import Project.Types
+import Project.Actors (CoordinationEffects, coordinationActor)
 import Project.Work (sameQuestion)
 
 -- Closure keeps unanswered questions. The terminal response is independent of
@@ -31,30 +38,49 @@ data WorkStatus = WorkOpen | WorkClosed | WorkRejected ReplyError
 data WorkSource value = WorkSource
   { sourceName :: Text
   , sourceProgress :: WorkProgress
+  , sourceCursor :: Maybe ProgressCursor
   , sourceStatus :: WorkStatus
   , sourceResult :: Maybe (Either ResponseFailure (ResponseResult value))
   } deriving (Show)
 
+data WorkDelta = WorkDelta
+  { deltaCursor :: ProgressCursor
+  , addedEvidence :: [Candidate]
+  , openedQuestions :: Attention
+  , resolvedQuestions :: Attention
+  } deriving (Show)
+
+workChange :: Text -> ProgressCursor -> WorkProgress -> WorkProgress -> WorkEvent value
+workChange name cursor previous current = WorkChanged name WorkDelta
+  { deltaCursor = cursor
+  , addedEvidence = workEvidence current \\ workEvidence previous
+  , openedQuestions = workQuestions current \\ workQuestions previous
+  , resolvedQuestions = [q | q <- workQuestions previous,
+      not (any (sameQuestion q) (workQuestions current))]
+  }
+
 data WorkEvent value
-  = WorkChanged Text WorkProgress WorkProgress
+  = WorkChanged Text WorkDelta
   | WorkEnded Text WorkStatus
   | WorkFinished Text (Either ResponseFailure (ResponseResult value))
   deriving (Show)
 
 -- Successful admission receipts and failures are both retained. Nothing here
 -- automatically retries an uncertain send or claims model incorporation.
-data Notice value = Notice
-  { noticeEvent :: WorkEvent value
+data Notice = Notice
+  { noticeEvent :: Int
   , noticeReceipt :: Either NotificationError NotificationReceipt
   }
 
-instance Show value => Show (Notice value) where
+instance Show Notice where
   show notice = "Notice " ++ show (noticeEvent notice) ++ " "
     ++ either show (const "NotificationReceipt") (noticeReceipt notice)
 
 data WorkState value = WorkState
   { collectedWork :: [WorkSource value]
-  , workNotices :: [Notice value]
+  , workNotices :: [Notice]
+  , workHistory :: [WorkEvent value]
+  , handledWork :: [(Text, Candidate)]
   }
 
 -- Binding a snapshot should not print whole tasks or accumulated receipts.
@@ -67,90 +93,90 @@ instance Show (WorkState value) where
     | source <- collectedWork state
     ] ++ " notices=" ++ show (length (workNotices state))
 
-data WorkInput value result where
-  WorkUpdate :: Text -> ProgressState WorkProgress -> WorkInput value ()
-  WorkSettled :: Text -> Either ResponseFailure (ResponseResult value) -> WorkInput value ()
-  WorkSnapshot :: WorkInput value (WorkState value)
-  WorkNotification :: NotificationReceipt -> WorkInput value (Either NotificationError NotificationState)
+data WorkActor value mode = WorkActor
+  { workState :: mode :- State (WorkState value)
+  , workSnapshot :: mode :- Call () (R.Reply (WorkState value))
+  , workNotification :: mode :- Call NotificationReceipt (R.Reply (Either NotificationError NotificationState))
+  , incorporatedWork :: mode :- Call (Text, [Candidate]) NoReply
+  , workUpdates :: mode :- Event (Text, ProgressState WorkProgress)
+  , workResults :: mode :- Event (Text, Either ResponseFailure (ResponseResult value))
+  } deriving Generic
 
--- Nothing means no native message (e.g. local retention or a typed cast). A
--- returned send failure is data: it must not unwind the observed source update.
+type WorkEffects value = CoordinationEffects (WorkActor value)
 type WorkSink value = WorkEvent value
-  -> Eff (Actor.ReadOnlyEffects (WorkInput value))
+  -> Handler (WorkState value) (WorkEffects value)
        (Maybe (Either NotificationError NotificationReceipt))
 
 keepWork :: WorkSink value
 keepWork _ = pure Nothing
 
--- No identifiers are inferred from task prose. Each fixed name belongs to one
--- response/progress pair; the handles remain available for independent inspection.
-workSources
-  :: [(Text, Response value, Progress WorkProgress)] -> [Actor.Source (WorkInput value)]
-workSources sources
-  | length names /= length (nub names) = error "work source names must be unique"
-  | otherwise = concat
-      [ [ Actor.progressSource progress (WorkUpdate name)
-        , Actor.settlementSource response (WorkSettled name)
-        ]
-      | (name, response, progress) <- sources
-      ]
-  where
-    names = [name | (name, _, _) <- sources]
-
 followWork
   :: Member Actor effects
   => [(Text, Response value, Progress WorkProgress)] -> WorkSink value
-  -> Eff effects (Actor.ActorRef (WorkInput value) (WorkState value))
-followWork sources sink = Actor.startActor (workDefinition sources sink)
-  (WorkState [WorkSource name (WorkProgress [] []) WorkOpen Nothing | (name, _, _) <- sources] [])
+  -> Eff effects (ActorHandle (WorkActor value))
+followWork inputs sink = R.start (workDefinition inputs sink)
 
--- Keep the same ordered sources on replacement. State initialization belongs to
--- startActor; replacing a sink retains all committed questions, results and receipts.
+readWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (WorkState value)
+readWork router = R.call (workSnapshot (R.client router)) ()
+
+finishWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (Actor.ActorExit (WorkState value))
+finishWork = R.finish
+
 workDefinition
   :: forall value. [(Text, Response value, Progress WorkProgress)] -> WorkSink value
-  -> Actor.ActorDefinition (WorkState value) (WorkInput value) (WorkState value)
-workDefinition sources sink = Actor.withSources (workSources sources) $
-  Actor.stateful "work" Actor.ReadOnly step
+  -> ActorSpec (WorkActor value) (WorkEffects value)
+workDefinition inputs sink
+  | length names /= length (nub names) = error "work source names must be unique"
+  | otherwise = coordinationActor "work" WorkActor
+      { workState = WorkState [WorkSource name (WorkProgress [] []) Nothing WorkOpen Nothing | name <- names] [] [] []
+      , workSnapshot = \() -> R.get
+      , workNotification = pollNotification
+      , incorporatedWork = \(name, candidates) -> R.modify' (\state -> state
+          { handledWork = nub (handledWork state ++ [(name, candidate) | candidate <- candidates]) })
+      , workUpdates = R.on (mconcat [fmap ((,) name) (R.progress updates) | (name, _, updates) <- inputs]) update
+      , workResults = R.on (mconcat [fmap ((,) name) (R.settlement response) | (name, response, _) <- inputs]) settled
+      }
   where
-    step
-      :: WorkState value -> WorkInput value result
-      -> Eff (Actor.ReadOnlyEffects (WorkInput value)) (result, WorkState value)
-    step state WorkSnapshot = pure (state, state)
-    step state (WorkNotification receipt) = do
-      observed <- pollNotification receipt
-      pure (observed, state)
-    step state (WorkUpdate name observation) = case observation of
-      ProgressPending -> pure ((), ensure name state)
-      ProgressUpdate _ progress -> do
-        let current = findSource name state
-            previous = sourceProgress current
-            next = WorkProgress
-              (nub (workEvidence previous ++ workEvidence progress))
-              (nub (sort (workQuestions progress)))
-            updated = putSource (current { sourceProgress = next }) state
-        if next == previous then pure ((), updated)
-        else publish (WorkChanged name previous next) updated
-      ProgressClosed -> ended name WorkClosed state
-      ProgressRejected failure -> ended name (WorkRejected failure) state
-    step state (WorkSettled name result) =
+    names = [name | (name, _, _) <- inputs]
+    update (name, observation) = do
+      state <- R.get
+      case observation of
+        ProgressPending -> R.put (ensure name state)
+        ProgressUpdate cursor progress -> do
+          let current = findSource name state
+              previous = sourceProgress current
+              next = WorkProgress (nub (workEvidence previous ++ workEvidence progress))
+                (nub (sort (workQuestions progress)))
+          R.put (putSource (current { sourceProgress = next, sourceCursor = Just cursor }) state)
+          publish (workChange name cursor previous next)
+        ProgressClosed -> ended name WorkClosed
+        ProgressRejected failure -> ended name (WorkRejected failure)
+    settled (name, result) = do
+      R.modify' (\state -> putSource ((findSource name state) { sourceResult = Just result }) state)
       publish (WorkFinished name result)
-        (putSource ((findSource name state) { sourceResult = Just result }) state)
-    ended name status state =
+    ended name status = do
+      state <- R.get
       let current = findSource name state
-          updated = putSource (current { sourceStatus = status }) state
-      in if sourceStatus current == status then pure ((), updated)
-         else publish (WorkEnded name status) updated
-    publish event updated = do
+      R.put (putSource (current { sourceStatus = status }) state)
+      if sourceStatus current == status then pure () else publish (WorkEnded name status)
+    publish event = do
+      state <- R.get
+      let index = length (workHistory state)
+      R.put (state { workHistory = workHistory state ++ [event] })
       sent <- sink event
-      pure ((), updated { workNotices = case sent of
-        Nothing -> workNotices updated
-        Just receipt -> workNotices updated ++ [Notice event receipt]
-        })
+      R.modify' (\current -> current { workNotices = case sent of
+        Nothing -> workNotices current
+        Just receipt -> workNotices current ++ [Notice index receipt] })
+
+outstandingEvidence :: WorkState value -> WorkSource value -> [Candidate]
+outstandingEvidence state source =
+  [candidate | candidate <- workEvidence (sourceProgress source),
+    (sourceName source, candidate) `notElem` handledWork state]
 
 findSource :: Text -> WorkState value -> WorkSource value
 findSource name state = case filter ((== name) . sourceName) (collectedWork state) of
   current : _ -> current
-  [] -> WorkSource name (WorkProgress [] []) WorkOpen Nothing
+  [] -> WorkSource name (WorkProgress [] []) Nothing WorkOpen Nothing
 
 ensure :: Text -> WorkState value -> WorkState value
 ensure name state = putSource (findSource name state) state
@@ -171,9 +197,9 @@ notifyWork owner render event = case render event of
 
 workMessage :: (value -> Text) -> WorkEvent value -> Maybe Text
 workMessage render event = case event of
-  WorkChanged name old new ->
-    let opened = workQuestions new \\ workQuestions old
-        closed = [q | q <- workQuestions old, not (any (sameQuestion q) (workQuestions new))]
+  WorkChanged name delta ->
+    let opened = openedQuestions delta
+        closed = resolvedQuestions delta
         ref q = questionPlan (questionDetails q) <> "#" <> questionKey q
           <> "@" <> questionSource (questionDetails q)
         added q = "+" <> ref q <> " " <> questionFinding (questionDetails q)
@@ -196,8 +222,8 @@ withCheckpoints render event = case (render event, checkpoints event) of
   (message, Nothing) -> message
   (Just message, Just refs) -> Just (message <> "; " <> refs)
   where
-    checkpoints (WorkChanged name old new) =
-      case workEvidence new \\ workEvidence old of
+    checkpoints (WorkChanged name delta) =
+      case addedEvidence delta of
         [] -> Nothing
         fresh -> Just (name <> ": checkpoint " <> Text.intercalate "," (map candidateCommit fresh))
     checkpoints _ = Nothing

@@ -121,6 +121,14 @@ impl ActorWorkbenchSource {
             .extend_text("Tidepool.QQ (fmt, j, patch, uri)");
         self
     }
+
+    /// Additional shared imports must enter declaration compilation as well as
+    /// expression templates, so bindings keep the same vocabulary after a fork.
+    #[must_use]
+    pub fn with_imports(mut self, imports: &str) -> Self {
+        self.workbench_imports.extend_text(imports);
+        self
+    }
 }
 
 /// Shared-machine registry shape used by actors. String holes are only the
@@ -768,6 +776,7 @@ pub(crate) enum ResidentActorBoundary {
     },
     Completed,
     ActorContext(ResidentHole),
+    ActorLocalContext(ResidentHole),
     ForkGroup(ForkGroupBoundary),
     Start(crate::ResidentActorStart),
     Outbound(ResidentOutbound),
@@ -900,6 +909,7 @@ impl ResidentActorBoundary {
             Self::NotificationSend { .. } => "notify",
             Self::NotificationPoll { .. } => "pollNotification",
             Self::ActorContext(_) => "actorContext",
+            Self::ActorLocalContext(_) => "actor local context",
             Self::ForkGroup(ForkGroupBoundary::Preview { .. }) => "preview context-fork policy",
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
@@ -1141,6 +1151,9 @@ impl ResidentRequest {
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorContinueWith(..),
             ) => "continue",
+            Self::ActorLocal(
+                crate::generated::actor_local::ActorLocalReq::ActorLocalContextWith,
+            ) => "actor local context",
             Self::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(
                 ..,
             )) => "receive",
@@ -2434,6 +2447,8 @@ where
                             },
                         ))
                     }
+                    ResidentRequest::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorLocalContextWith) =>
+                        Ok(ResidentActorBoundary::ActorLocalContext(hole)),
                     ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _),
                     ) => capture_receiver_boundary(session, hole, site, actor_realm),

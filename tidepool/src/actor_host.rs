@@ -1644,6 +1644,8 @@ fn compile_root(
     Ok((
         ActorWorkbenchSource::new(preamble, include)
             .with_default_browse_module(WORKBENCH_SURFACE_MODULE)
+            .with_imports("qualified Tidepool.Actor.Record as R")
+            .with_imports("qualified Tidepool.Actor as Actor")
             .with_default_quasiquoters(),
         ResidentActorRoot::new(descriptor, machine, outcome),
         Arc::new(compiled),
@@ -6109,6 +6111,87 @@ mod tests {
             campaign.deployments.try_recv().is_err(),
             "idle admission fabricated an activation"
         );
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_actor_dispatches_typed_routes_and_commits_state() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let result = dispatch_haskell_script(
+            campaign.root_installation.policy.as_ref(),
+            include_str!("actor_host/record_actor.hs"),
+        )
+        .await;
+        assert_eq!(result["status"], "committed", "{result:?}");
+        for item in result["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{result:?}");
+        }
+        assert!(result.to_string().contains("True"), "{result:?}");
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_actor_nested_failure_reaches_interactive_owner_once() {
+        let mut campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/record_actor_nested_failure.hs"),
+        )
+        .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        let notice = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                if let LocalResidentDeployment::NotificationSend(command) =
+                    campaign.deployments.recv().await.unwrap()
+                {
+                    break command;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(notice.target(), campaign.actor.identity());
+        assert!(notice.message().contains("nested-handler-probe"));
+        let available =
+            dispatch_haskell_script(root.as_ref(), "R.call (managerValue (R.client manager)) ()")
+                .await;
+        assert_eq!(available["status"], "committed", "{available:?}");
+        assert_eq!(available["items"][0]["output"], "7", "{available:?}");
+        assert!(
+            campaign.deployments.try_recv().is_err(),
+            "duplicate failure notice"
+        );
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_actor_explains_invalid_state_shapes() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let root = campaign.root_installation.policy.clone();
+        let setup = dispatch_haskell_script(
+            root.as_ref(),
+            include_str!("actor_host/record_actor_invalid_shapes.hs"),
+        )
+        .await;
+        assert_eq!(setup["status"], "committed", "{setup:?}");
+        for source in [
+            "invalid <- R.start (R.definition \"no-state\" Actor.ReadOnly (NoState (\\() -> pure ())))",
+            "invalid <- R.start (R.definition \"two-states\" Actor.ReadOnly (TwoStates 0 False))",
+        ] {
+            let result = dispatch_haskell_script_result(root.as_ref(), source).await;
+            let diagnostic = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                diagnostic.contains("must declare exactly one State field"),
+                "{diagnostic}"
+            );
+        }
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
     }

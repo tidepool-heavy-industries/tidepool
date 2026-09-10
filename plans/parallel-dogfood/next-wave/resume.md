@@ -1,50 +1,51 @@
 # Next run: resume the consolidated trees on main
 
-The September 9 routing run ended in a machine OOM. Its committed checkpoints
-and recovered dirty files are preserved below. Live TUI/Haskell state is not
-recoverable from these commits. Select the checked resource-isolating runner
-before the next run.
+Resume the final r6 checkpoints below on the launch-recorded main revision.
+Git preserves source and handoffs; it does not recreate live TUI/Haskell handles.
+The checked main runner and frozen `.shoal` package remain separate from product
+candidates throughout the run.
 
 ## Starting source
 
 | Input | Commit |
 |---|---|
-| Latest coordinator/engine checkpoint | `b1056582cf2be5be1bd6f2d976cf55a82d62ec41` |
-| Applications checkpoint | `97802912488b3aa90efcd15ce29a2033aa5972bb` |
-| Recovered applications working files, parented to that checkpoint | `3bed6d67e6a352cd14eda4b99c3e5320f2758f73` |
-| Recovered external Codex working files | `d73bdc83e0f6b67caa8184d1ded70a0deb043f43` (parent `3fc507260a16dc46feb9816f2f062e8cd2d85348`) |
-| Retained M2 root integration | `44518ae3b3dc794be57d7684926c835e8c32b718` |
-| Retained major-collector candidate | `03418804c15d54714f37ebc75ed950257e20cdb4` |
-| Retained A7 repair candidate | `78a77c3c3412904bd05bd81e809ae3f8bcf4be16` |
+| Consolidated coordinator checkpoint and final census | `4ac97b13c1b524e2ca050f37c5160210d9ffed40` |
+| Engine lane and final preservation ledger | `059c1677c3dcb71f9afd1a98e522325c8c378beb` |
+| Applications lane and custody handoff | `c19aaa84aa5cd0b99431457b2ec0c7b2d75a6a31` |
+| Introspection partial implementation | `82400a24b88c67b103245f367983e0511839ad84` |
+| Native A1/A2 candidate (Codex repository) | `b2163064d3b52b3e1a7ee458603f661d6162a165` |
+| Native completion tested sibling (Codex repository) | `d140e7ecf4df19d69ad200be405f5866d4b4d4a0` |
+| Native A6 continuation (Codex repository) | `6648c73f5d921e47fe81ce26e4caa99ef2a2fdd3` |
+| Preserved six-file recovery WIP (Codex repository) | `9d68c0dbb1c48614392a0e0079ce8fcb70c75c94` |
 
-Recovery branches in the owning repositories are
-`recovery/resource-restart-20260909/applications` and
-`recovery/resource-restart-20260909/codex`. These preserve bytes, not acceptance.
-Inspect the handoffs at the named commits; incorporate candidates only after
-checking their actual owning defects and integration requirements. The earlier
-`e0c37ff3` wave is an ancestor/provenance record, not the next run's baseline.
+Read the coordinator's `plans/parallel-dogfood/resource-wave/coordinator-wind-down.md`
+at its exact commit, then the assigned lane's handoff in that tree. Use `git show <commit>:<path>` when the file is not in main. Engine additionally reads
+`engine/engine-preservation.md` and `engine/m2-preservation.md`; applications reads
+`applications/applications-handoff.md`. These supersede the older OOM recovery
+inventory and old launch/release messages.
 
-The local evidence archive is
-`/home/inanna/dev/tidepool/target/dogfood-routing-20260909/`: `crash-panes/`,
-`oom-kernel.log`, and `recovery/` retain the terminal capture, patches, original
-files and `committed-recovery.json`. Original dirty checkouts remain untouched.
+The coordinator has already incorporated applications, engine and introspection
+partials. Engine includes M0/M1, M2 candidate `362094cd` and M3 scaffold `cb67a840`;
+its M2 preservation ledger is `1ecdbafb`. Do not implement those foundations again.
+The native refs are divergent candidates, not one accepted linear implementation.
+Reconcile them explicitly and preserve the recovery WIP ref before selecting a
+matched native candidate. No product megatask is accepted by these checkpoints.
 
-Main `61d6c0b41` imports the supervisor/resource slice and pins native
-`fe15831c8a22c0d1b8d78d5ce55b7aa5fc3fa666`. Preserve those owners during
-reconciliation; do not reintroduce the old direct pane launch or omit command
-admission. Full A5 settlement, native delivery/completion and engine changes
-remain product-branch work. See [slice acceptance](../../next/command-resource-acceptance.md).
+Main owns command-resource admission, supervisor/disk repairs and the curated
+actor/coordination package. Preserve those owners during reconciliation. The
+launch record selects exact main, native pin and package fingerprints; older
+hashes in product plans do not select the running harness. Full applications,
+engine and introspection acceptance remains on the product branches.
 
-The launch record selects current **main** for the running harness and its frozen
-prompt/Haskell package. It includes the routing improvements from `6b502116` and
-no actor-count cap; memory headroom gates actor starts and two bounded command
-allocations gate builds/tests. The running native Codex remains the
-main pin, independently of the applications candidate above.
-
-Before implementation forks, each Sol lead creates a new continuation branch from
-its recovered lane checkpoint and **rebases it onto the launch-recorded main commit**. Preserve
-the original checkpoint refs and existing worktrees. Preserve meaningful merges;
-resolve conflicts against current owners and keep main's orchestration package.
+Before implementation forks, each lane must descend from the launch-recorded main
+commit. Use an already-reconciled continuation when supplied in the launch record;
+do not repeat its rebase. Otherwise create a new continuation from the preserved
+lane checkpoint and rebase it onto that main revision. Preserve original refs and
+existing worktrees. A consolidated continuation may squash the lane's net change
+since its shared main ancestor, recording the exact original head and ancestor in
+the commit message. This preserves source provenance without replaying hundreds
+of intermediate handoff commits. Resolve conflicts against current owners and
+keep main's orchestration package.
 Record the resulting head and check the affected integration seams. Do the same
 source reconciliation for external Codex against its recorded tooling baseline.
 If that baseline is already an ancestor, no redundant rewrite is needed.
@@ -58,17 +59,21 @@ checks must be selected explicitly, separately from the running swarm's binaries
 
 | Owner | Opening result | Parallel work after the local contract is usable |
 |---|---|---|
-| Applications delivery | Complete the existing native/host round trip | Socket submit/query/withdraw/seal/ack and Remote behavior; real PTY lost-ack/stale-generation; host late-poll/no-overtaking |
-| Applications custody/completion | Connect checked A4 process ownership to A5/A6 | Hosted-work retirement, completed-call/context release, adversarial owner-loss consumers |
-| Applications recovery | Integrate A7 against the checked engine disposition | Source recovery and lost live-state reporting; join evolving custody/completion without waiting for all M2 reclamation |
-| Engine prepared frontend | Close remaining M1 worker/corpus and malformed-site recovery evidence | Use the integrated elaboration/facts; diagnose the distinct provider and pre-binding failures without replacement chains |
-| Engine memory | Complete M2 beyond machine-lifetime retention | Establish wrapper-complete root ownership; split reclamation/accounting from retirement and mixed-lifetime checks after agreeing the contract |
+| Applications delivery | Review the preserved host partial and reconcile native candidates | Real native/host failure paths and matched protocol checks |
+| Applications completion | Complete A6 durable completion/restart and exact release | Hosted-work retirement and adversarial owner-loss consumers |
+| Applications recovery | Recheck A7 against the resulting engine source | Source recovery and truthful lost-live-state reporting |
+| Engine memory | Independently review M2 and finish its consumer/failure matrix | Reclamation/accounting and retirement/mixed-lifetime checks |
+| Engine schema | Extend the preserved M3 scaffold and accepted design | Writer, bounded decoder/validator, linker and reference vertical |
+
+Introspection remains a bounded additional obligation: execute the real resident
+Eff reentrancy path and obtain independent review of the preserved implementation.
+Allocate it where its engine/actor ownership fits; do not create a third megatask.
 
 The existing native bridge, prepared frontend and memory-safety repair are starting
 assets, not assignments to implement again. Each lead owns substantive integration
 and forks meaningful implementation subtrees; reviewers are not the only children.
 
-M3 schema/execution work opens from real prepared evidence. M4 codegen and M5 heap
+Use the retained prepared evidence and accepted M3 amendment for schema/execution work. M4 codegen and M5 heap
 work fork from a shared signature/layout/root contract; M6/M7 follow real production
 consumers. Applications A8 owns the matched full-TUI package and failure-path join.
 These are dependencies, not globally synchronized rounds. The objective remains

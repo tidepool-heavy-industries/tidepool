@@ -125,6 +125,7 @@ struct ResidentEnvironment<H, O> {
 #[derive(Clone)]
 struct ResidentActorRecord {
     forest_control: bool,
+    interactive_policy_installed: bool,
     observation_roots: std::collections::HashSet<ActorRef>,
     descriptor: ActorDescriptor,
     bound_worktree: Option<String>,
@@ -256,6 +257,19 @@ struct StateCheckpoint {
 enum RetainedActorInput {
     Mailbox(Arc<RootCustody>),
     Source(crate::SourceDelivery),
+}
+
+#[derive(Clone, Copy, tidepool_bridge_derive::ToCore)]
+enum ActorInputOrigin {
+    ActorStartup,
+    ActorMessageFrom((i64, i64)),
+    ActorProgressFrom(i64),
+    ActorSettlementFrom(i64),
+    ActorLifecycleFrom((i64, i64)),
+}
+
+fn actor_address(actor: ActorRef) -> (i64, i64) {
+    (actor.id.0 as i64, actor.incarnation.0 as i64)
 }
 
 impl std::fmt::Debug for RetainedActorInput {
@@ -429,6 +443,7 @@ pub struct ResidentKernelBehavior<H, O> {
     checkpoint: Option<StateCheckpoint>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
+    input_origin: ActorInputOrigin,
     sources: Vec<crate::request::sources::SourceBinding>,
     source_connections: Option<crate::request::sources::ActorSourceConnections>,
     launch_worktrees: Vec<String>,
@@ -542,6 +557,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             checkpoint: None,
             pending_checkpoint: None,
             active_input: None,
+            input_origin: ActorInputOrigin::ActorStartup,
             sources: Vec::new(),
             source_connections: None,
             launch_worktrees,
@@ -585,10 +601,53 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// Publish an installed actor application exactly once readiness has made
     /// its reference usable.
     fn publish_installation(&self, installation: LocalResidentInstallation) {
+        if let Some(record) = self
+            .environment
+            .actors
+            .lock()
+            .get_mut(&installation.actor.identity())
+        {
+            record.interactive_policy_installed = true;
+        }
         let _ = self
             .environment
             .deployments
             .send(LocalResidentDeployment::PolicyInstalled(installation));
+    }
+
+    fn notification_supervisor(&self, mut next: Option<ActorRef>) -> Option<ActorRef> {
+        let records = self.environment.actors.lock();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(actor) = next {
+            if !visited.insert(actor) {
+                return None;
+            }
+            let record = records.get(&actor)?;
+            if record.interactive_policy_installed && record.terminal.is_none() {
+                return Some(actor);
+            }
+            next = record.descriptor.supervisor_parent();
+        }
+        None
+    }
+
+    fn notify_supervisor(&self, source: ActorRef, parent: Option<ActorRef>, message: String) {
+        let Some(target) = self.notification_supervisor(parent) else {
+            tracing::error!(actor = ?source, "actor failure has no live interactive supervisor");
+            return;
+        };
+        let (command, admission) = crate::NotificationSend::new(source, target, message);
+        // System notices have no model-owned receipt. Losing this waiter does
+        // not retract durable admission or authorize another send.
+        drop(admission);
+        if self
+            .environment
+            .deployments
+            .send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
+            .is_err()
+        {
+            tracing::error!(actor = ?source, "actor failure notice could not reach inbox owner");
+        }
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
@@ -1450,6 +1509,16 @@ where
             '_,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::ActorLocalContext(continuation) => Box::pin(async move {
+                self.environment
+                    .runner
+                    .resume_value(
+                        context.clone(),
+                        continuation,
+                        (actor_address(context.actor), self.input_origin),
+                    )
+                    .await
+            }),
             ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
                 self.environment
                     .runner
@@ -2758,6 +2827,7 @@ where
                         self.checkpoint = Some(checkpoint);
                     }
                     self.active_input = None;
+                    self.input_origin = ActorInputOrigin::ActorStartup;
                     self.standing = ResidentStanding::Receiving(receiver);
                     return Ok(KernelStep::Continue(()));
                 }
@@ -4306,6 +4376,18 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            use crate::request::sources::{RequestSourceKind, SourceTarget};
+            self.input_origin = match delivery.target {
+                SourceTarget::Request(request, RequestSourceKind::Progress) => {
+                    ActorInputOrigin::ActorProgressFrom(request.0 as i64)
+                }
+                SourceTarget::Request(request, RequestSourceKind::Settlement) => {
+                    ActorInputOrigin::ActorSettlementFrom(request.0 as i64)
+                }
+                SourceTarget::Lifecycle(actor) => {
+                    ActorInputOrigin::ActorLifecycleFrom(actor_address(actor))
+                }
+            };
             let source = self
                 .sources
                 .get(delivery.slot)
@@ -4418,24 +4500,11 @@ where
         if let Some(actor) = kernel.resolve(kernel.identity()) {
             actor.terminal().publish_paused(detail.to_owned());
         }
-        if let Some(supervisor) = kernel.supervisor_identity() {
-            let (command, admission) = crate::NotificationSend::new(
-                kernel.identity(),
-                supervisor,
-                format!("{:?} handler paused: {detail}. State/input/queue retained; no replay. Replace actor or stop.", kernel.identity()),
-            );
-            // Runtime notices need no model-owned receipt. Dropping this waiter
-            // does not retract durable admission or authorize a second send.
-            drop(admission);
-            if self
-                .environment
-                .deployments
-                .send(LocalResidentDeployment::NotificationSend(Arc::new(command)))
-                .is_err()
-            {
-                tracing::error!(actor = ?kernel.identity(), "paused-handler supervisor notice could not reach inbox owner");
-            }
-        }
+        self.notify_supervisor(
+            kernel.identity(),
+            kernel.supervisor_identity(),
+            format!("{:?} handler paused: {detail}. State/input/queue retained; no replay. Replace actor or stop.", kernel.identity()),
+        );
         true
     }
 
@@ -4450,6 +4519,7 @@ where
                 context.actor,
                 ResidentActorRecord {
                     forest_control: self.forest_control,
+                    interactive_policy_installed: false,
                     observation_roots: Default::default(),
                     descriptor: self.descriptor.clone(),
                     bound_worktree: self.launch_worktrees.first().cloned(),
@@ -4618,11 +4688,12 @@ where
     fn cast<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        _sender: ActorRef,
+        sender: ActorRef,
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
             let (_, step) = self
                 .run_receiver(
                     kernel,
@@ -4647,6 +4718,7 @@ where
     {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
             let (reply, step) = self
                 .run_receiver(kernel, &context, Some(caller), &ancestry, request)
                 .await
@@ -5226,6 +5298,15 @@ where
             }
             if matches!(self.standing, ResidentStanding::Boot) {
                 self.deferred_child_failures.push(notice);
+            } else if !self.policy_installed {
+                self.notify_supervisor(
+                    child,
+                    self.descriptor.supervisor_parent(),
+                    format!(
+                        "{child:?} exited {:?}: {}",
+                        notice.terminal.kind, notice.terminal.summary
+                    ),
+                );
             } else {
                 let _ = self
                     .environment

@@ -37,6 +37,8 @@ module Tidepool.Actors.Internal.Agent
   , requestWithSited
   , requestWithProgress
   , requestWithProgressSited
+  , requestWithProgressInto
+  , requestWithProgressIntoSited
   , AgentState (..)
   , AgentObservation (..)
   , agentIdentity
@@ -319,7 +321,7 @@ requestSited
   -> input
   -> Eff effs (Response result)
 requestSited site (AgentRef target targetWorktree) label@(RequestLabel renderedLabel) input = do
-  requestConfiguredSited site target targetWorktree label Nothing Nothing input
+  requestConfiguredSited site target targetWorktree label Nothing Nothing input (const (pure ()))
 
 {-# OPAQUE requestWith #-}
 requestWith
@@ -351,6 +353,34 @@ requestWithProgressSited site actor options = do
   response <- requestWithSited @result @input site actor options
   pure (response, Progress (responseRequestId response))
 
+-- | Retain the exact typed handles before admitting work. The callback should
+-- transfer them to an owned mailbox or install their result route. If it fails,
+-- no request is submitted; once admission happens its handles are already held
+-- independently of the submitting handler's next state checkpoint.
+{-# OPAQUE requestWithProgressInto #-}
+requestWithProgressInto
+  :: forall progress result input effs. Member Replies effs
+  => AgentRef
+  -> RequestOptions input
+  -> ((Response result, Progress progress) -> Eff effs ())
+  -> Eff effs (Response result, Progress progress)
+requestWithProgressInto = requestWithProgressIntoSited @progress @result @input 0
+
+{-# OPAQUE requestWithProgressIntoSited #-}
+requestWithProgressIntoSited
+  :: forall progress result input effs. Member Replies effs
+  => Int
+  -> AgentRef
+  -> RequestOptions input
+  -> ((Response result, Progress progress) -> Eff effs ())
+  -> Eff effs (Response result, Progress progress)
+requestWithProgressIntoSited site (AgentRef target targetWorktree) options retain = do
+  let handles response = (response, Progress (responseRequestId response))
+  response <- requestConfiguredSited site target targetWorktree
+    (requestOptionsLabel options) (requestOptionsGuidance options)
+    (requestOptionsDeadline options) (requestOptionsInput options) (retain . handles)
+  pure (handles response)
+
 {-# OPAQUE requestWithSited #-}
 requestWithSited
   :: forall result input effs
@@ -368,6 +398,7 @@ requestWithSited site (AgentRef target targetWorktree) options =
     (requestOptionsGuidance options)
     (requestOptionsDeadline options)
     (requestOptionsInput options)
+    (const (pure ()))
 
 requestConfiguredSited
   :: forall result input effs
@@ -379,10 +410,12 @@ requestConfiguredSited
   -> Maybe Text
   -> Maybe RequestDeadline
   -> input
+  -> (Response result -> Eff effs ())
   -> Eff effs (Response result)
-requestConfiguredSited site target targetWorktree label@(RequestLabel renderedLabel) guidance deadline input = do
+requestConfiguredSited site target targetWorktree label@(RequestLabel renderedLabel) guidance deadline input retain = do
   requestId <- reserveRequest label (actorAddress target)
   let (response, reply) = newRequestHandles input requestId
+  retain response
   submitRequest
     requestId
     (actorAddress target)
@@ -547,8 +580,7 @@ inspectAgent (ActorInternal.ActorRef actorId incarnation _) =
   send (AgentInspectWith (actorId, incarnation))
 
 profileCode :: Actor.EffectProfile protocol effs -> ActorEffectProfile
-profileCode Actor.ReadWrite = ActorReadWriteProfile
-profileCode Actor.ReadOnly = ActorReadOnlyProfile
+profileCode = ActorInternal.profileCode
 
 roleCode :: Actor.LaunchRole -> ActorLaunchRole
 roleCode Actor.RootRole = ActorRootRole

@@ -1,157 +1,59 @@
 # The concrete actor loop
 
-These are target sketches for [the RSI pass](coordination-rsi.md), not expressions
-available in the current package. Implementation must turn this exact flow into
-an executable skill/check, with real imports and inferred types. The new pieces
-are effectful actor definitions, a typed self mailbox and owned forwarding.
+The [coordination RSI plan](coordination-rsi.md) tracks implementation and acceptance.
+The executable usage lives in the curated workspace rather than parallel sketches:
 
-## What the owner writes
+- [Defining actors skill](../../examples/shoal-workspace/.shoal/skills/shoal-define-actors/SKILL.md): one generic record, state handlers, typed clients, fixed event sources and explicit finish.
+- [Project actor defaults](../../examples/shoal-workspace/.shoal/Project/Actors.hs): selected effect row and scoped worker release.
+- [Local collection](../../examples/shoal-workspace/.shoal/Project/Routing.hs): ordered deltas, original typed results, compact current views and exact incorporated evidence.
+- [Typed component handoff](../../examples/shoal-workspace/.shoal/checks/handoff-router.hs): independent final results cross a typed parent endpoint. The owner still integrates and checks actual source.
+- [Known review continuation](../../examples/shoal-workspace/.shoal/checks/review-continuation.hs): an available retained reviewer receives the selected candidate; results return directly to the owning actor.
+- [Continuation usage](../../examples/shoal-workspace/.shoal/plans/continuation.md): required bindings, request retention and completion.
 
-Keep ordinary applicative unfolding and explicit model/context choices:
-
-```haskell
-(api, runtime) <- unfold group $
-  (,) <$> Work.child apiBranch <*> Work.child runtimeBranch
-```
-
-`Work.child` is a thin project helper selecting the usual progress type and
-bundling the exact request/progress/worker handles. It does not select a model,
-change effort, choose context or create a hidden collector per worker. Custom
-progress and heterogeneous results remain available through the underlying API.
-
-For simple observation, the owner installs one short collector with a useful
-renderer. For this pass's richer case, it installs an integration actor whose
-sources map the two results into a small project protocol. The actor should match
-the engineering join, which need not match an admission batch.
+The defining shape is a record parameterized by its interpretation:
 
 ```haskell
-data Integration result where
-  ApiDone     :: Either ResponseFailure (ResponseResult ApiCandidate)
-              -> Integration ()
-  RuntimeDone :: Either ResponseFailure (ResponseResult RuntimeCandidate)
-              -> Integration ()
-  Incorporated :: SourcePair -> IntegrationEvidence -> Integration ()
-  View        :: (IntegrationState -> result) -> Integration result
-
-let inputs =
-      [ Actor.settlementSource apiResponse ApiDone
-      , Actor.settlementSource runtimeResponse RuntimeDone
-      ]
-integration <- Actor.startActor
-  (Actor.withSources inputs $ Actor.stateful "integration" integrationStep)
-  initialIntegration
+data Join mode = Join
+  { state :: mode :- State JoinState
+  , apiDone :: mode :- Event ApiResult
+  , runtimeDone :: mode :- Event RuntimeResult
+  , incorporated :: mode :- Call IntegrationEvidence NoReply
+  , brief :: mode :- Call () (R.Reply IntegrationBrief)
+  } deriving Generic
 ```
 
-The state retains original receipts and outstanding pairs. Its handler decides
-readiness using the project's contract. It sends a new exact integration packet
-once, retains later distinct packets, and stops repeating handled history. The Sol
-owner still decides how to merge and what the resulting-source checks establish.
+`JoinState`, `ApiResult`, `RuntimeResult`, `IntegrationEvidence` and
+`IntegrationBrief` are project-defined types in this illustrative schema, not
+built-in stages. The definition supplies the initial state, handlers and
+`R.on source handler` bindings. Generic derivation supplies endpoint values.
+`State` and `Event` expose no remote client capability. Each actor has one
+sequential mailbox; handlers use ordinary state effects. `R.self @Join` supplies
+send-only return endpoints for later continuations.
 
-```haskell
-brief <- Actor.call integration (View integrationBrief)
-Actor.cast integration (Incorporated selectedPair checkedIntegration)
-```
+The actor follows the actual dependency join, not an artificial admission batch.
+Keep ordinary applicative unfolding and explicit model/context choices. Bind
+request/progress handles directly; a bundle is useful only where it removes real
+repetition. Do not make every worker spawn create another integration stage.
 
-`View` performs a typed projection inside the actor. Full selected evidence remains
-available without making every brief return the entire history. `Incorporated` is
-project evidence, not an acknowledgment that happens to authorize unrelated work.
+For ordinary observation, use `followWork` once. For a known continuation, the
+actor submits directly to an available worker and installs the result route.
+`requestWithProgressInto` first gives a retention callback the exact handles, then
+admits the request. The review example transfers those handles to an owned mailbox
+before admission, independent of the submitting handler's final state checkpoint.
+External effects are not rolled back; replacement must never replay uncertainty.
 
-## The exact continuation we need to simplify
+Events carry changed facts and references to retained evidence. Full distinct
+publications remain in local history; only outstanding engineering appears in the
+normal brief. An explicit incorporated message removes exactly the handled
+candidate from that view, not every artifact sharing its commit. The parent gets
+an actionable typed result or compact decision packet, not recursive history.
 
-The parent has already chosen a reviewer, source policy and scope. A candidate
-result should therefore start the review directly in the local actor. Its result
-returns to the same mailbox while the handler is free to process other events.
+A final review result drains that attempt's collector automatically. The integration
+actor remains available through repairs; the owner explicitly finishes it and
+retains its exit. Worker release is separate and uses the existing cleanup owner's
+admission and custody fences. No model turn exists solely to rearm, relay a known
+result, narrate queue state or close a finite observer.
 
-```haskell
-type ReviewEffects = '[Replies, Actor, Notifications]
-
-data ReviewFlow result where
-  CandidateDone :: Either ResponseFailure (ResponseResult (Outcome Candidate))
-                -> ReviewFlow ()
-  ReviewProgress :: Candidate -> ProgressState WorkProgress -> ReviewFlow ()
-  ReviewDone :: Candidate
-             -> Either ResponseFailure (ResponseResult (Outcome ReviewDecision))
-             -> ReviewFlow ()
-  ViewReview :: (ReviewState -> result) -> ReviewFlow result
-
-step :: ReviewState -> ReviewFlow result
-     -> Eff (ActorLocal ReviewFlow ': ReviewEffects) (result, ReviewState)
-
-step state (CandidateDone receipt) = do
-  let retained = rememberCandidate receipt state
-  case reviewInputFor selectedScope receipt of
-    Left issue -> do
-      sent <- sendMessage owner (issueBrief issue)
-      pure ((), retainIssue issue sent retained)
-    Right input -> do
-      (response, progress) <- reviewAgain reviewer reviewLabel input
-      self <- Actor.self
-      forwarding <- Actor.forward self
-        [ Actor.progressSource progress (ReviewProgress (reviewInput input))
-        , Actor.settlementSource response (ReviewDone (reviewInput input))
-        ]
-      pure ((), rememberReview response progress forwarding retained)
-
-step state (ReviewProgress candidate progress) =
-  handleReviewProgress candidate progress state
-step state (ReviewDone candidate receipt) =
-  handleReviewResult candidate receipt state
-step state (ViewReview project) = pure (project state, state)
-```
-
-The state, source-selection function and result handlers are ordinary project
-Haskell. Use record syntax for substantial state. They preserve actual candidates,
-attempts and source evidence; Rust does not learn a review-stage taxonomy.
-
-`reviewAgain` is the existing typed request operation. The actor's newly selected
-effect row makes it callable without an owner-row route callback. `Actor.self`
-captures this actor's typed address. `Actor.forward` is owned composition over fixed
-sources, with an inspectable handle and automatic finite completion. It does not
-attach sources to the already-running review actor or add another scheduler.
-
-The review-result handler can cast an actual typed packet to `integration`, follow
-a repair edge the parent already declared, or message its Sol owner about a new
-decision. Each repeated review is an exact new request to the same useful specialist.
-There is no model relay solely to recover the result and issue the known next call.
-
-Do not request a repair from the owner of a still-pending parent delivery and then
-wait behind that delivery. A retained implementer is usable after its prior request
-settles; otherwise return the repair decision to its owning model. Do not silently
-pick a different source or infer acceptance from candidate/receipt hash equality.
-
-The request may be admitted before `rememberReview` commits. Failure at that point
-must preserve the exact operation and typed result under the existing owner; this
-is a required failure test, not a request-label retry convention authored here.
-
-## What becomes short
-
-The normal native message says what the owner can act on: exact candidate/pair,
-changed issue and selected result identity. The full receipt is queried only when
-needed. Haskell-to-Haskell handoffs carry values, not formatted transcript excerpts.
-
-Source progress stays lossless after attachment. The local actor derives compact
-changes and an outstanding-work view; it does not repeatedly forward its cumulative
-state up the tree. A newer candidate does not silently supersede another useful one.
-Question remove/reopen and changed evidence at the same commit remain distinct.
-
-When waiting, the owner can do independent engineering or end its turn. The
-installed actor continues routing. No extra watch is required to make its terminal
-receipt authoritative, and no stale watch notice needs a reassurance poll.
-
-When integration is finished, the parent closes the collector and receives its
-retained final state through one helper. The existing cleanup owner releases the
-selected finished workers, retaining active/uncertain work and intentionally kept
-specialists. A forwarder finishing does not retire a worker. Late provider anomalies
-remain supervised independently of request observation.
-
-## Ship this as the example
-
-The implementation should replace the current review-continuation workaround with
-this flow, not add a disconnected demonstration. Run its actual skill code blocks
-with model-free workers, including changed source, failed forwarding, failure after
-request admission, repeated review and retirement racing new work.
-
-Keep the basic collection skill short. Load the actor-composition skill when a
-model needs this loop. Stable imports, real signatures and small executable examples
-should replace guessed APIs and whole binding inventories. Actor messages use the
-minimum recoverable delta; human readability is secondary between agents.
+The acceptance checks must execute these files, including admission followed by
+handler failure and replacement, meaningful source checks, repeated review and
+integration. Compiling the record schema alone is not next-run acceptance.

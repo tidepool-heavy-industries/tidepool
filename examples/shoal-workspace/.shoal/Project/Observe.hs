@@ -17,7 +17,7 @@ import Tidepool.Effects.Core (AgentInspection)
 import Shoal.Workspace (workspaceIdentity)
 import Project.Types
 import Project.Work (projectPrompt)
-import Project.Routing (WorkState (..), WorkSource (..))
+import Project.Routing (WorkState (..), WorkSource (..), WorkEvent (..), WorkDelta (..), outstandingEvidence)
 
 -- Existing owned handles and observations are the evidence. This value is a
 -- snapshot to inspect or pass on, not another registry or mutable task record.
@@ -57,17 +57,17 @@ reviewSummary (Produced (Repair candidate findings)) =
   "repair " <> candidateCommit candidate <> ": " <> Text.intercalate "; " findings
 reviewSummary (Produced (Accepted accepted)) =
   "accepted " <> candidateRef (reviewedCandidate accepted)
-    <> "; review " <> Text.intercalate "; " (reviewChecks accepted)
+    <> "; review checks " <> shown (length (reviewChecks accepted))
 
 deliverySummary :: Delivery -> Text
 deliverySummary (Blocked reason evidence) = blockedSummary reason evidence
 deliverySummary (Produced (Delivered accepted head checks)) =
   head <> "; reviewed " <> candidateRef (reviewedCandidate accepted)
-    <> "; integration " <> Text.intercalate "; " checks
+    <> "; integration checks " <> shown (length checks)
 
 candidateRef :: Candidate -> Text
 candidateRef candidate = candidateCommit candidate
-  <> "; checks " <> Text.intercalate "; " (checkedCommands candidate)
+  <> "; checks " <> shown (length (checkedCommands candidate))
   <> (if null (remainingGates candidate) then ""
       else "; gates " <> Text.intercalate "; " (remainingGates candidate))
 
@@ -110,7 +110,10 @@ workSnapshotSummary render state = Text.unlines (map sourceLine (collectedWork s
   where
     sourceLine source = sourceName source <> " " <> shown (sourceStatus source)
       <> "; candidates " <> Text.intercalate ", "
-        (map candidateCommit (workEvidence (sourceProgress source)))
+        [candidateRef candidate <> " events " <> shown
+          [index | (index, WorkChanged name delta) <- zip [0 :: Int ..] (workHistory state),
+            name == sourceName source, candidate `elem` addedEvidence delta]
+        | candidate <- outstandingEvidence state source]
       <> "; questions " <> Text.intercalate ", "
         [questionKey q <> "@" <> questionSource (questionDetails q)
         | q <- workQuestions (sourceProgress source)]

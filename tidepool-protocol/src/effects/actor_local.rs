@@ -6,7 +6,10 @@
 //! authored operations.
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, TypeParam, Verb};
+use crate::schema::{
+    Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef,
+    TypeParam, TypeShape, VariantFields, Verb, WireDerive, WireDerives,
+};
 
 const TYPE_PARAMS: &[TypeParam] = &[TypeParam::unary("api")];
 
@@ -30,10 +33,33 @@ pub fn actor_local() -> Effect {
         default_row_args: &["Maybe"],
         helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Actor"],
-        type_defs: Vec::new(),
+        type_defs: vec![TypeDef {
+            name: "ActorInputOrigin",
+            wire_rust: None,
+            shape: TypeShape::Sum { variants: vec![
+                SumVariant { ctor: "ActorStartup", fields: VariantFields::Positional(vec![]), doc: &[] },
+                SumVariant { ctor: "ActorMessageFrom", fields: VariantFields::Positional(vec![HsType::Tuple(vec![HsType::Int, HsType::Int])]), doc: &[] },
+                SumVariant { ctor: "ActorProgressFrom", fields: VariantFields::Positional(vec![HsType::Int]), doc: &[] },
+                SumVariant { ctor: "ActorSettlementFrom", fields: VariantFields::Positional(vec![HsType::Int]), doc: &[] },
+                SumVariant { ctor: "ActorLifecycleFrom", fields: VariantFields::Positional(vec![HsType::Tuple(vec![HsType::Int, HsType::Int])]), doc: &[] },
+            ] },
+            json: JsonInstance::None,
+            derives: WireDerives(&[WireDerive::Debug, WireDerive::PartialEq, WireDerive::Eq]),
+            domain: None,
+            doc: &["Runtime identity of the currently handled input; it conveys no resource authority."],
+        }],
         foreign_types: &[],
         errors: None,
         verbs: vec![
+            Verb {
+                ctor: "ActorLocalContextWith",
+                method: "actor_local_context_with",
+                args: vec![],
+                ret: HsType::Tuple(vec![HsType::Tuple(vec![HsType::Int, HsType::Int]), HsType::Named("ActorInputOrigin")]),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
             Verb {
                 ctor: "ActorReceiveWith",
                 method: "actor_receive_with",

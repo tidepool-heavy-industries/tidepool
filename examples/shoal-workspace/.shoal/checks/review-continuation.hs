@@ -1,26 +1,66 @@
+import GHC.Generics (Generic)
 import qualified Tidepool.Actor as Actor
-type ReviewWave = Actor.ActorRef (WorkInput (Outcome ReviewDecision)) (WorkState (Outcome ReviewDecision))
-data ReviewFlowState = ReviewFlowState { reviewCollectors :: [ReviewWave], reviewEvents :: [WorkEvent (Outcome ReviewDecision)], stoppedCandidates :: [Settlement (Outcome Candidate)], stoppedNotices :: [Notice (Outcome Candidate)] }
-instance Show ReviewFlowState where show state = "ReviewFlowState " ++ show (length (reviewCollectors state), length (reviewEvents state), length (stoppedCandidates state), length (stoppedNotices state))
-data ReviewFlow result = ReviewAttached ReviewWave result | ReviewEvent (WorkEvent (Outcome ReviewDecision)) result | CandidateStopped (Settlement (Outcome Candidate)) result | StoppedNotice (Notice (Outcome Candidate)) result | ReviewFlowSnapshot (ReviewFlowState -> result)
-let reviewBoxDefinition = (Actor.stateful "review-handoff" Actor.ReadOnly (\state message -> case message of
-      ReviewAttached collector answer -> pure (answer, state { reviewCollectors = reviewCollectors state ++ [collector] })
-      ReviewEvent event answer -> pure (answer, state { reviewEvents = reviewEvents state ++ [event] })
-      CandidateStopped outcome answer -> pure (answer, state { stoppedCandidates = stoppedCandidates state ++ [outcome] })
-      StoppedNotice notice answer -> pure (answer, state { stoppedNotices = stoppedNotices state ++ [notice] })
-      ReviewFlowSnapshot answer -> pure (answer state, state)) :: Actor.ActorDefinition ReviewFlowState ReviewFlow ReviewFlowState)
-reviewBox <- Actor.startActor reviewBoxDefinition (ReviewFlowState [] [] [] [])
-let forwardReview = (\event -> do { Actor.cast reviewBox (ReviewEvent event ()); onReview event }) :: WorkSink (Outcome ReviewDecision)
-reviewDispatch <- route (awaitSettledFork worker) (\settled -> case settled of
-      ReplyAvailable receipt | Produced candidate <- responseValue receipt -> do
-        (attempt, progress) <- reviewAgain (forkedActor reviewer) reviewLabel (ReviewTask task candidate OwnerRepairs)
-        collector <- followWork [("review", attempt, progress)] forwardReview
-        Actor.cast reviewBox (ReviewAttached collector ())
-      _ -> do
-        Actor.cast reviewBox (CandidateStopped settled ())
-        case onStopped settled of
-          Nothing -> pure ()
-          Just message -> do
-            sent <- sendMessage owner message
-            let event = WorkFinished "implementation" (case settled of { ReplyAvailable receipt -> Right receipt; ReplyUnavailable failure -> Left failure })
-            Actor.cast reviewBox (StoppedNotice (Notice event sent) ()))
+type ReviewWave = ActorHandle (WorkActor (Outcome ReviewDecision))
+data ReviewFlowState = ReviewFlowState { reviewCollectors :: [(Response (Outcome ReviewDecision), ReviewWave)], reviewEvents :: [WorkEvent (Outcome ReviewDecision)], completedReviews :: [WorkState (Outcome ReviewDecision)], stoppedCandidates :: [Settlement (Outcome Candidate)], stoppedNotices :: [Either NotificationError NotificationReceipt], repairAttempts :: [(Response (Outcome Candidate), Forwarding (Outcome Candidate))], candidateReceipts :: [Either ResponseFailure (ResponseResult (Outcome Candidate))], sourceProblems :: [(ExecutionReceipt, Text)] }
+instance Show ReviewFlowState where show state = "ReviewFlowState " ++ show (length (reviewCollectors state), length (completedReviews state), length (reviewEvents state), length (stoppedCandidates state), length (stoppedNotices state), length (repairAttempts state), length (sourceProblems state))
+data ReviewFlow mode = ReviewFlow { reviewState :: mode :- State ReviewFlowState, reviewStarted :: mode :- Call (Response (Outcome ReviewDecision), Progress WorkProgress) NoReply, reviewEvent :: mode :- Call (Response (Outcome ReviewDecision), WorkEvent (Outcome ReviewDecision)) NoReply, reviewView :: mode :- Call () (R.Reply ReviewFlowState), repairStarted :: mode :- Call (Response (Outcome Candidate), Progress WorkProgress) NoReply, repairDone :: mode :- Call (Either ResponseFailure (ResponseResult (Outcome Candidate))) NoReply, candidateDone :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate))) } deriving Generic
+let startReview = (\own result -> do
+        modify' (\state -> state { candidateReceipts = candidateReceipts state ++ [result] })
+        case result of
+          Right receipt | Produced candidate <- responseValue receipt -> case candidateAtSubmission candidate (responseWorktree receipt) of
+            Right selected -> do
+              _ <- requestWithProgressInto @WorkProgress @(Outcome ReviewDecision)
+                (forkedActor reviewer)
+                (withRequestGuidance (projectPrompt "review") (requestOptions reviewLabel (ReviewTask task selected repairPolicy))) $ R.send (reviewStarted (own :: ReviewFlow Self))
+              pure ()
+            Left reason -> do
+              modify' (\state -> state { sourceProblems = sourceProblems state ++ [(responseExecution receipt, reason)] })
+              sent <- sendMessage owner reason
+              modify' (\state -> state { stoppedNotices = stoppedNotices state ++ [sent] })
+          _ -> do
+            let settled = either ReplyUnavailable ReplyAvailable result
+            modify' (\state -> state { stoppedCandidates = stoppedCandidates state ++ [settled] })
+            case onStopped settled of
+              Nothing -> pure ()
+              Just message -> do
+                sent <- sendMessage owner message
+                modify' (\state -> state { stoppedNotices = stoppedNotices state ++ [sent] })
+      ) :: ReviewFlow Self -> Either ResponseFailure (ResponseResult (Outcome Candidate)) -> Handler ReviewFlowState (CoordinationEffects ReviewFlow) ()
+let reviewBoxDefinition = coordinationActor "review-handoff" ReviewFlow
+      { reviewState = ReviewFlowState { reviewCollectors = [], reviewEvents = [], completedReviews = [], stoppedCandidates = [], stoppedNotices = [], repairAttempts = [], candidateReceipts = [], sourceProblems = [] }
+      , reviewView = \() -> get
+      , reviewStarted = \(attempt, updates) -> do
+          own <- R.self @ReviewFlow
+          collector <- followWork [("review", attempt, updates)] (\event -> do { R.send (reviewEvent own) (attempt, event); onReview event })
+          modify' (\state -> state { reviewCollectors = reviewCollectors state ++ [(attempt, collector)] })
+      , reviewEvent = \(attempt, event) -> do
+          modify' (\state -> state { reviewEvents = reviewEvents state ++ [event] })
+          case event of
+            WorkFinished _ result -> do
+              active <- gets reviewCollectors
+              case [collector | (response, collector) <- active, requestId response == requestId attempt] of
+                [collector] -> do
+                  completed <- finishWork collector
+                  modify' (\state -> state { reviewCollectors = [(response, retained) | (response, retained) <- reviewCollectors state, requestId response /= requestId attempt], completedReviews = case completed of { Actor.Completed value -> completedReviews state ++ [value]; _ -> completedReviews state } })
+                _ -> error "review result has no unique owned collector"
+              case (repairPolicy, result) of
+                (RetainedImplementer implementer, Right receipt) | Produced (Repair candidate findings) <- responseValue receipt -> do
+                  own <- R.self @ReviewFlow
+                  _ <- requestWithProgressInto @WorkProgress @(Outcome Candidate) implementer
+                    (withRequestGuidance (projectPrompt "repair") (requestOptions repairLabel (RepairTask task candidate findings)))
+                    (R.send (repairStarted own))
+                  pure ()
+                _ -> pure ()
+            _ -> pure ()
+      , repairStarted = \(attempt, _) -> do
+          own <- R.self @ReviewFlow
+          forwarding <- R.forwardResult attempt (repairDone own)
+          modify' (\state -> state { repairAttempts = repairAttempts state ++ [(attempt, forwarding)] })
+      , repairDone = \result -> do
+          own <- R.self @ReviewFlow
+          startReview own result
+      , candidateDone = R.on (R.settlement (forkedResponse worker)) $ \result -> do
+          own <- R.self @ReviewFlow
+          startReview own result
+      }
+reviewBox <- R.start reviewBoxDefinition

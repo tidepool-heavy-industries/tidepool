@@ -10,6 +10,7 @@ module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
   , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
   , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
+  , candidateAtSubmission
   , requestIncorporation, consultDesign
   , settledValue
   ) where
@@ -120,6 +121,17 @@ reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgre
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
   withModel "gpt-5.6-sol" $ withEffort Low $
   coding (named "review") (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
+
+-- This project's automatic review edge selects the committed submission head.
+-- Other authored flows may deliberately select earlier artifacts instead.
+candidateAtSubmission :: Candidate -> WorktreeEvidence -> Either Text Candidate
+candidateAtSubmission candidate evidence = case evidence of
+  WorktreeObserved _ _ observation
+    | actual == candidateCommit candidate -> Right candidate
+    | otherwise -> Left ("candidate " <> candidateCommit candidate <> "; submitted " <> actual)
+    where actual = renderGitOid (headOid (submittedHead observation))
+  NoBoundWorktree -> Left "candidate has no bound-source evidence"
+  WorktreeObservationFailed failure -> Left (renderWorktreeError failure)
 
 -- A completed review attempt leaves its actor available for the revised candidate.
 reviewAgain

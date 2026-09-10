@@ -110,6 +110,15 @@ pub fn actor() -> Effect {
                             fields: positional_fields![],
                             doc: &[],
                         },
+                        SumVariant {
+                            ctor: "ActorSelectedProfile",
+                            fields: positional_fields![HsType::List(Box::new(HsType::Named(
+                                "ActorEffectKey"
+                            )))],
+                            doc: &[
+                                "Explicit effect row; resource authority remains runtime-owned.",
+                            ],
+                        },
                     ],
                 },
                 json: JsonInstance::None,
@@ -182,7 +191,7 @@ pub fn actor() -> Effect {
                 doc: &["Result of a unit-returning actor call whose lifecycle failure is data."],
             },
         ],
-        foreign_types: &[],
+        foreign_types: &[("ActorEffectKey", "crate::ActorEffectKeyWire")],
         errors: None,
         verbs: vec![
             Verb {

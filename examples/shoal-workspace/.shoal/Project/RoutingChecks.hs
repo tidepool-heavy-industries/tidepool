@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (routing, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview) where
+module Project.RoutingChecks (routing, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, declaredRepair, forwardingFailure) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -13,10 +13,6 @@ import Project.Checks (script)
 routing :: Member RecipeCheck effects => Eff effects ()
 routing = do
   messageDeltas
-  void restart
-  notificationRetention
-  void restart
-  automaticReview
   void restart
   forwardCandidate Forward
   void restart
@@ -36,21 +32,21 @@ routing = do
   script owner "progress-route"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  first <- turn owner "inspectFull . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> Actor.call forwarding WorkSnapshot"
+  first <- turn owner "inspectFull . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
   check "the persistent actor consumes the first publication" (output first == "[[\"question-a\"]]")
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  void $ turn owner "Actor.call forwarding WorkSnapshot"
+  void $ turn owner "readWork forwarding"
   counts <- turn owner "Actor.call wakes (RoutingCount 0 id)"
   check "identical attention does not invoke the sink again" (output counts == "1")
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
-  second <- turn owner "inspectFull . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> Actor.call forwarding WorkSnapshot"
+  second <- turn owner "inspectFull . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
   check "later publications arrive without rearming" (output second == "[[\"question-a\",\"question-b\"]]")
   pending <- turn (checkActor producer) "pollReply sessionReply"
   check "publishing progress preserves the original reply" (output pending == "ReplyOpen")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "inspectFull . map sourceStatus . collectedWork <$> Actor.call forwarding WorkSnapshot"
+  closed <- turn owner "inspectFull . map sourceStatus . collectedWork <$> readWork forwarding"
   check "source closure leaves the actor's retained state queryable" (output closed == "[WorkClosed]")
-  void $ turn owner "Actor.drainActor forwarding\nActor.awaitExit forwarding"
+  void $ turn owner "finishWork forwarding"
   void restart
   independentSources
   void restart
@@ -70,10 +66,10 @@ twoLaneHandoff = do
   script owner "handoff-router"
   partial <- checkpoint (checkActor left) "left.txt" "partial\n" "left partial checkpoint"
   void $ turn (checkActor left) ("reportProgress (WorkProgress [Candidate " <> literal partial <> " [] [\"final source pending\"]] [])")
-  initial <- turn owner "view <- Actor.call handoff WorkSnapshot\ninspectFull (collectedWork view)"
+  initial <- turn owner "view <- readWork handoff\ninspectFull (collectedWork view)"
   check "partial checkpoint is retained before final publication" (partial `Text.isInfixOf` output initial)
-  before <- turn owner "Actor.call parent (HandoffSnapshot length)"
-  check "partial progress stays local to the subtree" (output before == "0")
+  before <- turn owner "length <$> R.call (handoffSnapshot (R.client parent)) ()"
+  check "partial progress stays local to the subtree" (lastOutput before == "0")
   leftFinal <- checkpoint (checkActor left) "left.txt" "left final\n" "left final checkpoint"
   rightFinal <- checkpoint (checkActor right) "right.txt" "right final\n" "right final checkpoint"
   leftSource <- readFile (checkActor left) "left.txt"
@@ -85,9 +81,9 @@ twoLaneHandoff = do
           <> literal commit <> " [\"read final source\"]))")
   deliver (checkActor left) leftFinal
   deliver (checkActor right) rightFinal
-  final <- turn owner "view <- Actor.call handoff WorkSnapshot\ninspectFull (collectedWork view)"
+  final <- turn owner "view <- readWork handoff\ninspectFull (collectedWork view)"
   check "both later final heads arrive without rearming" (all (`Text.isInfixOf` output final) [partial, leftFinal, rightFinal])
-  parentView <- turn owner "received <- Actor.call parent (HandoffSnapshot id)\ninspectFull received"
+  parentView <- turn owner "received <- R.call (handoffSnapshot (R.client parent)) ()\ninspectFull received"
   check "parent receives typed delivery and its runtime receipt" (all (`Text.isInfixOf` output parentView) [leftFinal, rightFinal, "product acceptance remains", "executionActorId"])
   count <- turn owner "inspectFull (length received)"
   check "each final result crosses the parent boundary exactly once" (output count == "2")
@@ -98,12 +94,21 @@ twoLaneHandoff = do
   check "coordinator integrates both exact final candidates" (integratedLeft == leftSource && integratedRight == rightSource)
   void $ git owner ["merge-base", "--is-ancestor", leftFinal, "HEAD"]
   void $ git owner ["merge-base", "--is-ancestor", rightFinal, "HEAD"]
-  retired <- turn owner "Actor.drainActor handoff\nretired <- Actor.awaitExit handoff\ninspectFull (case retired of { Actor.Completed state -> collectedWork state; _ -> [] })"
+  retired <- turn owner "retired <- finishWork handoff\ninspectFull (case retired of { Actor.Completed state -> collectedWork state; _ -> [] })"
   check "drain retains both incorporated final heads" (all (`Text.isInfixOf` output retired) [leftFinal, rightFinal])
-  void $ turn owner "Actor.drainActor parent\nActor.awaitExit parent"
+  void $ turn owner "R.finish parent"
 
 automaticReview :: Member RecipeCheck effects => Eff effects ()
-automaticReview = do
+automaticReview = reviewCycle False False
+
+requestRecovery :: Member RecipeCheck effects => Eff effects ()
+requestRecovery = reviewCycle True False
+
+declaredRepair :: Member RecipeCheck effects => Eff effects ()
+declaredRepair = reviewCycle False True
+
+reviewCycle :: Member RecipeCheck effects => Bool -> Bool -> Eff effects ()
+reviewCycle failAfterAdmission automaticRepair = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> literal baseline <> " :: Text")
@@ -112,31 +117,95 @@ automaticReview = do
   void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
   void $ turn owner "(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom workerLabel projectHead task))"
   worker <- activation
-  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nowner <- actorContext"
-  script owner "review-continuation"
+  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nowner <- actorContext\nlet repairPolicy = OwnerRepairs\nlet Right repairLabel = requestLabel \"repair-produced-candidate\""
+  if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (forkedActor worker)" else pure ()
+  if failAfterAdmission then do
+    source <- readFile owner ".shoal/checks/review-continuation.hs"
+    let withoutStart = fst (Text.breakOn "reviewBox <-" source)
+        definition = "let reviewBoxDefinition" <> snd (Text.breakOn " = coordinationActor" withoutStart)
+        faulty = Text.replace "let reviewBoxDefinition" "let failingDefinition"
+          (Text.replace "          startReview own result" "          startReview own result\n          error \"injected after admission\"" definition)
+    void $ turn owner (withoutStart <> "\n" <> faulty <> "\nreviewBox <- R.start failingDefinition")
+  else script owner "review-continuation"
   candidate <- checkpoint (checkActor worker) "feature.txt" "candidate feature\n" "candidate for automatic review"
   void $ turn (checkActor worker) ("respond (Produced (Candidate " <> literal candidate <> " [\"read feature\"] [\"integration pending\"]))")
   reviewing <- activation
   check "settlement submits to the available retained reviewer without a model relay" (checkActor reviewing == checkActor reviewer)
+  if failAfterAdmission then do
+    void $ turn owner "reviewBox <- R.replace reviewBox reviewBoxDefinition"
+    retained <- turn owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (length (reviewCollectors flow))"
+    check ("replacement receives the exact request handle queued before admission: " <> lastOutput retained) (lastOutput retained == "1")
+  else pure ()
   input <- turn (checkActor reviewing) "inspectFull (reviewInput sessionInput)"
   check "the automatic request carries the exact candidate and gates" (candidate `Text.isInfixOf` output input && "integration pending" `Text.isInfixOf` output input)
   void $ git (checkActor reviewing) ["merge", "--ff-only", candidate]
   feature <- readFile (checkActor reviewing) "feature.txt"
   check "the reviewer incorporates the actual settled source" (feature == "candidate feature\n")
-  void $ turn (checkActor reviewing) "reportProgress (WorkProgress [reviewInput sessionInput] [])"
-  void $ turn (checkActor reviewing) "respond (Produced (Accepted (ReviewedCandidate (reviewAssignment sessionInput) (reviewInput sessionInput) [\"read exact feature\"] \"ready for owner integration\")))"
-  received <- awaitOutput owner "flow <- Actor.call reviewBox (ReviewFlowSnapshot id)\ninspectFull (reviewEvents flow)" (Text.isInfixOf "WorkFinished")
-  let arrived = candidate `Text.isInfixOf` received && "WorkChanged" `Text.isInfixOf` received && "Accepted" `Text.isInfixOf` received
+  (accepting, finalCandidate) <- if automaticRepair then do
+    void $ turn (checkActor reviewing) "respond (Produced (Repair (reviewInput sessionInput) [\"repair the feature\"]))"
+    repairing <- activation
+    check "the declared repair edge reuses the settled implementer" (checkActor repairing == checkActor worker)
+    repairInput <- turn (checkActor repairing) "inspectFull (repairInput sessionInput, repairFindings sessionInput)"
+    check "the repair carries the exact candidate and finding" (candidate `Text.isInfixOf` output repairInput && "repair the feature" `Text.isInfixOf` output repairInput)
+    repaired <- checkpoint (checkActor repairing) "feature.txt" "repaired feature\n" "repair reviewed candidate"
+    void $ turn (checkActor repairing) ("respond (Produced (Candidate " <> literal repaired <> " [\"read repaired feature\"] [\"integration pending\"]))")
+    repeated <- activation
+    check "the repaired candidate returns to the same reviewer automatically" (checkActor repeated == checkActor reviewer)
+    void $ git (checkActor repeated) ["merge", "--ff-only", repaired]
+    checkedFeature <- readFile (checkActor repeated) "feature.txt"
+    check "the repeated reviewer checks repaired source" (checkedFeature == "repaired feature\n")
+    pure (repeated, repaired)
+  else pure (reviewing, candidate)
+  void $ turn (checkActor accepting) "reportProgress (WorkProgress [reviewInput sessionInput] [])"
+  void $ turn (checkActor accepting) "respond (Produced (Accepted (ReviewedCandidate (reviewAssignment sessionInput) (reviewInput sessionInput) [\"read exact feature\"] \"ready for owner integration\")))"
+  received <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (reviewEvents flow)" (Text.isInfixOf "Accepted")
+  let arrived = finalCandidate `Text.isInfixOf` received && "WorkChanged" `Text.isInfixOf` received && "Accepted" `Text.isInfixOf` received
   check (if arrived then "typed review progress and acceptance return through the mailbox"
          else "missing typed review evidence: " <> received) arrived
-  void $ turn owner "import Data.Foldable (traverse_)\ntraverse_ Actor.drainActor (reviewCollectors flow)\nretired <- traverse Actor.awaitExit (reviewCollectors flow)\nActor.drainActor reviewBox\nActor.awaitExit reviewBox"
+  finished <- turn owner "finished <- R.finish reviewBox\ninspectFull (case finished of { Actor.Completed state -> (length (reviewCollectors state), length (completedReviews state)); _ -> (-1,-1) })"
+  check "each admitted review completes and its collector drains" (lastOutput finished == if automaticRepair then "(0,2)" else "(0,1)")
+  if automaticRepair then do
+    forwarding <- turn owner "case finished of { Actor.Completed state -> mapM (R.forwardingExit . snd) (repairAttempts state); _ -> pure [] }"
+    check "the result-only repair forwarder exits without a model retirement turn" ("Completed" `Text.isInfixOf` output forwarding)
+    void $ git owner ["merge", "--ff-only", finalCandidate]
+    integrated <- readFile owner "feature.txt"
+    check "the owner integrates and checks the actual accepted repair" (integrated == "repaired feature\n")
+  else pure ()
   void $ turn owner "let Right blockedLabel = branchLabel \"blocked-implementation\"\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom blockedLabel projectHead task))"
   blocked <- activation
   script owner "review-continuation"
   void $ turn (checkActor blocked) "respond (Blocked \"needs owner decision\" [\"contract conflict\"] :: Outcome Candidate)"
-  stopped <- awaitOutput owner "Actor.call reviewBox (ReviewFlowSnapshot (\\flow -> inspectFull (length (reviewCollectors flow), stoppedCandidates flow, stoppedNotices flow)))" (Text.isInfixOf "contract conflict")
-  check "a blocked candidate retains its receipt without starting review" ("(0," `Text.isPrefixOf` stopped && "contract conflict" `Text.isInfixOf` stopped)
-  void $ turn owner "Actor.drainActor reviewBox\nActor.awaitExit reviewBox"
+  stopped <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (length (reviewCollectors flow), stoppedCandidates flow, length (stoppedNotices flow))" (Text.isInfixOf "contract conflict")
+  check "a blocked candidate retains its receipt without starting review" ("(0," `Text.isInfixOf` stopped && "contract conflict" `Text.isInfixOf` stopped)
+  void $ turn owner "R.finish reviewBox"
+  if automaticRepair then do
+    void $ turn owner "let Right mismatchLabel = branchLabel \"mismatched-source\"\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom mismatchLabel projectHead task))"
+    mismatched <- activation
+    script owner "review-continuation"
+    actual <- checkpoint (checkActor mismatched) "different.txt" "actual submitted source\n" "source evidence differs from claim"
+    void $ turn (checkActor mismatched) ("respond (Produced (Candidate " <> literal baseline <> " [] []))")
+    rejected <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (length (reviewCollectors flow), length (candidateReceipts flow), sourceProblems flow)" (Text.isInfixOf "submitted")
+    check "source mismatch retains the original receipt and stops automatic review"
+      ("(0,1," `Text.isInfixOf` rejected && baseline `Text.isInfixOf` rejected && actual `Text.isInfixOf` rejected)
+    void $ turn owner "R.finish reviewBox"
+  else pure ()
+
+forwardingFailure :: Member RecipeCheck effects => Eff effects ()
+forwardingFailure = do
+  owner <- root
+  script owner "progress-route-producer"
+  producer <- activation
+  script owner "forwarding-failure"
+  identity <- turn owner "forwarding"
+  check "a forwarding handle displays identity without inspecting its result cell" ("Forwarding (" `Text.isPrefixOf` output identity)
+  void $ turn (checkActor producer) "respond (\"retained result\" :: Text)"
+  failed <- awaitOutput owner "R.forwardingExit forwarding" (Text.isInfixOf "Failed")
+  check "finite forwarding retains a failed exit instead of retargeting a stale endpoint" ("Failed" `Text.isInfixOf` failed)
+  count <- turn owner "R.call (acceptedCount (R.client sink)) ()"
+  check "replacement does not receive a send addressed to the old incarnation" (output count == "0")
+  retained <- turn owner "R.forwardingExit forwarding"
+  check "the forwarder's failed exit remains inspectable after another query" ("Failed" `Text.isInfixOf` lastOutput retained)
+  void $ turn owner "R.finish sink"
 
 messageDeltas :: Member RecipeCheck effects => Eff effects ()
 messageDeltas = do
@@ -145,6 +214,27 @@ messageDeltas = do
   result <- turn owner "inspectFull questionMessageChecks"
   check "amendments upsert once; source advances, resolutions and unchanged questions stay distinct"
     (output result == "(True,True,True,True)")
+
+candidateHistory :: Member RecipeCheck effects => Eff effects ()
+candidateHistory = do
+  owner <- root
+  script owner "progress-route-producer"
+  producer <- activation
+  baseline <- git owner ["rev-parse", "HEAD"]
+  void $ turn owner "collection <- followWork [(\"producer\", forkedResponse producer, updates)] keepWork"
+  let candidates = "let firstCandidate = Candidate " <> literal baseline <> " [\"first check\"] []\nlet secondCandidate = firstCandidate { checkedCommands = [\"different check\"] }"
+  void $ turn (checkActor producer) (candidates <> "\nreportProgress (WorkProgress [firstCandidate] [])\nreportProgress (WorkProgress [secondCandidate] [])")
+  before <- turn owner "view <- readWork collection\ninspectFull (length (workEvidence (sourceProgress (head (collectedWork view)))), length (workHistory view))"
+  check "same-commit changed evidence remains distinct and ordered" (lastOutput before == "(2,2)")
+  void $ turn owner (candidates <> "\nR.send (incorporatedWork (R.client collection)) (\"producer\", [firstCandidate])\nview <- readWork collection\nlet briefBefore = workSnapshotSummary id view")
+  frontier <- turn owner "inspectFull (map checkedCommands (outstandingEvidence view (head (collectedWork view))))"
+  check "incorporation removes only the exact handled evidence" (output frontier == "[[\"different check\"]]")
+  void $ turn (checkActor producer) "mapM_ reportProgress (replicate 100 (WorkProgress [firstCandidate,secondCandidate] []))"
+  after <- turn owner "view <- readWork collection\ninspectFull (workSnapshotSummary id view == briefBefore, length (workHistory view), map checkedCommands (workEvidence (sourceProgress (head (collectedWork view)))))"
+  check "100 retained publications do not expand the normal brief or erase evidence"
+    (lastOutput after == "(True,102,[[\"first check\"],[\"different check\"]])")
+  void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
+  void $ turn owner "finishWork collection"
 
 notificationRetention :: Member RecipeCheck effects => Eff effects ()
 notificationRetention = do
@@ -157,32 +247,32 @@ notificationRetention = do
   void $ turn owner "import qualified Tidepool.Actor as Actor\ncollection <- followWork [(\"producer\", forkedResponse producer, updates)] (notifyWork (forkedActor consumer) (workMessage id))"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  retained <- turn owner "view <- Actor.call collection WorkSnapshot\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
+  retained <- turn owner "view <- readWork collection\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
   check "a failed real send retains the new question and typed failure" ("question-a" `Text.isInfixOf` output retained && "NotificationUnavailable" `Text.isInfixOf` output retained)
-  compact <- turn (checkActor producer) "inspectFull (workMessage (id :: Text -> Text) (WorkChanged \"producer\" (WorkProgress [] [first]) (WorkProgress [] [first,second])))"
+  compact <- turn (checkActor producer) "inspectFull (workMessage (id :: Text -> Text) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [] [first,second])))"
   check "question messages contain only the new question" ("question-b" `Text.isInfixOf` output compact && not ("question-a" `Text.isInfixOf` output compact))
-  combined <- turn (checkActor producer) "inspectFull (withCheckpoints (workMessage (id :: Text -> Text)) (WorkChanged \"producer\" (WorkProgress [] [first]) (WorkProgress [Candidate \"partial-head\" [] [\"review pending\"]] [first,second])))"
+  combined <- turn (checkActor producer) "inspectFull (withCheckpoints (workMessage (id :: Text -> Text)) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [Candidate \"partial-head\" [] [\"review pending\"]] [first,second])))"
   check "a useful checkpoint and a new question both reach the owner" ("partial-head" `Text.isInfixOf` output combined && "question-b" `Text.isInfixOf` output combined && not ("question-a" `Text.isInfixOf` output combined))
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,first])"
-  once <- turn owner "inspectFull . length . workNotices <$> Actor.call collection WorkSnapshot"
+  once <- turn owner "inspectFull . length . workNotices <$> readWork collection"
   check "repeated questions do not retry failed notification" (output once == "1")
-  void $ turn owner "collection <- Actor.replaceActor collection (workDefinition [(\"producer\", forkedResponse producer, updates)] (notifyWork (forkedActor consumer) (workMessage id)))"
-  preserved <- turn owner "(\\view -> inspectFull (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> Actor.call collection WorkSnapshot"
+  void $ turn owner "collection <- R.replace collection (workDefinition [(\"producer\", forkedResponse producer, updates)] (notifyWork (forkedActor consumer) (workMessage id)))"
+  preserved <- turn owner "(\\view -> inspectFull (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> readWork collection"
   check "replacement preserves failed notification evidence without replay" (output preserved == "(1,[[\"question-a\"]])")
   -- Exercise uncertainty as typed sink data. No external send is claimed here.
   script owner "uncertain-route"
-  uncertain <- turn owner "view <- Actor.call uncertain WorkSnapshot\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
+  uncertain <- turn owner "view <- readWork uncertain\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
   check "uncertain admission preserves the observed question" ("question-a" `Text.isInfixOf` output uncertain && "NotificationAdmissionUnconfirmed" `Text.isInfixOf` output uncertain)
-  void $ turn owner "uncertain <- Actor.replaceActor uncertain (workDefinition [(\"producer\", forkedResponse producer, updates)] keepWork)"
+  void $ turn owner "uncertain <- R.replace uncertain (workDefinition [(\"producer\", forkedResponse producer, updates)] keepWork)"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [])"
-  resolved <- turn owner "(\\view -> inspectFull (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> Actor.call collection WorkSnapshot"
+  resolved <- turn owner "(\\view -> inspectFull (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> readWork collection"
   check "resolving the final question produces its own delta" (output resolved == "([[]],2)")
-  uncertainOnce <- turn owner "inspectFull . length . workNotices <$> Actor.call uncertain WorkSnapshot"
+  uncertainOnce <- turn owner "inspectFull . length . workNotices <$> readWork uncertain"
   check "replacement never replays an uncertain send" (output uncertainOnce == "1")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> inspectFull (length (workNotices view), collectedWork view)) <$> Actor.call collection WorkSnapshot"
+  closed <- turn owner "(\\view -> inspectFull (length (workNotices view), collectedWork view)) <$> readWork collection"
   check "closure is quiet but the final result still arrives" ("(3," `Text.isPrefixOf` output closed && "finished" `Text.isInfixOf` output closed)
-  void $ turn owner "Actor.drainActor collection\nActor.awaitExit collection\nActor.drainActor uncertain\nActor.awaitExit uncertain"
+  void $ turn owner "finishWork collection\nfinishWork uncertain"
 
 -- Source publications and explicit queries use the same mailbox. A snapshot
 -- call after publication is a barrier; the test never rearms a progress watch.
@@ -197,26 +287,26 @@ independentSources = do
   script (checkActor left) "attention-sources-question"
   script (checkActor right) "attention-sources-question"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [first,second])"
-  first <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> Actor.call collection WorkSnapshot"
+  first <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "left progresses while right is silent" ("[\"same-key\",\"second\"]" `Text.isInfixOf` output first && "(\"right\",[],WorkOpen)" `Text.isInfixOf` output first)
-  void $ turn owner "collection <- Actor.replaceActor collection (workDefinition [(\"left\", forkedResponse left, leftProgress), (\"right\", forkedResponse right, rightProgress)] countChanges)"
+  void $ turn owner "collection <- R.replace collection (workDefinition [(\"left\", forkedResponse left, leftProgress), (\"right\", forkedResponse right, rightProgress)] countChanges)"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [second,first,first])"
-  void $ turn owner "Actor.call collection WorkSnapshot"
+  void $ turn owner "readWork collection"
   count <- turn owner "Actor.call wakes (RoutingCount 0 id)"
   check "reordered duplicate facts do not invoke the sink" (output count == "1")
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [first])"
-  both <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> Actor.call collection WorkSnapshot"
+  both <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "same-key questions retain both source identities" (output both == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])]")
   void $ turn (checkActor left) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> Actor.call collection WorkSnapshot"
+  closed <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "closure retains unanswered questions" ("(\"left\",[\"same-key\",\"second\"],WorkClosed)" `Text.isInfixOf` output closed)
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [])"
-  resolved <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> Actor.call collection WorkSnapshot"
+  resolved <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
   check "one resolution cannot erase another source's questions" (output resolved == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[])]")
   void $ turn (checkActor right) "respond (\"finished\" :: Text)"
-  final <- turn owner "inspectFull . map sourceStatus . collectedWork <$> Actor.call collection WorkSnapshot"
+  final <- turn owner "inspectFull . map sourceStatus . collectedWork <$> readWork collection"
   check "both sources close without rearming" (output final == "[WorkClosed,WorkClosed]")
-  void $ turn owner "Actor.drainActor collection\nActor.awaitExit collection"
+  void $ turn owner "finishWork collection"
 
 data RouteCase = Forward | CancelDestination | LoseProducer deriving (Eq)
 

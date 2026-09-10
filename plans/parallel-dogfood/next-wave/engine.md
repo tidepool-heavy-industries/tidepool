@@ -3,7 +3,8 @@
 Read [resume.md](resume.md) and its consolidated M1/M2 handoff, then design §1,
 §11 and §14. Completed M0 evidence
 and reviewed M2 repairs are starting assets. Finish only their documented remaining
-joins/checks. The first work is the actual remaining M1 boundary, not replaying M0.
+joins/checks. Start with M2 review and the final-source consumer matrix, then extend the saved
+M3 scaffold; reopen M0/M1 only for concrete integration defects.
 
 ## Required starting-source reconciliation
 

@@ -33,7 +33,8 @@ import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey, mkUnique)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
-import GHC.Core.DataCon (dataConRepArity, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConOrigArgTys, isUnboxedTupleDataCon)
+import GHC.Core.DataCon (dataConRepArgTys, dataConTag, dataConWorkId, dataConName, dataConOrigArgTys, isUnboxedTupleDataCon)
+import GHC.Core.Predicate (isCoVarType)
 import GHC.Types.FieldLabel (flLabel)
 import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 import Language.Haskell.Syntax.Basic (Boxity(..))
@@ -2326,7 +2327,7 @@ translateAlt (Alt con binders body) = do
   -- `AddE :: Expr Int -> Expr Int -> Expr Int`), which is a CoVar — NOT a
   -- TyVar — so filtering `isTyVar` alone leaves it in, binding one too many
   -- fields. The Con BUILD drops it (via `isValueArg`, which excludes both type
-  -- AND coercion args / `valueRepArity = dataConRepArity - |eqSpec|`), so an
+  -- AND coercion args, matching `valueRepArity`), so an
   -- unfiltered alt reads past the stored fields: eval ArityMismatch, JIT SIGSEGV.
   -- Exclude coercion binders too, matching the build's value-field count.
   let vBinders = filter (not . isErasedBinder) binders
@@ -2526,16 +2527,11 @@ wiredInDataCons = map dcToMeta wiredInList
       , ordLTDataCon, ordEQDataCon, ordGTDataCon
       ]
 
--- | Count value arguments excluding GADT equality evidence.
--- dataConRepArity includes equality evidence args (EqSpec) for GADT constructors,
--- but GHC Core passes these as Coercion arguments, which isValueArg filters out.
--- Subtract the EqSpec count to match what the translator sees as "value arguments".
--- For non-GADT constructors (including typeclass dicts), EqSpec is empty so this
--- equals dataConRepArity.
+-- | Match the value arguments retained by 'isValueArg'. Representation fields
+-- include primitive equality evidence both for GADT refinements and explicit
+-- equality dictionaries. Neither has a runtime field after coercion erasure.
 valueRepArity :: DataCon -> Int
-valueRepArity dc =
-  let (_, _, eqSpec, _, _, _) = dataConFullSig dc
-  in dataConRepArity dc - length eqSpec
+valueRepArity dc = length [() | Scaled _ ty <- dataConRepArgTys dc, not (isCoVarType ty)]
 
 -- | Recognize GHC's unpackCString# and unpackCStringUtf8# builtins.
 -- These convert Addr# (C string pointers) to [Char]. Since our

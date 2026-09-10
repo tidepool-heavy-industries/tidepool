@@ -8,7 +8,7 @@ module Tidepool.Check
   ( RecipeCheck, CheckActor, Activation (..)
   , root, turn, activation, git, writeFile, readFile
   , present, notPresented, unconfirmed, check, restart
-  , output, literal, checkpoint, awaitOutput
+  , output, lastOutput, literal, checkpoint, awaitOutput
   ) where
 
 import Prelude hiding (readFile, writeFile)
@@ -72,10 +72,20 @@ restart :: Member RecipeCheck effects => Eff effects Text
 restart = send RecipeRestart
 
 output :: Value -> Text
-output (Object fields) = case KeyMap.lookup "items" fields of
-  Just (Array items) -> Text.intercalate "\n" [text | Object item <- items, Just (String text) <- [KeyMap.lookup "output" item]]
-  _ -> ""
-output _ = ""
+output = Text.intercalate "\n" . outputs
+
+-- Setup bindings in a multi-unit example also have output. Assertions about
+-- its final expression should not depend on those workbench display receipts.
+lastOutput :: Value -> Text
+lastOutput value = case reverse (outputs value) of
+  final : _ -> final
+  [] -> ""
+
+outputs :: Value -> [Text]
+outputs (Object fields) = case KeyMap.lookup "items" fields of
+  Just (Array items) -> [text | Object item <- items, Just (String text) <- [KeyMap.lookup "output" item]]
+  _ -> []
+outputs _ = []
 
 literal :: Text -> Text
 literal = Text.pack . show

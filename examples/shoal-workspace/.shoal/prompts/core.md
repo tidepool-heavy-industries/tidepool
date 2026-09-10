@@ -18,7 +18,9 @@ The ordinary implementation helpers inherit context and the bound working checko
 Original-root calls select projectHead through the source variant. Fresh context
 and exact committed-source inspection are explicit choices; see plans/run.md.
 
-Workspace modules are already loaded. Start with the supplied expressions;
+Workspace modules are already loaded. Use Project.Routing for ordinary collection;
+load shoal-define-actors for custom typed joins and continuations. Actor handlers
+route known results; model turns decide and integrate. Start with supplied expressions;
 :type, :info or :doc resolve a particular missing signature. This is a GHCi-style
 surface with documented commands, not full GHCi: :module/:load/:reload are not
 available. Use let for a value/function and <- to run an effect and retain its
