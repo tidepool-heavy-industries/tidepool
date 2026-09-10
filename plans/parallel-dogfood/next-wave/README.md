@@ -1,5 +1,7 @@
 # Next wave: two recursive engineering trees
 
+[Ready selection](ready.md) records the tested platform and prepared continuation refs.
+
 [resume.md](resume.md) supplies the final r6 checkpoints, required reconciliation
 onto launch main, first remaining work and settled human decisions.
 Existing A0–A8 and M0–M7 designs own product semantics and acceptance.

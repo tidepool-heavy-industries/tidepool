@@ -1,10 +1,9 @@
 # Coordination RSI: make the real integration loop fluent
 
-Status: implementation complete; release preparation in progress. The complete
-model-free package run passed 114 assertions. Focused checks cover request recovery,
-review/repair/integration, compact history, scoped release and nested supervision.
-Next-run readiness still requires committing/selecting main and reconciling the
-preserved product continuations below.
+Status: implemented and verified on main. The model-free package and focused
+boundary checks pass; both preserved product continuations are reconciled onto
+the platform. [Next-wave selection](../parallel-dogfood/next-wave/ready.md) owns
+launch inputs and the remaining product-branch gates.
 
 Main is the working platform. Disk/custody fixes and executable skills are on main
 through `ee946b181`. Product applications/engine work stays on continuation
@@ -172,7 +171,7 @@ replay an uncertain request or send.
   definitions in the project modules. Fix qualified exports,
   supplied signatures and opaque-handle displays that caused the observed errors;
   remove contradictory watch examples and expansive default summaries.
-- [ ] Execute the actual examples through focused owning checks, review the combined
+- [x] Execute the actual examples through focused owning checks, review the combined
   main diff and select a frozen runner/package for the next authorized wave.
   Rebase both product continuations on that main baseline.
 
@@ -217,7 +216,7 @@ coverage. Live efficiency/cache claims require evidence from the next run.
 
 ## Current acceptance checkpoint
 
-Implementation remains in progress on the main RSI checkout. The record actor
+The implementation is committed on main. The record actor
 resident tests pass for typed calls/state/self/sender/drain and for compile-time
 rejection of zero or multiple state fields. The latter required an explicit
 launch constraint: an unused type family alone did not force the custom error.
@@ -250,4 +249,5 @@ copy, including the two-lane final-source integration. The subsequent nine-asser
 skill check adds pending-work retention and the executable scoped-release example.
 Independent cases use separate recipe repositories; a swarm restart intentionally
 preserves existing Git branches.
-Do not treat partial passing routing assertions as a completed recipe suite.
+The release selection preserves both lane source histories. Candidate engine/native
+acceptance remains separate from the tested main harness.

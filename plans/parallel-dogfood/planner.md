@@ -38,7 +38,7 @@ changes; the existing goals and two-lane implementation are already authorized.
 ## Commission and review inside Shoal
 
 The selected package loads `Project.Types`, `Project.Work`, `Project.Plan`,
-`Project.Routing` and `Project.Observe` unqualified. `Task` is a type, not a
+`Project.Actors`, `Project.Routing` and `Project.Observe` unqualified. `Task` is a type, not a
 module: its source accessor is `taskSource :: Task -> Text`. Use the supplied
 signatures and recipe; query types only when a concrete missing fact blocks work.
 
@@ -56,7 +56,6 @@ coordinator and retains its progress/reply collector. Names are local bindings,
 not extra roles or required workflow stages.
 
 ```haskell
-import qualified Tidepool.Actor as Actor
 import qualified Project.Plan as Plan
 import qualified Project.Work as Work
 let Right coordinatorLabel = branchLabel "coordinator"
@@ -68,11 +67,11 @@ review <- followWork [("coordinator", forkedResponse coordinator, coordinatorPro
 
 The coordinator commissions both Sol leads and consolidates their initial
 execution proposals. `review` has type
-`Actor.ActorRef (WorkInput Delivery) (WorkState Delivery)`; it receives ordered
+`ActorHandle (WorkActor Delivery)`; it receives ordered
 progress and final replies without rearming. Inspect it only when needed:
 
 ```haskell
-proposal <- Actor.call review WorkSnapshot
+proposal <- readWork review
 ```
 
 Read the referenced proposal artifacts. Send specific corrections and authority
@@ -85,8 +84,7 @@ After the initial planning corrections are incorporated and Sol owns execution,
 retire only this planner's review collector:
 
 ```haskell
-Actor.drainActor review
-reviewExit <- Actor.awaitExit review
+reviewExit <- finishWork review
 ```
 
 The coordinator and its tree continue independently. Remain idle for human
