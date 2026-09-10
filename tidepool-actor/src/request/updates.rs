@@ -204,7 +204,7 @@ impl RequestRegistry {
         let delivery = queued.then(|| RequestUpdateDelivery {
             registry: Arc::clone(self), target: request.target, id: update,
             key: format!("shoal-update-{}", uuid::Uuid::new_v4()),
-            message: format!("Update {} for your existing request {}. The original assignment and sessionReply remain pending.\n\n{}\n\nPresentation is not incorporation. Execute locally; surface only checked incorporation, a changed blocker, or a decision.", update.sequence, id.0, message),
+            message: format!("Update {} for your existing request {}. The original assignment and sessionReply remain pending.\n\n{}", update.sequence, id.0, message),
         });
         Ok((update, delivery))
     }
