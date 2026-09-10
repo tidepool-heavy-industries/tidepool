@@ -50,8 +50,9 @@ checkJob <- Cmd.start checkCommand
 ```
 
 Commands are values: inspect with `Cmd.describe`, retain or pass them, then execute.
-The default is 256 MiB. `Cmd.run command` returns within one second with `Finished`
-(result plus bounded output) or `Pending job`. Admission and execution continue
+The default is 256 MiB. `Cmd.run command` waits up to one second for `Finished`
+(result plus bounded output), `Pending job`, or `Unavailable job error` retaining
+the job if observation fails after starting. Admission and execution continue
 without polling. `Cmd.await job` explicitly waits; `Cmd.output job 8192` reads a
 bounded tail; `Cmd.status job` includes terminal cleanup; `Cmd.cancel job` accepts
 cancellation intent. Keep the same handle after uncertainty. For automatic routing,

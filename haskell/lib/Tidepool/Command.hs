@@ -3,7 +3,7 @@ module Tidepool.Command
   ( Commands, Command, Job, Memory (..), RunResult (..)
   , bash, argv, describe, withMemory, inDirectory, withEnvironment, withArguments, withStdin, withTerminal
   , start, run, await, status, output, sendInput, closeInput, resize, cancel, completion
-  , CommandStatus (..), CommandResult (..), CommandOutcome (..), CommandCleanup (..), CommandOutput (..)
+  , CommandStatus (..), CommandResult (..), CommandOutcome (..), CommandCleanup (..), CommandOutput (..), CommandError (..)
   , CommandSpec (..), CommandInput (..)
   ) where
 
@@ -24,6 +24,7 @@ data RunResult
       , capturedOutput :: CommandOutput
       }
   | Pending Job
+  | Unavailable Job CommandError
   deriving (Eq, Show)
 
 checked :: Either CommandError a -> a
@@ -32,14 +33,17 @@ checked = either (error . show) id
 start :: Member Commands effects => Command -> Eff effects Job
 start (Command spec) = Job . checked <$> send (CommandStartWith spec)
 
--- | Return a continuing handle after at most one second, including queue time.
+-- | Wait up to one second for completion; retain the job if observation fails.
 run :: Member Commands effects => Command -> Eff effects RunResult
 run command = do
   job@(Job key) <- start command
-  observed <- checked <$> send (CommandAwaitWith key 1000)
+  observed <- send (CommandAwaitWith key 1000)
   case observed of
-    CommandFinished result -> Finished job result <$> output job 8192
-    _ -> pure (Pending job)
+    Left failure -> pure (Unavailable job failure)
+    Right (CommandFinished result) -> do
+      captured <- send (CommandOutputWith key 8192)
+      pure $ either (Unavailable job) (Finished job result) captured
+    Right _ -> pure (Pending job)
 
 await :: Member Commands effects => Job -> Eff effects CommandResult
 await (Job key) = do

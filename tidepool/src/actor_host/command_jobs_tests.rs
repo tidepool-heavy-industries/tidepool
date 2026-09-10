@@ -8,6 +8,7 @@ struct TestCommands {
     specs: Mutex<Vec<CommandSpec>>,
     finish: watch::Sender<bool>,
     cancelled: std::sync::atomic::AtomicBool,
+    output_unavailable: std::sync::atomic::AtomicBool,
 }
 impl TestCommands {
     fn new() -> Arc<Self> {
@@ -15,6 +16,7 @@ impl TestCommands {
             specs: Mutex::new(Vec::new()),
             finish: watch::channel(false).0,
             cancelled: false.into(),
+            output_unavailable: false.into(),
         })
     }
 }
@@ -64,6 +66,14 @@ impl CommandBackend for TestCommands {
         _bytes: usize,
     ) -> futures_util::future::BoxFuture<'a, Result<CommandOutput, CommandError>> {
         Box::pin(async {
+            if self
+                .output_unavailable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(CommandError::CommandUnavailable(
+                    "output transport lost".into(),
+                ));
+            }
             Ok(CommandOutput {
                 stdout: "result".into(),
                 stderr: String::new(),
@@ -163,6 +173,33 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
 }
 
 #[tokio::test]
+async fn command_run_retains_job_after_output_observation_failure() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), "attempt <- Cmd.run [bash|printf done|]").await
+    });
+    let backend = TestCommands::new();
+    backend
+        .output_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign).await.supply(Ok(backend));
+    let result = running.await.unwrap();
+    assert_eq!(result["status"], "committed", "{result}");
+    let retained = committed(
+        &campaign,
+        "let retained = case attempt of { Cmd.Unavailable job _ -> job; _ -> error \"expected unavailable observation\" }\nCmd.status retained",
+    ).await;
+    assert!(
+        retained.to_string().contains("CommandExited 0"),
+        "{retained}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn command_skill_examples_execute_in_the_resident_workbench() {
     let mut campaign = TestCampaign::start().await;
     let skill =
@@ -180,6 +217,10 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
     let result = committed(&campaign, examples.next().unwrap()).await;
     assert!(result.to_string().contains("commandStdout"), "{result}");
     assert_eq!(backend.specs.lock()[0].memory, 4 * 1024 * 1024 * 1024);
+    assert_eq!(
+        backend.specs.lock()[0].environment,
+        [("CARGO_BUILD_JOBS".into(), "2".into())]
+    );
     let description = committed(&campaign, examples.next().unwrap()).await;
     assert!(
         description.to_string().contains("a path; not shell syntax"),

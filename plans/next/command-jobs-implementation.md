@@ -61,6 +61,10 @@ Matched native continuation is committed and pushed at
 - All three resident command checks passed: cancellation before backend attachment,
   early/late exactly-once record actor completion, composed environment overrides,
   argument fidelity, and execution of the command skill's actual code blocks.
+- Final DSL review: `Cmd.run` preserves `Unavailable job error` after post-start
+  observation failure. The retained-job regression and revised composed-builder
+  skill examples passed together (2 tests, 219.64 s). This follow-up must be included
+  in the final release selection; the initial Nix build predates it.
 - Native deferred cancellation, stdin closure, lossless output and
   root-exit/descendant-pipe lifetime tests passed. The matched native binary built.
 - Full-TUI scripted-provider acceptance passed (438.89 s): native OOM and
@@ -84,6 +88,13 @@ Matched native continuation is committed and pushed at
   was stopped after confirming its grants were removed.
 - The committed-source Nix release build is in progress with one build job and two
   cores. The frozen runner's packaged-binary checks remain before release.
+- Launch remains held for the operator's account switch and host recovery. A global
+  OOM killed the old live swarm host on September 10 at 12:53:08; the matched new
+  command runtime was not installed in that swarm. Kernel evidence is retained at
+  `target/command-release-20260910/host-oom.log`. Per-command and Nix limits bound
+  those workloads, not total memory held by existing TUIs, compiler workers and
+  hosts. Preserve their source/WIP before any teardown; do not equate successful
+  command containment acceptance with a machine-wide no-OOM guarantee.
 - Runtime Nix limits verified: MemoryMax=8589934592,
   MemorySwapMax=1073741824, CPUQuotaPerSecUSec=2s. Declarative changes are prepared
   in /etc/nixos/configuration.nix; operator is holding nixos-rebuild until notified
