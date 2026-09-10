@@ -35,9 +35,10 @@ and commission the Sol coordinator.
 
 The runner is built from the launch-recorded main revision. Main carries tested
 orchestration/tooling and the curated prompt package. Product implementations stay
-on their applications/engine branches. Before implementation forks, each lead
-rebases its consolidated checkpoint onto the launch-recorded main revision on a
-new continuation branch, preserving the original refs. No external format consumers
+on their applications/engine branches. Use the prepared continuation heads in the
+launch record and verify that launch main is their ancestor. If no prepared head
+is supplied, rebase the preserved checkpoint on a new continuation branch first.
+Keep the original refs; do not repeat an already-completed rebase. No external format consumers
 exist; protect main and our actual Shoal usage through matched candidate acceptance. Do not merge unfinished engine
 or applications code into main to obtain a new harness. Read
 .shoal/plans/coordination.md: Haskell owns mechanical routing and cursors; model

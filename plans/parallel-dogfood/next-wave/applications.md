@@ -7,9 +7,10 @@ that every branch is ready or requires a separate actor.
 
 ## Required starting-source reconciliation
 
-Before implementation children fork, create a new applications continuation branch
-from the recovered checkpoint in [resume.md](resume.md) and rebase it onto the
-**exact main commit selected for this launch**. This must include the accepted
+Before implementation children fork, verify that the selected applications head
+descends from the **exact main commit selected for this launch**. Use the prepared
+continuation supplied in the launch record. Only if preparing a different source,
+create a new continuation from its preserved checkpoint and rebase it first. This must include the accepted
 supervisor/resource changes and the current plan/prompt updates; do not continue
 from the old swarm baseline. Preserve the original recovery refs and dirty
 checkouts. Record the resulting head and verify launch main is its ancestor.

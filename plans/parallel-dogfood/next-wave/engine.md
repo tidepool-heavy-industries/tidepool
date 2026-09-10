@@ -8,10 +8,10 @@ M3 scaffold; reopen M0/M1 only for concrete integration defects.
 
 ## Required starting-source reconciliation
 
-Before implementation children fork, create a new engine continuation branch from
-its preserved checkpoint in [resume.md](resume.md) and rebase it onto the **exact
-latest main commit selected for this launch**, the same baseline used by the
-applications lane. Preserve original checkpoint refs, meaningful merges and dirty
+Before implementation children fork, verify that the selected engine head descends
+from the **exact main commit selected for this launch**, shared with applications.
+Use the prepared continuation in the launch record. Only if preparing another
+source, create a new continuation from its preserved checkpoint and rebase it first. Preserve original checkpoint refs, meaningful merges and dirty
 checkouts; do not continue implementation from the old swarm baseline.
 
 Retain main's supervisor/resource mechanisms and current prompts/Haskell helpers.
