@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Actual Shoal bootstrap/placement acceptance. Private offline Codex homes; no inference.
 
-Run in the repository dev shell with matched --shoal, --codex, --extractor and
---worker binaries. Requires the configured user swarm.slice and no existing
+Use --shoal for a packaged runner in a clean environment. Optional --codex,
+--extractor and --worker overrides support unwrapped development binaries. Requires the configured user swarm.slice and no existing
 command-resource service. Evidence is retained under --output, including failures.
 """
 import argparse
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import uuid
 
 
@@ -59,10 +60,40 @@ def verify_small_budget_oom(output):
         run("systemctl", "--user", "reset-failed", unit, check=False, timeout=30)
 
 
+def verify_wrong_service_slice(args, output, env):
+    """A second configured budget must not silently adopt the live service."""
+    slice_name = "shoaltest" + uuid.uuid4().hex + ".slice"
+    unit = Path(os.environ["XDG_RUNTIME_DIR"]) / "systemd/user" / slice_name
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    session = "shoal-wrong-slice-test-" + uuid.uuid4().hex
+    before = service()
+    try:
+        unit.write_text("[Slice]\nMemoryHigh=1G\nMemoryMax=2G\nMemorySwapMax=1G\n")
+        run("systemctl", "--user", "daemon-reload")
+        work = output / "wrong-slice"
+        selected = dict(env, CODEX_HOME=str(output / "codex-0"))
+        run(str(args.shoal), "new", str(work), env=selected)
+        config = work / ".shoal/config.toml"
+        config.write_text(config.read_text() + '\n[launch]\nsystemd_slice = "' + slice_name + '"\n')
+        rejected = run(str(args.shoal), "init", "--workspace", str(work),
+                       "--session", session, "--no-attach", env=selected, check=False)
+        (output / "wrong-slice.log").write_text(rejected.stdout + rejected.stderr)
+        assert rejected.returncode != 0, rejected.stdout
+        assert "shared command service is outside the selected slice" in rejected.stderr, rejected.stderr
+        assert service() == before, "rejected run disturbed the existing service"
+    finally:
+        run("tmux", "kill-session", "-t", session, check=False, timeout=20)
+        run("systemctl", "--user", "stop", slice_name, check=False, timeout=30)
+        unit.unlink(missing_ok=True)
+        run("systemctl", "--user", "daemon-reload")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for key in ("shoal", "codex", "extractor", "worker", "output"):
+    for key in ("shoal", "output"):
         parser.add_argument("--" + key, required=True, type=Path)
+    for key in ("codex", "extractor", "worker"):
+        parser.add_argument("--" + key, type=Path)
     args = parser.parse_args()
     assert "MainPID=0\n" in service(), "existing shared service: use an idle test boundary"
     output = args.output.resolve()
@@ -72,9 +103,11 @@ def main():
     roots = []
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("TIDEPOOL_", "CODEX_", "OPENAI_"))}
-    env.update(TIDEPOOL_EXTRACT=str(args.extractor.resolve()),
-               TIDEPOOL_EXTRACT_WORKER=str(args.worker.resolve()),
-               TIDEPOOL_INTERACTIVE_CODEX_BIN=str(args.codex.resolve()))
+    for key, value in (("TIDEPOOL_EXTRACT", args.extractor),
+                       ("TIDEPOOL_EXTRACT_WORKER", args.worker),
+                       ("TIDEPOOL_INTERACTIVE_CODEX_BIN", args.codex)):
+        if value is not None:
+            env[key] = str(value.resolve())
     shared = None
     try:
         missing = output / "missing-slice"
@@ -84,7 +117,8 @@ def main():
         rejected = run(str(args.shoal), "init", "--workspace", str(missing),
                        "--no-attach", env=env, check=False)
         (output / "missing-slice.log").write_text(rejected.stdout + rejected.stderr)
-        assert rejected.returncode != 0 and "configure the swarm slice" in rejected.stderr
+        assert rejected.returncode != 0 and ("configure the swarm slice" in rejected.stderr
+                                             or "slice requires a finite MemoryHigh" in rejected.stderr)
         assert "MainPID=0\n" in service(), "failed preflight started resources"
         for index in range(2):
             work = output / f"work-{index}"
@@ -113,8 +147,15 @@ supports_websockets = false
             root = Path(status_path).parent
             roots.append(root)
             units.add("shoal-host-" + root.name + ".scope")
-            status = json.loads((root / "status.json").read_text())
-            assert status["phase"]["state"] in ("ready", "awaiting_binding"), status
+            deadline = time.monotonic() + 60
+            while True:
+                status = json.loads((root / "status.json").read_text())
+                if status["phase"]["state"] == "ready":
+                    break
+                assert status["phase"]["state"] in ("starting", "awaiting_binding"), status
+                assert time.monotonic() < deadline, status
+                time.sleep(0.1)
+            (output / f"ready-{index}.json").write_text(json.dumps(status, indent=2))
             budget = json.loads((root / "resource-budget.json").read_text())
             assert budget["memory_max"] == 18 * 1024**3
             assert budget["swap_max"] == 24 * 1024**3
@@ -135,6 +176,7 @@ supports_websockets = false
             for row in owned.values():
                 units.update(part for part in Path(row["group"]).parts if part.endswith(".scope"))
             (output / f"processes-{index}.json").write_text(json.dumps(owned, indent=2))
+        verify_wrong_service_slice(args, output, env)
         verify_small_budget_oom(output)
         (output / "result.json").write_text(json.dumps({"passed": True, "service": shared}))
     finally:

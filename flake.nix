@@ -236,10 +236,13 @@
               cargoTestFlags = [ "--lib" ];
             };
           in
-          pkgs.writeShellScriptBin "tidepool-extract" ''
-            export PATH="${ghcEnv}/bin:$PATH"
-            export TIDEPOOL_EXTRACT_WORKER="${harness}/bin/tidepool-extract-bin"
-            exec ${frontend}/bin/tidepool-extract "$@"
+          pkgs.runCommand "tidepool-extract" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+            mkdir -p "$out/bin"
+            makeWrapper ${frontend}/bin/tidepool-extract "$out/bin/tidepool-extract" \
+              --prefix PATH : ${ghcEnv}/bin \
+              --set TIDEPOOL_EXTRACT_WORKER ${harness}/bin/tidepool-extract-bin
+            # Shoal locates the pair before retaining the frontend for a run.
+            ln -s ${harness}/bin/tidepool-extract-bin "$out/bin/tidepool-extract-bin"
           '';
 
         packages.shoal-unwrapped = tidepoolRustPlatform.buildRustPackage {
