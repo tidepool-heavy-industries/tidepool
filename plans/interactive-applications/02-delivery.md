@@ -1,7 +1,7 @@
 # Durable input and delivery outcomes
 
-Status: planned. Implements slices A2 and A3 after the
-[live session contract](01-native-session.md).
+Behavioral contract for the retained implementation. See [source inventory](current-state-review.md)
+and [wrap-up checklist](06-integration.md) for current status and assignments.
 
 ## Result and guarantee
 

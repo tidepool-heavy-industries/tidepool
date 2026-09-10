@@ -2,9 +2,11 @@
 
 [Ready selection](ready.md) records the tested platform and prepared continuation refs.
 
-[resume.md](resume.md) supplies the final r6 checkpoints, required reconciliation
+[resume.md](resume.md) supplies the retained R7 checkpoints, required reconciliation
 onto launch main, first remaining work and settled human decisions.
-Existing A0–A8 and M0–M7 designs own product semantics and acceptance.
+The applications wrap-up checklist and remaining engine M6/M7 contracts own
+product semantics and acceptance. Applications needs reconciliation and final
+verification, not a fresh broad implementation tree.
 This directory owns execution shape; it does not waive unverified product gates.
 
 Each run uses an exact runner built from main, including the selected curated

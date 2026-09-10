@@ -1,35 +1,31 @@
 # Next run: resume the consolidated trees on main
 
-Resume the final r6 checkpoints below on the launch-recorded main revision.
+Resume the retained R7 checkpoints below on the launch-recorded main revision.
 Git preserves source and handoffs; it does not recreate live TUI/Haskell handles.
 The checked main runner and frozen `.shoal` package remain separate from product
 candidates throughout the run.
 
 ## Starting source
 
-| Input | Commit |
-|---|---|
-| Consolidated coordinator checkpoint and final census | `4ac97b13c1b524e2ca050f37c5160210d9ffed40` |
-| Engine lane and final preservation ledger | `059c1677c3dcb71f9afd1a98e522325c8c378beb` |
-| Applications lane and custody handoff | `c19aaa84aa5cd0b99431457b2ec0c7b2d75a6a31` |
-| Introspection partial implementation | `82400a24b88c67b103245f367983e0511839ad84` |
-| Native A1/A2 candidate (Codex repository) | `b2163064d3b52b3e1a7ee458603f661d6162a165` |
-| Native completion tested sibling (Codex repository) | `d140e7ecf4df19d69ad200be405f5866d4b4d4a0` |
-| Native A6 continuation (Codex repository) | `6648c73f5d921e47fe81ce26e4caa99ef2a2fdd3` |
-| Preserved six-file recovery WIP (Codex repository) | `9d68c0dbb1c48614392a0e0079ce8fcb70c75c94` |
+Use the R7 coordinator `0c1fb83f2285775cb16b212ce2e152bbe9a07374` as the
+complete preservation source. It includes applications handoff
+`8eda2640b5047786f5dcf2af8b7eae9760e5e767`, engine handoff
+`0c1ff8d9995dddfc30756a2d26d5278749571826`, and checked fixture baseline
+`6bef6363d95ef5c9bb4749cfd5304c89767d9cb7`.
 
-Read the coordinator's `plans/parallel-dogfood/resource-wave/coordinator-wind-down.md`
-at its exact commit, then the assigned lane's handoff in that tree. Use `git show <commit>:<path>` when the file is not in main. Engine additionally reads
-`engine/engine-preservation.md` and `engine/m2-preservation.md`; applications reads
-`applications/applications-handoff.md`. These supersede the older OOM recovery
-inventory and old launch/release messages.
+Read `plans/parallel-dogfood/next-wave/coordinator-wind-down-handoff-r7.md`
+with `git show` at that coordinator commit, then the relevant lane handoff in
+that directory. Current applications source/evidence and native
+`d84cda697a8dac2842bec09dbd7562a3fab4c926` are inventoried in
+[applications](../../interactive-applications/current-state-review.md).
+The older R6 refs remain Git history, not the launch inputs.
 
-The coordinator has already incorporated applications, engine and introspection
-partials. Engine includes M0/M1, M2 candidate `362094cd` and M3 scaffold `cb67a840`;
-its M2 preservation ledger is `1ecdbafb`. Do not implement those foundations again.
-The native refs are divergent candidates, not one accepted linear implementation.
-Reconcile them explicitly and preserve the recovery WIP ref before selecting a
-matched native candidate. No product megatask is accepted by these checkpoints.
+Applications A0–A7 are implemented and matched A8 passed on the retained pair;
+reconciliation and final-source acceptance remain. Engine M0–M5 and a bounded
+M6 seam are retained; general production M6/M7 remain open. Structured
+introspection is included in the retained engine work, not a new third assignment.
+The combined checkpoint includes unfinished engine code and must not be merged
+wholesale into main as an applications release.
 
 Main owns command-resource admission, supervisor/disk repairs and the curated
 actor/coordination package. Preserve those owners during reconciliation. The
@@ -57,27 +53,17 @@ checks must be selected explicitly, separately from the running swarm's binaries
 
 ## First useful work
 
-| Owner | Opening result | Parallel work after the local contract is usable |
-|---|---|---|
-| Applications delivery | Review the preserved host partial and reconcile native candidates | Real native/host failure paths and matched protocol checks |
-| Applications completion | Complete A6 durable completion/restart and exact release | Hosted-work retirement and adversarial owner-loss consumers |
-| Applications recovery | Recheck A7 against the resulting engine source | Source recovery and truthful lost-live-state reporting |
-| Engine memory | Independently review M2 and finish its consumer/failure matrix | Reclamation/accounting and retirement/mixed-lifetime checks |
-| Engine schema | Extend the preserved M3 scaffold and accepted design | Writer, bounded decoder/validator, linker and reference vertical |
+Applications follows its [wrap-up allocation](applications.md): reconcile the
+existing pair, review actual conflicts, rerun owning recovery/full-TUI checks,
+and repair concrete failures. Do not commission admission/completion/recovery
+from scratch.
 
-Introspection remains a bounded additional obligation: execute the real resident
-Eff reentrancy path and obtain independent review of the preserved implementation.
-Allocate it where its engine/actor ownership fits; do not create a third megatask.
-
-The existing native bridge, prepared frontend and memory-safety repair are starting
-assets, not assignments to implement again. Each lead owns substantive integration
-and forks meaningful implementation subtrees; reviewers are not the only children.
-
-Use the retained prepared evidence and accepted M3 amendment for schema/execution work. M4 codegen and M5 heap
-work fork from a shared signature/layout/root contract; M6/M7 follow real production
-consumers. Applications A8 owns the matched full-TUI package and failure-path join.
-These are dependencies, not globally synchronized rounds. The objective remains
-both complete megatasks; useful partial commits arrive throughout the run.
+Engine reads its retained R7 handoff before the [engine map](engine.md). It owns
+the general native operation/handler ABI, generated-reference/GC join, real
+resident prepared-path cutover, legacy deletion and final comparison. Earlier
+M1–M5 allocations are provenance, not instructions to recreate their implementation.
+The applications owner reruns its affected checks when the final engine consumer
+is delivered. External RSI handles historical custody and infrastructure.
 
 ## Who does what
 

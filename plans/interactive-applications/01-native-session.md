@@ -1,8 +1,7 @@
 # Exact native session binding
 
-Status: planned. Shared decisions are in [README.md](README.md). This work is
-slice A1; native input outcome semantics are specified in
-[02-delivery.md](02-delivery.md).
+Behavioral contract for the retained implementation. See [source inventory](current-state-review.md)
+and [wrap-up checklist](06-integration.md) for current status and assignments.
 
 ## Result
 
@@ -64,10 +63,10 @@ of its completed-call boundary.
 All new launches require the complete capability set for the current release.
 Absence of a capability fails the affected launch or operation explicitly. A
 running older TUI can remain available for manual use; a socket field does not
-upgrade it to a new protocol. Initial version allocation is hosted protocol 4 and
-binding storage version 6, following the inspected protocol 3 and current binding
-version 5. A0 must adjust those numbers if another landed change consumed them.
-Unknown future storage versions fail closed through the existing migration owner.
+upgrade it to a new protocol. Select compatible protocol/storage revisions from the actual integrated writers
+and readers. Reuse existing migrations; historical version reservations are not
+authority to overwrite an allocated version. Unknown future versions fail closed
+through the existing migration owner.
 
 ## Live session API
 

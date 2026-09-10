@@ -1,7 +1,7 @@
 # Reconnection, recovery and operator behavior
 
-Status: planned. Implements slice A7 after input reconciliation, scoped
-retirement and hosted completion have production consumers.
+Behavioral contract for the retained implementation. See [source inventory](current-state-review.md)
+and [wrap-up checklist](06-integration.md) for current status and assignments.
 
 ## Result
 

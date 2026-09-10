@@ -1,7 +1,7 @@
 # Hosted calls, completion and context forks
 
-Status: planned. Implements slice A6 using the session binding from A1 and the
-retained process/hosted-work obligations from A5.
+Behavioral contract for the retained implementation. See [source inventory](current-state-review.md)
+and [wrap-up checklist](06-integration.md) for current status and assignments.
 
 ## Result
 
@@ -27,15 +27,10 @@ disabled with an honest explanation.
 | Tidepool `actor_host.rs`, `hosted_retirement.rs`, actor fork owner | Pending child admission, exact actor policy and retirement |
 | Tidepool runtime session/workbench owners | Haskell binding tip, accepted evaluation and cleanup |
 
-The current Codex fork already has an ordered background completion queue with
-60-second attempts and bounded retries. Keep that responsiveness fix. This slice
-clarifies its lifecycle owner and closes failure/accounting gaps; it does not
-return callbacks to the terminal render loop.
-
 ## Native session component
 
-Create a small native-session coordination object inside the existing hosted-tool
-modules, retained by `AppServerSession`. It owns the bound application/generation,
+The native-session coordination component in the existing hosted-tool modules
+is retained by the native session. It owns the bound application/generation,
 accepted call correlations, pending completed-call boundaries, bounded completion
 queue and coordination state. It must not depend on chat widget rendering,
 terminal size or whether the person is viewing the primary conversation.

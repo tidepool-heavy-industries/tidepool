@@ -1,9 +1,8 @@
 # Full-TUI process supervision and custody
 
-Status: supervisor and command-resource implementation present; full A5
-settlement remains open. See [current acceptance](../next/command-resource-acceptance.md)
-for checked behavior and the matched release. The contracts below continue to
-define A4/A5 acceptance.
+Behavioral contract. Main supplies the supervisor/command-resource foundation;
+retained applications work supplies the custody join. See the
+[source inventory](current-state-review.md) and [wrap-up checklist](06-integration.md).
 
 ## Result
 
@@ -20,9 +19,8 @@ process completion.
 
 ## Owners and implementation shape
 
-Extend `tidepool-node/src/process_scope.rs` and `process_boundary.rs`. Add the
-supervisor loop and its typed local control protocol in small modules in
-`tidepool-node`. Expose a hidden internal entry point through the existing parser
+Reuse `tidepool-node/src/process_scope.rs`, `process_boundary.rs` and the
+existing supervisor/control protocol. The hidden internal entry point uses the parser
 in `tidepool/src/bin/shoal.rs`, composed through `tidepool/src/shoal.rs`; do not
 build another command parser or standalone installed orchestration product.
 

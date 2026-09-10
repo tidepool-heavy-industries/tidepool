@@ -5,9 +5,10 @@ with [the current resume plan](next-wave/resume.md), then [the execution tree](n
 [restart.md](restart.md) and [saved-work.md](saved-work.md) describe the previous
 launch and older saved work; final current handoffs take precedence.
 
-Deliver both existing designs: full interactive Codex applications (A0–A8) and
-prepared-STG production execution (M0–M7). Reviewed partial slices are useful;
-keep the remaining feature gates open.
+Finish applications integration from its implemented R7 candidate and continue
+the engine production cutover. The applications lane follows a finite wrap-up
+checklist; the engine retains its larger implementation tree. Shared-server
+execution is subsequent work, not part of either assignment.
 
 A Shoal-managed Astra planner sets up the work with the human.
 Its Sol coordinator owns integration; two Sol leads own the delivery branches.

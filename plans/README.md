@@ -31,9 +31,8 @@ archive).
   [next coordination pass](next/coordination-rsi.md) targets fluent effectful actor
   routing, useful current views and scoped completion of the actual integration loop.
 - [Supervised interactive Codex applications](interactive-applications/README.md):
-  complete option A implementation plans for full worker TUIs, exact native
-  session binding, durable delivery, process custody, hosted completion and
-  recovery, with staged integration and acceptance across Tidepool and its Codex fork.
+  consolidate the implemented R7 candidate with current main, close matched
+  verification and ship. The subsequent shared-server migration remains separate.
 - [Haskell command workbench](next/haskell-command-workbench.md): in-progress
   design for inspectable bash values, memory-weighted execution, typed process
   interaction and gradual migration from native shell orchestration.

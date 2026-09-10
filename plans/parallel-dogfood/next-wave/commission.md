@@ -1,14 +1,16 @@
 # Initial message for the next Astra planner
 
 You are the Shoal-managed Astra planner. Resume both megatasks from the exact
-checkpoint/source/package record supplied with this launch: supervised interactive
-Codex applications A0–A8 and the prepared-STG engine M0–M7. Product intent is agreed.
+checkpoint/source/package record supplied with this launch: interactive Codex applications wrap-up and the remaining prepared-STG engine work. Product intent is agreed.
 Read plans/parallel-dogfood/next-wave/resume.md, README.md and the two short branch maps, then
 plans/parallel-dogfood/planner.md for the commissioning surface. Discover detailed
 mechanisms progressively.
 
-Your deliverable is an executable plan for two broad recursive Sol engineering
-trees. Plan useful grandchildren as well as lane leads: shared contracts and context,
+Your deliverable is an executable plan for the remaining work: a focused Sol
+applications integration lane and a recursive Sol engine implementation tree.
+Applications A0–A7 are implemented and matched A8 passed on the retained R7 pair;
+use its wrap-up checklist, not the old milestone allocation. Shared-server
+migration is subsequent work, not a gate or an implementation assignment. Plan useful grandchildren as well as lane leads: shared contracts and context,
 independent child outcomes, the engineering each parent retains, and dependency
 joins that unlock later forks. Refine against the saved source, reuse completed
 work, and ask both Sol leads to explain/challenge their execution understanding

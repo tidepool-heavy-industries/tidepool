@@ -1,99 +1,92 @@
-# Applications plan review after resource isolation
+# Applications source inventory
 
-Review date: 2026-09-09. This is a source-based continuation map, not acceptance
-of retained candidates. No product branch was merged or rebased during this review.
-The A0–A8 contracts remain the desired product outcome.
+Inventory: 2026-09-10. Two read-only Sol inventories and the committed R7 handoffs
+replace the older missing-implementation checklist. Historical executed evidence
+below has not been rerun on today's main or the eventual final engine source.
 
-## Source and evidence boundaries
+## Exact retained sources
 
-| Source | What it supplies | Evidence limit |
-|---|---|---|
-| Main runtime `2b27c3f2`, native `fe15831c` | Exact pane supervisor, bounded command trees, admission and retained cleanup, packaged normal TUI | Resource-slice packaged OOM/steering/follow-up test passed; full applications matrix not established |
-| Applications `978029124` | Earlier admission/delivery foundations plus later producer-seal custody work (`0caad300d`, `7dec4d98a`, `978029124`) | Older lane handoff predates these later changes; inspect source, not just its status prose |
-| Recovered applications `3bed6d67` | Installs deferred input-seal custody on binding; consolidates pre-launch failure cleanup | Preserved dirty bytes, not independently accepted implementation |
-| Native bridge `72f7b600` | In-process native input-control path and admission foundation | Historical focused checks; complete socket/PTY failure-path acceptance missing |
-| Native `3fc507260a` plus recovered `d73bdc83` | Durable input terminal retention, watermark compaction, withdrawal tombstones, recovered `Compacted` propagation | Newer than the older handoff's native pin; recovered changes need matched validation |
-| A7 candidate `78a77c3c` | Source-only recovery incarnation/order validation, declaration/retraction reporting and explicit lost live state | Not an ancestor of `978029124`; separate integration and engine join remain |
+| Input | Commit / evidence |
+|---|---|
+| Combined coordinator | `0c1fb83f2285775cb16b212ce2e152bbe9a07374` |
+| Applications handoff | `8eda2640b5047786f5dcf2af8b7eae9760e5e767` |
+| Applications code before handoff | `cff1ce52723a3568dbca197b3aca2936f928c725` |
+| Registry-test incorporation in coordinator | `bfcc72afd09df8806e16d1454541b3cee5933414` |
+| Last combined fixture baseline | `6bef6363d95ef5c9bb4749cfd5304c89767d9cb7` |
+| Matched native candidate | `d84cda697a8dac2842bec09dbd7562a3fab4c926` |
+| Engine handoff in combined source | `0c1ff8d9995dddfc30756a2d26d5278749571826` |
 
-Full hashes, recovery refs, original dirty-file archives and continuation rules are
-in [resume guidance](../parallel-dogfood/next-wave/resume.md). Main remains the
-running-tool baseline. Preserve recovered originals and make new continuation
-branches reconciled onto that baseline. The engine/combined checkpoint is a source
-asset, not a substitute for the applications/native pair.
+Read with `git show <commit>:plans/parallel-dogfood/next-wave/<file>`:
+`coordinator-wind-down-handoff-r7.md` at the coordinator and
+`applications-wind-down-handoff-r7.md` at the applications handoff.
+The coordinator corrects the applications handoff's stale assertion that the
+registry test was not incorporated. `a8-matched-pin-evidence-r7.md` contains
+command detail; its trailing pending-payload statement is superseded by the later
+acceptance commit `dc7d354149988c87a6a926784a99c0d43e6df9c6` and final handoffs.
 
-## Concrete integration findings
+The native branch is `shoal/typed-continuation-r7/native-delivery-completion`,
+with retained worktree `/tmp/tidepool-codex-applications-r7-native` and matching
+remote ref. Its tested package was
+`/nix/store/y820j4v0ldaim6hdrqn3fa41i6icwm39-codex-rs-0.0.0-dev+d84cda6`.
+Retain source refs even if that store output is later collected.
 
-1. **Recovered wire mismatch:** native `d73bdc83` adds `Outcome::Compacted` and
-   propagates compacted admission. Tidepool `3bed6d67` still has no `Compacted`
-   variant in `backend/codex/input_control.rs::OutcomeWire`; its serde decoder
-   cannot accept that response. Define the matched outcome and its host meaning,
-   update both consumers, and execute a compaction/query/admission round trip.
-   Do not map it to successful presentation or permit uncertain redispatch.
-2. **A5 has more implementation than the older handoff reports.** The retained
-   `HostedRetirement` owns a deferred producer-seal operation and separates input
-   seal, hosted seal, resident cleanup and HTTP drain. Recovered binding code
-   installs that operation before delivery starts; it does not eagerly execute
-   the seal. Reconcile this with main's supervisor/resource owner rather than
-   replacing that owner or restarting A5 from scratch. Review whether every
-   pre-/post-producer failure path proves the claimed absence or retains custody.
-3. **Input completion is not hosted-call completion.** Native `3fc507260a`
-   changes queue outcome retention/compaction. It does not prove A6's native
-   hosted-Haskell completion ownership, persisted result/fork boundary or
-   coordination-failure behavior. Keep those obligations distinct.
-4. **A7 is a real separate candidate.** Inspect and integrate its source-only
-   recovery changes with the engine's actual machine-disposition contract. Its
-   existence does not establish reconnect, live-helper adoption, full retirement,
-   or restoration of runtime values/authority.
-5. **The old handoff includes obsolete operating observations.** Its live actor
-   custody statements and compatibility-window question belong to that historical
-   run. Current resume guidance records the OOM and recovery; there are no external
-   TPLR consumers and no native aarch64 runner. Do not replay those questions or
-   treat old active actors as current executing owners.
+## Completed work and its evidence boundary
 
-## Recommended plan iteration
+| Area | Retained implementation / recorded evidence |
+|---|---|
+| Binding, admission, host delivery | Exact launch/generation, immutable input, no-overtaking reconciliation; preflight and lost-ack/order/restart checks passed |
+| Completion and retirement | Accepted-work/custody domains, correlated hosted completion and fork release; native-seal/hosted-drain/degraded-cleanup checks passed |
+| Recovery | Typed resident state, real actor-host recovery, ordered source-only replay, registry races; four focused cases independently rerun |
+| Matched applications integration | Actual socket/PTY/TUI, challenged Bind, exactly one provider delivery, foreign-thread rejection, Presented/Compacted fence, process/provider/host cleanup passed |
+| Combined fixtures | 217/217 at `6bef6363d`; this does not establish final prepared-engine cutover |
 
-Keep mechanism documents 01–05 as contracts. Use three explicit statuses in the
-execution map: accepted on main, retained candidate, and remaining acceptance.
-Unchecked boxes currently conflate absent code with implemented but unaccepted
-work. Do not check them merely because a matching symbol or commit exists.
+A0–A7 are implemented in the retained candidate; A8 passed on the then-selected
+pair. Do not commission those mechanisms from scratch. Final-source acceptance
+remains open, including the engine recovery join and reconciliation with new main.
+Native execution evidence is x86_64 only; no aarch64 runner exists. No broad
+workspace suite was run or is required by this plan.
 
-Reorganize the next implementation allocation around these concrete joins:
+## Main versus candidate
 
-1. **Reconcile sources and protocol:** main plus recovered applications/native
-   candidates, preserving new command admission and supervisor paths. Resolve
-   the `Compacted` mismatch and inventory other changed wire/storage contracts.
-2. **Finish admission/delivery acceptance (A1–A3):** complete the existing
-   submit/query/withdraw/seal/ack socket path, Remote unavailable behavior,
-   lost-ack/stale-generation real-TUI checks, late reconciliation and no overtaking.
-   Reuse existing canonical envelope/inbox/native-store machinery.
-3. **Finish retirement (A5):** integrate retained producer custody with exact
-   process exit, hosted-work settlement and resource release. Exercise interrupted
-   launch, lost waiters and failed cleanup at the joined production boundary.
-4. **Finish hosted completion (A6):** audit current native completion owner and
-   implement only missing native-session retention/context-fork behavior. Join
-   its evidence into A5 rather than inferring completion from terminal rendering.
-5. **Integrate recovery (A7):** incorporate the retained source-recovery candidate
-   against the checked engine contract; complete reconnect/operator paths and
-   truthful unrecoverable-state reporting.
-6. **Matched product release (A8):** run the complete applications matrix on the
-   reconciled pair, remove superseded consumers and select a reviewed product pin.
-   The resource release's package is useful baseline evidence, not this acceptance.
+Inventory main `997a60a6a` already carries the later command-job/resource foundation,
+workspace/process fixes and curated routing/prompts; its native pin is
+`7259e93777a0c3a323ce8ad6911b836eb1b73d37`. The applications candidate is not on
+main. Aggregate swarm-slice placement is separate RSI work still being finalized;
+the next launch record must select its accepted successor, not freeze these hashes.
 
-A4's accepted mechanisms are foundations to preserve. Its remaining terminal and
-owner-loss matrix can run alongside the joins above. A0 becomes baseline and
-fixture reconciliation, not rebuilding the initial scaffold. Keep explicit source,
-check and acceptance evidence with each join; no new orchestration terminology is
-needed.
+The coordinator source also contains unfinished engine work. It is the complete
+preservation source, not a commit to merge wholesale into main. Reconcile the
+applications delta and its required runtime interfaces explicitly. Preserve the
+engine continuation separately. If an applications check requires the final
+engine candidate, record and test that join there; do not silently import an
+unfinished engine into main to close applications.
 
-The [Haskell command workbench](../next/haskell-command-workbench.md) is a separate
-future capability. Its command values and tool migration should consume these
-process/resource owners, but must not expand A0–A8 or delay closing its existing
-native-input/completion/recovery obligations.
+## Native integration scope
 
-## Review limits
+The R7 native tip is linear and supersedes the older R6 admission/completion
+candidates. Do not replay those separately. Its common ancestor with tooling
+`7259e937` is `fe15831c8`; the inventory found actual conflicts in
+`codex-rs/tui/src/host_dynamic_tools.rs` and
+`codex-rs/tui/src/host_dynamic_tools/input_control.rs`. Compose command `Jobs`
+with the candidate's binding/control routes; neither owner replaces the other.
+A fresh review should concentrate on these resolutions and their lifecycle edges.
+The preserved recovery WIP `9d68c0db` remains provenance, not an extra accepted
+patch series to import blindly.
 
-This pass inspected retained handoffs, Git ancestry and the consequential source
-changes named above. It did not execute recovered product candidates or perform a
-line-by-line acceptance review of every A0–A8 implementation. The full native suite
-running on `fe15831c` validates the main resource pin, not `d73bdc83` or the complete
-applications candidate. Recovered work must receive its own matched checks.
+## Actual remaining assignment
+
+1. Consolidate the existing native and Tidepool implementation on launch main,
+   retaining newer resource/command owners and resolving concrete conflicts.
+2. Compile affected runtime/actor/application targets and rerun the four recovery
+   cases plus decisive matched full-TUI input/completion/cleanup checks.
+3. Repair only observed defects or uncovered contract gaps. Recheck the same
+   recovery/full-TUI boundary when the engine delivers its final changed consumer.
+4. Integrate the accepted pair and retire temporary plans. Give the subsequent
+   shared-server design an owner/coupling map, not speculative migration code.
+
+Historical degraded cleanup reports are evidence, not proof of current live
+processes. External RSI subsequently stopped the previous run at operator request,
+keeping the last dead panes and source. Recovery records/scrollback are retained
+under `target/dogfood-retirement-20260910`; termination alone does not certify every
+old hosted-work/resource obligation. Keep that reconciliation outside the new
+implementation tree unless it exposes a reproducible product defect.
