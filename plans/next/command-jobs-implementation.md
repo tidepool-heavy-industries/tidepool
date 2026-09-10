@@ -20,7 +20,7 @@ their existing runtime. This file tracks implementation, not shipped guidance.
   requests at most 256 MiB can use the protected capacity. Aggregate swap 1 GiB.
 - Queues have no implicit lifetime timeout. Transport loss does not cancel a
   retained job. Grants remain held until all descendants are gone.
-- Cap the existing Nix daemon at 8 GiB memory / 1 GiB swap, one build / two cores.
+- Cap the existing Nix daemon at 8 GiB memory / 1 GiB swap, one build / one core.
   This contains daemon work in aggregate; it does not attribute it to clients.
 - Remove the JavaScript tool wrapper for Shoal, retain direct tools and
   apply_patch. Rewrite prompting/examples and add a focused command skill.
@@ -86,8 +86,10 @@ Matched native continuation is committed and pushed at
   cancelled grant cleanup. Evidence is in
   `target/command-release-20260910/service-check/evidence.json`; the test service
   was stopped after confirming its grants were removed.
-- The committed-source Nix release build is in progress with one build job and two
-  cores. The frozen runner's packaged-binary checks remain before release.
+- The first release build hit the Nix service's memory cap with two concurrent
+  Cargo compilations. The final-source build runs with one build job and one core;
+  daemon defaults now match that selection while retaining a two-CPU quota.
+  The frozen runner's packaged-binary checks remain before release.
 - Launch remains held for the operator's account switch and host recovery. A global
   OOM killed the old live swarm host on September 10 at 12:53:08; the matched new
   command runtime was not installed in that swarm. Kernel evidence is retained at
@@ -98,4 +100,6 @@ Matched native continuation is committed and pushed at
 - Runtime Nix limits verified: MemoryMax=8589934592,
   MemorySwapMax=1073741824, CPUQuotaPerSecUSec=2s. Declarative changes are prepared
   in /etc/nixos/configuration.nix; operator is holding nixos-rebuild until notified
-  that current builds are clear. One-build/two-core defaults await activation.
+  that current builds are clear. One-build/one-core defaults and an additional
+  32 GiB swapfile (40 GiB total) await activation. Existing swarm.slice swap bans
+  and swappiness are unchanged; adding host swap does not override cgroup limits.

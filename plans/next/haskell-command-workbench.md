@@ -38,7 +38,7 @@ commands can progress while a large command waits. Aggregate command swap is
 1 GiB. Descendants retain their grant after the root command exits.
 
 Nix daemon work is outside the requesting shell's subtree. Its separate budget
-is 8 GiB memory and 1 GiB swap. Configure one build/two cores and a two-CPU
+is 8 GiB memory and 1 GiB swap. Configure one build/one core and a two-CPU
 aggregate limit. On NixOS, configure `nix.settings` and the daemon's systemd
 service declaratively; runtime systemd properties can activate caps without
 restarting active builds. These daemon limits do not attribute its memory to

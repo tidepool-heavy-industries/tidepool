@@ -14,7 +14,7 @@ case "${1:---check}" in
 MemoryMax=8G
 MemorySwapMax=1G
 CPUQuota=200%
-Environment="NIX_CONFIG=max-jobs = 1\ncores = 2"
+Environment="NIX_CONFIG=max-jobs = 1\ncores = 1"
 UNIT
     systemctl daemon-reload
     systemctl set-property --runtime nix-daemon.service MemoryMax=8G MemorySwapMax=1G CPUQuota=200%
