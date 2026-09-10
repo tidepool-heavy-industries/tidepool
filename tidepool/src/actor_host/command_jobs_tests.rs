@@ -60,6 +60,19 @@ impl CommandBackend for TestCommands {
             Ok(())
         })
     }
+    fn read<'a>(
+        &'a self,
+        _id: &'a str,
+        stream: CommandStream,
+        _position: CommandPosition,
+    ) -> futures_util::future::BoxFuture<'a, Result<CommandPage, CommandError>> {
+        Box::pin(async move {
+            Ok(test_page(match stream {
+                CommandStream::Stdout => "result",
+                CommandStream::Stderr => "",
+            }))
+        })
+    }
     fn output<'a>(
         &'a self,
         _id: &'a str,
@@ -75,11 +88,25 @@ impl CommandBackend for TestCommands {
                 ));
             }
             Ok(CommandOutput {
-                stdout: "result".into(),
-                stderr: String::new(),
-                truncated: false,
+                stdout: test_page("result"),
+                stderr: test_page(""),
             })
         })
+    }
+}
+
+fn test_page(text: &str) -> CommandPage {
+    CommandPage {
+        text: text.into(),
+        start: 0,
+        end: text.len() as i64,
+        available_end: text.len() as i64,
+        retained_start: 0,
+        lost_bytes: 0,
+        finished: true,
+        lossy: false,
+        leading_fragment: false,
+        trailing_fragment: false,
     }
 }
 
@@ -115,7 +142,7 @@ async fn command_jobs_retain_completion_and_route_to_record_actors() {
     backend.finish.send_replace(true);
     let result = committed(
         &campaign,
-        "Cmd.await job\nCmd.output job 1024\nR.call (completionCount (R.client listener)) ()",
+        "Cmd.await job\nCmd.readOutput Cmd.Stdout job\nR.call (completionCount (R.client listener)) ()",
     )
     .await;
     assert!(result.to_string().contains("CommandExited 0"), "{result}");
@@ -149,6 +176,57 @@ async fn command_jobs_retain_completion_and_route_to_record_actors() {
     )
     .await;
     assert_eq!(early["items"][0]["output"], "1", "{early}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    let backend = TestCommands::new();
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign).await.supply(Ok(backend));
+    committed(&campaign, "finished <- Cmd.await job").await;
+    let result = committed(&campaign, include_str!("command_output_ux.hs")).await;
+    let text = result.to_string();
+    for marker in [
+        "large-display-ok",
+        "json-ok",
+        "partial-rejected",
+        "streams-independent",
+        "decode-error-distinct",
+        "omission-kinds-preserved",
+        "data RunResult",
+    ] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
+    assert!(!text.contains("Display failed"), "{text}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_command_display_retains_result_without_reexecution() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    let backend = TestCommands::new();
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    committed(&campaign, "finished <- Cmd.await job").await;
+    let failed = committed(&campaign, include_str!("command_display_failure.hs")).await;
+    let text = failed.to_string();
+    assert!(text.contains("Display failed"), "{text}");
+    assert!(text.contains("Value remains bound"), "{text}");
+    assert!(!text.contains("Expand: inspectFull"), "{text}");
+    let recovered = committed(&campaign, "Cmd.stdout (savedResult broken)").await;
+    assert!(
+        recovered.to_string().contains("Right result"),
+        "{recovered}"
+    );
+    assert_eq!(backend.specs.lock().len(), 1);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -189,8 +267,9 @@ async fn command_run_retains_job_after_output_observation_failure() {
     assert_eq!(result["status"], "committed", "{result}");
     let retained = committed(
         &campaign,
-        "let retained = case attempt of { Cmd.Unavailable job _ -> job; _ -> error \"expected unavailable observation\" }\nCmd.status retained",
-    ).await;
+        "let retained = Cmd.job attempt\nCmd.status retained",
+    )
+    .await;
     assert!(
         retained.to_string().contains("CommandExited 0"),
         "{retained}"
@@ -215,21 +294,41 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
         .supply(Ok(backend.clone()));
     backend.finish.send_replace(true);
     let result = committed(&campaign, examples.next().unwrap()).await;
-    assert!(result.to_string().contains("commandStdout"), "{result}");
-    assert_eq!(backend.specs.lock()[0].memory, 4 * 1024 * 1024 * 1024);
-    assert_eq!(
-        backend.specs.lock()[0].environment,
-        [("CARGO_BUILD_JOBS".into(), "2".into())]
-    );
+    assert!(result.to_string().contains("result"), "{result}");
+    assert_eq!(backend.specs.lock()[0].memory, 256 * 1024 * 1024);
+    assert!(backend.specs.lock()[0].environment.is_empty());
     let description = committed(&campaign, examples.next().unwrap()).await;
     assert!(
         description.to_string().contains("a path; not shell syntax"),
         "{description}"
     );
+    committed(&campaign, examples.next().unwrap()).await;
     assert!(
         examples.next().is_none(),
         "new skill examples need execution coverage"
     );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "manual resident declaration latency probe; no subprocess execution"]
+async fn command_description_latency_probe() {
+    let campaign = TestCampaign::start().await;
+    for (label, source) in [
+        ("argv-first", "let a = Cmd.argv [\"printf\", \"one\"]"),
+        ("quote-first", "let b = [bash|printf two|]"),
+        ("quote-second", "let c = [bash|printf three|]"),
+        ("argv-second", "let d = Cmd.argv [\"printf\", \"four\"]"),
+        ("reuse", "Cmd.describe b"),
+    ] {
+        let start = std::time::Instant::now();
+        committed(&campaign, source).await;
+        eprintln!(
+            "command-description {label} elapsed_ms={}",
+            start.elapsed().as_millis()
+        );
+    }
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

@@ -159,12 +159,38 @@ pub fn commands() -> Effect {
                     ("CommandFinished", vec![named("CommandResult")]),
                 ],
             ),
+            sum(
+                "CommandStream",
+                vec![("Stdout", vec![]), ("Stderr", vec![])],
+            ),
+            sum(
+                "CommandPosition",
+                vec![
+                    ("OutputBeginning", vec![]),
+                    ("OutputTail", vec![]),
+                    ("OutputOffset", vec![HsType::Int]),
+                ],
+            ),
+            record(
+                "CommandPage",
+                vec![
+                    ("outputText", "text", HsType::Text),
+                    ("outputStart", "start", HsType::Int),
+                    ("outputEnd", "end", HsType::Int),
+                    ("outputAvailableEnd", "available_end", HsType::Int),
+                    ("outputRetainedStart", "retained_start", HsType::Int),
+                    ("outputLostBytes", "lost_bytes", HsType::Int),
+                    ("outputFinished", "finished", HsType::Bool),
+                    ("outputLossy", "lossy", HsType::Bool),
+                    ("outputLeadingFragment", "leading_fragment", HsType::Bool),
+                    ("outputTrailingFragment", "trailing_fragment", HsType::Bool),
+                ],
+            ),
             record(
                 "CommandOutput",
                 vec![
-                    ("commandStdout", "stdout", HsType::Text),
-                    ("commandStderr", "stderr", HsType::Text),
-                    ("commandTruncated", "truncated", HsType::Bool),
+                    ("commandStdout", "stdout", named("CommandPage")),
+                    ("commandStderr", "stderr", named("CommandPage")),
                 ],
             ),
             sum(
@@ -212,6 +238,24 @@ pub fn commands() -> Effect {
                     ("bytes", HsType::Int, "i64"),
                 ],
                 HsType::either(named("CommandError"), named("CommandOutput")),
+            ),
+            verb(
+                "CommandReadWith",
+                "command_read_with",
+                vec![
+                    ("job", HsType::Text, "String"),
+                    (
+                        "stream",
+                        named("CommandStream"),
+                        "tidepool_bridge_effects::CommandStream",
+                    ),
+                    (
+                        "position",
+                        named("CommandPosition"),
+                        "tidepool_bridge_effects::CommandPosition",
+                    ),
+                ],
+                HsType::either(named("CommandError"), named("CommandPage")),
             ),
             verb(
                 "CommandInputWith",

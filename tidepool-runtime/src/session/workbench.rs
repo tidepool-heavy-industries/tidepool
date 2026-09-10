@@ -1182,6 +1182,85 @@ mod tests {
     }
 
     #[test]
+    fn ghci_script_preserves_multiline_quasiquotes_and_following_units() {
+        let quotation = include_str!("fixtures/multiline-command.hs").trim_end_matches('\n');
+        let input = format!("{quotation}\nresult <- Cmd.run command\n:info Cmd.RunResult\n");
+        let units = parse_ghci_input(&input).unwrap();
+        assert_eq!(units.len(), 3);
+        assert_eq!(units[0].source(), quotation);
+        assert_eq!(units[1].source(), "result <- Cmd.run command");
+        assert_eq!(units[2].source(), ":info Cmd.RunResult");
+    }
+
+    #[test]
+    fn ghci_script_ignores_quotation_openers_in_haskell_lexical_islands() {
+        let input = "let text = \"[bash|\"\n-- [bash|\nlet char = '['\n{- [bash| {- nested -} -}\nnext <- pure text\n";
+        let units = parse_ghci_input(input).unwrap();
+        assert_eq!(units.len(), 5);
+        assert_eq!(units[4].source(), "next <- pure text");
+    }
+
+    #[test]
+    fn ghci_script_quasiquote_boundary_matrix() {
+        let quotations = [
+            "[bash|\nprintf '%s' \"$HOME\"\n|]",
+            "[Cmd.bash|\n# comment\n\ntrue\n|]",
+            "[bash|printf 'a'|] <> [bash|\nprintf 'b'\n|]",
+            "[bash|\ncat <<-END\n\ttabs stay tabs\n\tEND\n|]",
+            "[bash|\nprintf '%s' '[notAnotherQuote|'\n|]",
+        ];
+        for quotation in quotations {
+            for newline in ["\n", "\r\n"] {
+                let declaration = format!("let command = {quotation}").replace('\n', newline);
+                let input =
+                    format!("{declaration}{newline}result <- Cmd.run command{newline}:type result");
+                let units = parse_ghci_input(&input).unwrap();
+                assert_eq!(units.len(), 3, "{input:?}");
+                assert_eq!(units[0].source(), declaration, "quotation bytes changed");
+                assert_eq!(units[1].source(), "result <- Cmd.run command");
+                assert_eq!(units[2].source(), ":type result");
+                assert!(matches!(&units[1], GhciInputUnit::Code { line, .. }
+                    if *line == declaration.lines().count() + 1));
+            }
+        }
+    }
+
+    #[test]
+    fn ghci_script_unclosed_quasiquote_keeps_suffix_for_ghc_rejection() {
+        let input = "let command = [bash|\n:info literal\nrunDangerousEffect\n";
+        let units = parse_ghci_input(input).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].source(), input);
+    }
+
+    #[test]
+    fn ghci_script_explicit_block_preserves_quoted_block_delimiters() {
+        let quotation = include_str!("fixtures/multiline-command.hs").trim_end_matches('\n');
+        let input = format!(":{{\n{quotation}\n:}}\nnext <- pure ()");
+        let units = parse_ghci_input(&input).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].source(), quotation);
+        assert!(matches!(&units[0], GhciInputUnit::Block { .. }));
+        assert_eq!(units[1].source(), "next <- pure ()");
+    }
+
+    #[test]
+    fn ghci_script_escaped_strings_and_nested_comments_do_not_open_quotes() {
+        for source in [
+            r#"let text = "escaped \" [bash| still string""#,
+            "let primed' = '\\'' -- [bash| not code",
+            "{- outer {- [bash| -} still a comment -} let x = 1",
+            "let bracket = '['",
+        ] {
+            let input = format!("{source}\nnext <- pure ()");
+            let units = parse_ghci_input(&input).unwrap();
+            assert_eq!(units.len(), 2, "{input:?}");
+            assert_eq!(units[0].source(), source);
+            assert_eq!(units[1].source(), "next <- pure ()");
+        }
+    }
+
+    #[test]
     fn ghci_script_groups_indented_layout_before_following_reply() {
         assert_eq!(
             parse_ghci_input(

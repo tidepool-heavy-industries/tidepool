@@ -72,6 +72,9 @@ where
                     )),
                 }
             }),
+            CommandsReq::CommandReadWith(id, stream, position) => {
+                answer!(jobs.read(owner, &id, stream, position).await)
+            }
             CommandsReq::CommandInputWith(id, text) => {
                 answer!(jobs.control(owner, &id, CommandControl::Input(text)).await)
             }

@@ -51,10 +51,36 @@ pub enum CommandStatus {
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CommandStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CommandPosition {
+    OutputBeginning,
+    OutputTail,
+    OutputOffset(i64),
+}
+
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CommandPage {
+    pub text: String,
+    pub start: i64,
+    pub end: i64,
+    pub available_end: i64,
+    pub retained_start: i64,
+    pub lost_bytes: i64,
+    pub finished: bool,
+    pub lossy: bool,
+    pub leading_fragment: bool,
+    pub trailing_fragment: bool,
+}
+
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommandOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub truncated: bool,
+    pub stdout: CommandPage,
+    pub stderr: CommandPage,
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

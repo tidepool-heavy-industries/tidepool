@@ -7,8 +7,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tidepool_bridge_effects::{
-    CommandCleanup, CommandError, CommandOutcome, CommandOutput, CommandResult, CommandSpec,
-    CommandStatus,
+    CommandCleanup, CommandError, CommandOutcome, CommandOutput, CommandPage, CommandPosition,
+    CommandResult, CommandSpec, CommandStatus, CommandStream,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -32,6 +32,12 @@ pub trait CommandBackend: Send + Sync + 'static {
         id: &'a str,
         bytes: usize,
     ) -> BoxFuture<'a, Result<CommandOutput, CommandError>>;
+    fn read<'a>(
+        &'a self,
+        id: &'a str,
+        stream: CommandStream,
+        position: CommandPosition,
+    ) -> BoxFuture<'a, Result<CommandPage, CommandError>>;
     fn cleanup<'a>(&'a self, id: &'a str) -> BoxFuture<'a, CommandCleanup>;
 }
 #[derive(Clone, Debug)]
@@ -322,13 +328,30 @@ impl CommandJobs {
         }
         let shared = self.shared(owner, id)?;
         let Some(backend) = shared.backend.lock().clone() else {
-            return Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: String::new(),
-                truncated: false,
-            });
+            return Err(CommandError::CommandUnavailable(
+                "command backend not ready; retain the job".into(),
+            ));
         };
         backend.output(id, bytes).await
+    }
+
+    pub async fn read(
+        &self,
+        owner: ActorRef,
+        id: &str,
+        stream: CommandStream,
+        position: CommandPosition,
+    ) -> Result<CommandPage, CommandError> {
+        if matches!(position, CommandPosition::OutputOffset(n) if n < 0) {
+            return Err(CommandError::CommandInvalid(
+                "output position must be nonnegative".into(),
+            ));
+        }
+        let shared = self.shared(owner, id)?;
+        let backend = shared.backend.lock().clone().ok_or_else(|| {
+            CommandError::CommandUnavailable("command backend not ready; retain the job".into())
+        })?;
+        backend.read(id, stream, position).await
     }
 
     pub(crate) fn connect(

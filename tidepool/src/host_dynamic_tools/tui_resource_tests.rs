@@ -384,7 +384,12 @@ trust_level = "trusted"
         match expected {
             2 => {
                 assert!(output(1).contains("resource limit"), "{}", output(1));
-                assert!(requests[0]["input"].to_string().contains("Run builds, tests and interactive commands through Shoal's Haskell command jobs."), "command skill must appear in native skill discovery");
+                assert!(
+                    requests[0]["input"]
+                        .to_string()
+                        .contains("Run shell commands through resident Haskell;"),
+                    "command skill must appear in native skill discovery"
+                );
                 let tools = requests[0]["input"]
                     .as_array()
                     .unwrap()
@@ -433,7 +438,7 @@ trust_level = "trusted"
                     (9, "CommandOutOfMemory"),
                     (11, "CommandCancelled"),
                     (12, "TAIL-MARKER"),
-                    (13, "(1,Completed 1)"),
+                    (13, "completion-once"),
                     (15, "terminal:hello"),
                 ] {
                     assert!(
@@ -442,11 +447,8 @@ trust_level = "trusted"
                         output(index)
                     );
                 }
-                assert!(
-                    output(12).contains("commandTruncated = True"),
-                    "{}",
-                    output(12)
-                );
+                assert!(output(12).contains("page-contiguous"), "{}", output(12));
+                assert!(output(12).contains("retention loss"), "{}", output(12));
             }
             _ => unreachable!(),
         }

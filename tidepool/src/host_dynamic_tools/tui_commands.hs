@@ -1,4 +1,10 @@
-holder <- Cmd.start $ withMemory (MiB 512) [bash|touch holder-started; while [ ! -e release-holder ]; do sleep .02; done; printf holder-done|]
+holder <- Cmd.start $ withMemory (MiB 512) [bash|
+touch holder-started
+while [ ! -e release-holder ]; do
+  sleep .02
+done
+printf holder-done
+|]
 -- fixture-step
 queued <- Cmd.start $ withMemory (MiB 512) [bash|printf admitted-after-release|]
 Cmd.status queued
@@ -7,16 +13,16 @@ Cmd.status queued
 do
   small <- Cmd.start [bash|printf protected-slot-usable|]
   result <- Cmd.await small
-  output <- Cmd.output small 1024
-  pure (result, output)
+  output <- Cmd.tailOutput Cmd.Stdout small
+  pure (inspectFull (result, output))
 :}
 -- fixture-step
 :{
 do
   holderResult <- Cmd.await holder
   queuedResult <- Cmd.await queued
-  output <- Cmd.output queued 1024
-  pure (holderResult, queuedResult, output)
+  output <- Cmd.tailOutput Cmd.Stdout queued
+  pure (inspectFull (holderResult, queuedResult, output))
 :}
 -- fixture-step
 :{
@@ -25,8 +31,8 @@ do
   Cmd.sendInput stdinJob "a b;$HOME\n'quoted'"
   Cmd.closeInput stdinJob
   result <- Cmd.await stdinJob
-  output <- Cmd.output stdinJob 1024
-  pure (result, output)
+  output <- Cmd.tailOutput Cmd.Stdout stdinJob
+  pure (inspectFull (result, output))
 :}
 -- fixture-step
 :{
@@ -47,8 +53,11 @@ noisy <- Cmd.start [bash|python3 -c 'print("x"*600000); print("TAIL-MARKER")'|]
 :{
 do
   result <- Cmd.await noisy
-  output <- Cmd.output noisy 128
-  pure (result, output)
+  output <- Cmd.tailOutput Cmd.Stdout noisy
+  first <- Cmd.readOutput Cmd.Stdout noisy
+  next <- Cmd.nextPage first
+  let advances = Cmd.outputStart (Cmd.pageDetails next) == Cmd.outputEnd (Cmd.pageDetails first)
+  pure (inspectFull (if advances then "page-contiguous" else "bad-page-offset", result, output))
 :}
 -- fixture-step
 import GHC.Generics (Generic)
@@ -60,7 +69,7 @@ do
   listener <- R.start collector
   count <- R.call (readCompleted (R.client listener)) ()
   exit <- R.finish listener
-  pure (count, exit)
+  pure (if count == 1 then "completion-once" else "bad-completion-count", exit)
 :}
 -- fixture-step
 terminal <- Cmd.start $ Cmd.withTerminal [bash|stty size > terminal-size; touch terminal-started; IFS= read -r line; printf 'terminal:%s\n' "$line"|]
@@ -70,6 +79,6 @@ do
   Cmd.resize terminal 32 100
   Cmd.sendInput terminal "hello\n"
   result <- Cmd.await terminal
-  output <- Cmd.output terminal 1024
-  pure (result, output)
+  output <- Cmd.tailOutput Cmd.Stdout terminal
+  pure (inspectFull (result, output))
 :}

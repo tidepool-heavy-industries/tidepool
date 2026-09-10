@@ -1862,11 +1862,13 @@ where
                         &format!("{name} ()"),
                         ObservationPurpose::Inspection,
                     );
-                    let (text, omitted) = preview
-                        .unwrap_or_else(|error| (format!("preview unavailable: {error}"), true));
+                    let (text, omitted) = match preview {
+                        Ok(result) => result,
+                        Err(error) => (format!("Display failed: {error}\nValue remains bound as {name} (). Inspect a smaller field or projection; execution was not repeated."), false),
+                    };
                     let mut text = crate::workbench_display::layout(&text);
                     if omitted {
-                        text.push_str(&format!("\nAdditional detail omitted. Saved: {name} ()\nExpand: inspectFull ({name} ())\nKept among this actor's latest 8 automatic observations; bind explicitly to retain longer."));
+                        text.push_str(&format!("\nDisplay shortened; captured value retained. Saved: {name} ()\nExpand: inspectFull ({name} ())\nKept among this actor's latest 8 automatic observations; bind explicitly to retain longer."));
                     }
                     text
                 }

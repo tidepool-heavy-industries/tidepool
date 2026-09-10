@@ -275,9 +275,16 @@ pub enum NativeCommandOperation {
     Start(tidepool_bridge_effects::CommandSpec),
     Wait,
     Output(usize),
+    Read {
+        stream: tidepool_bridge_effects::CommandStream,
+        position: tidepool_bridge_effects::CommandPosition,
+    },
     Input(String),
     CloseInput,
-    Resize { rows: u16, columns: u16 },
+    Resize {
+        rows: u16,
+        columns: u16,
+    },
     Cancel,
 }
 
@@ -287,6 +294,7 @@ pub enum NativeCommandReply {
     Finished { exit_code: i32, cancelled: bool },
     Unconfirmed(String),
     Output(tidepool_bridge_effects::CommandOutput),
+    Page(tidepool_bridge_effects::CommandPage),
     Acknowledged,
 }
 

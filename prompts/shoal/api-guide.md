@@ -42,21 +42,24 @@ Register separate watches when results can be integrated independently.
 ## Commands
 
 `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB` are loaded.
-The following is a command example, not a required verification step:
-
 ```haskell
-let checkCommand = withMemory (GiB 4) [bash|just quick|]
-checkJob <- Cmd.start checkCommand
+result <- Cmd.run [bash|git status --short|]
+result
 ```
 
-Commands are values: inspect with `Cmd.describe`, retain or pass them, then execute.
-The default is 256 MiB. `Cmd.run command` waits up to one second for `Finished`
-(result plus bounded output), `Pending job`, or `Unavailable job error` retaining
-the job if observation fails after starting. Admission and execution continue
-without polling. `Cmd.await job` explicitly waits; `Cmd.output job 8192` reads a
-bounded tail; `Cmd.status job` includes terminal cleanup; `Cmd.cancel job` accepts
-cancellation intent. Keep the same handle after uncertainty. For automatic routing,
-`Cmd.completion job` is an `R.EventSource Cmd.CommandResult` for a record actor.
+Commands are values; `Cmd.describe` is optional inspection. Ordinary commands use
+256 MiB; choose explicit `withMemory` for substantial builds/tests. `Cmd.run`
+observes for one second; `Cmd.job result` retains the job whether finished,
+pending or unavailable. `Cmd.await job` waits and returns the same consumable
+result shape. Interrupted observation does not cancel the job.
+
+`Cmd.stdout result` purely extracts complete successful stdout or an explicit
+issue; use `T.lines` or `Cmd.decodeWith (Cmd.asJSON @Value)` for data use.
+`Cmd.readOutput Cmd.Stdout job`, `Cmd.tailOutput Cmd.Stderr job` and
+`Cmd.nextPage page` navigate bounded retained output without rerunning commands.
+`Cmd.status job` includes terminal cleanup; `Cmd.cancel job` accepts cancellation
+intent. `Cmd.completion job` supplies terminal metadata to a record actor.
+Load `shoal-command` for exact contracts, safe arguments, paging and interactive jobs.
 
 ## Construction and handles
 

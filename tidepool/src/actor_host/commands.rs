@@ -7,8 +7,8 @@ use tidepool_agent::{
     QueueReadyThread,
 };
 use tidepool_bridge_effects::{
-    CommandCleanup, CommandError, CommandOutcome, CommandOutput, CommandResult, CommandSpec,
-    CommandStatus,
+    CommandCleanup, CommandError, CommandOutcome, CommandOutput, CommandPage, CommandPosition,
+    CommandResult, CommandSpec, CommandStatus, CommandStream,
 };
 use tidepool_node::command_resources::{CommandResourceClient, CommandResourceStatus as Resource};
 use tokio::sync::watch;
@@ -207,11 +207,9 @@ impl CommandBackend for NativeCommandBackend {
     ) -> BoxFuture<'a, Result<CommandOutput, CommandError>> {
         Box::pin(async move {
             if !*self.ready.borrow() {
-                return Ok(CommandOutput {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    truncated: false,
-                });
+                return Err(CommandError::CommandUnavailable(
+                    "native command not ready; retain the job".into(),
+                ));
             }
             match self
                 .native
@@ -222,6 +220,31 @@ impl CommandBackend for NativeCommandBackend {
                 Reply::Output(output) => Ok(output),
                 _ => Err(CommandError::CommandUnavailable(
                     "native command output unavailable".into(),
+                )),
+            }
+        })
+    }
+    fn read<'a>(
+        &'a self,
+        id: &'a str,
+        stream: CommandStream,
+        position: CommandPosition,
+    ) -> BoxFuture<'a, Result<CommandPage, CommandError>> {
+        Box::pin(async move {
+            if !*self.ready.borrow() {
+                return Err(CommandError::CommandUnavailable(
+                    "native command not ready; retain the job".into(),
+                ));
+            }
+            match self
+                .native
+                .command(&self.thread, id, Op::Read { stream, position })
+                .await
+                .map_err(|error| CommandError::CommandUnavailable(error.to_string()))?
+            {
+                Reply::Page(page) => Ok(page),
+                _ => Err(CommandError::CommandUnavailable(
+                    "native command page unavailable".into(),
                 )),
             }
         })

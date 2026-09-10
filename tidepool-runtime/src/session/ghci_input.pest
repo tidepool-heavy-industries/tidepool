@@ -18,7 +18,7 @@ multiline_unit = { block_open ~ newline ~ block_body ~ block_close ~ line_ending
 block_body = { block_row* }
 block_row = _{ nested_block_open | code_block_row }
 nested_block_open = { block_open ~ newline }
-code_block_row = _{ !(block_close ~ line_ending) ~ line_text ~ newline }
+code_block_row = _{ !(block_close ~ line_ending) ~ code_atom* ~ newline }
 unterminated_multiline_unit = { block_open ~ (newline ~ (!EOI ~ ANY)* | &EOI) }
 stray_block_close = { block_close ~ line_ending }
 block_open = { horizontal* ~ ":{" ~ horizontal* }
@@ -30,8 +30,15 @@ command_name = @{ (!horizontal ~ !newline ~ ANY)+ }
 command_arguments = @{ horizontal+ ~ line_text }
 
 code_unit = { code_source ~ line_ending }
-code_source = @{ !(horizontal* ~ ":") ~ horizontal* ~ non_horizontal ~ line_text }
-non_horizontal = _{ !horizontal ~ !newline ~ ANY }
+code_source = @{ !(horizontal* ~ ":") ~ code_atom+ }
+// Quotation bodies belong to their quoter, including unindented newlines.
+// Recognize surrounding lexical islands before looking for a quotation opener.
+code_atom = _{ quasiquote | haskell_string | haskell_char | block_comment | line_comment | (!newline ~ ANY) }
+quasiquote = { "[" ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "'" | ".")* ~ "|" ~ (!"|]" ~ ANY)* ~ ("|]" | EOI) }
+haskell_string = { "\"" ~ ("\\" ~ ANY | (!"\"" ~ ANY))* ~ "\"" }
+haskell_char = { "'" ~ ("\\" ~ (!"'" ~ !newline ~ ANY)+ | (!"'" ~ !newline ~ ANY)) ~ "'" }
+block_comment = { "{-" ~ (block_comment | (!"-}" ~ ANY))* ~ "-}" }
+line_comment = { "--" ~ line_text }
 
 invalid_colon_unit = { horizontal* ~ ":" ~ line_text ~ line_ending }
 

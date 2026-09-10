@@ -61,7 +61,7 @@ Matched native continuation is committed and pushed at
 - All three resident command checks passed: cancellation before backend attachment,
   early/late exactly-once record actor completion, composed environment overrides,
   argument fidelity, and execution of the command skill's actual code blocks.
-- Final DSL review: `Cmd.run` preserves `Unavailable job error` after post-start
+- Final DSL review: `Cmd.run` preserves an `Unavailable` result retaining the job after post-start
   observation failure. The retained-job regression and revised composed-builder
   skill examples passed together (2 tests, 219.64 s). This follow-up must be included
   in the final release selection; the initial Nix build predates it.

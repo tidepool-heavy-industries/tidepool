@@ -439,8 +439,9 @@ mod tests {
             "{-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction #-}\n",
             "module Expr where\n",
             "import BrowseFixture\n",
+            "import qualified BrowseFixture as Alias\n",
         );
-        let queries = vec![
+        let mut queries = vec![
             InspectionQuery::TypeOf("exportedValue".into()),
             InspectionQuery::Info("Public".into()),
             InspectionQuery::TypeOf("missing + 1".into()),
@@ -457,6 +458,9 @@ mod tests {
                 expanded: true,
             },
         ];
+        queries.push(InspectionQuery::Info("Alias.Public".into()));
+        queries.push(InspectionQuery::Info("Alias.exportedValue".into()));
+        queries.push(InspectionQuery::Info("Missing.Public".into()));
         let results = run_inspections(InspectionRequest {
             preamble,
             imports: "",
@@ -477,6 +481,9 @@ mod tests {
                 module: "No.Such.Module".into()
             }
         );
+        assert!(results[6].render().contains("data Public"));
+        assert!(results[7].render().contains("exportedValue :: Int"));
+        assert!(matches!(results[8], InspectionResult::NotFound { .. }));
         let grouped = results[4].render();
         assert!(grouped.starts_with("-- BrowseFixture\n"));
         assert!(grouped.contains("data Public"));

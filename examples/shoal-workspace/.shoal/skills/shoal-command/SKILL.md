@@ -1,63 +1,98 @@
 ---
 name: shoal-command
-description: Run builds, tests and interactive commands through Shoal's Haskell command jobs. Load for memory limits, retained jobs, stdin, PTY or typed completion routing.
+description: Run shell commands through resident Haskell; consume structured results, navigate retained output, or control long-running and interactive jobs.
 ---
 
-`Cmd` is already imported as `Tidepool.Command`; `bash`, `withMemory`, `MiB`
-and `GiB` are in scope. Commands are inspectable values; effects start them.
-Use Haskell commands for builds/tests and other potentially expensive processes.
-Native shell tools remain a 256 MiB fallback; `apply_patch` remains available.
+`Cmd` is already `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB`
+are loaded. `T` is the shared qualified Text import. Commands are reusable,
+inspectable values; effects launch them. Start with an ordinary read:
 
 ```haskell
-let buildCommand = withMemory (GiB 4) . Cmd.withEnvironment [("CARGO_BUILD_JOBS", "2")]
-let focusedCheck = buildCommand [bash|just test-lib tidepool-node 'test(command_oom)'|]
-job <- Cmd.start focusedCheck
+result <- Cmd.run [bash|git status --short|]
+result
 ```
 
-Choose a realistic hard memory limit. It also determines admission weight. The
-shared pool queues commands automatically when capacity is occupied; retain the
-job, do other work or end the turn. Do not resubmit because it is queued.
-`Cmd.run command` waits up to one second and returns `Finished` with result/output
-or `Pending job`. If observation fails after starting, `Unavailable job error`
-retains the same job for inspection/cancellation. Bind the result rather than
-discarding its handle. `Cmd.await job` deliberately waits for completion.
+Results display readable output while remaining Haskell values. `Cmd.run` waits
+up to one second, returning `Cmd.Finished`, `Cmd.Pending` or `Cmd.Unavailable`.
+`Cmd.job result` retrieves the same job in every case. When waiting is intended:
 
 ```haskell
-result <- Cmd.await job
-Cmd.output job 8192
+finished <- Cmd.await (Cmd.job result)
+let lines = T.lines <$> Cmd.stdout finished
+lines
 ```
 
-Output reads accept 0–65536 bytes and return a tail and truncation flag, not a
-cumulative transcript. Read the amount needed for the next decision. To display that bounded
-tail without automatic observation summarization, use
-`inspectFull <$> Cmd.output job 8192`. Output retention is
-bounded; write large logs to a chosen workspace file when they must outlive jobs.
-Completion preserves exit, OOM, cancellation and unconfirmed outcomes, separately
-from descendant cleanup. After uncertain execution, inspect/cancel the same job;
-do not silently run a replacement. `Cmd.cancel job` accepts cancellation intent;
-`Cmd.status job` reports the subsequent result and cleanup.
+`Cmd.stdout` is pure: complete stdout from exit zero, or an explicit output issue.
+It never waits, reads more, reruns, or turns failure into empty text. Stderr
+completeness and descendant cleanup are separate from successful stdout.
+`Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout finished)` decodes JSON without
+nested error plumbing; `Cmd.asJSON` also accepts ordinary Text. Use `T.lines`
+and normal Haskell functions for filtering. Retain results rather than copying
+rendered output into another shell command.
 
-The quoter is literal: shell `$variables` and backticks are shell syntax, not
-Haskell interpolation. Bash uses its ordinary exit/pipeline semantics; put
-`set -euo pipefail` in a script when that is the behavior you want. Use one script
-for shell-local `cd`/variables, and Haskell bindings for values reused across jobs.
-Pass dynamic values as arguments, preserving exact bytes:
+Quotations preserve literal Bash, including multiline scripts and heredocs.
+Haskell does not interpolate shell `$variables`, backticks or indentation.
+Bash retains its normal exit/pipeline behavior; choose `set -euo pipefail` when
+appropriate. Pass dynamic values as arguments:
 
 ```haskell
-let showPath path = Cmd.withArguments [path] [bash|printf '%s\n' "$1"|]
-Cmd.describe (showPath "a path; not shell syntax")
+let preview path = Cmd.withArguments [path] [bash|sed -n '1,20p' -- "$1"|]
+Cmd.describe (preview "a path; not shell syntax")
 ```
 
-`Cmd.argv [program,arg1,arg2]` avoids a shell. `Cmd.inDirectory path` and
-`Cmd.withEnvironment [(key,value)]` customize the description. Ordinary commands
-close stdin; use `Cmd.withStdin` for a pipe or `Cmd.withTerminal` for a PTY,
-initially sized to the owning TUI. Retain the returned job for `Cmd.sendInput`,
-`Cmd.closeInput` and `Cmd.resize`. PTYs use terminal input such as EOF rather than `closeInput`.
+`Cmd.argv [program,arg1,arg2]` bypasses Bash. `Cmd.inDirectory` and
+`Cmd.withEnvironment` customize a command value. The native owner resolves the
+directory at launch: omitted means its configured workspace; relative paths are
+relative to that workspace. Constructing a Command does not snapshot a directory
+or inherited environment. Reusing it preserves explicit arguments/overrides, but
+each launch resolves the owner's environment policy again. `Cmd.describe` shows
+intent, not an execution receipt; use `pwd` in the job when location is evidence.
+Ordinary commands use 256 MiB;
+choose explicit realistic memory for substantial work, e.g.
+`Cmd.start (withMemory (GiB 8) [bash|cargo build|])`. The shared pool queues
+admission automatically; memory is both a hard limit and admission weight.
 
-`Cmd.completion job :: R.EventSource Cmd.CommandResult` composes with the existing
-record actor API. Supply it to an `Event Cmd.CommandResult` field with
-`R.on (Cmd.completion job) handler`. It delivers one retained terminal result even
-when attached after completion; the job's creator authorizes attachment. The
-handler can retain/route that result and wake an agent for a real decision.
-Load `shoal-define-actors` when defining a custom router. A captured job grants no
-control authority to a different actor. Finish the collector when its job is done.
+For longer work, bind `job <- Cmd.start command`, do other work, then
+`Cmd.await job`. Interrupting an observation does not cancel the command; inspect
+`Cmd.status job` using the retained handle. `Cmd.cancel job` accepts cancellation
+intent; status/await report the eventual outcome and cleanup. Live handles are
+not a promise of recovery after host restart. The one-second `run` window limits
+observation, not execution or cleanup. No execution-deadline modifier is implied.
+
+`traverse Cmd.run commands` launches sequentially, waiting briefly on each; jobs
+that return Pending may overlap. To launch all before waiting, retain
+`jobs <- traverse Cmd.start commands`, then `results <- traverse Cmd.await jobs`.
+Results follow input order. A nonzero exit is a result, not sibling cancellation;
+if collection is interrupted, the retained jobs remain the recovery path.
+
+Each result initially captures an 8 KiB tail per stream. Display shortening is
+separate from capture omission and retention loss. Read more without rerunning:
+
+```haskell
+page <- Cmd.readOutput Cmd.Stdout (Cmd.job finished)
+page
+next <- Cmd.nextPage page
+let relevant = filter (T.isInfixOf "error") (T.lines (Cmd.pageText next))
+relevant
+```
+
+`readOutput` begins at byte zero; `Cmd.tailOutput Cmd.Stderr job` selects a tail.
+Pages are immutable, non-consuming 8 KiB windows. `Cmd.pageDetails` exposes
+positions, loss and fragment markers. Current end while running differs from
+terminal EOF. Positions/counts are bytes, not Text character indices. Valid UTF-8
+is preserved across ordinary forward page boundaries; invalid or already-lost
+boundary bytes display with replacement characters and explicit lossiness.
+`Cmd.stdout` rejects lossy capture. A gap means retention passed the requested cursor; it is not
+recoverable by expanding the display. Retention is 256 KiB per stream and the
+latest 32 completed jobs. Write logs to a chosen file when longer retention is
+needed. Partial text is diagnostic data, not a complete JSON document.
+
+Use `Cmd.withStdin` for a pipe and `Cmd.withTerminal` for a PTY initially sized to
+the owning TUI. Retain the job for `Cmd.sendInput`, `Cmd.closeInput` and
+`Cmd.resize`. PTYs use terminal EOF input instead of `closeInput`.
+
+`Cmd.completion job :: R.EventSource Cmd.CommandResult` supplies one retained
+terminal result to a record actor, including attachment after completion.
+Load `shoal-define-actors` when defining a router; ordinary commands need none.
+Captured jobs do not transfer control authority. Finish collectors once their
+remaining obligations are settled.
