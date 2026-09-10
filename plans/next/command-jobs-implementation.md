@@ -70,9 +70,20 @@ Matched native continuation is committed and pushed at
   and direct-tool exposure were checked in the provider request. Test binaries
   were retained independently of Cargo output replacement. No paid model calls.
 - The shared API guide's executable success/unavailable example passed (619.03 s).
-- Generated files and skill format validated. Focused Clippy completed with existing
-  warnings outside the new command implementation; final formatting/diff review,
-  matched source pins and frozen release package remain.
+- Generated files and skill format validated; final formatting/diff review passed.
+  Focused Clippy completed with existing warnings outside the new implementation.
+- Main implementation is pushed at `06b9ce9ce570683754e043983f8e208acf8a99c4`.
+  Its frozen package compiles with definition identity
+  `6e533fb44aafff3f94bbd51cb12c7dec46abbd31c3517e65028c11c5441db052`.
+  Selection and file hashes are retained at
+  `target/command-release-20260910/selection.json`; launch is explicitly held.
+- Actual `shoal command-resources` under a delegated systemd service passed policy,
+  two-host weighted queue, protected native admission, exact memory limits and
+  cancelled grant cleanup. Evidence is in
+  `target/command-release-20260910/service-check/evidence.json`; the test service
+  was stopped after confirming its grants were removed.
+- The committed-source Nix release build is in progress with one build job and two
+  cores. The frozen runner's packaged-binary checks remain before release.
 - Runtime Nix limits verified: MemoryMax=8589934592,
   MemorySwapMax=1073741824, CPUQuotaPerSecUSec=2s. Declarative changes are prepared
   in /etc/nixos/configuration.nix; operator is holding nixos-rebuild until notified
