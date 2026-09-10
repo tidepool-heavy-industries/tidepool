@@ -66,8 +66,8 @@ impl ActivationContract {
             .response
             .progress_type
             .as_ref()
-            .map_or(String::new(), |ty| {
-                format!("\nProgress updates: `reportProgress` accepts {ty}.")
+            .map_or_else(|| "\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply.".to_owned(), |ty| {
+                format!("\nProgress updates for this request: `reportProgress` accepts {ty}.")
             });
         format!("Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}\n\nReturn with `respond` (reply type {}):\n{}{}",
             request.0, guidance.map(|text| format!(": {text}")).unwrap_or_default(),
@@ -200,7 +200,7 @@ mod tests {
         );
         assert_eq!(
             activation.message,
-            "Request 11: Review this candidate.\n\nAssignment (available as `sessionInput :: Candidate`):\n\ncandidate\n\nReturn with `respond` (reply type Review):\ndata Review = Accepted | Rejected"
+            "Request 11: Review this candidate.\n\nAssignment (available as `sessionInput :: Candidate`):\n\ncandidate\n\nReturn with `respond` (reply type Review):\ndata Review = Accepted | Rejected\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply."
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }

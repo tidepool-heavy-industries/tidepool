@@ -4033,7 +4033,7 @@ where
                     receipts.push(WorkbenchItemReceipt {
                         index,
                         status: WorkbenchItemStatus::Committed,
-                        output: String::new(),
+                        output: "Reply submitted.".to_owned(),
                         warnings: Vec::new(),
                         installed_bindings: Vec::new(),
                         operations: unit_operations,

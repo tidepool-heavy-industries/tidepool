@@ -186,7 +186,8 @@ result: poll its retained handle, and do not repeat the original work.
 
 Lifecycle observations may print only `WatchReady`; the payload still exists.
 Bind the observation, then apply a projection or `inspectFull` to that saved
-value. Full inspection does not poll again. `:info ResponseFailure` or
+value. `inspectFull expression` is standalone workbench display syntax, not an
+`Eff` action to compose with `>>=`. It does not poll again. `:info ResponseFailure` or
 `:info WatchFailure` supplies detailed constructors only when needed.
 
 ## Persistent typed coordination

@@ -128,6 +128,7 @@ async fn base_prompt_coordination_example_executes() {
     assert_eq!(child.fork_effort, Some(tidepool_actor::ForkEffort::Low));
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
+    assert_eq!(reply["items"][0]["output"], "Reply submitted.", "{reply}");
     campaign.await_watch_ready().await;
     committed(root.as_ref(), "result <- pollWatch ready").await;
     let result = committed(root.as_ref(), "inspectFull result").await;
@@ -353,6 +354,20 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
         })
         .await
         .expect("preview activation");
+        assert!(activation
+            .message
+            .contains("`reportProgress` is unavailable"));
+        if label == "preview-text" {
+            let unavailable = dispatch_haskell_script(
+                child.as_ref().unwrap().policy.as_ref(),
+                ":type reportProgress",
+            )
+            .await;
+            assert!(
+                unavailable.to_string().contains("not in scope"),
+                "{unavailable}"
+            );
+        }
         assert!(
             activation.message.contains(expected),
             "{}",

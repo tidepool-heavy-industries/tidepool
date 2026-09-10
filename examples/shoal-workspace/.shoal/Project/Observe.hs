@@ -4,7 +4,7 @@
 
 module Project.Observe
   ( WorkObservation (..), observeWork, workSummary, deliverySummary
-  , candidateSummary, reviewSummary, attentionSummary, progressSummary
+  , candidateSummary, reviewSummary, attentionSummary, progressSummary, workSnapshotSummary
   , workingAndAbnormal, actorSummary
   , RsiInput (..), rsiContext, rsiBranch
   ) where
@@ -17,6 +17,7 @@ import Tidepool.Effects.Core (AgentInspection)
 import Shoal.Workspace (workspaceIdentity)
 import Project.Types
 import Project.Work (projectPrompt)
+import Project.Routing (WorkState (..), WorkSource (..))
 
 -- Existing owned handles and observations are the evidence. This value is a
 -- snapshot to inspect or pass on, not another registry or mutable task record.
@@ -101,6 +102,22 @@ progressSummary :: WorkProgress -> ([(Text, [Text])], [(Text, Text, Text)])
 progressSummary progress =
   ([(candidateCommit candidate, remainingGates candidate) | candidate <- workEvidence progress]
   , attentionSummary (workQuestions progress))
+
+-- Render the existing collector without copying its state or consuming notices.
+-- The caller chooses how much of a final value belongs in this view.
+workSnapshotSummary :: (value -> Text) -> WorkState value -> Text
+workSnapshotSummary render state = Text.unlines (map sourceLine (collectedWork state))
+  where
+    sourceLine source = sourceName source <> " " <> shown (sourceStatus source)
+      <> "; candidates " <> Text.intercalate ", "
+        (map candidateCommit (workEvidence (sourceProgress source)))
+      <> "; questions " <> Text.intercalate ", "
+        [questionKey q <> "@" <> questionSource (questionDetails q)
+        | q <- workQuestions (sourceProgress source)]
+      <> "; result " <> case sourceResult source of
+        Nothing -> "pending"
+        Just (Left failure) -> "unavailable " <> shown failure
+        Just (Right result) -> render (responseValue result)
 
 -- Preserve full rows for drill-down. This is a view, not cleanup authorization;
 -- an omitted actor is not thereby proven safe to retire.
