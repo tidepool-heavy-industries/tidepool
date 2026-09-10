@@ -401,7 +401,7 @@ type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Notifications, Actor
+   , WorktreeIntegration, Notifications, Commands, Actor
    ]
 
 type ResearchActorEffects = ResearchEffects

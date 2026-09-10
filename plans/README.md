@@ -37,6 +37,8 @@ archive).
 - [Haskell command workbench](next/haskell-command-workbench.md): in-progress
   design for inspectable bash values, memory-weighted execution, typed process
   interaction and gradual migration from native shell orchestration.
+  [Implementation checkpoints](next/command-jobs-implementation.md) track the
+  matched native/resident acceptance and release.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers

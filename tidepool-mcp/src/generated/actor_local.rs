@@ -13,7 +13,7 @@ pub fn actor_local_decl() -> crate::EffectDecl {
             "ActorCheckpointWith :: Int -> state -> ActorLocal api ()",
         ],
         type_defs: &[
-            "data ActorInputOrigin = ActorStartup | ActorMessageFrom (Int, Int) | ActorProgressFrom Int | ActorSettlementFrom Int | ActorLifecycleFrom (Int, Int) deriving (Show, Eq)",
+            "data ActorInputOrigin = ActorStartup | ActorMessageFrom (Int, Int) | ActorProgressFrom Int | ActorSettlementFrom Int | ActorCommandFrom Text | ActorLifecycleFrom (Int, Int) deriving (Show, Eq)",
         ],
         extra_imports: &[
             "import Tidepool.Actor",

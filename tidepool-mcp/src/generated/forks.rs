@@ -20,7 +20,7 @@ pub fn forks_decl() -> crate::EffectDecl {
             "data WorkerLifetime = ParentOwned | SwarmOwned deriving (Show, Eq)",
             "data ForkContext = InheritedContext | SelectedContext deriving (Show, Eq)",
             "data ForkEffort = Low | Medium | High deriving (Show, Eq)",
-            "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectNotifications | EffectActor deriving (Show, Eq)",
+            "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration | EffectCommands | EffectNotifications | EffectActor deriving (Show, Eq)",
             "data ForkGroupCleanupOutcome = ForkGroupCleaned | ForkGroupStillActive [(Int, Int)] | ForkGroupCleanupRejected Text deriving (Show, Eq)",
         ],
         extra_imports: &[],

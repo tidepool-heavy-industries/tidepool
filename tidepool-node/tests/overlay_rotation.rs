@@ -83,8 +83,8 @@ async fn command_oom_releases_writers_for_cow_publication() {
         CommandResourcePolicy, CommandResourceStatus, CommandResources,
     };
     let owner = CommandResources::delegated(CommandResourcePolicy {
-        memory_high_bytes: None,
-        memory_max_bytes: 64 * 1024 * 1024,
+        general_bytes: 512 * 1024 * 1024,
+        protected_bytes: 0,
         swap_max_bytes: 0,
         ..Default::default()
     })
@@ -92,7 +92,8 @@ async fn command_oom_releases_writers_for_cow_publication() {
     let storage = tempfile::tempdir().unwrap();
     let root = storage.path();
     let (mut worker, namespace) = setup(root);
-    let CommandResourceStatus::Admitted { cgroup } = owner.acquire("overlay", "oom").await.unwrap()
+    owner.submit("overlay", "oom", 64 * 1024 * 1024).unwrap();
+    let CommandResourceStatus::Admitted { cgroup } = owner.wait("overlay", "oom").await.unwrap()
     else {
         panic!("expected command admission");
     };

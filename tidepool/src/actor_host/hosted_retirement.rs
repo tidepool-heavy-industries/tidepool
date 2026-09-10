@@ -128,7 +128,7 @@ fn start_endpoint(
     listener: tokio::net::UnixListener,
     endpoint_source: EndpointSource,
     resources: Option<(
-        Arc<tidepool_node::command_resources::CommandResources>,
+        Arc<tidepool_node::command_resources::CommandResourceClient>,
         String,
     )>,
 ) -> Result<HostedOwner, String> {
@@ -331,7 +331,7 @@ pub(super) fn start_with_resources(
     expected_resume: Option<BackendThreadId>,
     listener: tokio::net::UnixListener,
     resources: Option<(
-        Arc<tidepool_node::command_resources::CommandResources>,
+        Arc<tidepool_node::command_resources::CommandResourceClient>,
         String,
     )>,
 ) -> Result<HostedOwner, String> {

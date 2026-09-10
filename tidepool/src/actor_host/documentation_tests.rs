@@ -199,6 +199,8 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
     let success = committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    committed(root.as_ref(), "Cmd.cancel checkJob\nCmd.await checkJob").await;
     assert!(guide_examples.next().is_none(), "untested guide example");
     assert_eq!(
         success["items"][1]["output"],

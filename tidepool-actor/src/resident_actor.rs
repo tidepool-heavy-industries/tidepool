@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+mod commands;
 mod replacement;
 
 use parking_lot::Mutex;
@@ -83,6 +84,7 @@ pub struct LocalResidentInstallation {
 
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
+    CommandBackend(Arc<crate::command_jobs::CommandBackendRequest>),
     NotificationSend(Arc<crate::NotificationSend>),
     NotificationPoll(Arc<crate::NotificationPoll>),
     PolicyInstalled(LocalResidentInstallation),
@@ -115,6 +117,7 @@ struct ResidentEnvironment<H, O> {
     deployments: mpsc::UnboundedSender<LocalResidentDeployment>,
     retired: Arc<Mutex<std::collections::HashSet<ActorRef>>>,
     requests: Arc<RequestRegistry>,
+    commands: crate::command_jobs::CommandJobs,
     fork_groups: crate::ForkGroupRegistry,
     actors: Arc<Mutex<std::collections::HashMap<ActorRef, ResidentActorRecord>>>,
     fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
@@ -217,6 +220,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             deployments: self.deployments.clone(),
             retired: Arc::clone(&self.retired),
             requests: Arc::clone(&self.requests),
+            commands: self.commands.clone(),
             fork_groups: self.fork_groups.clone(),
             actors: Arc::clone(&self.actors),
             fork_workspaces: self.fork_workspaces.clone(),
@@ -259,13 +263,14 @@ enum RetainedActorInput {
     Source(crate::SourceDelivery),
 }
 
-#[derive(Clone, Copy, tidepool_bridge_derive::ToCore)]
+#[derive(Clone, tidepool_bridge_derive::ToCore)]
 enum ActorInputOrigin {
     ActorStartup,
     ActorMessageFrom((i64, i64)),
     ActorProgressFrom(i64),
     ActorSettlementFrom(i64),
     ActorLifecycleFrom((i64, i64)),
+    ActorCommandFrom(String),
 }
 
 fn actor_address(actor: ActorRef) -> (i64, i64) {
@@ -1509,13 +1514,17 @@ where
             '_,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Command {
+                continuation,
+                request,
+            } => Box::pin(self.resolve_command(kernel, context, continuation, request)),
             ResidentActorBoundary::ActorLocalContext(continuation) => Box::pin(async move {
                 self.environment
                     .runner
                     .resume_value(
                         context.clone(),
                         continuation,
-                        (actor_address(context.actor), self.input_origin),
+                        (actor_address(context.actor), self.input_origin.clone()),
                     )
                     .await
             }),
@@ -3240,7 +3249,8 @@ where
                                             request,
                                             kind,
                                         ) => Some((slot, request, kind)),
-                                        crate::request::sources::SourceTarget::Lifecycle(_) => None,
+                                        crate::request::sources::SourceTarget::Lifecycle(_)
+                                        | crate::request::sources::SourceTarget::Command(_) => None,
                                     })
                                     .collect::<Vec<_>>();
                                 let mut lifecycle = Vec::new();
@@ -3278,6 +3288,26 @@ where
                                             ))
                                         })?,
                                 );
+                                for (slot, source) in self.sources.iter().enumerate() {
+                                    if let crate::request::sources::SourceTarget::Command(key) =
+                                        source.target
+                                    {
+                                        self.source_connections
+                                            .as_mut()
+                                            .expect("attached sources")
+                                            .attach_command(
+                                                slot,
+                                                key,
+                                                owner,
+                                                &self.environment.commands,
+                                            )
+                                            .map_err(|error| {
+                                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                                    "command source: {error:?}"
+                                                ))
+                                            })?;
+                                    }
+                                }
                                 for (slot, actor) in lifecycle {
                                     self.source_connections
                                         .as_mut()
@@ -4384,6 +4414,9 @@ where
                 SourceTarget::Request(request, RequestSourceKind::Settlement) => {
                     ActorInputOrigin::ActorSettlementFrom(request.0 as i64)
                 }
+                SourceTarget::Command(key) => {
+                    ActorInputOrigin::ActorCommandFrom(uuid::Uuid::from_u128(key).to_string())
+                }
                 SourceTarget::Lifecycle(actor) => {
                     ActorInputOrigin::ActorLifecycleFrom(actor_address(actor))
                 }
@@ -5442,6 +5475,7 @@ where
         let runner = ResidentActorRunner::new(machines, source);
         let (deployments, receiver) = mpsc::unbounded_channel();
         let environment = ResidentEnvironment {
+            commands: Default::default(),
             runner,
             deployments,
             retired: Arc::new(Mutex::new(std::collections::HashSet::new())),

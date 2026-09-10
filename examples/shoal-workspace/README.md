@@ -12,9 +12,10 @@ prompt review, and updating this package does not authorize a paused run to resu
 Copy the accompanying `.agents/skills` links with the package when preparing a
 different repository. They use Codex's ordinary repository skill discovery and
 point into the canonical `.shoal/skills`; no Shoal-specific loader is involved.
-This repository already tracks those links at its root. The fork, coordination,
-and review skills supply focused examples, executed directly from their Markdown
-by `Project.SkillChecks.skills`. Keep installed skills unchanged during a wave.
+This repository already tracks those links at its root. Skills cover forking,
+coordination, review, actor definitions and commands. Their Markdown examples are
+executed by the coordination recipes and resident command acceptance checks.
+Keep installed skills unchanged during a wave.
 
 This authored .shoal package supplies a programmable working style for the current
 project, with a separate relationship-view example for shoal-repl. Begin with the human and

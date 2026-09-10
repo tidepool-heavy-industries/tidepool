@@ -5,6 +5,9 @@
 //! tmux is process ownership and observability, never message transport.
 
 #[cfg(test)]
+mod command_jobs_tests;
+mod commands;
+#[cfg(test)]
 mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
@@ -12,6 +15,9 @@ mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
 mod overlay_resource;
+#[cfg(test)]
+#[path = "host_dynamic_tools/tui_resource_tests.rs"]
+mod tui_resource_tests;
 mod workspace;
 pub mod workspace_cleanup;
 mod workspace_publication;
@@ -370,7 +376,7 @@ fn fork_workspace_admission(
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
-    pub command_resources: Option<Arc<tidepool_node::command_resources::CommandResources>>,
+    pub command_resources: Option<Arc<tidepool_node::command_resources::CommandResourceClient>>,
     /// This Shoal installation provides the internal namespace-entry executable.
     pub shoal_executable: PathBuf,
     pub workspace_inputs: Option<crate::shoal::workspace::FrozenWorkspace>,
@@ -1444,6 +1450,7 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::actor_context_decl(),
         tidepool_mcp::agent_control_decl(),
         tidepool_mcp::notifications_decl(),
+        tidepool_mcp::commands_decl(),
         tidepool_mcp::agent_inspection_decl(),
         tidepool_mcp::agent_launch_decl(),
         tidepool_mcp::forks_decl(),
@@ -1645,6 +1652,8 @@ fn compile_root(
         ActorWorkbenchSource::new(preamble, include)
             .with_default_browse_module(WORKBENCH_SURFACE_MODULE)
             .with_imports("qualified Tidepool.Actor.Record as R")
+            .with_imports("qualified Tidepool.Command as Cmd")
+            .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
             .with_imports("qualified Tidepool.Actor as Actor")
             .with_default_quasiquoters(),
         ResidentActorRoot::new(descriptor, machine, outcome),
@@ -2124,6 +2133,16 @@ async fn run_interactive_applications(
                                 &tmux,
                             );
                         }
+                    }
+                    LocalResidentDeployment::CommandBackend(request) => {
+                        let backend = deployments.iter().find(|app| app.actor == request.owner)
+                            .and_then(|app| app.thread.clone())
+                            .zip(launch_context.config.command_resources.clone())
+                            .map(|(thread, resources)| Arc::new(commands::NativeCommandBackend::new(
+                                launch_context.backend.clone(), thread, resources, request.owner,
+                            )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
+                            .ok_or_else(|| tidepool_bridge_effects::CommandError::CommandUnavailable("command owner has no bound native application".into()));
+                        request.supply(backend);
                     }
                     LocalResidentDeployment::NotificationSend(command) => {
                         let target = command.target();
@@ -3074,7 +3093,7 @@ async fn launch_prepared_interactive_application(
     );
     if let Some(owner) = &config.command_resources {
         let actor_key = format!("{}-{}", actor_identity.id.0, actor_identity.incarnation.0);
-        let directory = owner.actor_directory(&actor_key).map_err(|error| {
+        let directory = owner.actor_directory(&actor_key).await.map_err(|error| {
             application_error(
                 actor_identity,
                 InteractiveOperation::LaunchProcess,

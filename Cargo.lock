@@ -4032,6 +4032,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tidepool-atomic-write",
+ "tidepool-bridge-effects",
  "tidepool-extract-cmd",
  "tidepool-model",
  "tidepool-repr",
@@ -4086,6 +4087,7 @@ name = "tidepool-bridge-effects"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "serde",
  "serde_json",
  "tidepool-bridge",
  "tidepool-bridge-derive",

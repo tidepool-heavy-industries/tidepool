@@ -93,6 +93,14 @@ Inside declaration groups use ordinary definitions rather than GHCi `let`.
 Use `Member Effect effects` constraints for reusable effectful helpers. The
 compiler checks types; Rust interpreters enforce runtime authority.
 
+Run commands through `Cmd.run` or `Cmd.start`; give builds/tests and other
+potentially expensive commands a realistic `withMemory (GiB n)` hard limit.
+Admission queues automatically. Retain pending jobs, use completion routing when
+useful, and return the turn when only waiting remains. Native shell tools remain
+a 256 MiB fallback and `apply_patch` remains available for edits. The JavaScript
+tool wrapper is disabled. See the command example in the guide and, when supplied,
+load `shoal-command` for stdin, PTY and typed completion routing.
+
 Start from the shared core API guide below and the supplied assignment, not an
 inventory of the session. Do not run `:bindings` as a first-turn ritual: inherited
 names and automatic observations can be irrelevant, and visibility is not

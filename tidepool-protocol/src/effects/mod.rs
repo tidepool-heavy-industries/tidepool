@@ -27,6 +27,7 @@ pub mod agent_session;
 pub mod agent_tools;
 pub mod ask;
 pub mod ask_user;
+pub mod commands;
 pub mod console;
 pub mod event;
 pub mod exec;
@@ -77,6 +78,7 @@ pub fn all() -> Vec<Effect> {
         actor_kernel::actor_kernel(),
         actor_local::actor_local(),
         agent_control::agent_control(),
+        commands::commands(),
         notifications::notifications(),
         agent_inspection::agent_inspection(),
         agent_launch::agent_launch(),

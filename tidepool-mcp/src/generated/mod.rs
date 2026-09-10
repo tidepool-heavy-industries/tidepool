@@ -11,6 +11,7 @@ pub mod agent_session;
 pub mod agent_tools;
 pub mod ask_user;
 pub mod bound_worktree;
+pub mod commands;
 pub mod exec;
 pub mod finalize;
 pub mod fork;
@@ -38,6 +39,7 @@ pub use agent_session::*;
 pub use agent_tools::*;
 pub use ask_user::*;
 pub use bound_worktree::*;
+pub use commands::*;
 pub use exec::*;
 pub use finalize::*;
 pub use fork::*;
@@ -73,6 +75,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_kernel_decl(),
         actor_local_decl(),
         agent_control_decl(),
+        commands_decl(),
         notifications_decl(),
         agent_inspection_decl(),
         agent_launch_decl(),
@@ -93,6 +96,7 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "ActorKernel",
     "ActorLocal",
     "AgentControl",
+    "Commands",
     "Notifications",
     "AgentInspection",
     "AgentLaunch",
@@ -153,6 +157,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorContinueWith",
             "ActorInstallProgressSourceWith",
             "ActorInstallSettlementSourceWith",
+            "ActorInstallCommandSourceWith",
             "ActorInstallLifecycleSourceWith",
             "ActorSourceInputWith",
         ],
@@ -177,6 +182,27 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "CleanupReceipt",
             "AgentControlStopWith",
             "AgentControlExecuteCleanupWith",
+        ],
+    ),
+    (
+        "Commands",
+        &[
+            "CommandInput",
+            "CommandSpec",
+            "CommandOutcome",
+            "CommandCleanup",
+            "CommandResult",
+            "CommandStatus",
+            "CommandOutput",
+            "CommandError",
+            "CommandStartWith",
+            "CommandStatusWith",
+            "CommandAwaitWith",
+            "CommandOutputWith",
+            "CommandInputWith",
+            "CommandCloseInputWith",
+            "CommandResizeWith",
+            "CommandCancelWith",
         ],
     ),
     (

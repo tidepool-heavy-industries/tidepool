@@ -7,8 +7,8 @@ use tidepool_node::command_resources::{CommandResourcePolicy, CommandResources};
 async fn matched_native_command_resources() {
     let native = std::env::var_os("SHOAL_NATIVE_RESOURCE_TEST").expect("native test executable");
     let owner = CommandResources::delegated(CommandResourcePolicy {
-        memory_high_bytes: None,
-        memory_max_bytes: 64 * 1024 * 1024,
+        general_bytes: 512 * 1024 * 1024,
+        protected_bytes: 0,
         swap_max_bytes: 0,
         ..Default::default()
     })
@@ -19,7 +19,10 @@ async fn matched_native_command_resources() {
     let service =
         HostDynamicToolService::new(test_endpoint(), directory.path().join("binding.json"), None)
             .unwrap()
-            .with_command_resources(Some((owner.clone(), "native".into())));
+            .with_command_resources(Some((
+                tidepool_node::command_resources::CommandResourceClient::local(owner.clone()),
+                "native".into(),
+            )));
     let control = service.control();
     let server = tokio::spawn(service.serve(listener));
     let status = tokio::process::Command::new(native)

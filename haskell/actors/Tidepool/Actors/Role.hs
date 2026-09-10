@@ -10,6 +10,7 @@ module Tidepool.Actors.Role
   , AgentInspection
   , AgentControl
   , Notifications
+  , Commands
   , Actor
   , BoundWorktree
   , WorktreeRegistry
@@ -38,6 +39,7 @@ import Tidepool.Effects.Core
   ( ActorContext
   , AgentControl
   , Notifications
+  , Commands
   , Actor
   , AgentInspection
   , AgentLaunch
@@ -54,26 +56,26 @@ import Tidepool.Effects.Row
 -- are supplied by their owner modules. Actor supplies typed Haskell actor
 -- execution; workspace operations retain their separate capabilities.
 
-type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Actor]
-type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Actor]
+type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Commands, Actor]
+type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Commands, Actor]
 type ResearchEffects = ResearchCoordinatorEffects
 type ResearchCoordinatorEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree, Notifications, Actor
+   , AgentInspection, AgentControl, BoundWorktree, Notifications, Commands, Actor
    ]
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeIntegration, Notifications, Actor
+   , WorktreeIntegration, Notifications, Commands, Actor
    ]
 type ScaffoldEffects = CodingEffects
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
-   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Actor
+   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Commands, Actor
    ]
 type RootEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Notifications, Actor
+   , WorktreeIntegration, Notifications, Commands, Actor
    ]

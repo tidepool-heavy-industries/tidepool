@@ -8,6 +8,7 @@ module Tidepool.Actor.Source
   , progressSource
   , settlementSource
   , ActorLifecycle (..)
+  , commandSource
   , lifecycleSource
   , installSource
   ) where
@@ -25,7 +26,8 @@ import Tidepool.Agent.Reply.Internal
   , ResponseResult
   , readResponse
   )
-import Tidepool.Effects.Core (ActorKernel (..))
+import Tidepool.Effects.Core (ActorKernel (..), CommandResult)
+import Tidepool.Command.Types (Job (..))
 import Tidepool.Internal.ActorRef (ActorRef (..))
 
 -- | Runtime lifecycle facts. Live does not imply application readiness;
@@ -39,6 +41,7 @@ data ActorLifecycle
   deriving (Eq, Show)
 
 data Source (protocol :: Type -> Type) where
+  CommandSource :: Job -> (CommandResult -> protocol ()) -> Source protocol
   ProgressSource
     :: Progress progress
     -> (ProgressState progress -> protocol ())
@@ -71,7 +74,12 @@ lifecycleSource
   -> Source protocol
 lifecycleSource = LifecycleSource
 
+commandSource :: Job -> (CommandResult -> protocol ()) -> Source protocol
+commandSource = CommandSource
+
 installSource :: Member ActorKernel effs => Source protocol -> Eff effs ()
+installSource (CommandSource (Job job) project) =
+  send (ActorInstallCommandSourceWith job (sourceEntry project))
 installSource (ProgressSource (Progress (RequestId request)) project) =
   send (ActorInstallProgressSourceWith request (sourceEntry project))
 installSource (SettlementSource response@(Response (RequestId request) _) project) =

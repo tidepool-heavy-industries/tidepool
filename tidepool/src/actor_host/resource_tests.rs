@@ -6,7 +6,7 @@ use tidepool_node::command_resources::{CommandResourcePolicy, CommandResources};
 async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
     let resources = CommandResources::delegated(CommandResourcePolicy {
         machine_headroom_bytes: 1 << 60,
-        queue_timeout_seconds: 1,
+        actor_start_timeout_seconds: 1,
         ..Default::default()
     })
     .unwrap();
@@ -15,7 +15,8 @@ async fn resource_admission_timeout_and_cancellation_create_no_native_launch() {
         tidepool_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
-            config.command_resources = Some(resources);
+            config.command_resources =
+                Some(tidepool_node::command_resources::CommandResourceClient::local(resources));
             selected = Some(config.clone());
         },
     )

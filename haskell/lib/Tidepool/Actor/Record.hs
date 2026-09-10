@@ -24,7 +24,7 @@ module Tidepool.Actor.Record
   , Shape, Definition, Client, Self, Private
   , ActorState, Handler, ActorSpec, ActorHandle
   , Send, Request, EventHandler, EventSource
-  , on, progress, settlement, lifecycle
+  , on, progress, settlement, lifecycle, command
   , get, gets, put, modify'
   , start, client, send, call, finish, replace
   , definition
@@ -42,6 +42,9 @@ import GHC.TypeLits (ErrorMessage (..), TypeError)
 import qualified Tidepool.Actor as Actor
 import Tidepool.Actor (ActorExit, EffectProfile)
 import Tidepool.Actor.Source (Source)
+import qualified Tidepool.Actor.Source as Source
+import Tidepool.Command.Types (Job)
+import Tidepool.Effects.Core (CommandResult)
 import Tidepool.Agent.Reply.Internal
   ( Progress, ProgressState, Response, ResponseFailure, ResponseResult )
 import Tidepool.Effects.Core (Actor, ActorLocal, ActorInputOrigin (..))
@@ -108,6 +111,9 @@ data EventHandler m event = EventHandler
 
 on :: EventSource event -> (event -> m ()) -> EventHandler m event
 on = EventHandler
+
+command :: Job -> EventSource CommandResult
+command job = EventSource (\receive -> [Source.commandSource job receive])
 
 progress :: Progress p -> EventSource (ProgressState p)
 progress handle = EventSource (\receive -> [Actor.progressSource handle receive])

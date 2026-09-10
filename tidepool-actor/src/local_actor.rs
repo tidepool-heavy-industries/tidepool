@@ -1,7 +1,9 @@
 //! Canonical sequential Ractor wrapper for Tidepool actor behavior.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
@@ -62,9 +64,24 @@ pub struct KernelContext {
     identity: ActorRef,
     myself: RactorRef<KernelMessage>,
     children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
+    resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
     directory: LocalActorDirectory,
     forgotten_children: std::sync::Arc<parking_lot::Mutex<crate::CleanupComponentOutcome>>,
     child_admission_closed: std::sync::Arc<tokio::sync::RwLock<bool>>,
+}
+
+#[derive(Clone)]
+struct ResourceChild {
+    cell: ractor::ActorCell,
+    cleanup: Arc<
+        dyn Fn(ResourceCleanup) -> BoxFuture<'static, crate::CleanupComponentOutcome> + Send + Sync,
+    >,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ResourceCleanup {
+    Observe,
+    Retire,
 }
 
 /// Process-local exact-incarnation routing and terminal-observation index.
@@ -126,6 +143,35 @@ impl LocalActorDirectory {
 }
 
 impl KernelContext {
+    /// Internal resources use Ractor supervision without a resident machine or model.
+    pub(crate) async fn spawn_resource<A: ractor::Actor>(
+        &self,
+        name: Option<String>,
+        actor: A,
+        arguments: A::Arguments,
+        cleanup: impl Fn(ResourceCleanup) -> BoxFuture<'static, crate::CleanupComponentOutcome>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<RactorRef<A::Msg>, ractor::SpawnErr> {
+        let admission = self.child_admission_closed.clone().read_owned().await;
+        if *admission {
+            return Err(ractor::SpawnErr::StartupFailed(
+                std::io::Error::other("resource owner is retiring").into(),
+            ));
+        }
+        let (child, task) = self.myself.spawn_linked(name, actor, arguments).await?;
+        self.resources.lock().insert(
+            child.get_id(),
+            ResourceChild {
+                cell: child.get_cell(),
+                cleanup: Arc::new(cleanup),
+            },
+        );
+        drop(task);
+        Ok(child)
+    }
+
     pub(crate) fn supervisor_identity(&self) -> Option<ActorRef> {
         self.myself
             .get_cell()
@@ -648,6 +694,7 @@ where
             identity,
             myself,
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            resources: Arc::new(Mutex::new(HashMap::new())),
             directory: arguments.directory,
             child_admission_closed: std::sync::Arc::new(tokio::sync::RwLock::new(false)),
             forgotten_children: std::sync::Arc::new(parking_lot::Mutex::new(
@@ -833,6 +880,10 @@ where
                 }
                 drop(inherited);
                 drop(children);
+                for (id, child) in state.context.resources.lock().drain() {
+                    child.cell.link(successor_context.myself.get_cell());
+                    successor_context.resources.lock().insert(id, child);
+                }
                 {
                     let mut inherited = successor_context.forgotten_children.lock();
                     *inherited = combine_cleanup(
@@ -1151,6 +1202,20 @@ where
                 failed_terminal(format!("linked child actor failed: {error}")),
             ),
         };
+        let resource = state.context.resources.lock().get(&cell.get_id()).cloned();
+        if let Some(resource) = resource {
+            if matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    (resource.cleanup)(ResourceCleanup::Observe)
+                )
+                .await,
+                Ok(crate::CleanupComponentOutcome::Confirmed)
+            ) {
+                state.context.resources.lock().remove(&cell.get_id());
+            }
+            return Ok(());
+        }
         let child = state.context.children.lock().get(&cell.get_id()).cloned();
         let Some(child) = child else {
             tracing::warn!(child = %cell.get_id(), "received lifecycle event for an unregistered linked child");
@@ -1411,6 +1476,32 @@ async fn shutdown_children(
     owner_exit: ActorExitKind,
     timeout: Duration,
 ) -> crate::CleanupComponentOutcome {
+    let resources: Vec<_> = context.resources.lock().values().cloned().collect();
+    for resource in &resources {
+        resource.cell.stop(None);
+    }
+    let mut resource_shutdowns = FuturesUnordered::new();
+    for resource in resources {
+        resource_shutdowns.push(async move {
+            match tokio::time::timeout(timeout, async {
+                resource.cell.wait(Some(timeout)).await?;
+                Ok::<_, ractor::concurrency::Timeout>(
+                    (resource.cleanup)(ResourceCleanup::Retire).await,
+                )
+            })
+            .await
+            {
+                Ok(Ok(outcome)) => outcome,
+                _ => crate::CleanupComponentOutcome::Unconfirmed(
+                    "resource child cleanup is unconfirmed".into(),
+                ),
+            }
+        });
+    }
+    while let Some(outcome) = resource_shutdowns.next().await {
+        let mut retained = context.forgotten_children.lock();
+        *retained = combine_cleanup(retained.clone(), outcome);
+    }
     let (children, mut outcome) = {
         let children = context.children.lock();
         (
@@ -2537,6 +2628,7 @@ mod tests {
             )]))),
             directory: LocalActorDirectory::default(),
             child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
+            resources: Arc::new(Mutex::new(HashMap::new())),
             forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
         };
         let result =
@@ -2586,6 +2678,7 @@ mod tests {
                 children: Arc::new(Mutex::new(HashMap::new())),
                 directory: LocalActorDirectory::default(),
                 child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
+                resources: Arc::new(Mutex::new(HashMap::new())),
                 forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
             };
             let entered = Arc::new(Notify::new());

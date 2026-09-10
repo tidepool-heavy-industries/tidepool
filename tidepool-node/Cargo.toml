@@ -16,12 +16,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
-tokio = { workspace = true, features = ["process", "sync", "time", "macros", "rt"] }
+tokio = { workspace = true, features = ["process", "sync", "time", "macros", "rt", "net", "io-util"] }
 rustix = { version = "1", features = ["process", "event", "fs", "pipe", "thread", "mount", "stdio", "termios", "runtime"] }
 libc.workspace = true
 parking_lot.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
 uuid.workspace = true

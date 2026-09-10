@@ -529,6 +529,10 @@ impl Validation {
 /// is a compile error and the emission order is not a per-site decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireDerive {
+    /// Serialization at private native transport boundaries.
+    Serialize,
+    /// Deserialization at private native transport boundaries.
+    Deserialize,
     /// `tidepool_bridge_derive::ToCore` — Rust value out to Core.
     ToCore,
     /// `tidepool_bridge_derive::FromCore` — Core value in to Rust.
@@ -572,6 +576,8 @@ impl WireDerive {
             WireDerive::PartialOrd => 8,
             WireDerive::Ord => 9,
             WireDerive::Hash => 10,
+            WireDerive::Serialize => 11,
+            WireDerive::Deserialize => 12,
         }
     }
 
@@ -590,6 +596,8 @@ impl WireDerive {
             WireDerive::PartialOrd => "PartialOrd",
             WireDerive::Ord => "Ord",
             WireDerive::Hash => "Hash",
+            WireDerive::Serialize => "serde::Serialize",
+            WireDerive::Deserialize => "serde::Deserialize",
         }
     }
 }

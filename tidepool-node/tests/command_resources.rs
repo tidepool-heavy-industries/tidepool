@@ -24,7 +24,8 @@ fn spawn_in(path: &Path, script: &str) -> Child {
     command.spawn().unwrap()
 }
 async fn admitted(owner: &Arc<CommandResources>, id: &str) -> std::path::PathBuf {
-    match owner.acquire("test", id).await.unwrap() {
+    owner.submit("test", id, 64 * 1024 * 1024).unwrap();
+    match owner.wait("test", id).await.unwrap() {
         CommandResourceStatus::Admitted { cgroup } => cgroup,
         other => panic!("unexpected {other:?}"),
     }
@@ -33,11 +34,10 @@ async fn admitted(owner: &Arc<CommandResources>, id: &str) -> std::path::PathBuf
 #[ignore = "requires a fresh delegated systemd cgroup scope"]
 async fn command_oom_and_queue_preserve_the_control_process() {
     let policy = CommandResourcePolicy {
-        concurrency: 2,
-        memory_high_bytes: None,
-        memory_max_bytes: 64 * 1024 * 1024,
+        general_bytes: 128 * 1024 * 1024,
+        protected_bytes: 0,
         swap_max_bytes: 0,
-        queue_timeout_seconds: 1,
+        actor_start_timeout_seconds: 1,
         ..Default::default()
     };
     let owner = CommandResources::delegated(policy).unwrap();
@@ -57,12 +57,20 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     let third = admitted(&owner, "third").await;
     let mut command = spawn_in(&third, "import time; time.sleep(30)");
     owner.started("test", "third").unwrap();
-    assert!(matches!(
-        owner.acquire("test", "timeout").await.unwrap(),
-        CommandResourceStatus::AdmissionTimedOut
-    ));
+    assert_eq!(
+        owner.submit("test", "retained", 64 * 1024 * 1024).unwrap(),
+        CommandResourceStatus::Queued
+    );
+    owner.cancel("test", "retained").unwrap();
     let queued = owner.clone();
-    let waiter = tokio::spawn(async move { queued.acquire("test", "cancelled").await.unwrap() });
+    let waiter = tokio::spawn(async move {
+        {
+            queued
+                .submit("test", "cancelled", 64 * 1024 * 1024)
+                .unwrap();
+            queued.wait("test", "cancelled").await.unwrap()
+        }
+    });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(matches!(
         owner.cancel("test", "cancelled").unwrap(),
@@ -75,19 +83,29 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     // Cancellation arriving first must prevent a later admission with this identity.
     owner.cancel("test", "cancel-first").unwrap();
     assert!(matches!(
-        owner.acquire("test", "cancel-first").await.unwrap(),
+        owner
+            .submit("test", "cancel-first", 64 * 1024 * 1024)
+            .unwrap(),
         CommandResourceStatus::CancelledBeforeStart
     ));
-    // An abandoned request cannot linger in the queue and launch after capacity frees.
+    // Losing an observing future does not discard accepted work.
     let abandoned_owner = owner.clone();
-    let abandoned = tokio::spawn(async move { abandoned_owner.acquire("test", "abandoned").await });
+    let abandoned = tokio::spawn(async move {
+        {
+            abandoned_owner
+                .submit("test", "abandoned", 64 * 1024 * 1024)
+                .unwrap();
+            abandoned_owner.wait("test", "abandoned").await
+        }
+    });
     tokio::time::sleep(Duration::from_millis(30)).await;
     abandoned.abort();
     assert!(abandoned.await.unwrap_err().is_cancelled());
     assert!(matches!(
         owner.status("test", "abandoned").unwrap(),
-        CommandResourceStatus::CancelledBeforeStart
+        CommandResourceStatus::Queued
     ));
+    owner.cancel("test", "abandoned").unwrap();
     command.kill().await.unwrap();
     sibling.kill().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -105,16 +123,24 @@ async fn command_oom_and_queue_preserve_the_control_process() {
     let occupied = admitted(&owner, "occupied").await;
     let mut occupied_child = spawn_in(&occupied, "import time; time.sleep(30)");
     owner.started("test", "occupied").unwrap();
-    assert!(matches!(
-        owner.acquire("test", "descendant-wait").await.unwrap(),
-        CommandResourceStatus::AdmissionTimedOut
-    ));
+    assert_eq!(
+        owner
+            .submit("test", "descendant-wait", 64 * 1024 * 1024)
+            .unwrap(),
+        CommandResourceStatus::Queued
+    );
+    owner.cancel("test", "descendant-wait").unwrap();
     occupied_child.kill().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-    assert!(matches!(
-        owner.status("test", "background").unwrap(),
-        CommandResourceStatus::Completed
-    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            owner.status("test", "background").unwrap(),
+            CommandResourceStatus::Completed
+        ) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
     let final_group = admitted(&owner, "after").await;
     let mut final_command = spawn_in(&final_group, "print('control survived')");
     owner.started("test", "after").unwrap();
@@ -131,7 +157,7 @@ async fn command_oom_and_queue_preserve_the_control_process() {
 async fn actor_admission_times_out_without_starting() {
     let owner = CommandResources::delegated(CommandResourcePolicy {
         machine_headroom_bytes: 1 << 60,
-        queue_timeout_seconds: 1,
+        actor_start_timeout_seconds: 1,
         ..Default::default()
     })
     .unwrap();
@@ -148,4 +174,78 @@ async fn actor_admission_times_out_without_starting() {
     tokio::time::sleep(Duration::from_millis(30)).await;
     cancelled.abort();
     assert!(matches!(cancelled.await, Err(error) if error.is_cancelled()));
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh delegated systemd cgroup scope"]
+async fn shared_clients_retain_queued_work_after_observer_disconnect() {
+    use tidepool_node::command_resources::{service, CommandResourceClient};
+    let policy = CommandResourcePolicy {
+        general_bytes: 64 * 1024 * 1024,
+        protected_bytes: 0,
+        swap_max_bytes: 0,
+        ..Default::default()
+    };
+    let owner = CommandResources::delegated(policy.clone()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("resources.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(service::serve(listener, owner));
+    let first = CommandResourceClient::connect(socket.clone(), "run-a".into(), &policy)
+        .await
+        .unwrap();
+    let second = CommandResourceClient::connect(socket, "run-b".into(), &policy)
+        .await
+        .unwrap();
+    let status = first
+        .submit("0-1", "same-id", 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    let CommandResourceStatus::Admitted { cgroup } = status else {
+        panic!("{status:?}")
+    };
+    let mut command = spawn_in(&cgroup, "import time; time.sleep(30)");
+    first.started("0-1", "same-id").await.unwrap();
+    assert_eq!(
+        second
+            .submit("0-1", "same-id", 64 * 1024 * 1024)
+            .await
+            .unwrap(),
+        CommandResourceStatus::Queued
+    );
+    let observer = second.clone();
+    let abandoned = tokio::spawn(async move { observer.wait("0-1", "same-id").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    abandoned.abort();
+    let _ = abandoned.await;
+    assert_eq!(
+        second.status("0-1", "same-id").await.unwrap(),
+        CommandResourceStatus::Queued
+    );
+    assert!(second
+        .submit("0-1", "same-id", 32 * 1024 * 1024)
+        .await
+        .is_err());
+    command.kill().await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), second.wait("0-1", "same-id"))
+        .await
+        .unwrap()
+        .unwrap();
+    let CommandResourceStatus::Admitted {
+        cgroup: second_group,
+    } = result
+    else {
+        panic!("{result:?}")
+    };
+    assert_ne!(second_group, cgroup);
+    let mut next = spawn_in(&second_group, "print('admitted without a model retry')");
+    second.started("0-1", "same-id").await.unwrap();
+    assert!(next.wait().await.unwrap().success());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        second.status("0-1", "same-id").await.unwrap(),
+        CommandResourceStatus::Completed
+    );
+    server.abort();
+    let _ = server.await;
 }

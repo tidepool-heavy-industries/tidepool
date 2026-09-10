@@ -16,6 +16,7 @@ pub(crate) enum RequestSourceKind {
 pub(crate) enum SourceTarget {
     Request(RequestId, RequestSourceKind),
     Lifecycle(ActorRef),
+    Command(u128),
 }
 
 pub(crate) struct SourceBinding {
@@ -29,6 +30,7 @@ pub(crate) enum SourceEvent {
     ProgressClosed,
     Settled(Result<(), ResponseFailure>),
     Lifecycle(crate::ActorLifecycle),
+    Command(tidepool_bridge_effects::CommandResult),
 }
 
 /// A source publication owns its captured value until the receiving mailbox
@@ -87,10 +89,38 @@ impl RequestSourceConnection {
 pub(crate) struct ActorSourceConnections {
     registry: Arc<RequestRegistry>,
     lifecycle: Vec<crate::ActorLifecycleConnection>,
+    commands: Vec<crate::command_jobs::CommandConnection>,
     recipient: SourceDestination,
 }
 
 impl ActorSourceConnections {
+    pub(crate) fn attach_command(
+        &mut self,
+        slot: usize,
+        key: u128,
+        owner: ActorRef,
+        jobs: &crate::command_jobs::CommandJobs,
+    ) -> Result<(), tidepool_bridge_effects::CommandError> {
+        let recipient = self.recipient.clone();
+        let target = SourceTarget::Command(key);
+        let observer = recipient.identity();
+        self.commands.push(jobs.connect(
+            owner,
+            observer,
+            &uuid::Uuid::from_u128(key).to_string(),
+            move |event| {
+                recipient
+                    .send(SourceDelivery {
+                        slot,
+                        target,
+                        event: SourceEvent::Command(event),
+                    })
+                    .is_ok()
+            },
+        )?);
+        Ok(())
+    }
+
     pub(crate) fn attach_lifecycle(&mut self, slot: usize, actor: &LocalActorRef) {
         let recipient = self.recipient.clone();
         let target = SourceTarget::Lifecycle(actor.identity());
@@ -116,6 +146,9 @@ impl ActorSourceConnections {
     ) -> Result<(), E> {
         let mut recipient = self.recipient.0.lock();
         fence(&recipient)?;
+        for command in &mut self.commands {
+            command.handoff(successor.identity());
+        }
         *recipient = successor;
         Ok(())
     }
@@ -180,6 +213,7 @@ impl RequestRegistry {
         Ok(ActorSourceConnections {
             registry: Arc::clone(self),
             lifecycle: Vec::new(),
+            commands: Vec::new(),
             recipient,
         })
     }

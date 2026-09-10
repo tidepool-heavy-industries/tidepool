@@ -28,6 +28,7 @@ use crate::actor_host::ACTOR_PROJECT_ROOT;
 const STATUS_VERSION: u32 = 4;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
+pub mod resources;
 pub mod workspace;
 
 const SHOAL_EXCLUDES: &[&str] = &[
@@ -825,8 +826,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
     let configuration = workspace_inputs.config()?;
     let research_policy = configuration.research;
-    let command_resources =
-        tidepool_node::command_resources::CommandResources::delegated(configuration.resources)?;
+    let command_resources = resources::connect(configuration.resources, &options.run_id).await?;
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {

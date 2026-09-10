@@ -115,6 +115,7 @@ pub enum ActorEffectKeyWire {
     EffectWorktreeAllocation,
     EffectWorktreeIntegration,
     EffectNotifications,
+    EffectCommands,
     EffectActor,
 }
 
@@ -133,6 +134,7 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
             ActorEffectKeyWire::EffectWorktreeAllocation => Self::WorktreeAllocation,
             ActorEffectKeyWire::EffectWorktreeIntegration => Self::WorktreeIntegration,
             ActorEffectKeyWire::EffectNotifications => Self::Notifications,
+            ActorEffectKeyWire::EffectCommands => Self::Commands,
             ActorEffectKeyWire::EffectActor => Self::Actor,
         }
     }

@@ -1,5 +1,7 @@
 //! Matched full-TUI acceptance with a local scripted provider; no paid model calls.
 use super::*;
+use crate::host_dynamic_tools::HostDynamicToolService;
+use axum::{extract::State, routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex as StdMutex, time::Duration};
 use tidepool_node::command_resources::{CommandResourcePolicy, CommandResources};
@@ -7,34 +9,53 @@ use tidepool_node::{
     ProcessInvocation, ProcessMountBoundary, ProcessSupervisorClient, ProcessSupervisorManifest,
     ProcessSupervisorObservation, ServiceEnvironment, TmuxLaunch, TmuxSession,
 };
+use tokio::net::UnixListener;
 
-#[derive(Clone, Default)]
-struct Provider(Arc<StdMutex<Vec<Value>>>);
+#[derive(Clone)]
+struct Provider {
+    requests: Arc<StdMutex<Vec<Value>>>,
+    steps: Arc<Vec<Option<String>>>,
+    work: PathBuf,
+}
 
 async fn response(
     State(provider): State<Provider>,
     Json(body): Json<Value>,
 ) -> impl axum::response::IntoResponse {
-    let mut requests = provider.0.lock().unwrap();
-    let index = requests.len();
     let title = body
         .pointer("/text/format/schema/properties/title")
         .is_some();
-    if !title {
-        requests.push(body);
+    let index = {
+        let mut requests = provider.requests.lock().unwrap();
+        let index = requests.len();
+        if !title {
+            requests.push(body);
+        }
+        index
+    };
+    if let Some(marker) = match index {
+        3 => Some("holder-started"),
+        10 => Some("cancel-started"),
+        14 => Some("terminal-started"),
+        _ => None,
+    } {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            while !provider.work.join(marker).exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("prior native command must actually start");
     }
     let item = if title {
         json!({"type":"message", "role":"assistant", "id":"title",
             "content":[{"type":"output_text","text":"{\"title\":\"Exercise resource limits\"}"}]})
-    } else if index == 0 || index == 2 {
-        let command = if index == 0 {
-            "python3 -c 'a=bytearray(128*1024*1024)'"
-        } else {
-            "printf native-still-usable"
-        };
-        let args = json!({"cmd":command,"yield_time_ms":1000,"max_output_tokens":1000});
-        json!({"type":"custom_tool_call", "call_id":format!("command-{index}"),
-            "name":"exec", "input":format!("text(await tools.exec_command({args}));")})
+    } else if index == 0 {
+        json!({"type":"function_call", "call_id":"fallback-oom",
+            "name":"exec_command", "arguments":json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "yield_time_ms":1000,"max_output_tokens":1000}).to_string()})
+    } else if let Some(Some(source)) = provider.steps.get(index) {
+        json!({"type":"custom_tool_call", "call_id":format!("haskell-{index}"),
+            "name":"haskell", "namespace":"tidepool_actor", "input":source})
     } else {
         json!({"type":"message", "role":"assistant", "id":format!("message-{index}"),
             "content":[{"type":"output_text","text":format!("fixture-turn-{index}-done")}]})
@@ -90,15 +111,9 @@ async fn full_tui_survives_command_oom_and_accepts_steering() {
         std::env::var_os("SHOAL_RESOURCE_HOST_BIN").expect("matched Shoal executable"),
     );
     assert!(native.is_absolute() && host_binary.is_absolute());
-    let code_mode_host = native.with_file_name("codex-code-mode-host");
-    assert!(
-        code_mode_host.is_file(),
-        "build the matched codex-code-mode-host beside {} before running full-TUI acceptance",
-        native.display()
-    );
     let owner = CommandResources::delegated(CommandResourcePolicy {
-        memory_high_bytes: None,
-        memory_max_bytes: 64 * 1024 * 1024,
+        general_bytes: 512 * 1024 * 1024,
+        protected_bytes: 256 * 1024 * 1024,
         swap_max_bytes: 0,
         ..Default::default()
     })
@@ -112,7 +127,30 @@ async fn full_tui_survives_command_oom_and_accepts_steering() {
         std::fs::create_dir(path).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let provider = Provider::default();
+    assert!(std::process::Command::new("git").args(["init", "--quiet"]).arg(&work).status().unwrap().success());
+    let skill = work.join(".shoal/skills/shoal-command");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), include_str!("../../../examples/shoal-workspace/.shoal/skills/shoal-command/SKILL.md")).unwrap();
+    std::fs::create_dir_all(work.join(".agents/skills")).unwrap();
+    std::os::unix::fs::symlink("../../.shoal/skills/shoal-command", work.join(".agents/skills/shoal-command")).unwrap();
+    let mut campaign = test_campaign::TestCampaign::start().await;
+    let actor = campaign.actor.identity();
+    let actor_key = format!("{}-{}", actor.id.0, actor.incarnation.0);
+    let client = tidepool_node::command_resources::CommandResourceClient::local(owner.clone());
+    let snippets: Vec<_> = include_str!("tui_commands.hs")
+        .split("-- fixture-step\n")
+        .map(str::to_owned)
+        .collect();
+    let mut steps = vec![None, None];
+    steps.extend(snippets[..3].iter().cloned().map(Some));
+    steps.push(None);
+    steps.extend(snippets[3..].iter().cloned().map(Some));
+    steps.push(None);
+    let provider = Provider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        steps: Arc::new(steps),
+        work: work.clone(),
+    };
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = tcp.local_addr().unwrap();
     let app = Router::new()
@@ -142,10 +180,14 @@ trust_level = "trusted"
     .unwrap();
     let socket = temp.path().join("host.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let service =
-        HostDynamicToolService::new(test_endpoint(), temp.path().join("binding.json"), None)
-            .unwrap()
-            .with_command_resources(Some((owner.clone(), "tui".into())));
+    let binding_path = temp.path().join("binding.json");
+    let service = HostDynamicToolService::new(
+        campaign.root_installation.policy.clone(),
+        binding_path.clone(),
+        None,
+    )
+    .unwrap()
+    .with_command_resources(Some((client.clone(), actor_key.clone())));
     let control = service.control();
     let server = tokio::spawn(service.serve(listener));
     let environment = BTreeMap::from([
@@ -157,7 +199,11 @@ trust_level = "trusted"
         ),
         (
             "CODEX_COMMAND_WRITER_CGROUP".into(),
-            owner.actor_directory("tui").unwrap().display().to_string(),
+            owner
+                .actor_directory(&actor_key)
+                .unwrap()
+                .display()
+                .to_string(),
         ),
         ("TERM".into(), "xterm-256color".into()),
     ]);
@@ -177,6 +223,10 @@ trust_level = "trusted"
             program: native.display().to_string(),
             args: vec![
                 "--no-alt-screen".into(),
+                "--disable".into(),
+                "code_mode".into(),
+                "--disable".into(),
+                "code_mode_only".into(),
                 "--host-dynamic-tools-socket".into(),
                 socket.display().to_string(),
                 "-C".into(),
@@ -201,7 +251,7 @@ trust_level = "trusted"
     let pane = tmux
         .create(&TmuxLaunch {
             window_name: "native".into(),
-            cwd: work,
+            cwd: work.clone(),
             program: host_binary.display().to_string(),
             args: vec![
                 "process-supervisor".into(),
@@ -242,9 +292,29 @@ trust_level = "trusted"
         process.release(Duration::from_secs(10)).unwrap(),
         ProcessSupervisorObservation::Released
     );
-    for expected in [2, 4] {
-        let reached = tokio::time::timeout(Duration::from_secs(60), async {
-            while provider.0.lock().unwrap().len() < expected {
+    let native_backend = tidepool_agent::native_interactive_backend(
+        tidepool_agent::native_interactive_agent_from_parts(native, "command acceptance".into())
+            .unwrap(),
+    );
+    let backend_task = tokio::spawn(async move {
+        while let Some(deployment) = campaign.deployments.recv().await {
+            if let LocalResidentDeployment::CommandBackend(request) = deployment {
+                assert_eq!(request.owner, actor);
+                let thread = tidepool_agent::read_interactive_binding(&binding_path)
+                    .await
+                    .unwrap();
+                request.supply(Ok(Arc::new(commands::NativeCommandBackend::new(
+                    native_backend.clone(),
+                    thread,
+                    client.clone(),
+                    actor,
+                ))));
+            }
+        }
+    });
+    for expected in [2, 6, 16] {
+        let reached = tokio::time::timeout(Duration::from_secs(600), async {
+            while provider.requests.lock().unwrap().len() < expected {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
@@ -259,38 +329,99 @@ trust_level = "trusted"
                 String::from_utf8_lossy(&captured.stdout)
             );
         }
-        let text = {
-            let requests = provider.0.lock().unwrap();
-            requests[expected - 1]["input"]
+        let requests = provider.requests.lock().unwrap().clone();
+        let output = |index: usize| {
+            let call = if index == 1 { "fallback-oom".to_owned() } else { format!("haskell-{}", index - 1) };
+            requests[index]["input"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .filter(|item| {
-                    matches!(
+                    item["call_id"] == call && matches!(
                         item["type"].as_str(),
                         Some("function_call_output" | "custom_tool_call_output")
                     )
                 })
-                .map(Value::to_string)
+                .map(|item| item["output"].as_str().expect("textual command result").to_owned())
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        assert!(
-            text.contains(if expected == 2 {
-                "resource limit"
-            } else {
-                "native-still-usable"
-            }),
-            "{text}"
-        );
+        match expected {
+            2 => {
+                assert!(output(1).contains("resource limit"), "{}", output(1));
+                assert!(requests[0]["input"].to_string().contains("Run builds, tests and interactive commands through Shoal's Haskell command jobs."), "command skill must appear in native skill discovery");
+                let tools = requests[0]["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["type"] == "additional_tools")
+                    .expect("native provider request advertises tools in its shared prefix")
+                    ["tools"]
+                    .to_string();
+                assert!(
+                    tools.contains("exec_command") && tools.contains("haskell"),
+                    "{tools}"
+                );
+                assert!(
+                    !tools.contains("\"name\":\"exec\""),
+                    "JavaScript wrapper leaked: {tools}"
+                );
+            }
+            6 => {
+                assert!(output(4).contains("CommandQueued"), "{}", output(4));
+                assert!(output(5).contains("protected-slot-usable"), "{}", output(5));
+                assert!(!work.join("release-holder").exists());
+                std::fs::write(work.join("release-holder"), "release").unwrap();
+            }
+            16 => {
+                let size = std::process::Command::new("tmux")
+                    .args([
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane.as_str(),
+                        "#{pane_height} #{pane_width}",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(size.status.success());
+                assert_eq!(
+                    std::fs::read_to_string(work.join("terminal-size"))
+                        .unwrap()
+                        .trim(),
+                    String::from_utf8(size.stdout).unwrap().trim(),
+                    "PTY inherits the owning TUI dimensions"
+                );
+                for (index, expected) in [
+                    (7, "admitted-after-release"),
+                    (8, "input-closed"),
+                    (9, "CommandOutOfMemory"),
+                    (11, "CommandCancelled"),
+                    (12, "TAIL-MARKER"),
+                    (13, "(1,Completed 1)"),
+                    (15, "terminal:hello"),
+                ] {
+                    assert!(
+                        output(index).contains(expected),
+                        "step {index}: {}",
+                        output(index)
+                    );
+                }
+                assert!(
+                    output(12).contains("commandTruncated = True"),
+                    "{}",
+                    output(12)
+                );
+            }
+            _ => unreachable!(),
+        }
         assert!(!tmux.pane_status(&pane).await.unwrap().unwrap().dead);
-        if expected == 2 {
+        if expected != 16 {
             assert!(std::process::Command::new("tmux")
                 .args(["send-keys", "-t", pane.as_str(), "-l", "continue fixture"])
                 .status()
                 .unwrap()
                 .success());
-            // The TUI distinguishes pasted text from a subsequent submit key.
             tokio::time::sleep(Duration::from_millis(200)).await;
             assert!(std::process::Command::new("tmux")
                 .args(["send-keys", "-t", pane.as_str(), "Enter"])
@@ -299,6 +430,9 @@ trust_level = "trusted"
                 .success());
         }
     }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+    backend_task.abort();
     drop(fixture);
     control.drain();
     server.await.unwrap().unwrap();

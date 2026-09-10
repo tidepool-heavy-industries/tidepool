@@ -125,6 +125,15 @@ pub fn actor_kernel() -> Effect {
                 },
             ),
             source_install(
+                "ActorInstallCommandSourceWith",
+                "actor_install_command_source_with",
+                Arg {
+                    name: "job",
+                    ty: HsType::Text,
+                    rust: RustBinding::Path("String"),
+                },
+            ),
+            source_install(
                 "ActorInstallLifecycleSourceWith",
                 "actor_install_lifecycle_source_with",
                 Arg {

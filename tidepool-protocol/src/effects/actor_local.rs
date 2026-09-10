@@ -41,6 +41,7 @@ pub fn actor_local() -> Effect {
                 SumVariant { ctor: "ActorMessageFrom", fields: VariantFields::Positional(vec![HsType::Tuple(vec![HsType::Int, HsType::Int])]), doc: &[] },
                 SumVariant { ctor: "ActorProgressFrom", fields: VariantFields::Positional(vec![HsType::Int]), doc: &[] },
                 SumVariant { ctor: "ActorSettlementFrom", fields: VariantFields::Positional(vec![HsType::Int]), doc: &[] },
+                SumVariant { ctor: "ActorCommandFrom", fields: VariantFields::Positional(vec![HsType::Text]), doc: &[] },
                 SumVariant { ctor: "ActorLifecycleFrom", fields: VariantFields::Positional(vec![HsType::Tuple(vec![HsType::Int, HsType::Int])]), doc: &[] },
             ] },
             json: JsonInstance::None,

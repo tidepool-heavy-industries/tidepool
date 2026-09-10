@@ -65,6 +65,7 @@ pub enum ActorEffectKey {
     WorktreeAllocation,
     WorktreeIntegration,
     Notifications,
+    Commands,
     Actor,
 }
 
@@ -83,6 +84,7 @@ impl ActorEffectKey {
             Self::WorktreeAllocation => "WorktreeAllocation",
             Self::WorktreeIntegration => "WorktreeIntegration",
             Self::Notifications => "Notifications",
+            Self::Commands => "Commands",
             Self::Actor => "Actor",
         }
     }
@@ -124,6 +126,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeAllocation,
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Commands,
                 ActorEffectKey::Actor,
             ],
         )
@@ -149,6 +152,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Commands,
                 ActorEffectKey::Actor,
             ],
         )
@@ -175,6 +179,7 @@ impl EffectiveRole {
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Commands,
                 ActorEffectKey::Actor,
             ],
         )
@@ -211,6 +216,7 @@ impl EffectiveRole {
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Commands,
                 ActorEffectKey::Actor,
             ],
         )

@@ -757,6 +757,10 @@ fn cleanup_step_value(
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    Command {
+        continuation: ResidentHole,
+        request: crate::generated::commands::CommandsReq,
+    },
     Replace {
         target: crate::ActorRef,
         candidate: crate::ResidentActorStart,
@@ -906,6 +910,7 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::Command { .. } => "command job",
             Self::NotificationSend { .. } => "notify",
             Self::NotificationPoll { .. } => "pollNotification",
             Self::ActorContext(_) => "actorContext",
@@ -971,6 +976,7 @@ enum BoundaryCapture {
 /// boundaries. Generated request enums own constructor recognition and field
 /// shape; this sum owns orchestration routing.
 enum ResidentRequest {
+    Commands(crate::generated::commands::CommandsReq),
     Notifications(crate::generated::notifications::NotificationsReq),
     Actor(crate::generated::actor::ActorReq),
     ActorContext(crate::generated::actor_context::ActorContextReq),
@@ -1007,6 +1013,7 @@ impl ResidentRequest {
             Self::Notifications,
             crate::generated::notifications::NotificationsReq
         );
+        try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
         try_member!(
             Self::ActorContext,
@@ -1051,6 +1058,7 @@ impl ResidentRequest {
 
     fn operation(&self) -> &'static str {
         match self {
+            Self::Commands(_) => "command job",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
                 ..,
             )) => "notify",
@@ -1136,6 +1144,9 @@ impl ResidentRequest {
                     ..,
                 ),
             ) => "install settlement source",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(..),
+            ) => "command source",
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..),
             ) => "install lifecycle source",
@@ -2286,6 +2297,7 @@ where
                             continuation: hole,
                         },
                     )),
+                    ResidentRequest::Commands(request) => Ok(ResidentActorBoundary::Command { continuation: hole, request }),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlStopWith(
                             target,
@@ -2801,6 +2813,7 @@ where
                 let source = match &request_kind {
                     ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(request, _)) => Some(SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Progress)),
                     ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(request, _)) => Some(SourceTarget::Request(source_request_id(*request)?, RequestSourceKind::Settlement)),
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(job, _)) => Some(SourceTarget::Command(uuid::Uuid::parse_str(job).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid command job handle".into()))?.as_u128())),
                     ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith((id, incarnation), _)) => Some(SourceTarget::Lifecycle(crate::ActorRef {
                         id: crate::ActorId(u64::try_from(*id).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid lifecycle actor id".into()))?),
                         incarnation: crate::Incarnation(u64::try_from(*incarnation).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid lifecycle incarnation".into()))?),
@@ -2973,6 +2986,7 @@ where
                 .await?;
         use crate::request::sources::SourceEvent;
         let outcome = match event {
+            SourceEvent::Command(event) => self.resume_value(context.clone(), hole, event).await?,
             SourceEvent::Lifecycle(event) => {
                 self.access
                     .with_machine(context.clone(), move |session, _, _| {
@@ -3095,6 +3109,7 @@ where
                     crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
                         return Err(ResidentActorWorkbenchError::ActorProtocol("source boundary escaped its mapping or installation".into()));
                     }
@@ -3161,6 +3176,7 @@ where
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
                         return Ok(None)
                     }

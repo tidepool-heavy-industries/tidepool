@@ -52,6 +52,9 @@ R.call (resultCount (R.client results)) ()
 This block assumes `worker :: Forked (Outcome Candidate)` from the current
 session. `R.progress p` carries `ProgressState progress`; `R.settlement response`
 carries the exact typed terminal result, including failure and execution evidence.
+`Cmd.completion job` carries `Cmd.CommandResult` for a command owned by the
+creator. It retains completion for a late collector. Route the result, including
+its cleanup evidence, rather than waking a model to poll command status.
 Sources compose with `fmap` and `(<>)`: tag independent sources with shared project
 constructors or names. Each handler receives one event. Publications accepted
 while it is busy remain ordered; no cursor rearming is required. Attachment starts

@@ -134,3 +134,5 @@ pub use termination::{
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};
 pub use wait::{actor_terminal_value, ActorWaitError};
+
+pub mod command_jobs;

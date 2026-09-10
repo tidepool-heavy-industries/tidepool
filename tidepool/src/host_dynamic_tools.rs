@@ -147,7 +147,7 @@ impl HostToolControl {
 #[derive(Clone)]
 struct HostState {
     command_resources: Option<(
-        Arc<tidepool_node::command_resources::CommandResources>,
+        Arc<tidepool_node::command_resources::CommandResourceClient>,
         String,
     )>,
     control: HostToolControl,
@@ -237,7 +237,7 @@ impl HostDynamicToolService {
     pub(crate) fn with_command_resources(
         mut self,
         resources: Option<(
-            Arc<tidepool_node::command_resources::CommandResources>,
+            Arc<tidepool_node::command_resources::CommandResourceClient>,
             String,
         )>,
     ) -> Self {
@@ -1248,27 +1248,28 @@ async fn command_resources(
         CommandResourceOperation::Acquire => {
             let mut phase = state.control.phase.subscribe();
             if *phase.borrow_and_update() != HostToolPhase::Serving {
-                owner.cancel(actor, &request.id)
+                owner.cancel(actor, &request.id).await
             } else {
                 tokio::select! {
                     result = owner.acquire(actor, &request.id) => {
                         if *phase.borrow() == HostToolPhase::Serving {
                             result
                         } else {
-                            let _ = owner.cancel(actor, &request.id);
+                            let _ = owner.cancel(actor, &request.id).await;
                             Err(std::io::Error::other("host quiescing; command not started"))
                         }
                     },
-                    _ = phase.changed() => owner.cancel(actor, &request.id),
+                    _ = phase.changed() => owner.cancel(actor, &request.id).await,
                 }
             }
         }
-        CommandResourceOperation::Started => owner.started(actor, &request.id),
-        CommandResourceOperation::Status => owner.status(actor, &request.id),
-        CommandResourceOperation::Finished => owner
-            .started(actor, &request.id)
-            .and_then(|_| owner.status(actor, &request.id)),
-        CommandResourceOperation::Cancel => owner.cancel(actor, &request.id),
+        CommandResourceOperation::Started => owner.started(actor, &request.id).await,
+        CommandResourceOperation::Status => owner.status(actor, &request.id).await,
+        CommandResourceOperation::Finished => match owner.started(actor, &request.id).await {
+            Ok(_) => owner.status(actor, &request.id).await,
+            Err(error) => Err(error),
+        },
+        CommandResourceOperation::Cancel => owner.cancel(actor, &request.id).await,
     };
     result.map(Json).map_err(|error| {
         (
@@ -1280,9 +1281,6 @@ async fn command_resources(
 
 #[cfg(test)]
 mod resource_tests;
-
-#[cfg(test)]
-mod tui_resource_tests;
 
 #[cfg(test)]
 mod tui_workspace_tests;

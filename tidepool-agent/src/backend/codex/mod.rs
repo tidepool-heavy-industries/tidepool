@@ -33,6 +33,7 @@
 //! is the deliberate exception: it trusts one stable virtual project path,
 //! never the unbounded set of generated actor repositories.
 
+mod commands;
 pub mod driver;
 pub mod dynamic_tools;
 pub mod isolation;

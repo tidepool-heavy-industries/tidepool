@@ -39,6 +39,24 @@ Keep the original result when execution/worktree evidence matters.
 `(,) <$> awaitSettledFork workerA <*> awaitSettledFork workerB`.
 Register separate watches when results can be integrated independently.
 
+## Commands
+
+`Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB` are loaded.
+The following is a command example, not a required verification step:
+
+```haskell
+let checkCommand = withMemory (GiB 4) [bash|just quick|]
+checkJob <- Cmd.start checkCommand
+```
+
+Commands are values: inspect with `Cmd.describe`, retain or pass them, then execute.
+The default is 256 MiB. `Cmd.run command` returns within one second with `Finished`
+(result plus bounded output) or `Pending job`. Admission and execution continue
+without polling. `Cmd.await job` explicitly waits; `Cmd.output job 8192` reads a
+bounded tail; `Cmd.status job` includes terminal cleanup; `Cmd.cancel job` accepts
+cancellation intent. Keep the same handle after uncertainty. For automatic routing,
+`Cmd.completion job` is an `R.EventSource Cmd.CommandResult` for a record actor.
+
 ## Construction and handles
 
 The following are API reference signatures, not declarations to paste into the

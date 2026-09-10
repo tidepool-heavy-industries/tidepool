@@ -188,6 +188,19 @@ pub struct InteractiveAgentSpec {
 /// command construction; `push` is only the final backend hop to an
 /// already-bound exact conversation.
 pub trait InteractiveAgentBackend: Send + Sync {
+    /// Execute and control a command through the already-bound native process owner.
+    fn command<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _id: &'a str,
+        _operation: NativeCommandOperation,
+    ) -> InteractiveFuture<'a, NativeCommandReply> {
+        Box::pin(async {
+            Err(AgentBackendError::ProtocolRejected {
+                detail: "native commands are unsupported".into(),
+            })
+        })
+    }
     /// Control a process-owned workspace publication lease. Transport errors are
     /// unconfirmed: retain the same durable sequence until it can be reconciled.
     fn workspace_publication<'a>(
@@ -255,6 +268,26 @@ pub trait InteractiveAgentBackend: Send + Sync {
         cwd: &'a str,
         thread: &'a QueueReadyThread,
     ) -> InteractiveFuture<'a, ()>;
+}
+
+#[derive(Clone, Debug)]
+pub enum NativeCommandOperation {
+    Start(tidepool_bridge_effects::CommandSpec),
+    Wait,
+    Output(usize),
+    Input(String),
+    CloseInput,
+    Resize { rows: u16, columns: u16 },
+    Cancel,
+}
+
+#[derive(Clone, Debug)]
+pub enum NativeCommandReply {
+    Pending,
+    Finished { exit_code: i32, cancelled: bool },
+    Unconfirmed(String),
+    Output(tidepool_bridge_effects::CommandOutput),
+    Acknowledged,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -250,6 +250,14 @@ impl CodexInteractiveBackend {
 }
 
 impl InteractiveAgentBackend for CodexInteractiveBackend {
+    fn command<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        id: &'a str,
+        operation: crate::NativeCommandOperation,
+    ) -> InteractiveFuture<'a, crate::NativeCommandReply> {
+        Box::pin(super::commands::request(thread, id, operation))
+    }
     fn workspace_publication<'a>(
         &'a self,
         thread: &'a QueueReadyThread,
@@ -475,7 +483,12 @@ fn command_for(
         .arg(&spec.host_tools_socket);
     // The host owns the actor tree and reply routing. Native collaboration
     // would create a second, unrelated tree inside this actor's provider thread.
-    for feature in ["multi_agent", "multi_agent_v2"] {
+    for feature in [
+        "multi_agent",
+        "multi_agent_v2",
+        "code_mode",
+        "code_mode_only",
+    ] {
         command.arg("--disable").arg(feature);
     }
     if spec.goal_policy == crate::InteractiveGoalPolicy::Disabled {

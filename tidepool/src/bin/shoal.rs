@@ -12,6 +12,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Own shared command admission and cgroup custody across Shoal runs.
+    #[command(hide = true)]
+    CommandResources {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        policy: PathBuf,
+    },
     /// Inspect unused build storage for a stopped run; preserve all source/Git state.
     Cleanup {
         #[arg(long)]
@@ -161,6 +169,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::CommandResources { socket, policy } => {
+            tidepool::shoal::resources::serve(socket, policy).await
+        }
         Command::Cleanup { run_root, apply } => {
             println!(
                 "{}",

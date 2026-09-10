@@ -137,6 +137,7 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::actor_kernel::actor_kernel(),
         effects::actor_local::actor_local(),
         effects::agent_control::agent_control(),
+        effects::commands::commands(),
         effects::notifications::notifications(),
         effects::agent_inspection::agent_inspection(),
         effects::agent_launch::agent_launch(),

@@ -1,152 +1,88 @@
 # Haskell command workbench
 
-Status: in-progress design, not an implementation assignment. This follows the
-command-resource isolation release; it does not expand that release's acceptance
-scope. API names below illustrate the desired experience, not existing exports.
+Implementation wave: [command jobs checklist](command-jobs-implementation.md).
+That checklist owns completion evidence; this document records the intended
+surface and follow-on boundary. Linux is the current target. A future macOS
+installation may run the complete workspace in a Linux VM; no native macOS or
+Windows resource backend belongs in this wave.
 
-## Direction
+## Programmable commands
 
-Make the resident Haskell environment the agent's programmable workbench for
-commands, process interaction and coordination. Bash commands are inspectable,
-transferable values, not merely opaque actions buried in an effect monad. Agents
-can construct, inspect, modify and send a command before an authorized owner runs
-it. Haskell replaces the competing JavaScript tool-orchestration layer.
-
-Keep the surface fluent for GHCi-style use. Rust retains subprocess, PTY, resource,
-output-buffer and cleanup ownership. Extend existing owners rather than building
-another executor or process registry. Command descriptions convey intent, never
-execution authority; the receiving actor runs under its own grants.
-
-## Commands and results
+Commands are inspectable, transferable Haskell values. Rust owns execution,
+resource admission, PTY/stdin, retained output and descendant custody through the
+existing native TUI process owner. Receiving a command description does not grant
+execution authority. A receiving owner executes it under its own grants.
 
 ```haskell
-let search = [bash| rg 'CommandAllocation' tidepool-node |]
-result <- run search
-
-let tests = [bash| cargo test -p tidepool-node |]
-              & withMemory (GiB 8)
-result <- run tests
+let focused = withMemory (GiB 4) [bash|just test-lib tidepool-node 'test(command_oom)'|]
+job <- Cmd.start focused
 ```
 
-The bash quasiquote constructs a command value. Inspection should expose the
-script and execution settings without launching it. Define working-directory and
-environment semantics explicitly, especially when transferring a value to another
-actor. Keep literal shell source separate from safely passed Haskell arguments;
-implicit textual interpolation would recreate shell-quoting hazards.
+`Cmd` is the qualified `Tidepool.Command` import. `Cmd.describe` exposes the
+command description; `Cmd.argv [program,arg1,arg2]` avoids a shell. Bash quoting
+is literal, without implicit Haskell interpolation. `Cmd.withArguments` supplies
+actual positional arguments, including spaces and shell metacharacters.
+`Cmd.inDirectory` and `Cmd.withEnvironment` select per-command overrides.
 
-Results remain Haskell values for inspection and composition. Model-facing output
-is a deliberate projection, not a compulsory transcript dump. Preserve exit
-outcome, stdout/stderr access and resource failure distinctions. Large output
-needs bounded storage/access and explicit truncation, not an unbounded value sent
-to the model. Do not automatically retry failed commands: side effects may already
-have occurred.
+`Cmd.start` returns an owned job immediately. `Cmd.run` waits up to one second,
+including admission, returning `Finished` with result/bounded output or `Pending`
+with the continuing job. `Cmd.await` explicitly waits for completion. Jobs survive
+tool return and observer disconnection; queues have no implicit lifetime timeout.
+There is no automatic execution retry.
 
-## One memory setting
+The default hard limit is 256 MiB and the same value is the admission weight.
+An explicit memory override is the only model-facing resource setting. One
+per-user owner shares 8 GiB general capacity plus 512 MiB protected capacity for
+commands at most 256 MiB across runs. General admission is FIFO; protected small
+commands can progress while a large command waits. Aggregate command swap is
+1 GiB. Descendants retain their grant after the root command exits.
 
-- Default command hard limit: **256 MiB**.
-- An override such as `withMemory (GiB 8)` sets the command-tree hard limit.
-- Admission accounts for that same value. The sum of admitted active limits must
-  fit the host command-memory allowance. Replace fixed two-slot admission with
-  this weighted capacity model.
-- No separate model-facing reservation setting and no initial small/large lanes.
-- No inline usage dashboard or token-preview ceremony. Record resource usage and
-  admission/outcome evidence in logs for later analysis.
+Nix daemon work is outside the requesting shell's subtree. Its separate budget
+is 8 GiB memory and 1 GiB swap. Configure one build/two cores and a two-CPU
+aggregate limit. On NixOS, configure `nix.settings` and the daemon's systemd
+service declaratively; runtime systemd properties can activate caps without
+restarting active builds. These daemon limits do not attribute its memory to
+individual clients.
 
-Keep the existing host aggregate boundary, OOM containment, queue cancellation,
-identity and descendant-custody contracts. A shell exiting does not free capacity
-while background descendants remain. Reject a request larger than total capacity
-explicitly. Specify fair queue behavior so small jobs cannot indefinitely starve
-large ones; sophisticated knapsack optimization is unnecessary initially.
+## Interaction and routing
 
-The initial release's 8 GiB-per-command defaults remain unchanged until this
-migration lands. Resolve swap policy alongside weighted admission; it must not
-become an unaccounted escape from the aggregate policy. External service workers
-such as Nix daemon builds are not descendants of the requesting shell and need
-separate integration if they are to participate in these limits.
+Use `Cmd.withStdin` for pipe input, or `Cmd.withTerminal` for a PTY initialized from the owning TUI dimensions.
+Retain the job for `Cmd.sendInput`, `Cmd.closeInput`, `Cmd.resize` and `Cmd.cancel`.
+Cancellation accepts intent; terminal status and cleanup evidence remain distinct.
+Output reads are bounded tails with explicit truncation. Write large durable logs
+to chosen workspace files. No output-stream subscription DSL is required.
 
-## Ongoing processes compose with actors
+`Cmd.completion job :: R.EventSource Cmd.CommandResult` feeds the existing
+record-shaped Haskell actors. A handler receives one retained terminal value,
+including when attached after completion. Use actor composition for known
+continuations and message a model when judgment is needed. Command jobs themselves
+are lightweight Rust resource actors, with no GHC or model session per process.
+Native fallback tools keep their existing process-session owner and deferred
+admission handle rather than adding a competing process registry.
 
-```haskell
-job <- start tests
-sendInput job "..."
-closeInput job
-result <- await job
-```
+## Adoption and acceptance
 
-A running process has a typed handle. Output and completion can feed the existing
-owned Haskell routing actors; handlers may accumulate results or send ordinary
-steering when model judgment is needed. Avoid waking an LLM for polling mechanics.
-The input side replaces `write_stdin`; output observation uses routing rather
-than a bespoke model-operated polling protocol. `run` is the convenient ordinary
-case, while `start` supports continued interaction.
+Shipped guidance directs builds/tests and potentially expensive execution through
+Haskell. Native shell fallback remains fixed at 256 MiB; `apply_patch` remains
+available. Disable the competing JavaScript wrapper while preserving direct tools.
+The shared guide supplies a minimal example; the command skill carries occasional
+stdin/PTY/routing details. Freeze executable and prompt changes at a swarm boundary.
 
-Reuse process ownership beneath the actor abstraction. Define cancellation,
-terminal input/PTY selection, retained output and owner retirement against existing
-mechanisms. A routing handler's lifetime does not prove process cleanup or release
-its memory allocation. Delivery ordering, buffering and failed-handler behavior
-must agree with the existing actor contracts.
+Acceptance uses a scripted local provider with the actual native TUI and Shoal
+binaries, plus the real Haskell, namespace and cgroup boundaries. Cover delayed
+admission, small-command progress, OOM with subsequent steering, cancellation,
+stdin/PTY, bounded output, argument fidelity and retained completion. Focused
+resource tests additionally challenge cross-host ownership, disconnected observers
+and descendants retaining capacity. No paid inference or full workspace suites.
 
-## Editing
+## Later work
 
-Keep native `apply_patch` for the foreseeable future: it is useful and familiar.
-Offer precise Haskell editing as an additional capability, aligned with
-[typed file tools](../typed-file-tools.md):
+Keep transactional editing in [typed file tools](../typed-file-tools.md), not
+this wave. A future `edit path $ do ...` could apply several precise edits or none,
+with explicit stale-source and concurrent-writer semantics. Preserve native
+`apply_patch` while that design matures.
 
-```haskell
-edit "src/example.rs" $ do
-  replaceOnce oldDefinition newDefinition
-  insertAfter uniqueAnchor newFunction
-  deleteOnce obsoleteClause
-```
-
-Read one file version, apply edits sequentially in memory, and commit the result
-only when every operation succeeds. Missing or ambiguous matches abort the whole
-single-file edit. Preserve untouched bytes and file metadata as appropriate.
-Provide optional preview; do not force a separate approval/tool turn for every
-ordinary authorized edit.
-
-Require stale-source checks at the mutation owner. Atomic publication and
-protection against concurrent writers are separate properties: rename alone does
-not provide compare-and-swap, and advisory locking covers only cooperating writers.
-Specify that boundary honestly before implementing. Do not promise multi-file
-transactions initially. Reuse current file/patch owners, not a parallel filesystem
-service. The existing typed-file plan owns detailed file semantics.
-
-## Incremental migration
-
-1. Inventory exposed execution and orchestration tools and production owners.
-   Confirm the resident compiler supports the intended quasiquote path; implement
-   a vertical command-value → existing resource owner → typed result slice.
-2. Add weighted admission with the single hard-limit setting and focused failure,
-   cancellation, fairness and descendant-retention checks.
-3. Ship concise examples and developer guidance directing potentially expensive
-   commands through Tidepool. Keep direct shell tools available during adoption.
-4. Remove `functions.exec` early from Shoal-managed Codex tool exposure: Haskell
-   owns composition. First ensure useful nested capabilities remain accessible
-   directly or through Haskell; removing the wrapper must not strand tools.
-5. Add typed ongoing-process interaction/routing and useful single-file editing
-   through existing owners. Keep `apply_patch` exposed.
-6. Improve from actual use. Retire direct shell tools only when effectively unused
-   and remaining recovery/interaction needs are covered.
-
-This is a parallel option first, not an immediate universal execution mandate.
-Developer guidance is the initial adoption mechanism. Until bypasses are removed,
-resource accounting covers work routed through the owning mechanism, not every
-possible subprocess in the system. Keep the runtime/tool definitions and examples
-consistent; avoid changing live-wave core surfaces mid-wave.
-
-## Implementation questions still open
-
-- Exact public command/result/handle types and effect signatures, chosen from
-  production consumers and existing actor/process capabilities.
-- Portable command-value encoding and transfer, cwd/environment binding, safe
-  argument passage, and output access without incidental disclosure of secrets.
-- Fair weighted queue discipline and swap accounting.
-- PTY versus pipe selection and the smallest useful process-event source API.
-- Single-file concurrency guarantees with native apply_patch and external writers.
-
-Acceptance should exercise the resident Haskell surface end to end, including
-inspect/send/run under recipient authority, hard-limit OOM with interactive control
-survival, queued cancellation, descendants retaining capacity, routed completion,
-and all-or-none file edits on ambiguous/stale input. Use deterministic local
-fixtures; paid inference and an elaborate evaluation program are unnecessary.
+Improve from actual use. Retire native shell fallback only when effectively
+unused and recovery/interaction needs are covered. More detailed scheduling,
+output subscriptions and dashboards should follow demonstrated needs rather
+than expand the initial interface.
