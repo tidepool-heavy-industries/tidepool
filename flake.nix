@@ -282,6 +282,7 @@
                   pkgs.tmux
                 ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ])
               } \
+              --set TIDEPOOL_EXTRACT "${self.packages.${system}.tidepool-extract}/bin/tidepool-extract" \
               --set TIDEPOOL_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
               --set TIDEPOOL_SHOAL_CODEX_CLOSURE "${interactiveCodex}" \
               --set TIDEPOOL_SHOAL_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store"
