@@ -110,8 +110,8 @@ with coordinator. Deliver shared wiring early enough for real consumers to test.
 
 ## Discretion, experts and completion
 
-Sol Low owns bounded leaves and focused reviews; Sol Medium owns substantial
-engineering loops. Leads may rearrange independent children, repair local defects,
+Sol Medium owns leads, implementation, bounded leaves and focused reviews.
+Keep effort stable across inherited Sol forks. Leads may rearrange independent children, repair local defects,
 and integrate coherent slices without repeated planner approval. No headcount
 quota. Each coding fork carries useful shared reasoning, not merely a file list.
 

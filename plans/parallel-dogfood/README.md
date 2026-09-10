@@ -13,8 +13,8 @@ execution is subsequent work, not part of either assignment.
 A Shoal-managed Astra planner sets up the work with the human.
 Its Sol coordinator owns integration; two Sol leads own the delivery branches.
 Each lead implements, scaffolds shared decisions, forks useful Sol subtrees,
-then integrates and repeats. Use Sol Low for bounded work, Medium for substantial
-leads. Each lane names focused Astra consultations at consequential decisions.
+then integrates and repeats. Use Sol Medium throughout the execution tree, including bounded workers
+and reviews; keep effort stable across inherited forks. Each lane names focused Astra consultations at consequential decisions.
 
 ## Read only what your assignment needs
 

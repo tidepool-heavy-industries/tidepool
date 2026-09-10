@@ -131,6 +131,8 @@ impl std::fmt::Display for ShoalEffort {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ShoalConfig {
     #[serde(default)]
+    pub(crate) launch: LaunchConfig,
+    #[serde(default)]
     pub(crate) resources: tidepool_node::command_resources::CommandResourcePolicy,
     pub(crate) defaults: ShoalAgentDefaults,
     #[serde(default)]
@@ -139,6 +141,12 @@ pub(crate) struct ShoalConfig {
     haskell: workspace::HaskellConfig,
     #[serde(default)]
     prompts: workspace::PromptConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct LaunchConfig {
+    pub(crate) systemd_slice: tidepool_node::systemd_slice::SystemdSlice,
 }
 
 /// Initialize the smallest repository that can host a Shoal ensemble.
@@ -369,12 +377,27 @@ fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf, Box<dyn std:
 
 pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = resolve_workspace(options.workspace)?;
+    let configuration = ensure_project_config(&workspace)?;
+    let slice = configuration.launch.systemd_slice;
+    let limits = slice.inspect().await?;
+    if slice.current_membership().is_err() {
+        use std::os::unix::process::CommandExt;
+        let executable = std::env::current_exe()?;
+        let command = slice.scope(slice.verified_command(
+            &executable,
+            tidepool_node::ProcessInvocation {
+                program: executable.display().to_string(),
+                args: std::env::args().skip(1).collect(),
+            },
+        ));
+        return Err(std::process::Command::new(command.program)
+            .args(command.args)
+            .exec()
+            .into());
+    }
+    tracing::info!(slice = slice.as_str(), ?limits, "selected swarm budget");
     install_local_exclude(&workspace)?;
-    let agent = resolve_agent_defaults(
-        ensure_project_config(&workspace)?.defaults,
-        options.model,
-        options.effort,
-    )?;
+    let agent = resolve_agent_defaults(configuration.defaults, options.model, options.effort)?;
     retain_packaged_interactive_agent(&workspace).await?;
     let session_name = options
         .session
@@ -460,6 +483,15 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     compiler_launch
         .environment
         .extend(selected_environment.clone());
+    let scoped_compiler = slice.scope(slice.verified_command(
+        &executable,
+        tidepool_node::ProcessInvocation {
+            program: compiler_launch.program,
+            args: compiler_launch.args,
+        },
+    ));
+    compiler_launch.program = scoped_compiler.program;
+    compiler_launch.args = scoped_compiler.args;
     let daemon_launch = tmux.create(&compiler_launch).await;
     if let Err(error) = daemon_launch {
         write_startup_failure(
@@ -509,23 +541,22 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
     args.extend(["--model".into(), agent.model.clone()]);
     args.extend(["--effort".into(), agent.effort.to_string()]);
-    args.splice(
-        0..0,
-        [
-            "--user".into(),
-            "--scope".into(),
-            "--quiet".into(),
-            "--property=Delegate=yes".into(),
-            format!("--unit=shoal-host-{run_id}"),
-            executable.display().to_string(),
-        ],
+    let host_launch = slice.delegated_scope(
+        &format!("shoal-host-{run_id}"),
+        slice.verified_command(
+            &executable,
+            tidepool_node::ProcessInvocation {
+                program: executable.display().to_string(),
+                args,
+            },
+        ),
     );
     let launch = tmux
         .spawn_window(&TmuxLaunch {
             window_name: "Host".into(),
             cwd: workspace.clone(),
-            program: "systemd-run".into(),
-            args,
+            program: host_launch.program,
+            args: host_launch.args,
             environment: {
                 let mut environment = host_environment(&compiler_socket);
                 environment.extend(selected_environment);
@@ -822,14 +853,23 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     let root_launch_mode =
         resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?;
 
-    let haskell_root = crate::haskell_sources::ensure_shoal_haskell()?;
     let workspace_inputs = workspace::FrozenWorkspace::load(&options.workspace, &options.run_root)?;
     let configuration = workspace_inputs.config()?;
+    let slice = configuration.launch.systemd_slice;
+    slice.current_membership()?;
+    let limits = slice.inspect().await?;
+    tidepool_atomic_write::write_best_effort(
+        &options.run_root.join("resource-budget.json"),
+        &serde_json::to_vec_pretty(&limits)?,
+    )?;
+    let haskell_root = crate::haskell_sources::ensure_shoal_haskell()?;
     let research_policy = configuration.research;
-    let command_resources = resources::connect(configuration.resources, &options.run_id).await?;
+    let command_resources =
+        resources::connect(configuration.resources, &options.run_id, &slice).await?;
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
+            systemd_slice: Some(slice),
             command_resources: Some(command_resources),
             shoal_executable: std::env::current_exe()?,
             workspace: options.workspace.clone(),

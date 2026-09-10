@@ -1,8 +1,8 @@
 # Next launch prerequisites
 
 No next-run selection is declared ready by this document. The release runner and
-aggregate swarm resource placement are being finalized on main. Launch also needs
-operator activation of the host configuration and explicit authorization.
+aggregate swarm resource placement are being finalized on main. Host configuration is activated. Launch waits for the operator to confirm
+the account switch; preparation and model-free checks are authorized.
 
 Before launch, record:
 

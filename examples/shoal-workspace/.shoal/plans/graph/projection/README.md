@@ -3,7 +3,7 @@
 Input: the exact accepted shared-contract commit. Output: `Delivery` with checked
 projection. Recipient: Sol integration owner. Dependency: contract incorporation,
 not merely the contract worker saying it is done. Read the shared language and
-contract notes at this input commit. Sol Low is the default; local decomposition
+contract notes at this input commit. Sol Medium is the default; local decomposition
 is optional when independent implementation work warrants it.
 
 Own the graph projection and traversal in `src/agents.rs` and focused pure tests.

@@ -376,6 +376,7 @@ fn fork_workspace_admission(
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
+    pub systemd_slice: Option<tidepool_node::systemd_slice::SystemdSlice>,
     pub command_resources: Option<Arc<tidepool_node::command_resources::CommandResourceClient>>,
     /// This Shoal installation provides the internal namespace-entry executable.
     pub shoal_executable: PathBuf,
@@ -3187,6 +3188,20 @@ async fn launch_prepared_interactive_application(
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
+    let supervisor_command = tidepool_node::ProcessInvocation {
+        program: config.shoal_executable.to_string_lossy().into_owned(),
+        args: vec![
+            "process-supervisor".into(),
+            "--manifest".into(),
+            manifest_path.to_string_lossy().into_owned(),
+        ],
+    };
+    let supervisor_command = match &config.systemd_slice {
+        Some(slice) => {
+            slice.scope(slice.verified_command(&config.shoal_executable, supervisor_command))
+        }
+        None => supervisor_command,
+    };
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
@@ -3201,12 +3216,8 @@ async fn launch_prepared_interactive_application(
                 actor_identity.incarnation.0
             ),
             cwd: workspace.clone(),
-            program: config.shoal_executable.to_string_lossy().into_owned(),
-            args: vec![
-                "process-supervisor".into(),
-                "--manifest".into(),
-                manifest_path.to_string_lossy().into_owned(),
-            ],
+            program: supervisor_command.program,
+            args: supervisor_command.args,
             environment: launch_environment.set,
             unset_environment: launch_environment.unset,
         }),

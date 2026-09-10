@@ -69,7 +69,7 @@ is delivered. External RSI handles historical custody and infrastructure.
 
 A Shoal-managed Astra planner refines the recursive graph and context packaging,
 then reviews the two Sol leads' understanding once. Sol Medium leads/coordinator
-own execution; bounded workers default to Sol Low. Related workers inherit a useful
+own execution; bounded workers also use Sol Medium. Keep effort stable across Sol forks. Related workers inherit a useful
 completed reasoning prefix and the current bound checkout. Fork before unrelated
 investigations fill the parent's context. Each parent keeps real engineering work.
 

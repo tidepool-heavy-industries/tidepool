@@ -30,7 +30,7 @@ available. Use let for a value/function and <- to run an effect and retain its
 result. Successful input units survive later failure; inspect the receipt and
 retained work before retrying new intent.
 
-Task.taskSource records an exact committed Git revision, not provenance prose.
+taskSource records an exact committed Git revision, not provenance prose.
 The branch source independently selects live working files or a committed ref. A source
 commit and its accepted reasoning travel together. withDecision changes taskSource;
 its decisionSource must name source actually incorporated and checked. A retained
@@ -41,8 +41,10 @@ the owning public boundary; one consumer's representation may be incomplete.
 Check the actual requested behavior. Generated text, mocks and compilation prove
 their own boundaries; they do not alone establish an integrated user flow.
 
-Use declared model placements. Sol owns substantial engineering and recursive
-waves; targeted Astra work resolves consequential difficulty. Preserve useful
+Sol uses Medium throughout execution: leads, implementation, bounded workers and
+reviews. The project helpers select it explicitly; use withEffort Medium for
+handwritten Sol branches too. Keep effort stable across inherited Sol forks.
+Targeted Astra work resolves consequential difficulty. Preserve useful
 in-flight experts. Report meaningful usage with its coverage; token targets are
 not termination instructions.
 

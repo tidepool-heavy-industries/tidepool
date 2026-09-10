@@ -93,7 +93,7 @@ solTask label = solTaskFrom label boundHead
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
 solTaskFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label source task = withInstructions (projectPrompt "task") $
-  withContext inherited $ withModel "gpt-5.6-sol" $ withEffort Low $
+  withContext inherited $ withModel "gpt-5.6-sol" $ withEffort Medium $
   coding label source task
 
 implement
@@ -119,7 +119,7 @@ reviewCandidate
   => Task -> RepairOwner -> Candidate -> Eff effects (Forked (Outcome ReviewDecision), Progress WorkProgress)
 reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
-  withModel "gpt-5.6-sol" $ withEffort Low $
+  withModel "gpt-5.6-sol" $ withEffort Medium $
   coding (named "review") (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
 
 -- This project's automatic review edge selects the committed submission head.

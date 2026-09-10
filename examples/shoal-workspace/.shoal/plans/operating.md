@@ -125,8 +125,8 @@ shared investigation and accepted decisions are valuable to the child, and fork
 before unrelated debugging accumulates. Default solTask/componentLead uses
 inherited context and boundHead, as does implement. Original-root callers use
 solTaskFrom/componentLeadFrom with projectHead. Select a fresh taskContext
-explicitly for unrelated work. componentLead selects Medium; solTask/implement
-select Low, with withEffort Medium for substantial engineering. Use an explicit atRef
+explicitly for unrelated work. componentLead, solTask/implement and reviews select Medium. Keep Sol effort
+stable across inherited forks. Use an explicit atRef
 source for exact committed inspection. Model selection is independent. Descendants
 normally remain supervised. A root
 may admit SwarmOwned selected leads; that lifetime is not compatible with an

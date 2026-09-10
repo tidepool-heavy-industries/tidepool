@@ -68,6 +68,7 @@ impl TestCampaign {
             .unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let mut config = ActorHostConfig {
+            systemd_slice: None,
             command_resources: None,
             shoal_executable: std::env::current_exe().unwrap(),
             workspace_inputs: None,

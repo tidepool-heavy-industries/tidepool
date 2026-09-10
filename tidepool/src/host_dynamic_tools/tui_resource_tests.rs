@@ -127,12 +127,25 @@ async fn full_tui_survives_command_oom_and_accepts_steering() {
         std::fs::create_dir(path).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    assert!(std::process::Command::new("git").args(["init", "--quiet"]).arg(&work).status().unwrap().success());
+    assert!(std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&work)
+        .status()
+        .unwrap()
+        .success());
     let skill = work.join(".shoal/skills/shoal-command");
     std::fs::create_dir_all(&skill).unwrap();
-    std::fs::write(skill.join("SKILL.md"), include_str!("../../../examples/shoal-workspace/.shoal/skills/shoal-command/SKILL.md")).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        include_str!("../../../examples/shoal-workspace/.shoal/skills/shoal-command/SKILL.md"),
+    )
+    .unwrap();
     std::fs::create_dir_all(work.join(".agents/skills")).unwrap();
-    std::os::unix::fs::symlink("../../.shoal/skills/shoal-command", work.join(".agents/skills/shoal-command")).unwrap();
+    std::os::unix::fs::symlink(
+        "../../.shoal/skills/shoal-command",
+        work.join(".agents/skills/shoal-command"),
+    )
+    .unwrap();
     let mut campaign = test_campaign::TestCampaign::start().await;
     let actor = campaign.actor.identity();
     let actor_key = format!("{}-{}", actor.id.0, actor.incarnation.0);
@@ -248,16 +261,28 @@ trust_level = "trusted"
         session,
         process: None,
     };
-    let pane = tmux
-        .create(&TmuxLaunch {
-            window_name: "native".into(),
-            cwd: work.clone(),
+    let slice = tidepool_node::systemd_slice::SystemdSlice::default();
+    slice.inspect().await.unwrap();
+    slice
+        .current_membership()
+        .expect("test resource owner must share the swarm budget");
+    let launch = slice.scope(slice.verified_command(
+        &host_binary,
+        ProcessInvocation {
             program: host_binary.display().to_string(),
             args: vec![
                 "process-supervisor".into(),
                 "--manifest".into(),
                 manifest_path.display().to_string(),
             ],
+        },
+    ));
+    let pane = tmux
+        .create(&TmuxLaunch {
+            window_name: "native".into(),
+            cwd: work.clone(),
+            program: launch.program,
+            args: launch.args,
             environment,
             unset_environment: Default::default(),
         })
@@ -331,18 +356,28 @@ trust_level = "trusted"
         }
         let requests = provider.requests.lock().unwrap().clone();
         let output = |index: usize| {
-            let call = if index == 1 { "fallback-oom".to_owned() } else { format!("haskell-{}", index - 1) };
+            let call = if index == 1 {
+                "fallback-oom".to_owned()
+            } else {
+                format!("haskell-{}", index - 1)
+            };
             requests[index]["input"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .filter(|item| {
-                    item["call_id"] == call && matches!(
-                        item["type"].as_str(),
-                        Some("function_call_output" | "custom_tool_call_output")
-                    )
+                    item["call_id"] == call
+                        && matches!(
+                            item["type"].as_str(),
+                            Some("function_call_output" | "custom_tool_call_output")
+                        )
                 })
-                .map(|item| item["output"].as_str().expect("textual command result").to_owned())
+                .map(|item| {
+                    item["output"]
+                        .as_str()
+                        .expect("textual command result")
+                        .to_owned()
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };

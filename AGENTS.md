@@ -79,8 +79,9 @@ Keep detailed design references out of always-loaded instructions.
   before forking independent obligations. Use resident Haskell `unfold` for
   Shoal work; native tools operate on the assigned checkout.
 - Fork around meaningful shared decisions, not a headcount target. Leads can
-  recursively delegate implementation and fresh-context review. Prefer Low
-  effort for bounded work; escalate explicitly for consequential uncertainty.
+  recursively delegate implementation and fresh-context review. Use Sol Medium
+  consistently across execution forks; use fresh Astra consultations for
+  consequential uncertainty.
 - Reuse the exact parent prefix rather than reconstructing it through long task
   briefs. Keep one shared superset API guide and stable tool definitions across
   roles; put changing assignments and authority observations after the shared

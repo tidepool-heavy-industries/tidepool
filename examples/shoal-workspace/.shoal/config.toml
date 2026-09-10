@@ -1,6 +1,9 @@
 [defaults]
 model = "gpt-5.6-sol"
-effort = "low"
+effort = "medium"
+
+[launch]
+systemd_slice = "swarm.slice"
 
 [haskell]
 source_roots = ["."]

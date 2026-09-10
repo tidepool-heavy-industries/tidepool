@@ -7,6 +7,7 @@ mod inbox;
 mod mount_namespace;
 mod process_boundary;
 mod process_supervisor;
+pub mod systemd_slice;
 mod tmux;
 
 pub use inbox::{

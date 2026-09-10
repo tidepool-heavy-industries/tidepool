@@ -58,6 +58,12 @@ ordinary authored names selected by Project.Work, not Rust workflow roles.
 Shoal.Workspace exposes the captured prompts, module names and definition identity.
 Every worker has the normal Codex TUI for engineering and direct human steering.
 
+`[launch].systemd_slice` selects the shared systemd user slice (default
+`swarm.slice`). Configure its finite RAM and swap limits on the machine before
+launching. Shoal places compiler, host, native panes and shared command resources
+there; the tmux server stays outside. Placement is checked before payload execution.
+`resource-budget.json` in the run directory records the effective aggregate limits.
+
 The target's original repository root has one authoritative runtime .shoal. A swarm
 captures it once; later workers use that selection even when their checkout has
 newer files. For this package, incorporate changes in the Tidepool authoring source

@@ -38,8 +38,8 @@ Write a compact execution plan before implementation expands:
    and recursively fork independent obligations; the coordinator integrates both
    lanes. Astra receives consequential questions and selected outcomes.
 
-Sol Medium suits lane leads and substantial implementation; Low suits bounded
-leaves and checks. Scale the tree to independent work, without headcount targets.
+Sol Medium is selected for leads, implementation, bounded leaves and checks.
+Keep effort stable across inherited Sol forks. Scale the tree to independent work, without headcount targets.
 Prefer a useful engineer with several local cycles over chains of managers that
 only relay messages. Reviews cover concrete risk and integrated behavior, not a
 mandatory new worker at every stage. Shared scaffolds need usable contracts and

@@ -95,3 +95,112 @@ fn executable_enters_retained_view_without_runtime_or_mount_privileges() {
         .success());
     assert!(!namespace.try_exists(&view.join("forbidden")).unwrap());
 }
+
+#[test]
+fn executable_rejects_uncontained_payload_before_execution() {
+    let marker = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_shoal"))
+        .args([
+            "in-slice",
+            "--slice",
+            "shoal-unconfigured-test.slice",
+            "--",
+            "/bin/sh",
+            "-c",
+            "touch \"$1\"",
+            "test",
+        ])
+        .arg(marker.path().join("must-not-exist"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside required slice"));
+    assert!(!marker.path().join("must-not-exist").exists());
+}
+
+#[tokio::test]
+#[ignore = "requires a configured user swarm.slice and tmux"]
+async fn executable_enters_slice_through_outside_tmux_server() {
+    use tidepool_node::systemd_slice::SystemdSlice;
+    use tidepool_node::{ProcessInvocation, TmuxLaunch, TmuxSession};
+    let slice = SystemdSlice::default();
+    let limits = slice.inspect().await.unwrap();
+    assert!(limits.memory_max > 0);
+    // An isolated server starts outside the selected slice, just like an existing
+    // operator server. Both scoped windows must explicitly enter the budget.
+    assert!(slice.current_membership().is_err());
+    let storage = tempfile::tempdir().unwrap();
+    let socket = format!("shoal-slice-test-{}", uuid::Uuid::new_v4().simple());
+    struct Server(String);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux")
+                .args(["-L", &self.0, "kill-server"])
+                .output();
+        }
+    }
+    let _server = Server(socket.clone());
+    let tmux = TmuxSession::with_socket("slice-acceptance", socket).unwrap();
+    let seed = tmux
+        .create(&TmuxLaunch {
+            window_name: "outside".into(),
+            cwd: storage.path().into(),
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 120".into()],
+            environment: Default::default(),
+            unset_environment: Default::default(),
+        })
+        .await
+        .unwrap();
+    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_shoal"));
+    for name in ["first", "second"] {
+        let launch = slice.scope(slice.verified_command(
+            executable,
+            ProcessInvocation {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "cat /proc/self/cgroup > \"$1\"; printf '%s' \"$2\" > \"$1.args\"".into(),
+                    "test".into(),
+                    storage.path().join(name).display().to_string(),
+                    "$HOME; literal value".into(),
+                ],
+            },
+        ));
+        tmux.spawn_window(&TmuxLaunch {
+            window_name: name.into(),
+            cwd: storage.path().into(),
+            program: launch.program,
+            args: launch.args,
+            environment: Default::default(),
+            unset_environment: Default::default(),
+        })
+        .await
+        .unwrap();
+    }
+    let observed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if ["first", "second"].iter().all(|name| {
+                std::fs::read_to_string(storage.path().join(format!("{name}.args")))
+                    .is_ok_and(|value| value == "$HOME; literal value")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let outside = tmux.pane_status(&seed).await;
+    tmux.kill().await.unwrap();
+    observed.expect("both independently scoped payloads must finish");
+    assert!(outside.unwrap().is_some_and(|status| !status.dead));
+    for name in ["first", "second"] {
+        let group = std::fs::read_to_string(storage.path().join(name)).unwrap();
+        let path = group.trim().strip_prefix("0::").unwrap();
+        assert!(slice.contains(std::path::Path::new(path)), "{group}");
+        assert_eq!(
+            std::fs::read_to_string(storage.path().join(format!("{name}.args"))).unwrap(),
+            "$HOME; literal value"
+        );
+    }
+}

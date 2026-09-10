@@ -13,6 +13,7 @@ const UNIT: &str = "shoal-command-resources.service";
 pub(super) async fn connect(
     policy: CommandResourcePolicy,
     run: &str,
+    slice: &tidepool_node::systemd_slice::SystemdSlice,
 ) -> Result<Arc<CommandResourceClient>> {
     policy.validate()?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -29,6 +30,7 @@ pub(super) async fn connect(
     lock.lock()?;
     let socket = directory.join("resources.sock");
     if socket.exists() {
+        verify_service_slice(slice).await?;
         return Ok(CommandResourceClient::connect(socket, run.into(), &policy).await?);
     }
     let active = tokio::process::Command::new("systemctl")
@@ -46,6 +48,7 @@ pub(super) async fn connect(
                 "--user",
                 "--quiet",
                 "--service-type=exec",
+                "--expand-environment=no",
                 "--property=Delegate=yes",
                 "--property=KillMode=process",
                 "--property=Restart=no",
@@ -53,6 +56,9 @@ pub(super) async fn connect(
                 "--unit",
                 UNIT,
             ])
+            .arg(format!("--slice={}", slice.as_str()))
+            .arg(std::env::current_exe()?)
+            .args(["in-slice", "--slice", slice.as_str(), "--"])
             .arg(std::env::current_exe()?)
             .arg("command-resources")
             .arg("--socket")
@@ -70,6 +76,7 @@ pub(super) async fn connect(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         if socket.exists() {
+            verify_service_slice(slice).await?;
             return Ok(CommandResourceClient::connect(socket, run.into(), &policy).await?);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -77,6 +84,18 @@ pub(super) async fn connect(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+async fn verify_service_slice(slice: &tidepool_node::systemd_slice::SystemdSlice) -> Result<()> {
+    let output = tokio::process::Command::new("systemctl")
+        .args(["--user", "show", UNIT, "--property=ControlGroup", "--value"])
+        .output()
+        .await?;
+    let group = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || !slice.contains(std::path::Path::new(group.trim())) {
+        return Err("shared command service is outside the selected slice; stop its runs before restarting it".into());
+    }
+    Ok(())
 }
 
 pub async fn serve(socket: PathBuf, policy: PathBuf) -> Result<()> {

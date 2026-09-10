@@ -14,8 +14,8 @@ a new swarm or validating a package change.
 
 `solTask` and `componentLead` inherit the current completed reasoning and use
 `boundHead`. `implement` uses `solTask`. They suit recursive implementation from
-an allocated checkout. Component leads explicitly select Medium; solTask/implement retain Low for bounded
-work (override for substantial implementation). Original-root callers use `solTaskFrom label projectHead`
+an allocated checkout. Component leads, solTask/implement and reviews explicitly select Medium;
+keep Sol effort stable across inherited forks. Original-root callers use `solTaskFrom label projectHead`
 or `componentLeadFrom label projectHead`. A Task's source hash records provenance;
 it does not override that live checkout selection. Commit coherent work for Git
 integration and restart recovery, even though ordinary unfold inherits working files.
