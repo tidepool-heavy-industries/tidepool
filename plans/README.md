@@ -27,7 +27,9 @@ archive).
 - [Persistent coordination actors](next/coordination-actors.md): replace progress
   watch rearming with typed sources and owned Haskell handlers, normal TUI steering,
   recoverable handler failure and atomic typed replacement; migrate the curated
-  dogfood helpers and prompts alongside the runtime.
+  dogfood helpers and prompts alongside the runtime. The
+  [next coordination pass](next/coordination-rsi.md) targets fluent effectful actor
+  routing, useful current views and scoped completion of the actual integration loop.
 - [Supervised interactive Codex applications](interactive-applications/README.md):
   complete option A implementation plans for full worker TUIs, exact native
   session binding, durable delivery, process custody, hosted completion and
