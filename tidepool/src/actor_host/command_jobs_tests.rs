@@ -170,7 +170,7 @@ async fn raw_bash_uses_compiled_handler_and_shared_command_owner() {
             thread_id: "raw-thread".into(),
             turn_id: "raw-turn".into(),
             call_id: "raw-once".into(),
-            namespace: Some("tidepool_actor".into()),
+            namespace: None,
         }),
     };
     let first = tokio::spawn(policy.dispatch_boxed(invocation.clone()));

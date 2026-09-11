@@ -26,7 +26,6 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
 const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
-const NAMESPACE: &str = "tidepool_actor";
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
 const DESCRIPTION_LIMIT: usize = 1024;
 pub(crate) const MODEL_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -176,7 +175,7 @@ impl HostDynamicToolService {
         for tool in endpoint.tools() {
             let kind = match tool {
                 HostedTool::Custom(tool) => {
-                    wire_tools.push(NamespaceTool::Custom {
+                    wire_tools.push(DynamicTool::Custom {
                         name: tool.name.clone(),
                         description: tool.description.clone(),
                         defer_loading: false,
@@ -184,7 +183,7 @@ impl HostDynamicToolService {
                     ToolKind::Custom
                 }
                 HostedTool::Function(tool) => {
-                    wire_tools.push(NamespaceTool::Function(DynamicToolFunctionSpec {
+                    wire_tools.push(DynamicTool::Function(DynamicToolFunctionSpec {
                         name: tool.name.clone(),
                         description: tool.description.clone(),
                         input_schema: tool.input_schema.clone(),
@@ -200,22 +199,12 @@ impl HostDynamicToolService {
         if wire_tools.is_empty() {
             return Err("resident tool registration is empty".into());
         }
-        let description = endpoint
-            .instructions()
-            .unwrap_or("Actor-scoped Tidepool tools")
-            .to_owned();
-        validate_description("dynamic-tool namespace", NAMESPACE, &description)?;
         for tool in endpoint.tools() {
             validate_description("dynamic tool", tool.name(), tool.description())?;
         }
         let registration = Registration {
             protocol_version: PROTOCOL_VERSION,
-            dynamic_tools: vec![DynamicTool::Namespace {
-                model_only: true,
-                name: NAMESPACE.into(),
-                description,
-                tools: wire_tools,
-            }],
+            dynamic_tools: wire_tools,
             scope: RegistrationScope::PrimaryThread,
             input_control_socket: None,
         };
@@ -314,24 +303,12 @@ enum RegistrationScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum DynamicTool {
-    Namespace {
-        #[serde(rename = "modelOnly")]
-        model_only: bool,
-        name: String,
-        description: String,
-        tools: Vec<NamespaceTool>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-enum NamespaceTool {
+enum DynamicTool {
     Custom {
         name: String,
         description: String,
@@ -592,7 +569,7 @@ enum HostToolFailure {
     UnsupportedProtocol { expected: u32, actual: u32 },
     #[error("dynamic-tool namespace mismatch: received {actual:?}; expected {expected:?}")]
     NamespaceMismatch {
-        expected: &'static str,
+        expected: Option<&'static str>,
         actual: Option<String>,
     },
     #[error("unknown actor-scoped tool `{0}`")]
@@ -686,9 +663,9 @@ async fn call(
             },
         ));
     }
-    if request.namespace.as_deref() != Some(NAMESPACE) {
+    if request.namespace.is_some() {
         return Json(CallResponse::failure(&HostToolFailure::NamespaceMismatch {
-            expected: NAMESPACE,
+            expected: None,
             actual: request.namespace,
         }));
     }
@@ -783,7 +760,7 @@ async fn call(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tidepool_actor::ResidentToolFuture;
     use tidepool_tool::{CustomToolDeclaration, ToolDeclaration};
@@ -909,23 +886,47 @@ mod tests {
             thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
             turn_id: "turn".into(),
             call_id: "call".into(),
-            namespace: Some(NAMESPACE.into()),
+            namespace: None,
             tool: "haskell".into(),
             arguments,
         }
     }
 
     #[test]
-    fn registration_is_namespaced_and_custom() {
+    fn registration_is_flat_and_custom() {
         let service = HostDynamicToolService::new(endpoint(), "/tmp/binding".into(), None).unwrap();
         let value = serde_json::to_value(&*service.state.registration).unwrap();
         assert_eq!(value["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(value["scope"], "primaryThread");
-        assert_eq!(value["dynamicTools"][0]["type"], "namespace");
-        assert_eq!(value["dynamicTools"][0]["name"], NAMESPACE);
-        assert_eq!(value["dynamicTools"][0]["modelOnly"], true);
-        assert_eq!(value["dynamicTools"][0]["tools"][0]["type"], "custom");
-        assert_eq!(value["dynamicTools"][0]["tools"][0]["name"], "haskell");
+        assert_eq!(
+            value["dynamicTools"],
+            serde_json::json!([{
+                "type": "custom", "name": "haskell", "description": "Run Haskell"
+            }])
+        );
+    }
+
+    #[test]
+    fn flat_registration_rejects_cross_kind_name_collisions() {
+        let duplicate = Arc::new(EchoEndpoint {
+            tools: vec![
+                HostedTool::Custom(CustomToolDeclaration {
+                    name: "execute".into(),
+                    description: "Raw".into(),
+                }),
+                HostedTool::Function(ToolDeclaration {
+                    name: "execute".into(),
+                    description: "Structured".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: None,
+                    kind: tidepool_tool::ToolKind::Call,
+                }),
+            ],
+        });
+        let error = HostDynamicToolService::new(duplicate, "/tmp/unused-binding".into(), None)
+            .err()
+            .expect("duplicate rejected before serving");
+        assert_eq!(error, "duplicate resident tool `execute`");
     }
 
     #[test]
@@ -1098,7 +1099,7 @@ mod tests {
                 thread_id: thread.into(),
                 turn_id: "turn".into(),
                 call_id: "call".into(),
-                namespace: Some(NAMESPACE.into()),
+                namespace: None,
                 tool: "haskell".into(),
                 arguments: serde_json::Value::String(source.into()),
             }),
@@ -1130,7 +1131,7 @@ mod tests {
         .unwrap();
         let registration = serde_json::to_value(&*service.state.registration).unwrap();
         assert_eq!(
-            registration["dynamicTools"][0]["tools"][0],
+            registration["dynamicTools"][0],
             serde_json::json!({
                 "type":"function", "name":"execute", "description":"Run a command",
                 "inputSchema":{"type":"object"},
@@ -1214,7 +1215,7 @@ mod tests {
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
-            "dynamic-tool namespace mismatch: received Some(\"wrong\"); expected \"tidepool_actor\""
+            "dynamic-tool namespace mismatch: received Some(\"wrong\"); expected None"
         );
 
         let mut request = call_request(serde_json::Value::String("pure ()".into()));
@@ -1276,7 +1277,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(registration["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(registration["dynamicTools"][0]["name"], NAMESPACE);
+        assert_eq!(registration["dynamicTools"][0]["name"], "haskell");
         let input = socket.with_file_name("input.sock");
         assert_eq!(registration["inputControlSocket"], serde_json::json!(input));
 
@@ -1288,7 +1289,7 @@ mod tests {
             "turnId": "turn-1",
             "callId": "call-1",
             "contextCallId": "outer-exec",
-            "namespace": NAMESPACE,
+            "namespace": null,
             "tool": "haskell",
             "arguments": source,
         });
@@ -1360,7 +1361,7 @@ mod tests {
         assert_eq!(receipt["turnId"], "turn-1");
         assert_eq!(receipt["callId"], "call-1");
         assert_eq!(receipt["contextCallId"], "outer-exec");
-        assert_eq!(receipt["namespace"], NAMESPACE);
+        assert!(receipt["namespace"].is_null());
 
         let conflict = client
             .post("http://localhost/v1/dynamic-tools/session")

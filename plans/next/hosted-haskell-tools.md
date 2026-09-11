@@ -13,6 +13,14 @@ another record through `[haskell] tools = "Project.Tools.tools"`. Declarations,
 argument schemas and dispatch are derived together; code freezes at startup.
 Invocations supply data to retained compiled functions, not generated source.
 
+Registration is flat: `haskell`, `bash`, `exec_command`, `write_stdin`, and
+`read_output` have no project namespace. Shoal disables native shell registration
+uniformly across fresh/resumed/forked actors; `apply_patch` remains. The generic
+interactive backend selects native or hosted shell ownership explicitly. Codex
+accepts external command names when unoccupied and rejects collisions; it does
+not silently replace an existing handler. Old live runs keep their frozen tools;
+there are no namespaced compatibility aliases in the new surface.
+
 `bashCommand :: Text -> Command` shares construction with the Bash quoter.
 Structured handlers compose start, bounded observation, input and read effects.
 `Cmd.observe` returns the current status normally; foreground `Cmd.run` retains

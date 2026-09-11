@@ -14,4 +14,4 @@ updateRequest clarifies an owned active response. respond value settles the
 request; ending the model response only ends the turn. Roots have no reply.
 Register a labeled watch, end the turn, and poll its retained handle on wake.
 Expand saved observations with their displayed expression.
-Use native tools for repository work.
+Use shell tools for repository work.

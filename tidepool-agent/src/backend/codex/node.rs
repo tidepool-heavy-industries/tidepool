@@ -495,6 +495,9 @@ fn command_for(
     ] {
         command.arg("--disable").arg(feature);
     }
+    if spec.shell_tools == crate::InteractiveShellTools::Hosted {
+        command.args(["--disable", "shell_tool"]);
+    }
     if spec.goal_policy == crate::InteractiveGoalPolicy::Disabled {
         command.arg("--disable").arg("goals");
     }
@@ -842,6 +845,7 @@ mod tests {
 
     fn spec(mode: InteractiveLaunchMode) -> InteractiveAgentSpec {
         InteractiveAgentSpec {
+            shell_tools: crate::InteractiveShellTools::Native,
             mode,
             goal_policy: crate::InteractiveGoalPolicy::Configured,
             model: Some("gpt-test".to_string()),
@@ -1126,6 +1130,38 @@ mod tests {
                         .any(|args| args == ["--disable", "goals"]),
                     policy == crate::InteractiveGoalPolicy::Disabled,
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn shell_owner_is_preserved_for_fresh_resumed_and_forked_launches() {
+        for mode in [
+            InteractiveLaunchMode::Fresh,
+            InteractiveLaunchMode::Resume(BackendThreadId(THREAD.into())),
+            InteractiveLaunchMode::Fork {
+                parent: BackendThreadId(THREAD.into()),
+                after_call: "call-1".into(),
+            },
+        ] {
+            for owner in [
+                crate::InteractiveShellTools::Native,
+                crate::InteractiveShellTools::Hosted,
+            ] {
+                let mut requested = spec(mode.clone());
+                requested.shell_tools = owner;
+                let command = command_for(&installation(), &requested).unwrap();
+                assert_eq!(
+                    command
+                        .args
+                        .windows(2)
+                        .any(|args| args == ["--disable", "shell_tool"]),
+                    owner == crate::InteractiveShellTools::Hosted
+                );
+                assert!(!command
+                    .args
+                    .windows(2)
+                    .any(|args| args == ["--disable", "apply_patch"]));
             }
         }
     }

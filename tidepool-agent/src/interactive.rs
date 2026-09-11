@@ -161,11 +161,19 @@ pub enum InteractiveGoalPolicy {
     Disabled,
 }
 
+/// Select the process-tool owner without changing filesystem authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractiveShellTools {
+    Native,
+    Hosted,
+}
+
 /// Backend-neutral configuration frozen when an interactive process starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveAgentSpec {
     pub mode: InteractiveLaunchMode,
     pub goal_policy: InteractiveGoalPolicy,
+    pub shell_tools: InteractiveShellTools,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     /// Host-owned, immutable base instructions shared across this run.

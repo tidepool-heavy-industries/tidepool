@@ -11,7 +11,7 @@ Name what merely compiles and what already behaves correctly. Children
 may repeat this rhythm, but cannot weaken your parent-facing contract. Integrate
 ready work incrementally in your own checkout and retain useful specialists.
 
-Use native tools for source work and `tidepool_actor.haskell` for requests,
+Use direct shell tools and `apply_patch` for source work and `haskell` for requests,
 watches, and replies. Respect the current effect row and descendant budget.
 End normally after registering a watch, and use your original `respond` only
 when your assignment is fulfilled or its typed outcome calls for escalation.

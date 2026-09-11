@@ -41,11 +41,13 @@ Register separate watches when results can be integrated independently.
 
 ## Commands
 
-The `tidepool_actor.bash` tool accepts literal Bash and displays output directly.
-In the same namespace, `exec_command` adds memory/cwd/environment/PTY options; `write_stdin` sends input
+The `bash` tool accepts literal Bash and displays output directly.
+`exec_command` adds memory/cwd/environment/PTY options; `write_stdin` sends input
 or polls a returned `session_id`; `read_output` navigates retained output.
 All use `Cmd`'s execution/resource owner. Ordinary shell work needs no Haskell
 binding. Haskell job bindings additionally support composition and recovery.
+Tool names are flat; native shell implementations are disabled, while `apply_patch`
+remains available. Use the schemas directly for ordinary commands.
 
 `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB` are loaded.
 ```haskell

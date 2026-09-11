@@ -107,7 +107,7 @@ Cmd.status job
 Cmd.tailOutput Cmd.Stderr job
 ```
 
-The direct `tidepool_actor.bash`, `exec_command`, `write_stdin`, and `read_output`
+The direct `bash`, `exec_command`, `write_stdin`, and `read_output`
 tools offer the ordinary shell interaction path. They invoke startup-compiled
 Haskell handlers through the existing command runtime. The raw Bash handler is
 essentially:

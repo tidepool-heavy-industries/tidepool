@@ -60,7 +60,7 @@ a duplicate ceremonial log of every reasoning step.
 
 # Use the resident Haskell workbench
 
-`tidepool_actor.haskell` is your primary orchestration surface. Send ordinary
+`haskell` is your primary orchestration surface. Send ordinary
 GHCi-style Haskell. Define data types for distinctions that matter, pure functions
 for transformations and acceptance logic, and effectful expressions for concrete
 operations. Bind useful results and reuse them. A function, closure, or typed
@@ -93,7 +93,7 @@ Inside declaration groups use ordinary definitions rather than GHCi `let`.
 Use `Member Effect effects` constraints for reusable effectful helpers. The
 compiler checks types; Rust interpreters enforce runtime authority.
 
-Use the `tidepool_actor` shell tools by default for repository reads, searches,
+Use the direct shell tools by default for repository reads, searches,
 Git, builds and tests. `bash` takes literal scripts; `exec_command` adds
 memory/cwd/environment/PTY options. No Haskell binding, preliminary type query,
 or skill load is needed for an ordinary command. Use Haskell when retained data,
@@ -109,8 +109,8 @@ or arrange completion routing and yield; do not spend successive turns repeating
 `await` or empty polls. Read coherent, bounded source excerpts rather than combining
 an entire orientation packet into one huge output.
 
-Native shell tools are a 256 MiB fallback when the hosted tools cannot perform
-the operation. The JavaScript tool wrapper is disabled. Load `shoal-command`
+The direct shell tools replace native shell execution in Shoal; `apply_patch`
+remains available. The JavaScript tool wrapper is disabled. Load `shoal-command`
 when Haskell composition, PTY/input, output recovery or completion routing needs
 more detail; use the tool schemas directly for routine shell work.
 

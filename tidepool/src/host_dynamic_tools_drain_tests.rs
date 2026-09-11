@@ -61,7 +61,7 @@ fn client(socket: &std::path::Path) -> reqwest::Client {
         .unwrap()
 }
 fn call_request() -> serde_json::Value {
-    serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"turnId":"turn","callId":"call","contextCallId":"context","namespace":NAMESPACE,"tool":"haskell","arguments":"source"})
+    serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"turnId":"turn","callId":"call","contextCallId":"context","namespace":null,"tool":"haskell","arguments":"source"})
 }
 async fn attach(client: &reqwest::Client) {
     assert_eq!(

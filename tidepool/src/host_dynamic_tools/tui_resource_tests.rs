@@ -16,6 +16,7 @@ struct Provider {
     requests: Arc<StdMutex<Vec<Value>>>,
     steps: Arc<Vec<Option<String>>>,
     work: PathBuf,
+    shell: tidepool_agent::InteractiveShellTools,
 }
 
 async fn response(
@@ -53,8 +54,15 @@ async fn response(
         json!({"type":"message", "role":"assistant", "id":"title",
             "content":[{"type":"output_text","text":"{\"title\":\"Exercise resource limits\"}"}]})
     } else if index == 0 {
-        json!({"type":"function_call", "call_id":"fallback-oom",
-            "name":"exec_command", "arguments":json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "yield_time_ms":1000,"max_output_tokens":1000}).to_string()})
+        let args = match provider.shell {
+            tidepool_agent::InteractiveShellTools::Native => {
+                json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "yield_time_ms":1000,"max_output_tokens":1000})
+            }
+            tidepool_agent::InteractiveShellTools::Hosted => {
+                json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "memory_mib":64,"yield_time_ms":30000})
+            }
+        };
+        json!({"type":"function_call", "call_id":"initial-oom", "name":"exec_command", "arguments":args.to_string()})
     } else if index == 20 || index == 21 {
         let script = if index == 20 {
             "cat <<'EOF'\nraw λ $(literal) [bash|data|]\nEOF\nprintf 'raw-stderr\\n' >&2\n"
@@ -62,7 +70,7 @@ async fn response(
             "printf 'once\\n' >> raw-start-count; printf 'RAW-BEGIN\\n'; head -c 96000 /dev/zero | tr '\\0' x; printf '\\nRAW-END\\n'; printf 'nonzero diagnostic\\n' >&2; exit 7"
         };
         json!({"type":"custom_tool_call", "call_id":format!("haskell-{index}"),
-            "name":"bash", "namespace":"tidepool_actor", "input":script})
+            "name":"bash", "input":script})
     } else if index == 22 {
         let requests = provider.requests.lock().unwrap();
         let receipt = requests[index]["input"]
@@ -82,10 +90,10 @@ async fn response(
             })
             .expect("large raw command installs an actual job binding");
         json!({"type":"custom_tool_call", "call_id":"haskell-22",
-            "name":"haskell", "namespace":"tidepool_actor",
+            "name":"haskell",
             "input":format!("rawPage <- Cmd.output {binding}\n(T.length (Cmd.pageText rawPage), T.take 9 (Cmd.pageText rawPage))")})
     } else if index == 23 {
-        json!({"type":"function_call", "call_id":"structured-23", "namespace":"tidepool_actor",
+        json!({"type":"function_call", "call_id":"structured-23",
             "name":"exec_command", "arguments":json!({"cmd":"printf once >> structured-count; touch structured-started; read -r line; printf 'structured:%s\\n' \"$line\"; printf 'structured-error\\n' >&2; exit 7", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
     } else if (24..=26).contains(&index) {
         let requests = provider.requests.lock().unwrap();
@@ -116,10 +124,10 @@ async fn response(
                 json!({"session_id":session,"stream":if index == 25 {"Stdout"} else {"Stderr"}}),
             )
         };
-        json!({"type":"function_call","call_id":format!("structured-{index}"),"namespace":"tidepool_actor",
+        json!({"type":"function_call","call_id":format!("structured-{index}"),
             "name":name,"arguments":arguments.to_string()})
     } else if index == 27 {
-        json!({"type":"function_call", "call_id":"structured-27", "namespace":"tidepool_actor",
+        json!({"type":"function_call", "call_id":"structured-27",
             "name":"exec_command", "arguments":json!({"cmd":"trap 'exit 42' INT; touch structured-interrupt-ready; while :; do sleep 1; done", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
     } else if index == 28 {
         let requests = provider.requests.lock().unwrap();
@@ -139,7 +147,7 @@ async fn response(
             .split_whitespace()
             .next()
             .unwrap();
-        json!({"type":"function_call", "call_id":"structured-28", "namespace":"tidepool_actor", "name":"write_stdin",
+        json!({"type":"function_call", "call_id":"structured-28", "name":"write_stdin",
             "arguments":json!({"session_id":session,"chars":"\u{3}","yield_time_ms":30000}).to_string()})
     } else if index == 18 {
         let requests = provider.requests.lock().unwrap();
@@ -159,11 +167,11 @@ async fn response(
         assert!(binding.starts_with("job") && binding[3..].chars().all(|c| c.is_ascii_digit()));
         std::fs::write(provider.work.join("release-foreground"), "release").unwrap();
         json!({"type":"custom_tool_call", "call_id":"haskell-18",
-            "name":"haskell", "namespace":"tidepool_actor",
+            "name":"haskell",
             "input":format!("recovered <- Cmd.await {binding}\nCmd.stdout recovered")})
     } else if let Some(Some(source)) = provider.steps.get(index) {
         json!({"type":"custom_tool_call", "call_id":format!("haskell-{index}"),
-            "name":"haskell", "namespace":"tidepool_actor", "input":source})
+            "name":"haskell", "input":source})
     } else {
         json!({"type":"message", "role":"assistant", "id":format!("message-{index}"),
             "content":[{"type":"output_text","text":format!("fixture-turn-{index}-done")}]})
@@ -211,6 +219,16 @@ impl Drop for NativeFixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires delegated cgroups, SHOAL_RESOURCE_CODEX_BIN and SHOAL_RESOURCE_HOST_BIN"]
 async fn full_tui_survives_command_oom_and_accepts_steering() {
+    run_shell_fixture(tidepool_agent::InteractiveShellTools::Hosted).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires delegated cgroups, SHOAL_RESOURCE_CODEX_BIN and SHOAL_RESOURCE_HOST_BIN"]
+async fn full_tui_native_shell_oom_remains_isolated() {
+    run_shell_fixture(tidepool_agent::InteractiveShellTools::Native).await;
+}
+
+async fn run_shell_fixture(shell: tidepool_agent::InteractiveShellTools) {
     use std::os::unix::fs::PermissionsExt;
     let native = PathBuf::from(
         std::env::var_os("SHOAL_RESOURCE_CODEX_BIN").expect("matched native executable"),
@@ -300,6 +318,7 @@ async fn full_tui_survives_command_oom_and_accepts_steering() {
         requests: Arc::new(StdMutex::new(Vec::new())),
         steps: Arc::new(steps),
         work: work.clone(),
+        shell,
     };
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = tcp.local_addr().unwrap();
@@ -316,6 +335,8 @@ model_provider = "fixture"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 tool_output_token_limit = 16384
+[features]
+shell_tool = {}
 [model_providers.fixture]
 name = "Fixture"
 base_url = "http://{address}/v1"
@@ -325,6 +346,7 @@ supports_websockets = false
 [projects.{}]
 trust_level = "trusted"
 "#,
+            shell == tidepool_agent::InteractiveShellTools::Native,
             toml::Value::String(work.display().to_string())
         ),
     )
@@ -333,7 +355,14 @@ trust_level = "trusted"
     let listener = UnixListener::bind(&socket).unwrap();
     let binding_path = temp.path().join("binding.json");
     let service = HostDynamicToolService::new(
-        campaign.root_installation.policy.clone(),
+        match shell {
+            tidepool_agent::InteractiveShellTools::Hosted => {
+                campaign.root_installation.policy.clone()
+            }
+            tidepool_agent::InteractiveShellTools::Native => {
+                crate::host_dynamic_tools::tests::endpoint()
+            }
+        },
         binding_path.clone(),
         None,
     )
@@ -475,7 +504,11 @@ trust_level = "trusted"
             }
         }
     });
-    for expected in [2, 6, 16, 20, 30] {
+    let phases: &[usize] = match shell {
+        tidepool_agent::InteractiveShellTools::Hosted => &[2, 6, 16, 20, 30],
+        tidepool_agent::InteractiveShellTools::Native => &[2],
+    };
+    for &expected in phases {
         let reached = tokio::time::timeout(
             Duration::from_secs(if expected == 2 { 90 } else { 600 }),
             async {
@@ -502,7 +535,7 @@ trust_level = "trusted"
         let requests = provider.requests.lock().unwrap().clone();
         let output = |index: usize| {
             let call = if index == 1 {
-                "fallback-oom".to_owned()
+                "initial-oom".to_owned()
             } else {
                 format!("haskell-{}", index - 1)
             };
@@ -528,28 +561,63 @@ trust_level = "trusted"
         };
         match expected {
             2 => {
-                assert!(output(1).contains("resource limit"), "{}", output(1));
+                let oom = match shell {
+                    tidepool_agent::InteractiveShellTools::Native => "resource limit",
+                    tidepool_agent::InteractiveShellTools::Hosted => "CommandOutOfMemory",
+                };
+                assert!(output(1).contains(oom), "{}", output(1));
                 assert!(
                     requests[0]["input"].to_string().contains(skill_description),
                     "command skill must appear in native skill discovery"
                 );
-                let tools = requests[0]["input"]
+                let tools = &requests[0]["input"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .find(|item| item["type"] == "additional_tools")
-                    .expect("native provider request advertises tools in its shared prefix")
-                    ["tools"]
-                    .to_string();
+                    .expect("native provider request advertises tools")["tools"];
+                let flat = tools
+                    .as_array()
+                    .expect("tool list")
+                    .iter()
+                    .find(|tool| tool["type"] == "namespace" && tool["name"] == "functions")
+                    .expect("default tools share Codex's functions group")["tools"]
+                    .as_array()
+                    .expect("default tool list");
+                for name in ["exec_command", "write_stdin", "haskell", "apply_patch"] {
+                    assert_eq!(
+                        flat.iter().filter(|tool| tool["name"] == name).count(),
+                        1,
+                        "{tools}"
+                    );
+                }
+                if shell == tidepool_agent::InteractiveShellTools::Hosted {
+                    for name in ["bash", "read_output"] {
+                        assert_eq!(
+                            flat.iter().filter(|tool| tool["name"] == name).count(),
+                            1,
+                            "{tools}"
+                        );
+                    }
+                    let exec = flat
+                        .iter()
+                        .find(|tool| tool["name"] == "exec_command")
+                        .unwrap();
+                    assert!(
+                        exec.to_string().contains("memory_mib"),
+                        "hosted schema required: {exec}"
+                    );
+                    assert!(
+                        !exec.to_string().contains("sandbox_permissions"),
+                        "native schema leaked: {exec}"
+                    );
+                }
+                assert!(!tools.to_string().contains("tidepool_actor"), "{tools}");
                 assert!(
-                    tools.contains("exec_command")
-                        && tools.contains("haskell")
-                        && tools.contains("bash"),
+                    !flat
+                        .iter()
+                        .any(|tool| tool["name"] == "exec" || tool["name"] == "shell_command"),
                     "{tools}"
-                );
-                assert!(
-                    !tools.contains("\"name\":\"exec\""),
-                    "JavaScript wrapper leaked: {tools}"
                 );
             }
             6 => {
@@ -680,7 +748,7 @@ trust_level = "trusted"
             _ => unreachable!(),
         }
         assert!(!tmux.pane_status(&pane).await.unwrap().unwrap().dead);
-        if expected != 30 {
+        if Some(&expected) != phases.last() {
             assert!(std::process::Command::new("tmux")
                 .args(["send-keys", "-t", pane.as_str(), "-l", "continue fixture"])
                 .status()

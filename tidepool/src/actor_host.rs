@@ -3024,6 +3024,7 @@ async fn launch_prepared_interactive_application(
         )
     };
     let spec = InteractiveAgentSpec {
+        shell_tools: tidepool_agent::InteractiveShellTools::Hosted,
         mode: launch_mode,
         // Shoal owns continuation on every node. Keep the native tool surface
         // identical across roots and forks, without inheriting native goals.

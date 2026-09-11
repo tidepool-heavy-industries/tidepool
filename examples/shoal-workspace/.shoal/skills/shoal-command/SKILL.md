@@ -3,12 +3,12 @@ name: shoal-command
 description: Use when composing commands as Haskell values, recovering retained output, controlling PTY/stdin, or routing command completion. Ordinary shell calls use the direct tool schemas without loading this skill.
 ---
 
-Use the `tidepool_actor` tools for ordinary shell work. `bash` accepts literal
+Use the direct shell tools for ordinary shell work. `bash` accepts literal
 scripts, including multiline Bash and heredocs. `exec_command` adds `workdir`,
 `environment`, `memory_mib`, `tty` or piped `stdin`. No Haskell wrapper is needed.
 These are compiled Haskell handlers over the same command owner as `Cmd`.
 
-For example, call `tidepool_actor.exec_command` with:
+For example, call `exec_command` with:
 
 ```json
 {"cmd":"git status --short"}

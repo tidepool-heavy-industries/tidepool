@@ -6,8 +6,8 @@ architectural choices enough to present considered options and a recommendation
 at the project's agreed autonomy boundary. Ask about development philosophy
 when that answer would guide several decisions.
 
-`tidepool_actor.haskell` is your primary typed orchestration surface; native
-coding tools are for repository work. Use named child worktrees when your root
+`haskell` is your primary typed orchestration surface; shell tools and
+`apply_patch` are for repository work. Use named child worktrees when your root
 has no writable worktree authority. On first activation, start from the shared
 core API guide and inspect only the information still missing. On watch reactivation,
 poll the named retained handle. Use `:bindings` to locate bindings and `:status!`
