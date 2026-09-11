@@ -6,8 +6,9 @@
 //! fork's HTTP/1.1-over-UDS host dynamic-tool boundary.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -26,6 +27,9 @@ use tidepool_model::ProviderObservation;
 
 #[path = "active_update.rs"]
 mod active_update;
+#[allow(dead_code)]
+#[path = "input_control.rs"]
+mod input_control;
 #[path = "rollout_usage.rs"]
 mod rollout_usage;
 
@@ -114,7 +118,7 @@ pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, Agen
             detail: "interactive Codex returned an empty version".into(),
         }
     })?;
-    Ok(InteractiveAgentInstallation::new(executable, version))
+    installation(executable, version)
 }
 
 /// Reconstitute an installation already verified by Shoal's parent process.
@@ -135,61 +139,73 @@ pub fn installation_from_parts(
             detail: "interactive Codex version is empty".into(),
         });
     }
-    Ok(InteractiveAgentInstallation::new(executable, version))
+    installation(executable, version)
+}
+
+fn installation(
+    executable: PathBuf,
+    version: String,
+) -> Result<InteractiveAgentInstallation, AgentBackendError> {
+    let executable_sha256 = hash_executable(&executable)?;
+    let package_root = executable
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "bin"))
+        .and_then(Path::parent)
+        .map(Path::to_owned);
+    Ok(InteractiveAgentInstallation::new(
+        executable,
+        version,
+        executable_sha256,
+        package_root,
+    ))
+}
+
+fn hash_executable(executable: &Path) -> Result<String, AgentBackendError> {
+    let file = std::fs::File::open(executable)
+        .map_err(|error| unavailable("hash interactive Codex executable", error))?;
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| unavailable("hash interactive Codex executable", error))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let bytes = digest.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[(byte >> 4) as usize]));
+        encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    Ok(encoded)
 }
 
 fn resolve_executable() -> Result<PathBuf, AgentBackendError> {
-    resolve_executable_from(
-        std::env::var_os(ENV_INTERACTIVE_CODEX_BIN),
-        std::env::var_os("PATH"),
-    )
+    resolve_executable_from(std::env::var_os(ENV_INTERACTIVE_CODEX_BIN))
 }
 
-fn resolve_executable_from(
-    configured: Option<OsString>,
-    search_path: Option<OsString>,
-) -> Result<PathBuf, AgentBackendError> {
-    if let Some(configured) = configured {
-        let path = PathBuf::from(configured);
-        if !path.is_absolute() || !is_readable_executable_file(&path) {
-            return Err(AgentBackendError::BackendUnavailable {
-                detail: format!(
-                    "{ENV_INTERACTIVE_CODEX_BIN} must name an absolute readable executable file: {}",
-                    path.display()
-                ),
-            });
-        }
-        return std::fs::canonicalize(&path)
-            .map_err(|error| unavailable("canonicalize interactive Codex", error));
-    }
-
-    let path = search_path.ok_or_else(|| AgentBackendError::BackendUnavailable {
-        detail: format!("{ENV_INTERACTIVE_CODEX_BIN} is unset and PATH is unavailable"),
-    })?;
-    for directory in std::env::split_paths(&path) {
-        for name in executable_names() {
-            let candidate = directory.join(name);
-            if is_readable_executable_file(&candidate) {
-                return std::fs::canonicalize(&candidate)
-                    .map_err(|error| unavailable("canonicalize interactive Codex", error));
-            }
-        }
-    }
-    Err(AgentBackendError::BackendUnavailable {
+fn resolve_executable_from(configured: Option<OsString>) -> Result<PathBuf, AgentBackendError> {
+    let configured = configured.ok_or_else(|| AgentBackendError::BackendUnavailable {
         detail: format!(
-            "interactive Codex was not found; set {ENV_INTERACTIVE_CODEX_BIN} to the custom build"
+            "{ENV_INTERACTIVE_CODEX_BIN} must explicitly name the pinned interactive Codex executable"
         ),
-    })
-}
-
-#[cfg(windows)]
-fn executable_names() -> &'static [&'static str] {
-    &["codex.exe", "codex"]
-}
-
-#[cfg(not(windows))]
-fn executable_names() -> &'static [&'static str] {
-    &["codex"]
+    })?;
+    let path = PathBuf::from(configured);
+    if !path.is_absolute() || !is_readable_executable_file(&path) {
+        return Err(AgentBackendError::BackendUnavailable {
+            detail: format!(
+                "{ENV_INTERACTIVE_CODEX_BIN} must name an absolute readable executable file: {}",
+                path.display()
+            ),
+        });
+    }
+    std::fs::canonicalize(&path)
+        .map_err(|error| unavailable("canonicalize interactive Codex", error))
 }
 
 async fn require_probe(
@@ -258,6 +274,56 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     ) -> InteractiveFuture<'a, crate::NativeCommandReply> {
         Box::pin(super::commands::request(thread, id, operation))
     }
+
+    fn bind_input<'a>(&'a self, thread: &'a QueueReadyThread) -> crate::InteractiveInputFuture<'a> {
+        Box::pin(input_control::bind(thread))
+    }
+
+    fn submit_input<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        envelope: &'a crate::InteractiveInputEnvelope,
+    ) -> crate::InteractiveInputFuture<'a> {
+        Box::pin(input_control::submit(thread, envelope))
+    }
+
+    fn query_input<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        id: &'a crate::InputOperationId,
+    ) -> crate::InteractiveInputFuture<'a> {
+        Box::pin(input_control::query(thread, id))
+    }
+
+    fn withdraw_input<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        id: &'a crate::InputOperationId,
+    ) -> crate::InteractiveInputFuture<'a> {
+        Box::pin(input_control::withdraw(thread, id))
+    }
+
+    fn seal_input_producer<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        producer: &'a crate::InputProducerId,
+    ) -> crate::InputProducerControlFuture<'a> {
+        Box::pin(input_control::seal(thread, producer))
+    }
+
+    fn acknowledge_input_prefix<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        producer: &'a crate::InputProducerId,
+        through_sequence: std::num::NonZeroU64,
+    ) -> crate::InputProducerControlFuture<'a> {
+        Box::pin(input_control::acknowledge(
+            thread,
+            producer,
+            through_sequence,
+        ))
+    }
+
     fn workspace_publication<'a>(
         &'a self,
         thread: &'a QueueReadyThread,
@@ -830,6 +896,8 @@ fn unavailable(operation: &str, error: impl std::fmt::Display) -> AgentBackendEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     const THREAD: &str = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
 
@@ -837,7 +905,30 @@ mod tests {
         InteractiveAgentInstallation::new(
             PathBuf::from("/nix/store/custom-codex/bin/codex"),
             "codex 1".into(),
+            "fixture-sha256".into(),
+            Some(PathBuf::from("/nix/store/custom-codex")),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_records_exact_executable_and_package_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let package = directory.path().join("codex-package");
+        let bin = package.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join("codex");
+        std::fs::write(&executable, b"fixture executable bytes").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let installation = installation_from_parts(executable.clone(), "codex fixture".into())
+            .expect("readable fixture installation");
+        assert_eq!(installation.executable(), executable);
+        assert_eq!(installation.package_root(), Some(package.as_path()));
+        assert_eq!(
+            installation.executable_sha256(),
+            "f67bea1e29bf7fa00d04549495d9d5d3bf5fc92aa36a59fc471f792d6c8b153c"
+        );
     }
 
     fn spec(mode: InteractiveLaunchMode) -> InteractiveAgentSpec {
@@ -1170,12 +1261,22 @@ mod tests {
 
     #[test]
     fn invalid_explicit_binary_never_falls_through_to_path() {
-        let error = resolve_executable_from(
-            Some(OsString::from("relative-codex")),
-            Some(std::env::var_os("PATH").unwrap_or_default()),
-        )
-        .unwrap_err();
+        let error = resolve_executable_from(Some(OsString::from("relative-codex"))).unwrap_err();
         assert!(error.to_string().contains(ENV_INTERACTIVE_CODEX_BIN));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unset_explicit_binary_rejects_a_readable_path_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let candidate = directory.path().join("codex");
+        std::fs::write(&candidate, b"fixture executable").unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_readable_executable_file(&candidate));
+
+        let error = resolve_executable_from(None).unwrap_err();
+        assert!(error.to_string().contains(ENV_INTERACTIVE_CODEX_BIN));
+        assert!(error.to_string().contains("explicitly name the pinned"));
     }
 
     #[test]

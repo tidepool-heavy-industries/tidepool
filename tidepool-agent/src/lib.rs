@@ -28,11 +28,15 @@ pub use backend::codex::node::{
 pub use backend::codex::trust_interactive_project;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
-    InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentInstallation,
-    InteractiveAgentSpec, InteractiveFuture, InteractiveGoalPolicy, InteractiveLaunchMode,
+    InputAdmission, InputEnvelopeError, InputOperationId, InputProducerControlFuture,
+    InputProducerControlOutcome, InputProducerId, InputPurpose, InteractiveAgentBackend,
+    InteractiveAgentCommand, InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture,
+    InteractiveGoalPolicy, InteractiveInputEnvelope, InteractiveInputError, InteractiveInputFuture,
+    InteractiveInputMode, InteractiveInputTarget, InteractiveLaunchId, InteractiveLaunchMode,
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    NativeCommandOperation, NativeCommandReply, QueueReadyThread, UpdatePresentationError,
-    UpdatePresentationFuture,
+    InteractiveSessionBinding, NativeApplicationInstance, NativeCommandOperation,
+    NativeCommandReply, NativeSessionGeneration, QueueReadyThread, UpdatePresentationError,
+    UpdatePresentationFuture, MAX_INTERACTIVE_INPUT_BYTES,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
