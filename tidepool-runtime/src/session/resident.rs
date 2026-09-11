@@ -1320,14 +1320,6 @@ where
         self.core.is_bootstrapped()
     }
 
-    /// Typed machine-integrity observation for the host reentry boundary.
-    /// Registry ownership remains outside this value, so callers must still
-    /// acquire an ordinary checkout before executing anything.
-    #[must_use]
-    pub fn machine_disposition(&self) -> Option<tidepool_codegen::jit_machine::MachineDisposition> {
-        self.core.machine_disposition()
-    }
-
     #[must_use]
     pub fn data_con_table(&self) -> &DataConTable {
         self.core.session_table()

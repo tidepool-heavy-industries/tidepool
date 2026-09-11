@@ -274,12 +274,6 @@ impl PersistentSession {
         self.machine.as_mut()
     }
 
-    fn ensure_machine_reusable(&self) -> Result<(), JitError> {
-        self.machine
-            .as_ref()
-            .map_or(Ok(()), JitEffectMachine::ensure_reusable)
-    }
-
     /// Cancellation handle for this capacity-one registry realm.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
         self.machine
@@ -357,7 +351,6 @@ impl PersistentSession {
         expr: &CoreExpr,
         table: &DataConTable,
     ) -> Result<(), JitError> {
-        self.ensure_machine_reusable()?;
         if self.machine.is_none() {
             self.machine = Some(JitEffectMachine::compile_session(
                 expr,
@@ -409,7 +402,6 @@ impl PersistentSession {
         expr: &CoreExpr,
         env: &ExternalEnv,
     ) -> Result<FuncId, JitError> {
-        self.ensure_machine_reusable()?;
         self.turn_counter += 1;
         let frag_name = format!("{name_hint}_{}", self.turn_counter);
         let PersistentSession {
@@ -435,7 +427,6 @@ impl PersistentSession {
         expr: &CoreExpr,
         env: &ExternalEnv,
     ) -> Result<FuncId, JitError> {
-        self.ensure_machine_reusable()?;
         self.turn_counter += 1;
         let frag_name = format!("{name_hint}_child_{}", self.turn_counter);
         let PersistentSession {
@@ -463,7 +454,6 @@ impl PersistentSession {
         run_table: &DataConTable,
         env: &ExternalEnv,
     ) -> Result<FuncId, JitError> {
-        self.ensure_machine_reusable()?;
         self.turn_counter += 1;
         let frag_name = format!("{name_hint}_{}", self.turn_counter);
         #[allow(
@@ -574,7 +564,6 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        self.ensure_machine_reusable()?;
         let id = self
             .active_continuation
             .ok_or(JitError::InvalidSuspensionState(
@@ -613,7 +602,6 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -645,7 +633,6 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -704,7 +691,6 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -756,7 +742,6 @@ impl PersistentSession {
     /// Pure means no effects, hence no `Ask`, hence no suspension — this is the
     /// one run entry with no `resume_*` sibling.
     pub fn run_funcid_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
-        self.ensure_machine_reusable()?;
         #[allow(
             clippy::expect_used,
             reason = "machine bootstrapped before run_funcid_pure"
@@ -785,7 +770,6 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -852,7 +836,6 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -918,7 +901,6 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"

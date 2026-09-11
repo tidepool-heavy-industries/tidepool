@@ -1255,7 +1255,6 @@ impl<H, O> ResidentActorRunner<H, O> {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        use tidepool_codegen::jit_machine::MachineDisposition;
         use tidepool_runtime::session::{ResidentSessionState, SlotKind};
 
         match self.access.machines.kind(session) {
@@ -1265,15 +1264,14 @@ impl<H, O> ResidentActorRunner<H, O> {
             Some(SlotKind::Idle | SlotKind::Suspended) => self
                 .access
                 .machines
-                .peek(session, |resident| resident.machine_disposition())
-                .map_or(
-                    ResidentSessionState::Running,
-                    |disposition| match disposition {
-                        None => ResidentSessionState::Uninitialized,
-                        Some(MachineDisposition::Reusable) => ResidentSessionState::Reusable,
-                        Some(MachineDisposition::Unavailable) => ResidentSessionState::Unavailable,
-                    },
-                ),
+                .peek(session, |resident| resident.is_bootstrapped())
+                .map_or(ResidentSessionState::Running, |bootstrapped| {
+                    if bootstrapped {
+                        ResidentSessionState::Reusable
+                    } else {
+                        ResidentSessionState::Uninitialized
+                    }
+                }),
         }
     }
 
