@@ -146,6 +146,7 @@ struct ObservedEndpoint {
     inner: Arc<dyn ResidentToolEndpoint>,
     started: AtomicBool,
     changed: Notify,
+    cancellations: Arc<StdMutex<Vec<String>>>,
 }
 
 impl ObservedEndpoint {
@@ -154,6 +155,7 @@ impl ObservedEndpoint {
             inner,
             started: AtomicBool::new(false),
             changed: Notify::new(),
+            cancellations: Arc::new(StdMutex::new(Vec::new())),
         })
     }
 
@@ -201,7 +203,20 @@ impl ResidentToolEndpoint for ObservedEndpoint {
                 > + Send,
         >,
     > {
-        self.inner.cancel_workbench_boxed(invocation)
+        let cancellations = Arc::clone(&self.cancellations);
+        cancellations
+            .lock()
+            .unwrap()
+            .push(format!("request {invocation:?}"));
+        let cancel = self.inner.cancel_workbench_boxed(invocation);
+        Box::pin(async move {
+            let result = cancel.await;
+            cancellations
+                .lock()
+                .unwrap()
+                .push(format!("outcome {result:?}"));
+            result
+        })
     }
 
     fn reattach_boxed(&self) -> ResidentToolFuture {
@@ -241,6 +256,7 @@ impl TmuxSession {
                 .arg("env")
                 .arg(format!("CODEX_HOME={}", home.display()))
                 .arg("OPENAI_API_KEY=fixture")
+                .arg("RUST_LOG=codex_tui=trace")
                 .arg(native)
                 .arg("--no-alt-screen")
                 .arg("--host-dynamic-tools-socket")
@@ -301,6 +317,7 @@ struct Fixture {
     observed: Arc<ObservedEndpoint>,
     tui: TmuxSession,
     binding: PathBuf,
+    home: PathBuf,
     native: PathBuf,
 }
 
@@ -371,6 +388,7 @@ trust_level = "trusted"
             observed,
             tui,
             binding,
+            home,
             native,
         }
     }
@@ -405,7 +423,15 @@ trust_level = "trusted"
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("provider request timeout\n{}", self.tui.capture()))
+        .unwrap_or_else(|_| {
+            panic!(
+                "provider request timeout\n{}\ncancellation trace: {:?}\nnative log:\n{}",
+                self.tui.capture(),
+                self.observed.cancellations.lock().unwrap(),
+                std::fs::read_to_string(self.home.join("log/codex-tui.log"))
+                    .unwrap_or_else(|error| format!("unavailable: {error}"))
+            )
+        })
     }
 
     async fn shutdown(self) {
@@ -469,8 +495,19 @@ async fn submit_host_input(
         ingress.marker().as_bytes().to_vec(),
     )
     .unwrap();
+    let admission = backend
+        .submit_input(thread, &input)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "native input failed: {error}\ncancellation trace: {:?}\nnative log:\n{}",
+                fixture.observed.cancellations.lock().unwrap(),
+                std::fs::read_to_string(fixture.home.join("log/codex-tui.log"))
+                    .unwrap_or_else(|read_error| format!("unavailable: {read_error}"))
+            )
+        });
     assert!(matches!(
-        backend.submit_input(thread, &input).await.unwrap(),
+        admission,
         InputAdmission::Admitted | InputAdmission::Dispatching | InputAdmission::Presented
     ));
 }
