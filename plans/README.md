@@ -40,7 +40,7 @@ archive).
   matched native/resident acceptance and release.
 - [Haskell-backed native tools](next/hosted-haskell-tools.md): frozen typed
   handlers beside the workbench, raw Bash without per-call compilation, and
-  native shell interaction parity through the existing command owner.
+  native-quality execution, session input and output reads through the existing command owner.
 - [Resident sleep](next/resident-sleep.md): next-wave MVP for a fifteen-minute
   suspended Haskell call with no intermediate inference, normal interruption,
   and continuation-based composition. Proposed alongside Codex-use wrapup.

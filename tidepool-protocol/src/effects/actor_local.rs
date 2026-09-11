@@ -36,6 +36,7 @@ pub fn actor_local() -> Effect {
         type_defs: vec![TypeDef {
             name: "ActorInputOrigin",
             wire_rust: None,
+            core_module: None,
             shape: TypeShape::Sum { variants: vec![
                 SumVariant { ctor: "ActorStartup", fields: VariantFields::Positional(vec![]), doc: &[] },
                 SumVariant { ctor: "ActorMessageFrom", fields: VariantFields::Positional(vec![HsType::Tuple(vec![HsType::Int, HsType::Int])]), doc: &[] },

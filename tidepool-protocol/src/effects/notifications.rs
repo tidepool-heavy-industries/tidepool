@@ -28,6 +28,7 @@ fn sum(name: &'static str, variants: Vec<SumVariant>) -> TypeDef {
     TypeDef {
         name,
         wire_rust: None,
+        core_module: None,
         shape: TypeShape::Sum { variants },
         json: JsonInstance::None,
         derives: WireDerives(&[]),

@@ -4,7 +4,7 @@ use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation};
 
 #[tokio::test]
 async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindings() {
-    let campaign = TestCampaign::start_with_config(
+    let mut campaign = TestCampaign::start_with_config(
         tidepool_actor::ResearchPolicy::default(), |admission| admission,
         |config| {
             let directory = config.workspace.join(".shoal");
@@ -15,7 +15,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
             config.workspace_inputs = Some(crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root).unwrap());
         },
     ).await;
-    let policy = &campaign.root_installation.policy;
+    let policy = campaign.root_installation.policy.clone();
     // The running dispatcher uses captured source, even if authored files change.
     std::fs::write(
         campaign._repository.path().join(".shoal/Project/Tools.hs"),
@@ -70,6 +70,48 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         .unwrap();
     let text = huge["items"][0]["output"].as_str().unwrap();
     assert!(text.len() <= 32 * 1024, "UTF-8 bytes: {}", text.len());
+    let running = tokio::spawn(call(
+        "launch",
+        ToolArguments::Structured(serde_json::json!({"cmd":"custom", "yield_time_ms":30000})),
+    ));
+    let backend = super::command_jobs_tests::TestCommands::completed("custom-handler-output");
+    super::command_jobs_tests::backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend));
+    let launched = running.await.unwrap().unwrap();
+    assert_eq!(launched["status"], "committed", "{launched}");
+    let text = launched["items"][0]["output"].as_str().unwrap();
+    assert!(
+        text.contains("custom-handler-output") && text.contains("handler continued"),
+        "{text}"
+    );
+    let session = text
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let observed = call(
+        "follow_process",
+        ToolArguments::Structured(serde_json::json!({"session_id":session,"yield_time_ms":0})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(observed["status"], "committed", "{observed}");
+    let page = call(
+        "read_log",
+        ToolArguments::Structured(serde_json::json!({"session_id":session})),
+    )
+    .await
+    .unwrap();
+    assert!(
+        page["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("custom-handler-output"),
+        "{page}"
+    );
     let haskell = dispatch_haskell_script(policy.as_ref(), "40 + 2 :: Int").await;
     assert_eq!(haskell["items"][0]["output"], "42");
     campaign.forest.shutdown().await;

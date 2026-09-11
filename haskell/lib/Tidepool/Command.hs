@@ -24,6 +24,8 @@ module Tidepool.Command
     start,
     run,
     await,
+    Observation (..),
+    observe,
     quiet,
     job,
     status,
@@ -36,6 +38,8 @@ module Tidepool.Command
     output,
     next,
     readOutput,
+    readPage,
+    CommandPosition (..),
     tailOutput,
     nextPage,
     pageText,
@@ -67,12 +71,12 @@ import Tidepool.Effects.Core
   ( CommandCleanup (..),
     CommandError (..),
     CommandInput (..),
-    CommandOutcome (..),
     CommandObservation (..),
-    CommandPresentation (..),
+    CommandOutcome (..),
     CommandOutput (..),
     CommandPage (..),
     CommandPosition (..),
+    CommandPresentation (..),
     CommandResult (..),
     CommandSpec (..),
     CommandStatus (..),
@@ -84,6 +88,10 @@ import Tidepool.QQ.Bash (bash)
 
 data RunResult
   = Finished {completedJob :: Job, commandResult :: CommandResult, capturedOutput :: CommandOutput}
+  deriving (Eq, Show)
+
+-- | Bounded observation, independent of the lifetime of the process.
+data Observation = Observation {waitMilliseconds :: Int, outputBytes :: Int}
   deriving (Eq, Show)
 
 data OutputIssue
@@ -119,8 +127,20 @@ await :: (Member Commands effects) => Job -> Eff effects RunResult
 await retained@(Job key) = do
   observation <- checked <$> send (CommandForegroundWith key)
   let result = Finished retained (observedCommandResult observation) (observedCommandOutput observation)
-  send (CommandPresentWith key (CommandVisible (resultHeading (commandResult result))))
+  send (CommandPresentWith key (CommandVisible (resultHeading (commandResult result) <> " · session_id: " <> key) 65536))
   pure result
+
+-- | Wait briefly and display newly available output, retaining the same job.
+-- Unlike foreground 'await', an observation deadline returns the live status
+-- normally, so authored handlers can continue composing effects.
+observe :: (Member Commands effects) => Observation -> Job -> Eff effects CommandStatus
+observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job key) = do
+  current <- checked <$> send (CommandAwaitWith key milliseconds)
+  let heading = case current of
+        CommandFinished result -> resultHeading result
+        _ -> T.pack (show current)
+  send (CommandPresentWith key (CommandVisible (heading <> " · session_id: " <> key) bytes))
+  pure current
 
 -- | Suppress routine command output within this computation, without changing
 -- command execution, retained results, or necessary background-handoff receipts.

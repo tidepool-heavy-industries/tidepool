@@ -235,6 +235,12 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
     }
     out.push_str(&t.derives.render());
     out.push('\n');
+    if let Some(module) = t
+        .core_module
+        .filter(|_| !matches!(t.shape, TypeShape::Sum { .. }))
+    {
+        out.push_str(&format!("#[core(module = \"{module}\")]\n"));
+    }
     if t.needs_core_name() {
         out.push_str(&format!("#[core(name = \"{}\")]\n", t.name));
     }
@@ -259,6 +265,9 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
             for v in variants {
                 for line in v.doc {
                     out.push_str(&format!("    /// {line}\n"));
+                }
+                if let Some(module) = t.core_module {
+                    out.push_str(&format!("    #[core(module = \"{module}\")]\n"));
                 }
                 match &v.fields {
                     VariantFields::Positional(fields) if fields.is_empty() => {

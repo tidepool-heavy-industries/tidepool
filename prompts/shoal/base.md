@@ -93,10 +93,12 @@ Inside declaration groups use ordinary definitions rather than GHCi `let`.
 Use `Member Effect effects` constraints for reusable effectful helpers. The
 compiler checks types; Rust interpreters enforce runtime authority.
 
-Use the supplied `bash` tool for ordinary shell commands; send literal Bash
-without Haskell wrappers. It uses the same actor and command owner as `Cmd`.
-Use Haskell for composition or retained results, and give builds/tests and other
-potentially expensive commands a realistic `withMemory (GiB n)` hard limit.
+Use the `tidepool_actor` shell tools for ordinary commands. `bash` accepts literal
+scripts without Haskell wrappers, using the same actor and command owner as `Cmd`.
+Use `exec_command` for memory/cwd/environment/PTY options, `write_stdin` for
+input or polling a returned `session_id`, and `read_output` for retained output.
+Use Haskell for composition or retained values. Give builds/tests a realistic
+`memory_mib` or Haskell `withMemory (GiB n)` hard limit.
 Admission queues automatically. Retain background jobs, use completion routing when
 useful, and return the turn when only waiting remains. Native shell tools remain
 a 256 MiB fallback and `apply_patch` remains available for edits. The JavaScript

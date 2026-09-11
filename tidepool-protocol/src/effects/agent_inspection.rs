@@ -25,20 +25,20 @@ pub fn agent_inspection() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
-                name: "ObservationShareResult", wire_rust: None,
+                name: "ObservationShareResult", wire_rust: None, core_module: None,
                 shape: TypeShape::Sum { variants: ["ObservationShared", "ObservationRecipientUnavailable", "ObservationScopeUnavailable", "ObservationUnauthorized"]
                     .into_iter().map(|name| variant(name, vec![])).collect() },
                 json: JsonInstance::None, derives: NO_WIRE, domain: None,
                 doc: &["Observation sharing never grants mutation or lifecycle control."],
             },
             TypeDef {
-                name: "ProviderFailureKind", wire_rust: None,
+                name: "ProviderFailureKind", wire_rust: None, core_module: None,
                 shape: TypeShape::Sum { variants: vec![variant("RequestRejected", vec![]),
                     variant("TransportFailed", vec![]), variant("OtherProviderFailure", vec![HsType::Text])] },
                 json: JsonInstance::None, derives: NO_WIRE, domain: None, doc: &[],
             },
             TypeDef {
-                name: "ProviderHealth", wire_rust: None,
+                name: "ProviderHealth", wire_rust: None, core_module: None,
                 shape: TypeShape::Sum { variants: vec![
                     variant("ProviderUnknown", vec![]), variant("ProviderActive", vec![]),
                     variant("ProviderSucceeded", vec![]), variant("ProviderInterrupted", vec![]),
@@ -46,7 +46,7 @@ pub fn agent_inspection() -> Effect {
                 ] }, json: JsonInstance::None, derives: NO_WIRE, domain: None, doc: &[],
             },
             TypeDef {
-                name: "AgentDisposition", wire_rust: None,
+                name: "AgentDisposition", wire_rust: None, core_module: None,
                 shape: TypeShape::Sum { variants: vec![
                     variant("Working", vec![]), variant("NeedsAttention", vec![]),
                     variant("SettledAwaitingProvider", vec![]), variant("IdleRetained", vec![]),
@@ -56,6 +56,7 @@ pub fn agent_inspection() -> Effect {
             TypeDef {
                 name: "CacheBoundaryReason",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         variant("CacheFresh", vec![]),
@@ -72,6 +73,7 @@ pub fn agent_inspection() -> Effect {
             TypeDef {
                 name: "AgentRosterState",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         variant("RosterRunning", vec![]),
@@ -88,6 +90,7 @@ pub fn agent_inspection() -> Effect {
             TypeDef {
                 name: "AgentWorkbenchTransfer",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         variant("WorkbenchReplyTransfer", vec![]),
@@ -102,6 +105,7 @@ pub fn agent_inspection() -> Effect {
             TypeDef {
                 name: "AgentWorkbenchPosture",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         variant("WorkbenchIdle", vec![]),
@@ -127,6 +131,7 @@ pub fn agent_inspection() -> Effect {
             TypeDef {
                 name: "AgentRosterEntry",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Record {
                     fields: vec![
                         field("rosterActorId", HsType::Int),
@@ -191,6 +196,7 @@ pub fn agent_inspection() -> Effect {
             TypeDef {
                 name: "AgentForgetOutcome",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         variant("AgentForgotten", vec![]),

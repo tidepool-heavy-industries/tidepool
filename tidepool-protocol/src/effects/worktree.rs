@@ -40,6 +40,7 @@ fn identity(
     TypeDef {
         name,
         wire_rust: Some(wire_rust),
+        core_module: None,
         shape: TypeShape::Identity {
             payload: IdentityPayload::Text,
             hs_binder: "t",
@@ -171,6 +172,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeSource",
             wire_rust: Some("WtWorktreeSource"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -205,6 +207,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "DirtyPolicy",
             wire_rust: Some("WtDirtyPolicy"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -237,6 +240,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeSpec",
             wire_rust: Some("WtWorktreeSpec"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -273,6 +277,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "InProgressKind",
             wire_rust: Some("WtInProgressKind"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -325,6 +330,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "DirtySummary",
             wire_rust: Some("WtDirtySummary"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -383,6 +389,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "HeadState",
             wire_rust: Some("WtHeadState"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -429,6 +436,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorkingState",
             wire_rust: Some("WtWorkingState"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -459,6 +467,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "SubmissionObservation",
             wire_rust: Some("WtSubmissionObservation"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -511,6 +520,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "GitFailureReceipt",
             wire_rust: Some("WtGitFailureReceipt"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -575,6 +585,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeReceipt",
             wire_rust: Some("WtWorktreeReceipt"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -638,6 +649,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeHandle",
             wire_rust: Some("WtWorktreeHandle"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![RecordField {
                     hs_name: "handleReceipt",
@@ -663,6 +675,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeSummary",
             wire_rust: Some("WtWorktreeSummary"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -697,6 +710,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "MergeRequest",
             wire_rust: Some("WtMergeRequest"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -736,6 +750,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "MergeOutcome",
             wire_rust: Some("WtMergeOutcome"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {

@@ -22,6 +22,7 @@ fn sum(name: &'static str, variants: Vec<(&'static str, Vec<HsType>)>) -> TypeDe
     TypeDef {
         name,
         wire_rust: Some(name),
+        core_module: Some("Tidepool.Effects.Core"),
         shape: TypeShape::Sum {
             variants: variants
                 .into_iter()
@@ -42,6 +43,7 @@ fn record(name: &'static str, fields: Vec<(&'static str, &'static str, HsType)>)
     TypeDef {
         name,
         wire_rust: Some(name),
+        core_module: Some("Tidepool.Effects.Core"),
         shape: TypeShape::Record {
             fields: fields
                 .into_iter()
@@ -203,7 +205,7 @@ pub fn commands() -> Effect {
             sum(
                 "CommandPresentation",
                 vec![
-                    ("CommandVisible", vec![HsType::Text]),
+                    ("CommandVisible", vec![HsType::Text, HsType::Int]),
                     ("CommandQuiet", vec![]),
                 ],
             ),

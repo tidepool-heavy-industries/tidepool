@@ -32,7 +32,7 @@ pub fn commands_decl() -> crate::EffectDecl {
             "data CommandPage = CommandPage { outputText :: Text, outputStart :: Int, outputEnd :: Int, outputAvailableEnd :: Int, outputRetainedStart :: Int, outputLostBytes :: Int, outputFinished :: Bool, outputLossy :: Bool, outputLeadingFragment :: Bool, outputTrailingFragment :: Bool } deriving (Show, Eq)",
             "data CommandOutput = CommandOutput { commandStdout :: CommandPage, commandStderr :: CommandPage } deriving (Show, Eq)",
             "data CommandObservation = CommandObservation { observedCommandResult :: CommandResult, observedCommandOutput :: CommandOutput } deriving (Show, Eq)",
-            "data CommandPresentation = CommandVisible Text | CommandQuiet deriving (Show, Eq)",
+            "data CommandPresentation = CommandVisible Text Int | CommandQuiet deriving (Show, Eq)",
             "data CommandError = CommandUnavailable Text | CommandInvalid Text | CommandUnauthorized deriving (Show, Eq)",
         ],
         extra_imports: &[

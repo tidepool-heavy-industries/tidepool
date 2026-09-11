@@ -37,6 +37,8 @@ async fn response(
         3 => Some("holder-started"),
         10 => Some("cancel-started"),
         14 => Some("terminal-started"),
+        24 => Some("structured-started"),
+        28 => Some("structured-interrupt-ready"),
         _ => None,
     } {
         tokio::time::timeout(Duration::from_secs(120), async {
@@ -82,6 +84,63 @@ async fn response(
         json!({"type":"custom_tool_call", "call_id":"haskell-22",
             "name":"haskell", "namespace":"tidepool_actor",
             "input":format!("rawPage <- Cmd.output {binding}\n(T.length (Cmd.pageText rawPage), T.take 9 (Cmd.pageText rawPage))")})
+    } else if index == 23 {
+        json!({"type":"function_call", "call_id":"structured-23", "namespace":"tidepool_actor",
+            "name":"exec_command", "arguments":json!({"cmd":"printf once >> structured-count; touch structured-started; read -r line; printf 'structured:%s\\n' \"$line\"; printf 'structured-error\\n' >&2; exit 7", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
+    } else if (24..=26).contains(&index) {
+        let requests = provider.requests.lock().unwrap();
+        let receipt = requests[index]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["call_id"] == "structured-23" && item["type"] == "function_call_output"
+            })
+            .and_then(|item| item["output"].as_str())
+            .expect("structured command receipt");
+        let session = receipt
+            .split("session_id: ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let (name, arguments) = if index == 24 {
+            (
+                "write_stdin",
+                json!({"session_id":session,"chars":"hello\n","yield_time_ms":30000}),
+            )
+        } else {
+            (
+                "read_output",
+                json!({"session_id":session,"stream":if index == 25 {"Stdout"} else {"Stderr"}}),
+            )
+        };
+        json!({"type":"function_call","call_id":format!("structured-{index}"),"namespace":"tidepool_actor",
+            "name":name,"arguments":arguments.to_string()})
+    } else if index == 27 {
+        json!({"type":"function_call", "call_id":"structured-27", "namespace":"tidepool_actor",
+            "name":"exec_command", "arguments":json!({"cmd":"trap 'exit 42' INT; touch structured-interrupt-ready; while :; do sleep 1; done", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
+    } else if index == 28 {
+        let requests = provider.requests.lock().unwrap();
+        let receipt = requests[index]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["call_id"] == "structured-27" && item["type"] == "function_call_output"
+            })
+            .and_then(|item| item["output"].as_str())
+            .unwrap();
+        let session = receipt
+            .split("session_id: ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap();
+        json!({"type":"function_call", "call_id":"structured-28", "namespace":"tidepool_actor", "name":"write_stdin",
+            "arguments":json!({"session_id":session,"chars":"\u{3}","yield_time_ms":30000}).to_string()})
     } else if index == 18 {
         let requests = provider.requests.lock().unwrap();
         let receipt = requests[index]["input"]
@@ -416,13 +475,20 @@ trust_level = "trusted"
             }
         }
     });
-    for expected in [2, 6, 16, 20, 24] {
-        let reached = tokio::time::timeout(Duration::from_secs(600), async {
-            while provider.requests.lock().unwrap().len() < expected {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
+    for expected in [2, 6, 16, 20, 30] {
+        let reached = tokio::time::timeout(
+            Duration::from_secs(if expected == 2 { 90 } else { 600 }),
+            async {
+                while provider.requests.lock().unwrap().len() < expected {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
+        )
         .await;
+        eprintln!(
+            "TUI fixture: reached {} of {expected} provider requests",
+            provider.requests.lock().unwrap().len()
+        );
         if reached.is_err() {
             let captured = std::process::Command::new("tmux")
                 .args(["capture-pane", "-p", "-t", pane.as_str(), "-S", "-100"])
@@ -551,7 +617,7 @@ trust_level = "trusted"
                     assert!(output(index).len() <= MODEL_OUTPUT_LIMIT);
                 }
             }
-            24 => {
+            30 => {
                 assert!(
                     output(21).contains("raw λ $(literal) [bash|data|]"),
                     "{}",
@@ -574,6 +640,38 @@ trust_level = "trusted"
                     assert!(large.contains(expected), "missing {expected}: {large}");
                 }
                 assert!(output(23).contains("RAW-BEGIN"), "{}", output(23));
+                let native_output = |index: usize| {
+                    requests[index]["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| {
+                            item["call_id"] == format!("structured-{}", index - 1)
+                                && item["type"] == "function_call_output"
+                        })
+                        .and_then(|item| item["output"].as_str())
+                        .unwrap()
+                        .to_owned()
+                };
+                assert!(
+                    native_output(25).contains("CommandExited 7"),
+                    "{}",
+                    native_output(25)
+                );
+                assert!(
+                    native_output(26).contains("structured:hello"),
+                    "{}",
+                    native_output(26)
+                );
+                assert!(
+                    native_output(29).contains("CommandExited 42"),
+                    "{}",
+                    native_output(29)
+                );
+                assert_eq!(
+                    std::fs::read_to_string(work.join("structured-count")).unwrap(),
+                    "once"
+                );
                 assert_eq!(
                     std::fs::read_to_string(work.join("raw-start-count")).unwrap(),
                     "once\n"
@@ -582,7 +680,7 @@ trust_level = "trusted"
             _ => unreachable!(),
         }
         assert!(!tmux.pane_status(&pane).await.unwrap().unwrap().dead);
-        if expected != 24 {
+        if expected != 30 {
             assert!(std::process::Command::new("tmux")
                 .args(["send-keys", "-t", pane.as_str(), "-l", "continue fixture"])
                 .status()

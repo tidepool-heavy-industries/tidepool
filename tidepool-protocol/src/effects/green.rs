@@ -75,6 +75,7 @@ pub fn green() -> Effect {
         type_defs: vec![TypeDef {
             name: "AsyncStatus",
             wire_rust: None,
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {

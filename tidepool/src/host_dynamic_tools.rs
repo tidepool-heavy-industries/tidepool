@@ -17,6 +17,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tidepool_actor::{ResidentToolEndpoint, ResidentToolError, WorkbenchCancellationOutcome};
+use tidepool_agent::backend::codex::dynamic_tools::DynamicToolFunctionSpec;
 use tidepool_agent::{
     accept_interactive_session_binding, BackendThreadId, InteractiveSessionBinding,
     HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
@@ -192,12 +193,12 @@ impl HostDynamicToolService {
                     ToolKind::Custom
                 }
                 HostedTool::Function(tool) => {
-                    wire_tools.push(NamespaceTool::Function {
+                    wire_tools.push(NamespaceTool::Function(DynamicToolFunctionSpec {
                         name: tool.name.clone(),
                         description: tool.description.clone(),
                         input_schema: tool.input_schema.clone(),
                         defer_loading: false,
-                    });
+                    }));
                     ToolKind::Function
                 }
             };
@@ -340,7 +341,11 @@ enum DynamicTool {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum NamespaceTool {
     Custom {
         name: String,
@@ -348,13 +353,7 @@ enum NamespaceTool {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         defer_loading: bool,
     },
-    Function {
-        name: String,
-        description: String,
-        input_schema: serde_json::Value,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        defer_loading: bool,
-    },
+    Function(DynamicToolFunctionSpec),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1536,6 +1535,32 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(text).unwrap()["source"],
             source
+        );
+    }
+
+    #[test]
+    fn structured_registration_uses_native_function_wire_schema() {
+        let service = HostDynamicToolService::new(
+            Arc::new(EchoEndpoint {
+                tools: vec![HostedTool::Function(ToolDeclaration {
+                    name: "execute".into(),
+                    description: "Run a command".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: None,
+                    kind: tidepool_tool::ToolKind::Call,
+                })],
+            }),
+            PathBuf::from("unused-binding"),
+            None,
+        )
+        .unwrap();
+        let registration = serde_json::to_value(&*service.state.registration).unwrap();
+        assert_eq!(
+            registration["dynamicTools"][0]["tools"][0],
+            serde_json::json!({
+                "type":"function", "name":"execute", "description":"Run a command",
+                "inputSchema":{"type":"object"},
+            })
         );
     }
 

@@ -69,26 +69,27 @@
 -- rendering.
 module Tidepool.Aeson.Schema
   ( -- * The class
-    JsonSchema (..)
+    JsonSchema (..),
 
     -- * Generic hierarchy
-  , GJsonSchema (..)
-  , GJsonSchemaSum (..)
-  , GTaggedSchemas (..)
-  , GNullaryNames (..)
-  , GSchemaRecord (..)
-  , objectSchema
-  ) where
+    GJsonSchema (..),
+    GJsonSchemaSum (..),
+    GTaggedSchemas (..),
+    GNullaryNames (..),
+    GSchemaRecord (..),
+    objectSchema,
+  )
+where
 
-import Prelude
-import Data.Text (Text)
-import qualified Tidepool.Data.Text as T
-import qualified Data.Map.Strict as Map
 import Data.Kind (Type)
+import qualified Data.Map.Strict as Map
 import Data.Proxy (Proxy (..))
+import Data.Text (Text)
 import GHC.Generics
-import Tidepool.Aeson.Value (Value (..), object, GAllFieldsNamed, IsNullarySum, IsRecordCon)
 import Tidepool.Aeson.Scientific (scientific)
+import Tidepool.Aeson.Value (GAllFieldsNamed, IsNullarySum, IsRecordCon, Value (..), object)
+import qualified Tidepool.Data.Text as T
+import Prelude
 
 -- ---------------------------------------------------------------------------
 -- The class
@@ -137,16 +138,22 @@ instance JsonSchema Char where
 instance JsonSchema () where
   jsonSchema _ = object [("type", String "null")]
 
+-- | Text-keyed maps encode as objects with arbitrary keys and typed values.
+instance (JsonSchema a) => JsonSchema (Map.Map Text a) where
+  jsonSchema _ =
+    object
+      [("type", String "object"), ("additionalProperties", jsonSchema (Proxy :: Proxy a))]
+
 -- | A raw 'Value' field accepts any JSON, and the empty schema is how draft-07
 -- spells "anything".
 instance JsonSchema Value where
   jsonSchema _ = object []
 
-instance {-# OVERLAPPABLE #-} JsonSchema a => JsonSchema [a] where
+instance {-# OVERLAPPABLE #-} (JsonSchema a) => JsonSchema [a] where
   jsonSchema _ =
     object
-      [ ("type", String "array")
-      , ("items", jsonSchema (Proxy :: Proxy a))
+      [ ("type", String "array"),
+        ("items", jsonSchema (Proxy :: Proxy a))
       ]
 
 -- | @[Char]@ encodes as a JSON string, not an array of one-character strings
@@ -159,7 +166,7 @@ instance {-# OVERLAPPING #-} JsonSchema [Char] where
 -- @null@ for 'Nothing' and the decoder reads @null@ back. In FIELD position
 -- the optionality is additionally expressed by absence from @required@ — see
 -- 'GSchemaRecord'.
-instance JsonSchema a => JsonSchema (Maybe a) where
+instance (JsonSchema a) => JsonSchema (Maybe a) where
   jsonSchema _ = jsonSchema (Proxy :: Proxy a)
 
 -- ---------------------------------------------------------------------------
@@ -172,13 +179,13 @@ instance JsonSchema a => JsonSchema (Maybe a) where
 objectSchema :: Maybe Text -> [(Text, Value, Bool)] -> Value
 objectSchema mtag fields =
   object
-    [ ("type", String "object")
-    , ("properties", Object (Map.fromList (tagProperty ++ [(n, s) | (n, s, _) <- fields])))
-    , -- Only genuinely required fields: a 'Maybe' field is optional and must
+    [ ("type", String "object"),
+      ("properties", Object (Map.fromList (tagProperty ++ [(n, s) | (n, s, _) <- fields]))),
+      -- Only genuinely required fields: a 'Maybe' field is optional and must
       -- NOT appear here — a schema that lists an optional key in @required@
       -- forces the producer to invent a value for it.
-      ("required", Array (map String (tagRequired ++ [n | (n, _, req) <- fields, req])))
-    , ("additionalProperties", Bool False)
+      ("required", Array (map String (tagRequired ++ [n | (n, _, req) <- fields, req]))),
+      ("additionalProperties", Bool False)
     ]
   where
     tagProperty = case mtag of
@@ -198,13 +205,13 @@ objectSchema mtag fields =
 class GJsonSchema (f :: Type -> Type) where
   gJsonSchema :: Proxy f -> Value
 
-instance GJsonSchema f => GJsonSchema (M1 D d f) where
+instance (GJsonSchema f) => GJsonSchema (M1 D d f) where
   gJsonSchema _ = gJsonSchema (Proxy :: Proxy f)
 
-instance GSchemaRecord f => GJsonSchema (M1 C c f) where
+instance (GSchemaRecord f) => GJsonSchema (M1 C c f) where
   gJsonSchema _ = objectSchema Nothing (gSchemaFields (Proxy :: Proxy f))
 
-instance GJsonSchemaSum (IsNullarySum (a :+: b)) (a :+: b) => GJsonSchema (a :+: b) where
+instance (GJsonSchemaSum (IsNullarySum (a :+: b)) (a :+: b)) => GJsonSchema (a :+: b) where
   gJsonSchema = gJsonSchemaSum (Proxy :: Proxy (IsNullarySum (a :+: b)))
 
 -- | Dispatch on whether a sum is all-nullary — the same 'IsNullarySum' the
@@ -212,14 +219,14 @@ instance GJsonSchemaSum (IsNullarySum (a :+: b)) (a :+: b) => GJsonSchema (a :+:
 class GJsonSchemaSum (allNullary :: Bool) f where
   gJsonSchemaSum :: Proxy allNullary -> Proxy f -> Value
 
-instance GNullaryNames f => GJsonSchemaSum 'True f where
+instance (GNullaryNames f) => GJsonSchemaSum 'True f where
   gJsonSchemaSum _ p =
     object
-      [ ("type", String "string")
-      , ("enum", Array (map String (gNullaryNames p)))
+      [ ("type", String "string"),
+        ("enum", Array (map String (gNullaryNames p)))
       ]
 
-instance GTaggedSchemas f => GJsonSchemaSum 'False f where
+instance (GTaggedSchemas f) => GJsonSchemaSum 'False f where
   gJsonSchemaSum _ p = object [("oneOf", Array (gTaggedSchemas p))]
 
 -- | Constructor names of an all-nullary sum, in declaration order — the exact
@@ -230,7 +237,7 @@ class GNullaryNames (f :: Type -> Type) where
 instance (GNullaryNames a, GNullaryNames b) => GNullaryNames (a :+: b) where
   gNullaryNames _ = gNullaryNames (Proxy :: Proxy a) ++ gNullaryNames (Proxy :: Proxy b)
 
-instance Constructor c => GNullaryNames (M1 C c U1) where
+instance (Constructor c) => GNullaryNames (M1 C c U1) where
   gNullaryNames _ = [T.pack (conName (M1 Proxy :: M1 C c Proxy ()))]
 
 -- | One tagged object per constructor of a payload sum, in declaration order.
@@ -258,7 +265,7 @@ class GTaggedConSchema (isRecord :: Bool) (f :: Type -> Type) where
 instance (GSchemaRecord f, GAllFieldsNamed f) => GTaggedConSchema 'True f where
   gTaggedConSchema _ p tag = objectSchema (Just tag) (gSchemaFields p)
 
-instance GPositionalSchemas f => GTaggedConSchema 'False f where
+instance (GPositionalSchemas f) => GTaggedConSchema 'False f where
   gTaggedConSchema _ p tag =
     objectSchema (Just tag) [(T.pack "contents", contentsSchema, True)]
     where
@@ -266,10 +273,10 @@ instance GPositionalSchemas f => GTaggedConSchema 'False f where
         [s] -> s
         ss ->
           object
-            [ ("type", String "array")
-            , ("prefixItems", Array ss)
-            , ("minItems", Number (scientific (fromIntegral (length ss)) 0))
-            , ("maxItems", Number (scientific (fromIntegral (length ss)) 0))
+            [ ("type", String "array"),
+              ("prefixItems", Array ss),
+              ("minItems", Number (scientific (fromIntegral (length ss)) 0)),
+              ("maxItems", Number (scientific (fromIntegral (length ss)) 0))
             ]
 
 -- | A positional payload's per-field schemas, in declaration order.
@@ -279,7 +286,7 @@ class GPositionalSchemas (f :: Type -> Type) where
 instance (GPositionalSchemas a, GPositionalSchemas b) => GPositionalSchemas (a :*: b) where
   gPositionalSchemas _ = gPositionalSchemas (Proxy :: Proxy a) ++ gPositionalSchemas (Proxy :: Proxy b)
 
-instance JsonSchema c => GPositionalSchemas (M1 S s (K1 R c)) where
+instance (JsonSchema c) => GPositionalSchemas (M1 S s (K1 R c)) where
   gPositionalSchemas _ = [jsonSchema (Proxy :: Proxy c)]
 
 -- | Per field: (name, schema, required?). The name is the VERBATIM selector
