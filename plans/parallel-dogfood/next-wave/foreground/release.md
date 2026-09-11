@@ -51,9 +51,11 @@ The matched source and pin are ready for the existing release workflow. Running
 binaries, compiler services and the canonical `.shoal` were not replaced during
 this swarm.
 
-Retirement cleanup remains unconfirmed for actors 94, 159, 341, 383 and 632,
-which retain sockets; actors 159 and 341 additionally retain Git-operation/tmux
-custody uncertainty. They must not be reused or described as quiescent without
+Retirement cleanup remains unconfirmed for actors 90, 94, 159, 341, 383, 632
+and 854. The reported set retains sockets; actor 90 additionally has
+Git-operation/worktree custody uncertainty, actors 159 and 341 have
+Git-operation/tmux custody uncertainty, and actor 854 retains socket/process
+cleanup uncertainty. They must not be reused or described as quiescent without
 the external custody owner resolving that evidence.
 
 Later shared-server work inherits the documented session/completion/environment
