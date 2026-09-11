@@ -1,54 +1,46 @@
 # Initial message for the next Astra planner
 
-You are the Shoal-managed Astra planner. Resume both megatasks from the exact
-checkpoint/source/package record supplied with this launch: interactive Codex applications wrap-up and the remaining prepared-STG engine work. Product intent is agreed.
-Read plans/parallel-dogfood/next-wave/resume.md, README.md and the two short branch maps, then
-plans/parallel-dogfood/planner.md for the commissioning surface. Discover detailed
-mechanisms progressively.
+You are the Shoal-managed Astra planner. Plan two outcomes: the resident sleep
+MVP and interactive Codex applications wrapup. Engine implementation is paused.
+Read plans/parallel-dogfood/next-wave/resume.md and README.md, then
+plans/next/resident-sleep.md and the next-wave applications.md map. Read
+plans/parallel-dogfood/planner.md for the exact commissioning signatures and
+executable recipe. Discover detailed mechanisms only within assigned work.
 
-Your deliverable is an executable plan for the remaining work: a focused Sol
-applications integration lane and a recursive Sol engine implementation tree.
-Applications A0–A7 are implemented and matched A8 passed on the retained R7 pair;
-use its wrap-up checklist, not the old milestone allocation. Select useful
-behavior rather than preserving every patch: simplify or omit redundant candidate
-machinery within existing guarantees. Escalate changes to guarantees, not routine
-refactoring. Shared-server
-migration is subsequent work, not a gate or an implementation assignment. Plan useful grandchildren as well as lane leads: shared contracts and context,
-independent child outcomes, the engineering each parent retains, and dependency
-joins that unlock later forks. Refine against the saved source, reuse completed
-work, and ask both Sol leads to explain/challenge their execution understanding
-once. Correct material misunderstandings, then delegate routine execution.
-After that checkpoint, leave the initial planner idle without routine progress
-subscriptions. Sol owns ordinary decisions and integration. Hard questions go
-directly to fresh selected Astra consultations with compact evidence packets.
+Sleep's primary use case is one fifteen-minute Haskell suspension with no
+intermediate inference, normal operator interruption, and one eventual result.
+Use existing continuation/lifetime owners; no output-watching DSL or scheduler
+redesign. Applications A0–A7 are implemented and matched A8 passed on the retained
+R7 pair; reconcile with launch main, close final-source acceptance and ship useful
+behavior. Do not rebuild the old milestone tree. Shared-server migration and
+prepared-STG engine work are not assignments for this wave.
 
-Related implementation inherits the useful completed reasoning and current bound
-checkout; original-root calls select projectHead. Fresh context is deliberate for
-unrelated leads and independent review. Use the launch-supplied commissioning recipe and the selected package guide;
-query types only for a concrete missing fact, not as a startup inventory. Sol nodes recursively
-implement, fork and integrate; a milestone-sized task is not automatically a leaf.
-Targeted Astra engagements own hard semantic decisions or repairs. No agent quota,
-mandatory worker-stage zoo, or return to root for each local cycle.
+Create a concise executable decomposition for a Sol coordinator and the useful
+Sol owners beneath it. Have each lead explain/challenge its understanding once,
+correct material misunderstandings, then leave ordinary execution and integration
+to Sol. Fork related implementation from completed shared reasoning and the current
+bound checkout. Use Sol Medium consistently. Fresh Astra consultations receive
+compact evidence for hard decisions; the initial planner stays idle without
+routine progress subscriptions after the planning checkpoint. Choose useful
+engineering branches, not a mandatory worker-stage tree for this bounded task.
 
-Preserve full product acceptance and ordinary TUIs. External RSI owns build/cache/
-usage/harness monitoring; do not assign that bookkeeping to the development tree.
-Do not hot-change running executables/compiler sockets or canonical .shoal. Do not
-reopen historical operator holds as new questions: this launch authorizes the new
-wave, while newly requested holds still take effect. Ask the human about changed
-consequential product decisions, not routine engineering. Begin the execution plan
-and commission the Sol coordinator.
+Use the exact launch selection. New sleep work starts from launch main. For
+applications, use a prepared continuation if supplied; otherwise reconcile the
+preserved applications checkpoint and external Codex onto the recorded baselines
+on new branches, preserving original refs. The combined R7 checkpoint contains
+unfinished engine work: do not merge it wholesale into main. Keep main's tested
+runtime/resource owners. Record shared-file ownership before parallel edits and
+check the final integration seams. No external format consumers exist.
 
-The runner is built from the launch-recorded main revision. Main carries tested
-orchestration/tooling and the curated prompt package. Product implementations stay
-on their applications/engine branches. Use the prepared continuation heads in the
-launch record and verify that launch main is their ancestor. If no prepared head
-is supplied, rebase the preserved checkpoint on a new continuation branch first.
-Keep the original refs; do not repeat an already-completed rebase. No external format consumers
-exist; protect main and our actual Shoal usage through matched candidate acceptance. Do not merge unfinished engine
-or applications code into main to obtain a new harness. Read
-.shoal/plans/coordination.md: Haskell owns mechanical routing and cursors; model
-turns own engineering. Routine evidence is not an unresolved question.
+Use the selected package guide and commissioning recipe, not a startup inventory
+of types. Haskell owns mechanical routing; model turns own engineering. Send
+compact agent-to-agent deltas and exact artifact references. Routine evidence is
+not an unresolved question. Keep ordinary full TUIs and all product guarantees.
 
-The shared developer prompt contains this project's targeted-verification policy.
-Plan decisive checks for each mechanism and integration join, not full workspace
-suites. See verification-prompt.md; this applies to both lanes and the coordinator.
+External RSI owns build/cache/usage/harness monitoring. Do not hot-change running
+executables, compiler sockets or canonical .shoal. Follow the shared targeted-test
+policy and verification-prompt.md: decisive mechanism and integration checks, no
+full workspace suites. Warm the first useful owning build and share completed
+snapshots before implementation forks. The earlier command-UX-only pause belongs
+to a preserved run; begin this allocation when launched. Ask about consequential
+product changes, not historical holds or routine engineering.

@@ -1,6 +1,8 @@
-# Next run: resume the consolidated trees on main
+# Next run: sleep MVP and applications reconciliation
 
-Resume the retained R7 checkpoints below on the launch-recorded main revision.
+Resume applications from the retained R7 sources below on launch main. Implement
+[resident sleep](../../next/resident-sleep.md) from main. Engine is paused; its
+refs remain preservation inputs, not an instruction to spawn an engine lead.
 Git preserves source and handoffs; it does not recreate live TUI/Haskell handles.
 The checked main runner and frozen `.shoal` package remain separate from product
 candidates throughout the run.
@@ -46,7 +48,8 @@ Record the resulting head and check the affected integration seams. Do the same
 source reconciliation for external Codex against its recorded tooling baseline.
 If that baseline is already an ancestor, no redundant rewrite is needed.
 
-The coordinator combines the rebased lane heads on a product integration branch.
+The coordinator integrates sleep and the reconciled applications candidate on a
+checked integration branch; no engine branch is combined in this wave.
 Do not rebase main onto the combined candidate or merge unfinished product changes
 into main to obtain a runner. Candidate compiler/native executables used by product
 checks must be selected explicitly, separately from the running swarm's binaries.
@@ -58,12 +61,10 @@ existing pair, review actual conflicts, rerun owning recovery/full-TUI checks,
 and repair concrete failures. Do not commission admission/completion/recovery
 from scratch.
 
-Engine reads its retained R7 handoff before the [engine map](engine.md). It owns
-the general native operation/handler ABI, generated-reference/GC join, real
-resident prepared-path cutover, legacy deletion and final comparison. Earlier
-M1–M5 allocations are provenance, not instructions to recreate their implementation.
-The applications owner reruns its affected checks when the final engine consumer
-is delivered. External RSI handles historical custody and infrastructure.
+Sleep follows its PRD: suspend fifteen minutes with no intermediate inference,
+resume once, preserve normal interruption and reuse existing runtime owners.
+The engine's retained frontier remains documented in [engine.md](engine.md) for a
+later wave. External RSI handles historical custody and infrastructure.
 
 ## Who does what
 

@@ -10,10 +10,12 @@ Before launch, record:
 - Accepted main and matched native runtime revisions, immutable runner and package.
 - Verified active swarm memory/swap limits and working command-resource service.
 - Preserved R7 sources from [resume.md](resume.md), with applications/native
-  continuations reconciled on the selected baselines. Old prepared R6 restart
+  continuations reconciled on the selected baselines, or explicitly assigned to
+  reconcile before implementation forks when no prepared heads are supplied. Old prepared R6 restart
   branches are historical, not the next source selection.
-- The applications [wrap-up assignment](applications.md) and the engine's actual
-  remaining frontier from its R7 handoff. No shared-server migration implementation.
+- The applications [wrap-up assignment](applications.md) and
+  [resident sleep MVP](../../next/resident-sleep.md). Engine and shared-server
+  migration are paused.
 
 The launch record is authoritative for executable/package hashes and any prepared
 continuations. Keep running tools frozen and product candidate tools separately

@@ -1,31 +1,32 @@
-# Next wave: two recursive engineering trees
+# Next wave: resident sleep and applications wrapup
 
 [Ready selection](ready.md) records the tested platform and prepared continuation refs.
 
 [resume.md](resume.md) supplies the retained R7 checkpoints, required reconciliation
 onto launch main, first remaining work and settled human decisions.
-The applications wrap-up checklist and remaining engine M6/M7 contracts own
-product semantics and acceptance. Applications needs reconciliation and final
+The [resident sleep PRD](../../next/resident-sleep.md) and applications wrap-up
+checklist own this wave’s outcomes. Engine M6/M7 remains preserved but paused. Applications needs reconciliation and final
 verification, not a fresh broad implementation tree.
 This directory owns execution shape; it does not waive unverified product gates.
 
 Each run uses an exact runner built from main, including the selected curated
-prompt/Haskell package. The applications and engine implementations remain on
-separate task branches updated from main between runs. Their checkpoint hashes
-are work inputs, not the source of the harness running them. The latest launch
+prompt/Haskell package. Sleep starts from main; applications continues on its reconciled task branch.
+The preserved engine branch is not active in this wave. Checkpoint hashes select
+work inputs, not the source of the harness running them. The latest launch
 record and committed handoffs supersede historical source pins below.
 Current package changes and remaining mechanism limits are recorded in
 [coordination RSI](../../next/coordination-rsi.md).
 
-Read this page, then your branch: [applications](applications.md) or
-[engine](engine.md). The planner reads both short maps; descendants read only their
+Read this page, then your assignment: [applications](applications.md) or
+[sleep](../../next/resident-sleep.md). The planner reads both; descendants read only their
 assigned subtree and the relevant mechanism sections. The launch prompt is
 [commission.md](commission.md).
 
 ## Carry the useful tree forward
 
-Both prior trees consolidated coherent work into lane checkpoints. Continue recursive
-implementation, keeping each parent's integration substantial. The new typed routing
+The prior trees consolidated coherent work into lane checkpoints. Reuse the
+applications checkpoint; build sleep on current main. Decompose where useful,
+keeping each parent’s integration substantial. The new typed routing
 package removes routine collection/rearming and forwarding from model turns.
 Do not rebuild completed foundations or keep the initial Astra doing coordination.
 

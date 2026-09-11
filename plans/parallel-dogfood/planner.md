@@ -5,7 +5,7 @@ Codex TUI. The external setup conversation only supervises the harness. Both
 product designs already exist; focus your substantial reasoning on executing them
 well, rather than rewriting them or repeating the product interview.
 
-Start with next-wave/README.md and its two short branch maps. Read final checkpoint
+Start with next-wave/README.md and its selected task maps/PRD. Read final checkpoint
 evidence supplied by the launch, then deeper mechanisms only for consequential
 dependencies or uncertainties. Preserve the full product acceptance.
 

@@ -38,6 +38,9 @@ archive).
   interaction and gradual migration from native shell orchestration.
   [Implementation checkpoints](next/command-jobs-implementation.md) track the
   matched native/resident acceptance and release.
+- [Resident sleep](next/resident-sleep.md): next-wave MVP for a fifteen-minute
+  suspended Haskell call with no intermediate inference, normal interruption,
+  and continuation-based composition. Proposed alongside Codex-use wrapup.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers

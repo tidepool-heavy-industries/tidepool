@@ -92,7 +92,7 @@ eviction. The five shared byte-paging tests passed after extracting their common
 segment reader. All nine focused TUI storage/ordering tests passed, including
 complete capture beyond tail capacity, explicit gaps, zero allowance, Unicode,
 sustained output bounds and completed-before-active quota eviction. Evidence:
-`/tmp/foreground-native-storage.log`; no real-TUI acceptance claim yet.
+`/tmp/foreground-native-storage.log`; real-TUI acceptance is recorded below.
 Automatic output, scoped quiet, and retained quiet results passed in the resident
 workbench (`/tmp/command-presentation-test.log`). All four rewritten command-skill
 code blocks executed successfully (`/tmp/command-skill-foreground-test.log`).
@@ -132,7 +132,7 @@ Native history applies a separate model policy even when TUI/rollout shows full
 output. The existing `tool_output_token_limit=16384` override is now uniform in
 fresh/resumed/forked hosted launch commands; its focused test passed
 (`/tmp/command-native-history-budget-test.log`). No protocol extension is needed.
-Actual acceptance must inspect the subsequent normalized provider request.
+The real-TUI acceptance below inspects the subsequent normalized provider request.
 The real-TUI resource fixture passed against the matched native and Shoal binaries
 (`/tmp/command-full-tui-foreground-acceptance-r2.log`, 228.26 seconds, scripted
 local provider, no paid inference). The next normalized provider request retained
@@ -148,8 +148,16 @@ by main's flake inputs.
 The prepared immutable development runner is
 `/nix/store/crrcqgisalq6h2fca2c0ipj4ggpz3j2v-shoal-command-foreground-runner`.
 Its exact-source selection and package checks belong in
-`target/command-foreground-runner-20260911/`. Commit/push main and complete those
-launch-package checks before declaring the wave ready.
+`target/command-foreground-runner-20260911/`. Main implementation and native pin
+are pushed. All ten package recipes passed (117 assertions across
+`/tmp/command-foreground-package-check-r2.log` and
+`/tmp/routing-fixed-check.log`). The first run exposed a formatting-dependent
+source-mismatch assertion; `91231a8d4` checks typed routing state and retained
+candidate identity instead. Its 13-assertion repair recipe and the four previously
+unexecuted recipes passed. Clean-environment bootstrap of the final canonical
+package passed (`/tmp/command-foreground-bootstrap-final.log`). The launch record
+retains the exact runtime source separately from subsequent recipe/plan commits.
+The next allocation is resident sleep plus applications wrapup; engine is paused.
 
 No entirely hidden command presentation may advance its cursor; head/tail
 omissions are explicit intentional skips, not implied full delivery. Historical feedback is in
