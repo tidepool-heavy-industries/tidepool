@@ -122,9 +122,16 @@ following concrete ownership:
   `host_dynamic_tools/input_control.rs` and their existing protocol/state
   consumers, composed with command `Jobs`; dropping the HTTP future, response
   waiter or socket is never terminal proof; and
-- applications retains the cross-owner race: expiry and cancellation have one
-  winner, an acknowledged cancellation forbids later suffix execution, and an
-  unconfirmed outcome keeps the invocation and evaluation admission fenced.
+- the sleep resident evaluation owner linearizes expiry against cancellation;
+  applications coordinates and tests ordering across the native/host boundary,
+  while an acknowledged cancellation forbids later suffix execution and an
+  unconfirmed outcome keeps conflicting evaluation admission fenced.
+
+Before applications edits the dependent cancellation path, sleep publishes a
+typed exact-identity cancel operation returning terminal-or-uncertain evidence
+and the fixture expectations. The cancellation signal must bypass an occupied
+dispatch mutex or actor mailbox turn without admitting another workbench
+evaluation.
 
 The join tests must prove: exact invocation A can be cancelled without affecting
 B; a delivered human message and a delivered actor notification both queue
@@ -155,12 +162,13 @@ If the host or native process is lost, recovery reports lost live state and only
 an explicit new execution may replay safe source.
 
 Shared sleep flow: an ordinary fifteen-minute sleep tool call keeps its original
-invocation pending while other actors progress, obtains the exact evaluation's
-terminal result, then returns once and permits one inference suffix. On operator
-interrupt, the exact evaluation is cancelled, the original invocation settles
-promptly, its suffix never runs, and the next interaction remains usable.
-Socket/transport loss alone leaves the outcome uncertain and cannot trigger a
-second execution.
+invocation pending while other actors progress. Timer expiry resumes the Haskell
+suffix with no intervening inference, then returns one final tool result. On
+operator interrupt, the exact evaluation is cancelled, the original invocation
+settles promptly, its Haskell suffix never runs, and the next interaction remains
+usable. Socket/transport loss makes the observer's knowledge uncertain; it does
+not erase a known retained terminal result, cancel the invocation, or authorize
+a second execution. Exact-ID reconciliation returns existing evidence only.
 
 ## Released frontier after the checkpoint
 
@@ -206,8 +214,10 @@ Resulting-source behavior checks are:
   accepted work, producer seal, lost waiter and degraded cleanup cases;
 - the matched `pinned_full_tui_binds_and_accepts_exactly_one_owned_input`
   socket/PTY/scripted-provider consumer and its preflight failures; and
-- the shared sleep outer tool-wait cancellation path plus one real
-  fifteen-minute wait on the final pair.
+- a short interrupted actual-TUI sleep proving original-invocation settlement
+  before message inference, Haskell suffix suppression and subsequent use; and
+- a separate uncancelled real fifteen-minute actual-TUI wait proving one Haskell
+  suffix, one final tool result and no intermediate provider request.
 
 Use focused `just test-lib` / `just test-target` or the native repository's named
 target enumeration; record selected and executed counts. Reuse unchanged

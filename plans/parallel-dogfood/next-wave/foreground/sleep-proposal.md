@@ -156,12 +156,16 @@ unfinished input unit are not reconstructed across inference.
 This requires a narrow extension to the existing owners:
 
 - `ResidentToolEndpoint`/`ResidentInteractivePolicy` expose an
-  exact-`WorkbenchExecutionId` cancel-and-terminal-settlement operation rather
-  than interpreting dropped futures as cancellation.
+  exact-`WorkbenchExecutionId` cancellation operation whose typed result is
+  terminal evidence or explicit uncertainty, rather than interpreting dropped
+  futures as cancellation. Exact-ID reconciliation returns retained evidence
+  and never starts a new execution.
 - `ResidentToolClient` and the actor kernel pass the cancellation signal to the
-  already-admitted workbench execution without admitting a conflicting actor
+  already-admitted workbench execution by a path that bypasses its occupied
+  dispatch mutex and actor mailbox turn, without admitting a conflicting actor
   turn. The existing actor/workbench state and completed-execution journal own
-  its terminal result; do not add a second general evaluation registry.
+  its terminal result; a disconnected observer must not overwrite known
+  terminal evidence, and no second general evaluation registry is added.
 - The sleep resolver races monotonic expiry with that signal at one owning
   linearization point and records whether expiry or cancellation won. An expiry
   winner may run suffix effects, which must be reported honestly. Once

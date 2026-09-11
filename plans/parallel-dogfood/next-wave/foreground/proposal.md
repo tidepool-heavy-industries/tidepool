@@ -40,12 +40,21 @@ requirements. The coordinator owns the final Cargo/flake pin, fixture baseline,
 combined host wiring, matched integration checks, release disposition, and the
 real fifteen-minute smoke.
 
-The binding interruption rule is exact: transport observation loss does not
-cancel, complete, or permit replay. A delivered human/actor message queues
+The binding interruption rule is exact: transport observation loss makes the
+observer's knowledge uncertain but does not cancel, complete, erase a known
+retained terminal result, or permit replay. Exact-ID reconciliation returns
+existing evidence, never new execution. A delivered human/actor message queues
 behind cancellation or terminal settlement of the exact suspended evaluation
 before inference sees it. Queued inactive requests and collector/mailbox-only
 data do not interrupt. Without terminal proof, the host neither claims
 quiescence nor admits a conflicting evaluation.
+
+Sleep's resident evaluation owner linearizes cancellation against expiry and
+must publish a typed exact-identity cancel operation returning
+terminal-or-uncertain evidence plus fixture expectations before applications
+edits the dependent cancellation path. The cancel signal bypasses an occupied
+dispatch mutex or mailbox turn without admitting conflicting execution.
+Applications owns cross-owner coordination and tests, not a second race winner.
 
 ## Released recursive frontiers
 
@@ -76,11 +85,14 @@ presentation/compaction, completion persistence, cancellation, retirement, Jobs
 cleanup, and the matched full-TUI consumer.
 
 The coordinator checks the resulting joins rather than replaying unchanged lane
-evidence, runs required generated-fixture checks if serialization changes, and
-runs one actual mock-provider fifteen-minute TUI sleep with one final result,
-one suffix, no intermediate inference, prompt interruption, cancelled suffix
-suppression, and subsequent usability. No workspace-wide suite or aarch64
-execution is claimed.
+evidence and runs required generated-fixture checks if serialization changes.
+One uncancelled actual mock-provider fifteen-minute TUI sleep proves the Haskell
+suffix resumes with zero intervening inference, followed by one final tool
+result and no intermediate provider request. A separate short interrupted
+actual-TUI case proves settlement before message inference, Haskell suffix
+suppression, and subsequent usability. The evidence records the duration and
+outer path for each case. No workspace-wide suite or aarch64 execution is
+claimed.
 
 ## Planner decision
 
