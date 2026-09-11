@@ -397,7 +397,6 @@ enum WorkbenchCancellationResponse {
     },
     Unconfirmed {
         execution: tidepool_runtime::session::WorkbenchExecutionId,
-        reply: CallResponse,
     },
     NotSleeping {
         execution: tidepool_runtime::session::WorkbenchExecutionId,
@@ -418,10 +417,9 @@ impl WorkbenchCancellationResponse {
                 execution,
                 reply: workbench_reply(reply),
             },
-            WorkbenchCancellationOutcome::Unconfirmed { execution, reply } => Self::Unconfirmed {
-                execution,
-                reply: workbench_reply(reply),
-            },
+            WorkbenchCancellationOutcome::Unconfirmed { execution } => {
+                Self::Unconfirmed { execution }
+            }
             WorkbenchCancellationOutcome::NotSleeping { execution } => {
                 Self::NotSleeping { execution }
             }
