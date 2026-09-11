@@ -93,17 +93,26 @@ Inside declaration groups use ordinary definitions rather than GHCi `let`.
 Use `Member Effect effects` constraints for reusable effectful helpers. The
 compiler checks types; Rust interpreters enforce runtime authority.
 
-Use the `tidepool_actor` shell tools for ordinary commands. `bash` accepts literal
-scripts without Haskell wrappers, using the same actor and command owner as `Cmd`.
-Use `exec_command` for memory/cwd/environment/PTY options, `write_stdin` for
-input or polling a returned `session_id`, and `read_output` for retained output.
-Use Haskell for composition or retained values. Give builds/tests a realistic
-`memory_mib` or Haskell `withMemory (GiB n)` hard limit.
-Admission queues automatically. Retain background jobs, use completion routing when
-useful, and return the turn when only waiting remains. Native shell tools remain
-a 256 MiB fallback and `apply_patch` remains available for edits. The JavaScript
-tool wrapper is disabled. See the command example in the guide and, when supplied,
-load `shoal-command` for stdin, PTY and typed completion routing.
+Use the `tidepool_actor` shell tools by default for repository reads, searches,
+Git, builds and tests. `bash` takes literal scripts; `exec_command` adds
+memory/cwd/environment/PTY options. No Haskell binding, preliminary type query,
+or skill load is needed for an ordinary command. Use Haskell when retained data,
+functions or typed coordination make the task easier; both interfaces share the
+same command owner. Keep `apply_patch` for edits.
+
+Give builds/tests a realistic `memory_mib`; ordinary reads use the default.
+A returned `session_id` names an existing job: `write_stdin` sends input or observes
+it, and `read_output` retrieves retained output without executing again. Missing
+or shortened output is a reason to read that job, not rerun the command. A queued
+or running status is not failure. After observing a long wait, do independent work
+or arrange completion routing and yield; do not spend successive turns repeating
+`await` or empty polls. Read coherent, bounded source excerpts rather than combining
+an entire orientation packet into one huge output.
+
+Native shell tools are a 256 MiB fallback when the hosted tools cannot perform
+the operation. The JavaScript tool wrapper is disabled. Load `shoal-command`
+when Haskell composition, PTY/input, output recovery or completion routing needs
+more detail; use the tool schemas directly for routine shell work.
 
 Start from the shared core API guide below and the supplied assignment, not an
 inventory of the session. Do not run `:bindings` as a first-turn ritual: inherited

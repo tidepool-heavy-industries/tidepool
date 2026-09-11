@@ -1,20 +1,40 @@
 ---
 name: shoal-command
-description: Compose shell commands in resident Haskell, consume results as data, or control retained jobs and output from the Bash tool.
+description: Use when composing commands as Haskell values, recovering retained output, controlling PTY/stdin, or routing command completion. Ordinary shell calls use the direct tool schemas without loading this skill.
 ---
 
-Use the `tidepool_actor` tools: `bash` accepts literal scripts, including multiline Bash and
-heredocs. Use `exec_command` for `workdir`, `environment`, `memory_mib`, `tty`
-or piped `stdin`. These are compiled Haskell handlers over the same command
-owner as `Cmd`; ordinary shell use needs no Haskell wrappers.
+Use the `tidepool_actor` tools for ordinary shell work. `bash` accepts literal
+scripts, including multiline Bash and heredocs. `exec_command` adds `workdir`,
+`environment`, `memory_mib`, `tty` or piped `stdin`. No Haskell wrapper is needed.
+These are compiled Haskell handlers over the same command owner as `Cmd`.
 
-Defaults: 256 MiB and a 30-second observation. Give builds/tests a realistic
-`memory_mib`. Execution returns a `session_id`; use `write_stdin` with that ID
-and `chars` to send input, or omit `chars` to poll. Observation expiry leaves the
-command alive. `read_output` reads retained stdout from `offset: 0`; select
-`stream: "Stderr"` for diagnostics. None of these observations reexecutes a script.
-Output limits are byte budgets (`max_output_bytes`), not token counts. Automatic
-responses stay within 32 KiB; oversized command displays use an 8 KiB preview.
+For example, call `tidepool_actor.exec_command` with:
+
+```json
+{"cmd":"git status --short"}
+```
+
+For an expected long check, start once with an explicit memory limit and a short
+initial observation (choose the limit for the actual check):
+
+```json
+{"cmd":"cargo test -p my_crate --lib","memory_mib":4096,"yield_time_ms":1000}
+```
+
+Use the returned `session_id` verbatim. `write_stdin` with omitted `chars` polls;
+with `chars` it sends input. `read_output` with that ID and `stream: "Stderr"`
+reads diagnostics from the beginning; continue at the returned `next_offset`.
+None of these operations reruns the command. A finished nonzero exit is a command
+result; inspect its diagnostics. Running or queued means the same job remains
+owned. Do useful independent work or route completion rather than repeatedly
+polling through model turns. `Cmd.completion` is an actor EventSource, not an Await
+value for `watch`; see the routing example linked below.
+
+Defaults: 256 MiB and a 30-second observation. Expiry leaves the command alive.
+`max_output_bytes` is a byte budget, not a token count. Direct execution responses
+use at most 32 KiB; oversized foreground displays use an 8 KiB preview. Shortened
+output is recoverable only to the extent the job still retains it; follow the
+reported output position or gap. Do not rerun merely to obtain hidden output.
 
 Use Haskell for reusable command values, data-dependent follow-ups, or typed
 completion routing. `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB`,
