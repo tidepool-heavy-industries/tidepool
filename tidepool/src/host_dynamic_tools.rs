@@ -720,11 +720,18 @@ enum CallContent {
 }
 
 impl CallResponse {
+    fn workbench(value: serde_json::Value) -> Self {
+        Self::text(workbench_transcript(&value).unwrap_or_else(|| serialize(value)))
+    }
+
     fn domain(kind: ToolKind, value: serde_json::Value) -> Self {
-        let text = match kind {
-            ToolKind::Custom => workbench_transcript(&value).unwrap_or_else(|| serialize(value)),
-            ToolKind::Function => serialize(value),
-        };
+        Self::text(match (kind, value) {
+            (ToolKind::Custom, serde_json::Value::String(text)) => text,
+            (_, value) => serialize(value),
+        })
+    }
+
+    fn text(text: String) -> Self {
         Self {
             content_items: vec![CallContent::InputText {
                 text: tidepool_actor::bound_workbench_display(&text, MODEL_OUTPUT_LIMIT),
@@ -964,7 +971,10 @@ async fn call(
         }
     };
     match result {
-        Ok(Ok(value)) => Json(CallResponse::domain(kind, value)),
+        Ok(Ok(value)) => Json(match state.endpoint.output_format() {
+            tidepool_actor::ResidentToolOutput::Value => CallResponse::domain(kind, value),
+            tidepool_actor::ResidentToolOutput::Workbench => CallResponse::workbench(value),
+        }),
         Ok(Err(error)) => {
             let failure = HostToolFailure::Dispatch(error);
             tracing::error!(
@@ -1360,16 +1370,13 @@ mod tests {
             CallResponse::domain(ToolKind::Custom, serde_json::json!({"large": huge})),
             CallResponse::domain(ToolKind::Function, serde_json::json!({"large": huge})),
             CallResponse::failure(&HostToolFailure::PanicInFuture(huge.clone())),
-            CallResponse::domain(
-                ToolKind::Custom,
-                serde_json::json!({
-                    "status": "committed", "nextIndex": 2, "total": 2,
-                    "items": [
-                        {"index": 0, "status": "committed", "output": huge},
-                        {"index": 1, "status": "committed", "output": "final evidence"}
-                    ]
-                }),
-            ),
+            CallResponse::workbench(serde_json::json!({
+                "status": "committed", "nextIndex": 2, "total": 2,
+                "items": [
+                    {"index": 0, "status": "committed", "output": huge},
+                    {"index": 1, "status": "committed", "output": "final evidence"}
+                ]
+            })),
         ];
         for response in responses {
             let CallContent::InputText { text } = &response.content_items[0];
@@ -1431,23 +1438,20 @@ mod tests {
 
     #[test]
     fn custom_workbench_receipt_projects_only_ghci_output() {
-        let response = CallResponse::domain(
-            ToolKind::Custom,
-            serde_json::json!({
-                "items": [{
-                    "index": 0,
-                    "output": "response :: Response ReviewReport",
-                    "status": "committed"
-                }, {
-                    "index": 1,
-                    "output": "readiness :: Watch ReviewReport",
-                    "status": "committed"
-                }],
-                "nextIndex": 2,
-                "status": "committed",
-                "total": 2
-            }),
-        );
+        let response = CallResponse::workbench(serde_json::json!({
+            "items": [{
+                "index": 0,
+                "output": "response :: Response ReviewReport",
+                "status": "committed"
+            }, {
+                "index": 1,
+                "output": "readiness :: Watch ReviewReport",
+                "status": "committed"
+            }],
+            "nextIndex": 2,
+            "status": "committed",
+            "total": 2
+        }));
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
@@ -1456,20 +1460,34 @@ mod tests {
     }
 
     #[test]
-    fn custom_workbench_receipt_marks_unrun_suffix_compactly() {
-        let response = CallResponse::domain(
-            ToolKind::Custom,
-            serde_json::json!({
-                "items": [{
-                    "index": 0,
-                    "output": "Not in scope: `missing`",
-                    "status": "rejected"
-                }],
-                "nextIndex": 0,
-                "status": "rejected",
-                "total": 3
-            }),
+    fn ordinary_domain_values_do_not_acquire_workbench_meaning_from_their_shape() {
+        let value = serde_json::json!({
+            "items": [{"index":0, "output":"application data", "status":"committed"}],
+            "status":"committed", "nextIndex":1, "total":1,
+        });
+        let response = CallResponse::domain(ToolKind::Custom, value.clone());
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text).unwrap(),
+            value
         );
+        let response = CallResponse::domain(ToolKind::Custom, "literal λ\ntext".into());
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(text, "literal λ\ntext");
+    }
+
+    #[test]
+    fn custom_workbench_receipt_marks_unrun_suffix_compactly() {
+        let response = CallResponse::workbench(serde_json::json!({
+            "items": [{
+                "index": 0,
+                "output": "Not in scope: `missing`",
+                "status": "rejected"
+            }],
+            "nextIndex": 0,
+            "status": "rejected",
+            "total": 3
+        }));
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,

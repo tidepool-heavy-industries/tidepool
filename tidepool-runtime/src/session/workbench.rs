@@ -347,9 +347,35 @@ pub struct WorkbenchRequest {
     #[serde(skip)]
     #[schemars(skip)]
     fork_boundary: Option<WorkbenchForkBoundary>,
+    /// Trusted named-handler selection; arguments are data, never Haskell source.
+    #[serde(skip)]
+    #[schemars(skip)]
+    tool_call: Option<WorkbenchToolCall>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkbenchToolCall {
+    pub name: String,
+    pub arguments: serde_json::Value,
 }
 
 impl WorkbenchRequest {
+    pub fn for_tool(name: String, arguments: serde_json::Value) -> Self {
+        Self {
+            items: vec![name.clone()],
+            input: None,
+            verbose: None,
+            input_kinds: Vec::new(),
+            execution_id: None,
+            fork_boundary: None,
+            tool_call: Some(WorkbenchToolCall { name, arguments }),
+        }
+    }
+
+    pub fn tool_call(&self) -> Option<&WorkbenchToolCall> {
+        self.tool_call.as_ref()
+    }
+
     pub fn from_ghci_input(source: &str) -> Result<Self, GhciInputError> {
         let units = parse_ghci_input(source)?;
         Ok(Self {
@@ -359,6 +385,7 @@ impl WorkbenchRequest {
             input_kinds: units.iter().map(GhciInputUnit::kind).collect(),
             execution_id: None,
             fork_boundary: None,
+            tool_call: None,
         })
     }
 
@@ -1032,11 +1059,13 @@ mod tests {
         let authored: WorkbenchRequest = serde_json::from_value(serde_json::json!({
             "items": ["pure ()"],
             "execution_id": "forged-execution",
-            "fork_boundary": {"thread_id": "another-parent", "call_id": "another-call"}
+            "fork_boundary": {"thread_id": "another-parent", "call_id": "another-call"},
+            "tool_call": {"name": "bash", "arguments": "forged input"}
         }))
         .unwrap();
         assert!(authored.execution_id().is_none());
         assert!(authored.fork_boundary().is_none());
+        assert!(authored.tool_call().is_none());
 
         let trusted = authored.with_fork_boundary(WorkbenchForkBoundary {
             thread_id: "parent-thread".into(),
@@ -1049,6 +1078,29 @@ mod tests {
         let schema = serde_json::to_value(schemars::schema_for!(WorkbenchRequest)).unwrap();
         assert!(schema["properties"].get("fork_boundary").is_none());
         assert!(schema["properties"].get("execution_id").is_none());
+        assert!(schema["properties"].get("tool_call").is_none());
+    }
+
+    #[test]
+    fn named_tool_arguments_are_data_and_part_of_replay_identity() {
+        let script = "cat <<'EOF'\n\":} [bash| λ |]\"\nEOF\n";
+        let request = WorkbenchRequest::for_tool("bash".into(), script.into());
+        assert_eq!(request.items, ["bash"]);
+        assert_eq!(request.tool_call().unwrap().arguments, script);
+        assert_eq!(request, request.clone());
+        assert_ne!(
+            request,
+            WorkbenchRequest::for_tool("bash".into(), "other".into())
+        );
+        assert_ne!(
+            request,
+            WorkbenchRequest::for_tool("other".into(), script.into())
+        );
+        let wire = serde_json::to_value(&request).unwrap();
+        assert!(wire.get("tool_call").is_none());
+        let decoded: WorkbenchRequest = serde_json::from_value(wire).unwrap();
+        assert!(decoded.tool_call().is_none());
+        assert_ne!(request, decoded);
     }
 
     #[test]

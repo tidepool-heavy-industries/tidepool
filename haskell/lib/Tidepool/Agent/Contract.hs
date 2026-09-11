@@ -30,6 +30,7 @@
 module Tidepool.Agent.Contract
   ( -- * Endpoint algebra and server interpretation
     Call
+  , RawCall
   , Notify
   , Update
   , Finish
@@ -40,6 +41,8 @@ module Tidepool.Agent.Contract
     -- * Tool values
   , Tool (..)
   , tool
+  , RawTool
+  , rawTool
   , notify
   , updateTool
   , finishTool
@@ -51,6 +54,7 @@ module Tidepool.Agent.Contract
   , HasAgentApi
   , HasActorApi
   , compileTools
+  , installTools
   , serveTools
   , serveToolsWith
   , serveToolsWithInitialUser
@@ -75,10 +79,11 @@ import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage (..))
+import Tidepool.Inspection (Display (..))
 import Tidepool.Aeson.Value (Value, ToJSON (..), object, (.=))
 import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON)
 import Tidepool.Aeson.Schema (JsonSchema (..))
-import Control.Monad.Freer (Eff, Member, send)
+import Control.Monad.Freer (Eff, Member, raise, send)
 import Tidepool.Effects.Core (AgentTools (..))
 
 -- ---------------------------------------------------------------------------
@@ -87,6 +92,9 @@ import Tidepool.Effects.Core (AgentTools (..))
 
 -- | A request\/response endpoint.
 data Call input output
+
+-- | A native custom tool receiving literal text, with bounded text presentation.
+data RawCall output
 
 -- | A fire-and-forget endpoint, interpreted as @Tool m input ()@ by the
 -- server mode.
@@ -108,6 +116,8 @@ data AsActorT (m :: Type -> Type) state exit
 -- | Interpret one endpoint under a record mode. The closed fallthrough gives
 -- an author-facing error at an unsupported field.
 type family mode :- endpoint where
+  AsServerT m :- RawCall output = RawTool m output
+  AsActorT m state exit :- RawCall output = RawTool m output
   AsServerT m :- Call input output = Tool m input output
   AsServerT m :- Notify input = Tool m input ()
   AsActorT m state exit :- Call input output = Tool m input output
@@ -119,7 +129,7 @@ type family mode :- endpoint where
       ( 'Text "unsupported agent tool endpoint: `"
           ':<>: 'ShowType endpoint
           ':<>: 'Text "`."
-          ':$$: 'Text "A tools-record field must use Call, Notify, Update, or Finish under a compatible server interpretation."
+          ':$$: 'Text "A tools-record field must use Call, RawCall, Notify, Update, or Finish under a compatible server interpretation."
       )
 
 infixr 0 :-
@@ -134,6 +144,7 @@ infixr 0 :-
 -- requires the declared tool surface itself to remain stable.
 data ToolKind
   = CallKind
+  | RawKind
   | NotifyKind
   | UpdateKind
   | FinishKind
@@ -149,6 +160,15 @@ data Tool m input output = Tool
 -- from 'notify' so authored code reads its intent at the call site.
 tool :: Text -> (input -> m output) -> Tool m input output
 tool = Tool CallKind
+
+-- | Literal input is passed as data to an already compiled handler.
+data RawTool m output = RawTool
+  { rawDescription :: Text
+  , rawHandler :: Text -> m output
+  }
+
+rawTool :: Text -> (Text -> m output) -> RawTool m output
+rawTool = RawTool
 
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).
 notify :: Text -> (input -> m ()) -> Tool m input ()
@@ -335,6 +355,36 @@ instance
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
+instance
+  (Selector s, Display output, Functor m) =>
+  GCompileTools (M1 S s (K1 R (RawTool m output))) m StructuralValue
+  where
+  gCompileEntries (M1 (K1 (RawTool desc h))) =
+    [ ToolEntry
+        { entryRecordName = T.empty
+        , entrySelector = fieldName
+        , entryWireName = fieldName
+        , entryDescription = desc
+        , entryInputSchema = jsonSchema (Proxy :: Proxy Text)
+        , entryOutputSchema = jsonSchema (Proxy :: Proxy Text)
+        , entryKind = RawKind
+        , entryRun = \value -> case fromJSON value of
+            Success input -> toJSON . renderToolOutput <$> h input
+            Error message -> error (T.unpack fieldName ++ ": raw tool requires Text: " ++ message)
+        }
+    ]
+    where
+      fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
+
+instance
+  (Selector s, Display output, Functor m) =>
+  GCompileTools (M1 S s (K1 R (RawTool m output))) m (ActorToolStep state exit)
+  where
+  gCompileEntries leaf =
+    [ entry { entryRun = fmap ActorToolStay . entryRun entry }
+    | entry <- (gCompileEntries leaf :: [ToolEntry m StructuralValue])
+    ]
+
 data ActorToolStep state exit
   = ActorToolStay StructuralValue
   | ActorToolUpdate StructuralValue state
@@ -487,10 +537,35 @@ declarationsToJson decls =
 
 toolKindText :: ToolKind -> Text
 toolKindText kind = case kind of
+  RawKind -> "raw"
   CallKind -> "call"
   NotifyKind -> "notify"
   UpdateKind -> "update"
   FinishKind -> "finish"
+
+-- Bound evaluation before crossing the bridge. The host additionally applies
+-- its UTF-8 byte budget to the complete response, including effect output.
+renderToolOutput :: Display a => a -> Text
+renderToolOutput value =
+  let (text, omitted) = displayWith 32500 value
+  in if omitted then text <> "\n[Tool result shortened; request a smaller result.]" else text
+
+-- | Install startup-compiled tools alongside the interactive workbench.
+-- The runtime owns the captured dispatcher; this does not enter a serving loop.
+installTools
+  :: forall effects tools. HasAgentApi tools (Eff effects)
+  => tools (AsServerT (Eff effects)) -> Eff (AgentTools ': effects) ()
+installTools tools = case compileTools tools of
+  Left problem -> error (T.unpack (renderToolCompileError problem))
+  Right compiled -> send (AgentToolsInstallWith (declarationsToJson (declarations compiled)) run)
+    where
+      run :: Int -> Eff (AgentTools ': effects) Text
+      run _ = do
+        (name, arguments) <- send AgentToolsInputWith
+        result <- raise (dispatch compiled name arguments)
+        pure (case fromJSON result of
+          Success text -> text
+          Error _ -> renderToolOutput result)
 
 -- | Install an immutable tools record as this actor's resident tool policy.
 -- Rust resumes this loop only with names from the declarations published by

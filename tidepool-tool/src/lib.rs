@@ -33,6 +33,19 @@ pub enum HostedTool {
     Function(ToolDeclaration),
 }
 
+impl From<ToolDeclaration> for HostedTool {
+    fn from(declaration: ToolDeclaration) -> Self {
+        if declaration.kind == ToolKind::Raw {
+            Self::Custom(CustomToolDeclaration {
+                name: declaration.name,
+                description: declaration.description,
+            })
+        } else {
+            Self::Function(declaration)
+        }
+    }
+}
+
 impl HostedTool {
     #[must_use]
     pub fn name(&self) -> &str {
@@ -99,6 +112,7 @@ pub struct ToolInvocation {
 pub enum ToolKind {
     #[default]
     Call,
+    Raw,
     Notify,
     Update,
     Finish,

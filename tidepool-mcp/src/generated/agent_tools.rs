@@ -8,6 +8,8 @@ pub fn agent_tools_decl() -> crate::EffectDecl {
         description: "Private resident-policy boundary for tools exposed to an attached agent. Authored code uses `serveTools`; Rust owns host projection while Haskell owns declarations and dispatch.",
         prompt_card: None,
         constructors: &[
+            "AgentToolsInstallWith :: Value -> (Int -> Eff toolEffs Text) -> AgentTools ()",
+            "AgentToolsInputWith :: AgentTools (Text, Value)",
             "AgentToolsAwaitWith :: Value -> Text -> Maybe Text -> AgentTools (Text, Value)",
             "AgentToolsReplyWith :: Value -> AgentTools ()",
         ],

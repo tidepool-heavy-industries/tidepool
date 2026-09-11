@@ -84,7 +84,7 @@ pub(crate) enum HostedObservation {
 }
 
 enum EndpointSource {
-    Canonical,
+    Canonical(Vec<tidepool_tool::HostedTool>),
     #[cfg(test)]
     Untrusted(Arc<dyn tidepool_actor::ResidentToolEndpoint>),
 }
@@ -127,7 +127,7 @@ pub(super) fn start(
         binding_path,
         expected_resume,
         listener,
-        EndpointSource::Canonical,
+        EndpointSource::Canonical(Vec::new()),
         None,
     )
 }
@@ -168,9 +168,12 @@ fn start_endpoint(
     )>,
 ) -> Result<HostedOwner, String> {
     let endpoint: Arc<dyn tidepool_actor::ResidentToolEndpoint> = match &endpoint_source {
-        EndpointSource::Canonical => Arc::new(tidepool_actor::ResidentInteractivePolicy::local(
-            actor.clone(),
-        )),
+        EndpointSource::Canonical(tools) => {
+            Arc::new(tidepool_actor::ResidentInteractivePolicy::local_with_tools(
+                actor.clone(),
+                tools.clone(),
+            ))
+        }
         #[cfg(test)]
         EndpointSource::Untrusted(endpoint) => endpoint.clone(),
     };
@@ -324,7 +327,7 @@ impl HostedRetirement {
             InputSealState::TestExempt => {}
         }
         if self.seal.is_none() && !self.terminal_path {
-            if matches!(self.endpoint_source, EndpointSource::Canonical)
+            if matches!(self.endpoint_source, EndpointSource::Canonical(_))
                 && self.actor.terminal().get().is_some()
             {
                 self.terminal_path = true;
@@ -455,6 +458,7 @@ mod tests;
 pub(super) fn start_with_resources(
     slot: &HostedSlot,
     actor: LocalActorRef,
+    tools: Vec<tidepool_tool::HostedTool>,
     binding_path: PathBuf,
     expected_resume: Option<BackendThreadId>,
     listener: tokio::net::UnixListener,
@@ -469,7 +473,7 @@ pub(super) fn start_with_resources(
         binding_path,
         expected_resume,
         listener,
-        EndpointSource::Canonical,
+        EndpointSource::Canonical(tools),
         resources,
     )
 }

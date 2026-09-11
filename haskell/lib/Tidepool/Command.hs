@@ -12,6 +12,7 @@ module Tidepool.Command
     OutputIssue (..),
     DecodeIssue (..),
     bash,
+    bashCommand,
     argv,
     describe,
     withMemory,

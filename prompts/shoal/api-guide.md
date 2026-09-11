@@ -62,6 +62,11 @@ of starting conflicting work.
 
 ## Commands
 
+The supplied `bash` tool accepts literal Bash and displays output directly;
+ordinary shell work needs no Haskell binding. It shares `Cmd`'s execution and
+resource owner. Backgrounded or oversized output names a retained `jobN :: Cmd.Job`
+for inspection here. Never rerun a command to recover its output.
+
 `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB` are loaded.
 ```haskell
 result <- Cmd.run [bash|git status --short|]

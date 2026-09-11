@@ -69,6 +69,7 @@ pub struct ActorWorkbenchSource {
     base_include: Arc<[PathBuf]>,
     default_browse_module: Option<Arc<str>>,
     workbench_imports: SourceImports,
+    tools: Option<Arc<str>>,
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -101,6 +102,7 @@ impl ActorWorkbenchSource {
             base_include: base_include.into(),
             default_browse_module: None,
             workbench_imports: SourceImports::new(),
+            tools: None,
         }
     }
 
@@ -129,6 +131,25 @@ impl ActorWorkbenchSource {
         self.workbench_imports.extend_text(imports);
         self
     }
+
+    /// Select the deployment-frozen, qualified Haskell tool-record value.
+    #[must_use]
+    pub fn with_tools(mut self, entry: impl Into<Arc<str>>) -> Self {
+        let entry = entry.into();
+        if let Some((module, _)) = entry.rsplit_once('.') {
+            self.workbench_imports
+                .extend_text(&format!("qualified {module}"));
+        }
+        self.workbench_imports
+            .extend_text("qualified Tidepool.Agent.Contract");
+        self.tools = Some(entry);
+        self
+    }
+}
+
+pub(crate) struct ResidentWorkbenchTools {
+    pub(crate) declarations: Vec<tidepool_tool::HostedTool>,
+    pub(crate) dispatch: Arc<RootCustody>,
 }
 
 /// Shared-machine registry shape used by actors. String holes are only the
@@ -170,10 +191,15 @@ pub(crate) struct ResidentWorkbenchFragment {
     display: WorkbenchDisplay,
     output: Vec<String>,
     presented: Vec<String>,
+    recovered_jobs: Vec<String>,
     warnings: Vec<String>,
 }
 
 impl ResidentWorkbenchFragment {
+    pub(crate) fn retain_job_binding(&mut self, binding: String) {
+        self.recovered_jobs.push(binding);
+    }
+
     pub(crate) fn present_command(
         &mut self,
         job: String,
@@ -196,6 +222,7 @@ impl ResidentWorkbenchFragment {
 enum WorkbenchDisplay {
     Binding(Vec<String>),
     Opaque,
+    Tool,
     Observation {
         name: String,
         source: ActorWorkbenchSource,
@@ -1206,6 +1233,12 @@ impl ResidentRequest {
                 crate::generated::actor_local::ActorLocalReq::ActorCheckpointWith(..),
             ) => "state checkpoint",
             Self::AgentTools(
+                crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(..),
+            ) => "agent tool installation",
+            Self::AgentTools(crate::generated::agent_tools::AgentToolsReq::AgentToolsInputWith) => {
+                "agent tool input"
+            }
+            Self::AgentTools(
                 crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(..),
             ) => "agent tool await",
             Self::AgentTools(
@@ -1512,6 +1545,184 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(crate) async fn prepare_tools(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
+        let Some(entry) = self.access.source.tools.clone() else {
+            return Ok(None);
+        };
+        let mut source = self.access.source.clone();
+        source.preamble =
+            insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
+        source.preamble = format!(
+            "{}\ntype HostedToolEffects = Tidepool.Effects.Core.AgentTools ': {}\n",
+            source.preamble, context.haskell_effects_alias
+        )
+        .into();
+        let authored_effects = context.haskell_effects_alias.clone();
+        let mut compile_context = context.clone();
+        compile_context.haskell_effects_alias = "HostedToolEffects".into();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let block = ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: format!(
+                        "_ <- Tidepool.Agent.Contract.installTools @({authored_effects}) {entry}"
+                    ),
+                };
+                let step = begin_fragment(
+                    session,
+                    &compile_context,
+                    &source,
+                    RequestWorkbenchScope {
+                        response: None,
+                        request: None,
+                        type_modules: &[],
+                    },
+                    block,
+                    GhciInputKind::Code,
+                )?;
+                let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+                    let detail = match step {
+                        ResidentWorkbenchStep::Rejected(detail) => detail,
+                        _ => "installer completed without publishing its handler".into(),
+                    };
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "tool installation: {detail}"
+                    )));
+                };
+                let ResidentOutcome::Suspended { hole, request, .. } = *outcome else {
+                    unreachable!("running fragment has a suspension")
+                };
+                let publication = (|| {
+                    let ResidentRequest::AgentTools(
+                        crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(
+                            declarations,
+                            _,
+                        ),
+                    ) = ResidentRequest::decode(&request, session.data_con_table())?
+                    else {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "tool installer crossed an unexpected effect boundary".into(),
+                        ));
+                    };
+                    let declarations =
+                        tidepool_runtime::value_to_json(&declarations, session.data_con_table(), 0);
+                    let declarations: Vec<tidepool_tool::ToolDeclaration> =
+                        serde_json::from_value(declarations).map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "tool declarations: {error}"
+                            ))
+                        })?;
+                    let declarations = crate::resident_interactive::project_tools(declarations)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
+                    let dispatch = session
+                        .live_payload_handle_owned_by(
+                            hole.cont_id(),
+                            context.placement.resource_scope,
+                        )
+                        .ok_or_else(|| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "tool installer did not retain its dispatcher".into(),
+                            )
+                        })?;
+                    Ok((declarations, dispatch))
+                })();
+                let (declarations, dispatch) = match publication {
+                    Ok(publication) => publication,
+                    Err(error) => {
+                        let _ = session.abort(hole.cont_id(), "tool publication rejected".into());
+                        return Err(error);
+                    }
+                };
+                let answer = ().to_value(session.data_con_table())?;
+                let settled = session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                if !matches!(
+                    settled,
+                    ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
+                ) {
+                    if let ResidentOutcome::Suspended { hole, .. } = settled {
+                        let _ = session.abort(
+                            hole.cont_id(),
+                            "tool installer must finish after publication".into(),
+                        );
+                    }
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "tool installer did not finish after publication".into(),
+                    ));
+                }
+                Ok(Some(ResidentWorkbenchTools {
+                    declarations,
+                    dispatch: Arc::new(dispatch),
+                }))
+            })
+            .await
+    }
+
+    /// Apply the retained handler with invocation data. No source compiler is involved.
+    pub(crate) async fn begin_tool(
+        &self,
+        context: crate::ActorSessionContext,
+        dispatch: Arc<RootCustody>,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let outcome = session
+                    .run_rooted_entry_borrowed(
+                        "hosted_tool",
+                        &dispatch,
+                        0,
+                        context.placement.resource_scope,
+                        None,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "tool dispatcher completed without requesting invocation data".into(),
+                    ));
+                };
+                let input = (|| {
+                    if !matches!(
+                        ResidentRequest::decode(&request, session.data_con_table())?,
+                        ResidentRequest::AgentTools(
+                            crate::generated::agent_tools::AgentToolsReq::AgentToolsInputWith
+                        )
+                    ) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "tool dispatcher crossed an unexpected input boundary".into(),
+                        ));
+                    }
+                    Ok((name, arguments).to_value(session.data_con_table())?)
+                })();
+                let answer = match input {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        let _ =
+                            session.abort(hole.cont_id(), "tool invocation input rejected".into());
+                        return Err(error);
+                    }
+                };
+                let outcome = session.resume(hole, answer);
+                start_fragment_settlement(
+                    session,
+                    context,
+                    1,
+                    WorkbenchDisplay::Tool,
+                    Vec::new(),
+                    outcome,
+                )
+            })
+            .await
+    }
+
     pub(crate) async fn mount_named_input(
         &self,
         context: crate::ActorSessionContext,
@@ -1654,6 +1865,19 @@ where
         job: String,
         reason: CommandObservationStop,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        let binding = self.bind_command_job(context, job.clone()).await?;
+        Ok(ResidentWorkbenchStep::CommandBackgrounded {
+            job,
+            binding,
+            reason,
+        })
+    }
+
+    pub(crate) async fn bind_command_job(
+        &self,
+        context: crate::ActorSessionContext,
+        job: String,
+    ) -> Result<String, ResidentActorWorkbenchError> {
         self.access.with_machine(context, move |session, context, source| {
             let scope = context.placement.lexical_scope;
             let names: Vec<_> = session.workbench_bindings_in(scope).into_iter().map(|binding| binding.name).collect();
@@ -1669,7 +1893,7 @@ where
                 if name.strip_prefix("job").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
                     && session.workbench_declaration_matches_in(scope, name, &declaration_for(name), &trusted_imports)
                 {
-                    return Ok(ResidentWorkbenchStep::CommandBackgrounded { job, binding: name.clone(), reason });
+                    return Ok(name.clone());
                 }
             }
             let mut index = session.val_gen().0;
@@ -1685,7 +1909,7 @@ where
                 .map_err(|error| ResidentActorWorkbenchError::InputMount(format!(
                     "command {job} remains owned, but its automatic binding failed: {error}"
                 )))?;
-            Ok(ResidentWorkbenchStep::CommandBackgrounded { job, binding, reason })
+            Ok(binding)
         }).await
     }
 
@@ -1921,6 +2145,7 @@ where
                 display,
                 output: Vec::new(),
                 presented: Vec::new(),
+                recovered_jobs: Vec::new(),
                 warnings,
             },
             outcome,
@@ -1957,16 +2182,18 @@ where
     O: OutputSink + Sync,
 {
     match outcome {
-        ResidentOutcome::Completed { output, .. } => {
+        ResidentOutcome::Completed { output, result } => {
             fragment.output.extend(output);
-            let installed_bindings = match &fragment.display {
+            let mut installed_bindings = match &fragment.display {
                 WorkbenchDisplay::Binding(names) => names.clone(),
                 WorkbenchDisplay::Observation { name, .. } => vec![name.clone()],
-                WorkbenchDisplay::Opaque => Vec::new(),
+                WorkbenchDisplay::Opaque | WorkbenchDisplay::Tool => Vec::new(),
             };
+            installed_bindings.append(&mut fragment.recovered_jobs);
             let receipt = match fragment.display {
                 WorkbenchDisplay::Binding(names) => format!("[bound {}]", names.join(", ")),
                 WorkbenchDisplay::Opaque => "<opaque value>".into(),
+                WorkbenchDisplay::Tool => String::from_value(result.value(), result.table())?,
                 WorkbenchDisplay::Observation {
                     name,
                     source,
@@ -2005,12 +2232,16 @@ where
         ResidentOutcome::BindingsCommitted { output } => {
             let bound_name = match &fragment.display {
                 WorkbenchDisplay::Binding(names) => Some(names.join(", ")),
-                WorkbenchDisplay::Opaque | WorkbenchDisplay::Observation { .. } => None,
+                WorkbenchDisplay::Opaque
+                | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::Observation { .. } => None,
             };
             let receipt = projected_binding_receipt(bound_name.as_deref(), &output)?;
             let installed_bindings = match fragment.display {
                 WorkbenchDisplay::Binding(names) => names,
-                WorkbenchDisplay::Opaque | WorkbenchDisplay::Observation { .. } => Vec::new(),
+                WorkbenchDisplay::Opaque
+                | WorkbenchDisplay::Tool
+                | WorkbenchDisplay::Observation { .. } => Vec::new(),
             };
             fragment.output.push(receipt);
             Ok(ResidentWorkbenchStep::Committed {
