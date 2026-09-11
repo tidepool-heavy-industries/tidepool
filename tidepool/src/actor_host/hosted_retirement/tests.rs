@@ -1075,6 +1075,7 @@ impl tidepool_actor::KernelBehavior for GatedBehavior {
         &'a mut self,
         _: &'a tidepool_actor::KernelContext,
         _: tidepool_runtime::session::WorkbenchRequest,
+        _: Option<Arc<tidepool_actor::WorkbenchExecutionControl>>,
     ) -> BoxFuture<
         'a,
         Result<
