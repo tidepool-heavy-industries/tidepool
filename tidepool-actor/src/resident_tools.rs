@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::{future::Future, pin::Pin};
 
 use tidepool_runtime::session::{ResidentHole, WorkbenchExecutionId, WorkbenchRequest};
-use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
+use tidepool_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use tokio::sync::oneshot;
 
 /// A policy waiting for its next invocation.
@@ -51,6 +51,13 @@ pub struct ResidentToolPolicy {
 pub type ResidentToolFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ResidentToolError>> + Send + 'static>>;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum ResidentToolOutput {
+    #[default]
+    Value,
+    Workbench,
+}
+
 /// Transport-neutral interface projected by an actor-local tool host.
 /// Implementations retain actor admission and execution ownership behind
 /// their dispatcher; a concrete host sees only declarations and typed
@@ -70,6 +77,10 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 
     fn tools(&self) -> &[HostedTool];
+    /// The owning endpoint chooses interpretation; tool input syntax does not.
+    fn output_format(&self) -> ResidentToolOutput {
+        ResidentToolOutput::Value
+    }
     fn instructions(&self) -> Option<&str>;
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture;
     /// Settle unacknowledged forks when a hosted connection reattaches.
@@ -261,9 +272,13 @@ impl ResidentToolPolicy {
         &self,
         invocation: ToolInvocation,
     ) -> Result<serde_json::Value, ResidentToolError> {
-        if !matches!(&invocation.arguments, ToolArguments::Structured(_)) {
+        if !self
+            .tools
+            .iter()
+            .any(|tool| tool.name() == invocation.name && tool.accepts(&invocation.arguments))
+        {
             return Err(ResidentToolError::InvalidInvocation(
-                "function tool received raw arguments".into(),
+                "unknown tool or invalid argument kind".into(),
             ));
         }
         self.client.dispatch(invocation).await
@@ -295,10 +310,14 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
 
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
         let client = self.client.clone();
+        let tools = self.tools.clone();
         Box::pin(async move {
-            if !matches!(&invocation.arguments, ToolArguments::Structured(_)) {
+            if !tools
+                .iter()
+                .any(|tool| tool.name() == invocation.name && tool.accepts(&invocation.arguments))
+            {
                 return Err(ResidentToolError::InvalidInvocation(
-                    "function tool received raw arguments".into(),
+                    "unknown tool or invalid argument kind".into(),
                 ));
             }
             client.dispatch(invocation).await
@@ -315,7 +334,7 @@ pub(crate) fn install_local_resident_tools(
             .declarations
             .iter()
             .cloned()
-            .map(HostedTool::Function)
+            .map(HostedTool::from)
             .collect::<Vec<_>>()
             .into(),
         instructions: (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone()),

@@ -398,6 +398,7 @@ struct WorkbenchUnitExecution<'a> {
     execution: Option<&'a WorkbenchExecutionId>,
     input_unit_index: usize,
     total: usize,
+    named_tool: bool,
     operations: &'a mut Vec<WorkbenchOperationReceipt>,
     display_remaining: &'a mut usize,
     command_output: &'a mut Vec<String>,
@@ -460,6 +461,7 @@ pub struct ResidentKernelBehavior<H, O> {
     prepared_workspace: Option<crate::PreparedForkWorkspace>,
     worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     policy_installed: bool,
+    compiled_tools: Option<crate::resident_workbench::ResidentWorkbenchTools>,
     forest_control: bool,
     pending_program: Option<ResidentOutcome>,
     pending_reply: Option<crate::RequestId>,
@@ -574,6 +576,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             prepared_workspace: None,
             worktree_custody: None,
             policy_installed: false,
+            compiled_tools: None,
             forest_control: false,
             pending_program: None,
             pending_reply: None,
@@ -2951,7 +2954,8 @@ where
                         kernel,
                         context,
                         attachment.initial_user_message,
-                    )?;
+                    )
+                    .await?;
                     outcome = self
                         .environment
                         .runner
@@ -3017,7 +3021,8 @@ where
         };
         let request_message =
             contract.message(request.request, request.initial_user_message.as_deref());
-        self.install_interactive_policy(kernel, context, Some(request_message.clone()))?;
+        self.install_interactive_policy(kernel, context, Some(request_message.clone()))
+            .await?;
         self.standing =
             ResidentStanding::Interactive(crate::interactive_session::ResidentInteractiveAwait {
                 request,
@@ -3060,7 +3065,7 @@ where
         Ok(InteractivePark::Parked)
     }
 
-    fn install_interactive_policy(
+    async fn install_interactive_policy(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
@@ -3074,8 +3079,20 @@ where
                 "local actor was absent from its routing directory".into(),
             )
         })?;
-        let policy: Arc<dyn ResidentToolEndpoint> =
-            Arc::new(crate::ResidentInteractivePolicy::local(actor.clone()));
+        self.compiled_tools = self
+            .environment
+            .runner
+            .application_workbench()
+            .prepare_tools(context.clone())
+            .await?;
+        let declarations = self
+            .compiled_tools
+            .as_ref()
+            .map(|tools| tools.declarations.clone())
+            .unwrap_or_default();
+        let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
+            crate::ResidentInteractivePolicy::local_with_tools(actor.clone(), declarations),
+        );
         let fork_gate = self
             .descriptor
             .fork_group()
@@ -3247,7 +3264,8 @@ where
                                 kernel,
                                 context,
                                 attachment.initial_user_message,
-                            )?;
+                            )
+                            .await?;
                             outcome = self
                                 .environment
                                 .runner
@@ -3837,6 +3855,32 @@ where
                                                 None => {}
                                             }
                                 }
+                                if unit.named_tool {
+                                    if let CommandPresentation::CommandVisible(text) =
+                                        &mut presentation
+                                    {
+                                        let incomplete =
+                                            pages.as_ref().is_some_and(|pages| match pages {
+                                                Ok(pages) => pages.iter().any(|(_, page)| {
+                                                    page.lost_bytes > 0
+                                                        || page.start > 0
+                                                        || page.end < page.available_end
+                                                }),
+                                                Err(_) => true,
+                                            });
+                                        if text.len() > *unit.display_remaining || incomplete {
+                                            let binding = workbench
+                                                .bind_command_job(context.clone(), job.clone())
+                                                .await?;
+                                            *text = crate::workbench_display::bounded_output(
+                                                text,
+                                                (8 * 1024).min(*unit.display_remaining),
+                                            );
+                                            text.push_str(&format!("\nRetained output: {binding} :: Cmd.Job\nRead with Cmd.output {binding}; Cmd.next continues. Do not rerun to recover output."));
+                                            next_fragment.retain_job_binding(binding);
+                                        }
+                                    }
+                                }
                                 let rendered = next_fragment.present_command(
                                     job.clone(),
                                     presentation,
@@ -3920,6 +3964,35 @@ where
         request: WorkbenchRequest,
     ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
         let execution = request.execution_id().cloned();
+        let tool_dispatch = if let Some(call) = request.tool_call() {
+            let tools = self
+                .compiled_tools
+                .as_ref()
+                .filter(|tools| {
+                    tools.declarations.iter().any(|tool| {
+                        tool.name() == call.name
+                            && match tool {
+                                tidepool_tool::HostedTool::Custom(_) => call.arguments.is_string(),
+                                tidepool_tool::HostedTool::Function(_) => {
+                                    call.arguments.is_object()
+                                }
+                            }
+                    })
+                })
+                .ok_or_else(|| {
+                    workbench_failure(
+                        &[],
+                        0,
+                        1,
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "unknown tool or invalid argument kind".into(),
+                        ),
+                    )
+                })?;
+            Some(Arc::clone(&tools.dispatch))
+        } else {
+            None
+        };
         let workbench = match &self.standing {
             ResidentStanding::Interactive(awaiting) => self.environment.runner.workbench(
                 awaiting.request.response.clone(),
@@ -4040,7 +4113,12 @@ where
             let mut unit_operations = Vec::new();
             let mut command_output = Vec::new();
             // Leave room for a later stop/error receipt without hiding offered command output.
-            let mut display_remaining = (60usize * 1024).saturating_sub(
+            let display_budget = if request.tool_call().is_some() {
+                28usize * 1024
+            } else {
+                60usize * 1024
+            };
+            let mut display_remaining = display_budget.saturating_sub(
                 receipts
                     .iter()
                     .map(|item| item.output.len() + 1)
@@ -4057,10 +4135,22 @@ where
                     total: request.items.len(),
                 },
             );
-            let mut step = match workbench
-                .begin_item(context.clone(), block, request.input_kind(index))
-                .await
-            {
+            let started =
+                if let (Some(call), Some(dispatch)) = (request.tool_call(), &tool_dispatch) {
+                    workbench
+                        .begin_tool(
+                            context.clone(),
+                            Arc::clone(dispatch),
+                            call.name.clone(),
+                            call.arguments.clone(),
+                        )
+                        .await
+                } else {
+                    workbench
+                        .begin_item(context.clone(), block, request.input_kind(index))
+                        .await
+                };
+            let mut step = match started {
                 Ok(step) => step,
                 Err(source) => {
                     self.abort_incomplete_groups(
@@ -4089,6 +4179,7 @@ where
                             execution: execution.as_ref(),
                             input_unit_index: index,
                             total: request.items.len(),
+                            named_tool: request.tool_call().is_some(),
                             operations: &mut unit_operations,
                             display_remaining: &mut display_remaining,
                             command_output: &mut command_output,
@@ -4130,6 +4221,11 @@ where
                     warnings,
                     installed_bindings,
                 } => {
+                    let output = if request.tool_call().is_some() {
+                        crate::bound_workbench_display(&output, display_remaining)
+                    } else {
+                        output
+                    };
                     let output = if command_prefix.is_empty() {
                         output
                     } else {
@@ -4197,6 +4293,11 @@ where
                     });
                 }
                 ResidentWorkbenchStep::Rejected(output) => {
+                    let output = if request.tool_call().is_some() {
+                        crate::bound_workbench_display(&output, display_remaining)
+                    } else {
+                        output
+                    };
                     let output = if command_prefix.is_empty() {
                         output
                     } else {
@@ -4970,12 +5071,19 @@ where
                     });
                 }
             };
-            let tidepool_tool::ToolArguments::Structured(arguments) = invocation.arguments else {
+            if !awaiting.declarations.iter().any(|tool| {
+                tool.name == invocation.name
+                    && tidepool_tool::HostedTool::from(tool.clone()).accepts(&invocation.arguments)
+            }) {
                 self.standing = ResidentStanding::Tools(awaiting);
                 return Err(KernelInvocationFailure::Rejected {
                     actor: context.actor,
-                    detail: "actor function tool received raw arguments".into(),
+                    detail: "unknown tool or invalid argument kind".into(),
                 });
+            }
+            let arguments = match invocation.arguments {
+                tidepool_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
+                tidepool_tool::ToolArguments::Structured(value) => value,
             };
             let mut outcome = self
                 .environment

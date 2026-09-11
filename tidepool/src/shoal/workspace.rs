@@ -13,6 +13,7 @@ pub(super) struct HaskellConfig {
     pub source_roots: Vec<PathBuf>,
     pub modules: Vec<String>,
     pub checks: Vec<String>,
+    pub tools: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -39,6 +40,8 @@ pub struct FrozenWorkspace {
     pub(crate) modules: Vec<String>,
     #[serde(default)]
     pub(crate) checks: Vec<String>,
+    #[serde(default)]
+    pub(crate) tools: Option<String>,
     pub(crate) prompts: BTreeMap<String, String>,
     files: BTreeMap<PathBuf, String>,
     config: String,
@@ -83,9 +86,14 @@ impl FrozenWorkspace {
             capture_sources(&source, &relative, &directory, &mut files)?;
             include.push(directory.join(relative));
         }
-        for entry in &config.haskell.checks {
+        for entry in config
+            .haskell
+            .checks
+            .iter()
+            .chain(config.haskell.tools.iter())
+        {
             let Some((module, function)) = entry.rsplit_once('.') else {
-                return Err(format!("check entry must be Module.function: {entry}").into());
+                return Err(format!("Haskell entry must be Module.function: {entry}").into());
             };
             if !valid_module(module)
                 || !function.starts_with(|c: char| c.is_ascii_lowercase())
@@ -93,7 +101,7 @@ impl FrozenWorkspace {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
             {
-                return Err(format!("invalid Haskell check entry: {entry}").into());
+                return Err(format!("invalid Haskell entry: {entry}").into());
             }
         }
         for module in &config.haskell.modules {
@@ -180,6 +188,7 @@ impl FrozenWorkspace {
             include,
             modules: config.haskell.modules,
             checks: config.haskell.checks,
+            tools: config.haskell.tools,
             prompts,
             files,
             config: config_text,
@@ -381,6 +390,48 @@ mod tests {
             .unwrap();
             assert!(FrozenWorkspace::load(project.path(), run.path()).is_err());
         }
+    }
+
+    #[test]
+    fn tool_selection_is_qualified_and_frozen_with_the_package() {
+        let project = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".shoal");
+        std::fs::create_dir(&authored).unwrap();
+        let write = |entry: &str| {
+            std::fs::write(
+                authored.join("config.toml"),
+                format!(
+                    "[defaults]\nmodel='gpt-5.6-sol'\n[haskell]\ntools={}\n",
+                    serde_json::to_string(entry).unwrap(),
+                ),
+            )
+            .unwrap()
+        };
+        for entry in [
+            "tools",
+            "Project.Tools.tools\nimport Bad",
+            "Project.Tools.Tools",
+            "Project.Tools.tools ()",
+        ] {
+            write(entry);
+            assert!(
+                FrozenWorkspace::load(project.path(), tempfile::tempdir().unwrap().path()).is_err()
+            );
+        }
+        write("Tidepool.Command.Tools.tools");
+        let run = tempfile::tempdir().unwrap();
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        assert_eq!(
+            frozen.tools.as_deref(),
+            Some("Tidepool.Command.Tools.tools")
+        );
+        write("Project.Next.tools");
+        let same_run = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        assert_eq!(same_run.tools, frozen.tools);
+        let next =
+            FrozenWorkspace::load(project.path(), tempfile::tempdir().unwrap().path()).unwrap();
+        assert_eq!(next.tools.as_deref(), Some("Project.Next.tools"));
+        assert_ne!(next.identity, frozen.identity);
     }
 
     #[test]

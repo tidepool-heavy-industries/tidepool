@@ -33,12 +33,63 @@ impl ResidentInteractivePolicy {
         Self::with_client(ResidentToolClient::local(actor))
     }
 
+    pub fn local_with_tools(actor: crate::LocalActorRef, tools: Vec<HostedTool>) -> Self {
+        Self {
+            tools: std::iter::once(haskell_tool_declaration())
+                .chain(tools)
+                .collect::<Vec<_>>()
+                .into(),
+            client: ResidentToolClient::local(actor),
+        }
+    }
+
     fn with_client(client: ResidentToolClient) -> Self {
         Self {
             tools: vec![haskell_tool_declaration()].into(),
             client,
         }
     }
+}
+
+pub(crate) fn project_tools(
+    declarations: Vec<tidepool_tool::ToolDeclaration>,
+) -> Result<Vec<HostedTool>, ResidentToolError> {
+    use tidepool_tool::ToolKind;
+    let mut names = std::collections::HashSet::from([HASKELL_TOOL.to_string()]);
+    declarations
+        .into_iter()
+        .map(|declaration| {
+            if declaration.name.is_empty()
+                || declaration.name.len() > 64
+                || !declaration
+                    .name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || !names.insert(declaration.name.clone())
+            {
+                return Err(ResidentToolError::InvalidInvocation(format!(
+                    "invalid, duplicate or reserved tool name {:?}",
+                    declaration.name
+                )));
+            }
+            match declaration.kind {
+                ToolKind::Raw => Ok(declaration.into()),
+                ToolKind::Call | ToolKind::Notify
+                    if declaration
+                        .input_schema
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("object") =>
+                {
+                    Ok(HostedTool::Function(declaration))
+                }
+                _ => Err(ResidentToolError::InvalidInvocation(format!(
+                    "tool {:?} is not an interactive call with supported input",
+                    declaration.name
+                ))),
+            }
+        })
+        .collect()
 }
 
 fn haskell_tool_declaration() -> HostedTool {
@@ -70,6 +121,10 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         &self.tools
     }
 
+    fn output_format(&self) -> crate::ResidentToolOutput {
+        crate::ResidentToolOutput::Workbench
+    }
+
     fn instructions(&self) -> Option<&str> {
         Some(haskell_tool_instructions())
     }
@@ -89,12 +144,34 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
         let client = self.client.clone();
+        let tools = self.tools.clone();
         Box::pin(async move {
-            if invocation.name != HASKELL_TOOL {
-                return Err(crate::ResidentToolError::InvalidInvocation(format!(
-                    "unknown actor workbench tool `{}`",
+            let declaration = tools
+                .iter()
+                .find(|tool| tool.name() == invocation.name)
+                .ok_or_else(|| {
+                    ResidentToolError::InvalidInvocation(format!(
+                        "unknown actor tool {:?}",
+                        invocation.name
+                    ))
+                })?;
+            if !declaration.accepts(&invocation.arguments) {
+                return Err(ResidentToolError::InvalidInvocation(format!(
+                    "invalid argument kind for {:?}",
                     invocation.name
                 )));
+            }
+            if invocation.name != HASKELL_TOOL {
+                let arguments = match invocation.arguments {
+                    ToolArguments::Raw(text) => serde_json::Value::String(text),
+                    ToolArguments::Structured(value) => value,
+                };
+                return client
+                    .dispatch_workbench(
+                        WorkbenchRequest::for_tool(invocation.name, arguments),
+                        invocation.context,
+                    )
+                    .await;
             }
             let ToolArguments::Raw(source) = invocation.arguments else {
                 return Err(crate::ResidentToolError::InvalidInvocation(
@@ -129,6 +206,39 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw(name: &str) -> tidepool_tool::ToolDeclaration {
+        tidepool_tool::ToolDeclaration {
+            name: name.into(),
+            description: "literal input".into(),
+            input_schema: serde_json::json!({"type":"string"}),
+            output_schema: None,
+            kind: tidepool_tool::ToolKind::Raw,
+        }
+    }
+
+    #[test]
+    fn project_tools_checks_names_and_supported_input_before_publication() {
+        for name in ["", "haskell", "bad.name", "λ", &"a".repeat(65)] {
+            assert!(project_tools(vec![raw(name)]).is_err(), "{name}");
+        }
+        assert!(project_tools(vec![raw("bash"), raw("bash")]).is_err());
+        let mut structured = raw("structured");
+        structured.kind = tidepool_tool::ToolKind::Call;
+        assert!(project_tools(vec![structured.clone()]).is_err());
+        structured.input_schema = serde_json::json!({"type":"object","properties":{}});
+        let projected = project_tools(vec![raw("bash"), structured]).unwrap();
+        assert!(matches!(projected[0], HostedTool::Custom(_)));
+        assert!(matches!(projected[1], HostedTool::Function(_)));
+        for kind in [
+            tidepool_tool::ToolKind::Update,
+            tidepool_tool::ToolKind::Finish,
+        ] {
+            let mut unsupported = raw("stateful");
+            unsupported.kind = kind;
+            assert!(project_tools(vec![unsupported]).is_err());
+        }
+    }
 
     #[test]
     fn hosted_tool_surfaces_use_the_catalog_verbatim() {

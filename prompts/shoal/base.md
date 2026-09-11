@@ -93,7 +93,9 @@ Inside declaration groups use ordinary definitions rather than GHCi `let`.
 Use `Member Effect effects` constraints for reusable effectful helpers. The
 compiler checks types; Rust interpreters enforce runtime authority.
 
-Run commands through `Cmd.run` or `Cmd.start`; give builds/tests and other
+Use the supplied `bash` tool for ordinary shell commands; send literal Bash
+without Haskell wrappers. It uses the same actor and command owner as `Cmd`.
+Use Haskell for composition or retained results, and give builds/tests and other
 potentially expensive commands a realistic `withMemory (GiB n)` hard limit.
 Admission queues automatically. Retain background jobs, use completion routing when
 useful, and return the turn when only waiting remains. Native shell tools remain

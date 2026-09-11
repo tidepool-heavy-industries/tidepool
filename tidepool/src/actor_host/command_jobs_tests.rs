@@ -5,8 +5,9 @@ use tidepool_actor::command_jobs::{CommandBackend, CommandControl};
 use tidepool_bridge_effects::*;
 use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
-struct TestCommands {
+pub(super) struct TestCommands {
     specs: Mutex<Vec<CommandSpec>>,
+    stdout: Mutex<String>,
     finish: watch::Sender<bool>,
     cancelled: std::sync::atomic::AtomicBool,
     output_unavailable: std::sync::atomic::AtomicBool,
@@ -14,9 +15,17 @@ struct TestCommands {
     hold_output: watch::Sender<bool>,
 }
 impl TestCommands {
+    pub(super) fn completed(stdout: &str) -> Arc<Self> {
+        let backend = Self::new();
+        *backend.stdout.lock() = stdout.into();
+        backend.finish.send_replace(true);
+        backend
+    }
+
     fn new() -> Arc<Self> {
         Arc::new(Self {
             specs: Mutex::new(Vec::new()),
+            stdout: Mutex::new("result".into()),
             finish: watch::channel(false).0,
             cancelled: false.into(),
             output_unavailable: false.into(),
@@ -72,10 +81,10 @@ impl CommandBackend for TestCommands {
         position: CommandPosition,
     ) -> futures_util::future::BoxFuture<'a, Result<CommandPage, CommandError>> {
         Box::pin(async move {
-            let mut page = test_page(match stream {
-                CommandStream::Stdout => "result",
-                CommandStream::Stderr => "",
-            });
+            let mut page = match stream {
+                CommandStream::Stdout => test_page(&self.stdout.lock()),
+                CommandStream::Stderr => test_page(""),
+            };
             if let CommandPosition::OutputOffset(offset) = position {
                 let start = offset.min(page.end).max(0);
                 page.text = page.text[start as usize..].to_owned();
@@ -104,7 +113,7 @@ impl CommandBackend for TestCommands {
                 ));
             }
             Ok(CommandOutput {
-                stdout: test_page("result"),
+                stdout: test_page(&self.stdout.lock()),
                 stderr: test_page(""),
             })
         })
@@ -134,7 +143,7 @@ async fn committed(campaign: &TestCampaign, source: &str) -> serde_json::Value {
     }
     result
 }
-async fn backend_request(
+pub(super) async fn backend_request(
     campaign: &mut TestCampaign,
 ) -> Arc<tidepool_actor::command_jobs::CommandBackendRequest> {
     loop {
@@ -144,6 +153,138 @@ async fn backend_request(
             return request;
         }
     }
+}
+
+#[tokio::test]
+async fn raw_bash_uses_compiled_handler_and_shared_command_owner() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    assert!(policy.tools().iter().any(|tool| matches!(tool,
+        tidepool_tool::HostedTool::Custom(declaration) if declaration.name == "bash")));
+    let script = "cat <<'EOF'\nλ; $(literal) [bash|text|]\nEOF\n";
+    let invocation = ToolInvocation {
+        name: "bash".into(),
+        arguments: ToolArguments::Raw(script.into()),
+        context: Some(ToolInvocationContext {
+            context_call_id: Some("raw-once".into()),
+            thread_id: "raw-thread".into(),
+            turn_id: "raw-turn".into(),
+            call_id: "raw-once".into(),
+            namespace: Some("tidepool_actor".into()),
+        }),
+    };
+    let first = tokio::spawn(policy.dispatch_boxed(invocation.clone()));
+    let backend = TestCommands::new();
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let receipt = first.await.unwrap().unwrap();
+    assert_eq!(receipt["status"], "committed", "{receipt}");
+    assert!(
+        receipt["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("result"),
+        "{receipt}"
+    );
+    assert!(
+        receipt["items"][0]["installedBindings"].is_null(),
+        "{receipt}"
+    );
+    assert_eq!(
+        policy.dispatch_boxed(invocation.clone()).await.unwrap(),
+        receipt
+    );
+    assert_eq!(
+        backend.specs.lock().len(),
+        1,
+        "replayed call must not execute twice"
+    );
+    assert_eq!(
+        backend.specs.lock()[0].argv[4],
+        script,
+        "script is data, including Haskell delimiters"
+    );
+    assert_eq!(backend.specs.lock()[0].memory, 256 * 1024 * 1024);
+    let mut changed = invocation;
+    changed.arguments = ToolArguments::Raw("changed".into());
+    assert!(policy.dispatch_boxed(changed).await.is_err());
+    committed(&campaign, "40 + 2 :: Int").await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_bash_oversized_output_retains_a_real_job() {
+    let mut campaign = TestCampaign::start().await;
+    let backend = TestCommands::new();
+    *backend.stdout.lock() = format!("BEGIN\n{}\nEND\n", "λ".repeat(32_000));
+    backend.finish.send_replace(true);
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Raw("large".into()),
+    }));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let response = running.await.unwrap().unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    assert!(output.len() < 10 * 1024, "{}", output.len());
+    assert!(
+        output.contains("BEGIN") && output.contains("END"),
+        "{output}"
+    );
+    let binding = response["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    assert!(
+        output.contains(&format!("{binding} :: Cmd.Job")),
+        "{output}"
+    );
+    let observed = committed(
+        &campaign,
+        &format!("saved <- Cmd.readStdout {binding}\nfmap T.length saved"),
+    )
+    .await;
+    assert!(observed.to_string().contains("32011"), "{observed}");
+    assert_eq!(backend.specs.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_bash_timeout_preserves_the_command_for_haskell_continuation() {
+    let mut campaign = TestCampaign::start().await;
+    let backend = TestCommands::new();
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+        context: None,
+        name: "bash".into(),
+        arguments: ToolArguments::Raw("long-lived".into()),
+    }));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let response = running.await.unwrap().unwrap();
+    assert_eq!(response["status"], "backgrounded", "{response}");
+    let binding = response["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    backend.finish.send_replace(true);
+    let observed = committed(
+        &campaign,
+        &format!("saved <- Cmd.await {binding}\nCmd.stdout saved"),
+    )
+    .await;
+    assert!(observed.to_string().contains("result"), "{observed}");
+    assert_eq!(backend.specs.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]

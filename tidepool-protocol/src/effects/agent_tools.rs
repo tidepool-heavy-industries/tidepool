@@ -33,6 +33,41 @@ pub fn agent_tools() -> Effect {
         errors: None,
         verbs: vec![
             Verb {
+                ctor: "AgentToolsInstallWith",
+                method: "agent_tools_install_with",
+                args: vec![
+                    Arg {
+                        name: "declarations",
+                        ty: HsType::Value,
+                        rust: RustBinding::CoreValue,
+                    },
+                    Arg {
+                        name: "dispatch",
+                        ty: HsType::func(
+                            HsType::Int,
+                            HsType::app(
+                                HsType::app(HsType::Named("Eff"), HsType::Var("toolEffs")),
+                                HsType::Text,
+                            ),
+                        ),
+                        rust: RustBinding::CoreValue,
+                    },
+                ],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "AgentToolsInputWith",
+                method: "agent_tools_input_with",
+                args: vec![],
+                ret: HsType::Tuple(vec![HsType::Text, HsType::Value]),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
                 ctor: "AgentToolsAwaitWith",
                 method: "agent_tools_await_with",
                 args: vec![

@@ -293,6 +293,15 @@ impl CodexAgentBackend {
 
 impl AgentBackend for CodexAgentBackend {
     fn start_thread(&mut self, spec: &ThreadSpec) -> Result<BackendThreadId, AgentBackendError> {
+        if let Some(tool) = spec
+            .dynamic_tools
+            .iter()
+            .find(|tool| tool.kind == tidepool_tool::ToolKind::Raw)
+        {
+            return Err(AgentBackendError::ProtocolRejected {
+                detail: format!("raw tool {:?} requires the interactive native tool host; this headless protocol accepts structured tools", tool.name),
+            });
+        }
         let params = thread_start_params(spec);
         let (runtime, session) = self.connected()?;
         let response: ThreadStartResponse = runtime
@@ -853,6 +862,25 @@ pub(crate) fn map_session_error(error: SessionError) -> AgentBackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_raw_tool_is_rejected_before_connecting() {
+        let mut backend = CodexAgentBackend::new().unwrap();
+        let error = backend
+            .start_thread(&ThreadSpec {
+                ephemeral: true,
+                dynamic_tools: vec![ToolDeclaration {
+                    name: "raw".into(),
+                    description: "raw text".into(),
+                    input_schema: serde_json::json!({"type":"string"}),
+                    output_schema: None,
+                    kind: tidepool_tool::ToolKind::Raw,
+                }],
+            })
+            .unwrap_err();
+        assert!(matches!(error, AgentBackendError::ProtocolRejected { .. }));
+        assert!(backend.session.is_none());
+    }
 
     fn slugs(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()

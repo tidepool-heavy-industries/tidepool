@@ -14,6 +14,8 @@ mod documentation_tests;
 mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
+#[cfg(test)]
+mod hosted_tools_tests;
 mod overlay_resource;
 #[cfg(test)]
 #[path = "host_dynamic_tools/tui_resource_tests.rs"]
@@ -1656,7 +1658,14 @@ fn compile_root(
             .with_imports("qualified Tidepool.Command as Cmd")
             .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
             .with_imports("qualified Tidepool.Actor as Actor")
-            .with_default_quasiquoters(),
+            .with_default_quasiquoters()
+            .with_tools(
+                config
+                    .workspace_inputs
+                    .as_ref()
+                    .and_then(|inputs| inputs.tools.as_deref())
+                    .unwrap_or("Tidepool.Command.Tools.tools"),
+            ),
         ResidentActorRoot::new(descriptor, machine, outcome),
         Arc::new(compiled),
     ))
@@ -3050,6 +3059,13 @@ async fn launch_prepared_interactive_application(
     let service = hosted_retirement::start_with_resources(
         &hosted_slot,
         actor.clone(),
+        installation
+            .policy
+            .tools()
+            .iter()
+            .filter(|tool| tool.name() != tidepool_actor::HASKELL_TOOL)
+            .cloned()
+            .collect(),
         binding_path.clone(),
         expected_resume.clone(),
         listener,

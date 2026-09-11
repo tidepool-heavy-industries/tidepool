@@ -1,10 +1,19 @@
 ---
 name: shoal-command
-description: Run shell commands through resident Haskell; consume results as data, navigate retained output, or control background and interactive jobs.
+description: Compose shell commands in resident Haskell, consume results as data, or control retained jobs and output from the Bash tool.
 ---
 
-`Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB`, `GiB` and qualified
-Text as `T` are loaded. Start with an ordinary read:
+The supplied `bash` tool accepts raw scripts, including multiline Bash and heredocs.
+Use it for ordinary shell work without Haskell wrappers. It shares the same
+256 MiB default, 30-second observation window and command owner as `Cmd`.
+Small output displays directly. Oversized output uses an 8 KiB beginning/end
+preview within a 32 KiB response limit; its receipt names a real `jobN :: Cmd.Job`
+for retained-output navigation. A foreground overrun also retains a job. Inspect
+that job here; do not reexecute a script to recover output.
+
+Use Haskell when the result drives subsequent code, when commands need a larger
+memory limit, or for interactive jobs. `Cmd` is `Tidepool.Command`; `bash`,
+`withMemory`, `MiB`, `GiB` and qualified Text as `T` are loaded:
 
 ```haskell
 result <- Cmd.run [bash|git status --short|]
@@ -68,7 +77,7 @@ exit does not cancel siblings. Interrupted observation leaves jobs available.
 Live handles do not promise recovery after host restart.
 
 Completed results capture up to 1 MiB per stream. Automatic display has a shared
-64 KiB budget per tool response; shortening display does not discard captured
+64 KiB budget per Haskell tool response; shortening display does not discard captured
 data. `inspectFull` also has a display allowance; use pages or Haskell projections
 for larger values. Foreground observations skip output already offered, including
 explicitly marked omissions; explicit reads do not consume it. Read without executing again:

@@ -53,6 +53,35 @@ async fn response(
     } else if index == 0 {
         json!({"type":"function_call", "call_id":"fallback-oom",
             "name":"exec_command", "arguments":json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "yield_time_ms":1000,"max_output_tokens":1000}).to_string()})
+    } else if index == 20 || index == 21 {
+        let script = if index == 20 {
+            "cat <<'EOF'\nraw λ $(literal) [bash|data|]\nEOF\nprintf 'raw-stderr\\n' >&2\n"
+        } else {
+            "printf 'once\\n' >> raw-start-count; printf 'RAW-BEGIN\\n'; head -c 96000 /dev/zero | tr '\\0' x; printf '\\nRAW-END\\n'; printf 'nonzero diagnostic\\n' >&2; exit 7"
+        };
+        json!({"type":"custom_tool_call", "call_id":format!("haskell-{index}"),
+            "name":"bash", "namespace":"tidepool_actor", "input":script})
+    } else if index == 22 {
+        let requests = provider.requests.lock().unwrap();
+        let receipt = requests[index]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["call_id"] == "haskell-21" && item["type"] == "custom_tool_call_output"
+            })
+            .and_then(|item| item["output"].as_str())
+            .expect("raw tool output in provider history");
+        let binding = receipt
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Retained output: ")?
+                    .strip_suffix(" :: Cmd.Job")
+            })
+            .expect("large raw command installs an actual job binding");
+        json!({"type":"custom_tool_call", "call_id":"haskell-22",
+            "name":"haskell", "namespace":"tidepool_actor",
+            "input":format!("rawPage <- Cmd.output {binding}\n(T.length (Cmd.pageText rawPage), T.take 9 (Cmd.pageText rawPage))")})
     } else if index == 18 {
         let requests = provider.requests.lock().unwrap();
         let receipt = requests[index]["input"]
@@ -172,6 +201,10 @@ async fn full_tui_survives_command_oom_and_accepts_steering() {
     let readme = include_str!("../../../plans/parallel-dogfood/next-wave/README.md");
     let planner = include_str!("../../../plans/parallel-dogfood/planner.md");
     let skill_text = std::fs::read_to_string(skill.join("SKILL.md")).unwrap();
+    let skill_description = skill_text
+        .lines()
+        .find_map(|line| line.strip_prefix("description: "))
+        .unwrap();
     // Exercise the gap between the old native history allowance and hosted cap.
     let padding = 60_000usize
         .checked_sub(skill_text.len() + resume.len() + readme.len() + planner.len() + 100)
@@ -383,7 +416,7 @@ trust_level = "trusted"
             }
         }
     });
-    for expected in [2, 6, 16, 20] {
+    for expected in [2, 6, 16, 20, 24] {
         let reached = tokio::time::timeout(Duration::from_secs(600), async {
             while provider.requests.lock().unwrap().len() < expected {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -431,9 +464,7 @@ trust_level = "trusted"
             2 => {
                 assert!(output(1).contains("resource limit"), "{}", output(1));
                 assert!(
-                    requests[0]["input"]
-                        .to_string()
-                        .contains("Run shell commands through resident Haskell;"),
+                    requests[0]["input"].to_string().contains(skill_description),
                     "command skill must appear in native skill discovery"
                 );
                 let tools = requests[0]["input"]
@@ -445,7 +476,9 @@ trust_level = "trusted"
                     ["tools"]
                     .to_string();
                 assert!(
-                    tools.contains("exec_command") && tools.contains("haskell"),
+                    tools.contains("exec_command")
+                        && tools.contains("haskell")
+                        && tools.contains("bash"),
                     "{tools}"
                 );
                 assert!(
@@ -518,10 +551,38 @@ trust_level = "trusted"
                     assert!(output(index).len() <= MODEL_OUTPUT_LIMIT);
                 }
             }
+            24 => {
+                assert!(
+                    output(21).contains("raw λ $(literal) [bash|data|]"),
+                    "{}",
+                    output(21)
+                );
+                assert!(output(21).contains("raw-stderr"), "{}", output(21));
+                assert!(
+                    !output(21).contains(" :: Cmd.Job"),
+                    "short calls need no binding"
+                );
+                let large = output(22);
+                assert!(large.len() <= 32 * 1024, "{}", large.len());
+                for expected in [
+                    "RAW-BEGIN",
+                    "RAW-END",
+                    "CommandExited 7",
+                    "nonzero diagnostic",
+                    " :: Cmd.Job",
+                ] {
+                    assert!(large.contains(expected), "missing {expected}: {large}");
+                }
+                assert!(output(23).contains("RAW-BEGIN"), "{}", output(23));
+                assert_eq!(
+                    std::fs::read_to_string(work.join("raw-start-count")).unwrap(),
+                    "once\n"
+                );
+            }
             _ => unreachable!(),
         }
         assert!(!tmux.pane_status(&pane).await.unwrap().unwrap().dead);
-        if expected != 20 {
+        if expected != 24 {
             assert!(std::process::Command::new("tmux")
                 .args(["send-keys", "-t", pane.as_str(), "-l", "continue fixture"])
                 .status()

@@ -13,6 +13,8 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum AgentToolsReq {
+    AgentToolsInstallWith(tidepool_eval::value::Value, tidepool_eval::value::Value),
+    AgentToolsInputWith,
     AgentToolsAwaitWith(tidepool_eval::value::Value, String, Option<String>),
     AgentToolsReplyWith(tidepool_eval::value::Value),
 }

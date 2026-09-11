@@ -133,7 +133,7 @@ impl DynamicMcpServer {
                     _ => unreachable!("validated by DynamicMcpServer::new"),
                 };
                 let description = match declaration.kind {
-                    ToolKind::Call => declaration.description.clone(),
+                    ToolKind::Call | ToolKind::Raw => declaration.description.clone(),
                     ToolKind::Notify => format!(
                         "{} This notification does not return a domain result.",
                         declaration.description
@@ -150,7 +150,7 @@ impl DynamicMcpServer {
                 let mut tool =
                     crate::server_common::make_tool(&declaration.name, &description, schema);
                 let title = match declaration.kind {
-                    ToolKind::Call => "Call",
+                    ToolKind::Call | ToolKind::Raw => "Call",
                     ToolKind::Notify => "Notify",
                     ToolKind::Update => "Update actor state",
                     ToolKind::Finish => "Finish actor",
@@ -159,7 +159,7 @@ impl DynamicMcpServer {
                 tool.annotations = match declaration.kind {
                     // A Call handler may still perform effects, so its
                     // environmental mutability is deliberately unknown.
-                    ToolKind::Call => None,
+                    ToolKind::Call | ToolKind::Raw => None,
                     ToolKind::Notify | ToolKind::Update | ToolKind::Finish => {
                         Some(ToolAnnotations::with_title(title).read_only(false))
                     }
@@ -208,6 +208,11 @@ impl ServerHandler for DynamicMcpServer {
 fn validate_declarations(declarations: &[ToolDeclaration]) -> Result<(), DynamicMcpError> {
     let mut names = HashSet::new();
     for declaration in declarations {
+        if declaration.kind == ToolKind::Raw {
+            return Err(DynamicMcpError::UnsupportedCustomTool(
+                declaration.name.clone(),
+            ));
+        }
         if !valid_tool_name(&declaration.name) {
             return Err(DynamicMcpError::InvalidName(declaration.name.clone()));
         }
@@ -350,6 +355,12 @@ mod tests {
 
     #[test]
     fn malformed_declaration_sets_are_rejected_at_installation() {
+        let mut raw = declaration("bash");
+        raw.kind = ToolKind::Raw;
+        assert!(matches!(
+            DynamicMcpServer::new(vec![raw], None, |_, _| unreachable!()),
+            Err(DynamicMcpError::UnsupportedCustomTool(_))
+        ));
         assert!(matches!(
             DynamicMcpServer::new(vec![declaration("bad.name")], None, |_, _| unreachable!()),
             Err(DynamicMcpError::InvalidName(_))
