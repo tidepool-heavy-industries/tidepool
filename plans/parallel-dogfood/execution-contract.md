@@ -1,5 +1,9 @@
 # Execution contract
 
+Current allocation: [foreground launch contract](next-wave/foreground/README.md).
+The remainder records a superseded engine/applications allocation, not authority
+to resume engine work in this launch.
+
 Planner: the initial Astra root in this Shoal session. Integration owner: one
 Sol coordinator. Product authority: [applications](applications.md) A0–A8 and
 [engine](engine.md) M0–M7, without reduced acceptance. The commission authorizes
