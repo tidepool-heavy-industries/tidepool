@@ -184,9 +184,14 @@ reviewCycle failAfterAdmission automaticRepair = do
     script owner "review-continuation"
     actual <- checkpoint (checkActor mismatched) "different.txt" "actual submitted source\n" "source evidence differs from claim"
     void $ turn (checkActor mismatched) ("respond (Produced (Candidate " <> literal baseline <> " [] []))")
-    rejected <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\ninspectFull (length (reviewCollectors flow), length (candidateReceipts flow), sourceProblems flow)" (Text.isInfixOf "submitted")
+    _ <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\nnot (null (sourceProblems flow))" (Text.isSuffixOf "True")
+    let expectedProblem = "candidate " <> baseline <> "; submitted " <> actual
+    rejected <- turn owner
+      ("null (reviewCollectors flow) && map snd (sourceProblems flow) == [" <> literal expectedProblem
+        <> "] && (case candidateReceipts flow of { [Right receipt] -> case responseValue receipt of { Produced candidate -> candidateCommit candidate == "
+        <> literal baseline <> "; _ -> False }; _ -> False })")
     check "source mismatch retains the original receipt and stops automatic review"
-      ("(0,1," `Text.isInfixOf` rejected && baseline `Text.isInfixOf` rejected && actual `Text.isInfixOf` rejected)
+      (lastOutput rejected == "True")
     void $ turn owner "R.finish reviewBox"
   else pure ()
 
