@@ -200,28 +200,61 @@ impl Drop for CommandConnection {
     }
 }
 
+fn validate_spec(spec: &CommandSpec) -> Result<(), CommandError> {
+    let invalid = |detail: &str| CommandError::CommandInvalid(detail.into());
+    let Some(program) = spec.argv.first() else {
+        return Err(invalid(
+            "argv is empty; supply an executable as the first argument",
+        ));
+    };
+    if program.is_empty() {
+        return Err(invalid("argv[0] is empty; supply an executable name"));
+    }
+    if spec.memory <= 0 {
+        return Err(invalid("memory limit must be greater than zero bytes"));
+    }
+    if let Some(index) = spec.argv.iter().position(|arg| arg.contains('\0')) {
+        return Err(invalid(&format!("argv[{index}] contains a NUL byte")));
+    }
+    if spec
+        .directory
+        .as_ref()
+        .is_some_and(|path| path.contains('\0'))
+    {
+        return Err(invalid("working directory contains a NUL byte"));
+    }
+    for (index, (key, value)) in spec.environment.iter().enumerate() {
+        if key.is_empty() {
+            return Err(invalid(&format!(
+                "environment[{index}] has an empty variable name"
+            )));
+        }
+        if key.contains('=') {
+            return Err(invalid(&format!(
+                "environment[{index}] variable name contains '='"
+            )));
+        }
+        if key.contains('\0') {
+            return Err(invalid(&format!(
+                "environment[{index}] variable name contains a NUL byte"
+            )));
+        }
+        if value.contains('\0') {
+            return Err(invalid(&format!(
+                "environment[{index}] value contains a NUL byte"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl CommandJobs {
     pub(crate) async fn start(
         &self,
         parent: &KernelContext,
         spec: CommandSpec,
     ) -> Result<(String, Arc<CommandBackendRequest>), CommandError> {
-        if spec.argv.is_empty()
-            || spec.argv[0].is_empty()
-            || spec.memory <= 0
-            || spec.argv.iter().any(|arg| arg.contains('\0'))
-            || spec
-                .directory
-                .as_ref()
-                .is_some_and(|path| path.contains('\0'))
-            || spec.environment.iter().any(|(key, value)| {
-                key.is_empty() || key.contains(['\0', '=']) || value.contains('\0')
-            })
-        {
-            return Err(CommandError::CommandInvalid(
-                "invalid argv, environment, directory or memory limit".into(),
-            ));
-        }
+        validate_spec(&spec)?;
         let id = uuid::Uuid::new_v4().to_string();
         let (reply, receive) = oneshot::channel();
         let request = Arc::new(CommandBackendRequest {
@@ -765,5 +798,104 @@ impl Actor for JobActor {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_command_names_the_rejected_field_without_echoing_values() {
+        let valid = CommandSpec {
+            argv: vec!["printf".into(), "".into()],
+            directory: None,
+            environment: vec![("EMPTY".into(), "".into())],
+            memory: 256 * 1024 * 1024,
+            input: CommandInput::ClosedInput,
+        };
+        assert!(validate_spec(&valid).is_ok());
+        let cases = [
+            (
+                CommandSpec {
+                    argv: vec![],
+                    ..valid.clone()
+                },
+                "argv is empty",
+            ),
+            (
+                CommandSpec {
+                    argv: vec!["".into()],
+                    ..valid.clone()
+                },
+                "argv[0] is empty",
+            ),
+            (
+                CommandSpec {
+                    argv: vec!["printf".into(), "private\0value".into()],
+                    ..valid.clone()
+                },
+                "argv[1] contains a NUL byte",
+            ),
+            (
+                CommandSpec {
+                    directory: Some("private\0path".into()),
+                    ..valid.clone()
+                },
+                "working directory contains a NUL byte",
+            ),
+            (
+                CommandSpec {
+                    memory: 0,
+                    ..valid.clone()
+                },
+                "memory limit must be greater than zero",
+            ),
+            (
+                CommandSpec {
+                    memory: -1,
+                    ..valid.clone()
+                },
+                "memory limit must be greater than zero",
+            ),
+            (
+                CommandSpec {
+                    environment: vec![("".into(), "private".into())],
+                    ..valid.clone()
+                },
+                "environment[0] has an empty variable name",
+            ),
+            (
+                CommandSpec {
+                    environment: vec![("private=name".into(), "private".into())],
+                    ..valid.clone()
+                },
+                "environment[0] variable name contains '='",
+            ),
+            (
+                CommandSpec {
+                    environment: vec![("private\0name".into(), "private".into())],
+                    ..valid.clone()
+                },
+                "environment[0] variable name contains a NUL byte",
+            ),
+            (
+                CommandSpec {
+                    environment: vec![("KEY".into(), "private\0value".into())],
+                    ..valid
+                },
+                "environment[0] value contains a NUL byte",
+            ),
+        ];
+        for (spec, expected) in cases {
+            let CommandError::CommandInvalid(detail) = validate_spec(&spec).unwrap_err() else {
+                panic!("expected an invalid command");
+            };
+            assert!(detail.starts_with(expected), "{detail}");
+            assert!(
+                !detail.contains("private"),
+                "diagnostics must not echo command data"
+            );
+        }
     }
 }
