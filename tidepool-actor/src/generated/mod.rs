@@ -12,3 +12,4 @@ pub mod agent_tools;
 pub mod commands;
 pub mod forks;
 pub mod notifications;
+pub mod sleep;

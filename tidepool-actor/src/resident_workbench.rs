@@ -783,6 +783,10 @@ fn cleanup_step_value(
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    Sleep {
+        continuation: ResidentHole,
+        duration: Duration,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -936,6 +940,7 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::Sleep { .. } => "sleep",
             Self::Command { .. } => "command job",
             Self::NotificationSend { .. } => "notify",
             Self::NotificationPoll { .. } => "pollNotification",
@@ -1002,6 +1007,7 @@ enum BoundaryCapture {
 /// boundaries. Generated request enums own constructor recognition and field
 /// shape; this sum owns orchestration routing.
 enum ResidentRequest {
+    Sleep(crate::generated::sleep::SleepReq),
     Commands(crate::generated::commands::CommandsReq),
     Notifications(crate::generated::notifications::NotificationsReq),
     Actor(crate::generated::actor::ActorReq),
@@ -1039,6 +1045,7 @@ impl ResidentRequest {
             Self::Notifications,
             crate::generated::notifications::NotificationsReq
         );
+        try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
         try_member!(
@@ -1084,6 +1091,7 @@ impl ResidentRequest {
 
     fn operation(&self) -> &'static str {
         match self {
+            Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
             Self::Commands(_) => "command job",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
                 ..,
@@ -2266,6 +2274,16 @@ where
                     )));
                 }
                 match decoded {
+                    ResidentRequest::Sleep(crate::generated::sleep::SleepReq::SleepWith(
+                        duration,
+                    )) => Ok(ResidentActorBoundary::Sleep {
+                        continuation: hole,
+                        duration: Duration::from_millis(
+                            duration
+                                .checked_milliseconds()
+                                .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                        ),
+                    }),
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),

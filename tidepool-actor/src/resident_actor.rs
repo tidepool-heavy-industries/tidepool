@@ -1540,6 +1540,16 @@ where
             '_,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Sleep {
+                continuation,
+                duration,
+            } => Box::pin(async move {
+                tokio::time::sleep(duration).await;
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }),
             ResidentActorBoundary::Command {
                 continuation,
                 request,
