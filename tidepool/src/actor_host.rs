@@ -7032,6 +7032,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_actor_sleep_keeps_mailbox_handlers_sequential() {
+        let campaign = test_campaign::TestCampaign::start().await;
+        let result = dispatch_haskell_script(
+            campaign.root_installation.policy.as_ref(),
+            include_str!("actor_host/record_actor_sleep.hs"),
+        )
+        .await;
+        assert_eq!(result["status"], "committed", "{result:?}");
+        for item in result["items"].as_array().unwrap() {
+            assert_eq!(item["status"], "committed", "{result:?}");
+        }
+        assert!(result.to_string().contains("True"), "{result:?}");
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn record_actor_nested_failure_reaches_interactive_owner_once() {
         let mut campaign = test_campaign::TestCampaign::start().await;
         let root = campaign.root_installation.policy.clone();

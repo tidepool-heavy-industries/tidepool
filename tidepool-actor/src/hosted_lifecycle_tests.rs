@@ -304,16 +304,16 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         .new_workbench("sibling".into(), EffectiveRole::coding())
         .await
         .unwrap();
-    let sleeper_policy: Arc<dyn ResidentToolEndpoint> =
-        Arc::new(super::ResidentInteractivePolicy::local(sleeper));
-    let sibling_policy: Arc<dyn ResidentToolEndpoint> =
-        Arc::new(super::ResidentInteractivePolicy::local(sibling));
+    let sleeper_policy = Arc::new(super::ResidentInteractivePolicy::local(sleeper.clone()));
+    let sibling_policy = Arc::new(super::ResidentInteractivePolicy::local(sibling));
 
     tokio::time::pause();
-    let sleeping = tokio::spawn(sleeper_policy.dispatch_boxed(invocation(
+    let completed_invocation = invocation(
         "sleep (minutes 15)\npure (7 :: Int)",
         "fifteen-minute-sleep",
-    )));
+    );
+    let completed_context = completed_invocation.context.clone().unwrap();
+    let sleeping = tokio::spawn(sleeper_policy.dispatch_boxed(completed_invocation));
     tokio::task::yield_now().await;
 
     let sibling_result = sibling_policy
@@ -336,16 +336,29 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
     let sleep_result = sleeping.await.unwrap().unwrap();
     assert_eq!(sleep_result["status"], "committed");
     assert_eq!(sleep_result["items"].as_array().unwrap().len(), 2);
+    assert!(matches!(
+        sleeper_policy
+            .cancel_workbench_boxed(completed_context)
+            .await
+            .unwrap(),
+        WorkbenchCancellationOutcome::Expired { .. }
+    ));
 
     let cancel_invocation = invocation(
         "sleep (minutes 15)\nafterCancelled <- pure (99 :: Int)",
         "cancelled-sleep",
     );
     let cancel_context = cancel_invocation.context.clone().unwrap();
-    let cancelled = {
+    let mut cancelled = {
         let sleeper_policy = Arc::clone(&sleeper_policy);
         tokio::spawn(async move { sleeper_policy.dispatch_boxed(cancel_invocation).await })
     };
+    sleeper_policy
+        .client
+        .wait_until_sleeping(&cancel_context)
+        .await;
+    cancelled.abort();
+    let _ = (&mut cancelled).await;
     let cancellation = loop {
         tokio::task::yield_now().await;
         match sleeper_policy
@@ -365,10 +378,15 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         ),
         "cancellation outcome: {cancellation:?}"
     );
-    let cancelled_result = cancelled.await.unwrap();
     assert!(
-        cancelled_result.is_err(),
-        "an interrupted evaluation must not report committed"
+        matches!(
+            sleeper_policy
+                .cancel_workbench_boxed(cancel_context.clone())
+                .await
+                .unwrap(),
+            WorkbenchCancellationOutcome::Cancelled { .. }
+        ),
+        "an exact retry must return the retained terminal cancellation"
     );
 
     let next = sleeper_policy
@@ -386,6 +404,41 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         ),
         Err(_) => {}
     }
+
+    let unknown = invocation("pure ()", "never-admitted").context.unwrap();
+    assert!(matches!(
+        sleeper_policy.cancel_workbench_boxed(unknown).await.unwrap(),
+        WorkbenchCancellationOutcome::UnknownEvaluation { .. }
+    ));
+    let retiring = sleeper;
+    let retiring_policy = Arc::clone(&sleeper_policy);
+    let mut retirement_waiter = {
+        let retiring_policy = Arc::clone(&retiring_policy);
+        tokio::spawn(async move {
+            retiring_policy
+                .dispatch_boxed(invocation("sleep (minutes 15)", "retiring-sleep"))
+                .await
+        })
+    };
+    retiring_policy
+        .client
+        .wait_until_sleeping(
+            &invocation("pure ()", "retiring-sleep")
+                .context
+                .unwrap(),
+        )
+        .await;
+    retirement_waiter.abort();
+    let _ = (&mut retirement_waiter).await;
+    let shutdown = retiring
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "sleep retirement test".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(shutdown.terminal.kind, ActorExitKind::Cancelled);
+    assert!(shutdown.cleanup.is_confirmed(), "{shutdown:?}");
     forest.shutdown().await;
 }
 

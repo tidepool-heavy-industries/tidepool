@@ -189,6 +189,10 @@ pub enum KernelMessage {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    ReconcileWorkbenchCancellation {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+        reply: RpcReplyPort<crate::WorkbenchCancellationOutcome>,
+    },
     ToolCompleted {
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
@@ -254,6 +258,10 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("Workbench")
                 .field("request", request)
                 .finish_non_exhaustive(),
+            Self::ReconcileWorkbenchCancellation { execution, .. } => formatter
+                .debug_tuple("ReconcileWorkbenchCancellation")
+                .field(execution)
+                .finish(),
             Self::ToolCompleted { boundary, .. } => formatter
                 .debug_tuple("ToolCompleted")
                 .field(boundary)

@@ -543,6 +543,13 @@ pub trait KernelBehavior: Send + 'static {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
 
+    fn reconcile_workbench_cancellation(
+        &self,
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+    ) -> crate::WorkbenchCancellationOutcome {
+        crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution }
+    }
+
     /// Continue work deliberately yielded after its initiating caller was
     /// settled. Behaviors which never return 'ContinueLater' own no pending
     /// continuation and keep this rejecting default.
@@ -1141,6 +1148,10 @@ where
                         let _ = reply.send(Err(error));
                     }
                 }
+            }
+            KernelMessage::ReconcileWorkbenchCancellation { execution, reply } => {
+                let outcome = state.behavior.reconcile_workbench_cancellation(execution);
+                let _ = reply.send(outcome);
             }
             KernelMessage::DrainMailbox => {
                 unreachable!("mailbox drain messages are normalized before dispatch")

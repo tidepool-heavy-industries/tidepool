@@ -16,6 +16,10 @@ const WORKBENCH_SLEEPING: u8 = 1;
 const WORKBENCH_CANCEL_REQUESTED: u8 = 2;
 const WORKBENCH_EXPIRED: u8 = 3;
 const WORKBENCH_CANCELLED: u8 = 4;
+const SLEEP_NONE: u8 = 0;
+const SLEEP_EXPIRED: u8 = 1;
+const SLEEP_CANCELLED: u8 = 2;
+const SLEEP_UNCONFIRMED: u8 = 3;
 
 /// Terminal evidence for an exact resident workbench interruption attempt.
 #[derive(Debug, Clone)]
@@ -30,7 +34,6 @@ pub enum WorkbenchCancellationOutcome {
     },
     Unconfirmed {
         execution: WorkbenchExecutionId,
-        reply: crate::KernelWorkbenchReply,
     },
     NotSleeping {
         execution: WorkbenchExecutionId,
@@ -42,6 +45,7 @@ pub enum WorkbenchCancellationOutcome {
 
 pub struct WorkbenchExecutionControl {
     phase: std::sync::atomic::AtomicU8,
+    sleep_outcome: std::sync::atomic::AtomicU8,
     changed: tokio::sync::Notify,
     settlement: tokio::sync::watch::Sender<Option<crate::KernelWorkbenchReply>>,
 }
@@ -50,6 +54,7 @@ impl WorkbenchExecutionControl {
     pub(crate) fn untracked() -> Arc<Self> {
         Arc::new(Self {
             phase: std::sync::atomic::AtomicU8::new(WORKBENCH_IDLE),
+            sleep_outcome: std::sync::atomic::AtomicU8::new(SLEEP_NONE),
             changed: tokio::sync::Notify::new(),
             settlement: tokio::sync::watch::channel(None).0,
         })
@@ -80,14 +85,20 @@ impl WorkbenchExecutionControl {
     }
 
     pub(crate) fn claim_expiry(&self) -> bool {
-        self.phase
+        let claimed = self
+            .phase
             .compare_exchange(
                 WORKBENCH_SLEEPING,
                 WORKBENCH_EXPIRED,
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
             )
-            .is_ok()
+            .is_ok();
+        if claimed {
+            self.sleep_outcome
+                .store(SLEEP_EXPIRED, std::sync::atomic::Ordering::Release);
+        }
+        claimed
     }
 
     pub(crate) fn acknowledge_cancellation(&self) {
@@ -95,6 +106,8 @@ impl WorkbenchExecutionControl {
             .phase
             .swap(WORKBENCH_CANCELLED, std::sync::atomic::Ordering::AcqRel);
         debug_assert_eq!(previous, WORKBENCH_CANCEL_REQUESTED);
+        self.sleep_outcome
+            .store(SLEEP_CANCELLED, std::sync::atomic::Ordering::Release);
     }
 
     pub(crate) fn finish_sleep(&self) {
@@ -141,6 +154,41 @@ impl WorkbenchExecutionControl {
                 unreachable!("workbench execution control retains its settlement sender");
             }
         }
+    }
+
+    fn terminal_reply(&self) -> Option<crate::KernelWorkbenchReply> {
+        self.settlement.borrow().clone()
+    }
+
+    pub(crate) fn cancellation_outcome(
+        &self,
+        execution: WorkbenchExecutionId,
+        reply: crate::KernelWorkbenchReply,
+    ) -> WorkbenchCancellationOutcome {
+        let phase = self.phase.load(std::sync::atomic::Ordering::Acquire);
+        match self
+            .sleep_outcome
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            SLEEP_CANCELLED => WorkbenchCancellationOutcome::Cancelled { execution, reply },
+            SLEEP_EXPIRED => WorkbenchCancellationOutcome::Expired { execution, reply },
+            SLEEP_NONE if phase == WORKBENCH_CANCEL_REQUESTED => {
+                WorkbenchCancellationOutcome::Unconfirmed { execution }
+            }
+            SLEEP_NONE => WorkbenchCancellationOutcome::NotSleeping { execution },
+            _ => WorkbenchCancellationOutcome::Unconfirmed { execution },
+        }
+    }
+
+    pub(crate) fn mark_unconfirmed(&self) {
+        self.sleep_outcome
+            .compare_exchange(
+                SLEEP_NONE,
+                SLEEP_UNCONFIRMED,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok();
     }
 }
 
@@ -301,6 +349,25 @@ impl ResidentToolClient {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn wait_until_sleeping(&self, invocation: &ToolInvocationContext) {
+        let execution = execution_id(self.actor.identity(), &invocation.clone().into());
+        loop {
+            let sleeping = self
+                .active_workbench
+                .lock()
+                .as_ref()
+                .filter(|(active, _)| active == &execution)
+                .is_some_and(|(_, control)| {
+                    control.phase.load(std::sync::atomic::Ordering::Acquire) == WORKBENCH_SLEEPING
+                });
+            if sleeping {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     pub(crate) async fn cancel_workbench(
         &self,
         invocation: ToolInvocationContext,
@@ -313,20 +380,48 @@ impl ResidentToolClient {
             .filter(|(active, _)| active == &execution)
             .map(|(_, control)| Arc::clone(control));
         let Some(control) = control else {
-            return Ok(WorkbenchCancellationOutcome::UnknownEvaluation { execution });
+            let (reply, receive) = oneshot::channel();
+            self.actor
+                .address()
+                .send_message(crate::KernelMessage::ReconcileWorkbenchCancellation {
+                    execution,
+                    reply: reply.into(),
+                })
+                .map_err(|_| {
+                    ResidentToolError::Unavailable("the owning actor has stopped".into())
+                })?;
+            return receive.await.map_err(|_| {
+                ResidentToolError::Unavailable(
+                    "the actor stopped before reconciling the exact evaluation".into(),
+                )
+            });
         };
-        if !control.request_cancellation() {
+        if let Some(reply) = control.terminal_reply() {
+            return Ok(control.cancellation_outcome(execution, reply));
+        }
+        let claimed = control.request_cancellation();
+        let phase = control.phase.load(std::sync::atomic::Ordering::Acquire);
+        if !claimed
+            && !matches!(
+                phase,
+                WORKBENCH_CANCEL_REQUESTED | WORKBENCH_EXPIRED | WORKBENCH_CANCELLED
+            )
+        {
             return Ok(WorkbenchCancellationOutcome::NotSleeping { execution });
         }
-        let reply = control.settled().await;
-        let outcome = match control.phase.load(std::sync::atomic::Ordering::Acquire) {
-            WORKBENCH_CANCELLED => WorkbenchCancellationOutcome::Cancelled { execution, reply },
-            WORKBENCH_EXPIRED | WORKBENCH_IDLE => {
-                WorkbenchCancellationOutcome::Expired { execution, reply }
+        let reply = if let Some(reply) = control.terminal_reply() {
+            Some(reply)
+        } else {
+            tokio::select! {
+                reply = control.settled() => Some(reply),
+                _ = self.actor.terminal().wait() => control.terminal_reply(),
             }
-            _ => WorkbenchCancellationOutcome::Unconfirmed { execution, reply },
         };
-        Ok(outcome)
+        let Some(reply) = reply else {
+            control.mark_unconfirmed();
+            return Ok(WorkbenchCancellationOutcome::Unconfirmed { execution });
+        };
+        Ok(control.cancellation_outcome(execution, reply))
     }
 
     pub(crate) async fn dispatch(
@@ -596,5 +691,17 @@ mod tests {
             control.phase.load(std::sync::atomic::Ordering::Acquire),
             WORKBENCH_IDLE
         );
+    }
+
+    #[test]
+    fn exact_workbench_control_never_turns_an_unproved_abort_into_cancellation() {
+        let execution = WorkbenchExecutionId::from_digest([9; 16]);
+        let control = WorkbenchExecutionControl::new(execution.clone());
+        control.arm_sleep();
+        assert!(control.request_cancellation());
+        assert!(matches!(
+            control.cancellation_outcome(execution, terminal_reply()),
+            WorkbenchCancellationOutcome::Unconfirmed { .. }
+        ));
     }
 }

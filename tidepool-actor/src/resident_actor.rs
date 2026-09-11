@@ -479,6 +479,7 @@ pub struct ResidentKernelBehavior<H, O> {
 struct CompletedWorkbenchExecution {
     request: WorkbenchRequest,
     reply: crate::KernelWorkbenchReply,
+    cancellation: crate::WorkbenchCancellationOutcome,
 }
 
 #[derive(Default)]
@@ -506,9 +507,25 @@ impl CompletedWorkbenchExecutions {
         execution: WorkbenchExecutionId,
         request: WorkbenchRequest,
         reply: crate::KernelWorkbenchReply,
+        cancellation: crate::WorkbenchCancellationOutcome,
     ) {
-        self.0
-            .insert(execution, CompletedWorkbenchExecution { request, reply });
+        self.0.insert(
+            execution,
+            CompletedWorkbenchExecution {
+                request,
+                reply,
+                cancellation,
+            },
+        );
+    }
+
+    fn cancellation(&self, execution: WorkbenchExecutionId) -> crate::WorkbenchCancellationOutcome {
+        self.0.get(&execution).map_or(
+            crate::WorkbenchCancellationOutcome::UnknownEvaluation {
+                execution,
+            },
+            |completed| completed.cancellation.clone(),
+        )
     }
 }
 
@@ -5264,7 +5281,14 @@ where
                     ) => Ok(response.clone()),
                     Err(error) => Err(error.clone()),
                 };
-                self.completed_workbenches.record(execution, request, reply);
+                let cancellation = control.as_ref().map_or_else(
+                    || crate::WorkbenchCancellationOutcome::NotSleeping {
+                        execution: execution.clone(),
+                    },
+                    |control| control.cancellation_outcome(execution.clone(), reply.clone()),
+                );
+                self.completed_workbenches
+                    .record(execution, request, reply, cancellation);
             }
             let terminal_reply = match &result {
                 Ok(
@@ -5281,6 +5305,13 @@ where
             }
             result
         })
+    }
+
+    fn reconcile_workbench_cancellation(
+        &self,
+        execution: WorkbenchExecutionId,
+    ) -> crate::WorkbenchCancellationOutcome {
+        self.completed_workbenches.cancellation(execution)
     }
 
     fn route<'a>(
@@ -6163,9 +6194,22 @@ mod tests {
             total: 1,
         });
         let mut completed = CompletedWorkbenchExecutions::default();
-        completed.record(execution.clone(), request.clone(), reply.clone());
+        let cancellation = crate::WorkbenchCancellationOutcome::Expired {
+            execution: execution.clone(),
+            reply: reply.clone(),
+        };
+        completed.record(
+            execution.clone(),
+            request.clone(),
+            reply.clone(),
+            cancellation,
+        );
 
         assert_eq!(completed.lookup(&execution, &request), Ok(Some(reply)));
+        assert!(matches!(
+            completed.cancellation(execution.clone()),
+            crate::WorkbenchCancellationOutcome::Expired { .. }
+        ));
         let different = WorkbenchRequest::from_ghci_input("differentAction")
             .unwrap()
             .with_execution_id(execution.clone());

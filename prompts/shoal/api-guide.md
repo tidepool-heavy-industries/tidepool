@@ -43,21 +43,22 @@ Register separate watches when results can be integrated independently.
 
 ```text
 sleep :: Member Sleep effects => Duration -> Eff effects ()
-milliseconds :: Natural -> Duration
-seconds      :: Natural -> Duration
-minutes      :: Natural -> Duration
 ```
+
+The smart constructors `milliseconds`, `seconds`, and `minutes` accept
+non-negative `Natural` values and return `Duration`.
 
 `sleep (minutes 15)` suspends the current Haskell evaluation on a monotonic
 timer. It does not occupy command memory, poll the model, or wake it before the
 eventual tool result. Prefer an existing typed completion source when waiting
 for actual work rather than elapsed time.
 
-Delivered human, steering, or notification input interrupts a sleeping
-evaluation through the native exact-invocation path. Data that remains only in
-collectors or mailboxes does not. Transport loss alone neither cancels nor
-permits replay; if terminal cancellation cannot be confirmed, retain uncertainty
-instead of starting conflicting work.
+Native hosts integrating delivered human, steering, or notification input must
+interrupt a sleeping evaluation through its exact invocation identity before
+starting another inference. Data that remains only in collectors or mailboxes
+does not trigger that path. Transport loss alone neither cancels nor permits
+replay; if terminal cancellation cannot be confirmed, retain uncertainty instead
+of starting conflicting work.
 
 ## Commands
 
