@@ -1247,6 +1247,36 @@ impl<H, O> ResidentActorRunner<H, O> {
         }
     }
 
+    pub(crate) fn resident_session_state(
+        &self,
+        session: tidepool_repr::SessionId,
+    ) -> tidepool_runtime::session::ResidentSessionState
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        use tidepool_codegen::jit_machine::MachineDisposition;
+        use tidepool_runtime::session::{ResidentSessionState, SlotKind};
+
+        match self.access.machines.kind(session) {
+            None => ResidentSessionState::Gone,
+            Some(SlotKind::Running) => ResidentSessionState::Running,
+            Some(SlotKind::Wedged) => ResidentSessionState::Unavailable,
+            Some(SlotKind::Idle | SlotKind::Suspended) => self
+                .access
+                .machines
+                .peek(session, |resident| resident.machine_disposition())
+                .map_or(
+                    ResidentSessionState::Running,
+                    |disposition| match disposition {
+                        None => ResidentSessionState::Uninitialized,
+                        Some(MachineDisposition::Reusable) => ResidentSessionState::Reusable,
+                        Some(MachineDisposition::Unavailable) => ResidentSessionState::Unavailable,
+                    },
+                ),
+        }
+    }
+
     pub(crate) fn workbench(
         &self,
         response: ResponseExpectation,
@@ -4954,6 +4984,97 @@ mod request_tests {
             .unwrap();
         assert_eq!(sibling, 42);
         assert!(machines.checkout_run(SessionId(2)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resident_reentry_state_tracks_unavailable_busy_and_stale_checkout() {
+        use std::time::Instant;
+        use tidepool_repr::{CoreFrame, Literal, SessionId, TreeBuilder};
+        use tidepool_runtime::session::{ResidentSessionState, Slot};
+
+        fn unbootstrapped() -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
+            ResidentSession::unbootstrapped(
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                Vec::new(),
+                64 * 1024,
+                None,
+            )
+        }
+
+        fn bootstrapped(
+            expression: tidepool_repr::CoreExpr,
+        ) -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
+            let table = tidepool_testing::proptest::build_table_for_expr(&expression);
+            ResidentSession::bootstrap(
+                &expression,
+                table,
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                Vec::new(),
+                64 * 1024,
+                None,
+            )
+            .unwrap()
+        }
+
+        let machines = Arc::new(SessionRegistry::new());
+        let uninitialized_id = SessionId(11);
+        let reusable_id = SessionId(12);
+        let unavailable_id = SessionId(13);
+        machines.insert_idle(uninitialized_id, unbootstrapped());
+        let mut literal = TreeBuilder::new();
+        literal.push(CoreFrame::Lit(Literal::LitInt(42)));
+        machines.insert_idle(reusable_id, bootstrapped(literal.build()));
+        let mut literal = TreeBuilder::new();
+        literal.push(CoreFrame::Lit(Literal::LitInt(42)));
+        machines.insert_idle(unavailable_id, bootstrapped(literal.build()));
+
+        let source = ActorWorkbenchSource::new("", Vec::new());
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
+        assert_eq!(
+            runner.resident_session_state(uninitialized_id),
+            ResidentSessionState::Uninitialized
+        );
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Reusable
+        );
+
+        machines
+            .checkout_run(unavailable_id)
+            .unwrap()
+            .mark_wedged(Instant::now());
+        assert_eq!(
+            runner.resident_session_state(unavailable_id),
+            ResidentSessionState::Unavailable
+        );
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Reusable,
+            "one unavailable session must not poison its sibling"
+        );
+
+        let checkout = machines.checkout_run(reusable_id).unwrap();
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Running
+        );
+        assert!(matches!(
+            machines.remove(reusable_id),
+            Some(Slot::Running { .. })
+        ));
+        machines.insert_idle(reusable_id, unbootstrapped());
+        drop(checkout);
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Uninitialized,
+            "stale checkout settlement must not replace the new incarnation"
+        );
+        assert_eq!(
+            runner.resident_session_state(SessionId(99)),
+            ResidentSessionState::Gone
+        );
     }
 
     #[test]

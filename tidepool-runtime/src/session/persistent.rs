@@ -274,6 +274,12 @@ impl PersistentSession {
         self.machine.as_mut()
     }
 
+    fn ensure_machine_reusable(&self) -> Result<(), JitError> {
+        self.machine
+            .as_ref()
+            .map_or(Ok(()), JitEffectMachine::ensure_reusable)
+    }
+
     /// Cancellation handle for this capacity-one registry realm.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
         self.machine
@@ -351,6 +357,7 @@ impl PersistentSession {
         expr: &CoreExpr,
         table: &DataConTable,
     ) -> Result<(), JitError> {
+        self.ensure_machine_reusable()?;
         if self.machine.is_none() {
             self.machine = Some(JitEffectMachine::compile_session(
                 expr,
@@ -402,6 +409,7 @@ impl PersistentSession {
         expr: &CoreExpr,
         env: &ExternalEnv,
     ) -> Result<FuncId, JitError> {
+        self.ensure_machine_reusable()?;
         self.turn_counter += 1;
         let frag_name = format!("{name_hint}_{}", self.turn_counter);
         let PersistentSession {
@@ -427,6 +435,7 @@ impl PersistentSession {
         expr: &CoreExpr,
         env: &ExternalEnv,
     ) -> Result<FuncId, JitError> {
+        self.ensure_machine_reusable()?;
         self.turn_counter += 1;
         let frag_name = format!("{name_hint}_child_{}", self.turn_counter);
         let PersistentSession {
@@ -454,6 +463,7 @@ impl PersistentSession {
         run_table: &DataConTable,
         env: &ExternalEnv,
     ) -> Result<FuncId, JitError> {
+        self.ensure_machine_reusable()?;
         self.turn_counter += 1;
         let frag_name = format!("{name_hint}_{}", self.turn_counter);
         #[allow(
@@ -564,6 +574,7 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        self.ensure_machine_reusable()?;
         let id = self
             .active_continuation
             .ok_or(JitError::InvalidSuspensionState(
@@ -602,6 +613,7 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -633,6 +645,7 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -691,6 +704,7 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -742,6 +756,7 @@ impl PersistentSession {
     /// Pure means no effects, hence no `Ask`, hence no suspension — this is the
     /// one run entry with no `resume_*` sibling.
     pub fn run_funcid_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
+        self.ensure_machine_reusable()?;
         #[allow(
             clippy::expect_used,
             reason = "machine bootstrapped before run_funcid_pure"
@@ -770,6 +785,7 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -836,6 +852,7 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -901,6 +918,7 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        self.ensure_machine_reusable()?;
         assert!(
             self.active_continuation.is_none(),
             "resume the active turn first"
@@ -1623,4 +1641,249 @@ pub struct ScopeRetirement {
     pub bindings_retired: usize,
     /// Persistent GC roots deregistered — the sole-owner subset of the above.
     pub roots_released: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_effect::dispatch::EffectContext;
+    use tidepool_effect::error::EffectError;
+    use tidepool_effect::Response;
+    use tidepool_repr::{CoreFrame, Literal, PrimOpKind, TreeBuilder};
+
+    const VAL_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(10);
+    const E_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(11);
+    const UNION_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(12);
+    const LEAF_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(13);
+    const NODE_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(14);
+
+    #[derive(Clone)]
+    struct TestSink;
+
+    impl OutputSink for TestSink {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    struct NoDispatch;
+
+    impl DispatchEffect<TestSink> for NoDispatch {
+        fn dispatch(
+            &mut self,
+            _request: &Value,
+            _cx: &EffectContext<'_, TestSink>,
+        ) -> Result<Option<Response>, EffectError> {
+            Ok(None)
+        }
+    }
+
+    struct RespondAfterSuspend {
+        calls: usize,
+    }
+
+    impl DispatchEffect<TestSink> for RespondAfterSuspend {
+        fn dispatch(
+            &mut self,
+            _request: &Value,
+            _cx: &EffectContext<'_, TestSink>,
+        ) -> Result<Option<Response>, EffectError> {
+            self.calls += 1;
+            Ok((self.calls > 1).then(|| Response::Complete(Value::Lit(Literal::LitInt(10)))))
+        }
+    }
+
+    fn effect_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        for (id, name, qualified_name, arity) in [
+            (VAL_ID, "Val", "Control.Monad.Freer.Val", 1),
+            (E_ID, "E", "Control.Monad.Freer.E", 2),
+            (UNION_ID, "Union", "Data.OpenUnion.Union", 2),
+            (LEAF_ID, "Leaf", "Data.FTCQueue.Leaf", 1),
+            (NODE_ID, "Node", "Data.FTCQueue.Node", 2),
+        ] {
+            table.insert(DataCon {
+                id,
+                name: name.to_owned(),
+                tag: 0,
+                rep_arity: arity,
+                field_bangs: Vec::new(),
+                qualified_name: Some(qualified_name.to_owned()),
+                type_name: String::new(),
+            });
+        }
+        table
+    }
+
+    fn suspending_expr() -> CoreExpr {
+        let mut builder = TreeBuilder::new();
+        let final_answer = builder.push(CoreFrame::Var(VarId(2)));
+        let final_val = builder.push(CoreFrame::Con {
+            tag: VAL_ID,
+            fields: vec![final_answer],
+        });
+        let final_continuation = builder.push(CoreFrame::Lam {
+            binder: VarId(2),
+            body: final_val,
+        });
+        let final_leaf = builder.push(CoreFrame::Con {
+            tag: LEAF_ID,
+            fields: vec![final_continuation],
+        });
+        let second_tag = builder.push(CoreFrame::Lit(Literal::LitWord(0)));
+        let second_request = builder.push(CoreFrame::Lit(Literal::LitInt(8)));
+        let second_union = builder.push(CoreFrame::Con {
+            tag: UNION_ID,
+            fields: vec![second_tag, second_request],
+        });
+        let second_effect = builder.push(CoreFrame::Con {
+            tag: E_ID,
+            fields: vec![second_union, final_leaf],
+        });
+        let continuation = builder.push(CoreFrame::Lam {
+            binder: VarId(1),
+            body: second_effect,
+        });
+        let leaf = builder.push(CoreFrame::Con {
+            tag: LEAF_ID,
+            fields: vec![continuation],
+        });
+        let effect_tag = builder.push(CoreFrame::Lit(Literal::LitWord(0)));
+        let request = builder.push(CoreFrame::Lit(Literal::LitInt(7)));
+        let union = builder.push(CoreFrame::Con {
+            tag: UNION_ID,
+            fields: vec![effect_tag, request],
+        });
+        builder.push(CoreFrame::Con {
+            tag: E_ID,
+            fields: vec![union, leaf],
+        });
+        builder.build()
+    }
+
+    #[test]
+    fn persistent_session_allows_reuse_after_language_error() {
+        let mut builder = TreeBuilder::new();
+        let numerator = builder.push(CoreFrame::Lit(Literal::LitInt(5)));
+        let zero = builder.push(CoreFrame::Lit(Literal::LitInt(0)));
+        builder.push(CoreFrame::PrimOp {
+            op: PrimOpKind::IntQuot,
+            args: vec![numerator, zero],
+        });
+        let expr = builder.build();
+        let table = effect_table();
+        let mut session = PersistentSession::new(None, 4096);
+        session.bootstrap_if_needed(&expr, &table).unwrap();
+
+        let failure = match session.run_entry(&table, &mut NoDispatch, &TestSink) {
+            Err(error) => error,
+            Ok(_) => panic!("division by zero unexpectedly completed"),
+        };
+        assert!(
+            matches!(
+                failure,
+                JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
+                    tidepool_codegen::host_fns::RuntimeError::DivisionByZero
+                ))
+            ),
+            "unexpected language failure: {failure:?}"
+        );
+        assert_eq!(
+            session.machine().unwrap().disposition(),
+            tidepool_codegen::machine_state::MachineDisposition::Reusable
+        );
+        session.bootstrap_if_needed(&expr, &table).unwrap();
+    }
+
+    #[test]
+    fn persistent_session_refuses_unavailable_machine_reuse() {
+        let mut builder = TreeBuilder::new();
+        builder.push(CoreFrame::Var(VarId(0xfeed)));
+        let expr = builder.build();
+        let table = effect_table();
+        let mut session = PersistentSession::new(None, 4096);
+        session.bootstrap_if_needed(&expr, &table).unwrap();
+
+        let first = match session.run_entry(&table, &mut NoDispatch, &TestSink) {
+            Err(error) => error,
+            Ok(_) => panic!("unresolved variable unexpectedly completed"),
+        };
+        assert!(
+            matches!(
+                first,
+                JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
+                    tidepool_codegen::host_fns::RuntimeError::UnresolvedVar(..)
+                ))
+            ),
+            "unexpected integrity failure: {first:?}"
+        );
+        assert!(matches!(
+            session.bootstrap_if_needed(&expr, &table),
+            Err(JitError::MachineUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn persistent_session_cancels_suspended_work_without_poisoning_reuse() {
+        let expr = suspending_expr();
+        let table = effect_table();
+        let mut session = PersistentSession::new(None, 4096);
+        session.bootstrap_if_needed(&expr, &table).unwrap();
+        let mut dispatch = RespondAfterSuspend { calls: 0 };
+
+        assert!(matches!(
+            session.run_entry(&table, &mut dispatch, &TestSink).unwrap(),
+            SuspendableOutcome::Suspended { .. }
+        ));
+        let cancel = session.cancel_handle().expect("bootstrapped machine");
+        cancel.cancel();
+        let failure = match session.resume_with_table(
+            &table,
+            &mut dispatch,
+            &TestSink,
+            ResumeInput::Answer(Value::Lit(Literal::LitInt(9))),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled continuation unexpectedly completed"),
+        };
+        assert!(matches!(
+            failure,
+            JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
+                tidepool_codegen::host_fns::RuntimeError::Cancelled
+            ))
+        ));
+        assert_eq!(
+            session.machine().unwrap().disposition(),
+            tidepool_codegen::machine_state::MachineDisposition::Reusable
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "observing cancellation must not clear the consumer-owned flag"
+        );
+        let repeated = match session.run_entry(&table, &mut dispatch, &TestSink) {
+            Err(error) => error,
+            Ok(_) => panic!("a new run ignored the outstanding cancellation request"),
+        };
+        assert!(matches!(
+            repeated,
+            JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
+                tidepool_codegen::host_fns::RuntimeError::Cancelled
+            ))
+        ));
+        assert!(cancel.is_cancelled());
+        cancel.reset();
+        assert!(!cancel.is_cancelled());
+        session.bootstrap_if_needed(&expr, &table).unwrap();
+        let mut fresh_dispatch = RespondAfterSuspend { calls: 0 };
+        assert!(matches!(
+            session
+                .run_entry(&table, &mut fresh_dispatch, &TestSink)
+                .unwrap(),
+            SuspendableOutcome::Suspended { .. }
+        ));
+    }
 }

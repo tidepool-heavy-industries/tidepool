@@ -88,6 +88,26 @@ pub use turn::{
     DECL_TEMPLATE_SOURCE,
 };
 
+/// Host-visible reentry state for one resident session.
+///
+/// This is an observation, not admission authority: the next operation must
+/// still acquire the registry checkout and pass the machine's own reuse guard.
+/// Source-only recovery is a separate declaration-plane transition and never
+/// changes an unavailable machine into a reusable one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentSessionState {
+    /// No machine has been bootstrapped yet; a first admitted entry may create it.
+    Uninitialized,
+    /// The existing machine can safely accept another explicitly submitted entry.
+    Reusable,
+    /// A checkout currently owns the machine, so reentry must not overtake it.
+    Running,
+    /// Heap or code integrity is uncertain, or the registry retained a terminal slot.
+    Unavailable,
+    /// The registry no longer owns this session incarnation.
+    Gone,
+}
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

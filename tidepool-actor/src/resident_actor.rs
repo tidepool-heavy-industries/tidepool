@@ -2115,16 +2115,23 @@ where
                         );
                     }
                     let group_path = group.to_string();
-                    let (group_id, reservations) = self
-                        .environment
-                        .fork_groups
-                        .begin(
+                    let maximum = budget.maximum_active_children.map(usize::from);
+                    let (group_id, reservations) = match self.active_fork_boundary.clone() {
+                        Some(boundary) => self.environment.fork_groups.begin_at_boundary(
                             context.actor,
                             group,
                             branches,
-                            budget.maximum_active_children.map(usize::from),
-                        )
-                        .map_err(|error| error.to_string())?;
+                            maximum,
+                            boundary,
+                        ),
+                        None => self.environment.fork_groups.begin(
+                            context.actor,
+                            group,
+                            branches,
+                            maximum,
+                        ),
+                    }
+                    .map_err(|error| error.to_string())?;
                     Ok::<_, String>((group_id, group_path, reservations))
                 })();
                 match admitted {
@@ -4787,13 +4794,24 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
-            self.abort_incomplete_groups(
-                kernel,
-                context.actor,
-                "fork admission stopped before tool completion",
-            )
-            .await;
-            let groups = self.environment.fork_groups.ready_groups(context.actor);
+            for child in self
+                .environment
+                .fork_groups
+                .abort_incomplete_at_boundary(context.actor, &boundary)
+            {
+                if let Some(child) = kernel.resolve(child) {
+                    let _ = child
+                        .shutdown(ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "fork admission stopped before tool completion".into(),
+                        })
+                        .await;
+                }
+            }
+            let groups = self
+                .environment
+                .fork_groups
+                .ready_groups_at_boundary(context.actor, &boundary);
             let groups: Vec<_> = groups
                 .into_iter()
                 .filter(|(_, children)| {
@@ -5633,6 +5651,14 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Observe whether this forest's one resident session can be considered
+    /// for same-incarnation root reentry. The subsequent checkout remains the
+    /// authoritative admission boundary.
+    #[must_use]
+    pub fn resident_session_state(&self) -> tidepool_runtime::session::ResidentSessionState {
+        self.environment.runner.resident_session_state(self.session)
+    }
+
     pub fn new(
         source: ActorWorkbenchSource,
         session: tidepool_repr::SessionId,
