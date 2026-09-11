@@ -247,3 +247,34 @@ applications ownership of shared backend/host edits, with the coordinator
 retaining the pin and sleep supplying the typed wait/cancel contract; or identify
 a concrete application guarantee or sleep outer-path seam that requires a
 different owner before the reconciled pair and implementation frontier proceed.
+
+## Resulting matched release
+
+The reconciled external Codex head is
+`db2442eccc5da8561b3d922dccfa1a67654beb6e`. It descends through the Jobs merge
+`9433593103bcfd4bfe9d159b898ec37c715f2fdb`, cancellation/input settlement
+`c76aa485e4a1d71bd3e8970884cc02b3f14f0827`, queued-follow-up repair
+`56321b517e58fbec6fb74c4e8047ee6987aa3e31`, and early `NotSleeping`
+reconciliation `27019d64291a5d339f11848d7f89d2cb0f9269d4`. The exact locally tested
+package is `/tmp/tidepool-native-package-db2442ec/bin/codex`, with SHA-256
+`b411cce7f18bddded8baac539fa7846071d765249035385e09f3bd0103c65205`.
+
+The Tidepool side is based on coordinator integration
+`21106c549a654acb30844cb44759998e44fc1303`, which incorporates the matched
+fixture and the external raw-tools main changes. Its conflict resolution keeps
+the sleep controls together with `ResidentToolOutput`, the raw-tool response
+rendering together with the Haskell fallback, and both sleep cancellation and
+`DynamicToolFunctionSpec`/`InteractiveSessionBinding` imports. The final
+applications commit is the descendant returned by this lane after review
+repairs and exact-source checks.
+
+After the external commit is available from the configured GitHub source, the
+coordinator-owned minimal pin update is:
+
+```sh
+sed -i 's#github:inanna-malick/codex/80e36633f515b03e11189e8516be21065e73335e#github:inanna-malick/codex/db2442eccc5da8561b3d922dccfa1a67654beb6e#' flake.nix
+nix flake lock --update-input codex
+```
+
+The coordinator must inspect and commit only the resulting `flake.nix` and
+`flake.lock` pin change; applications does not mutate those shared files.

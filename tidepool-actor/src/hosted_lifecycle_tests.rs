@@ -359,23 +359,25 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         .await;
     cancelled.abort();
     let _ = (&mut cancelled).await;
-    let cancellation = loop {
-        tokio::task::yield_now().await;
-        match sleeper_policy
-            .cancel_workbench_boxed(cancel_context.clone())
-            .await
-            .unwrap()
-        {
-            WorkbenchCancellationOutcome::UnknownEvaluation { .. }
-            | WorkbenchCancellationOutcome::NotSleeping { .. } => continue,
-            outcome => break outcome,
-        }
+    let mut foreign_context = cancel_context.clone();
+    foreign_context.context_call_id = Some("foreign-outer-call".into());
+    let foreign_cancellation = {
+        let sleeper_policy = Arc::clone(&sleeper_policy);
+        tokio::spawn(async move { sleeper_policy.cancel_workbench_boxed(foreign_context).await })
     };
+    let cancellation = sleeper_policy
+        .cancel_workbench_boxed(cancel_context.clone())
+        .await
+        .unwrap();
     assert!(
         matches!(
-            cancellation,
-            WorkbenchCancellationOutcome::Cancelled { .. }
+            foreign_cancellation.await.unwrap().unwrap(),
+            WorkbenchCancellationOutcome::UnknownEvaluation { .. }
         ),
+        "a different enclosing call must not target the active evaluation"
+    );
+    assert!(
+        matches!(cancellation, WorkbenchCancellationOutcome::Cancelled { .. }),
         "cancellation outcome: {cancellation:?}"
     );
     assert!(
@@ -407,7 +409,10 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
 
     let unknown = invocation("pure ()", "never-admitted").context.unwrap();
     assert!(matches!(
-        sleeper_policy.cancel_workbench_boxed(unknown).await.unwrap(),
+        sleeper_policy
+            .cancel_workbench_boxed(unknown)
+            .await
+            .unwrap(),
         WorkbenchCancellationOutcome::UnknownEvaluation { .. }
     ));
     let retiring = sleeper;
@@ -422,11 +427,7 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
     };
     retiring_policy
         .client
-        .wait_until_sleeping(
-            &invocation("pure ()", "retiring-sleep")
-                .context
-                .unwrap(),
-        )
+        .wait_until_sleeping(&invocation("pure ()", "retiring-sleep").context.unwrap())
         .await;
     retirement_waiter.abort();
     let _ = (&mut retirement_waiter).await;

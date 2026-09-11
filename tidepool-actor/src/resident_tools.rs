@@ -301,6 +301,7 @@ pub(crate) struct ResidentToolClient {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WorkbenchCallKey {
+    context_call_id: Option<String>,
     thread_id: String,
     turn_id: String,
     call_id: String,
@@ -310,6 +311,7 @@ struct WorkbenchCallKey {
 impl From<ToolInvocationContext> for WorkbenchCallKey {
     fn from(context: ToolInvocationContext) -> Self {
         Self {
+            context_call_id: context.context_call_id,
             thread_id: context.thread_id,
             turn_id: context.turn_id,
             call_id: context.call_id,
@@ -325,9 +327,18 @@ fn execution_id(actor: crate::ActorRef, operation: &WorkbenchCallKey) -> Workben
     }
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tidepool.workbench-execution.v1\0");
+    hasher.update(b"tidepool.workbench-execution.v2\0");
     hasher.update(&actor.id.0.to_le_bytes());
     hasher.update(&actor.incarnation.0.to_le_bytes());
+    match &operation.context_call_id {
+        Some(context_call_id) => {
+            hasher.update(&[1]);
+            field(&mut hasher, context_call_id.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
     field(&mut hasher, operation.thread_id.as_bytes());
     field(&mut hasher, operation.turn_id.as_bytes());
     field(&mut hasher, operation.call_id.as_bytes());
@@ -661,6 +672,11 @@ mod tests {
         let original = execution_id(actor, &call_key("call-1"));
         assert_eq!(original, execution_id(actor, &call_key("call-1")));
         assert_ne!(original, execution_id(actor, &call_key("call-2")));
+        let mut different_context = call_key("call-1");
+        different_context.context_call_id = Some("different-outer-call".into());
+        assert_ne!(original, execution_id(actor, &different_context));
+        different_context.context_call_id = None;
+        assert_ne!(original, execution_id(actor, &different_context));
         assert_ne!(
             original,
             execution_id(

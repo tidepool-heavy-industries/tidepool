@@ -5,13 +5,13 @@
 
 use super::*;
 use crate::host_dynamic_tools::HostDynamicToolService;
-use axum::{Json, Router, extract::State, routing::post};
-use serde_json::{Value, json};
+use axum::{extract::State, routing::post, Json, Router};
+use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
     },
     time::{Duration, Instant},
 };
@@ -20,9 +20,9 @@ use tidepool_actor::{
     WorkbenchCancellationOutcome,
 };
 use tidepool_agent::{
+    native_interactive_agent_from_parts, native_interactive_backend, read_interactive_binding,
     InputAdmission, InputOperationId, InputProducerId, InputPurpose, InteractiveInputEnvelope,
-    InteractiveInputMode, InteractiveInputTarget, native_interactive_agent_from_parts,
-    native_interactive_backend, read_interactive_binding,
+    InteractiveInputMode, InteractiveInputTarget,
 };
 use tidepool_tool::{HostedTool, ToolInvocation, ToolInvocationContext};
 use tokio::{net::UnixListener, sync::Notify};
@@ -240,58 +240,48 @@ struct TmuxSession(String);
 impl TmuxSession {
     fn launch(native: &Path, home: &Path, work: &Path, socket: &Path) -> Self {
         let session = format!("shoal-sleep-test-{}", uuid::Uuid::new_v4().simple());
-        assert!(
-            std::process::Command::new("tmux")
-                .args(["new-session", "-d", "-s", &session, "-x", "100", "-y", "30"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            std::process::Command::new("tmux")
-                .args(["set-option", "-t", &session, "remain-on-exit", "on"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            std::process::Command::new("tmux")
-                .args(["respawn-pane", "-k", "-t", &session])
-                .arg("env")
-                .arg(format!("CODEX_HOME={}", home.display()))
-                .arg("OPENAI_API_KEY=fixture")
-                .arg("RUST_LOG=codex_tui=trace")
-                .arg(native)
-                .arg("--no-alt-screen")
-                .arg("--host-dynamic-tools-socket")
-                .arg(socket)
-                .arg("-C")
-                .arg(work)
-                .arg("fixture bootstrap")
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-x", "100", "-y", "30"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("tmux")
+            .args(["set-option", "-t", &session, "remain-on-exit", "on"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("tmux")
+            .args(["respawn-pane", "-k", "-t", &session])
+            .arg("env")
+            .arg(format!("CODEX_HOME={}", home.display()))
+            .arg("OPENAI_API_KEY=fixture")
+            .arg("RUST_LOG=codex_tui=trace")
+            .arg(native)
+            .arg("--no-alt-screen")
+            .arg("--host-dynamic-tools-socket")
+            .arg(socket)
+            .arg("-C")
+            .arg(work)
+            .arg("fixture bootstrap")
+            .status()
+            .unwrap()
+            .success());
         Self(session)
     }
 
     fn human_input(&self, text: &str) {
-        assert!(
-            std::process::Command::new("tmux")
-                .args(["send-keys", "-t", &self.0, "-l", text])
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new("tmux")
+            .args(["send-keys", "-t", &self.0, "-l", text])
+            .status()
+            .unwrap()
+            .success());
         // While a turn is running, Tab is the native TUI's explicit
         // queue/steer action. Enter only leaves text in the composer.
-        assert!(
-            std::process::Command::new("tmux")
-                .args(["send-keys", "-t", &self.0, "Tab"])
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new("tmux")
+            .args(["send-keys", "-t", &self.0, "Tab"])
+            .status()
+            .unwrap()
+            .success());
     }
 
     fn capture(&self) -> String {
@@ -527,6 +517,10 @@ async fn run_short_case(ingress: ShortIngress) {
     assert!(
         !cancelled.is_empty() && !cancelled.contains("interruptedSuffix"),
         "the first inference ran without original invocation settlement: {cancelled}"
+    );
+    assert!(
+        !requests[1].to_string().contains(ingress.marker()),
+        "{ingress:?} leaked into inference before the original invocation settled"
     );
     assert!(
         requests[2].to_string().contains(ingress.marker()),
