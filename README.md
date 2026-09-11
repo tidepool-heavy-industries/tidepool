@@ -1,23 +1,33 @@
 # Tidepool
 
-**Programmable agent swarms, built from typed Haskell programs and a Rust runtime.**
+**A programmable swarm harness: Haskell as the agent interface, cheap copy-on-write forks underneath.**
 
 [![CI](https://github.com/tidepool-heavy-industries/tidepool/actions/workflows/ci.yml/badge.svg)](https://github.com/tidepool-heavy-industries/tidepool/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE.md)
 
-Tidepool gives coding agents a persistent, GHCi-style workbench. They can keep
-values and functions between turns, compose effectful programs, fork related
-agents, and build typed actors to route results without spending a model turn
-on every coordination step.
+**Shoal**, Tidepool's swarm harness, makes Haskell the primary interface for
+agents to act and coordinate. An agent can write directly in a persistent,
+GHCi-style session or invoke a Haskell-defined tool with a familiar shell or
+structured-input interface. Both run through the same effect stack and runtime
+owners. Tools are compiled Haskell functions; orchestration is code the agents
+can compose and revise as they work.
 
-**Shoal** is the swarm environment built on that foundation. Each interactive
-agent has an ordinary Codex TUI and a Haskell session. Agents work in isolated
-checkouts, inherit useful context, and return typed results. Their orchestration
-is Haskell they can write and revise while working.
+**Fork the reasoning and the working environment.** Related agents inherit useful
+conversation context, while extensive use of Bubblewrap and OverlayFS gives them
+isolated copy-on-write source and build views. A child can start with the parent's
+warm artifacts instead of copying a huge build directory or rebuilding from
+scratch at every branch. That makes recursive fork/implement/integrate cycles
+practical for substantial development tasks.
 
-Underneath, Tidepool extracts Haskell through GHC, compiles it with Cranelift,
-and runs it as effect machines driven by Rust. Haskell expresses the program;
-Rust owns processes, providers, scheduling, permissions, and resources.
+Each interactive agent still has an ordinary Codex TUI. Behind it, persistent
+Haskell bindings hold data, functions, jobs, and typed agent handles. Small
+Haskell actors route events and collect results without spending an inference
+turn on every mechanical step.
+
+Tidepool supplies the compiler and runtime: GHC extracts the Haskell program,
+Cranelift compiles it into an effect machine, and Rust drives it. Haskell
+expresses behavior; Rust owns processes, providers, scheduling, permissions,
+and resources.
 
 ## What works today
 
@@ -32,9 +42,10 @@ turnkey, unattended service.
 - **Recursive agent trees.** `unfold` composes children with typed assignments
   and results. Related work can inherit the parent's conversation context;
   independent review can start with selected fresh context.
-- **Warm workspace forks.** Linux Bubblewrap and OverlayFS provide copy-on-write
-  workspace/build views so descendants can reuse existing artifacts. Cache hits
-  still depend on the compiler inputs; forks are not a promise of zero rebuilds.
+- **Cheap workspace and build forks.** Bubblewrap establishes isolated process
+  views; OverlayFS shares inherited filesystem layers and gives each child its
+  own writable layer. Source and compiled artifacts travel together into the
+  next development frontier without eagerly duplicating the whole tree.
 - **Typed coordination actors.** Record-shaped APIs describe state, calls, and
   event handlers. Small Haskell state machines collect results and route messages;
   model turns remain available for engineering decisions.
@@ -53,7 +64,27 @@ replacement and further interactive-application/sleep work are developed on
 separate branches; their plans are not claims of shipped functionality. See the
 [active plan index](plans/README.md) for those boundaries.
 
-## A workbench, not just a sequence of tool calls
+## Fork deeply without starting cold
+
+A recursive swarm needs more than parallel model calls. Its children also need
+the source, dependencies, and build artifacts their parents just worked with.
+Shoal uses Linux mount namespaces through Bubblewrap and copy-on-write layers
+through OverlayFS for that working environment.
+
+Inherited layers are shared; each child writes into its own layer. Unchanged
+build artifacts can stay shared across descendants, while edits remain isolated
+for review and integration. The same mounted workspace location also helps avoid
+unnecessary path changes between parent and child. This supports multiple rounds
+of scaffolding, forking, and consolidation rather than a single fan-out of cold
+checkouts.
+
+Copy-on-write makes the fork cheap, not every subsequent write: modifying
+inherited files can require copying them into a writable layer, and genuinely
+new artifacts still consume disk. Compiler inputs determine actual cache reuse.
+The goal is to preserve useful working state across forks, with resource ownership
+and cleanup handled by the runtime.
+
+## Haskell directly, or Haskell behind a tool
 
 In a Shoal Haskell session, commands are ordinary reusable values:
 
