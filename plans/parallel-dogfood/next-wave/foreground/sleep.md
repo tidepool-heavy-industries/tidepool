@@ -1,5 +1,40 @@
 # Sleep owner
 
+## Settled interruption UX
+
+Human delegated this choice to the initial planner after source inspection.
+Sleep leaves one logical tool invocation pending; ending a transport observation
+does not cancel the evaluation, complete the invocation, or authorize re-execution.
+Use retained exact invocation identity for transport reconciliation.
+
+Any new message delivered to the sleeping LLM through its normal human/actor
+steering or notification path interrupts the whole suspended evaluation.
+Do not classify message prose as important/unimportant: even a delivered progress
+notification interrupts. Data retained only in Haskell collectors, actor events,
+and new requests queued behind an active request do not interrupt merely by
+arriving. Haskell-only handlers retain sequential mailbox semantics.
+
+Queue the message, obtain the exact evaluation's terminal cancellation outcome,
+settle the interrupted tool invocation, then permit inference to handle the
+message. Abort the continuation rather than returning unit from sleep. Completed
+effects and independently owned jobs survive according to their existing owners;
+only actually committed/installed workbench bindings are recoverable, not arbitrary
+locals in an unfinished do block. Never resume abandoned code after steering.
+
+Cancellation and expiry need one owning race decision. If expiry wins and suffix
+effects already execute, report them honestly; acknowledged cancellation prevents
+further suffix execution, not effects retroactively. If cancellation cannot be
+confirmed, report uncertainty rather than claiming quiescence or admitting
+conflicting workbench execution. No retained-program-across-inference mechanism.
+
+Inspected launch-main `ResidentToolEndpoint` has dispatch/completion/reattachment/
+seal but no explicit exact-evaluation cancellation operation. The native-to-resident
+cancel-and-settle join therefore needs implementation ownership and consumer proof.
+Reuse resident continuation abort and native correlated completion owners;
+dropping an HTTP future or native response waiter is not cancellation proof.
+The inspected selected-native host-tools call has no explicit whole-call deadline;
+this is not proof of the entire outer fifteen-minute transport path.
+
 Start on launch main plus planning commits, never R7 engine source.
 Read the PRD, nearest contributor guidance, and actual suspension/lifetime and
 tool-wait consumers. Keep verified observations separate from implementation proposals.
