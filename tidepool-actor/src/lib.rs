@@ -110,6 +110,7 @@ pub use resident_actor::{
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{
     ResidentToolEndpoint, ResidentToolError, ResidentToolFuture, ResidentToolPolicy,
+    WorkbenchCancellationOutcome, WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,

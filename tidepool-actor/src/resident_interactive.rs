@@ -124,6 +124,24 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
             client.dispatch_workbench(request, invocation.context).await
         })
     }
+
+    fn cancel_workbench_boxed(
+        &self,
+        invocation: tidepool_tool::ToolInvocationContext,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::WorkbenchCancellationOutcome,
+                        crate::ResidentToolError,
+                    >,
+                > + Send
+                + 'static,
+        >,
+    > {
+        let client = self.client.clone();
+        Box::pin(async move { client.cancel_workbench(invocation).await })
+    }
 }
 
 #[cfg(test)]

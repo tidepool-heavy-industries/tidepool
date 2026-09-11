@@ -3341,6 +3341,21 @@ where
             .await
     }
 
+    pub(crate) async fn abort_live(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        reason: String,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .abort(hole.cont_id(), reason)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub(crate) async fn resume_int(
         &self,
         context: crate::ActorSessionContext,

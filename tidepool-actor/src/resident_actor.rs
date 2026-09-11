@@ -472,6 +472,7 @@ pub struct ResidentKernelBehavior<H, O> {
     completed_workbenches: CompletedWorkbenchExecutions,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    active_workbench_control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
 }
 
 #[derive(Clone)]
@@ -586,6 +587,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             completed_workbenches: CompletedWorkbenchExecutions::default(),
             active_route: None,
             active_fork_boundary: None,
+            active_workbench_control: None,
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
@@ -1544,11 +1546,78 @@ where
                 continuation,
                 duration,
             } => Box::pin(async move {
-                tokio::time::sleep(duration).await;
-                self.environment
-                    .runner
-                    .resume_unit(context.clone(), continuation)
-                    .await
+                // Mailbox handlers and direct local workbenches have no hosted
+                // evaluation to cancel, but still share the actor-owned timer
+                // and retirement path.
+                let control = self
+                    .active_workbench_control
+                    .clone()
+                    .unwrap_or_else(crate::resident_tools::WorkbenchExecutionControl::untracked);
+                control.arm_sleep();
+                let timer = tokio::time::sleep(duration);
+                tokio::pin!(timer);
+                tokio::select! {
+                    () = &mut timer => {
+                        if control.claim_expiry() {
+                            let outcome = self.environment
+                                .runner
+                                .resume_unit(context.clone(), continuation)
+                                .await;
+                            control.finish_sleep();
+                            outcome
+                        } else {
+                            let outcome = self.environment
+                                .runner
+                                .abort_live(
+                                    context.clone(),
+                                    continuation,
+                                    "sleep interrupted by delivered input".into(),
+                                )
+                                .await;
+                            if outcome.is_ok() {
+                                control.acknowledge_cancellation();
+                            }
+                            outcome
+                        }
+                    }
+                    () = control.wait_for_cancellation() => {
+                        let outcome = self.environment
+                            .runner
+                            .abort_live(
+                                context.clone(),
+                                continuation,
+                                "sleep interrupted by delivered input".into(),
+                            )
+                            .await;
+                        if outcome.is_ok() {
+                            control.acknowledge_cancellation();
+                        }
+                        outcome
+                    }
+                    terminal = kernel.wait_requested_shutdown() => {
+                        if control.request_cancellation() || control.cancellation_requested() {
+                            let outcome = self.environment
+                                .runner
+                                .abort_live(
+                                    context.clone(),
+                                    continuation,
+                                    format!("sleep interrupted by actor retirement: {}", terminal.summary),
+                                )
+                                .await;
+                            if outcome.is_ok() {
+                                control.acknowledge_cancellation();
+                            }
+                            outcome
+                        } else {
+                            let outcome = self.environment
+                                .runner
+                                .resume_unit(context.clone(), continuation)
+                                .await;
+                            control.finish_sleep();
+                            outcome
+                        }
+                    }
+                }
             }),
             ResidentActorBoundary::Command {
                 continuation,
@@ -4265,7 +4334,9 @@ where
                 } => {
                     let reason =
                         crate::workbench_display::bounded_output(&reason.to_string(), 1024);
-                    let mut output = format!("Retained command {job}: {reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}");
+                    let mut output = format!(
+                        "Retained command {job}: {reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}"
+                    );
                     if !command_prefix.is_empty() {
                         output.push_str(&format!("\n{command_prefix}"));
                     }
@@ -5078,6 +5149,7 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
         request: WorkbenchRequest,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
@@ -5101,21 +5173,32 @@ where
             if let Some(execution) = &execution {
                 match self.completed_workbenches.lookup(execution, &request) {
                     Err(()) => {
-                        return Err(KernelInvocationFailure::Rejected {
+                        let result = Err(KernelInvocationFailure::Rejected {
                             actor: context.actor,
                             detail:
                                 "one hosted call identity was retried with different Haskell input"
                                     .into(),
                         });
+                        if let Some(control) = &control {
+                            control.settle(result.clone());
+                        }
+                        return result.map(KernelStep::Continue);
                     }
-                    Ok(Some(reply)) => return reply.map(KernelStep::Continue),
+                    Ok(Some(reply)) => {
+                        if let Some(control) = &control {
+                            control.settle(reply.clone());
+                        }
+                        return reply.map(KernelStep::Continue);
+                    }
                     Ok(None) => {}
                 }
             }
             let retained_request = execution.as_ref().map(|_| request.clone());
+            self.active_workbench_control = control.clone();
             self.active_fork_boundary = request.fork_boundary().cloned();
             let result = self.execute_workbench(kernel, &context, request).await;
             self.active_fork_boundary = None;
+            self.active_workbench_control = None;
             match &result {
                 Ok(KernelStep::Continue(_)) => self
                     .runtime_observation
@@ -5182,6 +5265,19 @@ where
                     Err(error) => Err(error.clone()),
                 };
                 self.completed_workbenches.record(execution, request, reply);
+            }
+            let terminal_reply = match &result {
+                Ok(
+                    KernelStep::Continue(response)
+                    | KernelStep::ContinueLater(response)
+                    | KernelStep::Stop {
+                        output: response, ..
+                    },
+                ) => Ok(response.clone()),
+                Err(error) => Err(error.clone()),
+            };
+            if let Some(control) = control {
+                control.settle(terminal_reply);
             }
             result
         })
@@ -5976,8 +6072,8 @@ fn workbench_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        workbench_failure_after_operations, workbench_response, ChildExitObservations,
-        CompletedWorkbenchExecutions,
+        ChildExitObservations, CompletedWorkbenchExecutions, workbench_failure_after_operations,
+        workbench_response,
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
@@ -6047,9 +6143,11 @@ mod tests {
         assert!(response.items[1].installed_bindings.is_empty());
         assert_eq!(response.items[2].status, WorkbenchItemStatus::NotRun);
         assert_eq!(response.items[3].status, WorkbenchItemStatus::NotRun);
-        assert!(response.items[2..]
-            .iter()
-            .all(|item| item.installed_bindings.is_empty()));
+        assert!(
+            response.items[2..]
+                .iter()
+                .all(|item| item.installed_bindings.is_empty())
+        );
     }
 
     #[test]

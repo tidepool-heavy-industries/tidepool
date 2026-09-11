@@ -4943,6 +4943,7 @@ mod tests {
                 .send_message(tidepool_actor::KernelMessage::Workbench {
                     request: tidepool_runtime::session::WorkbenchRequest::from_ghci_input(source)
                         .unwrap(),
+                    control: None,
                     reply: reply.into(),
                 })
                 .unwrap();

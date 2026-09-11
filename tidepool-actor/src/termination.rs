@@ -145,15 +145,31 @@ impl RetainedActorExit {
     /// Record intent without publishing an exit. Bootstrap checks this at safe
     /// boundaries; only ordinary lifecycle cleanup may publish the terminal.
     pub(crate) fn request_shutdown(&self, terminal: ActorTerminal) -> ActorTerminal {
-        self.state
+        let terminal = self
+            .state
             .requested_shutdown
             .lock()
             .get_or_insert(terminal)
-            .clone()
+            .clone();
+        self.state.changed.send_modify(|revision| *revision += 1);
+        terminal
     }
 
     pub(crate) fn requested_shutdown(&self) -> Option<ActorTerminal> {
         self.state.requested_shutdown.lock().clone()
+    }
+
+    pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
+        let mut changed = self.state.changed.subscribe();
+        loop {
+            if let Some(terminal) = self.requested_shutdown() {
+                return terminal;
+            }
+            changed
+                .changed()
+                .await
+                .expect("retained actor exit owns its lifecycle sender");
+        }
     }
 
     pub(crate) fn acknowledge_retirement(&self, supervisor: crate::ActorRef) {

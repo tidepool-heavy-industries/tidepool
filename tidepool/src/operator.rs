@@ -310,6 +310,7 @@ async fn submit(
         .address()
         .send_message(KernelMessage::Workbench {
             request,
+            control: None,
             reply: reply.into(),
         })
         .is_err()

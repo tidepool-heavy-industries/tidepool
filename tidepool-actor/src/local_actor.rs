@@ -221,6 +221,15 @@ impl KernelContext {
             .requested_shutdown()
     }
 
+    pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
+        self.directory
+            .resolve(self.identity)
+            .expect("running actor remains in its local directory")
+            .terminal()
+            .wait_requested_shutdown()
+            .await
+    }
+
     #[must_use]
     pub fn identity(&self) -> ActorRef {
         self.identity
@@ -531,6 +540,7 @@ pub trait KernelBehavior: Send + 'static {
         &'a mut self,
         context: &'a KernelContext,
         request: WorkbenchRequest,
+        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
 
     /// Continue work deliberately yielded after its initiating caller was
@@ -1103,7 +1113,11 @@ where
                     }
                 }
             }
-            KernelMessage::Workbench { request, reply } => {
+            KernelMessage::Workbench {
+                request,
+                control,
+                reply,
+            } => {
                 if !matches!(state.hosted_admission, HostedAdmission::Open) {
                     let _ = reply.send(Err(KernelInvocationFailure::Rejected {
                         actor: state.context.identity,
@@ -1112,7 +1126,11 @@ where
                     return Ok(());
                 }
 
-                match state.behavior.workbench(&state.context, request).await {
+                match state
+                    .behavior
+                    .workbench(&state.context, request, control)
+                    .await
+                {
                     Ok(step) => {
                         settle_step(&myself, state, step, |output| {
                             let _ = reply.send(Ok(output));
@@ -1719,6 +1737,7 @@ mod tests {
             &mut self,
             _context: &KernelContext,
             _request: WorkbenchRequest,
+            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
             Box::pin(async {
                 Ok(KernelStep::Continue(WorkbenchResponse {
@@ -1824,6 +1843,7 @@ mod tests {
             &'a mut self,
             context: &'a KernelContext,
             _request: WorkbenchRequest,
+            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
             Box::pin(async move {
                 Err(KernelInvocationFailure::Rejected {

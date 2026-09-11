@@ -39,6 +39,26 @@ Keep the original result when execution/worktree evidence matters.
 `(,) <$> awaitSettledFork workerA <*> awaitSettledFork workerB`.
 Register separate watches when results can be integrated independently.
 
+## Sleep
+
+```text
+sleep :: Member Sleep effects => Duration -> Eff effects ()
+milliseconds :: Natural -> Duration
+seconds      :: Natural -> Duration
+minutes      :: Natural -> Duration
+```
+
+`sleep (minutes 15)` suspends the current Haskell evaluation on a monotonic
+timer. It does not occupy command memory, poll the model, or wake it before the
+eventual tool result. Prefer an existing typed completion source when waiting
+for actual work rather than elapsed time.
+
+Delivered human, steering, or notification input interrupts a sleeping
+evaluation through the native exact-invocation path. Data that remains only in
+collectors or mailboxes does not. Transport loss alone neither cancels nor
+permits replay; if terminal cancellation cannot be confirmed, retain uncertainty
+instead of starting conflicting work.
+
 ## Commands
 
 `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB` are loaded.

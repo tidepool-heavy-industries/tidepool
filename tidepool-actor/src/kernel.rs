@@ -186,6 +186,7 @@ pub enum KernelMessage {
     },
     Workbench {
         request: WorkbenchRequest,
+        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
     ToolCompleted {
