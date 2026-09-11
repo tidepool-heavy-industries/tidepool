@@ -171,6 +171,7 @@ pub fn commands() -> Effect {
                     ("OutputBeginning", vec![]),
                     ("OutputTail", vec![]),
                     ("OutputOffset", vec![HsType::Int]),
+                    ("OutputSlice", vec![HsType::Int, HsType::Int]),
                 ],
             ),
             record(
@@ -216,6 +217,7 @@ pub fn commands() -> Effect {
                     ("CommandInvalid", vec![HsType::Text]),
                     ("CommandUnauthorized", vec![]),
                     ("CommandOutputPending", vec![]),
+                    ("CommandInputRejected", vec![HsType::Text]),
                     ("CommandInputAcceptedCloseUnconfirmed", vec![HsType::Text]),
                 ],
             ),

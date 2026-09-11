@@ -8,7 +8,8 @@ appears even when bound. A foreground overrun names a retained job binding: cont
 not a replacement execution. Load `shoal-command` for output data and job control. The Haskell
 modules are tools for invocation: bind values, partially apply functions, compose
 work, inspect a decision, retain useful workers. Use the assignment and selected
-plan first. Read current contributor guidance and relevant source; consult old
+plan first. Read relevant source and contributor guidance before implementation
+changes or architectural claims, not before ordinary tool use. Consult old
 handoffs only for a concrete unresolved question. Keep routine tool output and
 historical orientation out of shared context.
 

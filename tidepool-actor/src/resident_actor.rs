@@ -1553,7 +1553,11 @@ where
             ResidentActorBoundary::Command {
                 continuation,
                 request,
-            } => Box::pin(self.resolve_command(kernel, context, continuation, request)),
+            } => Box::pin(async move {
+                self.resolve_command(kernel, context, continuation, request)
+                    .await
+                    .outcome
+            }),
             ResidentActorBoundary::ActorLocalContext(continuation) => Box::pin(async move {
                 self.environment
                     .runner
@@ -3939,15 +3943,28 @@ where
                                         })?;
                                 }
                             }
-                            outcome = match self
-                                .resolve_effect(
-                                    kernel,
-                                    context,
-                                    &crate::CallAncestry::begin(context.actor),
-                                    boundary,
-                                )
-                                .await
-                            {
+                            let (resolved, command_disposition) = match boundary {
+                                ResidentActorBoundary::Command {
+                                    continuation,
+                                    request,
+                                } => {
+                                    let resolved = self
+                                        .resolve_command(kernel, context, continuation, request)
+                                        .await;
+                                    (resolved.outcome, Some(resolved.disposition))
+                                }
+                                boundary => (
+                                    self.resolve_effect(
+                                        kernel,
+                                        context,
+                                        &crate::CallAncestry::begin(context.actor),
+                                        boundary,
+                                    )
+                                    .await,
+                                    None,
+                                ),
+                            };
+                            outcome = match resolved {
                                 Ok(outcome) => {
                                     record_workbench_operation(
                                         unit.operations,
@@ -3955,7 +3972,8 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
-                                        WorkbenchOperationDisposition::Committed,
+                                        command_disposition
+                                            .unwrap_or(WorkbenchOperationDisposition::Committed),
                                     );
                                     outcome
                                 }
@@ -3969,7 +3987,8 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
-                                        WorkbenchOperationDisposition::Committed,
+                                        command_disposition
+                                            .unwrap_or(WorkbenchOperationDisposition::Committed),
                                     );
                                     return workbench
                                         .bind_background_job(context.clone(), job, reason)
@@ -3982,7 +4001,8 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
-                                        WorkbenchOperationDisposition::Unknown,
+                                        command_disposition
+                                            .unwrap_or(WorkbenchOperationDisposition::Unknown),
                                     );
                                     return Err(error);
                                 }

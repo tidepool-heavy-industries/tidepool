@@ -85,6 +85,8 @@ pub enum CommandPosition {
     OutputTail,
     #[core(module = "Tidepool.Effects.Core")]
     OutputOffset(i64),
+    #[core(module = "Tidepool.Effects.Core")]
+    OutputSlice(i64, i64),
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -134,6 +136,8 @@ pub enum CommandError {
     CommandUnauthorized,
     #[core(module = "Tidepool.Effects.Core")]
     CommandOutputPending,
+    #[core(module = "Tidepool.Effects.Core")]
+    CommandInputRejected(String),
     #[core(module = "Tidepool.Effects.Core")]
     CommandInputAcceptedCloseUnconfirmed(String),
 }

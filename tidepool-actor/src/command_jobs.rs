@@ -81,7 +81,7 @@ impl Shared {
             (
                 CommandInput::TerminalInput,
                 CommandControl::CloseInput | CommandControl::InputAndClose(_),
-            ) => Err(CommandError::CommandInvalid(
+            ) => Err(CommandError::CommandInputRejected(
                 "close_stdin requires piped input; PTYs use explicit terminal control characters"
                     .into(),
             )),
@@ -89,7 +89,7 @@ impl Shared {
             (
                 CommandInput::ClosedInput,
                 CommandControl::Input(_) | CommandControl::InputAndClose(_),
-            ) => Err(CommandError::CommandInvalid(
+            ) => Err(CommandError::CommandInputRejected(
                 "stdin is closed; input was not sent".into(),
             )),
             _ => Ok(false),
@@ -254,7 +254,12 @@ impl CommandJobs {
         parent: &KernelContext,
         spec: CommandSpec,
     ) -> Result<(String, Arc<CommandBackendRequest>), CommandError> {
-        validate_spec(&spec)?;
+        validate_spec(&spec).map_err(|error| match error {
+            CommandError::CommandInvalid(detail) => CommandError::CommandInvalid(format!(
+                "{detail}; no job created, no cleanup required"
+            )),
+            error => error,
+        })?;
         let id = uuid::Uuid::new_v4().to_string();
         let (reply, receive) = oneshot::channel();
         let request = Arc::new(CommandBackendRequest {
@@ -375,9 +380,25 @@ impl CommandJobs {
         id: &str,
         operation: CommandControl,
     ) -> Result<(), CommandError> {
-        let shared = self.shared(owner, id)?;
+        let input = matches!(
+            operation,
+            CommandControl::Input(_)
+                | CommandControl::InputAndClose(_)
+                | CommandControl::CloseInput
+        );
+        let shared = self.shared(owner, id).map_err(|error| {
+            if input {
+                CommandError::CommandInputRejected(format!("{error:?}"))
+            } else {
+                error
+            }
+        })?;
         if shared.owner != owner {
-            return Err(CommandError::CommandUnauthorized);
+            return Err(if input {
+                CommandError::CommandInputRejected("input control is not authorized".into())
+            } else {
+                CommandError::CommandUnauthorized
+            });
         }
         if shared.input_control(&operation)? {
             return Ok(());
@@ -413,9 +434,11 @@ impl CommandJobs {
                 let _ = shared.cleanup(id).await;
                 return Ok(());
             }
-            return Err(CommandError::CommandUnavailable(
-                "command has finished".into(),
-            ));
+            return Err(if input {
+                CommandError::CommandInputRejected("command has finished".into())
+            } else {
+                CommandError::CommandUnavailable("command has finished".into())
+            });
         }
         let actor = self
             .entries
@@ -465,7 +488,14 @@ impl CommandJobs {
         stream: CommandStream,
         position: CommandPosition,
     ) -> Result<CommandPage, CommandError> {
-        if matches!(position, CommandPosition::OutputOffset(n) if n < 0) {
+        if matches!(position, CommandPosition::OutputSlice(_, bytes) if !(1..=65536).contains(&bytes))
+        {
+            return Err(CommandError::CommandInvalid(
+                "output slice size must be 1..65536 bytes".into(),
+            ));
+        }
+        if matches!(position, CommandPosition::OutputOffset(n) | CommandPosition::OutputSlice(n, _) if n < 0)
+        {
             return Err(CommandError::CommandInvalid(
                 "output position must be nonnegative".into(),
             ));

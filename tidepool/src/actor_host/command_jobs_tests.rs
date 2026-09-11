@@ -117,11 +117,23 @@ impl CommandBackend for TestCommands {
                 CommandStream::Stdout => test_page(&self.stdout.lock()),
                 CommandStream::Stderr => test_page(""),
             };
-            if let CommandPosition::OutputOffset(offset) = position {
-                let start = offset.min(page.end).max(0);
-                page.text = page.text[start as usize..].to_owned();
-                page.start = start;
+            let (offset, limit) = match position {
+                CommandPosition::OutputSlice(offset, bytes) => (offset, bytes as usize),
+                CommandPosition::OutputOffset(offset) => (offset, 65536),
+                CommandPosition::OutputBeginning => (0, 65536),
+                CommandPosition::OutputTail => (page.end.saturating_sub(65536), 65536),
+            };
+            let mut start = offset.min(page.end).max(0) as usize;
+            while start < page.text.len() && !page.text.is_char_boundary(start) {
+                start += 1;
             }
+            let mut end = (start + limit).min(page.text.len());
+            while end > start && !page.text.is_char_boundary(end) {
+                end -= 1;
+            }
+            page.text = page.text[start..end].to_owned();
+            page.start = start as i64;
+            page.end = end as i64;
             Ok(page)
         })
     }
@@ -405,16 +417,24 @@ async fn raw_bash_oversized_output_retains_a_real_job() {
         .unwrap();
     let page_text = page["items"][0]["output"].as_str().unwrap();
     assert!(
-        page_text.contains("BEGIN") && page_text.contains("next_offset: 11994"),
+        page_text.contains("BEGIN") && page_text.contains("next_offset:"),
         "{page_text}"
     );
-    assert!(page_text.len() <= 32 * 1024);
+    assert!(page_text.len() <= 8192);
+    assert!(!page_text.contains("END"));
+    let offset: i64 = page_text
+        .split("next_offset: ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     let next_page = policy
         .dispatch_boxed(ToolInvocation {
             context: None,
             name: "read_output".into(),
             arguments: ToolArguments::Structured(
-                serde_json::json!({"session_id":session,"offset":11994}),
+                serde_json::json!({"session_id":session,"offset":offset,"max_output_bytes":1024}),
             ),
         })
         .await
@@ -423,9 +443,10 @@ async fn raw_bash_oversized_output_retains_a_real_job() {
         next_page["items"][0]["output"]
             .as_str()
             .unwrap()
-            .contains("bytes 11994–23994"),
+            .contains(&format!("bytes {offset}–")),
         "{next_page}"
     );
+    assert!(next_page["items"][0]["output"].as_str().unwrap().len() <= 1024);
     let binding = response["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();
@@ -1142,6 +1163,16 @@ async fn flat_input_lifecycle_preserves_partial_acknowledgments() {
         rejected.to_string().contains("stdin is closed"),
         "{rejected}"
     );
+    assert!(
+        rejected
+            .to_string()
+            .contains("input not submitted (including chars)"),
+        "{rejected}"
+    );
+    assert!(
+        !rejected.to_string().contains("Do not replay"),
+        "{rejected}"
+    );
     assert_eq!(backend.controls.lock().len(), 4);
     for _ in 0..2 {
         let cancelled = call(
@@ -1275,6 +1306,107 @@ async fn flat_output_pending_is_distinct_from_empty_and_failure() {
         "{unauthorized}"
     );
     backend.finish.send_replace(true);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn command_receipts_preserve_owner_settlement_across_continuation_failure() {
+    let mut campaign = TestCampaign::start().await;
+    let rejected = super::tests::dispatch_haskell_script_result(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("command_receipt_rejected.hs"),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(rejected.contains("Rejected (command job)"), "{rejected}");
+    assert!(
+        rejected.contains("no job created, no cleanup required"),
+        "{rejected}"
+    );
+    assert!(!rejected.contains("Unknown (command job)"), "{rejected}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), backend_request(&mut campaign))
+            .await
+            .is_err()
+    );
+    let failed = super::tests::dispatch_haskell_script_result(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("command_receipt_continuation.hs"),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(failed.contains("Committed (command job)"), "{failed}");
+    assert!(!failed.contains("Unknown (command job)"), "{failed}");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(TestCommands::completed("started-once")));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn flat_pty_eof_rejection_proves_no_input_submitted() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let call = |name: &str, arguments| {
+        policy.dispatch_boxed(ToolInvocation {
+            context: None,
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        })
+    };
+    let backend = TestCommands::new();
+    let pending = tokio::spawn(call(
+        "exec_command",
+        serde_json::json!({"cmd":"tty fixture","tty":true,"yield_time_ms":0}),
+    ));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let receipt = pending.await.unwrap().unwrap();
+    let text = receipt["items"][0]["output"].as_str().unwrap();
+    let session = text
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let rejected = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"chars":"hello\n","close_stdin":true}),
+    )
+    .await
+    .unwrap();
+    let text = rejected.to_string();
+    assert!(
+        text.contains("Rejected · input not submitted (including chars); EOF not submitted"),
+        "{text}"
+    );
+    assert!(!text.contains("Do not replay"), "{text}");
+    assert!(backend.controls.lock().is_empty());
+    call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"chars":"hello\n","yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(&backend.controls.lock()[..], [CommandControl::Input(text)] if text == "hello\n")
+    );
+    let cancelled = call(
+        "cancel_command",
+        serde_json::json!({"session_id":session,"yield_time_ms":1000}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        cancelled.to_string().contains("cleanup: clean"),
+        "{cancelled}"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

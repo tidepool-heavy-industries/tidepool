@@ -68,7 +68,8 @@ data Stream = Stdout | Stderr
 data ReadOutput = ReadOutput
   { session_id :: Text,
     stream :: Maybe Stream,
-    offset :: Maybe Int
+    offset :: Maybe Int,
+    max_output_bytes :: Maybe Int
   }
   deriving (Generic, FromJSON, JsonSchema)
 
@@ -100,7 +101,7 @@ tools =
           writeInput,
       readOutput =
         tool
-          "Read retained output without executing, waiting or consuming it. Default stream Stdout, offset 0. Reply reports byte positions, next offset, current end versus EOF and retention gaps. Use Stderr for diagnostics."
+          "Read retained output without executing, waiting or consuming it. Default stream Stdout, offset 0, max_output_bytes 8192 (1024..32768 including metadata). Contiguous pages, never head/tail previews. Reply reports byte positions, next offset, current end versus EOF and retention gaps. Use Stderr for diagnostics."
           readRetained,
       cancelCommand =
         tool
@@ -157,9 +158,13 @@ writeInput WriteInput {session_id = key, chars = input, close_stdin = close, yie
         (False, False) -> send (CommandInputWith key text)
         (False, True) -> send (CommandFinishInputWith key text)
       case receipt of
+        Left (Cmd.CommandInputRejected detail) ->
+          pure $ "session_id: " <> key <> "\nRejected · input not submitted (including chars); EOF not submitted · " <> detail
+        Left Cmd.CommandUnauthorized ->
+          pure $ "session_id: " <> key <> "\nRejected · input not submitted (including chars); EOF not submitted · input control is not authorized"
         Left (Cmd.CommandInputAcceptedCloseUnconfirmed detail) ->
           pure $ "session_id: " <> key <> "\nBackend acknowledged the write; child consumption is unknown. EOF unconfirmed: " <> detail <> "\nRetry close-only with write_stdin(close_stdin=true), without chars. Do not resend these bytes."
-        Left issue -> pure $ "session_id: " <> key <> "\nInput operation failed or was unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
+        Left issue -> pure $ "session_id: " <> key <> "\nInput submission unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
         Right () -> do
           _ <- Cmd.observe options (Job key)
           pure $ if eof then "Stdin is closed." else ""
@@ -178,34 +183,32 @@ cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output
             _ -> "Cancellation requested; terminal outcome and cleanup are not yet confirmed."
 
 readRetained :: (Member Cmd.Commands effects) => ReadOutput -> Eff effects Text
-readRetained ReadOutput {session_id = key, stream = selected, offset = position} = do
-  let selectedStream = case selected of
-        Just Stderr -> Cmd.Stderr
-        _ -> Cmd.Stdout
-  result <- send (CommandReadWith key selectedStream (Cmd.OutputOffset (fromMaybe 0 position)))
-  pure $ case result of
-    Left Cmd.CommandOutputPending -> "session_id: " <> key <> "\nNo output yet; streams are starting."
-    Left issue -> "session_id: " <> key <> "\nOutput unavailable: " <> T.pack (show issue) <> "\nInspect the same job; do not rerun the command."
-    Right details -> T.pack (show selectedStream) <> " · " <> renderPage details
+readRetained ReadOutput {session_id = key, stream = selected, offset = position, max_output_bytes = limit} =
+  case observation 0 (Just 0) (Just (fromMaybe 8192 limit)) of
+    Cmd.Observation {outputBytes = budget} -> do
+      let selectedStream = case selected of
+            Just Stderr -> Cmd.Stderr
+            _ -> Cmd.Stdout
+          offset = fromMaybe 0 position
+          contentBudget = budget - 512
+          read bytes = send (CommandReadWith key selectedStream (Cmd.OutputSlice offset bytes))
+      first <- read contentBudget
+      -- Replacement characters can expand invalid UTF-8. Ask the byte owner for
+      -- a smaller page rather than inventing offsets from decoded text.
+      result <- case first of
+        Right page | utf8Bytes (Cmd.outputText page) > contentBudget -> read (max 1 (contentBudget `div` 3))
+        _ -> pure first
+      pure $ case result of
+        Left Cmd.CommandOutputPending -> "session_id: " <> key <> "\nNo output yet; streams are starting."
+        Left issue -> "session_id: " <> key <> "\nOutput unavailable: " <> T.pack (show issue) <> "\nInspect the same job; do not rerun the command."
+        Right details ->
+          let (text, _) = displayWith budget details
+          in T.pack (show selectedStream) <> " · " <> text <> "\nnext_offset: " <> T.pack (show (Cmd.outputEnd details))
 
-renderPage :: Cmd.CommandPage -> Text
-renderPage details =
-  let prefix = T.take 6000 (Cmd.outputText details)
-      shortened = T.length prefix < T.length (Cmd.outputText details)
-      byteCount = T.foldl' (\n c -> n + utf8Width c) 0 prefix
-      nextOffset = Cmd.outputStart details + byteCount
-      visible =
-        details
-          { Cmd.outputText = prefix,
-            Cmd.outputEnd = nextOffset,
-            Cmd.outputTrailingFragment = shortened && not (T.isSuffixOf "\n" prefix)
-          }
-      (text, _) = displayWith 28000 (if shortened && not (Cmd.outputLossy details) then visible else details)
-  in if shortened && Cmd.outputLossy details
-      then "Lossy UTF-8; displayed text is abbreviated. Exact byte positions refer to the retained page, not the displayed prefix. Supply offset to inspect another range.\n" <> text
-      else text <> "\nnext_offset: " <> T.pack (show (if shortened then nextOffset else Cmd.outputEnd details))
+utf8Bytes :: Text -> Int
+utf8Bytes = T.foldl' (\n c -> n + width c) 0
   where
-    utf8Width c
+    width c
       | ord c < 0x80 = 1
       | ord c < 0x800 = 2
       | ord c < 0x10000 = 3

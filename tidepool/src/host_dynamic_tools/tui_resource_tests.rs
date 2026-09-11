@@ -63,6 +63,40 @@ async fn response(
             }
         };
         json!({"type":"function_call", "call_id":"initial-oom", "name":"exec_command", "arguments":args.to_string()})
+    } else if index == 40 {
+        json!({"type":"function_call", "call_id":"structured-40", "name":"exec_command",
+            "arguments":json!({"cmd":"python3 -c 'import sys; sys.stdout.buffer.write(bytes([255])*9000)'", "memory_mib":64,"yield_time_ms":30000}).to_string()})
+    } else if index == 41 || index == 42 {
+        let requests = provider.requests.lock().unwrap();
+        let output = |call: &str| {
+            requests[index]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["call_id"] == call && item["type"] == "function_call_output")
+                .and_then(|item| item["output"].as_str())
+                .unwrap()
+        };
+        let session = output("structured-40")
+            .split("session_id: ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let offset = if index == 41 {
+            0
+        } else {
+            output("structured-41")
+                .split("next_offset: ")
+                .nth(1)
+                .unwrap()
+                .trim()
+                .parse::<usize>()
+                .unwrap()
+        };
+        json!({"type":"function_call", "call_id":format!("structured-{index}"), "name":"read_output",
+            "arguments":json!({"session_id":session,"offset":offset,"max_output_bytes":if index == 41 {1024} else {8192}}).to_string()})
     } else if index == 30 || index == 34 {
         let arguments = if index == 30 {
             json!({"cmd":"wc -c", "stdin":true, "yield_time_ms":0})
@@ -555,7 +589,7 @@ trust_level = "trusted"
         }
     });
     let phases: &[usize] = match shell {
-        tidepool_agent::InteractiveShellTools::Hosted => &[2, 6, 16, 20, 30, 40],
+        tidepool_agent::InteractiveShellTools::Hosted => &[2, 6, 16, 20, 30, 40, 44],
         tidepool_agent::InteractiveShellTools::Native => &[2],
     };
     for &expected in phases {
@@ -825,6 +859,47 @@ trust_level = "trusted"
                 }
                 assert!(receipt(38).contains("bytes"), "{}", receipt(38));
                 assert!(receipt(39).contains("PTY"), "{}", receipt(39));
+                assert!(
+                    receipt(39).contains("input not submitted"),
+                    "{}",
+                    receipt(39)
+                );
+                for index in [32, 34, 36, 37] {
+                    assert!(
+                        receipt(index).contains("cleanup: clean"),
+                        "{}",
+                        receipt(index)
+                    );
+                }
+            }
+            44 => {
+                let receipt = |call: &str| {
+                    requests[43]["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| {
+                            item["call_id"] == call && item["type"] == "function_call_output"
+                        })
+                        .and_then(|item| item["output"].as_str())
+                        .unwrap()
+                };
+                let first = receipt("structured-41");
+                let next = receipt("structured-42");
+                assert!(first.len() <= 1024, "{} bytes: {first}", first.len());
+                assert!(next.len() <= 8192, "{} bytes", next.len());
+                let position = |text: &str| {
+                    text.split("next_offset: ")
+                        .nth(1)
+                        .unwrap()
+                        .trim()
+                        .parse::<usize>()
+                        .unwrap()
+                };
+                let end = position(first);
+                assert_eq!(end, first.matches('�').count());
+                assert!(next.contains(&format!("bytes {end}–")), "{next}");
+                assert_eq!(position(next) - end, next.matches('�').count());
             }
             _ => unreachable!(),
         }

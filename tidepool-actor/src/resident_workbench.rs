@@ -1342,7 +1342,7 @@ impl<H, O> ResidentActorWorkbench<H, O> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandObservationStop {
-    #[error("command is still running after 30 seconds")]
+    #[error("the 30-second observation expired; the retained job may since have finished")]
     Deadline,
     #[error("command completed, but output observation failed: {0:?}")]
     OutputUnavailable(tidepool_bridge_effects::CommandError),

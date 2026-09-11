@@ -44,10 +44,13 @@ Register separate watches when results can be integrated independently.
 The `bash` tool accepts literal Bash and displays output directly.
 `exec_command` adds memory/cwd/environment/PTY options; `write_stdin` sends input
 or polls a returned `session_id`; `close_stdin: true` closes piped input after any
-final chars. A partial write/close receipt requires close-only recovery, never
+final chars. A verified rejection states that neither input nor EOF was submitted;
+correct that call safely. A partial write/close receipt requires close-only recovery, never
 replaying acknowledged bytes. Backend acknowledgment does not prove child consumption.
 `cancel_command` requests cancellation; its receipt distinguishes terminal outcome
-and cleanup from an outstanding request. `read_output` navigates retained output.
+and cleanup from an outstanding request. Terminal receipts always show cleanup.
+`read_output` returns contiguous retained output with `next_offset`; its default
+display budget is 8 KiB (`max_output_bytes` selects 1024–32768 bytes).
 All use `Cmd`'s execution/resource owner. Ordinary shell work needs no Haskell
 binding. Haskell job bindings additionally support composition and recovery.
 Tool names are flat; native shell implementations are disabled, while `apply_patch`

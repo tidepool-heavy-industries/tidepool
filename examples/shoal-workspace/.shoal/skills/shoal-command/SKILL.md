@@ -24,7 +24,8 @@ initial observation (choose the limit for the actual check):
 Use the returned `session_id` verbatim. `write_stdin` with omitted `chars` polls;
 with `chars` it sends input. For piped stdin, `close_stdin: true` sends any final
 chars before EOF. PTYs reject this flag; use explicit terminal input there.
-If a write is acknowledged but EOF fails, retry close-only, without chars.
+Known rejection explicitly reports that neither chars nor EOF was submitted; correct
+the request. If a write is acknowledged but EOF fails, retry close-only, without chars.
 Acknowledgment means the backend accepted the write, not that the child consumed it.
 An uncertain write must not be replayed automatically.
 `cancel_command` requests cancellation of the same job, regardless of stdin mode;
@@ -32,8 +33,12 @@ its receipt distinguishes the request from terminal outcome and cleanup. Repeate
 close/cancel is safe; cancellation preserves an already-finished outcome.
 `read_output` with that ID and `stream: "Stderr"`
 reads diagnostics from the beginning; continue at the returned `next_offset`.
+Recovery reads are contiguous, with an 8 KiB default display budget;
+`max_output_bytes` selects 1024..32768 bytes including metadata. They never use a
+head/tail preview. Positions are original bytes, even for lossy UTF-8.
 None of these operations reruns the command. A finished nonzero exit is a command
-result; inspect its diagnostics. Running or queued means the same job remains
+result; inspect its diagnostics. Terminal receipts always show cleanup separately.
+Running or queued means the same job remains
 owned. Do useful independent work or route completion rather than repeatedly
 polling through model turns. `Cmd.completion` is an actor EventSource, not an Await
 value for `watch`; see the routing example linked below.

@@ -297,7 +297,7 @@ resultHeading result =
   "Finished · "
     <> T.pack (show (commandOutcome result))
     <> case commandCleanup result of
-      CommandClean -> ""
+      CommandClean -> " · cleanup: clean"
       other -> " · cleanup: " <> T.pack (show other)
 
 outputHeading :: Text -> CommandPage -> Text
