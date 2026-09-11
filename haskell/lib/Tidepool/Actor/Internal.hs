@@ -47,6 +47,7 @@ import Tidepool.Effects.Core
   , FsRead
   , FsWrite
   , Notifications
+  , Sleep
   , Worktree
   )
 import Tidepool.Internal.ActorRef (ActorRef (..))
@@ -76,6 +77,7 @@ type ReadOnlyEffects protocol =
    , Worktree
    , Notifications
    , Console
+   , Sleep
    ]
 
 type ReadWriteEffects protocol = FsWrite ': ReadOnlyEffects protocol

@@ -3,6 +3,9 @@ use super::*;
 use crate::host_dynamic_tools::HostDynamicToolService;
 use futures_util::future::BoxFuture;
 use tidepool_actor::{HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown};
+use tidepool_agent::{
+    InputProducerControlOutcome, InputProducerId, InteractiveAgentBackend, QueueReadyThread,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompletionBoundary {
@@ -33,6 +36,28 @@ pub(crate) enum SealObservation {
     Failed(String),
 }
 #[derive(Debug, Clone)]
+pub(crate) enum InputSealObservation {
+    Required,
+    NoProducer,
+    #[cfg(test)]
+    TestExempt,
+    Pending,
+    Sealed,
+    Rejected,
+    Unconfirmed(String),
+}
+
+impl InputSealObservation {
+    pub(super) fn confirms_retirement(&self) -> bool {
+        match self {
+            Self::NoProducer | Self::Sealed => true,
+            #[cfg(test)]
+            Self::TestExempt => true,
+            Self::Required | Self::Pending | Self::Rejected | Self::Unconfirmed(_) => false,
+        }
+    }
+}
+#[derive(Debug, Clone)]
 pub(crate) enum ResidentObservation {
     Pending,
     Absent,
@@ -50,6 +75,7 @@ pub(crate) enum HttpObservation {
 pub(crate) enum HostedObservation {
     Pending,
     Observed {
+        input_seal: InputSealObservation,
         seal: SealObservation,
         resident: ResidentObservation,
         http: HttpObservation,
@@ -69,11 +95,20 @@ pub(super) struct HostedRetirement {
     pub(super) control: crate::host_dynamic_tools::HostToolControl,
     boundary: CompletionBoundary,
     terminal_path: bool,
+    input_seal: InputSealState,
     seal: Option<Operation<HostedWorkSeal>>,
     shutdown: Option<Operation<ResidentShutdown>>,
     resident: ResidentObservation,
     service: Option<tokio::task::JoinHandle<Result<(), String>>>,
     service_result: Option<Result<(), String>>,
+}
+
+enum InputSealState {
+    Required,
+    NoProducer,
+    Pending(Operation<InputProducerControlOutcome>),
+    #[cfg(test)]
+    TestExempt,
 }
 
 /// Construct the canonical policy from this exact actor inside the owning entry.
@@ -165,6 +200,10 @@ fn start_endpoint(
         control,
         boundary: CompletionBoundary::AwaitingNativeDecision,
         terminal_path: false,
+        // Native input custody is mandatory for every production endpoint.
+        // Retirement cannot fail open if its composition owner forgets to
+        // install the producer fence.
+        input_seal: InputSealState::Required,
         seal: None,
         shutdown: None,
         resident: ResidentObservation::Pending,
@@ -176,6 +215,59 @@ fn start_endpoint(
         .send(())
         .map_err(|_| "service start receiver lost".to_string())?;
     Ok(owner)
+}
+
+/// Start the native producer fence inside the retained hosted-work owner.
+///
+/// Construction is synchronous with respect to owner state: cancellation can
+/// drop a later observer, but cannot lose or recreate the exact seal operation.
+pub(super) async fn begin_input_seal(
+    owner: &HostedOwner,
+    backend: Arc<dyn InteractiveAgentBackend>,
+    thread: QueueReadyThread,
+    producer: InputProducerId,
+) -> Result<(), String> {
+    install_input_seal(
+        owner,
+        Box::pin(async move {
+            backend
+                .seal_input_producer(&thread, &producer)
+                .await
+                .map_err(|error| error.to_string())
+        }),
+    )
+    .await
+}
+
+/// Record the mutually exclusive pre-admission path. This is required when a
+/// launch is cancelled before the host creates its durable producer identity;
+/// absence is explicit rather than inferred from a missing operation.
+pub(super) async fn confirm_no_input_producer(owner: &HostedOwner) -> Result<(), String> {
+    let mut state = owner.lock().await;
+    if !matches!(state.input_seal, InputSealState::Required) {
+        return Err("native input custody is already decided".into());
+    }
+    state.input_seal = InputSealState::NoProducer;
+    Ok(())
+}
+
+async fn install_input_seal(
+    owner: &HostedOwner,
+    operation: BoxFuture<'static, Result<InputProducerControlOutcome, String>>,
+) -> Result<(), String> {
+    let mut state = owner.lock().await;
+    if !matches!(state.input_seal, InputSealState::Required) {
+        return Err("native input producer seal is already retained".into());
+    }
+    state.input_seal = InputSealState::Pending(Operation::Pending(operation));
+    Ok(())
+}
+
+#[cfg(test)]
+async fn exempt_input_seal_for_fixture(owner: &HostedOwner) {
+    let mut state = owner.lock().await;
+    assert!(matches!(state.input_seal, InputSealState::Required));
+    state.input_seal = InputSealState::TestExempt;
 }
 
 pub(super) fn service_finished(owner: &HostedOwner) -> bool {
@@ -219,6 +311,21 @@ fn account(expected: ActorRef, cleanup: Option<ResidentCleanupOutcome>) -> Resid
 impl HostedRetirement {
     async fn advance(&mut self) {
         let exact = self.actor.identity();
+        match &mut self.input_seal {
+            InputSealState::Required => return,
+            InputSealState::NoProducer => {}
+            InputSealState::Pending(input_seal) => {
+                input_seal.finish().await;
+                if !matches!(
+                    input_seal,
+                    Operation::Finished(Ok(InputProducerControlOutcome::Applied))
+                ) {
+                    return;
+                }
+            }
+            #[cfg(test)]
+            InputSealState::TestExempt => {}
+        }
         if self.seal.is_none() && !self.terminal_path {
             if matches!(self.endpoint_source, EndpointSource::Canonical(_))
                 && self.actor.terminal().get().is_some()
@@ -305,6 +412,27 @@ impl HostedRetirement {
     }
     fn observation(&self) -> HostedObservation {
         HostedObservation::Observed {
+            input_seal: match &self.input_seal {
+                InputSealState::Required => InputSealObservation::Required,
+                InputSealState::NoProducer => InputSealObservation::NoProducer,
+                InputSealState::Pending(Operation::Pending(_)) => InputSealObservation::Pending,
+                InputSealState::Pending(Operation::Finished(Ok(
+                    InputProducerControlOutcome::Applied,
+                ))) => InputSealObservation::Sealed,
+                InputSealState::Pending(Operation::Finished(Ok(
+                    InputProducerControlOutcome::Rejected,
+                ))) => InputSealObservation::Rejected,
+                InputSealState::Pending(Operation::Finished(Ok(
+                    InputProducerControlOutcome::Unknown,
+                ))) => InputSealObservation::Unconfirmed(
+                    "native input producer seal outcome is unknown".into(),
+                ),
+                InputSealState::Pending(Operation::Finished(Err(error))) => {
+                    InputSealObservation::Unconfirmed(error.clone())
+                }
+                #[cfg(test)]
+                InputSealState::TestExempt => InputSealObservation::TestExempt,
+            },
             seal: if self.terminal_path {
                 SealObservation::TerminalPath
             } else {

@@ -8,10 +8,257 @@
 //! either side lie.
 
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use sha2::{Digest, Sha256};
+
 use crate::{AgentBackendError, BackendThreadId, ReasoningEffort};
+
+/// Stable producer identity allocated by the host's existing run/inbox owner.
+///
+/// This value deliberately does not encode actor policy. The host maps its run
+/// scope and exact actor incarnation into one bounded identifier before crossing
+/// the backend-neutral seam.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InputProducerId(String);
+
+impl InputProducerId {
+    pub fn new(value: String) -> Result<Self, InputEnvelopeError> {
+        if value.is_empty() || value.len() > 512 {
+            return Err(InputEnvelopeError::InvalidProducer);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InputOperationId {
+    pub producer: InputProducerId,
+    pub sequence: NonZeroU64,
+}
+
+impl InputOperationId {
+    /// Bounded native `client_user_message_id` encoding. The host producer is
+    /// already an authority-scoped identity; hashing only keeps the transport
+    /// key bounded and does not mint or broaden that authority.
+    pub fn native_key(&self) -> String {
+        let producer = Sha256::digest(self.producer.as_str().as_bytes());
+        let mut encoded = String::with_capacity(4 + producer.len() * 2 + 20);
+        encoded.push_str("tp1:");
+        for byte in producer {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "{byte:02x}");
+        }
+        encoded.push(':');
+        encoded.push_str(&self.sequence.to_string());
+        encoded
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InputPurpose {
+    Bootstrap,
+    Assignment,
+    RequestUpdate,
+    Notification,
+    OperatorInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InteractiveInputMode {
+    QueueOnly,
+    StartOrSteer,
+}
+
+/// Stable target and optional owner correlation frozen before publication.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InteractiveInputTarget {
+    pub conversation: BackendThreadId,
+    pub actor: String,
+    pub correlation: Option<String>,
+}
+
+pub const MAX_INTERACTIVE_INPUT_BYTES: usize = 256 * 1024;
+
+/// One immutable host input. Attempt generations and live binding generations
+/// are intentionally absent from the canonical digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveInputEnvelope {
+    id: InputOperationId,
+    purpose: InputPurpose,
+    mode: InteractiveInputMode,
+    target: InteractiveInputTarget,
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+}
+
+impl InteractiveInputEnvelope {
+    pub fn new(
+        id: InputOperationId,
+        purpose: InputPurpose,
+        mode: InteractiveInputMode,
+        target: InteractiveInputTarget,
+        bytes: Vec<u8>,
+    ) -> Result<Self, InputEnvelopeError> {
+        if bytes.len() > MAX_INTERACTIVE_INPUT_BYTES {
+            return Err(InputEnvelopeError::PayloadTooLarge {
+                actual: bytes.len(),
+                limit: MAX_INTERACTIVE_INPUT_BYTES,
+            });
+        }
+        let digest = canonical_input_digest(mode, &target, &bytes);
+        Ok(Self {
+            id,
+            purpose,
+            mode,
+            target,
+            bytes,
+            digest,
+        })
+    }
+
+    pub fn id(&self) -> &InputOperationId {
+        &self.id
+    }
+    pub fn purpose(&self) -> InputPurpose {
+        self.purpose
+    }
+    pub fn mode(&self) -> InteractiveInputMode {
+        self.mode
+    }
+    pub fn target(&self) -> &InteractiveInputTarget {
+        &self.target
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Reconstruct persisted input only after verifying its canonical digest.
+    /// Native admission uses this boundary before accepting stored or wire data.
+    pub fn from_persisted(
+        id: InputOperationId,
+        purpose: InputPurpose,
+        mode: InteractiveInputMode,
+        target: InteractiveInputTarget,
+        bytes: Vec<u8>,
+        persisted_digest: [u8; 32],
+    ) -> Result<Self, InputEnvelopeError> {
+        let envelope = Self::new(id, purpose, mode, target, bytes)?;
+        if envelope.digest != persisted_digest {
+            return Err(InputEnvelopeError::DigestMismatch);
+        }
+        Ok(envelope)
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum InputEnvelopeError {
+    #[error("input producer identity must contain 1..=512 bytes")]
+    InvalidProducer,
+    #[error("interactive input contains {actual} bytes; limit is {limit}")]
+    PayloadTooLarge { actual: usize, limit: usize },
+    #[error("persisted interactive input digest does not match canonical content")]
+    DigestMismatch,
+}
+
+fn canonical_input_digest(
+    mode: InteractiveInputMode,
+    target: &InteractiveInputTarget,
+    bytes: &[u8],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"tidepool-interactive-input-v1\0");
+    digest.update([match mode {
+        InteractiveInputMode::QueueOnly => 0,
+        InteractiveInputMode::StartOrSteer => 1,
+    }]);
+    digest_field(&mut digest, target.conversation.0.as_bytes());
+    digest_field(&mut digest, target.actor.as_bytes());
+    match &target.correlation {
+        Some(correlation) => {
+            digest.update([1]);
+            digest_field(&mut digest, correlation.as_bytes());
+        }
+        None => digest.update([0]),
+    }
+    digest_field(&mut digest, bytes);
+    digest.finalize().into()
+}
+
+fn digest_field(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InteractiveLaunchId(pub u128);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NativeApplicationInstance(pub u128);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NativeSessionGeneration(pub NonZeroU64);
+
+/// Freshly challenged binding to one exact native application generation.
+/// Persisted locators may reconstruct this value only after a new handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveSessionBinding {
+    pub launch_id: String,
+    pub instance_id: String,
+    pub generation: NonZeroU64,
+    pub nonce: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputAdmission {
+    NotSubmitted,
+    Admitted,
+    Dispatching,
+    Presented,
+    Withdrawn,
+    Rejected,
+    /// Native retained evidence was intentionally removed only after a prior
+    /// acknowledgement. This fences resubmission but cannot reconstruct the
+    /// earlier terminal outcome.
+    Compacted,
+    Unknown,
+}
+
+/// Result of a producer-level native input control operation.
+///
+/// This is deliberately separate from hosted-call completion acknowledgement:
+/// it controls retention of native input outcomes only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputProducerControlOutcome {
+    Applied,
+    Rejected,
+    Unknown,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InteractiveInputError {
+    #[error("native input was not submitted: {0}")]
+    NotSubmitted(String),
+    #[error("native input outcome is unconfirmed: {0}")]
+    Unconfirmed(String),
+}
+
+pub type InteractiveInputFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<InputAdmission, InteractiveInputError>> + Send + 'a>>;
+pub type InputProducerControlFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<InputProducerControlOutcome, InteractiveInputError>> + Send + 'a,
+    >,
+>;
 
 /// An interactive conversation whose durable rollout can be addressed by a
 /// separate native queue or archive process.
@@ -22,6 +269,7 @@ use crate::{AgentBackendError, BackendThreadId, ReasoningEffort};
 pub struct QueueReadyThread {
     thread: BackendThreadId,
     input_control_socket: Option<PathBuf>,
+    session_binding: Option<InteractiveSessionBinding>,
 }
 
 impl QueueReadyThread {
@@ -29,6 +277,7 @@ impl QueueReadyThread {
         Self {
             thread,
             input_control_socket: None,
+            session_binding: None,
         }
     }
 
@@ -47,6 +296,18 @@ impl QueueReadyThread {
         self.input_control_socket.is_some()
     }
 
+    pub fn with_challenged_session_binding(
+        mut self,
+        binding: Option<InteractiveSessionBinding>,
+    ) -> Self {
+        self.session_binding = binding;
+        self
+    }
+
+    pub(crate) fn session_binding(&self) -> Option<&InteractiveSessionBinding> {
+        self.session_binding.as_ref()
+    }
+
     #[must_use]
     pub fn id(&self) -> &BackendThreadId {
         &self.thread
@@ -63,13 +324,22 @@ impl QueueReadyThread {
 pub struct InteractiveAgentInstallation {
     executable: PathBuf,
     version: String,
+    executable_sha256: String,
+    package_root: Option<PathBuf>,
 }
 
 impl InteractiveAgentInstallation {
-    pub(crate) fn new(executable: PathBuf, version: String) -> Self {
+    pub(crate) fn new(
+        executable: PathBuf,
+        version: String,
+        executable_sha256: String,
+        package_root: Option<PathBuf>,
+    ) -> Self {
         Self {
             executable,
             version,
+            executable_sha256,
+            package_root,
         }
     }
 
@@ -81,6 +351,20 @@ impl InteractiveAgentInstallation {
     #[must_use]
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    /// SHA-256 of the exact executable accepted by the capability probes.
+    #[must_use]
+    pub fn executable_sha256(&self) -> &str {
+        &self.executable_sha256
+    }
+
+    /// Package root when the executable has the conventional
+    /// `<package>/bin/<program>` layout. The path itself records whether this
+    /// is an immutable store package or a mutable developer installation.
+    #[must_use]
+    pub fn package_root(&self) -> Option<&Path> {
+        self.package_root.as_deref()
     }
 }
 
@@ -207,6 +491,78 @@ pub trait InteractiveAgentBackend: Send + Sync {
             Err(AgentBackendError::ProtocolRejected {
                 detail: "native commands are unsupported".into(),
             })
+        })
+    }
+
+    /// Bind the already host-challenged native generation before any input
+    /// operation. This is the native half of the existing attach, not another
+    /// challenge or conversation handshake.
+    fn bind_input<'a>(&'a self, _thread: &'a QueueReadyThread) -> InteractiveInputFuture<'a> {
+        Box::pin(async {
+            Err(InteractiveInputError::NotSubmitted(
+                "bound native input control is unavailable".into(),
+            ))
+        })
+    }
+
+    fn submit_input<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _envelope: &'a InteractiveInputEnvelope,
+    ) -> InteractiveInputFuture<'a> {
+        Box::pin(async {
+            Err(InteractiveInputError::NotSubmitted(
+                "bound native input control is unavailable".into(),
+            ))
+        })
+    }
+
+    fn query_input<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _id: &'a InputOperationId,
+    ) -> InteractiveInputFuture<'a> {
+        Box::pin(async {
+            Err(InteractiveInputError::NotSubmitted(
+                "bound native input control is unavailable".into(),
+            ))
+        })
+    }
+
+    fn withdraw_input<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _id: &'a InputOperationId,
+    ) -> InteractiveInputFuture<'a> {
+        Box::pin(async {
+            Err(InteractiveInputError::NotSubmitted(
+                "bound native input control is unavailable".into(),
+            ))
+        })
+    }
+
+    fn seal_input_producer<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _producer: &'a InputProducerId,
+    ) -> InputProducerControlFuture<'a> {
+        Box::pin(async {
+            Err(InteractiveInputError::NotSubmitted(
+                "bound native input control is unavailable".into(),
+            ))
+        })
+    }
+
+    fn acknowledge_input_prefix<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _producer: &'a InputProducerId,
+        _through_sequence: NonZeroU64,
+    ) -> InputProducerControlFuture<'a> {
+        Box::pin(async {
+            Err(InteractiveInputError::NotSubmitted(
+                "bound native input control is unavailable".into(),
+            ))
         })
     }
     /// Control a process-owned workspace publication lease. Transport errors are
@@ -339,4 +695,98 @@ pub enum PublicationReply {
     Unavailable {
         detail: String,
     },
+}
+
+#[cfg(test)]
+mod input_envelope_tests {
+    use super::*;
+
+    fn envelope(mode: InteractiveInputMode, bytes: &[u8]) -> InteractiveInputEnvelope {
+        InteractiveInputEnvelope::new(
+            InputOperationId {
+                producer: InputProducerId::new("run-7/inbox-2/actor-3.1".into()).unwrap(),
+                sequence: NonZeroU64::new(9).unwrap(),
+            },
+            InputPurpose::Assignment,
+            mode,
+            InteractiveInputTarget {
+                conversation: BackendThreadId("thread-4".into()),
+                actor: "actor-3.1".into(),
+                correlation: Some("request-5".into()),
+            },
+            bytes.to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn canonical_digest_fixes_mode_target_and_frozen_bytes() {
+        let original = envelope(InteractiveInputMode::QueueOnly, b"hello");
+        assert_eq!(
+            original.digest(),
+            envelope(InteractiveInputMode::QueueOnly, b"hello").digest()
+        );
+        assert_ne!(
+            original.digest(),
+            envelope(InteractiveInputMode::StartOrSteer, b"hello").digest()
+        );
+        assert_ne!(
+            original.digest(),
+            envelope(InteractiveInputMode::QueueOnly, b"hello!").digest()
+        );
+    }
+
+    #[test]
+    fn producer_scope_is_part_of_identity_not_content_digest() {
+        let original = envelope(InteractiveInputMode::QueueOnly, b"hello");
+        let second = InteractiveInputEnvelope::new(
+            InputOperationId {
+                producer: InputProducerId::new("another-run/inbox-2/actor-3.1".into()).unwrap(),
+                sequence: original.id().sequence,
+            },
+            original.purpose(),
+            original.mode(),
+            original.target().clone(),
+            original.bytes().to_vec(),
+        )
+        .unwrap();
+        assert_ne!(original.id(), second.id());
+        assert_ne!(original.id().native_key(), second.id().native_key());
+        assert_eq!(original.digest(), second.digest());
+    }
+
+    #[test]
+    fn persisted_reconstruction_rejects_noncanonical_content() {
+        let original = envelope(InteractiveInputMode::QueueOnly, b"hello");
+        let error = InteractiveInputEnvelope::from_persisted(
+            original.id().clone(),
+            original.purpose(),
+            InteractiveInputMode::StartOrSteer,
+            original.target().clone(),
+            original.bytes().to_vec(),
+            *original.digest(),
+        )
+        .unwrap_err();
+        assert_eq!(error, InputEnvelopeError::DigestMismatch);
+    }
+
+    #[test]
+    fn payload_bound_is_enforced_before_publication() {
+        let error = InteractiveInputEnvelope::new(
+            InputOperationId {
+                producer: InputProducerId::new("run/inbox/actor".into()).unwrap(),
+                sequence: NonZeroU64::new(1).unwrap(),
+            },
+            InputPurpose::Bootstrap,
+            InteractiveInputMode::QueueOnly,
+            InteractiveInputTarget {
+                conversation: BackendThreadId("thread".into()),
+                actor: "actor".into(),
+                correlation: None,
+            },
+            vec![0; MAX_INTERACTIVE_INPUT_BYTES + 1],
+        )
+        .unwrap_err();
+        assert!(matches!(error, InputEnvelopeError::PayloadTooLarge { .. }));
+    }
 }

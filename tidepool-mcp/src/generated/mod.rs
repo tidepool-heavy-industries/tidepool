@@ -23,6 +23,7 @@ pub mod read_state;
 pub mod recipe_check;
 pub mod repo_event;
 pub mod run_l_l_m_turn;
+pub mod sleep;
 pub mod worktree;
 pub mod worktree_allocation;
 pub mod worktree_integration;
@@ -51,6 +52,7 @@ pub use read_state::*;
 pub use recipe_check::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
+pub use sleep::*;
 pub use worktree::*;
 pub use worktree_allocation::*;
 pub use worktree_integration::*;
@@ -74,6 +76,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_context_decl(),
         actor_kernel_decl(),
         actor_local_decl(),
+        sleep_decl(),
         agent_control_decl(),
         commands_decl(),
         notifications_decl(),

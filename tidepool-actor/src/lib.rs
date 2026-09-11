@@ -95,10 +95,11 @@ pub use profile::ActorEffectProfile;
 pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerprint;
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
-    DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, ReplyError, ReplyObservation,
-    RequestCancellationNotification, RequestDeadline, RequestId, RequestUpdateDelivery,
-    RequestUpdateId, RequestUpdatePresentation, RequestUpdateState, ResponseFailure,
-    ResponseObservation, WatchId, WatchNotification, WatchObservation, WatchStateProjection,
+    DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, LateUpdateEvidence, ReplyError,
+    ReplyObservation, RequestCancellationNotification, RequestDeadline, RequestId,
+    RequestUpdateCorrelation, RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation,
+    RequestUpdateReconciler, RequestUpdateState, ResponseFailure, ResponseObservation,
+    UpdateReconciliationError, WatchId, WatchNotification, WatchObservation, WatchStateProjection,
     WatchTransition,
 };
 pub use resident_actor::{
@@ -109,7 +110,7 @@ pub use resident_actor::{
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{
     ResidentToolEndpoint, ResidentToolError, ResidentToolFuture, ResidentToolOutput,
-    ResidentToolPolicy,
+    ResidentToolPolicy, WorkbenchCancellationOutcome, WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,

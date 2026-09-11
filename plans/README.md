@@ -30,9 +30,12 @@ archive).
   dogfood helpers and prompts alongside the runtime. The
   [next coordination pass](next/coordination-rsi.md) targets fluent effectful actor
   routing, useful current views and scoped completion of the actual integration loop.
-- [Supervised interactive Codex applications](interactive-applications/README.md):
-  consolidate the implemented R7 candidate with current main, close matched
-  verification and ship. The subsequent shared-server migration remains separate.
+- [Sleep and supervised interactive applications integration](interactive-applications/README.md):
+  resident sleep and applications are accepted together on unified main, paired
+  with native Codex `d0e5fd48e0`. The
+  [main integration record](interactive-applications/main-integration.md) owns the
+  final source and evidence. Do not recommission the completed sleep or applications
+  branches from their historical checkpoints. Shared-server migration remains separate.
 - [Haskell command workbench](next/haskell-command-workbench.md): in-progress
   design for inspectable bash values, memory-weighted execution, typed process
   interaction and gradual migration from native shell orchestration.
@@ -41,9 +44,6 @@ archive).
 - [Haskell-backed native tools](next/hosted-haskell-tools.md): frozen typed
   handlers beside the workbench, raw Bash without per-call compilation, and
   native-quality execution, session input and output reads through the existing command owner.
-- [Resident sleep](next/resident-sleep.md): next-wave MVP for a fifteen-minute
-  suspended Haskell call with no intermediate inference, normal interruption,
-  and continuation-based composition. Proposed alongside Codex-use wrapup.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers

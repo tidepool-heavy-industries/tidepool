@@ -163,7 +163,8 @@ the actual provider prefix needs inspection.
 ## Acceptance
 
 - [ ] Native rendering stalls and an unviewed primary conversation do not stall completion processing.
-- [ ] Slow completion callbacks preserve normal typing, native tools and host input routing.
+- [ ] Slow completion callbacks preserve normal typing and host input routing;
+  hosted commands continue through their existing owner and resource limits.
 - [ ] Duplicate hosted invocation cannot execute its Haskell side effects twice.
 - [ ] Lost hosted result response does not cause automatic reevaluation or premature child launch.
 - [ ] Child admission waits for the real persisted result and complete relevant native batch.

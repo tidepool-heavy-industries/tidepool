@@ -23,6 +23,10 @@ pub(crate) enum RequestDuration {
 }
 
 impl RequestDuration {
+    pub(crate) fn checked_milliseconds(self) -> Result<u64, String> {
+        Ok(self.checked()?.duration().as_millis() as u64)
+    }
+
     pub(crate) fn checked(self) -> Result<crate::RequestDeadline, String> {
         let (value, unit) = match self {
             Self::DurationMilliseconds(value) => (value, crate::DeadlineUnit::Milliseconds),
@@ -462,5 +466,17 @@ mod tests {
         assert!(RequestDuration::DurationMinutes(i64::MAX)
             .checked()
             .is_err());
+        assert_eq!(
+            RequestDuration::DurationMilliseconds(0)
+                .checked_milliseconds()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            RequestDuration::DurationMinutes(15)
+                .checked_milliseconds()
+                .unwrap(),
+            900_000
+        );
     }
 }

@@ -40,6 +40,7 @@ pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
 pub mod run_llm_turn;
+pub mod sleep;
 pub mod subagent;
 pub mod worktree;
 pub mod worktree_facades;
@@ -77,6 +78,7 @@ pub fn all() -> Vec<Effect> {
         actor_context::actor_context(),
         actor_kernel::actor_kernel(),
         actor_local::actor_local(),
+        sleep::sleep(),
         agent_control::agent_control(),
         commands::commands(),
         notifications::notifications(),

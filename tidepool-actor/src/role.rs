@@ -64,6 +64,7 @@ pub enum ActorEffectKey {
     WorktreeRegistry,
     WorktreeAllocation,
     WorktreeIntegration,
+    Sleep,
     Notifications,
     Commands,
     Console,
@@ -84,6 +85,7 @@ impl ActorEffectKey {
             Self::WorktreeRegistry => "WorktreeRegistry",
             Self::WorktreeAllocation => "WorktreeAllocation",
             Self::WorktreeIntegration => "WorktreeIntegration",
+            Self::Sleep => "Sleep",
             Self::Notifications => "Notifications",
             Self::Commands => "Commands",
             Self::Console => "Console",
@@ -127,6 +129,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeRegistry,
                 ActorEffectKey::WorktreeAllocation,
                 ActorEffectKey::WorktreeIntegration,
+                ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
@@ -154,6 +157,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentInspection,
                 ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
+                ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
@@ -182,6 +186,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
+                ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
@@ -220,6 +225,7 @@ impl EffectiveRole {
                 ActorEffectKey::AgentInspection,
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::WorktreeIntegration,
+                ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
@@ -485,7 +491,7 @@ mod tests {
     fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
             EffectiveRole::research().haskell_effects_type(),
-            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Notifications, Commands, Console, Actor]"
+            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Sleep, Notifications, Commands, Console, Actor]"
         );
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");

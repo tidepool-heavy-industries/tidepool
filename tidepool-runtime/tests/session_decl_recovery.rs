@@ -59,6 +59,7 @@ fn successor_replays_only_root_source_independent_of_resident_values() {
     assert!(initial.replayed.is_empty());
 
     first.define("stable = 40 :: Int").unwrap();
+    first.define("removed = 7 :: Int").unwrap();
     first
         .define_with_vals(
             "residentDependent = stable + 1",
@@ -66,11 +67,27 @@ fn successor_replays_only_root_source_independent_of_resident_values() {
             &[],
         )
         .unwrap();
+    first
+        .define("downstream = residentDependent + 1 :: Int")
+        .unwrap();
+    first.define("independent = stable + 2 :: Int").unwrap();
     first.seed_scope(ScopeId(7), first.scope_tip(ScopeId::ROOT));
     first
         .define_scoped_in(ScopeId(7), "childOnly = 99 :: Int")
         .unwrap();
     first.retract("residentDependent").unwrap();
+    first.retract("removed").unwrap();
+
+    let manifest_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    let manifest_text = manifest_json.to_string();
+    assert!(!manifest_text.contains("childOnly"));
+    for forbidden in ["Tidepool.Data.Text", "handles", "grants", "effects"] {
+        assert!(
+            !manifest_text.contains(forbidden),
+            "source manifest retained resident authority: {forbidden}"
+        );
+    }
 
     let successor_root = tempfile::tempdir().unwrap();
     let mut successor = SessionLib::open(
@@ -84,15 +101,31 @@ fn successor_replays_only_root_source_independent_of_resident_values() {
 
     assert_eq!(report.source_session, Some(70));
     assert_eq!(report.successor_session, 71);
-    assert_eq!(report.replayed.len(), 1);
-    assert_eq!(report.lost.len(), 1);
-    assert!(report.lost[0]
-        .reason
-        .contains("depended on resident values"));
-    assert_eq!(run_probe(&lib_dir, &successor, "stable + 2"), 42);
+    assert_eq!(report.replayed.len(), 3);
+    assert_eq!(report.lost.len(), 2);
+    assert!(report
+        .lost
+        .iter()
+        .any(|lost| lost.reason.contains("depended on resident values")));
+    assert!(report.lost.iter().any(|lost| {
+        lost.sources
+            .iter()
+            .any(|source| source.contains("downstream"))
+            && lost.reason.contains("residentDependent")
+    }));
+    assert!(report
+        .replayed
+        .windows(2)
+        .all(|pair| pair[0].source_generation < pair[1].source_generation
+            && pair[0].successor_generation < pair[1].successor_generation));
+    assert!(report
+        .replayed
+        .iter()
+        .all(|replayed| replayed.origin_session == 70));
+    assert_eq!(run_probe(&lib_dir, &successor, "stable + independent"), 82);
     assert_eq!(
         successor.current_decl_heads(),
-        vec![("stable".into(), 1)],
-        "child scopes and resident-dependent declarations must not enter root recovery"
+        vec![("independent".into(), 3), ("stable".into(), 1)],
+        "retracted, child-scoped, resident-dependent and downstream declarations must stay absent"
     );
 }

@@ -2,7 +2,7 @@ use crate as tidepool_actor;
 use std::{sync::Arc, time::Duration};
 use tidepool_actor::{
     ActorExitKind, ActorTerminal, ActorWorkbenchSource, EffectiveRole, Incarnation,
-    LocalResidentDeployment, ResidentForest, ResidentToolEndpoint,
+    LocalResidentDeployment, ResidentForest, ResidentToolEndpoint, WorkbenchCancellationOutcome,
 };
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_runtime::session::{
@@ -238,6 +238,209 @@ fn invocation(source: &str, id: &str) -> tidepool_tool::ToolInvocation {
             namespace: Some("haskell".into()),
         }),
     }
+}
+
+#[tokio::test]
+async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
+    eval_harness::require_extract();
+    let declarations = [tidepool_mcp::sleep_decl()];
+    let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
+    let mut include = effects.include_paths().to_vec();
+    include.push(eval_harness::prelude_path());
+    let preamble = format!(
+        "{}\ntype ActorEffects = '[Sleep, Replies, Watches]\n",
+        tidepool_mcp::build_preamble(&declarations, false)
+    );
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Reply (Replies)");
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
+    let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
+    let root = tempfile::tempdir().unwrap();
+    let boot = match run_turn(TurnRequest {
+        turn_text: "pure (0 :: Int)",
+        templates: &templates,
+        include: &include_refs,
+        session_root: root.path(),
+        inject_modules: &[],
+        gen: 1,
+        verdict: None,
+        target: None,
+    })
+    .unwrap()
+    {
+        TurnResult::Expr { compiled, .. } => Arc::new(compiled),
+        _ => panic!("expected compiled program"),
+    };
+    let session = tidepool_repr::SessionId((u64::from(std::process::id()) << 32) | 206);
+    let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(include.clone());
+    let mut machine = ResidentSession::bootstrap(
+        &boot.expr,
+        boot.table.clone(),
+        NoHandlers,
+        TestSink,
+        include.clone(),
+        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+        Some(lib),
+    )
+    .unwrap();
+    machine.set_effect_execution(
+        EffectRunPolicy::SuspendAll,
+        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    );
+    let (forest, _events) = ResidentForest::new(
+        ActorWorkbenchSource::new(preamble, include),
+        session,
+        machine,
+        None,
+        Incarnation::FIRST,
+    );
+    let sleeper = forest
+        .new_workbench("sleeper".into(), EffectiveRole::coding())
+        .await
+        .unwrap();
+    let sibling = forest
+        .new_workbench("sibling".into(), EffectiveRole::coding())
+        .await
+        .unwrap();
+    let sleeper_policy = Arc::new(super::ResidentInteractivePolicy::local(sleeper.clone()));
+    let sibling_policy = Arc::new(super::ResidentInteractivePolicy::local(sibling));
+
+    tokio::time::pause();
+    let completed_invocation = invocation(
+        "sleep (minutes 15)\npure (7 :: Int)",
+        "fifteen-minute-sleep",
+    );
+    let completed_context = completed_invocation.context.clone().unwrap();
+    let sleeping = tokio::spawn(sleeper_policy.dispatch_boxed(completed_invocation));
+    tokio::task::yield_now().await;
+
+    let sibling_result = sibling_policy
+        .dispatch_boxed(invocation("pure (3 :: Int)", "sibling-progress"))
+        .await
+        .unwrap();
+    assert_eq!(
+        sibling_result["status"], "committed",
+        "sibling result: {sibling_result}"
+    );
+    assert!(!sleeping.is_finished());
+
+    tokio::time::advance(Duration::from_secs(899)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !sleeping.is_finished(),
+        "sleep completed before its monotonic deadline"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let sleep_result = sleeping.await.unwrap().unwrap();
+    assert_eq!(sleep_result["status"], "committed");
+    assert_eq!(sleep_result["items"].as_array().unwrap().len(), 2);
+    assert!(matches!(
+        sleeper_policy
+            .cancel_workbench_boxed(completed_context)
+            .await
+            .unwrap(),
+        WorkbenchCancellationOutcome::Expired { .. }
+    ));
+
+    let cancel_invocation = invocation(
+        "sleep (minutes 15)\nafterCancelled <- pure (99 :: Int)",
+        "cancelled-sleep",
+    );
+    let cancel_context = cancel_invocation.context.clone().unwrap();
+    let mut cancelled = {
+        let sleeper_policy = Arc::clone(&sleeper_policy);
+        tokio::spawn(async move { sleeper_policy.dispatch_boxed(cancel_invocation).await })
+    };
+    sleeper_policy
+        .client
+        .wait_until_sleeping(&cancel_context)
+        .await;
+    cancelled.abort();
+    let _ = (&mut cancelled).await;
+    let mut foreign_context = cancel_context.clone();
+    foreign_context.context_call_id = Some("foreign-outer-call".into());
+    let foreign_cancellation = {
+        let sleeper_policy = Arc::clone(&sleeper_policy);
+        tokio::spawn(async move { sleeper_policy.cancel_workbench_boxed(foreign_context).await })
+    };
+    let cancellation = sleeper_policy
+        .cancel_workbench_boxed(cancel_context.clone())
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            foreign_cancellation.await.unwrap().unwrap(),
+            WorkbenchCancellationOutcome::UnknownEvaluation { .. }
+        ),
+        "a different enclosing call must not target the active evaluation"
+    );
+    assert!(
+        matches!(cancellation, WorkbenchCancellationOutcome::Cancelled { .. }),
+        "cancellation outcome: {cancellation:?}"
+    );
+    assert!(
+        matches!(
+            sleeper_policy
+                .cancel_workbench_boxed(cancel_context.clone())
+                .await
+                .unwrap(),
+            WorkbenchCancellationOutcome::Cancelled { .. }
+        ),
+        "an exact retry must return the retained terminal cancellation"
+    );
+
+    let next = sleeper_policy
+        .dispatch_boxed(invocation("pure (11 :: Int)", "after-cancellation"))
+        .await
+        .unwrap();
+    assert_eq!(next["status"], "committed");
+    let suffix = sleeper_policy
+        .dispatch_boxed(invocation("afterCancelled", "cancelled-suffix"))
+        .await;
+    match suffix {
+        Ok(response) => assert_eq!(
+            response["status"], "rejected",
+            "the interrupted suffix must not install bindings: {response}"
+        ),
+        Err(_) => {}
+    }
+
+    let unknown = invocation("pure ()", "never-admitted").context.unwrap();
+    assert!(matches!(
+        sleeper_policy
+            .cancel_workbench_boxed(unknown)
+            .await
+            .unwrap(),
+        WorkbenchCancellationOutcome::UnknownEvaluation { .. }
+    ));
+    let retiring = sleeper;
+    let retiring_policy = Arc::clone(&sleeper_policy);
+    let mut retirement_waiter = {
+        let retiring_policy = Arc::clone(&retiring_policy);
+        tokio::spawn(async move {
+            retiring_policy
+                .dispatch_boxed(invocation("sleep (minutes 15)", "retiring-sleep"))
+                .await
+        })
+    };
+    retiring_policy
+        .client
+        .wait_until_sleeping(&invocation("pure ()", "retiring-sleep").context.unwrap())
+        .await;
+    retirement_waiter.abort();
+    let _ = (&mut retirement_waiter).await;
+    let shutdown = retiring
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "sleep retirement test".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(shutdown.terminal.kind, ActorExitKind::Cancelled);
+    assert!(shutdown.cleanup.is_confirmed(), "{shutdown:?}");
+    forest.shutdown().await;
 }
 
 struct UnsupportedEndpoint;

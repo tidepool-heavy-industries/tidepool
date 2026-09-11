@@ -231,11 +231,9 @@ async fn publication_peer_pid_is_host_visible_across_pid_namespace() {
         start_ticks
     );
     drop(child.stdin.take());
-    assert!(
-        tokio::time::timeout(Duration::from_secs(10), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success()
-    );
+    assert!(tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .success());
 }

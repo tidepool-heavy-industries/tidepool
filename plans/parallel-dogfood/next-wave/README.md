@@ -1,38 +1,25 @@
-# Next wave: resident sleep and applications wrapup
+# Resident sleep and applications wrapup: campaign record
 
-[Ready selection](ready.md) records the tested platform and prepared continuation refs.
+This directory records the completed implementation campaign. Resident sleep and
+interactive applications are accepted together on unified Tidepool main, paired
+with native Codex `d0e5fd48e0`. Source and check evidence is recorded in the
+[applications main integration record](../../interactive-applications/main-integration.md).
 
-[resume.md](resume.md) supplies the retained R7 checkpoints, required reconciliation
-onto launch main, first remaining work and settled human decisions.
-The [resident sleep PRD](../../next/resident-sleep.md) and applications wrap-up
-checklist own this wave’s outcomes. Engine M6/M7 remains preserved but paused. Applications needs reconciliation and final
-verification, not a fresh broad implementation tree.
-This directory owns execution shape; it does not waive unverified product gates.
+[Ready](ready.md), [resume](resume.md), and [commission](commission.md) preserve
+the launch selection, checkpoints, and allocation used by this campaign. They are
+historical evidence, not authority to launch or recommission the completed sleep
+and applications branches. Engine work remains preserved and excluded from this
+integration. A later campaign requires a new chosen scope and launch record.
+Use the [new RSI commissioning template](new-rsi-commission.md) for an Astra
+planning partner and Sol execution tree driven by newly agreed human ideas.
 
-Each run uses an exact runner built from main, including the selected curated
-prompt/Haskell package. Sleep starts from main; applications continues on its reconciled task branch.
-The preserved engine branch is not active in this wave. Checkpoint hashes select
-work inputs, not the source of the harness running them. The latest launch
-record and committed handoffs supersede historical source pins below.
-Current package changes and remaining mechanism limits are recorded in
-[coordination RSI](../../next/coordination-rsi.md).
+The [resident sleep PRD](../../next/resident-sleep.md), applications
+[mechanism router](../../interactive-applications/README.md), and retained engine
+[map](engine.md) remain design and provenance references. They do not describe
+unfinished lane commissioning.
 
-Read this page, then your assignment: [applications](applications.md) or
-[sleep](../../next/resident-sleep.md). The planner reads both; descendants read only their
-assigned subtree and the relevant mechanism sections. The launch prompt is
-[commission.md](commission.md).
+## Reusable recursive planning guidance
 
-## Carry the useful tree forward
-
-The prior trees consolidated coherent work into lane checkpoints. Reuse the
-applications checkpoint; build sleep on current main. Decompose where useful,
-keeping each parent’s integration substantial. The new typed routing
-package removes routine collection/rearming and forwarding from model turns.
-Do not rebuild completed foundations or keep the initial Astra doing coordination.
-
-## Planner output: a tree that can execute
-
-Refine the supplied branch maps against the saved source with the two Sol leads.
 Each substantial assignment should contain:
 
 - A concrete integrated outcome, relevant plan sections and source/file ownership.
@@ -45,9 +32,9 @@ Each substantial assignment should contain:
 
 Plan the first two implementation levels concretely where source supports it.
 For distant work, name contracts and outcomes, not speculative file-level tickets.
-Ask leads to explain/challenge this decomposition once, then correct material
+Ask leads to explain or challenge the decomposition once, then correct material
 misunderstandings and let them implement. Existing accepted decisions and saved
-scaffolds should shorten this checkpoint; do not regenerate the old plans.
+scaffolds should shorten this checkpoint; do not regenerate historical plans.
 
 ## Package context at the fork
 
@@ -85,7 +72,7 @@ multiple owning mechanisms, split that work before unrelated debugging fills its
 context. If it cannot split, name the concrete coupling in one sentence and keep
 working; this is judgment, not a quota or a new approval gate. No headcount cap.
 
-Astra plans the graph and checks Sol's execution understanding once, then idles
+Astra can plan the graph and check Sol's execution understanding once, then idle
 without routine progress subscriptions. Sol owns implementation, integration and
 ordinary choices. Fresh Astra consultations own bounded hard decisions or repairs
 and return directly to the requesting Sol. Haskell handles mechanical collection,
@@ -94,23 +81,19 @@ evidence out of Attention and use compact projections at decision boundaries.
 Return compact commits/checks/gates; exact transport and source
 incorporation still matter without a paragraph of acknowledgment history.
 
-## Restart inputs and external supervision
+## Historical inputs and external supervision
 
 Earlier execution-contract.md, planner-review.md and restart-review.md describe
-older launches. Retain substantive design findings through the final checkpoint;
-their actor handles, release messages and frozen-helper workarounds are historical.
-The selected package and this launch own current invocation and execution guidance.
+older launches. Their actor handles, release messages, source pins and frozen-helper
+workarounds remain evidence only. The applications integration record
+supersedes them as the release source. Historical check results are never fresh
+integrated evidence.
 
-The next launch record must name final coordinator/lane commits, separate native
-commit, preserved unmerged candidates and exact failed checks from this wind-down.
-Do not use the older saved-work.md inventory as the latest state, or recreate
-already accepted A0/M0/M2 work. Reconcile source before the first implementation
-fork; historical check results are not fresh integrated evidence.
-
-External RSI handles build/cache/usage/disk monitoring and harness issues. Workers
-run product checks with the supplied toolchain and explicit candidate selection;
-they do not start environment archaeology or hot-patch the running harness.
-Keep ordinary TUIs, one frozen canonical .shoal and fixed running tools. Native
-aarch64 has no available runner; x86_64 work proceeds, with unsupported native
-acceptance reported honestly. There are no external TPLR consumers; use a coordinated format cutover and
-validate our Shoal usage before changing main or the running package.
+In a future campaign, external supervision can handle build/cache/usage/disk
+monitoring and harness issues. Product workers run checks with the supplied
+toolchain and explicit candidate selection; they do not start environment
+archaeology or hot-patch the running harness.
+Keep ordinary TUIs, one frozen canonical `.shoal`, and fixed running tools during
+any future campaign. Platform gaps must be reported honestly. There are no external
+TPLR consumers; coordinate format cutovers and validate Shoal usage before changing
+the selected main or running package.

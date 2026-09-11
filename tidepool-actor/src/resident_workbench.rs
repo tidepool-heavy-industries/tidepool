@@ -815,6 +815,10 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         text: String,
     },
+    Sleep {
+        continuation: ResidentHole,
+        duration: Duration,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -968,6 +972,7 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::Sleep { .. } => "sleep",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::NotificationSend { .. } => "notify",
@@ -1036,6 +1041,7 @@ enum BoundaryCapture {
 /// shape; this sum owns orchestration routing.
 enum ResidentRequest {
     Console(crate::generated::console::ConsoleReq),
+    Sleep(crate::generated::sleep::SleepReq),
     Commands(crate::generated::commands::CommandsReq),
     Notifications(crate::generated::notifications::NotificationsReq),
     Actor(crate::generated::actor::ActorReq),
@@ -1073,6 +1079,7 @@ impl ResidentRequest {
             Self::Notifications,
             crate::generated::notifications::NotificationsReq
         );
+        try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
@@ -1119,6 +1126,7 @@ impl ResidentRequest {
 
     fn operation(&self) -> &'static str {
         match self {
+            Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
@@ -1286,6 +1294,34 @@ impl<H, O> ResidentActorRunner<H, O> {
     pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
         Self {
             access: ResidentMachineAccess::new(machines, source),
+        }
+    }
+
+    pub(crate) fn resident_session_state(
+        &self,
+        session: tidepool_repr::SessionId,
+    ) -> tidepool_runtime::session::ResidentSessionState
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        use tidepool_runtime::session::{ResidentSessionState, SlotKind};
+
+        match self.access.machines.kind(session) {
+            None => ResidentSessionState::Gone,
+            Some(SlotKind::Running) => ResidentSessionState::Running,
+            Some(SlotKind::Wedged) => ResidentSessionState::Unavailable,
+            Some(SlotKind::Idle | SlotKind::Suspended) => self
+                .access
+                .machines
+                .peek(session, |resident| resident.is_bootstrapped())
+                .map_or(ResidentSessionState::Running, |bootstrapped| {
+                    if bootstrapped {
+                        ResidentSessionState::Reusable
+                    } else {
+                        ResidentSessionState::Uninitialized
+                    }
+                }),
         }
     }
 
@@ -2478,6 +2514,16 @@ where
                     )));
                 }
                 match decoded {
+                    ResidentRequest::Sleep(crate::generated::sleep::SleepReq::SleepWith(
+                        duration,
+                    )) => Ok(ResidentActorBoundary::Sleep {
+                        continuation: hole,
+                        duration: Duration::from_millis(
+                            duration
+                                .checked_milliseconds()
+                                .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                        ),
+                    }),
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
@@ -3534,6 +3580,29 @@ where
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
+    }
+
+    pub(crate) async fn abort_live(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        reason: String,
+    ) -> (Result<ResidentOutcome, ResidentActorWorkbenchError>, bool) {
+        let result = self
+            .access
+            .with_machine(context, move |session, _, _| {
+                let result = session.abort(hole.cont_id(), reason);
+                let consumed = !session.parked_holes().contains(&hole.cont_id());
+                Ok((result, consumed))
+            })
+            .await;
+        match result {
+            Ok((result, consumed)) => (
+                result.map_err(ResidentActorWorkbenchError::Resident),
+                consumed,
+            ),
+            Err(error) => (Err(error), false),
+        }
     }
 
     pub(crate) async fn resume_int(
@@ -5195,6 +5264,97 @@ mod request_tests {
             .unwrap();
         assert_eq!(sibling, 42);
         assert!(machines.checkout_run(SessionId(2)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resident_reentry_state_tracks_unavailable_busy_and_stale_checkout() {
+        use std::time::Instant;
+        use tidepool_repr::{CoreFrame, Literal, SessionId, TreeBuilder};
+        use tidepool_runtime::session::{ResidentSessionState, Slot};
+
+        fn unbootstrapped() -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
+            ResidentSession::unbootstrapped(
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                Vec::new(),
+                64 * 1024,
+                None,
+            )
+        }
+
+        fn bootstrapped(
+            expression: tidepool_repr::CoreExpr,
+        ) -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
+            let table = tidepool_testing::proptest::build_table_for_expr(&expression);
+            ResidentSession::bootstrap(
+                &expression,
+                table,
+                frunk::HNil,
+                tidepool_mcp::CapturedOutput::new(),
+                Vec::new(),
+                64 * 1024,
+                None,
+            )
+            .unwrap()
+        }
+
+        let machines = Arc::new(SessionRegistry::new());
+        let uninitialized_id = SessionId(11);
+        let reusable_id = SessionId(12);
+        let unavailable_id = SessionId(13);
+        machines.insert_idle(uninitialized_id, unbootstrapped());
+        let mut literal = TreeBuilder::new();
+        literal.push(CoreFrame::Lit(Literal::LitInt(42)));
+        machines.insert_idle(reusable_id, bootstrapped(literal.build()));
+        let mut literal = TreeBuilder::new();
+        literal.push(CoreFrame::Lit(Literal::LitInt(42)));
+        machines.insert_idle(unavailable_id, bootstrapped(literal.build()));
+
+        let source = ActorWorkbenchSource::new("", Vec::new());
+        let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
+        assert_eq!(
+            runner.resident_session_state(uninitialized_id),
+            ResidentSessionState::Uninitialized
+        );
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Reusable
+        );
+
+        machines
+            .checkout_run(unavailable_id)
+            .unwrap()
+            .mark_wedged(Instant::now());
+        assert_eq!(
+            runner.resident_session_state(unavailable_id),
+            ResidentSessionState::Unavailable
+        );
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Reusable,
+            "one unavailable session must not poison its sibling"
+        );
+
+        let checkout = machines.checkout_run(reusable_id).unwrap();
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Running
+        );
+        assert!(matches!(
+            machines.remove(reusable_id),
+            Some(Slot::Running { .. })
+        ));
+        machines.insert_idle(reusable_id, unbootstrapped());
+        drop(checkout);
+        assert_eq!(
+            runner.resident_session_state(reusable_id),
+            ResidentSessionState::Uninitialized,
+            "stale checkout settlement must not replace the new incarnation"
+        );
+        assert_eq!(
+            runner.resident_session_state(SessionId(99)),
+            ResidentSessionState::Gone
+        );
     }
 
     #[test]

@@ -1,5 +1,9 @@
 use super::*;
 use tidepool_actor::{ResidentToolEndpoint, ResidentToolError, ResidentToolFuture};
+use tidepool_agent::{
+    AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
+    InteractiveInputError, InteractiveNativeToolPolicy, InteractivePolicyMount,
+};
 use tidepool_runtime::session::ModuleEnv;
 use tidepool_tool::{HostedTool, ToolInvocation};
 use tokio::sync::Semaphore;
@@ -32,7 +36,7 @@ async fn call(client: &reqwest::Client, source: &str, id: &str) -> serde_json::V
         .post(format!("{URL}/call"))
         .json(&serde_json::json!({
             "protocolVersion":protocol(), "threadId":THREAD, "turnId":id,
-            "callId":id, "contextCallId":id, "namespace":"tidepool_actor",
+            "callId":id, "contextCallId":id,
             "tool":"haskell", "arguments":source,
         }))
         .send()
@@ -76,9 +80,19 @@ impl HttpFixture {
     async fn canonical(actor: LocalActorRef) -> Self {
         Self::with_endpoint(actor, None).await
     }
+    async fn canonical_requiring_input_seal(actor: LocalActorRef) -> Self {
+        Self::with_endpoint_mode(actor, None, true).await
+    }
     async fn with_endpoint(
         actor: LocalActorRef,
         endpoint: Option<Arc<dyn ResidentToolEndpoint>>,
+    ) -> Self {
+        Self::with_endpoint_mode(actor, endpoint, false).await
+    }
+    async fn with_endpoint_mode(
+        actor: LocalActorRef,
+        endpoint: Option<Arc<dyn ResidentToolEndpoint>>,
+        require_input_seal: bool,
     ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("http.sock");
@@ -110,6 +124,11 @@ impl HttpFixture {
             None => start(&slot, actor, binding, None, listener),
         }
         .unwrap();
+        if !require_input_seal {
+            // Older hosted-work tests isolate the resident/HTTP boundary. The
+            // production constructor itself remains fail-closed.
+            exempt_input_seal_for_fixture(&owner).await;
+        }
         assert!(Arc::ptr_eq(slot.lock().as_ref().unwrap(), &owner));
         let client = client(&socket);
         attach(&client).await;
@@ -143,6 +162,123 @@ impl HttpFixture {
         assert_eq!(self.owners.lock().len(), 1);
         observe(&self.owner, CompletionBoundary::AbortForShutdown, limit()).await
     }
+}
+
+struct SealBackend {
+    calls: std::sync::atomic::AtomicUsize,
+    entered: Arc<Semaphore>,
+    release: Option<Arc<Semaphore>>,
+    result: SealResult,
+}
+
+#[derive(Clone, Copy)]
+enum SealResult {
+    Applied,
+    Unknown,
+    Failed,
+}
+
+impl SealBackend {
+    fn immediate(result: SealResult) -> Arc<Self> {
+        Arc::new(Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered: Arc::new(Semaphore::new(0)),
+            release: None,
+            result,
+        })
+    }
+    fn held(entered: Arc<Semaphore>, release: Arc<Semaphore>) -> Arc<Self> {
+        Arc::new(Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered,
+            release: Some(release),
+            result: SealResult::Applied,
+        })
+    }
+}
+impl InteractiveAgentBackend for SealBackend {
+    fn seal_input_producer<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        producer: &'a InputProducerId,
+    ) -> tidepool_agent::InputProducerControlFuture<'a> {
+        assert_eq!(thread.id().0, THREAD);
+        assert_eq!(producer.as_str(), "fixture-producer");
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        let result = self.result;
+        Box::pin(async move {
+            entered.add_permits(1);
+            if let Some(release) = release {
+                release.acquire().await.unwrap().forget();
+            }
+            match result {
+                SealResult::Applied => Ok(InputProducerControlOutcome::Applied),
+                SealResult::Unknown => Ok(InputProducerControlOutcome::Unknown),
+                SealResult::Failed => Err(InteractiveInputError::Unconfirmed(
+                    "native seal reply lost".into(),
+                )),
+            }
+        })
+    }
+    fn prepare_native_tool_policy(
+        &self,
+        _: InteractiveNativeToolPolicy,
+        _: &Path,
+    ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+        unreachable!("seal fixture does not launch a process")
+    }
+    fn render(
+        &self,
+        _: &InteractiveAgentSpec,
+    ) -> Result<InteractiveAgentCommand, AgentBackendError> {
+        unreachable!("seal fixture does not render a command")
+    }
+    fn push<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a QueueReadyThread,
+        _: &'a str,
+    ) -> InteractiveFuture<'a, ()> {
+        unreachable!("seal fixture does not push input")
+    }
+    fn archive<'a>(&'a self, _: &'a str, _: &'a QueueReadyThread) -> InteractiveFuture<'a, ()> {
+        unreachable!("seal fixture does not archive")
+    }
+}
+
+async fn queue_ready_thread(directory: &Path) -> QueueReadyThread {
+    let binding = directory.join("native-binding.json");
+    tidepool_agent::accept_interactive_session_binding(
+        &binding,
+        protocol(),
+        BackendThreadId(THREAD.into()),
+        None,
+    )
+    .await
+    .unwrap();
+    tidepool_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap()
+}
+fn producer() -> InputProducerId {
+    InputProducerId::new("fixture-producer".into()).unwrap()
+}
+
+async fn active_queue_ready_thread(directory: &Path) -> QueueReadyThread {
+    let binding = directory.join("active-native-binding.json");
+    tidepool_agent::accept_interactive_session_binding(
+        &binding,
+        protocol(),
+        BackendThreadId(THREAD.into()),
+        Some(directory.join("native-input.sock")),
+    )
+    .await
+    .unwrap();
+    tidepool_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap()
 }
 fn confirmed_http(observation: HostedObservation, actor: ActorRef) {
     let HostedObservation::Observed { resident, http, .. } = observation else {
@@ -229,6 +365,232 @@ async fn entered(semaphore: &Semaphore) {
         .unwrap()
         .unwrap()
         .forget();
+}
+
+#[tokio::test]
+async fn production_retirement_requires_native_input_fence() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
+    let observation = fixture.finish().await;
+    assert!(matches!(
+        observation,
+        HostedObservation::Observed {
+            input_seal: InputSealObservation::Required,
+            seal: SealObservation::Pending,
+            resident: ResidentObservation::Pending,
+            http: HttpObservation::Pending,
+        }
+    ));
+    assert!(campaign.actor.terminal().get().is_none());
+    assert!(matches!(
+        stop_retired_tool_service(campaign.actor.identity(), &mut fixture.owner.clone()).await,
+        CleanupComponentOutcome::Failed { .. }
+    ));
+    fixture.dispose_http().await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_pre_admission_path_can_retire_without_a_producer() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let actor = campaign.actor.identity();
+    let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
+    confirm_no_input_producer(&fixture.owner).await.unwrap();
+    let observation = fixture.finish().await;
+    assert!(matches!(
+        observation,
+        HostedObservation::Observed {
+            input_seal: InputSealObservation::NoProducer,
+            ..
+        }
+    ));
+    confirmed_http(observation, actor);
+    assert_eq!(
+        stop_retired_tool_service(actor, &mut fixture.owner.clone()).await,
+        CleanupComponentOutcome::Completed
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_input_seal_failure_retains_hosted_completion_and_http_owner() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
+    assert_eq!(
+        call(&fixture.client, "let answer = 11 :: Int", "input-seal").await["success"],
+        true
+    );
+    let backend = SealBackend::immediate(SealResult::Failed);
+    begin_input_seal(
+        &fixture.owner,
+        backend.clone(),
+        queue_ready_thread(fixture._directory.path()).await,
+        producer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        completed(&fixture.client, "input-seal").await.status(),
+        reqwest::StatusCode::OK,
+        "input producer sealing is not hosted-call completion acknowledgement"
+    );
+    let observation = fixture.finish().await;
+    assert!(matches!(
+        observation,
+        HostedObservation::Observed {
+            input_seal: InputSealObservation::Unconfirmed(_),
+            seal: SealObservation::Pending,
+            resident: ResidentObservation::Pending,
+            http: HttpObservation::Pending,
+            ..
+        }
+    ));
+    assert!(campaign.actor.terminal().get().is_none());
+    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(matches!(
+        stop_retired_tool_service(campaign.actor.identity(), &mut fixture.owner.clone()).await,
+        CleanupComponentOutcome::Failed { .. }
+    ));
+    fixture.dispose_http().await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_bind_failure_still_retains_the_exact_input_seal() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
+    let backend = SealBackend::immediate(SealResult::Applied);
+    let thread = active_queue_ready_thread(fixture._directory.path()).await;
+    let producer = producer();
+
+    let error = super::super::retain_input_custody_and_bind(
+        &fixture.owner,
+        backend.clone(),
+        &thread,
+        &producer,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("could not bind native input control"),
+        "{error}"
+    );
+    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let owner = fixture.owner.lock().await;
+    assert!(matches!(
+        &owner.input_seal,
+        InputSealState::Pending(Operation::Pending(_))
+    ));
+    drop(owner);
+
+    fixture.dispose_http().await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_native_input_seal_remains_distinct_from_hosted_call_completion() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
+    assert_eq!(
+        call(&fixture.client, "let answer = 12 :: Int", "unknown-seal").await["success"],
+        true
+    );
+    let backend = SealBackend::immediate(SealResult::Unknown);
+    begin_input_seal(
+        &fixture.owner,
+        backend.clone(),
+        queue_ready_thread(fixture._directory.path()).await,
+        producer(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        completed(&fixture.client, "unknown-seal").await.status(),
+        reqwest::StatusCode::OK,
+        "hosted-call completion must not settle the native producer seal"
+    );
+    for _ in 0..2 {
+        assert!(matches!(
+            fixture.finish().await,
+            HostedObservation::Observed {
+                input_seal: InputSealObservation::Unconfirmed(_),
+                seal: SealObservation::Pending,
+                resident: ResidentObservation::Pending,
+                http: HttpObservation::Pending,
+            }
+        ));
+    }
+    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        fixture.slot.lock().is_some(),
+        "unknown cleanup remains retained"
+    );
+    assert!(campaign.actor.terminal().get().is_none());
+    fixture.dispose_http().await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn lost_input_seal_waiter_reuses_the_retained_operation() {
+    let campaign = test_campaign::TestCampaign::start().await;
+    let fixture = HttpFixture::canonical_requiring_input_seal(campaign.actor.clone()).await;
+    let input_seal_entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let backend = SealBackend::held(input_seal_entered.clone(), release.clone());
+    begin_input_seal(
+        &fixture.owner,
+        backend.clone(),
+        queue_ready_thread(fixture._directory.path()).await,
+        producer(),
+    )
+    .await
+    .unwrap();
+    let owner = fixture.owner.clone();
+    let waiter = tokio::spawn(async move {
+        observe(&owner, CompletionBoundary::AwaitingNativeDecision, limit()).await
+    });
+    entered(&input_seal_entered).await;
+    waiter.abort();
+    let _ = waiter.await;
+    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(matches!(
+        observe(
+            &fixture.owner,
+            CompletionBoundary::AwaitingNativeDecision,
+            Duration::ZERO
+        )
+        .await,
+        HostedObservation::Pending
+    ));
+    release.add_permits(1);
+    assert!(matches!(
+        observe(
+            &fixture.owner,
+            CompletionBoundary::AwaitingNativeDecision,
+            limit()
+        )
+        .await,
+        HostedObservation::Observed {
+            input_seal: InputSealObservation::Sealed,
+            seal: SealObservation::Confirmed(_),
+            ..
+        }
+    ));
+    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    campaign
+        .actor
+        .shutdown_with_cleanup(cancelled())
+        .await
+        .unwrap();
+    confirmed_http(fixture.finish().await, campaign.actor.identity());
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
@@ -423,6 +785,7 @@ async fn hosted_unsupported_seal_retains_live_actor_and_http() {
                 seal: SealObservation::Failed(_),
                 resident: ResidentObservation::Pending,
                 http: HttpObservation::Pending,
+                ..
             }
         ),
         "{observation:?}"
@@ -495,6 +858,7 @@ async fn foreign_seal_terminal_race(terminal_while_pending: bool) {
                 seal: SealObservation::Failed(_),
                 resident: ResidentObservation::Pending,
                 http: HttpObservation::Pending,
+                ..
             }
         ),
         "{observation:?}"
@@ -526,6 +890,7 @@ async fn foreign_seal_terminal_race(terminal_while_pending: bool) {
                 seal: SealObservation::Failed(_),
                 resident: ResidentObservation::Pending,
                 http: HttpObservation::Pending,
+                ..
             }
         ),
         "{after_expected_terminal:?}"
@@ -663,7 +1028,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
         .post(format!("{URL}/call"))
         .json(&serde_json::json!({
             "protocolVersion":protocol(), "threadId":THREAD, "turnId":"spawn",
-            "callId":"spawn", "contextCallId":"spawn", "namespace":"tidepool_actor",
+            "callId":"spawn", "contextCallId":"spawn",
             "tool":"spawn_child", "arguments":{"seed":8},
         }))
         .send()
@@ -758,6 +1123,7 @@ impl tidepool_actor::KernelBehavior for GatedBehavior {
         &'a mut self,
         _: &'a tidepool_actor::KernelContext,
         _: tidepool_runtime::session::WorkbenchRequest,
+        _: Option<Arc<tidepool_actor::WorkbenchExecutionControl>>,
     ) -> BoxFuture<
         'a,
         Result<
@@ -925,6 +1291,7 @@ async fn hosted_initially_terminal_actor_cannot_drain_foreign_endpoint() {
             seal: SealObservation::Failed(_),
             resident: ResidentObservation::Pending,
             http: HttpObservation::Pending,
+            ..
         }
     );
     let sibling_live = sibling.actor.terminal().get().is_none();

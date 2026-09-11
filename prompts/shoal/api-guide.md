@@ -39,6 +39,26 @@ Keep the original result when execution/worktree evidence matters.
 `(,) <$> awaitSettledFork workerA <*> awaitSettledFork workerB`.
 Register separate watches when results can be integrated independently.
 
+## Sleep
+
+```text
+sleep :: Member Sleep effects => Duration -> Eff effects ()
+```
+
+The smart constructors `milliseconds`, `seconds`, and `minutes` accept
+non-negative `Natural` values and return `Duration`.
+
+`sleep (minutes 15)` suspends the current Haskell evaluation on a monotonic
+timer. It does not occupy command memory, poll the model, or wake it before the
+eventual tool result. Prefer an existing typed completion source when waiting
+for actual work rather than elapsed time.
+
+A delivered human message, steering update, or notification interrupts sleep before
+the next inference. Earlier effects stay committed; the interrupted block's suffix
+does not run. Collector/mailbox data alone does not interrupt it. Transport loss
+is not cancellation or permission to replay. If cancellation is unconfirmed,
+retain the existing evaluation rather than start conflicting work.
+
 ## Commands
 
 The `bash` tool accepts literal Bash and displays output directly.

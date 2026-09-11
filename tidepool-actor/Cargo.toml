@@ -39,4 +39,4 @@ tempfile.workspace = true
 tidepool-handlers.workspace = true
 tidepool-mcp.workspace = true
 tidepool-testing.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "test-util"] }

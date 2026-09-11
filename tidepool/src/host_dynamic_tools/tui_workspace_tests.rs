@@ -6,12 +6,85 @@ use std::{collections::BTreeMap, path::Path, sync::Mutex as StdMutex, time::Dura
 #[derive(Clone, Default)]
 struct Provider(Arc<StdMutex<BTreeMap<String, Vec<Value>>>>);
 
+fn workspace_config() -> String {
+    let resources =
+        toml::to_string(&tidepool_node::command_resources::CommandResourcePolicy::default())
+            .unwrap();
+    format!("[defaults]\nmodel=\"gpt-5.6-sol\"\neffort=\"low\"\n[resources]\n{resources}")
+}
+fn oom_allocation_bytes() -> u64 {
+    let policy = tidepool_node::command_resources::CommandResourcePolicy::default();
+    policy.swap_max_bytes + tidepool_node::command_resources::GIB
+}
+
+#[test]
+fn workspace_fixture_config_matches_shoal_schema() {
+    toml::from_str::<crate::shoal::ShoalConfig>(&workspace_config()).unwrap();
+    let policy = tidepool_node::command_resources::CommandResourcePolicy::default();
+    assert!(
+        oom_allocation_bytes()
+            > tidepool_node::command_resources::NATIVE_COMMAND_BYTES + policy.swap_max_bytes
+    );
+}
+
 fn shell(role: &str, command: &str) -> Value {
     let args = json!({"cmd":format!("set -eux; {command}; printf CHECKED-{role}"),"login":false,"yield_time_ms":10000,"max_output_tokens":3000});
-    json!({"type":"custom_tool_call","name":"exec","input":format!("text(await tools.exec_command({args}));")})
+    json!({"type":"function_call","name":"exec_command","arguments":args.to_string()})
 }
 fn haskell(code: &str) -> Value {
-    json!({"type":"custom_tool_call","namespace":"tidepool_actor","name":"haskell","input":code})
+    json!({"type":"custom_tool_call","name":"haskell","input":code})
+}
+fn is_tool_output(item: &Value) -> bool {
+    item["type"] == "custom_tool_call_output" || item["type"] == "function_call_output"
+}
+fn completed_command_output<'a>(item: &'a Value, marker: &str) -> Option<&'a str> {
+    let output = (item["type"] == "function_call_output")
+        .then(|| item["output"].as_str())
+        .flatten()?;
+    output
+        .lines()
+        .next()
+        .is_some_and(|line| line.contains("CommandExited 0"))
+        .then_some(output)
+        .filter(|output| output.contains(marker))
+}
+fn running_command_output(item: &Value) -> bool {
+    (item["type"] == "function_call_output")
+        .then(|| item["output"].as_str())
+        .flatten()
+        .and_then(|output| output.lines().next())
+        .is_some_and(|line| line.starts_with("Running · session_id: "))
+}
+
+#[test]
+fn workspace_fixture_recognizes_completed_command_output() {
+    let output = |text| json!({"type":"function_call_output","output":text});
+    assert!(completed_command_output(
+        &output("Finished · CommandExited 0 · cleanup: clean\nstdout:\nCHECKED-root\n"),
+        "CHECKED-root"
+    )
+    .is_some());
+    assert!(completed_command_output(
+        &output("Finished · CommandExited 7 · cleanup: clean\nstdout:\nCHECKED-root\n"),
+        "CHECKED-root"
+    )
+    .is_none());
+    assert!(completed_command_output(
+        &output("Script running with session ID 42\n"),
+        "CHECKED-root"
+    )
+    .is_none());
+    assert!(running_command_output(&output(
+        "Running · session_id: b885ec4a-2f7c-4a36-b89b-3ed93be60572\nstderr:\n+ exec sleep infinity\n"
+    )));
+    assert!(!running_command_output(&output(
+        "Running · stderr available, but no retained session identity\n"
+    )));
+    assert!(completed_command_output(
+        &output("Finished · CommandExited 0 · cleanup: clean\n"),
+        "CHECKED-root"
+    )
+    .is_none());
 }
 async fn scripted(
     State(provider): State<Provider>,
@@ -37,6 +110,15 @@ async fn scripted(
     if !title {
         turns.push(body);
     }
+    if role == "root" && index == 7 {
+        assert!(turns.last().is_some_and(|request| {
+            request["input"].as_array().is_some_and(|input| {
+                input
+                    .iter()
+                    .any(|item| item["call_id"] == "root-6" && running_command_output(item))
+            })
+        }));
+    }
     let inherited = "test -r .shoal/config.toml; test ! -w .shoal/config.toml; test \"$(cat untracked)\" = untracked; test \"$(stat -c %y tracked)\" = \"$(cat source-mtime)\"; CARGO_LOG=cargo::core::compiler::fingerprint=info cargo build --offline --message-format=json > build-result; rg '\"fresh\":true' build-result";
     let mut item = if title {
         json!({"type":"message","role":"assistant","id":"title","content":[{"type":"output_text","text":"{\"title\":\"Workspace acceptance\"}"}]})
@@ -47,10 +129,13 @@ async fn scripted(
             ("root", 2) => shell(role, "printf root-v2 > tracked; stat -c %y tracked > source-mtime"),
             ("root", 3) => haskell(include_str!("fixtures/workspace/root-later.hs")),
             ("root", 4) => shell(role, "test \"$(cat tracked)\" = root-v2"),
-            ("root", 6) => shell(role, "echo $$ > writer-pid; sleep 60"),
+            ("root", 6) => shell(role, "echo $$ > writer-pid; exec sleep infinity"),
             ("root", 7) => haskell(include_str!("fixtures/workspace/root-busy.hs")),
             ("root", 8) => shell(role, "kill $(cat writer-pid)"),
-            ("root", 9) => shell(role, "python3 -c 'a=bytearray(1024*1024*1024)'"),
+            ("root", 9) => shell(
+                role,
+                &format!("python3 -c 'a=bytearray({})'", oom_allocation_bytes()),
+            ),
             ("root", 11) => shell(role, "test \"$(cat tracked)\" = root-v2"),
             ("busy", 0) => shell(role, "test \"$(cat tracked)\" = base; test ! -e untracked; test -x \"$CARGO_TARGET_DIR/debug/workspace-acceptance\"; cargo build --offline"),
             ("child", 0) => shell(role, &format!("test \"$(cat tracked)\" = root-v1; {inherited}; printf child-v1 > tracked; stat -c %y tracked > source-mtime")),
@@ -65,7 +150,7 @@ async fn scripted(
             _ => json!({"type":"message","role":"assistant","id":"done","content":[{"type":"output_text","text":"fixture-complete"}]}),
         }
     };
-    if item["type"] == "custom_tool_call" {
+    if item["type"] == "custom_tool_call" || item["type"] == "function_call" {
         item["call_id"] = format!("{role}-{index}").into();
     }
     let events = [
@@ -175,11 +260,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(root.join("tracked"), "base").unwrap();
     std::fs::write(root.join(".gitignore"), ".shoal/\ntarget/\nbuild-result\n").unwrap();
-    std::fs::write(
-        root.join(".shoal/config.toml"),
-        "[defaults]\nmodel=\"gpt-5.6-sol\"\neffort=\"low\"\n[resources]\nmemory_max_bytes=536870912\nswap_max_bytes=0\n",
-    )
-    .unwrap();
+    std::fs::write(root.join(".shoal/config.toml"), workspace_config()).unwrap();
     for args in [
         vec!["init"],
         vec!["config", "user.email", "fixture@example.invalid"],
@@ -306,17 +387,22 @@ async fn production_tuis_fork_live_workspaces_recursively() {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .filter(|item| item["type"] == "custom_tool_call_output")
+                        .filter(|item| item["type"] == "function_call_output")
                     {
-                        if let Some(output) = item["output"]
-                            .as_str()
-                            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-                        {
-                            if let Some(code) = output["exit_code"].as_i64() {
-                                if item["call_id"] != "root-9" {
-                                    assert_eq!(code, 0, "{}: {}", item["call_id"], output);
-                                }
-                            }
+                        match item["call_id"].as_str() {
+                            Some("root-6") => assert!(running_command_output(item), "{item}"),
+                            Some("root-9") => assert!(
+                                item["output"]
+                                    .as_str()
+                                    .is_some_and(|output| output.contains("CommandOutOfMemory")),
+                                "{item}"
+                            ),
+                            _ => assert!(
+                                completed_command_output(item, "").is_some(),
+                                "{}: {}",
+                                item["call_id"],
+                                item["output"]
+                            ),
                         }
                     }
                     let text = request["input"].to_string();
@@ -327,7 +413,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
                             .as_array()
                             .unwrap()
                             .iter()
-                            .filter(|item| item["type"] == "custom_tool_call_output")
+                            .filter(|item| is_tool_output(item))
                             .last()
                             .unwrap()
                     );
@@ -337,11 +423,14 @@ async fn production_tuis_fork_live_workspaces_recursively() {
                 let oom = requests["root"]
                     .iter()
                     .flat_map(|request| request["input"].as_array().unwrap())
-                    .find(|item| {
-                        item["type"] == "custom_tool_call_output" && item["call_id"] == "root-9"
-                    })
+                    .find(|item| is_tool_output(item) && item["call_id"] == "root-9")
                     .expect("OOM result");
-                assert!(oom.to_string().contains("resource limit"), "{oom}");
+                assert!(
+                    oom["output"]
+                        .as_str()
+                        .is_some_and(|output| output.contains("CommandOutOfMemory")),
+                    "{oom}"
+                );
                 assert!(tokio::process::Command::new("tmux")
                     .args(["send-keys", "-t", &pane, "-l", "fixture-resume"])
                     .status()
@@ -361,20 +450,10 @@ async fn production_tuis_fork_live_workspaces_recursively() {
                 requests.get(role).is_some_and(|turns| {
                     turns.iter().any(|request| {
                         request["input"].as_array().unwrap().iter().any(|item| {
-                            if item["type"] != "custom_tool_call_output" || item["call_id"] != call
-                            {
+                            if !is_tool_output(item) || item["call_id"] != call {
                                 return false;
                             }
-                            let Some(output) = item["output"]
-                                .as_str()
-                                .and_then(|text| serde_json::from_str::<Value>(text).ok())
-                            else {
-                                return false;
-                            };
-                            output["exit_code"] == 0
-                                && output["output"]
-                                    .as_str()
-                                    .is_some_and(|text| text.contains(&format!("CHECKED-{role}")))
+                            completed_command_output(item, &format!("CHECKED-{role}")).is_some()
                         })
                     })
                 })

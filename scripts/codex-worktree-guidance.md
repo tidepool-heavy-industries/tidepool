@@ -131,3 +131,20 @@ Reuse the same Cargo target directory for compatible validation commands; do not
 create a fresh target per test or diagnostic attempt. Retire obsolete validation
 caches after recording results. Selected launch binaries and recovery records
 belong to the run directory, not disposable build output.
+
+When a release check runs alongside further builds, freeze its executable in a
+unique validation directory first (`cp --reflink=auto` on Linux), and record its
+source and hash. Do not replace that copy while the check runs. A live process
+can keep executing an unlinked Cargo binary while `current_exe()` reports a
+deleted path, invalidating fixtures that verify or relaunch the executable.
+
+Cgroup-admission fixtures need a dedicated delegated scope. Run those directly,
+without a shared compiler daemon in the scope's parent cgroup: unrelated live
+processes prevent enabling subtree controllers and cause `EBUSY` before the
+behavior under test starts. Size OOM probes against the command's RAM plus
+allowed swap, keeping them within the enclosing test scope's safety budget.
+
+Cross-repository acceptance uses each repository's pinned toolchain. Run native
+Codex builds/tests from its checkout with its `rust-toolchain.toml`; entering
+Tidepool's Nix shell can select a different Rust version. Keep Tidepool's
+extractor-backed checks in the Tidepool environment.

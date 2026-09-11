@@ -13,3 +13,4 @@ pub mod commands;
 pub mod console;
 pub mod forks;
 pub mod notifications;
+pub mod sleep;

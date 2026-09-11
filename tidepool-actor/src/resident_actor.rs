@@ -128,6 +128,8 @@ struct ResidentEnvironment<H, O> {
 
 #[derive(Clone)]
 struct ResidentActorRecord {
+    recovery_claimed: bool,
+    workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     forest_control: bool,
     interactive_policy_installed: bool,
     observation_roots: std::collections::HashSet<ActorRef>,
@@ -471,35 +473,93 @@ pub struct ResidentKernelBehavior<H, O> {
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
-    completed_workbenches: CompletedWorkbenchExecutions,
+    workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    active_workbench_control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
 }
 
 #[derive(Clone)]
-struct CompletedWorkbenchExecution {
+struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
-    reply: crate::KernelWorkbenchReply,
+    state: WorkbenchExecutionState,
+}
+
+#[derive(Clone)]
+enum WorkbenchExecutionState {
+    Unconfirmed,
+    Terminal {
+        reply: crate::KernelWorkbenchReply,
+        cancellation: crate::WorkbenchCancellationOutcome,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum WorkbenchReplayKey {
+    Hosted(crate::resident_tools::WorkbenchCallKey),
+    Execution(WorkbenchExecutionId),
+}
+
+impl WorkbenchReplayKey {
+    fn new(
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) -> Self {
+        invocation.map_or_else(
+            || Self::Execution(execution.clone()),
+            |key| Self::Hosted(key.clone()),
+        )
+    }
 }
 
 #[derive(Default)]
-struct CompletedWorkbenchExecutions(
-    std::collections::HashMap<WorkbenchExecutionId, CompletedWorkbenchExecution>,
-);
+struct WorkbenchExecutions(std::collections::HashMap<WorkbenchReplayKey, WorkbenchExecutionRecord>);
 
-impl CompletedWorkbenchExecutions {
+#[derive(Debug, PartialEq, Eq)]
+enum WorkbenchReplayFailure {
+    DifferentInput,
+    Unconfirmed,
+}
+
+impl WorkbenchExecutions {
     fn lookup(
         &self,
         execution: &WorkbenchExecutionId,
         request: &WorkbenchRequest,
-    ) -> Result<Option<crate::KernelWorkbenchReply>, ()> {
-        let Some(completed) = self.0.get(execution) else {
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) -> Result<Option<crate::KernelWorkbenchReply>, WorkbenchReplayFailure> {
+        let Some(record) = self.0.get(&WorkbenchReplayKey::new(execution, invocation)) else {
             return Ok(None);
         };
-        if completed.request != *request {
-            return Err(());
+        let comparable = request.clone().with_execution_id(
+            record
+                .request
+                .execution_id()
+                .expect("retained execution identity")
+                .clone(),
+        );
+        if record.request != comparable {
+            return Err(WorkbenchReplayFailure::DifferentInput);
         }
-        Ok(Some(completed.reply.clone()))
+        match &record.state {
+            WorkbenchExecutionState::Unconfirmed => Err(WorkbenchReplayFailure::Unconfirmed),
+            WorkbenchExecutionState::Terminal { reply, .. } => Ok(Some(reply.clone())),
+        }
+    }
+
+    fn begin(
+        &mut self,
+        execution: &WorkbenchExecutionId,
+        request: WorkbenchRequest,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) {
+        self.0.insert(
+            WorkbenchReplayKey::new(execution, invocation),
+            WorkbenchExecutionRecord {
+                request,
+                state: WorkbenchExecutionState::Unconfirmed,
+            },
+        );
     }
 
     fn record(
@@ -507,9 +567,41 @@ impl CompletedWorkbenchExecutions {
         execution: WorkbenchExecutionId,
         request: WorkbenchRequest,
         reply: crate::KernelWorkbenchReply,
+        cancellation: crate::WorkbenchCancellationOutcome,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
     ) {
-        self.0
-            .insert(execution, CompletedWorkbenchExecution { request, reply });
+        self.0.insert(
+            WorkbenchReplayKey::new(&execution, invocation),
+            WorkbenchExecutionRecord {
+                request,
+                state: WorkbenchExecutionState::Terminal {
+                    reply,
+                    cancellation,
+                },
+            },
+        );
+    }
+
+    fn cancellation(
+        &self,
+        execution: WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) -> crate::WorkbenchCancellationOutcome {
+        match self.0.get(&WorkbenchReplayKey::new(&execution, invocation)) {
+            None => crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution },
+            Some(record) => match &record.state {
+                WorkbenchExecutionState::Unconfirmed => {
+                    crate::WorkbenchCancellationOutcome::Unconfirmed {
+                        execution: record
+                            .request
+                            .execution_id()
+                            .expect("retained execution identity")
+                            .clone(),
+                    }
+                }
+                WorkbenchExecutionState::Terminal { cancellation, .. } => cancellation.clone(),
+            },
+        }
     }
 }
 
@@ -586,9 +678,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
-            completed_workbenches: CompletedWorkbenchExecutions::default(),
+            workbench_executions: Arc::default(),
             active_route: None,
             active_fork_boundary: None,
+            active_workbench_control: None,
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
@@ -1550,6 +1643,83 @@ where
                     .resume_unit(context.clone(), continuation)
                     .await
             }),
+            ResidentActorBoundary::Sleep {
+                continuation,
+                duration,
+            } => Box::pin(async move {
+                // Mailbox handlers and direct local workbenches have no hosted
+                // evaluation to cancel, but still share the actor-owned timer
+                // and retirement path.
+                let control = self
+                    .active_workbench_control
+                    .clone()
+                    .unwrap_or_else(crate::resident_tools::WorkbenchExecutionControl::untracked);
+                control.arm_sleep();
+                let timer = tokio::time::sleep(duration);
+                tokio::pin!(timer);
+                tokio::select! {
+                    () = &mut timer => {
+                        if control.claim_expiry() {
+                            let outcome = self.environment
+                                .runner
+                                .resume_unit(context.clone(), continuation)
+                                .await;
+                            control.finish_sleep();
+                            outcome
+                        } else {
+                            let (outcome, consumed) = self.environment
+                                .runner
+                                .abort_live(
+                                    context.clone(),
+                                    continuation,
+                                    "sleep interrupted by delivered input".into(),
+                                )
+                                .await;
+                            if consumed {
+                                control.acknowledge_cancellation();
+                            }
+                            outcome
+                        }
+                    }
+                    () = control.wait_for_cancellation() => {
+                        let (outcome, consumed) = self.environment
+                            .runner
+                            .abort_live(
+                                context.clone(),
+                                continuation,
+                                "sleep interrupted by delivered input".into(),
+                            )
+                            .await;
+                        if consumed {
+                            control.acknowledge_cancellation();
+                        }
+                        outcome
+                    }
+                    terminal = kernel.wait_requested_shutdown() => {
+                        if control.request_cancellation() || control.cancellation_requested() {
+                            let (outcome, consumed) = self.environment
+                                .runner
+                                .abort_live(
+                                    context.clone(),
+                                    continuation,
+                                    format!("sleep interrupted by actor retirement: {}", terminal.summary),
+                                )
+                                .await;
+                            if consumed {
+                                control.acknowledge_cancellation();
+                            }
+                            outcome
+                        } else {
+                            let outcome = self.environment
+                                .runner
+                                .resume_unit(context.clone(), continuation)
+                                .await;
+                            control.finish_sleep();
+                            outcome
+                        }
+                    }
+                }
+            }),
             ResidentActorBoundary::Command {
                 continuation,
                 request,
@@ -2129,16 +2299,23 @@ where
                         );
                     }
                     let group_path = group.to_string();
-                    let (group_id, reservations) = self
-                        .environment
-                        .fork_groups
-                        .begin(
+                    let maximum = budget.maximum_active_children.map(usize::from);
+                    let (group_id, reservations) = match self.active_fork_boundary.clone() {
+                        Some(boundary) => self.environment.fork_groups.begin_at_boundary(
                             context.actor,
                             group,
                             branches,
-                            budget.maximum_active_children.map(usize::from),
-                        )
-                        .map_err(|error| error.to_string())?;
+                            maximum,
+                            boundary,
+                        ),
+                        None => self.environment.fork_groups.begin(
+                            context.actor,
+                            group,
+                            branches,
+                            maximum,
+                        ),
+                    }
+                    .map_err(|error| error.to_string())?;
                     Ok::<_, String>((group_id, group_path, reservations))
                 })();
                 match admitted {
@@ -4902,6 +5079,8 @@ where
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {
+                    recovery_claimed: false,
+                    workbench_executions: self.workbench_executions.clone(),
                     forest_control: self.forest_control,
                     interactive_policy_installed: false,
                     observation_roots: Default::default(),
@@ -4958,13 +5137,24 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
-            self.abort_incomplete_groups(
-                kernel,
-                context.actor,
-                "fork admission stopped before tool completion",
-            )
-            .await;
-            let groups = self.environment.fork_groups.ready_groups(context.actor);
+            for child in self
+                .environment
+                .fork_groups
+                .abort_incomplete_at_boundary(context.actor, &boundary)
+            {
+                if let Some(child) = kernel.resolve(child) {
+                    let _ = child
+                        .shutdown(ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "fork admission stopped before tool completion".into(),
+                        })
+                        .await;
+                }
+            }
+            let groups = self
+                .environment
+                .fork_groups
+                .ready_groups_at_boundary(context.actor, &boundary);
             let groups: Vec<_> = groups
                 .into_iter()
                 .filter(|(_, children)| {
@@ -5228,6 +5418,7 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
         request: WorkbenchRequest,
+        control: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
@@ -5248,24 +5439,50 @@ where
                 });
             }
             let execution = request.execution_id().cloned();
+            let invocation = control
+                .as_ref()
+                .and_then(|control| control.invocation.as_ref());
             if let Some(execution) = &execution {
-                match self.completed_workbenches.lookup(execution, &request) {
-                    Err(()) => {
-                        return Err(KernelInvocationFailure::Rejected {
+                let retained = self
+                    .workbench_executions
+                    .lock()
+                    .lookup(execution, &request, invocation);
+                match retained {
+                    Err(failure) => {
+                        let result = Err(KernelInvocationFailure::Rejected {
                             actor: context.actor,
-                            detail:
-                                "one hosted call identity was retried with different Haskell input"
-                                    .into(),
+                            detail: match failure {
+                                WorkbenchReplayFailure::DifferentInput => "one hosted call identity was retried with different Haskell input",
+                                WorkbenchReplayFailure::Unconfirmed => "the original hosted call outcome is unconfirmed; replay cannot repeat its effects",
+                            }.into(),
                         });
+                        if let Some(control) = &control {
+                            control.settle(result.clone());
+                        }
+                        return result.map(KernelStep::Continue);
                     }
-                    Ok(Some(reply)) => return reply.map(KernelStep::Continue),
+                    Ok(Some(reply)) => {
+                        if let Some(control) = &control {
+                            control.settle(reply.clone());
+                        }
+                        return reply.map(KernelStep::Continue);
+                    }
                     Ok(None) => {}
                 }
             }
             let retained_request = execution.as_ref().map(|_| request.clone());
+            if let Some(execution) = &execution {
+                // Persist the fence in the forest-retained journal before effects
+                // can run; actor termination cannot turn uncertainty into replay.
+                self.workbench_executions
+                    .lock()
+                    .begin(execution, request.clone(), invocation);
+            }
+            self.active_workbench_control = control.clone();
             self.active_fork_boundary = request.fork_boundary().cloned();
             let result = self.execute_workbench(kernel, &context, request).await;
             self.active_fork_boundary = None;
+            self.active_workbench_control = None;
             match &result {
                 Ok(KernelStep::Continue(_)) => self
                     .runtime_observation
@@ -5331,10 +5548,46 @@ where
                     ) => Ok(response.clone()),
                     Err(error) => Err(error.clone()),
                 };
-                self.completed_workbenches.record(execution, request, reply);
+                let cancellation = control.as_ref().map_or_else(
+                    || crate::WorkbenchCancellationOutcome::NotSleeping {
+                        execution: execution.clone(),
+                    },
+                    |control| control.cancellation_outcome(execution.clone(), reply.clone()),
+                );
+                self.workbench_executions.lock().record(
+                    execution,
+                    request,
+                    reply,
+                    cancellation,
+                    invocation,
+                );
+            }
+            let terminal_reply = match &result {
+                Ok(
+                    KernelStep::Continue(response)
+                    | KernelStep::ContinueLater(response)
+                    | KernelStep::Stop {
+                        output: response, ..
+                    },
+                ) => Ok(response.clone()),
+                Err(error) => Err(error.clone()),
+            };
+            if let Some(control) = control {
+                control.settle(terminal_reply);
             }
             result
         })
+    }
+
+    fn reconcile_workbench_cancellation(
+        &self,
+        execution: WorkbenchExecutionId,
+        invocation: Option<tidepool_tool::ToolInvocationContext>,
+    ) -> crate::WorkbenchCancellationOutcome {
+        let invocation = invocation.map(crate::resident_tools::WorkbenchCallKey::from);
+        self.workbench_executions
+            .lock()
+            .cancellation(execution, invocation.as_ref())
     }
 
     fn route<'a>(
@@ -5811,6 +6064,14 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Observe whether this forest's one resident session can be considered
+    /// for same-incarnation root reentry. The subsequent checkout remains the
+    /// authoritative admission boundary.
+    #[must_use]
+    pub fn resident_session_state(&self) -> tidepool_runtime::session::ResidentSessionState {
+        self.environment.runner.resident_session_state(self.session)
+    }
+
     pub fn new(
         source: ActorWorkbenchSource,
         session: tidepool_repr::SessionId,
@@ -5913,6 +6174,85 @@ where
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        self.new_program_root_with_replay(label, role, compiled, None)
+            .await
+    }
+
+    /// Recover a failed root in this resident forest without replaying its
+    /// retained native invocations. Only replay evidence crosses this boundary;
+    /// actor identity, placement and grants are freshly admitted.
+    pub async fn recover_program_root(
+        &self,
+        predecessor: ActorRef,
+        label: String,
+        role: crate::EffectiveRole,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+    ) -> Result<
+        (LocalActorRef, ractor::concurrency::JoinHandle<()>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let prior = self.directory.resolve(predecessor).ok_or_else(|| {
+            std::io::Error::other("root recovery predecessor is not in this forest")
+        })?;
+        if prior
+            .terminal()
+            .get()
+            .is_none_or(|terminal| terminal.kind != ActorExitKind::Failed)
+        {
+            return Err(std::io::Error::other(
+                "root recovery requires a failed, terminal predecessor",
+            )
+            .into());
+        }
+        if !matches!(
+            self.resident_session_state(),
+            tidepool_runtime::session::ResidentSessionState::Reusable
+                | tidepool_runtime::session::ResidentSessionState::Uninitialized
+        ) {
+            return Err(
+                std::io::Error::other("root recovery resident session is not reusable").into(),
+            );
+        }
+        let journal = {
+            let mut records = self.environment.actors.lock();
+            let record = records
+                .get_mut(&predecessor)
+                .ok_or_else(|| std::io::Error::other("root recovery evidence is unavailable"))?;
+            if record.descriptor.placement().session != self.session
+                || record.descriptor.creator().is_some()
+                || record.descriptor.supervisor_parent().is_some()
+                || record.descriptor.context_parent().is_some()
+                || record.recovery_claimed
+            {
+                return Err(std::io::Error::other(
+                    "root recovery predecessor is ineligible or already recovered",
+                )
+                .into());
+            }
+            record.recovery_claimed = true;
+            record.workbench_executions.clone()
+        };
+        let result = self
+            .new_program_root_with_replay(label, role, compiled, Some(journal))
+            .await;
+        if result.is_err() {
+            if let Some(record) = self.environment.actors.lock().get_mut(&predecessor) {
+                record.recovery_claimed = false;
+            }
+        }
+        result
+    }
+
+    async fn new_program_root_with_replay(
+        &self,
+        label: String,
+        role: crate::EffectiveRole,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+        replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
+    ) -> Result<
+        (LocalActorRef, ractor::concurrency::JoinHandle<()>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let admission = self.environment.root_admission_closed.read().await;
         if *admission {
             return Err(std::io::Error::other("swarm root admission is closed").into());
@@ -5927,6 +6267,7 @@ where
                 ActorDescriptor::new(label, placement).with_effective_role(role),
                 outcome,
                 &admission,
+                replay,
             )
             .await
         {
@@ -6021,7 +6362,7 @@ where
                 std::io::Error::other("swarm root admission is closed").into(),
             ));
         }
-        self.admit_prepared_root(descriptor, outcome, &admission)
+        self.admit_prepared_root(descriptor, outcome, &admission, None)
             .await
     }
 
@@ -6030,6 +6371,7 @@ where
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
         _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
+        replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         if descriptor.placement().session != self.session
             || descriptor.supervisor_parent().is_some()
@@ -6042,8 +6384,11 @@ where
                 ),
             )));
         }
-        let behavior =
+        let mut behavior =
             ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
+        if let Some(replay) = replay {
+            behavior.workbench_executions = replay;
+        }
         crate::local_actor::spawn_local_actor_in_directory(
             None,
             behavior,
@@ -6119,7 +6464,7 @@ fn workbench_response(
 mod tests {
     use super::{
         workbench_failure_after_operations, workbench_response, ChildExitObservations,
-        CompletedWorkbenchExecutions,
+        WorkbenchExecutions,
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
@@ -6195,6 +6540,39 @@ mod tests {
     }
 
     #[test]
+    fn recovered_workbench_fences_unsettled_native_calls_and_conflicting_input() {
+        let invocation =
+            crate::resident_tools::WorkbenchCallKey::from(tidepool_tool::ToolInvocationContext {
+                context_call_id: Some("outer".into()),
+                thread_id: "thread".into(),
+                turn_id: "turn".into(),
+                call_id: "call".into(),
+                namespace: None,
+            });
+        let original = WorkbenchExecutionId::from_digest([1; 16]);
+        let successor = WorkbenchExecutionId::from_digest([2; 16]);
+        let request = WorkbenchRequest::from_ghci_input("effectfulAction")
+            .unwrap()
+            .with_execution_id(original.clone());
+        let mut journal = WorkbenchExecutions::default();
+        journal.begin(&original, request.clone(), Some(&invocation));
+        let retry = request.with_execution_id(successor.clone());
+        assert_eq!(
+            journal.lookup(&successor, &retry, Some(&invocation)),
+            Err(super::WorkbenchReplayFailure::Unconfirmed)
+        );
+        let changed = WorkbenchRequest::from_ghci_input("differentAction")
+            .unwrap()
+            .with_execution_id(successor.clone());
+        assert_eq!(
+            journal.lookup(&successor, &changed, Some(&invocation)),
+            Err(super::WorkbenchReplayFailure::DifferentInput)
+        );
+        assert!(matches!(journal.cancellation(successor, Some(&invocation)),
+            crate::WorkbenchCancellationOutcome::Unconfirmed { execution } if execution == original));
+    }
+
+    #[test]
     fn actor_owned_workbench_retry_returns_only_the_exact_committed_call() {
         let execution = WorkbenchExecutionId::from_digest([7; 16]);
         let request = WorkbenchRequest::from_ghci_input("effectfulAction")
@@ -6206,16 +6584,36 @@ mod tests {
             next_index: 1,
             total: 1,
         });
-        let mut completed = CompletedWorkbenchExecutions::default();
-        completed.record(execution.clone(), request.clone(), reply.clone());
+        let mut completed = WorkbenchExecutions::default();
+        let cancellation = crate::WorkbenchCancellationOutcome::Expired {
+            execution: execution.clone(),
+            reply: reply.clone(),
+        };
+        completed.record(
+            execution.clone(),
+            request.clone(),
+            reply.clone(),
+            cancellation,
+            None,
+        );
 
-        assert_eq!(completed.lookup(&execution, &request), Ok(Some(reply)));
+        assert_eq!(
+            completed.lookup(&execution, &request, None),
+            Ok(Some(reply))
+        );
+        assert!(matches!(
+            completed.cancellation(execution.clone(), None),
+            crate::WorkbenchCancellationOutcome::Expired { .. }
+        ));
         let different = WorkbenchRequest::from_ghci_input("differentAction")
             .unwrap()
             .with_execution_id(execution.clone());
-        assert_eq!(completed.lookup(&execution, &different), Err(()));
         assert_eq!(
-            completed.lookup(&WorkbenchExecutionId::from_digest([8; 16]), &request),
+            completed.lookup(&execution, &different, None),
+            Err(super::WorkbenchReplayFailure::DifferentInput)
+        );
+        assert_eq!(
+            completed.lookup(&WorkbenchExecutionId::from_digest([8; 16]), &request, None),
             Ok(None)
         );
     }

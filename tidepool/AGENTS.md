@@ -31,5 +31,14 @@
 For launch/prompt changes, use focused owning tests: `actor_host::prompt_catalog`,
 `shared_api_guide_example_handles_success_and_unavailable`, and
 `fork_effort_defaults_low_and_preserves_explicit_overrides` in the `tidepool`
-library. Compile changed consumers and follow root verification guidance.
+library. When changing launch configuration or tool contracts, update their
+scripted-provider fixtures in the same change, including result envelopes and
+the conditions that advance the script. Construct valid fixture setup
+from production configuration types/defaults; assert expected wire behavior
+independently. Keep configuration and request-shape preflight checks in ordinary
+focused tests so drift fails before launching an ignored full-TUI test. Check
+that an exact test selection actually ran tests. Keep background probes alive
+until explicit test cleanup rather than relying on a sleep duration to outlast
+compilation. Compile changed consumers and
+follow root verification guidance.
 Contributor instructions in this file are not shipped model prompts.

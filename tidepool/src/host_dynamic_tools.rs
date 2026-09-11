@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tidepool_actor::{ResidentToolEndpoint, ResidentToolError};
+use tidepool_actor::{ResidentToolEndpoint, ResidentToolError, WorkbenchCancellationOutcome};
 use tidepool_agent::backend::codex::dynamic_tools::DynamicToolFunctionSpec;
 use tidepool_agent::{
-    accept_interactive_session_binding, BackendThreadId, HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+    accept_interactive_session_binding, BackendThreadId, InteractiveSessionBinding,
+    HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
 };
 use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use tokio::net::UnixListener;
@@ -53,6 +54,7 @@ enum AdmissionKind {
 #[derive(Clone)]
 pub(crate) struct HostToolControl {
     bound_thread: Arc<Mutex<Option<BackendThreadId>>>,
+    challenged_binding: Arc<Mutex<Option<InteractiveSessionBinding>>>,
     phase: tokio::sync::watch::Sender<HostToolPhase>,
     endpoint: Arc<dyn ResidentToolEndpoint>,
 }
@@ -82,6 +84,13 @@ impl HostToolControl {
         self.bound_thread
             .try_lock()
             .is_ok_and(|bound| bound.is_some())
+    }
+
+    pub(crate) fn challenged_binding(&self) -> Option<InteractiveSessionBinding> {
+        self.challenged_binding
+            .try_lock()
+            .ok()
+            .and_then(|binding| binding.clone())
     }
 
     /// Immediately quiesce HTTP admission, then return the exact endpoint barrier
@@ -207,6 +216,8 @@ impl HostDynamicToolService {
             dynamic_tools: wire_tools,
             scope: RegistrationScope::PrimaryThread,
             input_control_socket: None,
+            launch_id: uuid::Uuid::new_v4().to_string(),
+            input_control_nonce: uuid::Uuid::new_v4().to_string(),
         };
         Ok(Self {
             state: HostState {
@@ -214,6 +225,7 @@ impl HostDynamicToolService {
                 control: HostToolControl {
                     phase: tokio::sync::watch::channel(HostToolPhase::Serving).0,
                     bound_thread: Arc::new(Mutex::new(None)),
+                    challenged_binding: Arc::new(Mutex::new(None)),
                     endpoint: Arc::clone(&endpoint),
                 },
                 registration: Arc::new(registration),
@@ -268,6 +280,7 @@ impl HostDynamicToolService {
             .route("/v1/dynamic-tools/registration", get(registration))
             .route("/v1/dynamic-tools/session", post(attach_session))
             .route("/v1/dynamic-tools/call", post(call))
+            .route("/v1/dynamic-tools/cancel", post(cancel_workbench))
             .route("/v1/dynamic-tools/completed", post(completed))
             .layer(DefaultBodyLimit::max(REQUEST_LIMIT))
             .with_state(self.state);
@@ -294,6 +307,8 @@ struct Registration {
     scope: RegistrationScope,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_control_socket: Option<PathBuf>,
+    launch_id: String,
+    input_control_nonce: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -324,6 +339,167 @@ struct CompletionRequest {
     protocol_version: u32,
     thread_id: String,
     context_call_id: String,
+}
+
+/// Exact native/application custody supplied by the challenged session plus
+/// the complete hosted invocation coordinate. The resident owner derives its
+/// opaque execution identity from this coordinate; the HTTP host never issues
+/// or substitutes one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkbenchCancellationRequest {
+    protocol_version: u32,
+    thread_id: String,
+    turn_id: String,
+    call_id: String,
+    context_call_id: Option<String>,
+    namespace: Option<String>,
+    launch_id: String,
+    application_instance_id: String,
+    session_generation: u64,
+    input_control_nonce: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum WorkbenchCancellationResponse {
+    Cancelled {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+        reply: CallResponse,
+    },
+    Expired {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+        reply: CallResponse,
+    },
+    Unconfirmed {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+    },
+    NotSleeping {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+    },
+    UnknownEvaluation {
+        execution: tidepool_runtime::session::WorkbenchExecutionId,
+    },
+}
+
+impl WorkbenchCancellationResponse {
+    fn from_outcome(outcome: WorkbenchCancellationOutcome) -> Self {
+        match outcome {
+            WorkbenchCancellationOutcome::Cancelled { execution, reply } => Self::Cancelled {
+                execution,
+                reply: workbench_reply(reply),
+            },
+            WorkbenchCancellationOutcome::Expired { execution, reply } => Self::Expired {
+                execution,
+                reply: workbench_reply(reply),
+            },
+            WorkbenchCancellationOutcome::Unconfirmed { execution } => {
+                Self::Unconfirmed { execution }
+            }
+            WorkbenchCancellationOutcome::NotSleeping { execution } => {
+                Self::NotSleeping { execution }
+            }
+            WorkbenchCancellationOutcome::UnknownEvaluation { execution } => {
+                Self::UnknownEvaluation { execution }
+            }
+        }
+    }
+}
+
+fn workbench_reply(reply: tidepool_actor::KernelWorkbenchReply) -> CallResponse {
+    match reply {
+        Ok(response) => CallResponse::domain(
+            ToolKind::Custom,
+            serde_json::to_value(response).expect("WorkbenchResponse serialization is infallible"),
+        ),
+        Err(error) => CallResponse::failure(&HostToolFailure::Dispatch(
+            ResidentToolError::Invocation(error),
+        )),
+    }
+}
+
+async fn cancel_workbench(
+    State(state): State<HostState>,
+    Json(request): Json<WorkbenchCancellationRequest>,
+) -> Result<Json<WorkbenchCancellationResponse>, (StatusCode, String)> {
+    if !state.control.admits(AdmissionKind::CompletionOrRead) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tool host is draining".into(),
+        ));
+    }
+    if request.protocol_version != PROTOCOL_VERSION {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unsupported dynamic-tool protocol version {}; expected {PROTOCOL_VERSION}",
+                request.protocol_version
+            ),
+        ));
+    }
+    if request.namespace.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid workbench cancellation namespace".into(),
+        ));
+    }
+    let bound = state.control.bound_thread.lock().await.clone();
+    if bound.as_ref().map(|thread| thread.0.as_str()) != Some(request.thread_id.as_str()) {
+        return Err((
+            StatusCode::CONFLICT,
+            "workbench cancellation thread does not match bound thread".into(),
+        ));
+    }
+    let challenged = state.control.challenged_binding.lock().await.clone();
+    let Some(challenged) = challenged else {
+        return Err((
+            StatusCode::CONFLICT,
+            "workbench cancellation requires a challenged native session".into(),
+        ));
+    };
+    if challenged.launch_id != request.launch_id
+        || challenged.instance_id != request.application_instance_id
+        || challenged.generation.get() != request.session_generation
+        || challenged.nonce != request.input_control_nonce
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "workbench cancellation session identity does not match current generation".into(),
+        ));
+    }
+    if request.turn_id.is_empty()
+        || request.call_id.is_empty()
+        || request
+            .context_call_id
+            .as_ref()
+            .is_some_and(String::is_empty)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "incomplete workbench cancellation identity".into(),
+        ));
+    }
+
+    let invocation = ToolInvocationContext {
+        context_call_id: request.context_call_id,
+        thread_id: request.thread_id,
+        turn_id: request.turn_id,
+        call_id: request.call_id,
+        namespace: request.namespace,
+    };
+    state
+        .endpoint
+        .cancel_workbench_boxed(invocation)
+        .await
+        .map(WorkbenchCancellationResponse::from_outcome)
+        .map(Json)
+        .map_err(|error| {
+            let status = match error {
+                ResidentToolError::CancellationUnsupported => StatusCode::NOT_IMPLEMENTED,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.to_string())
+        })
 }
 
 async fn completed(
@@ -377,6 +553,14 @@ struct SessionRequest {
     thread_id: String,
     #[serde(default)]
     input_control_socket: Option<PathBuf>,
+    #[serde(default)]
+    launch_id: Option<String>,
+    #[serde(default)]
+    application_instance_id: Option<String>,
+    #[serde(default)]
+    session_generation: Option<u64>,
+    #[serde(default)]
+    input_control_nonce: Option<String>,
 }
 
 async fn attach_session(
@@ -394,6 +578,35 @@ async fn attach_session(
             "input endpoint does not match actor socket",
         ));
     }
+    let challenged_binding = if request.input_control_socket.is_some() {
+        let generation = request
+            .session_generation
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or((StatusCode::BAD_REQUEST, "missing native session generation"))?;
+        let launch_id = request
+            .launch_id
+            .filter(|value| value == &state.registration.launch_id)
+            .ok_or((StatusCode::CONFLICT, "launch challenge does not match"))?;
+        let nonce = request
+            .input_control_nonce
+            .filter(|value| value == &state.registration.input_control_nonce)
+            .ok_or((StatusCode::CONFLICT, "input challenge does not match"))?;
+        let instance_id = request
+            .application_instance_id
+            .filter(|value| !value.is_empty())
+            .ok_or((
+                StatusCode::BAD_REQUEST,
+                "missing native application instance",
+            ))?;
+        Some(InteractiveSessionBinding {
+            launch_id,
+            instance_id,
+            generation,
+            nonce,
+        })
+    } else {
+        None
+    };
     let thread = parse_thread(request.thread_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid thread id"))?;
     if state
@@ -443,6 +656,9 @@ async fn attach_session(
                 "could not settle queued forks",
             )
         })?;
+    }
+    if let Some(binding) = challenged_binding {
+        *state.control.challenged_binding.lock().await = Some(binding);
     }
     *bound = Some(thread);
     Ok(StatusCode::NO_CONTENT)
@@ -762,7 +978,10 @@ async fn call(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::num::NonZeroU64;
+    use std::sync::Mutex as StdMutex;
     use tidepool_actor::ResidentToolFuture;
+    use tidepool_runtime::session::{WorkbenchExecutionId, WorkbenchResponse, WorkbenchRunStatus};
     use tidepool_tool::{CustomToolDeclaration, ToolDeclaration};
 
     struct EchoEndpoint {
@@ -805,6 +1024,222 @@ pub(crate) mod tests {
                 description: "Run Haskell".into(),
             })],
         })
+    }
+
+    struct CancellationEndpoint {
+        tools: Vec<HostedTool>,
+        calls: Arc<StdMutex<Vec<ToolInvocationContext>>>,
+    }
+
+    impl ResidentToolEndpoint for CancellationEndpoint {
+        fn tools(&self) -> &[HostedTool] {
+            &self.tools
+        }
+
+        fn instructions(&self) -> Option<&str> {
+            None
+        }
+
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+            Box::pin(async {
+                Err(ResidentToolError::InvalidInvocation(
+                    "dispatch must not be used for cancellation".into(),
+                ))
+            })
+        }
+
+        fn cancel_workbench_boxed(
+            &self,
+            invocation: ToolInvocationContext,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<WorkbenchCancellationOutcome, ResidentToolError>,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            self.calls.lock().unwrap().push(invocation.clone());
+            Box::pin(async move {
+                let execution =
+                    WorkbenchExecutionId::from_digest(if invocation.call_id == "call-a" {
+                        [0x0a; 16]
+                    } else {
+                        [0x0b; 16]
+                    });
+                if invocation.call_id == "call-a" {
+                    Ok(WorkbenchCancellationOutcome::Cancelled {
+                        execution,
+                        reply: Ok(WorkbenchResponse {
+                            status: WorkbenchRunStatus::RequestCancelled,
+                            items: vec![],
+                            next_index: 0,
+                            total: 2,
+                        }),
+                    })
+                } else {
+                    Ok(WorkbenchCancellationOutcome::UnknownEvaluation { execution })
+                }
+            })
+        }
+    }
+
+    fn cancellation_endpoint() -> (
+        Arc<CancellationEndpoint>,
+        Arc<StdMutex<Vec<ToolInvocationContext>>>,
+    ) {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        (
+            Arc::new(CancellationEndpoint {
+                tools: vec![HostedTool::Custom(CustomToolDeclaration {
+                    name: "haskell".into(),
+                    description: "Run Haskell".into(),
+                })],
+                calls: Arc::clone(&calls),
+            }),
+            calls,
+        )
+    }
+
+    async fn challenged_cancellation_state(endpoint: Arc<dyn ResidentToolEndpoint>) -> HostState {
+        let state = HostDynamicToolService::new(endpoint, "/tmp/cancellation-binding".into(), None)
+            .unwrap()
+            .state;
+        *state.control.bound_thread.lock().await = Some(BackendThreadId(
+            "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+        ));
+        *state.control.challenged_binding.lock().await = Some(InteractiveSessionBinding {
+            launch_id: "launch".into(),
+            instance_id: "application".into(),
+            generation: NonZeroU64::new(7).unwrap(),
+            nonce: "nonce".into(),
+        });
+        state
+    }
+
+    fn cancellation_request(call_id: &str) -> WorkbenchCancellationRequest {
+        WorkbenchCancellationRequest {
+            protocol_version: PROTOCOL_VERSION,
+            thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+            turn_id: "turn".into(),
+            call_id: call_id.into(),
+            context_call_id: Some("outer".into()),
+            namespace: None,
+            launch_id: "launch".into(),
+            application_instance_id: "application".into(),
+            session_generation: 7,
+            input_control_nonce: "nonce".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_cancellation_reconciles_while_quiescing_without_redispatch() {
+        let (endpoint, calls) = cancellation_endpoint();
+        let state = challenged_cancellation_state(endpoint).await;
+
+        let mut stale = cancellation_request("call-a");
+        stale.session_generation = 6;
+        let error = cancel_workbench(State(state.clone()), Json(stale))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(calls.lock().unwrap().is_empty());
+
+        state.control.quiesce();
+        for (call_id, expected_status, expected_execution) in [
+            (
+                "call-a",
+                "cancelled",
+                "exec-0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+            ),
+            (
+                "call-b",
+                "unknownEvaluation",
+                "exec-0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+            ),
+            (
+                "call-a",
+                "cancelled",
+                "exec-0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+            ),
+        ] {
+            let response =
+                cancel_workbench(State(state.clone()), Json(cancellation_request(call_id)))
+                    .await
+                    .unwrap();
+            let response = serde_json::to_value(response.0).unwrap();
+            assert_eq!(response["status"], expected_status);
+            assert_eq!(response["execution"], expected_execution);
+            if expected_status == "cancelled" {
+                assert_eq!(response["reply"]["success"], true);
+                let reply: serde_json::Value = serde_json::from_str(
+                    response["reply"]["contentItems"][0]["text"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reply["status"], "requestCancelled");
+                assert_eq!(reply["items"], serde_json::json!([]));
+            }
+        }
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0], calls[2]);
+        assert_ne!(calls[0].call_id, calls[1].call_id);
+        drop(calls);
+
+        state.control.drain();
+        let error = cancel_workbench(State(state), Json(cancellation_request("call-a")))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn cancellation_rejects_foreign_protocol_thread_and_legacy_session() {
+        let (endpoint, calls) = cancellation_endpoint();
+        let state = challenged_cancellation_state(endpoint).await;
+
+        let mut foreign_protocol = cancellation_request("call-a");
+        foreign_protocol.protocol_version += 1;
+        assert_eq!(
+            cancel_workbench(State(state.clone()), Json(foreign_protocol))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut foreign_namespace = cancellation_request("call-a");
+        foreign_namespace.namespace = Some("tidepool_actor".into());
+        assert_eq!(
+            cancel_workbench(State(state.clone()), Json(foreign_namespace))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut foreign_thread = cancellation_request("call-a");
+        foreign_thread.thread_id = "019fe92a-1a66-7820-9481-c0a2d108aba1".into();
+        assert_eq!(
+            cancel_workbench(State(state.clone()), Json(foreign_thread))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+
+        *state.control.challenged_binding.lock().await = None;
+        assert_eq!(
+            cancel_workbench(State(state), Json(cancellation_request("call-a")))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[derive(Clone, Copy)]
@@ -866,6 +1301,10 @@ pub(crate) mod tests {
             State(state.clone()),
             Json(SessionRequest {
                 input_control_socket: None,
+                launch_id: None,
+                application_instance_id: None,
+                session_generation: None,
+                input_control_nonce: None,
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
             }),
@@ -1084,6 +1523,10 @@ pub(crate) mod tests {
             State(state.clone()),
             Json(SessionRequest {
                 input_control_socket: None,
+                launch_id: None,
+                application_instance_id: None,
+                session_generation: None,
+                input_control_nonce: None,
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: thread.into(),
             }),
@@ -1320,7 +1763,36 @@ pub(crate) mod tests {
         assert_eq!(foreign.status(), StatusCode::BAD_REQUEST);
         assert!(!binding.exists());
 
-        let session = serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "threadId": thread, "inputControlSocket": input});
+        let stale = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "threadId": thread,
+            "inputControlSocket": input,
+            "launchId": registration["launchId"],
+            "applicationInstanceId": "native-instance-1",
+            "sessionGeneration": 1,
+            "inputControlNonce": "stale-nonce",
+        });
+        assert_eq!(
+            client
+                .post("http://localhost/v1/dynamic-tools/session")
+                .json(&stale)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(!binding.exists());
+
+        let session = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "threadId": thread,
+            "inputControlSocket": input,
+            "launchId": registration["launchId"],
+            "applicationInstanceId": "native-instance-1",
+            "sessionGeneration": 1,
+            "inputControlNonce": registration["inputControlNonce"],
+        });
         for _ in 0..2 {
             assert_eq!(
                 client
@@ -1343,6 +1815,29 @@ pub(crate) mod tests {
         let persisted: serde_json::Value =
             serde_json::from_slice(&tokio::fs::read(&binding).await.unwrap()).unwrap();
         assert_eq!(persisted["input_control_socket"], serde_json::json!(input));
+
+        let cancellation = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "threadId": thread,
+            "turnId": "turn-1",
+            "callId": "call-1",
+            "contextCallId": "outer-exec",
+            "namespace": null,
+            "launchId": registration["launchId"],
+            "applicationInstanceId": "native-instance-1",
+            "sessionGeneration": 1,
+            "inputControlNonce": registration["inputControlNonce"],
+        });
+        assert_eq!(
+            client
+                .post("http://localhost/v1/dynamic-tools/cancel")
+                .json(&cancellation)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
 
         let response: serde_json::Value = client
             .post("http://localhost/v1/dynamic-tools/call")

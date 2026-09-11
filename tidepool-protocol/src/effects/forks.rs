@@ -116,6 +116,7 @@ pub fn forks() -> Effect {
                         "EffectWorktreeRegistry",
                         "EffectWorktreeAllocation",
                         "EffectWorktreeIntegration",
+                        "EffectSleep",
                         "EffectCommands",
                         "EffectConsole",
                         "EffectNotifications",

@@ -102,6 +102,9 @@ fn fault_child() {
             .unwrap()
             .submitted()
             .unwrap();
+        inbox
+            .confirm_presented_exact(row.sequence, &"owner".into())
+            .unwrap();
         for _ in 1..COMPACT_ACKNOWLEDGED_ROWS {
             inbox.publish("legacy".into()).unwrap();
         }
@@ -126,7 +129,7 @@ fn fault_child() {
             reopened.observe_receipt(row.sequence).unwrap(),
             ReceiptLookup::Retained(ReceiptEvidence {
                 context: "owner".into(),
-                phase: DeliveryPhase::Submitted
+                phase: DeliveryPhase::Presented
             })
         );
         assert_eq!(

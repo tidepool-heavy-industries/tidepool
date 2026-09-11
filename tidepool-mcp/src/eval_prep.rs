@@ -197,6 +197,10 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     // vocabulary check this function doesn't otherwise make per-effect.
     out.push_str("import Data.Void (Void)\n");
     out.push_str("import Data.Kind (Type)\n");
+    // Stable model-facing duration type used by the resident Sleep effect.
+    // Its constructors stay hidden; authored units receive the smart
+    // constructors through Sleep's row-specific extra imports.
+    out.push_str("import Tidepool.Duration (Duration)\n");
     // Leaf representation used by the exit-indexed private worker kernel.
     // This module imports no effects, so the generated vocabulary can name
     // `ExitRef exit` without creating a Core -> Actor facade -> Core cycle.
@@ -1368,6 +1372,20 @@ mod tests {
         let other = crate::RowArgs::at("Finalize", ["Contribution"]).importing(["HarnessTypes"]);
         assert_ne!(pinned, effects_shim_module_source(&decls, &other));
         assert_eq!(core, effects_core_module_source_for(&decls));
+    }
+
+    #[test]
+    fn stable_core_imports_the_sleep_duration_type() {
+        let core = effects_core_module_source_for(&[crate::sleep_decl()]);
+        assert!(
+            core.contains("import Tidepool.Duration (Duration)"),
+            "{core}"
+        );
+        assert!(core.contains("SleepWith :: Duration -> Sleep ()"), "{core}");
+        assert!(
+            core.contains("sleep :: forall effs. Member Sleep effs => Duration -> Eff effs ()"),
+            "{core}"
+        );
     }
 
     /// A row entry stays ONE element: a function or applied answer type is

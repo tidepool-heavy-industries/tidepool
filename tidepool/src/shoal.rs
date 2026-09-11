@@ -80,6 +80,15 @@ pub struct HostOptions {
     pub agent: ShoalAgentDefaults,
 }
 
+/// Early CLI boundary for the private per-launch process supervisor.
+///
+/// This dispatch is called by the binary before it constructs Tokio, compiler,
+/// provider, or actor-host state. The node helper owns exactly one manifest and
+/// never falls back to pane/PID supervision.
+pub fn process_supervisor(manifest: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    tidepool_node::run_process_supervisor(&manifest).map_err(Into::into)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShoalAgentDefaults {
@@ -582,6 +591,15 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         "compiler: {} (tmux window Compiler)",
         compiler_socket.display()
     );
+    println!(
+        "interactive agent: {} (version {}, sha256 {}, package {})",
+        interactive_agent.executable().display(),
+        interactive_agent.version(),
+        interactive_agent.executable_sha256(),
+        interactive_agent
+            .package_root()
+            .map_or_else(|| "unpackaged".into(), |path| path.display().to_string())
+    );
 
     let interactive = match wait_until_interactive(&tmux, &status_path, &run_id).await {
         Ok(interactive) => interactive,
@@ -829,6 +847,8 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
         workspace = %options.workspace.display(),
         interactive_agent = %options.interactive_agent.executable().display(),
         interactive_agent_version = options.interactive_agent.version(),
+        interactive_agent_sha256 = options.interactive_agent.executable_sha256(),
+        interactive_agent_package = %options.interactive_agent.package_root().map_or_else(|| "unpackaged".into(), |path| path.display().to_string()),
         model = %options.agent.model,
         effort = %options.agent.effort,
         detailed_log = %log_path.display(),
@@ -1323,10 +1343,6 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
 
 fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     Box::new(std::io::Error::other(message.into()))
-}
-
-pub fn process_supervisor(manifest: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    tidepool_node::run_process_supervisor(&manifest).map_err(Into::into)
 }
 
 #[cfg(test)]

@@ -34,8 +34,6 @@ mod datacon_never_used_as_value;
 mod deep_force_nf;
 #[path = "../e6_no_rules_pragma.rs"]
 mod e6_no_rules_pragma;
-#[path = "../engine_review.rs"]
-mod engine_review;
 #[path = "../effect_machine.rs"]
 mod effect_machine;
 #[path = "../emit_case.rs"]
@@ -50,6 +48,8 @@ mod emit_join_advanced;
 mod emit_letrec_advanced;
 #[path = "../emit_letrec_con.rs"]
 mod emit_letrec_con;
+#[path = "../engine_review.rs"]
+mod engine_review;
 #[path = "../external_cancellation.rs"]
 mod external_cancellation;
 #[path = "../external_env_resolution.rs"]

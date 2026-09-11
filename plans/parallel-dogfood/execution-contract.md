@@ -1,10 +1,19 @@
-# Execution contract
+# Historical execution contract
 
-Planner: the initial Astra root in this Shoal session. Integration owner: one
-Sol coordinator. Product authority: [applications](applications.md) A0–A8 and
-[engine](engine.md) M0–M7, without reduced acceptance. The commission authorizes
-parallel implementation after the initial proposal review; older sequential or
-planning-only restrictions do not restrict that released implementation.
+This is a historical execution contract for superseded engine and applications
+allocations. The later sleep/applications foreground campaign has completed its
+implementation and is accepted on unified main; see the
+[applications main integration record](../interactive-applications/main-integration.md).
+Neither this contract nor the foreground launch record authorizes recommissioning
+those branches. Engine work remains preserved and excluded. A next campaign needs
+a new chosen scope and launch record. The recursive Sol guidance below remains a
+reference where it still matches that new scope.
+
+The allocation used the initial Astra root as planner and one Sol coordinator as
+integration owner. Product authority covered [applications](applications.md)
+A0–A8 and [engine](engine.md) M0–M7 without reduced acceptance. Its commission
+authorized parallel implementation after the initial proposal review. These roles
+and authorizations ended with that campaign.
 
 ## Restart baseline and running tools
 

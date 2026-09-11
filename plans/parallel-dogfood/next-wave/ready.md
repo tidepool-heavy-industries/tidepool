@@ -1,22 +1,18 @@
-# Next launch prerequisites
+# Historical launch readiness record
 
-Host configuration is activated and the operator confirmed the account switch
-and launch authorization on 2026-09-10. The launch selection records the exact
-packaged runner, clean-environment bootstrap results and workspace hashes.
-Launch only after those checks pass.
+This page records the prerequisites used for the 2026-09-10 sleep and applications
+launch. It is not a current launch checklist or authorization. The selected
+continuations are accepted on unified Tidepool main with native Codex
+`d0e5fd48e0`. The
+[main integration record](../../interactive-applications/main-integration.md)
+names the source and checks.
 
-Before launch, record:
+The historical launch required an exact packaged runner, clean-environment
+bootstrap evidence, verified memory and swap limits, a working command-resource
+service, and explicit applications and sleep source selections. It kept candidate
+tools separate from the running harness. Old R6/R7 refs and launch records remain
+provenance, not the source for another run.
 
-- Accepted main and matched native runtime revisions, immutable runner and package.
-- Verified active swarm memory/swap limits and working command-resource service.
-- Preserved R7 sources from [resume.md](resume.md), with applications/native
-  continuations reconciled on the selected baselines, or explicitly assigned to
-  reconcile before implementation forks when no prepared heads are supplied. Old prepared R6 restart
-  branches are historical, not the next source selection.
-- The applications [wrap-up assignment](applications.md) and
-  [resident sleep MVP](../../next/resident-sleep.md). Engine and shared-server
-  migration are paused.
-
-The launch record is authoritative for executable/package hashes and any prepared
-continuations. Keep running tools frozen and product candidate tools separately
-selected. This file does not authorize starting agents.
+Engine and shared-server migration were excluded and remain separately preserved.
+A future campaign needs a newly chosen scope, current main/package hashes, fresh
+environment evidence, and explicit launch authorization.

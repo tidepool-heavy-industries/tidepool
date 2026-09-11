@@ -430,6 +430,28 @@ fn scoped_custody_exact_claim_and_pre_spawn_failure() {
         .unwrap();
 }
 
+#[test]
+fn scoped_custody_cancellation_cannot_fabricate_not_spawned() {
+    let fixture = Fixture::new(1);
+    let map = owners();
+    fixture.register(&map);
+    let slot = fixture.claim(&map, fixture.custody.actor).unwrap();
+
+    map.lock()
+        .get_mut(&fixture.custody.actor)
+        .unwrap()
+        .retired(cancelled());
+
+    assert!(matches!(*slot.lock(), ScopedProcessSlot::Reserved));
+    assert!(matches!(
+        fixture.custody.state.lock().launch,
+        LaunchCustody::ScopedClaimed
+    ));
+    let successor = ActorRef::first(tidepool_actor::ActorId(2));
+    assert!(fixture.custody.transfer_to(successor).is_err());
+    fixture.retained();
+}
+
 #[tokio::test]
 async fn scoped_custody_lost_spawn_and_retirement_result_remain_addressable() {
     let fixture = Fixture::new(1);

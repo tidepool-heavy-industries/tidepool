@@ -196,6 +196,7 @@ pub enum ForkGroupError {
 
 struct ForkGroup {
     owner: ActorRef,
+    completion_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     reservations: Vec<ActorPathReservation>,
     claimed: usize,
     children: Vec<ActorRef>,
@@ -343,6 +344,34 @@ impl ForkGroupRegistry {
         children: Vec<ActorPathSegment>,
         maximum_active_descendants: impl Into<Option<usize>>,
     ) -> Result<(ForkGroupId, Vec<ActorPathReservation>), ForkGroupError> {
+        self.begin_inner(owner, group, children, maximum_active_descendants, None)
+    }
+
+    pub(crate) fn begin_at_boundary(
+        &self,
+        owner: ActorRef,
+        group: ActorPath,
+        children: Vec<ActorPathSegment>,
+        maximum_active_descendants: impl Into<Option<usize>>,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<(ForkGroupId, Vec<ActorPathReservation>), ForkGroupError> {
+        self.begin_inner(
+            owner,
+            group,
+            children,
+            maximum_active_descendants,
+            Some(boundary),
+        )
+    }
+
+    fn begin_inner(
+        &self,
+        owner: ActorRef,
+        group: ActorPath,
+        children: Vec<ActorPathSegment>,
+        maximum_active_descendants: impl Into<Option<usize>>,
+        completion_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    ) -> Result<(ForkGroupId, Vec<ActorPathReservation>), ForkGroupError> {
         let mut state = self.state.lock();
         if state.cleaning.contains(&owner) {
             return Err(ForkGroupError::Cleaning(owner));
@@ -377,6 +406,7 @@ impl ForkGroupRegistry {
             id,
             ForkGroup {
                 owner,
+                completion_boundary,
                 reservations: reservations.clone(),
                 claimed: 0,
                 children: Vec::with_capacity(reservations.len()),
@@ -622,14 +652,20 @@ impl ForkGroupRegistry {
         })
     }
 
-    pub(crate) fn ready_groups(&self, owner: ActorRef) -> Vec<(ForkGroupId, Vec<ActorRef>)> {
+    pub(crate) fn ready_groups_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Vec<(ForkGroupId, Vec<ActorRef>)> {
         let mut groups: Vec<_> = self
             .state
             .lock()
             .groups
             .iter()
             .filter_map(|(id, group)| {
-                (group.owner == owner && *group.phase.borrow() == ForkGroupPhase::Ready)
+                (group.owner == owner
+                    && group.completion_boundary.as_ref() == Some(boundary)
+                    && *group.phase.borrow() == ForkGroupPhase::Ready)
                     .then(|| (*id, group.children.clone()))
             })
             .collect();
@@ -698,6 +734,30 @@ impl ForkGroupRegistry {
         selected: Option<&[ForkGroupId]>,
     ) -> Vec<ActorRef> {
         self.abort_pending(owner, false, selected)
+    }
+
+    pub(crate) fn abort_incomplete_at_boundary(
+        &self,
+        owner: ActorRef,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Vec<ActorRef> {
+        let selected = {
+            let state = self.state.lock();
+            state
+                .groups
+                .iter()
+                .filter_map(|(id, group)| {
+                    (group.owner == owner
+                        && group.completion_boundary.as_ref() == Some(boundary)
+                        && matches!(
+                            *group.phase.borrow(),
+                            ForkGroupPhase::Staging | ForkGroupPhase::Aborted
+                        ))
+                    .then_some(*id)
+                })
+                .collect::<Vec<_>>()
+        };
+        self.abort_pending(owner, false, Some(&selected))
     }
 
     pub(crate) fn has_incomplete(&self, owner: ActorRef) -> bool {
@@ -1143,6 +1203,71 @@ mod tests {
             vec![ActorRef::first(ActorId(3))]
         );
         assert!(groups.abort_unpublished(owner).is_empty());
+    }
+
+    #[test]
+    fn completion_boundary_selects_only_its_exact_pending_groups() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let owner = ActorRef::first(ActorId(1));
+        let first_boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "thread-a".into(),
+            call_id: "call-a".into(),
+        };
+        let second_boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "thread-a".into(),
+            call_id: "call-b".into(),
+        };
+        let unmatched = tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "thread-b".into(),
+            call_id: "call-a".into(),
+        };
+
+        let make_group = |name: &str,
+                          child: ActorRef,
+                          boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+                          ready: bool| {
+            let (group, reservations) = groups
+                .begin_at_boundary(
+                    owner,
+                    ActorPath::parse(&format!("root/{name}")).unwrap(),
+                    vec![segment("child")],
+                    None,
+                    boundary,
+                )
+                .unwrap();
+            groups
+                .claim(group, owner, &reservations[0].allocated)
+                .unwrap();
+            groups.attach_child(group, owner, child).unwrap();
+            groups.request_commit(group, owner).unwrap();
+            if ready {
+                groups.mark_ready(group, child).unwrap();
+            }
+            group
+        };
+        let first_child = ActorRef::first(ActorId(2));
+        let second_child = ActorRef::first(ActorId(3));
+        let _first = make_group("first", first_child, first_boundary.clone(), false);
+        let second = make_group("second", second_child, second_boundary.clone(), true);
+
+        assert!(groups
+            .abort_incomplete_at_boundary(owner, &unmatched)
+            .is_empty());
+        assert!(groups
+            .ready_groups_at_boundary(owner, &unmatched)
+            .is_empty());
+        assert_eq!(
+            groups.abort_incomplete_at_boundary(owner, &first_boundary),
+            vec![first_child]
+        );
+        assert_eq!(
+            groups.ready_groups_at_boundary(owner, &second_boundary),
+            vec![(second, vec![second_child])]
+        );
+        groups.publish_group(second, owner).unwrap();
+        assert!(groups
+            .ready_groups_at_boundary(owner, &second_boundary)
+            .is_empty());
     }
 
     #[test]
