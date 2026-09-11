@@ -85,3 +85,65 @@ to the same command, without a second process registry.
 Work belongs on main. Applications/sleep candidates retain their existing
 owners and integrate at a later boundary. No engine refactor, new process
 registry, MCP raw-input shim, paid inference fixture or full test battery.
+
+## Remaining implementation sequence
+
+Native reference: Codex `80e36633f515b03e11189e8516be21065e73335e`.
+The implementation must cross the native **tool** boundary, not just call a
+process launcher with similarly named arguments.
+
+1. **Preserve the invoking native context.** Extend the existing pending dynamic
+   call in `core/src/state/turn.rs` to retain the invoking `StepContext`,
+   cancellation and diff tracker while the Haskell handler is running. Do not
+   reconstruct these from the latest thread settings: `StepContext.tool_router`
+   is the actual sampled tool plan, including availability and shell options.
+   Avoid an `Arc<Session>` cycle inside the session's own pending-call map.
+   Route a narrowly typed execution/input request through that captured router;
+   reject absent, completed, foreign-thread or cancelled parent calls before
+   invoking a tool. Do not expose unrestricted recursive dynamic-tool dispatch.
+2. **Reuse native execution and input handlers.** The production path must reach
+   `ExecCommandHandler` and `WriteStdinHandler` through the registry, preserving
+   hooks, approval handling and native structured output. Publish their actual
+   configured schemas rather than reproducing option policy in Haskell.
+   The compiled Haskell handler remains the authored entry point. Native tool
+   requests and results cross its effect boundary as data, without compilation.
+   Keep the raw Bash shortcut alongside the structured native surface.
+3. **Join exact process custody and retained output.** Extend the existing
+   command/native process owners so the native session and `Cmd.Job` designate
+   one process. A numeric native session ID alone is insufficient: native IDs
+   can be reused after removal, and `write_stdin` already revalidates process
+   identity after approval. Preserve that invariant through later Haskell
+   inspection, input and cancellation. Native output collection drains its
+   buffer; retain output at the owning capture boundary, before draining or
+   formatting, for bounded non-consuming Haskell reads. Do not reconstruct
+   retained output from truncated model-facing responses. Continue enforcing
+   Shoal memory admission and resource cleanup at the actual launch boundary.
+4. **Wire and verify the complete surface.** Connect the native owner through
+   the existing owning-TUI transport and command interpreter. Execution and
+   stdin must remain usable directly, without discovering a Haskell binding.
+   Automatic bindings supplement that interface for composition and recovery.
+   Preserve the agreed 256 MiB/30-second defaults and bounded presentation.
+
+Each stage must acquire a production consumer before being called complete.
+The native boundary is part of this task; it is not deferred to the separate
+applications megatask. Coordinate file ownership before changing overlapping
+native files, and keep the live runner immutable.
+
+### Differential acceptance
+
+Use the same scripted provider and actual native binaries for direct and
+Haskell-backed calls. Compare observable behavior, allowing only the agreed
+resource/foreground defaults and additional retained-job affordances.
+
+| Boundary | Required evidence |
+|---|---|
+| Input and discovery | Configured native schemas; workdir, shell/login, PTY, output budget and applicable permission fields accepted/rejected identically |
+| Execution context | Captured shell/environment and hooks; actual approval acceptance/rejection; no use of newer thread settings during a suspended handler |
+| Background interaction | Direct session receipt; input and empty polling; incremental output; terminal exit; no duplicate execution after interrupted observation |
+| Custody | Retained job controls the original process; retired/reused numeric session cannot redirect it; foreign actor cannot acquire control |
+| Output | Native response shape and bounds; Unicode; native polling followed by retained Haskell reads; explicit retention gaps |
+| Resources and failures | Real command OOM leaves TUI alive; cancellation and cleanup; rejected/stale parent invocation starts no process; transport uncertainty does not trigger retry |
+| Composition | Compiled handler can consume a native result and perform another effect; ordinary calls need no Haskell discovery; later Haskell uses the same job |
+
+Run focused native/core and bridge checks first, then the matched TUI fixture.
+The existing raw-tool fixture alone cannot prove this matrix.
