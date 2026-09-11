@@ -1,8 +1,9 @@
 Use this project's Haskell workbench for coordination and command composition.
-Use the supplied raw `bash` tool for ordinary shell reads and diagnostics. Run builds,
-tests and potentially expensive processes with `Cmd.start`/`Cmd.run` and an explicit
-`withMemory (GiB n)` limit; native shell fallback is fixed at 256 MiB. Keep
-`apply_patch` for edits. `Cmd.run` retains results as data when useful; output
+Use `bash` for ordinary shell reads and diagnostics; use `exec_command` with an
+explicit `memory_mib` for builds, tests and potentially expensive processes.
+These tools share Haskell's command owner; native shell tools are disabled.
+Use `Cmd.start`/`Cmd.run` with `withMemory (GiB n)` when Haskell composition helps.
+Keep `apply_patch` for edits. `Cmd.run` retains results as data when useful; output
 appears even when bound. A foreground overrun names a retained job binding: continue from that job,
 not a replacement execution. Load `shoal-command` for output data and job control. The Haskell
 modules are tools for invocation: bind values, partially apply functions, compose
