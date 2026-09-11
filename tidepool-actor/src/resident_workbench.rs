@@ -3346,14 +3346,25 @@ where
         context: crate::ActorSessionContext,
         hole: ResidentHole,
         reason: String,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
+    ) -> (
+        Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        bool,
+    ) {
+        let result = self
+            .access
             .with_machine(context, move |session, _, _| {
-                session
-                    .abort(hole.cont_id(), reason)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                let result = session.abort(hole.cont_id(), reason);
+                let consumed = !session.parked_holes().contains(&hole.cont_id());
+                Ok((result, consumed))
             })
-            .await
+            .await;
+        match result {
+            Ok((result, consumed)) => (
+                result.map_err(ResidentActorWorkbenchError::Resident),
+                consumed,
+            ),
+            Err(error) => (Err(error), false),
+        }
     }
 
     pub(crate) async fn resume_int(

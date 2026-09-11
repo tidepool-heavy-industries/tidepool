@@ -1566,7 +1566,7 @@ where
                             control.finish_sleep();
                             outcome
                         } else {
-                            let outcome = self.environment
+                            let (outcome, consumed) = self.environment
                                 .runner
                                 .abort_live(
                                     context.clone(),
@@ -1574,14 +1574,14 @@ where
                                     "sleep interrupted by delivered input".into(),
                                 )
                                 .await;
-                            if outcome.is_ok() {
+                            if consumed {
                                 control.acknowledge_cancellation();
                             }
                             outcome
                         }
                     }
                     () = control.wait_for_cancellation() => {
-                        let outcome = self.environment
+                        let (outcome, consumed) = self.environment
                             .runner
                             .abort_live(
                                 context.clone(),
@@ -1589,14 +1589,14 @@ where
                                 "sleep interrupted by delivered input".into(),
                             )
                             .await;
-                        if outcome.is_ok() {
+                        if consumed {
                             control.acknowledge_cancellation();
                         }
                         outcome
                     }
                     terminal = kernel.wait_requested_shutdown() => {
                         if control.request_cancellation() || control.cancellation_requested() {
-                            let outcome = self.environment
+                            let (outcome, consumed) = self.environment
                                 .runner
                                 .abort_live(
                                     context.clone(),
@@ -1604,7 +1604,7 @@ where
                                     format!("sleep interrupted by actor retirement: {}", terminal.summary),
                                 )
                                 .await;
-                            if outcome.is_ok() {
+                            if consumed {
                                 control.acknowledge_cancellation();
                             }
                             outcome

@@ -2,7 +2,7 @@ use crate as tidepool_actor;
 use std::{sync::Arc, time::Duration};
 use tidepool_actor::{
     ActorExitKind, ActorTerminal, ActorWorkbenchSource, EffectiveRole, Incarnation,
-    LocalResidentDeployment, ResidentForest, ResidentToolEndpoint,
+    LocalResidentDeployment, ResidentForest, ResidentToolEndpoint, WorkbenchCancellationOutcome,
 };
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_runtime::session::{
@@ -336,6 +336,56 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
     let sleep_result = sleeping.await.unwrap().unwrap();
     assert_eq!(sleep_result["status"], "committed");
     assert_eq!(sleep_result["items"].as_array().unwrap().len(), 2);
+
+    let cancel_invocation = invocation(
+        "sleep (minutes 15)\nafterCancelled <- pure (99 :: Int)",
+        "cancelled-sleep",
+    );
+    let cancel_context = cancel_invocation.context.clone().unwrap();
+    let cancelled = {
+        let sleeper_policy = Arc::clone(&sleeper_policy);
+        tokio::spawn(async move { sleeper_policy.dispatch_boxed(cancel_invocation).await })
+    };
+    let cancellation = loop {
+        tokio::task::yield_now().await;
+        match sleeper_policy
+            .cancel_workbench_boxed(cancel_context.clone())
+            .await
+            .unwrap()
+        {
+            WorkbenchCancellationOutcome::UnknownEvaluation { .. }
+            | WorkbenchCancellationOutcome::NotSleeping { .. } => continue,
+            outcome => break outcome,
+        }
+    };
+    assert!(
+        matches!(
+            cancellation,
+            WorkbenchCancellationOutcome::Cancelled { .. }
+        ),
+        "cancellation outcome: {cancellation:?}"
+    );
+    let cancelled_result = cancelled.await.unwrap();
+    assert!(
+        cancelled_result.is_err(),
+        "an interrupted evaluation must not report committed"
+    );
+
+    let next = sleeper_policy
+        .dispatch_boxed(invocation("pure (11 :: Int)", "after-cancellation"))
+        .await
+        .unwrap();
+    assert_eq!(next["status"], "committed");
+    let suffix = sleeper_policy
+        .dispatch_boxed(invocation("afterCancelled", "cancelled-suffix"))
+        .await;
+    match suffix {
+        Ok(response) => assert_eq!(
+            response["status"], "rejected",
+            "the interrupted suffix must not install bindings: {response}"
+        ),
+        Err(_) => {}
+    }
     forest.shutdown().await;
 }
 
