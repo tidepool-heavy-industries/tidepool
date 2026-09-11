@@ -28,8 +28,9 @@ skills = do
   check "skill launches a fresh Sol Medium worker" (checkModel worker == Just "gpt-5.6-sol" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)
   early <- turn owner "cleanup <- releaseGroup (forkGroupHandle worker)\ninspectFull cleanup"
   check "scoped release retains the pending worker instead of cancelling its request" ("CleanupBlocked" `Text.isInfixOf` lastOutput early)
-  joined <- example owner "shoal-define-actors" 0
-  check "record skill joins differently typed inputs" (lastOutput joined == "Just (\"abc123\",4)")
+  void $ example owner "shoal-define-actors" 0
+  joined <- turn owner "(== Just (\"abc123\",4)) <$> R.call (joined endpoints) ()"
+  check "record skill joins differently typed inputs" (lastOutput joined == "True")
   initialResults <- example owner "shoal-define-actors" 1
   check "record skill attaches the exact pending request" (lastOutput initialResults == "0")
   void $ turn (checkActor worker) ("let candidate = Candidate " <> literal baseline <> " [\"example check\"] [\"product acceptance remains\"]")

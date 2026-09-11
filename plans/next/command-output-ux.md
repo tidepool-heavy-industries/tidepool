@@ -27,8 +27,16 @@ Actual TUI acceptance passed in 181.44 s, exercising the real native/host binari
 with a scripted provider. Thirteen native boundary tests and scoped lint completed;
 lint also reported preexisting warnings outside the changed mechanism. Native source
 `8c5f5477f0a65cac1144614c75d26d4f2004b248` is pushed.
-Remaining release gates: matched Tidepool source pin and frozen next-run package.
-No new swarm launch.
+The matched runtime is Tidepool `61f40e8bd443fbf6f1aa002a9fe85a18d7a035b0`
+with the native revision above. The frozen package and selection manifest are in
+`/home/inanna/dev/tidepool/target/command-output-runner-20260910/`.
+The wrapper selects immutable native, host, extractor and standard-library store
+paths. The running recipe compiler's executable hash matches the packaged worker.
+
+Remaining release gate: finish the updated workspace recipe checks. Coordination
+assertions compare typed values inside the resident session, avoiding dependence
+on the display layout. The command's own presentation fixtures test rendering
+separately. No new swarm launch.
 The TUI fixture must execute as the sole process in a fresh systemd scope with
 `--user --scope --slice=swarm.slice --property=Delegate=yes`. Start the compiler
 and test launcher outside that scope; delegating their shared cgroup is invalid.

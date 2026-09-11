@@ -27,25 +27,25 @@ routing = do
   consumer <- activation
   script (checkActor consumer) "layout-reply"
   void $ turn owner "layoutReceipt <- pollResponse (forkedResponse consumer)"
-  layoutResult <- turn owner "inspectFull (case layoutReceipt of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
-  check "an indented finding list reaches the actual reply" (output layoutResult == "Just \"ready; layout preserved\"")
+  layoutResult <- turn owner "(== (Just \"ready; layout preserved\")) (case layoutReceipt of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
+  check "an indented finding list reaches the actual reply" (output layoutResult == "True")
   script owner "progress-route"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
-  first <- turn owner "inspectFull . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
-  check "the persistent actor consumes the first publication" (output first == "[[\"question-a\"]]")
+  first <- turn owner "(== ([[\"question-a\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
+  check "the persistent actor consumes the first publication" (output first == "True")
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
   void $ turn owner "readWork forwarding"
   counts <- turn owner "Actor.call wakes (RoutingCount 0 id)"
   check "identical attention does not invoke the sink again" (output counts == "1")
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
-  second <- turn owner "inspectFull . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
-  check "later publications arrive without rearming" (output second == "[[\"question-a\",\"question-b\"]]")
+  second <- turn owner "(== ([[\"question-a\",\"question-b\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
+  check "later publications arrive without rearming" (output second == "True")
   pending <- turn (checkActor producer) "pollReply sessionReply"
   check "publishing progress preserves the original reply" (output pending == "ReplyOpen")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
-  closed <- turn owner "inspectFull . map sourceStatus . collectedWork <$> readWork forwarding"
-  check "source closure leaves the actor's retained state queryable" (output closed == "[WorkClosed]")
+  closed <- turn owner "(== ([WorkClosed])) . map sourceStatus . collectedWork <$> readWork forwarding"
+  check "source closure leaves the actor's retained state queryable" (output closed == "True")
   void $ turn owner "finishWork forwarding"
   void restart
   independentSources
@@ -162,8 +162,8 @@ reviewCycle failAfterAdmission automaticRepair = do
   let arrived = finalCandidate `Text.isInfixOf` received && "WorkChanged" `Text.isInfixOf` received && "Accepted" `Text.isInfixOf` received
   check (if arrived then "typed review progress and acceptance return through the mailbox"
          else "missing typed review evidence: " <> received) arrived
-  finished <- turn owner "finished <- R.finish reviewBox\ninspectFull (case finished of { Actor.Completed state -> (length (reviewCollectors state), length (completedReviews state)); _ -> (-1,-1) })"
-  check "each admitted review completes and its collector drains" (lastOutput finished == if automaticRepair then "(0,2)" else "(0,1)")
+  finished <- turn owner (("let expectedReviews = " <> (if automaticRepair then "2" else "1") <> "\n") <> "finished <- R.finish reviewBox\n(== (0,expectedReviews)) (case finished of { Actor.Completed state -> (length (reviewCollectors state), length (completedReviews state)); _ -> (-1,-1) })")
+  check "each admitted review completes and its collector drains" (lastOutput finished == "True")
   if automaticRepair then do
     forwarding <- turn owner "case finished of { Actor.Completed state -> mapM (R.forwardingExit . snd) (repairAttempts state); _ -> pure [] }"
     check "the result-only repair forwarder exits without a model retirement turn" ("Completed" `Text.isInfixOf` output forwarding)
@@ -211,9 +211,9 @@ messageDeltas :: Member RecipeCheck effects => Eff effects ()
 messageDeltas = do
   owner <- root
   script owner "question-message-deltas"
-  result <- turn owner "inspectFull questionMessageChecks"
+  result <- turn owner "(== ((True,True,True,True))) questionMessageChecks"
   check "amendments upsert once; source advances, resolutions and unchanged questions stay distinct"
-    (output result == "(True,True,True,True)")
+    (output result == "True")
 
 candidateHistory :: Member RecipeCheck effects => Eff effects ()
 candidateHistory = do
@@ -224,15 +224,15 @@ candidateHistory = do
   void $ turn owner "collection <- followWork [(\"producer\", forkedResponse producer, updates)] keepWork"
   let candidates = "let firstCandidate = Candidate " <> literal baseline <> " [\"first check\"] []\nlet secondCandidate = firstCandidate { checkedCommands = [\"different check\"] }"
   void $ turn (checkActor producer) (candidates <> "\nreportProgress (WorkProgress [firstCandidate] [])\nreportProgress (WorkProgress [secondCandidate] [])")
-  before <- turn owner "view <- readWork collection\ninspectFull (length (workEvidence (sourceProgress (head (collectedWork view)))), length (workHistory view))"
-  check "same-commit changed evidence remains distinct and ordered" (lastOutput before == "(2,2)")
+  before <- turn owner "view <- readWork collection\n(== ((2,2))) (length (workEvidence (sourceProgress (head (collectedWork view)))), length (workHistory view))"
+  check "same-commit changed evidence remains distinct and ordered" (lastOutput before == "True")
   void $ turn owner (candidates <> "\nR.send (incorporatedWork (R.client collection)) (\"producer\", [firstCandidate])\nview <- readWork collection\nlet briefBefore = workSnapshotSummary id view")
-  frontier <- turn owner "inspectFull (map checkedCommands (outstandingEvidence view (head (collectedWork view))))"
-  check "incorporation removes only the exact handled evidence" (output frontier == "[[\"different check\"]]")
+  frontier <- turn owner "(== ([[\"different check\"]])) (map checkedCommands (outstandingEvidence view (head (collectedWork view))))"
+  check "incorporation removes only the exact handled evidence" (output frontier == "True")
   void $ turn (checkActor producer) "mapM_ reportProgress (replicate 100 (WorkProgress [firstCandidate,secondCandidate] []))"
-  after <- turn owner "view <- readWork collection\ninspectFull (workSnapshotSummary id view == briefBefore, length (workHistory view), map checkedCommands (workEvidence (sourceProgress (head (collectedWork view)))))"
+  after <- turn owner "view <- readWork collection\n(== ((True,102,[[\"first check\"],[\"different check\"]]))) (workSnapshotSummary id view == briefBefore, length (workHistory view), map checkedCommands (workEvidence (sourceProgress (head (collectedWork view)))))"
   check "100 retained publications do not expand the normal brief or erase evidence"
-    (lastOutput after == "(True,102,[[\"first check\"],[\"different check\"]])")
+    (lastOutput after == "True")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
   void $ turn owner "finishWork collection"
 
@@ -257,16 +257,16 @@ notificationRetention = do
   once <- turn owner "inspectFull . length . workNotices <$> readWork collection"
   check "repeated questions do not retry failed notification" (output once == "1")
   void $ turn owner "collection <- R.replace collection (workDefinition [(\"producer\", forkedResponse producer, updates)] (notifyWork (forkedActor consumer) (workMessage id)))"
-  preserved <- turn owner "(\\view -> inspectFull (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> readWork collection"
-  check "replacement preserves failed notification evidence without replay" (output preserved == "(1,[[\"question-a\"]])")
+  preserved <- turn owner "(\\view -> (== ((1,[[\"question-a\"]]))) (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> readWork collection"
+  check "replacement preserves failed notification evidence without replay" (output preserved == "True")
   -- Exercise uncertainty as typed sink data. No external send is claimed here.
   script owner "uncertain-route"
   uncertain <- turn owner "view <- readWork uncertain\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
   check "uncertain admission preserves the observed question" ("question-a" `Text.isInfixOf` output uncertain && "NotificationAdmissionUnconfirmed" `Text.isInfixOf` output uncertain)
   void $ turn owner "uncertain <- R.replace uncertain (workDefinition [(\"producer\", forkedResponse producer, updates)] keepWork)"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [])"
-  resolved <- turn owner "(\\view -> inspectFull (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> readWork collection"
-  check "resolving the final question produces its own delta" (output resolved == "([[]],2)")
+  resolved <- turn owner "(\\view -> (== (([[]],2))) (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> readWork collection"
+  check "resolving the final question produces its own delta" (output resolved == "True")
   uncertainOnce <- turn owner "inspectFull . length . workNotices <$> readWork uncertain"
   check "replacement never replays an uncertain send" (output uncertainOnce == "1")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
@@ -287,25 +287,25 @@ independentSources = do
   script (checkActor left) "attention-sources-question"
   script (checkActor right) "attention-sources-question"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [first,second])"
-  first <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
-  check "left progresses while right is silent" ("[\"same-key\",\"second\"]" `Text.isInfixOf` output first && "(\"right\",[],WorkOpen)" `Text.isInfixOf` output first)
+  first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  check "left progresses while right is silent" (output first == "True")
   void $ turn owner "collection <- R.replace collection (workDefinition [(\"left\", forkedResponse left, leftProgress), (\"right\", forkedResponse right, rightProgress)] countChanges)"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [second,first,first])"
   void $ turn owner "readWork collection"
   count <- turn owner "Actor.call wakes (RoutingCount 0 id)"
   check "reordered duplicate facts do not invoke the sink" (output count == "1")
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [first])"
-  both <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
-  check "same-key questions retain both source identities" (output both == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])]")
+  both <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[\"same-key\"])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
+  check "same-key questions retain both source identities" (output both == "True")
   void $ turn (checkActor left) "respond (\"finished\" :: Text)"
-  closed <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
-  check "closure retains unanswered questions" ("(\"left\",[\"same-key\",\"second\"],WorkClosed)" `Text.isInfixOf` output closed)
+  closed <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkClosed),(\"right\",[\"same-key\"],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
+  check "closure retains unanswered questions" (output closed == "True")
   void $ turn (checkActor right) "reportProgress (WorkProgress [] [])"
-  resolved <- turn owner "(\\view -> inspectFull [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
-  check "one resolution cannot erase another source's questions" (output resolved == "[(\"left\",[\"same-key\",\"second\"]),(\"right\",[])]")
+  resolved <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"]),(\"right\",[])])) [(sourceName s, map questionKey (workQuestions (sourceProgress s))) | s <- collectedWork view]) <$> readWork collection"
+  check "one resolution cannot erase another source's questions" (output resolved == "True")
   void $ turn (checkActor right) "respond (\"finished\" :: Text)"
-  final <- turn owner "inspectFull . map sourceStatus . collectedWork <$> readWork collection"
-  check "both sources close without rearming" (output final == "[WorkClosed,WorkClosed]")
+  final <- turn owner "(== ([WorkClosed,WorkClosed])) . map sourceStatus . collectedWork <$> readWork collection"
+  check "both sources close without rearming" (output final == "True")
   void $ turn owner "finishWork collection"
 
 data RouteCase = Forward | CancelDestination | LoseProducer deriving (Eq)
