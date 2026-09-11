@@ -1,5 +1,6 @@
 //! Presentation custody for updates to an exact existing request.
 use std::sync::Arc;
+use std::{fmt, num::NonZeroU64};
 
 use super::{authorize_owner, OwnerState, ReplyError, RequestId, RequestRegistry, TargetState};
 use crate::ActorRef;
@@ -9,6 +10,39 @@ pub struct RequestUpdateId {
     pub request: RequestId,
     pub sequence: u64,
 }
+
+/// Durable delivery identity installed by the host inbox owner before transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestUpdateCorrelation {
+    pub producer: String,
+    pub sequence: NonZeroU64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LateUpdateEvidence {
+    Presented,
+    NotPresented(String),
+    Unconfirmed(String),
+    /// Native evidence was compacted after acknowledgement. Presentation
+    /// remains unknown, but further reconciliation is permanently fenced.
+    Compacted(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateReconciliationError {
+    Reply(ReplyError),
+    CorrelationNotInstalled,
+    CorrelationMismatch,
+    ConflictingTerminalEvidence,
+}
+
+impl fmt::Display for UpdateReconciliationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for UpdateReconciliationError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToCore)]
 pub enum RequestUpdateState {
@@ -24,18 +58,28 @@ pub enum RequestUpdateState {
     UpdateNotPresented(String),
 }
 
-pub(super) enum UpdateRecord {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdatePhase {
     Queued,
     Presenting,
     Presented,
     TooLate,
     Unconfirmed(String),
+    Compacted(String),
     NotPresented(String),
+}
+
+pub(super) struct UpdateRecord {
+    phase: UpdatePhase,
+    correlation: Option<RequestUpdateCorrelation>,
 }
 
 impl UpdateRecord {
     pub(super) fn fences_settlement(&self) -> bool {
-        matches!(self, Self::Presenting | Self::Unconfirmed(_))
+        matches!(
+            self.phase,
+            UpdatePhase::Presenting | UpdatePhase::Unconfirmed(_) | UpdatePhase::Compacted(_)
+        )
     }
 }
 
@@ -43,6 +87,7 @@ impl UpdateRecord {
 #[derive(Clone)]
 pub struct RequestUpdateDelivery {
     registry: Arc<RequestRegistry>,
+    owner: ActorRef,
     target: ActorRef,
     id: RequestUpdateId,
     key: String,
@@ -50,8 +95,35 @@ pub struct RequestUpdateDelivery {
 }
 
 impl RequestUpdateDelivery {
+    pub fn owner(&self) -> ActorRef {
+        self.owner
+    }
+
+    pub fn id(&self) -> RequestUpdateId {
+        self.id
+    }
+
     pub fn target(&self) -> ActorRef {
         self.target
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Install the host's durable inbox identity before any transport attempt.
+    pub fn bind_correlation(
+        &self,
+        correlation: RequestUpdateCorrelation,
+    ) -> Result<RequestUpdateReconciler, UpdateReconciliationError> {
+        self.registry
+            .bind_update_correlation(self.owner, self.id, correlation.clone())?;
+        Ok(RequestUpdateReconciler {
+            registry: Arc::clone(&self.registry),
+            owner: self.owner,
+            id: self.id,
+            correlation,
+        })
     }
 
     /// At most one claimant can acquire the presentation lease. A reply which
@@ -61,21 +133,49 @@ impl RequestUpdateDelivery {
             let mut state = self.registry.state.lock();
             let request = state.requests.get_mut(&self.id.request)?;
             let update = request.updates.get_mut(self.id.sequence as usize - 1)?;
-            if !matches!(update, UpdateRecord::Queued) {
+            if !matches!(update.phase, UpdatePhase::Queued) {
                 return None;
             }
             if !matches!(request.target_state, TargetState::Presented)
                 || !matches!(request.owner_state, OwnerState::Observing)
             {
-                *update = UpdateRecord::TooLate;
+                update.phase = UpdatePhase::TooLate;
                 return None;
             }
-            *update = UpdateRecord::Presenting;
+            update.phase = UpdatePhase::Presenting;
         }
         Some(RequestUpdatePresentation {
             delivery: self,
             finished: false,
         })
+    }
+}
+
+/// Retained authority to apply late native evidence to one exact update.
+#[derive(Clone)]
+pub struct RequestUpdateReconciler {
+    registry: Arc<RequestRegistry>,
+    owner: ActorRef,
+    id: RequestUpdateId,
+    correlation: RequestUpdateCorrelation,
+}
+
+impl RequestUpdateReconciler {
+    pub fn id(&self) -> RequestUpdateId {
+        self.id
+    }
+
+    pub fn correlation(&self) -> &RequestUpdateCorrelation {
+        &self.correlation
+    }
+
+    pub fn reconcile(&self, evidence: LateUpdateEvidence) -> Result<(), UpdateReconciliationError> {
+        self.registry.reconcile_update_presentation(
+            self.owner,
+            self.id,
+            &self.correlation,
+            evidence,
+        )
     }
 }
 
@@ -148,10 +248,10 @@ impl RequestUpdatePresentation {
                 .updates
                 .get_mut(self.delivery.id.sequence as usize - 1)
             {
-                *update = match outcome {
-                    PresentationOutcome::Presented => UpdateRecord::Presented,
-                    PresentationOutcome::Unconfirmed(reason) => UpdateRecord::Unconfirmed(reason),
-                    PresentationOutcome::NotPresented(reason) => UpdateRecord::NotPresented(reason),
+                update.phase = match outcome {
+                    PresentationOutcome::Presented => UpdatePhase::Presented,
+                    PresentationOutcome::Unconfirmed(reason) => UpdatePhase::Unconfirmed(reason),
+                    PresentationOutcome::NotPresented(reason) => UpdatePhase::NotPresented(reason),
                 };
             }
         }
@@ -185,10 +285,9 @@ impl RequestRegistry {
             _ => false,
         };
         if queued
-            && request
-                .updates
-                .iter()
-                .any(|update| matches!(update, UpdateRecord::Queued) || update.fences_settlement())
+            && request.updates.iter().any(|update| {
+                matches!(update.phase, UpdatePhase::Queued) || update.fences_settlement()
+            })
         {
             return Err(ReplyError::UpdatePending);
         }
@@ -196,13 +295,16 @@ impl RequestRegistry {
             request: id,
             sequence: request.updates.len() as u64 + 1,
         };
-        request.updates.push(if queued {
-            UpdateRecord::Queued
-        } else {
-            UpdateRecord::TooLate
+        request.updates.push(UpdateRecord {
+            phase: if queued {
+                UpdatePhase::Queued
+            } else {
+                UpdatePhase::TooLate
+            },
+            correlation: None,
         });
         let delivery = queued.then(|| RequestUpdateDelivery {
-            registry: Arc::clone(self), target: request.target, id: update,
+            registry: Arc::clone(self), owner, target: request.target, id: update,
             key: format!("shoal-update-{}", uuid::Uuid::new_v4()),
             message: format!("Update {} for your existing request {}. The original assignment and sessionReply remain pending.\n\n{}", update.sequence, id.0, message),
         });
@@ -219,23 +321,128 @@ impl RequestRegistry {
         authorize_owner(request, owner)?;
         let index = id.sequence.checked_sub(1).ok_or(ReplyError::Stale)? as usize;
         let update = request.updates.get(index).ok_or(ReplyError::Stale)?;
-        Ok(match update {
-            UpdateRecord::Queued
+        Ok(match &update.phase {
+            UpdatePhase::Queued
                 if !matches!(request.target_state, TargetState::Presented)
                     || !matches!(request.owner_state, OwnerState::Observing) =>
             {
                 RequestUpdateState::UpdateTooLate
             }
-            UpdateRecord::Queued | UpdateRecord::Presenting => RequestUpdateState::UpdateQueued,
-            UpdateRecord::Presented => RequestUpdateState::UpdatePresented,
-            UpdateRecord::TooLate => RequestUpdateState::UpdateTooLate,
-            UpdateRecord::Unconfirmed(reason) => {
+            UpdatePhase::Queued | UpdatePhase::Presenting => RequestUpdateState::UpdateQueued,
+            UpdatePhase::Presented => RequestUpdateState::UpdatePresented,
+            UpdatePhase::TooLate => RequestUpdateState::UpdateTooLate,
+            UpdatePhase::Unconfirmed(reason) | UpdatePhase::Compacted(reason) => {
                 RequestUpdateState::UpdateUnconfirmed(reason.clone())
             }
-            UpdateRecord::NotPresented(reason) => {
+            UpdatePhase::NotPresented(reason) => {
                 RequestUpdateState::UpdateNotPresented(reason.clone())
             }
         })
+    }
+
+    /// Bind an update to the exact durable inbox operation before transport.
+    fn bind_update_correlation(
+        &self,
+        owner: ActorRef,
+        id: RequestUpdateId,
+        correlation: RequestUpdateCorrelation,
+    ) -> Result<(), UpdateReconciliationError> {
+        let mut state = self.state.lock();
+        let request = state
+            .requests
+            .get_mut(&id.request)
+            .ok_or(ReplyError::Stale)
+            .map_err(UpdateReconciliationError::Reply)?;
+        authorize_owner(request, owner).map_err(UpdateReconciliationError::Reply)?;
+        let index = id
+            .sequence
+            .checked_sub(1)
+            .ok_or(ReplyError::Stale)
+            .map_err(UpdateReconciliationError::Reply)? as usize;
+        let update = request
+            .updates
+            .get_mut(index)
+            .ok_or(ReplyError::Stale)
+            .map_err(UpdateReconciliationError::Reply)?;
+        match &update.correlation {
+            Some(existing) if existing == &correlation => Ok(()),
+            Some(_) => Err(UpdateReconciliationError::CorrelationMismatch),
+            None if matches!(
+                update.phase,
+                UpdatePhase::Queued | UpdatePhase::Presenting | UpdatePhase::Unconfirmed(_)
+            ) =>
+            {
+                update.correlation = Some(correlation);
+                Ok(())
+            }
+            None => Err(UpdateReconciliationError::CorrelationNotInstalled),
+        }
+    }
+
+    /// Apply late authoritative native evidence to the original update only.
+    fn reconcile_update_presentation(
+        &self,
+        owner: ActorRef,
+        id: RequestUpdateId,
+        correlation: &RequestUpdateCorrelation,
+        evidence: LateUpdateEvidence,
+    ) -> Result<(), UpdateReconciliationError> {
+        let mut state = self.state.lock();
+        let request = state
+            .requests
+            .get_mut(&id.request)
+            .ok_or(ReplyError::Stale)
+            .map_err(UpdateReconciliationError::Reply)?;
+        authorize_owner(request, owner).map_err(UpdateReconciliationError::Reply)?;
+        let index = id
+            .sequence
+            .checked_sub(1)
+            .ok_or(ReplyError::Stale)
+            .map_err(UpdateReconciliationError::Reply)? as usize;
+        let update = request
+            .updates
+            .get_mut(index)
+            .ok_or(ReplyError::Stale)
+            .map_err(UpdateReconciliationError::Reply)?;
+        match update.correlation.as_ref() {
+            None => return Err(UpdateReconciliationError::CorrelationNotInstalled),
+            Some(bound) if bound != correlation => {
+                return Err(UpdateReconciliationError::CorrelationMismatch)
+            }
+            Some(_) => {}
+        }
+        let observed = match evidence {
+            LateUpdateEvidence::Presented => UpdatePhase::Presented,
+            LateUpdateEvidence::NotPresented(reason) => UpdatePhase::NotPresented(reason),
+            LateUpdateEvidence::Unconfirmed(reason) => UpdatePhase::Unconfirmed(reason),
+            LateUpdateEvidence::Compacted(reason) => UpdatePhase::Compacted(reason),
+        };
+        match &update.phase {
+            existing if existing == &observed => Ok(()),
+            UpdatePhase::Presenting => {
+                update.phase = observed;
+                Ok(())
+            }
+            UpdatePhase::Unconfirmed(_)
+                if matches!(
+                    observed,
+                    UpdatePhase::Unconfirmed(_)
+                        | UpdatePhase::Presented
+                        | UpdatePhase::NotPresented(_)
+                        | UpdatePhase::Compacted(_)
+                ) =>
+            {
+                update.phase = observed;
+                Ok(())
+            }
+            UpdatePhase::Presented
+            | UpdatePhase::NotPresented(_)
+            | UpdatePhase::Unconfirmed(_)
+            | UpdatePhase::Compacted(_) => {
+                Err(UpdateReconciliationError::ConflictingTerminalEvidence)
+            }
+            _ => Err(UpdateReconciliationError::CorrelationNotInstalled),
+        }
     }
 }
 
@@ -506,5 +713,186 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn late_evidence_reconciles_only_the_exact_durable_operation() {
+        let (registry, owner, target, request) = active();
+        let (update, delivery) = registry
+            .update_request(owner, request, "tabs".into())
+            .unwrap();
+        let correlation = RequestUpdateCorrelation {
+            producer: "run-a/inbox-2/actor-2.1".into(),
+            sequence: NonZeroU64::new(7).unwrap(),
+        };
+        let delivery = delivery.unwrap();
+        let reconciler = delivery.bind_correlation(correlation.clone()).unwrap();
+        assert_eq!(delivery.id(), update);
+        assert_eq!(delivery.target(), target);
+        delivery
+            .begin()
+            .unwrap()
+            .unconfirmed("lost admission reply".into());
+
+        let foreign_scope = RequestUpdateCorrelation {
+            producer: "run-b/inbox-2/actor-2.1".into(),
+            ..correlation.clone()
+        };
+        assert_eq!(
+            registry.reconcile_update_presentation(
+                owner,
+                update,
+                &foreign_scope,
+                LateUpdateEvidence::Presented,
+            ),
+            Err(UpdateReconciliationError::CorrelationMismatch)
+        );
+        assert!(matches!(
+            registry.observe_update(owner, update),
+            Ok(RequestUpdateState::UpdateUnconfirmed(_))
+        ));
+
+        reconciler.reconcile(LateUpdateEvidence::Presented).unwrap();
+        assert_eq!(
+            registry.observe_update(owner, update),
+            Ok(RequestUpdateState::UpdatePresented)
+        );
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Pending)
+        );
+        registry.begin_reply(target, request).unwrap();
+    }
+
+    #[test]
+    fn repeated_terminal_evidence_is_idempotent_and_conflict_is_retained() {
+        let (registry, owner, _, request) = active();
+        let (update, delivery) = registry
+            .update_request(owner, request, "tabs".into())
+            .unwrap();
+        let correlation = RequestUpdateCorrelation {
+            producer: "run/inbox/actor".into(),
+            sequence: NonZeroU64::new(1).unwrap(),
+        };
+        let delivery = delivery.unwrap();
+        let reconciler = delivery.bind_correlation(correlation.clone()).unwrap();
+        delivery.begin().unwrap().unconfirmed("timeout".into());
+        reconciler
+            .reconcile(LateUpdateEvidence::Unconfirmed("timeout".into()))
+            .unwrap();
+        let evidence = LateUpdateEvidence::NotPresented("withdrawn".into());
+        reconciler.reconcile(evidence.clone()).unwrap();
+        reconciler.reconcile(evidence).unwrap();
+        assert_eq!(
+            reconciler.reconcile(LateUpdateEvidence::Presented),
+            Err(UpdateReconciliationError::ConflictingTerminalEvidence)
+        );
+        assert_eq!(
+            registry.observe_update(owner, update),
+            Ok(RequestUpdateState::UpdateNotPresented("withdrawn".into()))
+        );
+    }
+
+    #[test]
+    fn repeated_unconfirmed_evidence_keeps_the_fence_until_a_terminal_outcome() {
+        let (registry, owner, target, request) = active();
+        let (update, delivery) = registry
+            .update_request(owner, request, "tabs".into())
+            .unwrap();
+        let correlation = RequestUpdateCorrelation {
+            producer: "run/inbox/actor".into(),
+            sequence: NonZeroU64::new(1).unwrap(),
+        };
+        let delivery = delivery.unwrap();
+        let reconciler = delivery.bind_correlation(correlation).unwrap();
+        delivery
+            .begin()
+            .unwrap()
+            .unconfirmed("lost submit reply".into());
+
+        reconciler
+            .reconcile(LateUpdateEvidence::Unconfirmed(
+                "later query reply was also lost".into(),
+            ))
+            .unwrap();
+        assert_eq!(
+            registry.observe_update(owner, update),
+            Ok(RequestUpdateState::UpdateUnconfirmed(
+                "later query reply was also lost".into()
+            ))
+        );
+        assert_eq!(
+            registry.begin_reply(target, request),
+            Err(ReplyError::UpdatePending)
+        );
+
+        reconciler.reconcile(LateUpdateEvidence::Presented).unwrap();
+        assert_eq!(
+            registry.observe_update(owner, update),
+            Ok(RequestUpdateState::UpdatePresented)
+        );
+        registry.begin_reply(target, request).unwrap();
+    }
+
+    #[test]
+    fn compacted_is_terminal_unconfirmed_and_keeps_settlement_fenced() {
+        let (registry, owner, target, request) = active();
+        let (update, delivery) = registry
+            .update_request(owner, request, "tabs".into())
+            .unwrap();
+        let correlation = RequestUpdateCorrelation {
+            producer: "run/inbox/actor-2.1".into(),
+            sequence: NonZeroU64::new(9).unwrap(),
+        };
+        let delivery = delivery.unwrap();
+        let reconciler = delivery.bind_correlation(correlation.clone()).unwrap();
+        delivery
+            .begin()
+            .unwrap()
+            .unconfirmed("lost native acknowledgement".into());
+
+        reconciler
+            .reconcile(LateUpdateEvidence::Compacted(
+                "native evidence compacted".into(),
+            ))
+            .unwrap();
+        assert_eq!(
+            registry.observe_update(owner, update),
+            Ok(RequestUpdateState::UpdateUnconfirmed(
+                "native evidence compacted".into()
+            ))
+        );
+        assert_eq!(
+            registry.begin_reply(target, request),
+            Err(ReplyError::UpdatePending)
+        );
+        assert!(matches!(
+            registry.update_request(owner, request, "later".into()),
+            Err(ReplyError::UpdatePending)
+        ));
+        assert_eq!(
+            reconciler.reconcile(LateUpdateEvidence::Presented),
+            Err(UpdateReconciliationError::ConflictingTerminalEvidence)
+        );
+        let stale = RequestUpdateCorrelation {
+            sequence: NonZeroU64::new(10).unwrap(),
+            ..correlation
+        };
+        assert_eq!(
+            registry.reconcile_update_presentation(
+                owner,
+                update,
+                &stale,
+                LateUpdateEvidence::Compacted("native evidence compacted".into()),
+            ),
+            Err(UpdateReconciliationError::CorrelationMismatch)
+        );
+        registry
+            .cancel_request(owner, request, CancellationReason::RequesterCancelled)
+            .unwrap();
+        assert_eq!(
+            registry.begin_cancellation_acknowledgement(target, request),
+            Err(ReplyError::UpdatePending)
+        );
     }
 }

@@ -181,7 +181,7 @@ fn tracked_migration_is_opt_in_and_old_readers_reject_before_rows_are_published(
     assert!(serde_json::from_slice::<OldCursor>(&checkpoint).is_err());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&checkpoint).unwrap()["version"],
-        1
+        2
     );
     drop(inbox);
     let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
@@ -212,7 +212,9 @@ fn pre_send_fence_survives_drop_and_reopen_and_cannot_be_retried_or_acked() {
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Unconfirmed);
     assert!(reopened.begin_tracked_delivery(row.sequence).is_err());
     // Late, exact correlation can establish presentation without resubmitting.
-    reopened.confirm_presented(row.sequence).unwrap();
+    reopened
+        .confirm_presented_exact(row.sequence, &"sender".into())
+        .unwrap();
     assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Presented);
     assert_eq!(reopened.cursor(), row.sequence);
 }
@@ -224,7 +226,7 @@ fn submitted_is_not_presented_and_provenance_survives_compaction_and_reopen() {
         .publish_tracked("message".into(), "actor-7@3".into())
         .unwrap();
     assert!(matches!(
-        inbox.confirm_presented(row.sequence),
+        inbox.confirm_presented_exact(row.sequence, &"actor-7@3".into()),
         Err(InboxError::ReceiptTransition {
             phase: DeliveryPhase::Accepted,
             ..
@@ -236,25 +238,32 @@ fn submitted_is_not_presented_and_provenance_survives_compaction_and_reopen() {
         .submitted()
         .unwrap();
     assert_eq!(phase(&inbox, row.sequence), DeliveryPhase::Submitted);
-    assert_eq!(inbox.cursor(), row.sequence);
+    assert_eq!(inbox.cursor(), 0);
+    assert!(matches!(
+        inbox.acknowledge(row.sequence),
+        Err(InboxError::TrackedBarrier { .. })
+    ));
+    drop(inbox);
+    let reopened = DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).unwrap();
+    assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Submitted);
+    assert_eq!(reopened.cursor(), 0);
+    reopened
+        .confirm_presented_exact(row.sequence, &"actor-7@3".into())
+        .unwrap();
     for _ in 1..COMPACT_ACKNOWLEDGED_ROWS {
-        let row = inbox.publish("legacy".into()).unwrap();
-        inbox.acknowledge(row.sequence).unwrap();
+        let row = reopened.publish("legacy".into()).unwrap();
+        reopened.acknowledge(row.sequence).unwrap();
     }
     assert_eq!(std::fs::read_to_string(&rows).unwrap(), "");
-    drop(inbox);
+    drop(reopened);
     let reopened = DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).unwrap();
     assert_eq!(
         reopened.observe_receipt(row.sequence).unwrap(),
         ReceiptLookup::Retained(ReceiptEvidence {
             context: "actor-7@3".into(),
-            phase: DeliveryPhase::Submitted
+            phase: DeliveryPhase::Presented
         })
     );
-    reopened.confirm_presented(row.sequence).unwrap();
-    drop(reopened);
-    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
-    assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Presented);
 }
 
 #[test]
@@ -280,6 +289,14 @@ fn proven_not_submitted_releases_only_its_attempt_and_mixed_queue_stops_at_track
         .begin_tracked_delivery(tracked.sequence)
         .unwrap()
         .submitted()
+        .unwrap();
+    assert!(inbox.legacy_pending_prefix().unwrap().is_empty());
+    assert!(matches!(
+        inbox.acknowledge(after.sequence),
+        Err(InboxError::TrackedBarrier { sequence }) if sequence == tracked.sequence
+    ));
+    inbox
+        .confirm_presented_exact(tracked.sequence, &"owner".into())
         .unwrap();
     assert_eq!(inbox.legacy_pending_prefix().unwrap(), vec![after.clone()]);
     inbox.acknowledge(after.sequence).unwrap();
@@ -409,7 +426,7 @@ fn future_and_malformed_checkpoints_and_provenance_disagreement_fail_closed() {
     drop(inbox);
     let original = std::fs::read(&cursor).unwrap();
     for version in [
-        serde_json::json!(2),
+        serde_json::json!(3),
         serde_json::json!("1"),
         serde_json::json!(-1),
     ] {
@@ -437,12 +454,175 @@ fn presentation_racing_with_submission_is_monotone_and_exact() {
         .unwrap();
     let attempt = inbox.begin_tracked_delivery(row.sequence).unwrap();
     assert!(matches!(
-        inbox.confirm_presented(row.sequence + 1),
+        inbox.confirm_presented_exact(row.sequence + 1, &"owner".into()),
         Err(InboxError::ReceiptUnavailable { .. })
     ));
-    inbox.confirm_presented(row.sequence).unwrap();
+    inbox
+        .confirm_presented_exact(row.sequence, &"owner".into())
+        .unwrap();
     attempt.submitted().unwrap();
     assert_eq!(phase(&inbox, row.sequence), DeliveryPhase::Presented);
+}
+
+#[test]
+fn late_terminal_negative_advances_without_claiming_presentation() {
+    let (_dir, rows, cursor, inbox) = tracked();
+    let withdrawn = inbox
+        .publish_tracked("cancelled".into(), "run-a/inbox/actor-7.1".into())
+        .unwrap();
+    inbox
+        .confirm_withdrawn(withdrawn.sequence, &"run-a/inbox/actor-7.1".into())
+        .unwrap();
+    assert_eq!(phase(&inbox, withdrawn.sequence), DeliveryPhase::Withdrawn);
+    assert_eq!(inbox.cursor(), withdrawn.sequence);
+
+    let rejected = inbox
+        .publish_tracked("invalid".into(), "run-a/inbox/actor-7.1".into())
+        .unwrap();
+    inbox
+        .begin_tracked_delivery(rejected.sequence)
+        .unwrap()
+        .unconfirmed()
+        .unwrap();
+    inbox
+        .confirm_rejected(rejected.sequence, &"run-a/inbox/actor-7.1".into())
+        .unwrap();
+    assert_eq!(phase(&inbox, rejected.sequence), DeliveryPhase::Rejected);
+    assert_eq!(inbox.cursor(), rejected.sequence);
+    drop(inbox);
+
+    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    assert_eq!(
+        phase(&reopened, withdrawn.sequence),
+        DeliveryPhase::Withdrawn
+    );
+    assert_eq!(phase(&reopened, rejected.sequence), DeliveryPhase::Rejected);
+}
+
+#[test]
+fn compacted_is_durable_terminal_no_redispatch_and_blocks_later_rows() {
+    let (_dir, rows, cursor, inbox) = tracked();
+    let context = "run-a/inbox/actor-7.1".to_string();
+    let compacted = inbox
+        .publish_tracked("lost evidence".into(), context.clone())
+        .unwrap();
+    let later = inbox
+        .publish_tracked("must not overtake".into(), context.clone())
+        .unwrap();
+    drop(inbox.begin_tracked_delivery(compacted.sequence).unwrap());
+    drop(inbox);
+
+    // A lost acknowledgement leaves InFlight on disk. Reopen converts it to
+    // query-only Unconfirmed, and late native evidence settles that exact row.
+    let inbox = DurableInbox::<String, String>::open(rows.clone(), cursor.clone()).unwrap();
+    assert_eq!(
+        phase(&inbox, compacted.sequence),
+        DeliveryPhase::Unconfirmed
+    );
+    assert!(inbox.begin_tracked_delivery(compacted.sequence).is_err());
+    inbox
+        .confirm_compacted_exact(compacted.sequence, &context)
+        .unwrap();
+
+    assert_eq!(phase(&inbox, compacted.sequence), DeliveryPhase::Compacted);
+    assert_eq!(phase(&inbox, later.sequence), DeliveryPhase::Accepted);
+    assert_eq!(inbox.cursor(), 0);
+    assert!(inbox.begin_tracked_delivery(compacted.sequence).is_err());
+    assert!(inbox.begin_tracked_delivery(later.sequence).is_err());
+    drop(inbox);
+
+    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    assert_eq!(
+        phase(&reopened, compacted.sequence),
+        DeliveryPhase::Compacted
+    );
+    assert_eq!(phase(&reopened, later.sequence), DeliveryPhase::Accepted);
+    assert_eq!(reopened.cursor(), 0);
+    assert!(reopened.begin_tracked_delivery(compacted.sequence).is_err());
+    assert!(reopened.begin_tracked_delivery(later.sequence).is_err());
+}
+
+#[test]
+fn uncertain_compacted_checkpoint_reopens_exact_terminal_fence() {
+    let (_dir, rows, cursor, inbox) = tracked();
+    let context = "run-a/inbox/actor-7.1".to_string();
+    let row = inbox
+        .publish_tracked("lost evidence".into(), context.clone())
+        .unwrap();
+    let later = inbox
+        .publish_tracked("must remain behind".into(), context.clone())
+        .unwrap();
+    inbox
+        .begin_tracked_delivery(row.sequence)
+        .unwrap()
+        .unconfirmed()
+        .unwrap();
+
+    assert!(matches!(
+        inbox.confirm_compacted_exact(row.sequence, &"another actor".into()),
+        Err(InboxError::ReceiptContextMismatch { sequence }) if sequence == row.sequence
+    ));
+    assert_eq!(phase(&inbox, row.sequence), DeliveryPhase::Unconfirmed);
+
+    *lock(&inbox.fault) = Some(FaultPoint::AfterCheckpoint);
+    assert!(matches!(
+        inbox.confirm_compacted_exact(row.sequence, &context),
+        Err(InboxError::UncertainWrite {
+            operation: InboxWriteOperation::Checkpoint,
+            ..
+        })
+    ));
+    assert!(matches!(
+        inbox.observe_receipt(row.sequence),
+        Err(InboxError::Poisoned)
+    ));
+    drop(inbox);
+
+    let reopened = DurableInbox::<String, String>::open(rows, cursor).unwrap();
+    assert_eq!(phase(&reopened, row.sequence), DeliveryPhase::Compacted);
+    assert_eq!(phase(&reopened, later.sequence), DeliveryPhase::Accepted);
+    assert_eq!(reopened.cursor(), 0);
+    assert!(reopened.begin_tracked_delivery(row.sequence).is_err());
+    assert!(reopened.begin_tracked_delivery(later.sequence).is_err());
+    assert!(matches!(
+        reopened.confirm_presented_exact(row.sequence, &context),
+        Err(InboxError::ReceiptTransition { .. })
+    ));
+}
+
+#[test]
+fn late_evidence_requires_the_original_immutable_scope() {
+    let (_dir, _rows, _cursor, inbox) = tracked();
+    let row = inbox
+        .publish_tracked("message".into(), "run-a/inbox/actor-1.1".into())
+        .unwrap();
+    drop(inbox.begin_tracked_delivery(row.sequence).unwrap());
+
+    assert!(matches!(
+        inbox.confirm_admitted(row.sequence, &"run-b/inbox/actor-1.1".into()),
+        Err(InboxError::ReceiptContextMismatch { sequence }) if sequence == row.sequence
+    ));
+    assert_eq!(phase(&inbox, row.sequence), DeliveryPhase::Unconfirmed);
+    inbox
+        .confirm_admitted(row.sequence, &"run-a/inbox/actor-1.1".into())
+        .unwrap();
+    assert_eq!(phase(&inbox, row.sequence), DeliveryPhase::Submitted);
+}
+
+#[test]
+fn conflicting_terminal_evidence_does_not_overwrite_the_first_result() {
+    let (_dir, _rows, _cursor, inbox) = tracked();
+    let context = "run/inbox/actor".to_string();
+    let row = inbox
+        .publish_tracked("message".into(), context.clone())
+        .unwrap();
+    inbox.confirm_withdrawn(row.sequence, &context).unwrap();
+    inbox.confirm_withdrawn(row.sequence, &context).unwrap();
+    assert!(matches!(
+        inbox.confirm_presented_exact(row.sequence, &context),
+        Err(InboxError::ReceiptTransition { .. })
+    ));
+    assert_eq!(phase(&inbox, row.sequence), DeliveryPhase::Withdrawn);
 }
 
 #[test]

@@ -2,7 +2,9 @@ pub(crate) mod routes;
 pub(crate) mod sources;
 mod updates;
 pub use updates::{
-    RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation, RequestUpdateState,
+    LateUpdateEvidence, RequestUpdateCorrelation, RequestUpdateDelivery, RequestUpdateId,
+    RequestUpdatePresentation, RequestUpdateReconciler, RequestUpdateState,
+    UpdateReconciliationError,
 };
 
 use std::collections::HashMap;

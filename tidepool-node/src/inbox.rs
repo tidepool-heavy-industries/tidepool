@@ -53,7 +53,10 @@ pub enum DeliveryPhase {
     InFlight,
     Submitted,
     Presented,
+    Withdrawn,
+    Rejected,
     Unconfirmed,
+    Compacted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +125,8 @@ pub enum InboxError {
     ReceiptUnavailable { sequence: u64 },
     #[error("tracked receipt {sequence} cannot transition from {phase:?}")]
     ReceiptTransition { sequence: u64, phase: DeliveryPhase },
+    #[error("tracked receipt {sequence} provenance does not match its original row")]
+    ReceiptContextMismatch { sequence: u64 },
     #[error("tracked receipt {sequence} blocks this delivery/acknowledgement")]
     TrackedBarrier { sequence: u64 },
     #[error("receipt evidence capacity is exhausted")]
@@ -187,7 +192,8 @@ where
         self.finished = result.is_ok();
         result
     }
-    /// Consumer acceptance is not correlated model presentation.
+    /// Native admission fences redispatch but does not acknowledge this row or
+    /// permit a later row to overtake it.
     pub fn submitted(mut self) -> Result<(), InboxError> {
         let result = self
             .inbox
@@ -268,7 +274,7 @@ where
             if *sequence <= cursor
                 && !matches!(
                     evidence.phase,
-                    DeliveryPhase::Submitted | DeliveryPhase::Presented
+                    DeliveryPhase::Presented | DeliveryPhase::Withdrawn | DeliveryPhase::Rejected
                 )
             {
                 return Err(InboxError::Corrupt(
@@ -278,7 +284,7 @@ where
             if *sequence > cursor
                 && matches!(
                     evidence.phase,
-                    DeliveryPhase::Submitted | DeliveryPhase::Presented
+                    DeliveryPhase::Presented | DeliveryPhase::Withdrawn | DeliveryPhase::Rejected
                 )
             {
                 return Err(InboxError::Corrupt(
@@ -475,6 +481,13 @@ where
             .cloned()
             .collect())
     }
+    /// Exact durable front row for an ordered consumer. Receipt state still
+    /// decides whether this row may be submitted or only reconciled.
+    pub fn front_pending(&self) -> Result<Option<DurableEnvelope<T, R>>, InboxError> {
+        let state = lock_state(&self.state);
+        healthy(&state)?;
+        Ok(state.pending.front().cloned())
+    }
     /// Last confirmed in-memory cursor; never evidence of model presentation.
     pub fn cursor(&self) -> u64 {
         lock_state(&self.state).checkpoint.sequence
@@ -529,10 +542,48 @@ where
             finished: false,
         })
     }
-    /// The caller must have correlated actual model-input presentation to this row.
-    /// Neither legacy acknowledgement nor RPC acceptance calls this operation.
-    pub fn confirm_presented(&self, sequence: u64) -> Result<(), InboxError> {
-        self.transition(sequence, DeliveryPhase::Presented, false)
+    /// The caller must have correlated actual model-input presentation to this
+    /// row and its immutable producer scope. Neither legacy acknowledgement nor
+    /// RPC acceptance calls this operation.
+    pub fn confirm_presented_exact(&self, sequence: u64, context: &R) -> Result<(), InboxError> {
+        self.transition_exact(sequence, context, DeliveryPhase::Presented)
+    }
+    /// Apply late native admission evidence without resubmitting this row.
+    pub fn confirm_admitted(&self, sequence: u64, context: &R) -> Result<(), InboxError> {
+        self.transition_exact(sequence, context, DeliveryPhase::Submitted)
+    }
+    /// Record proof that native dispatch was fenced before presentation.
+    pub fn confirm_withdrawn(&self, sequence: u64, context: &R) -> Result<(), InboxError> {
+        self.transition_exact(sequence, context, DeliveryPhase::Withdrawn)
+    }
+    /// Record terminal native evidence loss. This permanently fences redispatch
+    /// and later rows, but is neither presentation nor consumer acknowledgement.
+    pub fn confirm_compacted_exact(&self, sequence: u64, context: &R) -> Result<(), InboxError> {
+        self.transition_exact(sequence, context, DeliveryPhase::Compacted)
+    }
+    /// Record a terminal native rejection that excludes later presentation.
+    pub fn confirm_rejected(&self, sequence: u64, context: &R) -> Result<(), InboxError> {
+        self.transition_exact(sequence, context, DeliveryPhase::Rejected)
+    }
+    fn transition_exact(
+        &self,
+        sequence: u64,
+        context: &R,
+        phase: DeliveryPhase,
+    ) -> Result<(), InboxError> {
+        {
+            let state = lock_state(&self.state);
+            healthy(&state)?;
+            let evidence = state
+                .checkpoint
+                .receipts
+                .get(&sequence)
+                .ok_or(InboxError::ReceiptUnavailable { sequence })?;
+            if &evidence.context != context {
+                return Err(InboxError::ReceiptContextMismatch { sequence });
+            }
+        }
+        self.transition(sequence, phase, false)
     }
     fn finish_attempt(&self, sequence: u64, phase: DeliveryPhase) -> Result<(), InboxError> {
         self.transition(sequence, phase, true)
@@ -551,16 +602,41 @@ where
             .get(&sequence)
             .ok_or(InboxError::ReceiptUnavailable { sequence })?
             .phase;
-        if current == DeliveryPhase::Presented && phase != DeliveryPhase::Accepted {
+        if current == phase {
+            return Ok(());
+        }
+        // A presentation observation may win a race with the transport's
+        // admission reply. The weaker reply cannot overwrite it.
+        if attempt && current == DeliveryPhase::Presented && phase == DeliveryPhase::Submitted {
             return Ok(());
         }
         let permitted = if attempt {
             current == DeliveryPhase::InFlight
         } else {
-            matches!(
-                current,
-                DeliveryPhase::InFlight | DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed
-            )
+            match phase {
+                DeliveryPhase::Submitted => matches!(
+                    current,
+                    DeliveryPhase::InFlight | DeliveryPhase::Unconfirmed
+                ),
+                DeliveryPhase::Presented => matches!(
+                    current,
+                    DeliveryPhase::InFlight | DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed
+                ),
+                DeliveryPhase::Withdrawn | DeliveryPhase::Rejected => matches!(
+                    current,
+                    DeliveryPhase::Accepted
+                        | DeliveryPhase::InFlight
+                        | DeliveryPhase::Submitted
+                        | DeliveryPhase::Unconfirmed
+                ),
+                DeliveryPhase::Compacted => matches!(
+                    current,
+                    DeliveryPhase::InFlight | DeliveryPhase::Submitted | DeliveryPhase::Unconfirmed
+                ),
+                DeliveryPhase::Accepted | DeliveryPhase::InFlight | DeliveryPhase::Unconfirmed => {
+                    false
+                }
+            }
         };
         if !permitted {
             return Err(InboxError::ReceiptTransition {
@@ -574,8 +650,10 @@ where
             .get_mut(&sequence)
             .ok_or(InboxError::ReceiptUnavailable { sequence })?
             .phase = phase;
-        if matches!(phase, DeliveryPhase::Submitted | DeliveryPhase::Presented)
-            && sequence > checkpoint.sequence
+        if matches!(
+            phase,
+            DeliveryPhase::Presented | DeliveryPhase::Withdrawn | DeliveryPhase::Rejected
+        ) && sequence > checkpoint.sequence
         {
             if state.pending.front().map(|row| row.sequence) != Some(sequence) {
                 return Err(InboxError::TrackedBarrier { sequence });
@@ -654,7 +732,7 @@ where
     ) -> Result<(), InboxError> {
         let bytes = if versioned {
             serde_json::to_vec(&VersionedCheckpoint {
-                version: 1,
+                version: 2,
                 checkpoint: checkpoint.clone(),
             })
         } else {
@@ -766,6 +844,10 @@ fn migrate_legacy(value: serde_json::Value) -> Result<serde_json::Value, Migrati
         serde_json::json!({"version": 1, "checkpoint": {"sequence": legacy.sequence, "watermarks": legacy.watermarks, "receipts": {}}}),
     )
 }
+fn migrate_v1(mut value: serde_json::Value) -> Result<serde_json::Value, MigrationError> {
+    value["version"] = serde_json::json!(2);
+    Ok(value)
+}
 fn read_cursor<R: DeserializeOwned>(path: &Path) -> Result<(InboxCheckpoint<R>, bool), InboxError> {
     let value = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes).map_err(corrupt)?,
@@ -785,8 +867,9 @@ fn read_cursor<R: DeserializeOwned>(path: &Path) -> Result<(InboxCheckpoint<R>, 
     }
     let found = version_ladder::found_version(&value);
     let versioned = value.get("version").is_some();
-    let value = version_ladder::migrate_to_current(value, found, 0, 1, &[migrate_legacy])
-        .map_err(corrupt)?;
+    let value =
+        version_ladder::migrate_to_current(value, found, 0, 2, &[migrate_legacy, migrate_v1])
+            .map_err(corrupt)?;
     let stored: VersionedCheckpoint<R> = serde_json::from_value(value).map_err(corrupt)?;
     Ok((stored.checkpoint, versioned))
 }
