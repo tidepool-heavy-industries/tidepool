@@ -103,13 +103,17 @@ async fn provider_response(
                 "input":"sleep (minutes 15)\ninterruptedSuffix <- pure (99 :: Int)"
             }),
             (Scenario::Short, 1) => json!({
+                "type":"message","role":"assistant","id":"interrupted-turn-settled",
+                "content":[{"type":"output_text","text":"interrupted turn settled"}]
+            }),
+            (Scenario::Short, 2) => json!({
                 "type":"custom_tool_call",
                 "call_id":"reuse-after-interrupt",
                 "name":"haskell",
                 "namespace":"tidepool_actor",
                 "input":"pure (11 :: Int)"
             }),
-            (Scenario::Short, 2) => json!({
+            (Scenario::Short, 3) => json!({
                 "type":"custom_tool_call",
                 "call_id":"suppressed-suffix",
                 "name":"haskell",
@@ -518,21 +522,21 @@ async fn run_short_case(ingress: ShortIngress) {
     fixture.observed.await_dispatch().await;
     assert_eq!(fixture.provider.requests.lock().unwrap().len(), 1);
     submit_host_input(&fixture, &thread, ingress).await;
-    let requests = fixture.await_requests(4, Duration::from_secs(30)).await;
-    assert!(
-        requests[1].to_string().contains(ingress.marker()),
-        "{ingress:?} was not queued into the first post-settlement inference"
-    );
+    let requests = fixture.await_requests(5, Duration::from_secs(30)).await;
     let cancelled = output_for(&requests[1], "sleep-short");
     assert!(
         !cancelled.is_empty() && !cancelled.contains("interruptedSuffix"),
-        "original invocation did not settle cleanly before inference: {cancelled}"
+        "the first inference ran without original invocation settlement: {cancelled}"
     );
     assert!(
-        output_for(&requests[2], "reuse-after-interrupt").contains("11"),
+        requests[2].to_string().contains(ingress.marker()),
+        "{ingress:?} was not retained for inference after the interrupted turn settled"
+    );
+    assert!(
+        output_for(&requests[3], "reuse-after-interrupt").contains("11"),
         "workbench did not reuse after {ingress:?}"
     );
-    let suffix = output_for(&requests[3], "suppressed-suffix");
+    let suffix = output_for(&requests[4], "suppressed-suffix");
     let normalized_suffix = suffix.to_lowercase();
     assert!(
         normalized_suffix.contains("rejected") || normalized_suffix.contains("not in scope"),
