@@ -18,7 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tidepool_actor::{ResidentToolEndpoint, ResidentToolError};
 use tidepool_agent::{
-    accept_interactive_session_binding, BackendThreadId, HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+    accept_interactive_session_binding, BackendThreadId, InteractiveSessionBinding,
+    HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
 };
 use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use tokio::net::UnixListener;
@@ -53,6 +54,7 @@ enum AdmissionKind {
 #[derive(Clone)]
 pub(crate) struct HostToolControl {
     bound_thread: Arc<Mutex<Option<BackendThreadId>>>,
+    challenged_binding: Arc<Mutex<Option<InteractiveSessionBinding>>>,
     phase: tokio::sync::watch::Sender<HostToolPhase>,
     endpoint: Arc<dyn ResidentToolEndpoint>,
 }
@@ -82,6 +84,13 @@ impl HostToolControl {
         self.bound_thread
             .try_lock()
             .is_ok_and(|bound| bound.is_some())
+    }
+
+    pub(crate) fn challenged_binding(&self) -> Option<InteractiveSessionBinding> {
+        self.challenged_binding
+            .try_lock()
+            .ok()
+            .and_then(|binding| binding.clone())
     }
 
     /// Immediately quiesce HTTP admission, then return the exact endpoint barrier
@@ -217,6 +226,8 @@ impl HostDynamicToolService {
             }],
             scope: RegistrationScope::PrimaryThread,
             input_control_socket: None,
+            launch_id: uuid::Uuid::new_v4().to_string(),
+            input_control_nonce: uuid::Uuid::new_v4().to_string(),
         };
         Ok(Self {
             state: HostState {
@@ -224,6 +235,7 @@ impl HostDynamicToolService {
                 control: HostToolControl {
                     phase: tokio::sync::watch::channel(HostToolPhase::Serving).0,
                     bound_thread: Arc::new(Mutex::new(None)),
+                    challenged_binding: Arc::new(Mutex::new(None)),
                     endpoint: Arc::clone(&endpoint),
                 },
                 registration: Arc::new(registration),
@@ -304,6 +316,8 @@ struct Registration {
     scope: RegistrationScope,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_control_socket: Option<PathBuf>,
+    launch_id: String,
+    input_control_nonce: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -401,6 +415,14 @@ struct SessionRequest {
     thread_id: String,
     #[serde(default)]
     input_control_socket: Option<PathBuf>,
+    #[serde(default)]
+    launch_id: Option<String>,
+    #[serde(default)]
+    application_instance_id: Option<String>,
+    #[serde(default)]
+    session_generation: Option<u64>,
+    #[serde(default)]
+    input_control_nonce: Option<String>,
 }
 
 async fn attach_session(
@@ -418,6 +440,35 @@ async fn attach_session(
             "input endpoint does not match actor socket",
         ));
     }
+    let challenged_binding = if request.input_control_socket.is_some() {
+        let generation = request
+            .session_generation
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or((StatusCode::BAD_REQUEST, "missing native session generation"))?;
+        let launch_id = request
+            .launch_id
+            .filter(|value| value == &state.registration.launch_id)
+            .ok_or((StatusCode::CONFLICT, "launch challenge does not match"))?;
+        let nonce = request
+            .input_control_nonce
+            .filter(|value| value == &state.registration.input_control_nonce)
+            .ok_or((StatusCode::CONFLICT, "input challenge does not match"))?;
+        let instance_id = request
+            .application_instance_id
+            .filter(|value| !value.is_empty())
+            .ok_or((
+                StatusCode::BAD_REQUEST,
+                "missing native application instance",
+            ))?;
+        Some(InteractiveSessionBinding {
+            launch_id,
+            instance_id,
+            generation,
+            nonce,
+        })
+    } else {
+        None
+    };
     let thread = parse_thread(request.thread_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid thread id"))?;
     if state
@@ -467,6 +518,9 @@ async fn attach_session(
                 "could not settle queued forks",
             )
         })?;
+    }
+    if let Some(binding) = challenged_binding {
+        *state.control.challenged_binding.lock().await = Some(binding);
     }
     *bound = Some(thread);
     Ok(StatusCode::NO_CONTENT)
@@ -880,6 +934,10 @@ mod tests {
             State(state.clone()),
             Json(SessionRequest {
                 input_control_socket: None,
+                launch_id: None,
+                application_instance_id: None,
+                session_generation: None,
+                input_control_nonce: None,
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
             }),
@@ -1066,6 +1124,10 @@ mod tests {
             State(state.clone()),
             Json(SessionRequest {
                 input_control_socket: None,
+                launch_id: None,
+                application_instance_id: None,
+                session_generation: None,
+                input_control_nonce: None,
                 protocol_version: PROTOCOL_VERSION,
                 thread_id: thread.into(),
             }),
@@ -1276,7 +1338,36 @@ mod tests {
         assert_eq!(foreign.status(), StatusCode::BAD_REQUEST);
         assert!(!binding.exists());
 
-        let session = serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "threadId": thread, "inputControlSocket": input});
+        let stale = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "threadId": thread,
+            "inputControlSocket": input,
+            "launchId": registration["launchId"],
+            "applicationInstanceId": "native-instance-1",
+            "sessionGeneration": 1,
+            "inputControlNonce": "stale-nonce",
+        });
+        assert_eq!(
+            client
+                .post("http://localhost/v1/dynamic-tools/session")
+                .json(&stale)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(!binding.exists());
+
+        let session = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "threadId": thread,
+            "inputControlSocket": input,
+            "launchId": registration["launchId"],
+            "applicationInstanceId": "native-instance-1",
+            "sessionGeneration": 1,
+            "inputControlNonce": registration["inputControlNonce"],
+        });
         for _ in 0..2 {
             assert_eq!(
                 client
