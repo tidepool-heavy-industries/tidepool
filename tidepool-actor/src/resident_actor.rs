@@ -1543,6 +1543,13 @@ where
             '_,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Console { continuation, text } => Box::pin(async move {
+                tracing::debug!(actor = ?context.actor, output = %crate::workbench_display::bounded_output(&text, 8192), "actor console");
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }),
             ResidentActorBoundary::Command {
                 continuation,
                 request,
@@ -3820,6 +3827,17 @@ where
                             }
                         }
                         boundary => {
+                            if let ResidentActorBoundary::Console { text, .. } = &boundary {
+                                let rendered = crate::workbench_display::bounded_output(
+                                    text,
+                                    (*unit.display_remaining).min(32768),
+                                );
+                                *unit.display_remaining =
+                                    unit.display_remaining.saturating_sub(rendered.len() + 1);
+                                if !rendered.is_empty() {
+                                    unit.command_output.push(rendered);
+                                }
+                            }
                             let presentation = match &boundary {
                                 ResidentActorBoundary::Command {
                                     request:
@@ -3862,6 +3880,7 @@ where
                                     *text = crate::workbench_display::bounded_output(text, 512);
                                     match &pages {
                                                 Some(Ok(pages)) => text.push_str(&crate::workbench_display::command_pages(pages)),
+                                                Some(Err(tidepool_bridge_effects::CommandError::CommandOutputPending)) => text.push_str("\nNo output yet; streams are starting."),
                                                 Some(Err(error)) => text.push_str(&format!("\nOutput observation unavailable: {error:?}. Inspect the same job; do not rerun for output.")),
                                                 None => {}
                                             }
@@ -3876,6 +3895,7 @@ where
                                                     page.lost_bytes > 0
                                                         || page.end < page.available_end
                                                 }),
+                                                Err(tidepool_bridge_effects::CommandError::CommandOutputPending) => false,
                                                 Err(_) => true,
                                             });
                                         if text.len() > limit || incomplete {
@@ -3889,7 +3909,7 @@ where
                                                 text,
                                                 (8 * 1024).min(limit).saturating_sub(512),
                                             );
-                                            text.push_str(&format!("\nRetained output: {binding} :: Cmd.Job\nRead with read_output using session_id {job}, or Cmd.output {binding}; Cmd.next continues. Do not rerun to recover output."));
+                                            text.push_str(&format!("\nRead retained output with read_output: session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\nOptional Haskell binding: {binding} :: Cmd.Job"));
                                             next_fragment.retain_job_binding(binding);
                                         }
                                     }
@@ -4369,9 +4389,13 @@ where
                     let reason =
                         crate::workbench_display::bounded_output(&reason.to_string(), 1024);
                     let mut output = if request.tool_call().is_some() {
-                        format!("session_id: {job}\n{reason}. Observation ended; the command remains retained. Poll/send input with write_stdin; read_output navigates output. Later handler effects did not run.\nHaskell binding: {binding} :: Cmd.Job")
+                        format!(
+                            "session_id: {job}\n{reason}. Observation ended; the command remains retained. Poll/send input with write_stdin; read_output navigates output. Later handler effects did not run.\nHaskell binding: {binding} :: Cmd.Job"
+                        )
                     } else {
-                        format!("Retained command · session_id: {job}\n{reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}")
+                        format!(
+                            "Retained command · session_id: {job}\n{reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}"
+                        )
                     };
                     if !command_prefix.is_empty() {
                         output.push_str(&format!("\n{command_prefix}"));
@@ -4399,8 +4423,11 @@ where
                                 }
                             }
                         }
+                        Err(tidepool_bridge_effects::CommandError::CommandOutputPending) => {
+                            output.push_str("\nNo output yet; streams are starting.")
+                        }
                         Err(error) => output.push_str(&format!(
-                            "\nOutput unavailable: {error:?}; the binding remains usable."
+                            "\nOutput unavailable: {error:?}; the same job remains retained."
                         )),
                     }
                     receipts.push(WorkbenchItemReceipt {

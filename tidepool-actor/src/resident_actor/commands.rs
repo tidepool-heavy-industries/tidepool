@@ -155,6 +155,12 @@ where
             CommandsReq::CommandInputWith(id, text) => {
                 answer!(jobs.control(owner, &id, CommandControl::Input(text)).await)
             }
+            CommandsReq::CommandFinishInputWith(id, text) => {
+                answer!(
+                    jobs.control(owner, &id, CommandControl::InputAndClose(text))
+                        .await
+                )
+            }
             CommandsReq::CommandCloseInputWith(id) => {
                 answer!(jobs.control(owner, &id, CommandControl::CloseInput).await)
             }

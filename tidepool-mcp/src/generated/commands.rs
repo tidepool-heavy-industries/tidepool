@@ -16,6 +16,7 @@ pub fn commands_decl() -> crate::EffectDecl {
             "CommandOutputWith :: Text -> Int -> Commands (Either CommandError CommandOutput)",
             "CommandReadWith :: Text -> CommandStream -> CommandPosition -> Commands (Either CommandError CommandPage)",
             "CommandInputWith :: Text -> Text -> Commands (Either CommandError ())",
+            "CommandFinishInputWith :: Text -> Text -> Commands (Either CommandError ())",
             "CommandCloseInputWith :: Text -> Commands (Either CommandError ())",
             "CommandResizeWith :: Text -> Int -> Int -> Commands (Either CommandError ())",
             "CommandCancelWith :: Text -> Commands (Either CommandError ())",
@@ -33,7 +34,7 @@ pub fn commands_decl() -> crate::EffectDecl {
             "data CommandOutput = CommandOutput { commandStdout :: CommandPage, commandStderr :: CommandPage } deriving (Show, Eq)",
             "data CommandObservation = CommandObservation { observedCommandResult :: CommandResult, observedCommandOutput :: CommandOutput } deriving (Show, Eq)",
             "data CommandPresentation = CommandVisible Text Int | CommandQuiet deriving (Show, Eq)",
-            "data CommandError = CommandUnavailable Text | CommandInvalid Text | CommandUnauthorized deriving (Show, Eq)",
+            "data CommandError = CommandUnavailable Text | CommandInvalid Text | CommandUnauthorized | CommandOutputPending | CommandInputAcceptedCloseUnconfirmed Text deriving (Show, Eq)",
         ],
         extra_imports: &[
             "import qualified Tidepool.Command as Cmd",

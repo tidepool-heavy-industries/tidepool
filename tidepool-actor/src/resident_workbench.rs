@@ -87,7 +87,7 @@ impl ActorWorkbenchSource {
         WorkbenchCompilation {
             preamble: insert_preamble_imports(
                 &scope.shadow_preamble(&self.preamble),
-                "qualified Tidepool.Inspection as TidepoolInspection",
+                "qualified Tidepool.Inspection as TidepoolInspection\nTidepool.Inspection (print)",
             ),
             imports: scope.turn_imports(),
             include: scope.include_paths(&self.base_include),
@@ -811,6 +811,10 @@ fn cleanup_step_value(
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    Console {
+        continuation: ResidentHole,
+        text: String,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -965,6 +969,7 @@ impl ResidentActorBoundary {
         match self {
             Self::Completed => "program completion",
             Self::Command { .. } => "command job",
+            Self::Console { .. } => "print",
             Self::NotificationSend { .. } => "notify",
             Self::NotificationPoll { .. } => "pollNotification",
             Self::ActorContext(_) => "actorContext",
@@ -1030,6 +1035,7 @@ enum BoundaryCapture {
 /// boundaries. Generated request enums own constructor recognition and field
 /// shape; this sum owns orchestration routing.
 enum ResidentRequest {
+    Console(crate::generated::console::ConsoleReq),
     Commands(crate::generated::commands::CommandsReq),
     Notifications(crate::generated::notifications::NotificationsReq),
     Actor(crate::generated::actor::ActorReq),
@@ -1068,6 +1074,7 @@ impl ResidentRequest {
             crate::generated::notifications::NotificationsReq
         );
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
+        try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
         try_member!(
             Self::ActorContext,
@@ -1113,6 +1120,7 @@ impl ResidentRequest {
     fn operation(&self) -> &'static str {
         match self {
             Self::Commands(_) => "command job",
+            Self::Console(_) => "console output",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
                 ..,
             )) => "notify",
@@ -2617,6 +2625,7 @@ where
                             continuation: hole,
                         },
                     )),
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::Print(text)) => Ok(ResidentActorBoundary::Console { continuation: hole, text }),
                     ResidentRequest::Commands(request) => Ok(ResidentActorBoundary::Command { continuation: hole, request }),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlStopWith(

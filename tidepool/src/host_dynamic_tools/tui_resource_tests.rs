@@ -63,6 +63,56 @@ async fn response(
             }
         };
         json!({"type":"function_call", "call_id":"initial-oom", "name":"exec_command", "arguments":args.to_string()})
+    } else if index == 30 || index == 34 {
+        let arguments = if index == 30 {
+            json!({"cmd":"wc -c", "stdin":true, "yield_time_ms":0})
+        } else {
+            json!({"cmd":"printf cancel-ready; exec sleep 30", "yield_time_ms":0})
+        };
+        json!({"type":"function_call", "call_id":format!("structured-{index}"),
+            "name":"exec_command", "arguments":arguments.to_string()})
+    } else if (31..=33).contains(&index) || (35..=38).contains(&index) {
+        let origin = if index == 38 {
+            27
+        } else if index >= 35 {
+            34
+        } else {
+            30
+        };
+        let requests = provider.requests.lock().unwrap();
+        let receipt = requests[index]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["call_id"] == format!("structured-{origin}")
+                    && item["type"] == "function_call_output"
+            })
+            .and_then(|item| item["output"].as_str())
+            .expect("existing process receipt");
+        let session = receipt
+            .split("session_id: ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap();
+        let (name, arguments) = match index {
+            31 => (
+                "write_stdin",
+                json!({"session_id":session,"chars":"abc\n","close_stdin":true,"yield_time_ms":30000}),
+            ),
+            32 | 38 => (
+                "write_stdin",
+                json!({"session_id":session,"close_stdin":true,"yield_time_ms":0}),
+            ),
+            37 => ("read_output", json!({"session_id":session})),
+            _ => (
+                "cancel_command",
+                json!({"session_id":session,"yield_time_ms":30000}),
+            ),
+        };
+        json!({"type":"function_call", "call_id":format!("structured-{index}"), "name":name,"arguments":arguments.to_string()})
     } else if index == 20 || index == 21 {
         let script = if index == 20 {
             "cat <<'EOF'\nraw λ $(literal) [bash|data|]\nEOF\nprintf 'raw-stderr\\n' >&2\n"
@@ -85,7 +135,7 @@ async fn response(
         let binding = receipt
             .lines()
             .find_map(|line| {
-                line.strip_prefix("Retained output: ")?
+                line.strip_prefix("Optional Haskell binding: ")?
                     .strip_suffix(" :: Cmd.Job")
             })
             .expect("large raw command installs an actual job binding");
@@ -505,7 +555,7 @@ trust_level = "trusted"
         }
     });
     let phases: &[usize] = match shell {
-        tidepool_agent::InteractiveShellTools::Hosted => &[2, 6, 16, 20, 30],
+        tidepool_agent::InteractiveShellTools::Hosted => &[2, 6, 16, 20, 30, 40],
         tidepool_agent::InteractiveShellTools::Native => &[2],
     };
     for &expected in phases {
@@ -592,7 +642,7 @@ trust_level = "trusted"
                     );
                 }
                 if shell == tidepool_agent::InteractiveShellTools::Hosted {
-                    for name in ["bash", "read_output"] {
+                    for name in ["bash", "read_output", "cancel_command"] {
                         assert_eq!(
                             flat.iter().filter(|tool| tool["name"] == name).count(),
                             1,
@@ -744,6 +794,37 @@ trust_level = "trusted"
                     std::fs::read_to_string(work.join("raw-start-count")).unwrap(),
                     "once\n"
                 );
+            }
+            40 => {
+                let receipt = |index: usize| {
+                    requests[index]["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| {
+                            item["call_id"] == format!("structured-{}", index - 1)
+                                && item["type"] == "function_call_output"
+                        })
+                        .and_then(|item| item["output"].as_str())
+                        .unwrap()
+                };
+                assert!(receipt(32).contains("CommandExited 0"), "{}", receipt(32));
+                assert!(receipt(32).contains("\n4"), "{}", receipt(32));
+                assert!(receipt(33).contains("Stdin is closed"), "{}", receipt(33));
+                assert!(
+                    receipt(34).contains("CommandExited 0"),
+                    "finished outcome changed: {}",
+                    receipt(34)
+                );
+                for index in [36, 37] {
+                    assert!(
+                        receipt(index).contains("CommandCancelled"),
+                        "{}",
+                        receipt(index)
+                    );
+                }
+                assert!(receipt(38).contains("bytes"), "{}", receipt(38));
+                assert!(receipt(39).contains("PTY"), "{}", receipt(39));
             }
             _ => unreachable!(),
         }

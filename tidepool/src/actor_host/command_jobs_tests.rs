@@ -11,6 +11,10 @@ pub(super) struct TestCommands {
     finish: watch::Sender<bool>,
     cancelled: std::sync::atomic::AtomicBool,
     output_unavailable: std::sync::atomic::AtomicBool,
+    output_pending: std::sync::atomic::AtomicBool,
+    controls: Mutex<Vec<CommandControl>>,
+    fail_input: std::sync::atomic::AtomicBool,
+    fail_close: std::sync::atomic::AtomicBool,
     output_entered: tokio::sync::Notify,
     hold_output: watch::Sender<bool>,
 }
@@ -29,6 +33,10 @@ impl TestCommands {
             finish: watch::channel(false).0,
             cancelled: false.into(),
             output_unavailable: false.into(),
+            output_pending: false.into(),
+            controls: Mutex::new(Vec::new()),
+            fail_input: false.into(),
+            fail_close: false.into(),
             output_entered: tokio::sync::Notify::new(),
             hold_output: watch::channel(false).0,
         })
@@ -66,6 +74,16 @@ impl CommandBackend for TestCommands {
         operation: CommandControl,
     ) -> futures_util::future::BoxFuture<'a, Result<(), CommandError>> {
         Box::pin(async move {
+            self.controls.lock().push(operation.clone());
+            if (matches!(operation, CommandControl::Input(_))
+                && self.fail_input.load(std::sync::atomic::Ordering::Acquire))
+                || (matches!(operation, CommandControl::CloseInput)
+                    && self.fail_close.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Err(CommandError::CommandUnavailable(
+                    "test acknowledgment unavailable".into(),
+                ));
+            }
             if matches!(operation, CommandControl::Cancel) {
                 self.cancelled
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -81,6 +99,20 @@ impl CommandBackend for TestCommands {
         position: CommandPosition,
     ) -> futures_util::future::BoxFuture<'a, Result<CommandPage, CommandError>> {
         Box::pin(async move {
+            if self
+                .output_unavailable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(CommandError::CommandUnavailable(
+                    "output transport lost".into(),
+                ));
+            }
+            if self
+                .output_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(CommandError::CommandOutputPending);
+            }
             let mut page = match stream {
                 CommandStream::Stdout => test_page(&self.stdout.lock()),
                 CommandStream::Stderr => test_page(""),
@@ -566,16 +598,60 @@ async fn failed_command_display_retains_result_without_reexecution() {
 #[tokio::test]
 async fn command_jobs_cancel_before_backend_cannot_start_later() {
     let mut campaign = TestCampaign::start().await;
-    committed(
-        &campaign,
-        "job <- Cmd.start [bash|never-execute|]\nCmd.cancel job\nCmd.await job",
-    )
-    .await;
+    let started = campaign
+        .root_installation
+        .policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "exec_command".into(),
+            arguments: ToolArguments::Structured(
+                serde_json::json!({"cmd":"never-execute","yield_time_ms":0}),
+            ),
+        })
+        .await
+        .unwrap();
+    let text = started["items"][0]["output"].as_str().unwrap();
+    let session = text
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    for _ in 0..2 {
+        let cancelled = campaign
+            .root_installation
+            .policy
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: "cancel_command".into(),
+                arguments: ToolArguments::Structured(
+                    serde_json::json!({"session_id":session,"yield_time_ms":1000}),
+                ),
+            })
+            .await
+            .unwrap();
+        assert!(
+            cancelled.to_string().contains("CommandCancelled"),
+            "{cancelled}"
+        );
+    }
     let backend = TestCommands::new();
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
-    let result = committed(&campaign, "Cmd.status job").await;
+    let result = campaign
+        .root_installation
+        .policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "write_stdin".into(),
+            arguments: ToolArguments::Structured(
+                serde_json::json!({"session_id":session,"yield_time_ms":0}),
+            ),
+        })
+        .await
+        .unwrap();
     assert!(result.to_string().contains("CommandCancelled"), "{result}");
     assert!(backend.specs.lock().is_empty());
     campaign.forest.shutdown().await;
@@ -989,6 +1065,216 @@ async fn completed_command_output_survives_a_later_failure_in_the_same_computati
     );
     assert!(rendered.contains("result"), "{rendered}");
     assert_eq!(backend.specs.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn flat_input_lifecycle_preserves_partial_acknowledgments() {
+    use std::sync::atomic::Ordering::Release;
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let call = |name: &str, arguments| {
+        policy.dispatch_boxed(ToolInvocation {
+            context: None,
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        })
+    };
+    let backend = TestCommands::new();
+    let started = tokio::spawn(call(
+        "exec_command",
+        serde_json::json!({"cmd":"input fixture","stdin":true,"yield_time_ms":0}),
+    ));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let receipt = started.await.unwrap().unwrap();
+    let output = receipt["items"][0]["output"].as_str().unwrap();
+    let session = output
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    backend.fail_input.store(true, Release);
+    let failed = call("write_stdin", serde_json::json!({"session_id":session,"chars":"first","close_stdin":true,"yield_time_ms":0})).await.unwrap();
+    assert!(failed.to_string().contains("Do not replay"), "{failed}");
+    assert_eq!(backend.controls.lock().len(), 1);
+    backend.fail_input.store(false, Release);
+    backend.fail_close.store(true, Release);
+    let partial = call("write_stdin", serde_json::json!({"session_id":session,"chars":"final","close_stdin":true,"yield_time_ms":0})).await.unwrap();
+    assert!(
+        partial
+            .to_string()
+            .contains("Backend acknowledged the write; child consumption is unknown"),
+        "{partial}"
+    );
+    assert!(
+        partial.to_string().contains("Retry close-only"),
+        "{partial}"
+    );
+    assert_eq!(backend.controls.lock().len(), 3);
+    backend.fail_close.store(false, Release);
+    for _ in 0..2 {
+        let closed = call(
+            "write_stdin",
+            serde_json::json!({"session_id":session,"close_stdin":true,"yield_time_ms":0}),
+        )
+        .await
+        .unwrap();
+        assert!(closed.to_string().contains("Stdin is closed"), "{closed}");
+    }
+    assert_eq!(
+        backend.controls.lock().len(),
+        4,
+        "repeated close is owner-idempotent"
+    );
+    let rejected = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"chars":"never","yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        rejected.to_string().contains("stdin is closed"),
+        "{rejected}"
+    );
+    assert_eq!(backend.controls.lock().len(), 4);
+    for _ in 0..2 {
+        let cancelled = call(
+            "cancel_command",
+            serde_json::json!({"session_id":session,"yield_time_ms":1000}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            cancelled.to_string().contains("CommandCancelled"),
+            "{cancelled}"
+        );
+    }
+    let retained = call("read_output", serde_json::json!({"session_id":session}))
+        .await
+        .unwrap();
+    assert!(retained.to_string().contains("result"), "{retained}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn resident_print_preserves_order_and_output_before_same_unit_failure() {
+    let mut campaign = TestCampaign::start().await;
+    let plain = committed(
+        &campaign,
+        "print (Just (Right (\"λ line\\nsecond\" :: Text) :: Either Text Text))",
+    )
+    .await;
+    assert!(plain.to_string().contains("λ line"), "{plain}");
+    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    let backend = TestCommands::completed("command-middle");
+    backend_request(&mut campaign).await.supply(Ok(backend));
+    let result = super::tests::dispatch_haskell_script_result(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("print_command_failure.hs"),
+    )
+    .await;
+    let text = match result {
+        Ok(value) => value.to_string(),
+        Err(error) => error.to_string(),
+    };
+    for marker in [
+        "printed-before",
+        "command-middle",
+        "printed-after",
+        "failure-after-print",
+    ] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
+    assert!(
+        text.find("printed-before").unwrap() < text.find("command-middle").unwrap(),
+        "{text}"
+    );
+    assert!(
+        text.find("command-middle").unwrap() < text.find("printed-after").unwrap(),
+        "{text}"
+    );
+    committed(&campaign, "traverse print ([1,2,3] :: [Int])").await;
+    let large = committed(&campaign, "print (Just (T.replicate 20000 \"λ\"))").await;
+    let printed = large["items"][0]["output"].as_str().unwrap();
+    assert!(printed.contains("λ"), "{large}");
+    assert!(
+        printed.len() < 18000,
+        "bounded Display must not dump the whole value"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn flat_output_pending_is_distinct_from_empty_and_failure() {
+    use std::sync::atomic::Ordering::Release;
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let call = |name: &str, arguments| {
+        policy.dispatch_boxed(ToolInvocation {
+            context: None,
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        })
+    };
+    let backend = TestCommands::new();
+    backend.output_pending.store(true, Release);
+    let started = tokio::spawn(call(
+        "exec_command",
+        serde_json::json!({"cmd":"pending fixture","yield_time_ms":0}),
+    ));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let receipt = started.await.unwrap().unwrap();
+    let output = receipt["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains("No output yet"), "{output}");
+    assert!(!output.contains("Unavailable"), "{output}");
+    let session = output
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let pending = call("read_output", serde_json::json!({"session_id":session}))
+        .await
+        .unwrap();
+    assert!(pending.to_string().contains("No output yet"), "{pending}");
+    backend.output_pending.store(false, Release);
+    *backend.stdout.lock() = String::new();
+    let empty = call("read_output", serde_json::json!({"session_id":session}))
+        .await
+        .unwrap();
+    assert!(empty.to_string().contains("bytes 0–0"), "{empty}");
+    assert!(!empty.to_string().contains("No output yet"), "{empty}");
+    backend.output_unavailable.store(true, Release);
+    let failed = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        failed.to_string().contains("output transport lost"),
+        "{failed}"
+    );
+    let unauthorized = call("read_output", serde_json::json!({"session_id":"not-owned"}))
+        .await
+        .unwrap();
+    assert!(
+        unauthorized.to_string().contains("unknown command job"),
+        "{unauthorized}"
+    );
+    backend.finish.send_replace(true);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

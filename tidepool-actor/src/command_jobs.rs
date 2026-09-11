@@ -7,8 +7,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tidepool_bridge_effects::{
-    CommandCleanup, CommandError, CommandOutcome, CommandOutput, CommandPage, CommandPosition,
-    CommandResult, CommandSpec, CommandStatus, CommandStream,
+    CommandCleanup, CommandError, CommandInput, CommandOutcome, CommandOutput, CommandPage,
+    CommandPosition, CommandResult, CommandSpec, CommandStatus, CommandStream,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -43,6 +43,7 @@ pub trait CommandBackend: Send + Sync + 'static {
 #[derive(Clone, Debug)]
 pub enum CommandControl {
     Input(String),
+    InputAndClose(String),
     CloseInput,
     Resize { rows: u16, columns: u16 },
     Cancel,
@@ -67,11 +68,33 @@ struct Shared {
     owner: ActorRef,
     phase: watch::Sender<CommandStatus>,
     backend: Mutex<Option<Arc<dyn CommandBackend>>>,
+    input: Mutex<CommandInput>,
     sinks: Mutex<Vec<std::sync::Weak<CompletionSink>>>,
     observers: Mutex<HashMap<ActorRef, usize>>,
     displayed: Mutex<HashMap<ActorRef, [i64; 2]>>,
 }
 impl Shared {
+    // Checked again by the serialized control worker, since earlier queued EOF
+    // may have closed input after this operation was admitted.
+    fn input_control(&self, operation: &CommandControl) -> Result<bool, CommandError> {
+        match (&*self.input.lock(), operation) {
+            (
+                CommandInput::TerminalInput,
+                CommandControl::CloseInput | CommandControl::InputAndClose(_),
+            ) => Err(CommandError::CommandInvalid(
+                "close_stdin requires piped input; PTYs use explicit terminal control characters"
+                    .into(),
+            )),
+            (CommandInput::ClosedInput, CommandControl::CloseInput) => Ok(true),
+            (
+                CommandInput::ClosedInput,
+                CommandControl::Input(_) | CommandControl::InputAndClose(_),
+            ) => Err(CommandError::CommandInvalid(
+                "stdin is closed; input was not sent".into(),
+            )),
+            _ => Ok(false),
+        }
+    }
     /// A settled command with no supplied backend never opened output streams.
     fn unstarted_output(&self) -> Option<CommandPage> {
         let phase = self.phase.borrow();
@@ -96,6 +119,16 @@ impl Shared {
             leading_fragment: false,
             trailing_fragment: false,
         })
+    }
+
+    fn unavailable_output(&self) -> CommandError {
+        match &*self.phase.borrow() {
+            CommandStatus::CommandFinished(result) => CommandError::CommandUnavailable(format!(
+                "command terminated without confirmed output streams: {:?}; cleanup: {:?}",
+                result.outcome, result.cleanup
+            )),
+            _ => CommandError::CommandOutputPending,
+        }
     }
 
     async fn cleanup(&self, id: &str) -> CommandCleanup {
@@ -199,6 +232,7 @@ impl CommandJobs {
             owner: parent.identity(),
             phase: watch::channel(CommandStatus::CommandQueued).0,
             backend: Mutex::new(None),
+            input: Mutex::new(spec.input.clone()),
             sinks: Mutex::new(Vec::new()),
             observers: Mutex::new(Default::default()),
             displayed: Mutex::new(Default::default()),
@@ -312,9 +346,33 @@ impl CommandJobs {
         if shared.owner != owner {
             return Err(CommandError::CommandUnauthorized);
         }
+        if shared.input_control(&operation)? {
+            return Ok(());
+        }
         let finished = matches!(*shared.phase.borrow(), CommandStatus::CommandFinished(_));
         if finished {
+            if matches!(operation, CommandControl::CloseInput)
+                && matches!(
+                    &*shared.phase.borrow(),
+                    CommandStatus::CommandFinished(CommandResult {
+                        cleanup: CommandCleanup::CommandClean,
+                        ..
+                    })
+                )
+            {
+                *shared.input.lock() = CommandInput::ClosedInput;
+                return Ok(());
+            }
             if matches!(operation, CommandControl::Cancel) {
+                if matches!(
+                    &*shared.phase.borrow(),
+                    CommandStatus::CommandFinished(CommandResult {
+                        cleanup: CommandCleanup::CommandClean,
+                        ..
+                    })
+                ) {
+                    return Ok(());
+                }
                 let backend = shared.backend.lock().clone();
                 if let Some(backend) = backend {
                     backend.control(id, operation).await?;
@@ -362,9 +420,7 @@ impl CommandJobs {
                     stderr: page,
                 });
             }
-            return Err(CommandError::CommandUnavailable(
-                "command backend not ready; retain the job".into(),
-            ));
+            return Err(shared.unavailable_output());
         };
         backend.output(id, bytes).await
     }
@@ -383,9 +439,9 @@ impl CommandJobs {
         }
         let shared = self.shared(owner, id)?;
         let Some(backend) = shared.backend.lock().clone() else {
-            return shared.unstarted_output().ok_or_else(|| {
-                CommandError::CommandUnavailable("command backend not ready; retain the job".into())
-            });
+            return shared
+                .unstarted_output()
+                .ok_or_else(|| shared.unavailable_output());
         };
         backend.read(id, stream, position).await
     }
@@ -534,8 +590,38 @@ impl JobState {
         };
         let id = self.id.clone();
         let myself = myself.clone();
+        let shared = self.shared.clone();
         self.control = Some(tokio::spawn(async move {
-            let result = backend.control(&id, operation).await;
+            let result = match shared.input_control(&operation) {
+                Ok(true) => Ok(()),
+                Err(error) => Err(error),
+                Ok(false) => {
+                    let close = matches!(
+                        operation,
+                        CommandControl::CloseInput | CommandControl::InputAndClose(_)
+                    );
+                    let result = match operation {
+                        CommandControl::InputAndClose(text) => {
+                            match backend.control(&id, CommandControl::Input(text)).await {
+                                Err(error) => Err(error),
+                                Ok(()) => backend
+                                    .control(&id, CommandControl::CloseInput)
+                                    .await
+                                    .map_err(|error| {
+                                        CommandError::CommandInputAcceptedCloseUnconfirmed(format!(
+                                            "{error:?}"
+                                        ))
+                                    }),
+                            }
+                        }
+                        operation => backend.control(&id, operation).await,
+                    };
+                    if close && result.is_ok() {
+                        *shared.input.lock() = CommandInput::ClosedInput;
+                    }
+                    result
+                }
+            };
             let _ = myself.cast(JobMessage::ControlFinished(reply, result));
         }));
     }

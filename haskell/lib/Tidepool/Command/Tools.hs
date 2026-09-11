@@ -10,15 +10,17 @@ module Tidepool.Command.Tools
     Execute (..),
     WriteInput (..),
     ReadOutput (..),
+    CancelCommand (..),
     Stream (..),
     tools,
     execute,
     writeInput,
     readRetained,
+    cancelRetained,
   )
 where
 
-import Control.Monad.Freer (Eff, Member)
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Char (ord)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -29,6 +31,7 @@ import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
 import qualified Tidepool.Command as Cmd
 import Tidepool.Command.Types (Job (..))
+import Tidepool.Effects.Core (Commands (..))
 import Tidepool.Inspection (Display (..))
 
 data Execute = Execute
@@ -46,6 +49,14 @@ data Execute = Execute
 data WriteInput = WriteInput
   { session_id :: Text,
     chars :: Maybe Text,
+    close_stdin :: Maybe Bool,
+    yield_time_ms :: Maybe Int,
+    max_output_bytes :: Maybe Int
+  }
+  deriving (Generic, FromJSON, JsonSchema)
+
+data CancelCommand = CancelCommand
+  { session_id :: Text,
     yield_time_ms :: Maybe Int,
     max_output_bytes :: Maybe Int
   }
@@ -67,7 +78,8 @@ data ShellTools mode = ShellTools
   { bash :: mode :- RawCall Text,
     execCommand :: mode :- Call Execute Text,
     writeStdin :: mode :- Call WriteInput Text,
-    readOutput :: mode :- Call ReadOutput Text
+    readOutput :: mode :- Call ReadOutput Text,
+    cancelCommand :: mode :- Call CancelCommand Text
   }
   deriving (Generic)
 
@@ -84,12 +96,16 @@ tools =
           execute,
       writeStdin =
         tool
-          "Send chars to an existing session_id, then observe new output. Omit chars or use empty text to poll without writing. yield_time_ms: 0..30000 (default 250). Output allowance: 1024..32768 bytes. PTYs accept terminal control characters. Never rerun to recover output."
+          "Send chars to an existing session_id, then observe new output. Omit chars or use empty text to poll without writing. close_stdin sends final bytes then EOF for pipes only; PTYs reject it. Backend write acknowledgment does not prove the child consumed the bytes. yield_time_ms: 0..30000 (default 250). Output allowance: 1024..32768 bytes. PTYs accept terminal control characters. Never rerun to recover output."
           writeInput,
       readOutput =
         tool
           "Read retained output without executing, waiting or consuming it. Default stream Stdout, offset 0. Reply reports byte positions, next offset, current end versus EOF and retention gaps. Use Stderr for diagnostics."
-          readRetained
+          readRetained,
+      cancelCommand =
+        tool
+          "Request cancellation of an existing session_id, then observe it. Works for queued jobs, pipes and PTYs; stdin need not be open. Default observation 250ms, maximum 30000ms. Cancellation requested is not terminal/cleanup confirmation. Repeated cancellation preserves the actual outcome; retained output remains readable."
+          cancelRetained
     }
 
 -- Validate observation options before starting a process or sending input.
@@ -130,26 +146,52 @@ execute
         pure ""
 
 writeInput :: (Member Cmd.Commands effects) => WriteInput -> Eff effects Text
-writeInput WriteInput {session_id = key, chars = input, yield_time_ms = wait, max_output_bytes = limit} =
+writeInput WriteInput {session_id = key, chars = input, close_stdin = close, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
     options@Cmd.Observation {} -> do
-      let retained = Job key
-      case input of
-        Nothing -> pure ()
-        Just "" -> pure ()
-        Just text -> Cmd.sendInput retained text
-      _ <- Cmd.observe options retained
-      pure ""
+      let text = fromMaybe "" input
+          eof = fromMaybe False close
+      receipt <- case (T.null text, eof) of
+        (True, False) -> pure (Right ())
+        (True, True) -> send (CommandCloseInputWith key)
+        (False, False) -> send (CommandInputWith key text)
+        (False, True) -> send (CommandFinishInputWith key text)
+      case receipt of
+        Left (Cmd.CommandInputAcceptedCloseUnconfirmed detail) ->
+          pure $ "session_id: " <> key <> "\nBackend acknowledged the write; child consumption is unknown. EOF unconfirmed: " <> detail <> "\nRetry close-only with write_stdin(close_stdin=true), without chars. Do not resend these bytes."
+        Left issue -> pure $ "session_id: " <> key <> "\nInput operation failed or was unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
+        Right () -> do
+          _ <- Cmd.observe options (Job key)
+          pure $ if eof then "Stdin is closed." else ""
+
+cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
+cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
+  case observation 250 wait limit of
+    options@Cmd.Observation {} -> do
+      receipt <- send (CommandCancelWith key)
+      case receipt of
+        Left issue -> pure $ "session_id: " <> key <> "\nCancellation unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job; do not start a replacement."
+        Right () -> do
+          current <- Cmd.observe options (Job key)
+          pure $ case current of
+            Cmd.CommandFinished _ -> ""
+            _ -> "Cancellation requested; terminal outcome and cleanup are not yet confirmed."
 
 readRetained :: (Member Cmd.Commands effects) => ReadOutput -> Eff effects Text
 readRetained ReadOutput {session_id = key, stream = selected, offset = position} = do
   let selectedStream = case selected of
         Just Stderr -> Cmd.Stderr
         _ -> Cmd.Stdout
-  page <- Cmd.readPage (Job key) selectedStream (Cmd.OutputOffset (fromMaybe 0 position))
-  let details = Cmd.pageDetails page
-      prefix = T.take 6000 (Cmd.pageText page)
-      shortened = T.length prefix < T.length (Cmd.pageText page)
+  result <- send (CommandReadWith key selectedStream (Cmd.OutputOffset (fromMaybe 0 position)))
+  pure $ case result of
+    Left Cmd.CommandOutputPending -> "session_id: " <> key <> "\nNo output yet; streams are starting."
+    Left issue -> "session_id: " <> key <> "\nOutput unavailable: " <> T.pack (show issue) <> "\nInspect the same job; do not rerun the command."
+    Right details -> T.pack (show selectedStream) <> " · " <> renderPage details
+
+renderPage :: Cmd.CommandPage -> Text
+renderPage details =
+  let prefix = T.take 6000 (Cmd.outputText details)
+      shortened = T.length prefix < T.length (Cmd.outputText details)
       byteCount = T.foldl' (\n c -> n + utf8Width c) 0 prefix
       nextOffset = Cmd.outputStart details + byteCount
       visible =
@@ -159,8 +201,7 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position}
             Cmd.outputTrailingFragment = shortened && not (T.isSuffixOf "\n" prefix)
           }
       (text, _) = displayWith 28000 (if shortened && not (Cmd.outputLossy details) then visible else details)
-  pure $
-    if shortened && Cmd.outputLossy details
+  in if shortened && Cmd.outputLossy details
       then "Lossy UTF-8; displayed text is abbreviated. Exact byte positions refer to the retained page, not the displayed prefix. Supply offset to inspect another range.\n" <> text
       else text <> "\nnext_offset: " <> T.pack (show (if shortened then nextOffset else Cmd.outputEnd details))
   where

@@ -132,4 +132,8 @@ pub enum CommandError {
     CommandInvalid(String),
     #[core(module = "Tidepool.Effects.Core")]
     CommandUnauthorized,
+    #[core(module = "Tidepool.Effects.Core")]
+    CommandOutputPending,
+    #[core(module = "Tidepool.Effects.Core")]
+    CommandInputAcceptedCloseUnconfirmed(String),
 }

@@ -43,6 +43,7 @@ import Tidepool.Effects.Core
   , ActorLocal
   , AgentSession
   , AgentTools
+  , Console
   , FsRead
   , FsWrite
   , Notifications
@@ -74,6 +75,7 @@ type ReadOnlyEffects protocol =
    , FsRead
    , Worktree
    , Notifications
+   , Console
    ]
 
 type ReadWriteEffects protocol = FsWrite ': ReadOnlyEffects protocol

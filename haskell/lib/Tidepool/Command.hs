@@ -138,7 +138,10 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
   current <- checked <$> send (CommandAwaitWith key milliseconds)
   let heading = case current of
         CommandFinished result -> resultHeading result
-        _ -> T.pack (show current)
+        CommandQueued -> "Queued"
+        CommandStarting -> "Starting"
+        CommandRunning -> "Running"
+        CommandStopping -> "Stopping"
   send (CommandPresentWith key (CommandVisible (heading <> " · session_id: " <> key) bytes))
   pure current
 
@@ -311,7 +314,7 @@ outputMetadata stream page =
     <> number (outputAvailableEnd page)
     <> (if outputRetainedStart page > 0 then " · retention loss before byte " <> number (outputRetainedStart page) else "")
     <> (if outputLostBytes page > 0 then " · retention gap: " <> number (outputLostBytes page) <> " bytes" else "")
-    <> (if outputStart page > outputRetainedStart page && outputLostBytes page == 0 then " · earlier available output not in capture; read from job" else "")
+    <> (if outputStart page > outputRetainedStart page && outputLostBytes page == 0 then " · earlier retained output available" else "")
     <> (if outputEnd page < outputAvailableEnd page then " · more available" else if outputFinished page then " · EOF" else " · current end; running")
     <> (if outputLossy page then " · lossy UTF-8" else "")
     <> (if outputLeadingFragment page then " · leading line fragment" else "")

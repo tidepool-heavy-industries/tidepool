@@ -10,5 +10,6 @@ pub mod agent_launch;
 pub mod agent_session;
 pub mod agent_tools;
 pub mod commands;
+pub mod console;
 pub mod forks;
 pub mod notifications;

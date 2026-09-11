@@ -77,7 +77,7 @@ fn command_pages_explain_gaps_without_merging_stream_order() {
         (CommandStream::Stdout, page("last\n", 95, 100)),
         (CommandStream::Stderr, page("error\n", 0, 6)),
     ]);
-    assert!(rendered.contains("89 bytes between displayed pages"));
+    assert!(rendered.contains("89 retained bytes between displayed pages"));
     assert_eq!(rendered.matches("between displayed pages").count(), 1);
     assert!(rendered.contains("stdout · bytes 95–100 of 100"));
     assert!(rendered.contains("stderr · bytes 0–6 of 100"));

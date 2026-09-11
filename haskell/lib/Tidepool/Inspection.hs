@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -6,17 +7,27 @@
 module Tidepool.Inspection
   ( Display (..),
     renderText,
+    print,
     WorkbenchDisplay (..),
     FullInspection,
     FullDisplay (inspectFull),
   )
 where
 
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
-import Prelude
+import Tidepool.Effects.Core (Console (Print))
+import Prelude hiding (print)
+
+-- | Bounded Display-based output in execution order; unlike Prelude.print,
+-- Text and nested displayable values use the workbench's literal rendering.
+print :: (Display a, Member Console effects) => a -> Eff effects ()
+print value =
+  let (text, shortened) = displayWith 8192 value
+  in send (Print (text <> if shortened then "\n[display shortened]" else ""))
 
 -- | The Bool reports omitted detail. The character limit bounds the demanded
 -- Show prefix, not the evaluation time of an arbitrary Show implementation.

@@ -92,7 +92,11 @@ pub fn bounded_output(text: &str, budget: usize) -> String {
         }
     }
     let omitted = tail - head;
-    format!("{}\n[… {omitted} output bytes not displayed; For commands, navigate retained output with Cmd.output. For values, inspect a smaller projection.]\n{}", &text[..head], &text[tail..])
+    format!(
+        "{}\n[… {omitted} output bytes not displayed]\n{}",
+        &text[..head],
+        &text[tail..]
+    )
 }
 
 /// Command output remains literal text; stream positions explain omissions
@@ -112,7 +116,10 @@ pub(crate) fn command_pages(
         };
         if let Some(previous) = ends[stream_index] {
             if page.start > previous {
-                output.push_str(&format!("\n[… {} bytes between displayed pages; navigate with Cmd.output and Cmd.next.]\n", page.start - previous));
+                output.push_str(&format!(
+                    "\n[… {} retained bytes between displayed pages.]\n",
+                    page.start - previous
+                ));
             }
         }
         ends[stream_index] = Some(page.end);

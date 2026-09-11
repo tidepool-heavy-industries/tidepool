@@ -20,6 +20,7 @@ import Tidepool.Effects.Core
   ( ActorContext
   , AgentControl
   , Commands
+  , Console
   , Notifications
   , Actor
   , AgentInspection
@@ -74,5 +75,6 @@ instance KnownEffect WorktreeAllocation where effectWitness = EffectWitness Effe
 instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness EffectWorktreeIntegration
 instance KnownEffect Forks where effectWitness = EffectWitness EffectForks
 instance KnownEffect Commands where effectWitness = EffectWitness EffectCommands
+instance KnownEffect Console where effectWitness = EffectWitness EffectConsole
 instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
 instance KnownEffect Actor where effectWitness = EffectWitness EffectActor

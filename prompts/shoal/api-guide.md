@@ -43,7 +43,11 @@ Register separate watches when results can be integrated independently.
 
 The `bash` tool accepts literal Bash and displays output directly.
 `exec_command` adds memory/cwd/environment/PTY options; `write_stdin` sends input
-or polls a returned `session_id`; `read_output` navigates retained output.
+or polls a returned `session_id`; `close_stdin: true` closes piped input after any
+final chars. A partial write/close receipt requires close-only recovery, never
+replaying acknowledged bytes. Backend acknowledgment does not prove child consumption.
+`cancel_command` requests cancellation; its receipt distinguishes terminal outcome
+and cleanup from an outstanding request. `read_output` navigates retained output.
 All use `Cmd`'s execution/resource owner. Ordinary shell work needs no Haskell
 binding. Haskell job bindings additionally support composition and recovery.
 Tool names are flat; native shell implementations are disabled, while `apply_patch`
@@ -57,6 +61,10 @@ result <- Cmd.run [bash|git status --short|]
 Output appears automatically; `result` remains data. `Cmd.quiet action` suppresses
 routine display within that action. Commands are reusable values; `Cmd.describe`
 inspects intent. Ordinary commands use 256 MiB; use `withMemory` for builds/tests.
+`print value` inside an effectful block emits bounded `Display` output through
+Console in execution order; output before a later failure remains visible.
+It differs from Prelude's `Show`-based IO print. State-machine actors log it without
+waking a model; use projections for large values.
 
 `Cmd.run` and `Cmd.await job` wait up to 30 seconds for completion. An overrun
 stops the current computation; the interactive workbench names a retained

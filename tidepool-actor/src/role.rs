@@ -66,6 +66,7 @@ pub enum ActorEffectKey {
     WorktreeIntegration,
     Notifications,
     Commands,
+    Console,
     Actor,
 }
 
@@ -85,6 +86,7 @@ impl ActorEffectKey {
             Self::WorktreeIntegration => "WorktreeIntegration",
             Self::Notifications => "Notifications",
             Self::Commands => "Commands",
+            Self::Console => "Console",
             Self::Actor => "Actor",
         }
     }
@@ -127,6 +129,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
+                ActorEffectKey::Console,
                 ActorEffectKey::Actor,
             ],
         )
@@ -153,6 +156,7 @@ impl EffectiveRole {
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
+                ActorEffectKey::Console,
                 ActorEffectKey::Actor,
             ],
         )
@@ -180,6 +184,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
+                ActorEffectKey::Console,
                 ActorEffectKey::Actor,
             ],
         )
@@ -217,6 +222,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Notifications,
                 ActorEffectKey::Commands,
+                ActorEffectKey::Console,
                 ActorEffectKey::Actor,
             ],
         )
@@ -479,7 +485,7 @@ mod tests {
     fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
             EffectiveRole::research().haskell_effects_type(),
-            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Notifications, Actor]"
+            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Notifications, Commands, Console, Actor]"
         );
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");

@@ -215,6 +215,8 @@ pub fn commands() -> Effect {
                     ("CommandUnavailable", vec![HsType::Text]),
                     ("CommandInvalid", vec![HsType::Text]),
                     ("CommandUnauthorized", vec![]),
+                    ("CommandOutputPending", vec![]),
+                    ("CommandInputAcceptedCloseUnconfirmed", vec![HsType::Text]),
                 ],
             ),
         ],
@@ -295,6 +297,15 @@ pub fn commands() -> Effect {
             verb(
                 "CommandInputWith",
                 "command_input_with",
+                vec![
+                    ("job", HsType::Text, "String"),
+                    ("text", HsType::Text, "String"),
+                ],
+                HsType::either(named("CommandError"), HsType::Unit),
+            ),
+            verb(
+                "CommandFinishInputWith",
+                "command_finish_input_with",
                 vec![
                     ("job", HsType::Text, "String"),
                     ("text", HsType::Text, "String"),

@@ -22,13 +22,24 @@ initial observation (choose the limit for the actual check):
 ```
 
 Use the returned `session_id` verbatim. `write_stdin` with omitted `chars` polls;
-with `chars` it sends input. `read_output` with that ID and `stream: "Stderr"`
+with `chars` it sends input. For piped stdin, `close_stdin: true` sends any final
+chars before EOF. PTYs reject this flag; use explicit terminal input there.
+If a write is acknowledged but EOF fails, retry close-only, without chars.
+Acknowledgment means the backend accepted the write, not that the child consumed it.
+An uncertain write must not be replayed automatically.
+`cancel_command` requests cancellation of the same job, regardless of stdin mode;
+its receipt distinguishes the request from terminal outcome and cleanup. Repeated
+close/cancel is safe; cancellation preserves an already-finished outcome.
+`read_output` with that ID and `stream: "Stderr"`
 reads diagnostics from the beginning; continue at the returned `next_offset`.
 None of these operations reruns the command. A finished nonzero exit is a command
 result; inspect its diagnostics. Running or queued means the same job remains
 owned. Do useful independent work or route completion rather than repeatedly
 polling through model turns. `Cmd.completion` is an actor EventSource, not an Await
 value for `watch`; see the routing example linked below.
+
+Starting with no output is ordinary progress. Readable-but-empty output has byte
+positions; an unavailable-output error is different and keeps the same job.
 
 Defaults: 256 MiB and a 30-second observation. Expiry leaves the command alive.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
@@ -46,6 +57,10 @@ result <- Cmd.run [bash|git status --short|]
 
 Output appears automatically, including for a bound result. The result remains
 available as Haskell data; displaying it again does not execute the command.
+Inside an effectful block, `print value` emits bounded `Display` output in execution
+order, including output before a later failure. It uses the existing Console effect;
+it is not Prelude's `Show`-based IO print. State-machine actors log this output without
+waking a model. Large values still need projections or explicit pages.
 Use `Cmd.quiet action` when only the data matters. Quiet is scoped to that action
 and does not hide a stopped computation or its recovery receipt. Nonzero process
 exits remain in the retained result even when routine presentation is quiet.

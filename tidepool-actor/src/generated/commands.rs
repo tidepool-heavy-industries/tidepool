@@ -25,6 +25,7 @@ pub enum CommandsReq {
         tidepool_bridge_effects::CommandPosition,
     ),
     CommandInputWith(String, String),
+    CommandFinishInputWith(String, String),
     CommandCloseInputWith(String),
     CommandResizeWith(String, i64, i64),
     CommandCancelWith(String),
