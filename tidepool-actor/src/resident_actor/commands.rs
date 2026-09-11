@@ -1,6 +1,7 @@
 use super::*;
 use crate::command_jobs::CommandControl;
 use crate::generated::commands::CommandsReq;
+use crate::resident_workbench::CommandObservationStop;
 use tidepool_bridge_effects::CommandError;
 
 impl<H, O> ResidentKernelBehavior<H, O>
@@ -63,6 +64,82 @@ where
             CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
             CommandsReq::CommandAwaitWith(id, milliseconds) => {
                 answer!(jobs.wait(owner, &id, milliseconds).await)
+            }
+            CommandsReq::CommandForegroundWith(id) => {
+                let observed = if permitted {
+                    jobs.wait(owner, &id, 30_000).await
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
+                match observed {
+                    Ok(tidepool_bridge_effects::CommandStatus::CommandFinished(result)) => {
+                        match jobs.output(owner, &id, 1024 * 1024).await {
+                            Ok(output) => {
+                                self.environment
+                                    .runner
+                                    .resume_value(
+                                        context.clone(),
+                                        continuation,
+                                        Ok::<_, CommandError>(
+                                            tidepool_bridge_effects::CommandObservation {
+                                                result,
+                                                output,
+                                            },
+                                        ),
+                                    )
+                                    .await
+                            }
+                            Err(error) => {
+                                self.environment
+                                    .runner
+                                    .stop_command_observation(
+                                        context.clone(),
+                                        continuation,
+                                        id,
+                                        CommandObservationStop::OutputUnavailable(error),
+                                    )
+                                    .await
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        self.environment
+                            .runner
+                            .stop_command_observation(
+                                context.clone(),
+                                continuation,
+                                id,
+                                CommandObservationStop::Deadline,
+                            )
+                            .await
+                    }
+                    Err(error) => {
+                        self.environment
+                            .runner
+                            .resume_value(
+                                context.clone(),
+                                continuation,
+                                Err::<tidepool_bridge_effects::CommandObservation, _>(error),
+                            )
+                            .await
+                    }
+                }
+            }
+            CommandsReq::CommandPresentWith(id, _) => {
+                if !permitted {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "command presentation is not authorized".into(),
+                    ));
+                }
+                jobs.status(owner, &id).await.map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "command presentation rejected: {error:?}"
+                    ))
+                })?;
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
             }
             CommandsReq::CommandOutputWith(id, bytes) => answer!({
                 match usize::try_from(bytes) {

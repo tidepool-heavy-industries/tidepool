@@ -23,6 +23,11 @@ import Prelude
 class WorkbenchDisplay a where
   workbenchDisplay :: a -> (Text, Bool)
 
+  -- | Omit payloads already presented by effects in the current expression.
+  -- Identity keys are opaque; explicitly inspecting the value later shows it again.
+  workbenchDisplayWithout :: [Text] -> a -> (Text, Bool)
+  workbenchDisplayWithout _ = workbenchDisplay
+
   -- | Assignments need readable instructions on arrival. Structured inputs
   -- retain their ordinary compact presentation; the host also caps UTF-8 bytes.
   workbenchActivationDisplay :: Int -> a -> (Text, Bool)
@@ -31,6 +36,9 @@ class WorkbenchDisplay a where
 -- | Budgeted text rendering. Containers pass their remaining budget to children.
 class Display a where
   displayWith :: Int -> a -> (Text, Bool)
+
+  displayWithout :: [Text] -> Int -> a -> (Text, Bool)
+  displayWithout _ = displayWith
 
 renderText :: Int -> Text -> (Text, Bool)
 renderText budget value = (Text.take (max 0 budget) value, Text.length value > max 0 budget)
@@ -45,20 +53,27 @@ instance Display Text where
   displayWith = renderText
 
 instance (Display a) => Display (Maybe a) where
+  displayWithout _ budget Nothing = renderText budget "Nothing"
+  displayWithout keys budget (Just value) = renderParts budget "Just " "" [\n -> displayWithout keys n value]
   displayWith budget Nothing = renderText budget "Nothing"
   displayWith budget (Just value) = renderParts budget "Just " "" [\n -> displayWith n value]
 
 instance (Display a, Display b) => Display (Either a b) where
+  displayWithout keys budget (Left value) = renderParts budget "Left " "" [\n -> displayWithout keys n value]
+  displayWithout keys budget (Right value) = renderParts budget "Right " "" [\n -> displayWithout keys n value]
   displayWith budget (Left value) = renderParts budget "Left " "" [\n -> displayWith n value]
   displayWith budget (Right value) = renderParts budget "Right " "" [\n -> displayWith n value]
 
 instance {-# OVERLAPPING #-} (Display a) => Display [a] where
+  displayWithout keys budget values = renderParts budget "[" "]" (map (\value n -> displayWithout keys n value) values)
   displayWith budget values = renderParts budget "[" "]" (map (\value n -> displayWith n value) values)
 
 instance (Display a, Display b) => Display (a, b) where
+  displayWithout keys budget (a, b) = renderParts budget "(" ")" [\n -> displayWithout keys n a, \n -> displayWithout keys n b]
   displayWith budget (a, b) = renderParts budget "(" ")" [\n -> displayWith n a, \n -> displayWith n b]
 
 instance (Display a, Display b, Display c) => Display (a, b, c) where
+  displayWithout keys budget (a, b, c) = renderParts budget "(" ")" [\n -> displayWithout keys n a, \n -> displayWithout keys n b, \n -> displayWithout keys n c]
   displayWith budget (a, b, c) = renderParts budget "(" ")" [\n -> displayWith n a, \n -> displayWith n b, \n -> displayWith n c]
 
 renderParts :: Int -> Text -> Text -> [Int -> (Text, Bool)] -> (Text, Bool)
@@ -79,6 +94,7 @@ renderParts budget opening closing values =
 
 instance {-# OVERLAPPABLE #-} (Display a) => WorkbenchDisplay a where
   workbenchDisplay = displayWith 512
+  workbenchDisplayWithout keys = displayWithout keys 512
 
 instance WorkbenchDisplay Text where
   workbenchDisplay value =
@@ -88,21 +104,23 @@ instance WorkbenchDisplay Text where
     let prefix = Text.take (limit + 1) value
      in (Text.take limit prefix, Text.length prefix > limit)
 
-newtype FullInspection = FullInspection Text
+newtype FullInspection = FullInspection ([Text] -> Int -> (Text, Bool))
 
--- | Render a saved value explicitly. Text is already a presentation; other
--- values use Show by default, which can be expensive or fail.
+-- | Retain the value and render only the display allowance when observed.
+-- Explicit inspection uses a larger preview, not an unbounded serialization.
 class FullDisplay a where
   inspectFull :: a -> FullInspection
 
 instance {-# OVERLAPPABLE #-} (Display a) => FullDisplay a where
-  inspectFull value = FullInspection (fst (displayWith (maxBound - 1) value))
+  inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value)
 
 instance FullDisplay Text where
-  inspectFull = FullInspection
+  inspectFull value = FullInspection (\_ budget -> renderText budget value)
 
 instance WorkbenchDisplay FullInspection where
-  workbenchDisplay (FullInspection text) = (text, False)
+  workbenchDisplay (FullInspection render) = render [] 65536
+  workbenchDisplayWithout keys (FullInspection render) = render keys 65536
+  workbenchActivationDisplay budget (FullInspection render) = render [] budget
 
 instance WorkbenchDisplay (ResponseResult a) where
   workbenchDisplay value =

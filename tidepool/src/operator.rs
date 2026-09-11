@@ -355,7 +355,7 @@ async fn submit(
 }
 fn map_result(result: WorkbenchResponse) -> SubmitResponse {
     let outcome = match result.status {
-        WorkbenchRunStatus::Rejected => Outcome::Rejected,
+        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::Backgrounded => Outcome::Rejected,
         WorkbenchRunStatus::Committed
         | WorkbenchRunStatus::Completed
         | WorkbenchRunStatus::Replied
@@ -366,6 +366,7 @@ fn map_result(result: WorkbenchResponse) -> SubmitResponse {
         if !item.output.is_empty() {
             blocks.push(match item.status {
                 tidepool_runtime::session::WorkbenchItemStatus::Diagnostic
+                | tidepool_runtime::session::WorkbenchItemStatus::Stopped
                 | tidepool_runtime::session::WorkbenchItemStatus::Rejected => {
                     Block::Diagnostic(item.output.clone())
                 }

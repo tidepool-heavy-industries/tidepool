@@ -3,12 +3,15 @@ use super::tests::dispatch_haskell_script;
 use super::*;
 use tidepool_actor::command_jobs::{CommandBackend, CommandControl};
 use tidepool_bridge_effects::*;
+use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
 struct TestCommands {
     specs: Mutex<Vec<CommandSpec>>,
     finish: watch::Sender<bool>,
     cancelled: std::sync::atomic::AtomicBool,
     output_unavailable: std::sync::atomic::AtomicBool,
+    output_entered: tokio::sync::Notify,
+    hold_output: watch::Sender<bool>,
 }
 impl TestCommands {
     fn new() -> Arc<Self> {
@@ -17,6 +20,8 @@ impl TestCommands {
             finish: watch::channel(false).0,
             cancelled: false.into(),
             output_unavailable: false.into(),
+            output_entered: tokio::sync::Notify::new(),
+            hold_output: watch::channel(false).0,
         })
     }
 }
@@ -64,13 +69,19 @@ impl CommandBackend for TestCommands {
         &'a self,
         _id: &'a str,
         stream: CommandStream,
-        _position: CommandPosition,
+        position: CommandPosition,
     ) -> futures_util::future::BoxFuture<'a, Result<CommandPage, CommandError>> {
         Box::pin(async move {
-            Ok(test_page(match stream {
+            let mut page = test_page(match stream {
                 CommandStream::Stdout => "result",
                 CommandStream::Stderr => "",
-            }))
+            });
+            if let CommandPosition::OutputOffset(offset) = position {
+                let start = offset.min(page.end).max(0);
+                page.text = page.text[start as usize..].to_owned();
+                page.start = start;
+            }
+            Ok(page)
         })
     }
     fn output<'a>(
@@ -79,6 +90,11 @@ impl CommandBackend for TestCommands {
         _bytes: usize,
     ) -> futures_util::future::BoxFuture<'a, Result<CommandOutput, CommandError>> {
         Box::pin(async {
+            self.output_entered.notify_one();
+            let mut held = self.hold_output.subscribe();
+            while *held.borrow_and_update() {
+                held.changed().await.unwrap();
+            }
             if self
                 .output_unavailable
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -251,29 +267,286 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
 }
 
 #[tokio::test]
+async fn command_hidden_by_the_response_budget_remains_unobserved() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(async move {
+        dispatch_haskell_script(
+            policy.as_ref(),
+            "inspectFull (T.replicate 70000 \"x\")\nhidden <- Cmd.run [bash|printf ignored|]",
+        )
+        .await
+    });
+    let backend = TestCommands::new();
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let first = running.await.unwrap();
+    assert_eq!(first["status"], "committed");
+    assert!(!first.to_string().contains("stdout ·"));
+    let next = committed(&campaign, "Cmd.await (Cmd.job hidden)").await;
+    assert!(next.to_string().contains("stdout ·"), "{next}");
+    assert!(next.to_string().contains("result"), "{next}");
+    assert_eq!(backend.specs.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn disconnected_foreground_caller_retries_the_same_handoff_without_reexecution() {
+    let mut campaign = TestCampaign::start().await;
+    let backend = TestCommands::new();
+    backend.finish.send_replace(true);
+    backend.hold_output.send_replace(true);
+    backend
+        .output_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    let call_id = uuid::Uuid::new_v4().to_string();
+    let invocation = || ToolInvocation {
+        context: Some(ToolInvocationContext {
+            context_call_id: Some(call_id.clone()),
+            thread_id: "disconnected-foreground".into(),
+            turn_id: call_id.clone(),
+            call_id: call_id.clone(),
+            namespace: Some("haskell".into()),
+        }),
+        name: tidepool_actor::HASKELL_TOOL.into(),
+        arguments: ToolArguments::Raw(include_str!("command_foreground_stop.hs").into()),
+    };
+    let policy = campaign.root_installation.policy.clone();
+    let first = invocation();
+    let waiter = tokio::spawn(async move { policy.dispatch_boxed(first).await });
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    backend.output_entered.notified().await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    backend.hold_output.send_replace(false);
+    let policy = campaign.root_installation.policy.as_ref();
+    let recovered = policy.dispatch_boxed(invocation()).await.unwrap();
+    let repeated = policy.dispatch_boxed(invocation()).await.unwrap();
+    assert_eq!(
+        recovered, repeated,
+        "exact transport retry changed the receipt"
+    );
+    assert_eq!(recovered["status"], "backgrounded", "{recovered}");
+    let binding = recovered["items"][1]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    policy
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "disconnected-foreground".into(),
+            call_id,
+        })
+        .await
+        .unwrap();
+    let usable = committed(&campaign, &format!("Cmd.status {binding}")).await;
+    assert!(usable.to_string().contains("CommandExited 0"), "{usable}");
+    assert_eq!(backend.specs.lock().len(), 1);
+    assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn command_run_retains_job_after_output_observation_failure() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), "attempt <- Cmd.run [bash|printf done|]").await
+        dispatch_haskell_script(policy.as_ref(), include_str!("command_foreground_stop.hs")).await
     });
     let backend = TestCommands::new();
     backend
         .output_unavailable
         .store(true, std::sync::atomic::Ordering::Release);
     backend.finish.send_replace(true);
-    backend_request(&mut campaign).await.supply(Ok(backend));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
     let result = running.await.unwrap();
-    assert_eq!(result["status"], "committed", "{result}");
-    let retained = committed(
-        &campaign,
-        "let retained = Cmd.job attempt\nCmd.status retained",
-    )
-    .await;
+    assert_eq!(result["status"], "backgrounded", "{result}");
+    assert_eq!(result["items"][0]["status"], "committed", "{result}");
+    assert_eq!(result["items"][1]["status"], "stopped", "{result}");
+    assert_eq!(result["items"][2]["status"], "notRun", "{result}");
+    let binding = result["items"][1]["installedBindings"][0].as_str().unwrap();
+    assert_eq!(
+        backend.specs.lock().len(),
+        1,
+        "abandoned continuation ran another command"
+    );
+    let retained = committed(&campaign, &format!("Cmd.status {binding}")).await;
     assert!(
         retained.to_string().contains("CommandExited 0"),
         "{retained}"
     );
+    let missing = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        "Cmd.job attempt",
+    )
+    .await;
+    assert!(
+        missing.to_string().contains("not in scope")
+            || missing.to_string().contains("Not in scope"),
+        "{missing}"
+    );
+    let prefix = committed(&campaign, "foregroundPrefix").await;
+    assert!(prefix.to_string().contains("prefix-preserved"), "{prefix}");
+    let repeated = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        &format!("Cmd.await {binding}"),
+    )
+    .await;
+    assert_eq!(
+        repeated["items"][0]["installedBindings"][0], binding,
+        "{repeated}"
+    );
+    committed(
+        &campaign,
+        &format!("let savedCommandJob = {binding}\n{binding} <- pure (17 :: Int)"),
+    )
+    .await;
+    let shadowed = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        "Cmd.await savedCommandJob",
+    )
+    .await;
+    let fresh = shadowed["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    assert_ne!(
+        fresh, binding,
+        "shadowed automatic alias was reused: {shadowed}"
+    );
+    let preserved = committed(&campaign, binding).await;
+    assert!(preserved.to_string().contains("17"), "{preserved}");
+    let binding = fresh;
+    backend
+        .output_unavailable
+        .store(false, std::sync::atomic::Ordering::Release);
+    let recovered = committed(
+        &campaign,
+        &format!("recovered <- Cmd.await {binding}\nCmd.stdout recovered"),
+    )
+    .await;
+    assert!(recovered.to_string().contains("result"), "{recovered}");
+    assert_eq!(backend.specs.lock().len(), 1, "recovery reran the command");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn command_foreground_deadline_installs_binding_without_cancelling_or_resuming() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let running = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), include_str!("command_foreground_stop.hs")).await
+    });
+    let backend = TestCommands::new();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let result = running.await.unwrap();
+    assert_eq!(result["status"], "backgrounded", "{result}");
+    assert_eq!(result["items"][1]["status"], "stopped", "{result}");
+    assert_eq!(result["items"][2]["status"], "notRun", "{result}");
+    assert!(
+        result["items"][1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("stdout ·"),
+        "handoff omitted available output: {result}"
+    );
+    let binding = result["items"][1]["installedBindings"][0].as_str().unwrap();
+    let live = committed(&campaign, &format!("Cmd.status {binding}")).await;
+    assert!(!live.to_string().contains("CommandFinished"), "{live}");
+    assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(backend.specs.lock().len(), 1);
+    backend.finish.send_replace(true);
+    let recovered = committed(
+        &campaign,
+        &format!("recovered <- Cmd.await {binding}\nCmd.stdout recovered"),
+    )
+    .await;
+    assert!(recovered.to_string().contains("result"), "{recovered}");
+    assert_eq!(
+        backend.specs.lock().len(),
+        1,
+        "await resumed the abandoned continuation"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn command_handler_failure_does_not_install_interactive_recovery_binding() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, include_str!("command_handler_stop.hs")).await;
+    let policy = campaign.root_installation.policy.clone();
+    let mut running = tokio::spawn(async move {
+        super::tests::dispatch_haskell_script_result(
+            policy.as_ref(),
+            "R.call (execute (R.client handler)) ()",
+        )
+        .await
+    });
+    let backend = TestCommands::new();
+    backend
+        .output_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    backend.finish.send_replace(true);
+    let request = tokio::select! {
+        result = &mut running => panic!("handler ended before requesting backend: {result:?}"),
+        request = backend_request(&mut campaign) => request,
+    };
+    request.supply(Ok(backend.clone()));
+    let result = running
+        .await
+        .unwrap()
+        .expect_err("handler failure must propagate")
+        .to_string();
+    assert!(result.contains("output transport lost"), "{result}");
+    assert!(!result.contains("installedBindings"), "{result}");
+    assert!(!result.contains("Continue with:"), "{result}");
+    assert_eq!(backend.specs.lock().len(), 1);
+    committed(&campaign, "21 + 21 :: Int").await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let mut running = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), include_str!("command_presentation.hs")).await
+    });
+    let backend = TestCommands::new();
+    backend.finish.send_replace(true);
+    for _ in 0..3 {
+        let request = tokio::select! {
+            result = &mut running => panic!("command program ended before its expected launches: {result:?}"),
+            request = backend_request(&mut campaign) => request,
+        };
+        request.supply(Ok(backend.clone()));
+    }
+    let result = running.await.unwrap();
+    assert_eq!(result["status"], "committed", "{result}");
+    let text = |index: usize| result["items"][index]["output"].as_str().unwrap();
+    assert_eq!(text(0).matches("stdout ·").count(), 1, "{result}");
+    assert!(!text(1).contains("stdout ·"), "{result}");
+    assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
+    assert!(text(3).contains("Right result"), "{result}");
+    assert!(
+        !text(4).contains("stdout ·"),
+        "repeated await repeated output: {result}"
+    );
+    assert!(
+        text(5).contains("result"),
+        "explicit output was consumed: {result}"
+    );
+    assert_eq!(backend.specs.lock().len(), 3);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -287,12 +560,18 @@ async fn command_skill_examples_execute_in_the_resident_workbench() {
         .split("```haskell\n")
         .skip(1)
         .map(|block| block.split_once("```").unwrap().0);
-    committed(&campaign, examples.next().unwrap()).await;
+    let policy = campaign.root_installation.policy.clone();
+    let first = examples.next().unwrap().to_owned();
+    let mut running =
+        tokio::spawn(async move { dispatch_haskell_script(policy.as_ref(), &first).await });
     let backend = TestCommands::new();
-    backend_request(&mut campaign)
-        .await
-        .supply(Ok(backend.clone()));
     backend.finish.send_replace(true);
+    tokio::select! {
+        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
+        result = &mut running => panic!("skill failed before launching: {result:?}"),
+    }
+    let first = running.await.unwrap();
+    assert_eq!(first["status"], "committed", "{first}");
     let result = committed(&campaign, examples.next().unwrap()).await;
     assert!(result.to_string().contains("result"), "{result}");
     assert_eq!(backend.specs.lock()[0].memory, 256 * 1024 * 1024);
@@ -329,6 +608,71 @@ async fn command_description_latency_probe() {
             start.elapsed().as_millis()
         );
     }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn command_binding_failure_preserves_the_existing_job_without_claiming_an_alias() {
+    let mut campaign = TestCampaign::start().await;
+    committed(
+        &campaign,
+        "retainedBeforeFailure <- Cmd.start [bash|printf preserved|]",
+    )
+    .await;
+    let backend = TestCommands::new();
+    backend
+        .output_unavailable
+        .store(true, std::sync::atomic::Ordering::Release);
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let outcome = super::tests::dispatch_haskell_script_result(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("command_binding_failure.hs"),
+    )
+    .await;
+    let rendered = match outcome {
+        Ok(value) => value.to_string(),
+        Err(error) => error.to_string(),
+    };
+    assert!(rendered.contains("automatic binding failed"), "{rendered}");
+    assert!(!rendered.contains("Available binding:"), "{rendered}");
+    assert!(!rendered.contains("Continue with:"), "{rendered}");
+    let status = committed(&campaign, "Cmd.status retainedBeforeFailure").await;
+    assert!(status.to_string().contains("CommandExited 0"), "{status}");
+    assert_eq!(backend.specs.lock().len(), 1);
+    assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_command_output_survives_a_later_failure_in_the_same_computation() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
+    let backend = TestCommands::new();
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let result = super::tests::dispatch_haskell_script_result(
+        campaign.root_installation.policy.as_ref(),
+        include_str!("command_prefix_failure.hs"),
+    )
+    .await;
+    let rendered = match result {
+        Ok(value) => value.to_string(),
+        Err(error) => error.to_string(),
+    };
+    assert!(rendered.contains("failure-after-command"), "{rendered}");
+    assert!(
+        rendered.contains("stdout ·"),
+        "lost committed command output: {rendered}"
+    );
+    assert!(rendered.contains("result"), "{rendered}");
+    assert_eq!(backend.specs.lock().len(), 1);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

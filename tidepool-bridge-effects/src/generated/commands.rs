@@ -84,6 +84,18 @@ pub struct CommandOutput {
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CommandObservation {
+    pub result: CommandResult,
+    pub output: CommandOutput,
+}
+
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CommandPresentation {
+    CommandVisible(String),
+    CommandQuiet,
+}
+
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandError {
     CommandUnavailable(String),
     CommandInvalid(String),

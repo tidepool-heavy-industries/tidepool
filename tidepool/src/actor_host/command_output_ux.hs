@@ -5,9 +5,10 @@ let page text = Cmd.CommandPage { Cmd.outputText = text, Cmd.outputStart = 0, Cm
 let outcome = Cmd.CommandResult { Cmd.commandOutcome = Cmd.CommandExited 0, Cmd.commandCleanup = Cmd.CommandClean }
 let captured out err = Cmd.Finished retained outcome (Cmd.CommandOutput (page out) (page err))
 let large = captured (T.replicate 32768 "λ") (T.replicate 32768 "z")
-let rendered = fst (Inspection.workbenchDisplay (inspectFull (Just [Right large :: Either Text Cmd.RunResult])))
+let rendering = Inspection.workbenchDisplay (inspectFull (Just [Right large :: Either Text Cmd.RunResult]))
+let rendered = fst rendering
 let bounded = Inspection.displayWith 1024 [large, large, large]
-if T.isInfixOf (T.replicate 32768 "λ") rendered && T.isInfixOf (T.replicate 32768 "z") rendered && T.length (fst bounded) <= 1024 && snd bounded then pure ("large-display-ok" :: Text) else error "large display failed"
+if T.length rendered <= 65536 && snd rendering && Cmd.stdout large == Right (T.replicate 32768 "λ") && T.isInfixOf (T.replicate 1024 "λ") rendered && T.isInfixOf (T.replicate 1024 "z") rendered && T.length (fst bounded) <= 1024 && snd bounded then pure ("large-display-ok" :: Text) else error "large display failed"
 let goodJSON = Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout (captured "{\"ok\":true}" ""))
 case goodJSON of { Right _ -> pure ("json-ok" :: Text); Left _ -> error "JSON decode failed" }
 let partial = (page "true") { Cmd.outputStart = 100, Cmd.outputEnd = 104, Cmd.outputAvailableEnd = 104 }

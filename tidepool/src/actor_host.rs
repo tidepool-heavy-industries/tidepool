@@ -5082,7 +5082,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"))
     }
 
-    async fn dispatch_haskell_script_result(
+    pub(super) async fn dispatch_haskell_script_result(
         endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
         script: &str,
     ) -> Result<serde_json::Value, tidepool_actor::ResidentToolError> {

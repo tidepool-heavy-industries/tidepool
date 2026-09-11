@@ -1,4 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.Command
@@ -21,13 +23,17 @@ module Tidepool.Command
     start,
     run,
     await,
+    quiet,
     job,
     status,
     stdout,
+    readStdout,
     decodeWith,
     asJSON,
     OutputPage,
     CommandStream (..),
+    output,
+    next,
     readOutput,
     tailOutput,
     nextPage,
@@ -50,7 +56,7 @@ module Tidepool.Command
   )
 where
 
-import Control.Monad.Freer (Eff, Member, send)
+import Control.Monad.Freer (Eff, Member, interpose, send)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Tidepool.Actor.Record as R
@@ -61,6 +67,8 @@ import Tidepool.Effects.Core
     CommandError (..),
     CommandInput (..),
     CommandOutcome (..),
+    CommandObservation (..),
+    CommandPresentation (..),
     CommandOutput (..),
     CommandPage (..),
     CommandPosition (..),
@@ -75,8 +83,6 @@ import Tidepool.QQ.Bash (bash)
 
 data RunResult
   = Finished {completedJob :: Job, commandResult :: CommandResult, capturedOutput :: CommandOutput}
-  | Pending Job
-  | Unavailable {unavailableJob :: Job, observedResult :: Maybe CommandResult, observationError :: CommandError}
   deriving (Eq, Show)
 
 data OutputIssue
@@ -99,29 +105,31 @@ checked = either (error . show) id
 start :: (Member Commands effects) => Command -> Eff effects Job
 start (Command spec) = Job . checked <$> send (CommandStartWith spec)
 
--- | Brief observation; a pending or unavailable result retains the same job.
+-- | Run and observe for up to 30 seconds, returning a completed result.
+-- If still running, the interactive workbench stops the enclosing computation
+-- and installs a retained Job binding. A Haskell handler instead fails through
+-- its normal supervision boundary. Neither observation deadline cancels the job.
 run :: (Member Commands effects) => Command -> Eff effects RunResult
-run command = start command >>= observe 1000
+run command = start command >>= await
 
--- | Wait for terminal execution, then capture output. Interruption stops the
--- observation, not the independently owned command. Reuse the same Job.
+-- | Observe the same job for up to 30 seconds. A foreground handoff never resumes
+-- an earlier block; subsequent calls observe only the retained command.
 await :: (Member Commands effects) => Job -> Eff effects RunResult
-await = observe (-1)
+await retained@(Job key) = do
+  observation <- checked <$> send (CommandForegroundWith key)
+  let result = Finished retained (observedCommandResult observation) (observedCommandOutput observation)
+  send (CommandPresentWith key (CommandVisible (resultHeading (commandResult result))))
+  pure result
 
-observe :: (Member Commands effects) => Int -> Job -> Eff effects RunResult
-observe milliseconds retained@(Job key) = do
-  observed <- send (CommandAwaitWith key milliseconds)
-  case observed of
-    Left failure -> pure (Unavailable retained Nothing failure)
-    Right (CommandFinished result) -> do
-      captured <- send (CommandOutputWith key 8192)
-      pure $ either (Unavailable retained (Just result)) (Finished retained result) captured
-    Right _ -> pure (Pending retained)
+-- | Suppress routine command output within this computation, without changing
+-- command execution, retained results, or necessary background-handoff receipts.
+quiet :: (Member Commands effects) => Eff effects a -> Eff effects a
+quiet = interpose $ \case
+  CommandPresentWith key _ -> send (CommandPresentWith key CommandQuiet)
+  request -> send request
 
 job :: RunResult -> Job
 job Finished {completedJob = retained} = retained
-job (Pending retained) = retained
-job Unavailable {unavailableJob = retained} = retained
 
 -- | Pure successful, complete stdout extraction. Cleanup is a separate obligation.
 stdout :: RunResult -> Either OutputIssue Text
@@ -136,8 +144,29 @@ stdout result@Finished {commandResult = outcome, capturedOutput = captured} =
                 then Left (IncompleteStdout (job result))
                 else Right (outputText text)
     other -> Left (Unsuccessful other)
-stdout (Pending retained) = Left (StillRunning retained)
-stdout Unavailable {unavailableJob = retained, observationError = failure} = Left (OutputUnavailable retained failure)
+
+-- | Read complete retained stdout without starting or waiting for execution.
+readStdout :: (Member Commands effects) => Job -> Eff effects (Either OutputIssue Text)
+readStdout retained@(Job key) = do
+  observed <- send (CommandStatusWith key)
+  case observed of
+    Left failure -> pure (Left (OutputUnavailable retained failure))
+    Right (CommandFinished result) -> case commandOutcome result of
+      CommandExited 0 -> collect 0 []
+      other -> pure (Left (Unsuccessful other))
+    Right _ -> pure (Left (StillRunning retained))
+  where
+    collect cursor chunks = do
+      observed <- send (CommandReadWith key Stdout (OutputOffset cursor))
+      case observed of
+        Left failure -> pure (Left (OutputUnavailable retained failure))
+        Right page
+          | outputLossy page -> pure (Left (InvalidOutputEncoding retained))
+          | outputStart page /= cursor || outputLostBytes page /= 0 -> pure (Left (IncompleteStdout retained))
+          | outputEnd page == outputAvailableEnd page && outputFinished page ->
+              pure (Right (T.concat (reverse (outputText page : chunks))))
+          | outputEnd page <= cursor -> pure (Left (IncompleteStdout retained))
+          | otherwise -> collect (outputEnd page) (outputText page : chunks)
 
 decodeWith :: (Text -> Either e a) -> Either OutputIssue Text -> Either (DecodeIssue e) a
 decodeWith _ (Left issue) = Left (OutputProblem issue)
@@ -148,6 +177,13 @@ asJSON = eitherDecode
 
 status :: (Member Commands effects) => Job -> Eff effects CommandStatus
 status (Job key) = checked <$> send (CommandStatusWith key)
+
+-- | Navigate retained stdout from its beginning; reading never executes again.
+output :: (Member Commands effects) => Job -> Eff effects OutputPage
+output = readOutput Stdout
+
+next :: (Member Commands effects) => OutputPage -> Eff effects OutputPage
+next = nextPage
 
 readOutput :: (Member Commands effects) => CommandStream -> Job -> Eff effects OutputPage
 readOutput stream retained = readPage retained stream OutputBeginning
@@ -182,24 +218,25 @@ completion :: Job -> R.EventSource CommandResult
 completion = R.command
 
 instance WorkbenchDisplay RunResult where
-  workbenchDisplay = displayWith 4096
+  workbenchDisplay = displayWith 65536
+  workbenchDisplayWithout keys = displayWithout keys 65536
 
 instance WorkbenchDisplay OutputPage where
-  workbenchDisplay = displayWith 8192
+  workbenchDisplay = displayWith 65536
 
 instance WorkbenchDisplay CommandOutput where
-  workbenchDisplay = displayWith 4096
+  workbenchDisplay = displayWith 65536
 
 instance Display RunResult where
+  displayWithout keys budget result@Finished {completedJob = Job key, commandResult = outcome}
+    | key `elem` keys = renderText budget (resultHeading outcome <> " · output retained")
+    | otherwise = displayWith budget result
   displayWith budget result = case result of
     Finished {commandResult = outcome, capturedOutput = captured} ->
       let heading = resultHeading outcome <> "\n"
           (body, omitted) = displayOutput (max 0 (budget - T.length heading)) captured
           (text, clipped) = renderText budget (heading <> body)
        in (text, omitted || clipped)
-    Pending retained -> renderText budget ("Pending · " <> T.pack (show retained) <> " · use Cmd.job / Cmd.await")
-    Unavailable {unavailableJob = retained, observedResult = observed, observationError = failure} ->
-      renderText budget ("Observation unavailable · " <> T.pack (show retained) <> "\n" <> T.pack (show observed) <> "\n" <> T.pack (show failure))
 
 instance Display OutputPage where
   displayWith budget OutputPage {pageStream = stream, pageDetails = details} =
@@ -260,3 +297,11 @@ outputMetadata stream page =
     <> (if outputTrailingFragment page then " · trailing line fragment" else "")
   where
     number = T.pack . show
+
+instance Display OutputIssue where
+  displayWith budget issue = renderText budget $ case issue of
+    IncompleteStdout retained ->
+      "Command finished; this capture is incomplete. Awaiting again does not enlarge it. Use Cmd.readStdout with your existing job binding, or Cmd.job applied to your result; Cmd.output navigates retained output. Retention gaps are explicit. Job: " <> T.pack (show retained)
+    StillRunning retained ->
+      "Command still running: " <> T.pack (show retained) <> ". Continue observing the same job with Cmd.await."
+    other -> T.pack (show other)

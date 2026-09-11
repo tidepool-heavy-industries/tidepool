@@ -1,6 +1,6 @@
 //! Matched full-TUI acceptance with a local scripted provider; no paid model calls.
 use super::*;
-use crate::host_dynamic_tools::HostDynamicToolService;
+use crate::host_dynamic_tools::{HostDynamicToolService, MODEL_OUTPUT_LIMIT};
 use axum::{extract::State, routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex as StdMutex, time::Duration};
@@ -53,6 +53,26 @@ async fn response(
     } else if index == 0 {
         json!({"type":"function_call", "call_id":"fallback-oom",
             "name":"exec_command", "arguments":json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "yield_time_ms":1000,"max_output_tokens":1000}).to_string()})
+    } else if index == 18 {
+        let requests = provider.requests.lock().unwrap();
+        let receipt = requests[index]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["call_id"] == "haskell-17" && item["type"] == "custom_tool_call_output"
+            })
+            .and_then(|item| item["output"].as_str())
+            .expect("foreground handoff in next provider request");
+        let binding = receipt
+            .lines()
+            .find_map(|line| line.strip_suffix(" :: Cmd.Job"))
+            .expect("installed recovery binding");
+        assert!(binding.starts_with("job") && binding[3..].chars().all(|c| c.is_ascii_digit()));
+        std::fs::write(provider.work.join("release-foreground"), "release").unwrap();
+        json!({"type":"custom_tool_call", "call_id":"haskell-18",
+            "name":"haskell", "namespace":"tidepool_actor",
+            "input":format!("recovered <- Cmd.await {binding}\nCmd.stdout recovered")})
     } else if let Some(Some(source)) = provider.steps.get(index) {
         json!({"type":"custom_tool_call", "call_id":format!("haskell-{index}"),
             "name":"haskell", "namespace":"tidepool_actor", "input":source})
@@ -146,6 +166,25 @@ async fn full_tui_survives_command_oom_and_accepts_steering() {
         work.join(".agents/skills/shoal-command"),
     )
     .unwrap();
+    let plan_dir = work.join("plans/parallel-dogfood");
+    std::fs::create_dir_all(plan_dir.join("next-wave")).unwrap();
+    let resume = include_str!("../../../plans/parallel-dogfood/next-wave/resume.md");
+    let readme = include_str!("../../../plans/parallel-dogfood/next-wave/README.md");
+    let planner = include_str!("../../../plans/parallel-dogfood/planner.md");
+    let skill_text = std::fs::read_to_string(skill.join("SKILL.md")).unwrap();
+    // Exercise the gap between the old native history allowance and hosted cap.
+    let padding = 60_000usize
+        .checked_sub(skill_text.len() + resume.len() + readme.len() + planner.len() + 100)
+        .expect("four-file fixture must fit its presentation budget");
+    let readme = format!(
+        "{readme}\nREAD-BEGIN\n{}\nREAD-MIDDLE\n{}\nREAD-END\n",
+        "a".repeat(padding / 2),
+        "b".repeat(padding - padding / 2)
+    );
+    std::fs::write(plan_dir.join("next-wave/resume.md"), resume).unwrap();
+    std::fs::write(plan_dir.join("next-wave/README.md"), &readme).unwrap();
+    std::fs::write(plan_dir.join("planner.md"), planner).unwrap();
+    let expected_read = format!("{skill_text}{resume}{readme}{planner}");
     let mut campaign = test_campaign::TestCampaign::start().await;
     let actor = campaign.actor.identity();
     let actor_key = format!("{}-{}", actor.id.0, actor.incarnation.0);
@@ -159,6 +198,12 @@ async fn full_tui_survives_command_oom_and_accepts_steering() {
     steps.push(None);
     steps.extend(snippets[3..].iter().cloned().map(Some));
     steps.push(None);
+    steps.extend(
+        include_str!("tui_foreground_commands.hs")
+            .split("-- fixture-step\n")
+            .map(|source| Some(source.to_owned())),
+    );
+    steps.extend([None, None]);
     let provider = Provider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         steps: Arc::new(steps),
@@ -178,6 +223,7 @@ model = "gpt-5.6-sol"
 model_provider = "fixture"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+tool_output_token_limit = 16384
 [model_providers.fixture]
 name = "Fixture"
 base_url = "http://{address}/v1"
@@ -337,7 +383,7 @@ trust_level = "trusted"
             }
         }
     });
-    for expected in [2, 6, 16] {
+    for expected in [2, 6, 16, 20] {
         let reached = tokio::time::timeout(Duration::from_secs(600), async {
             while provider.requests.lock().unwrap().len() < expected {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -448,12 +494,34 @@ trust_level = "trusted"
                     );
                 }
                 assert!(output(12).contains("page-contiguous"), "{}", output(12));
-                assert!(output(12).contains("retention loss"), "{}", output(12));
+                assert!(!output(12).contains("retention loss"), "{}", output(12));
+            }
+            20 => {
+                assert!(
+                    output(17).contains(&expected_read),
+                    "four-file read lost content in provider history"
+                );
+                let handoff = output(18);
+                assert!(handoff.contains(" :: Cmd.Job"), "{handoff}");
+                assert!(
+                    handoff.contains("subsequent statements did not run"),
+                    "{handoff}"
+                );
+                assert!(handoff.contains("foreground-started"), "{handoff}");
+                assert!(!work.join("forbidden-suffix").exists());
+                assert_eq!(
+                    std::fs::read_to_string(work.join("foreground-start-count")).unwrap(),
+                    "once\n"
+                );
+                assert!(output(19).contains("foreground-finished"), "{}", output(19));
+                for index in [17, 18, 19] {
+                    assert!(output(index).len() <= MODEL_OUTPUT_LIMIT);
+                }
             }
             _ => unreachable!(),
         }
         assert!(!tmux.pane_status(&pane).await.unwrap().unwrap().dead);
-        if expected != 16 {
+        if expected != 20 {
             assert!(std::process::Command::new("tmux")
                 .args(["send-keys", "-t", pane.as_str(), "-l", "continue fixture"])
                 .status()

@@ -11,6 +11,7 @@ mod commands;
 mod replacement;
 
 use parking_lot::Mutex;
+use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
@@ -343,7 +344,9 @@ fn workbench_failure_after_operations(
         receipts.push(WorkbenchItemReceipt {
             index: failed_index,
             status: WorkbenchItemStatus::Rejected,
-            output: source.to_string(),
+            // The failure owns its diagnostic separately; this field retains
+            // output committed before the failing continuation.
+            output: String::new(),
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations,
@@ -396,6 +399,8 @@ struct WorkbenchUnitExecution<'a> {
     input_unit_index: usize,
     total: usize,
     operations: &'a mut Vec<WorkbenchOperationReceipt>,
+    display_remaining: &'a mut usize,
+    command_output: &'a mut Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -837,11 +842,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let prompt_identity = if view == StatusView::Trace {
             format!(
                 " prompt_catalog={:?} prompt_fingerprint={:?}\n  backend: executable={:?} version={:?} requested_model={:?} requested_effort={:?}\n  provider: turn={:?} stale={} confirmed_model={:?} confirmed_effort={:?}",
-                runtime.prompt_catalog_version, runtime.prompt_fingerprint,
-                runtime.backend_executable, runtime.backend_version,
-                runtime.requested_model, runtime.requested_effort,
-                runtime.provider_turn, runtime.provider_observation_stale,
-                runtime.confirmed_model, runtime.confirmed_effort,
+                runtime.prompt_catalog_version,
+                runtime.prompt_fingerprint,
+                runtime.backend_executable,
+                runtime.backend_version,
+                runtime.requested_model,
+                runtime.requested_effort,
+                runtime.provider_turn,
+                runtime.provider_observation_stale,
+                runtime.confirmed_model,
+                runtime.confirmed_effort,
             )
         } else {
             String::new()
@@ -849,60 +859,76 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let current = if view == StatusView::Concise {
             format!(
                 "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={:?} bound_worktree={:?} workbench={:?}{}",
-                self.descriptor.label(), actor.id.0, actor.incarnation.0,
-                runtime.activation_kind, if self.policy_installed { "attached" } else { "detached" }, requests.ready_responses, unavailable_responses,
-                requests.pending_responses, requests.ready_watches, unavailable_watches,
-                requests.pending_watches, self.descriptor.effective_role().role(),
+                self.descriptor.label(),
+                actor.id.0,
+                actor.incarnation.0,
+                runtime.activation_kind,
+                if self.policy_installed {
+                    "attached"
+                } else {
+                    "detached"
+                },
+                requests.ready_responses,
+                unavailable_responses,
+                requests.pending_responses,
+                requests.ready_watches,
+                unavailable_watches,
+                requests.pending_watches,
+                self.descriptor.effective_role().role(),
                 self.descriptor.effective_role().workspace(),
                 self.descriptor.effective_role().descendants().maximum_depth,
-                self.descriptor.effective_role().descendants().maximum_active_children,
+                self.descriptor
+                    .effective_role()
+                    .descendants()
+                    .maximum_active_children,
                 self.launch_worktrees.first(),
-                runtime.workbench_posture, roster_summary,
+                runtime.workbench_posture,
+                roster_summary,
             )
         } else {
             format!(
-            "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
-            actor.id.0,
-            actor.incarnation.0,
-            self.descriptor.label(),
-            self.descriptor.creator(),
-            self.descriptor.supervisor_parent(),
-            self.descriptor.context_parent(),
-            self.descriptor.fork_group(),
-            self.descriptor.placement().lexical_scope.0,
-            runtime.provider_thread,
-            runtime.provider_parent_thread,
-            usage.map(|sample| sample.cached_input_tokens),
-            usage.map(|sample| sample.uncached_input_tokens),
-            usage.map(|sample| sample.cache_boundary),
-            runtime.activation_kind,
-            runtime.event_watermark,
-            self.descriptor.effective_role().role(),
-            self.descriptor.effective_role().haskell_effects_type(),
-            self.descriptor.effective_role().native_tools(),
-            self.descriptor.effective_role().workspace(),
-            self.descriptor.effective_role().descendants(),
-            runtime
-                .prompt_profile
-                .as_deref()
-                .unwrap_or(self.descriptor.effective_role().prompt_profile()),
-            prompt_identity,
-            if self.policy_installed {
-                "attached"
-            } else {
-                "detached"
-            },
-            runtime.workbench_posture,
-            self.launch_worktrees.first(),
-            requests.pending_responses,
-            requests.ready_responses,
-            unavailable_responses,
-            requests.pending_watches,
-            requests.ready_watches,
-            unavailable_watches,
-            roster_summary,
-            sample_history,
-        )
+                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
+                actor.id.0,
+                actor.incarnation.0,
+                self.descriptor.label(),
+                self.descriptor.creator(),
+                self.descriptor.supervisor_parent(),
+                self.descriptor.context_parent(),
+                self.descriptor.fork_group(),
+                self.descriptor.placement().lexical_scope.0,
+                runtime.provider_thread,
+                runtime.provider_parent_thread,
+                usage.map(|sample| sample.cached_input_tokens),
+                usage.map(|sample| sample.uncached_input_tokens),
+                usage.map(|sample| sample.cache_boundary),
+                runtime.activation_kind,
+                runtime.event_watermark,
+                self.descriptor.effective_role().role(),
+                self.descriptor.effective_role().haskell_effects_type(),
+                self.descriptor.effective_role().native_tools(),
+                self.descriptor.effective_role().workspace(),
+                self.descriptor.effective_role().descendants(),
+                runtime
+                    .prompt_profile
+                    .as_deref()
+                    .unwrap_or(self.descriptor.effective_role().prompt_profile()),
+                prompt_identity,
+                if self.policy_installed {
+                    "attached"
+                } else {
+                    "detached"
+                },
+                runtime.workbench_posture,
+                self.launch_worktrees.first(),
+                requests.pending_responses,
+                requests.ready_responses,
+                unavailable_responses,
+                requests.pending_watches,
+                requests.ready_watches,
+                unavailable_watches,
+                roster_summary,
+                sample_history,
+            )
         };
         let workspace = runtime.workspace.as_ref().map_or_else(
             || "workspace mapping: unavailable (no hosted launch observation)".to_owned(),
@@ -3143,7 +3169,7 @@ where
                 _ => {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "actor bootstrap requires at most one worktree".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -3643,7 +3669,7 @@ where
                 .await?
             {
                 ResidentWorkbenchStep::Running {
-                    fragment: next_fragment,
+                    fragment: mut next_fragment,
                     outcome: next,
                 } => {
                     let boundary = self
@@ -3776,6 +3802,60 @@ where
                             }
                         }
                         boundary => {
+                            let presentation = match &boundary {
+                                ResidentActorBoundary::Command {
+                                    request:
+                                        crate::generated::commands::CommandsReq::CommandPresentWith(
+                                            job,
+                                            presentation,
+                                        ),
+                                    ..
+                                } => Some((job.clone(), presentation.clone())),
+                                _ => None,
+                            };
+                            if let Some((job, mut presentation)) = presentation {
+                                let pages = if matches!(
+                                    presentation,
+                                    CommandPresentation::CommandVisible(_)
+                                ) && *unit.display_remaining >= 1024
+                                {
+                                    Some(
+                                        self.environment
+                                            .commands
+                                            .observation(context.actor, &job)
+                                            .await,
+                                    )
+                                } else {
+                                    None
+                                };
+                                if let CommandPresentation::CommandVisible(text) = &mut presentation
+                                {
+                                    *text = crate::workbench_display::bounded_output(text, 512);
+                                    match &pages {
+                                                Some(Ok(pages)) => text.push_str(&crate::workbench_display::command_pages(pages)),
+                                                Some(Err(error)) => text.push_str(&format!("\nOutput observation unavailable: {error:?}. Inspect the same job; do not rerun for output.")),
+                                                None => {}
+                                            }
+                                }
+                                let rendered = next_fragment.present_command(
+                                    job.clone(),
+                                    presentation,
+                                    unit.display_remaining,
+                                );
+                                if !rendered.is_empty() {
+                                    unit.command_output.push(rendered);
+                                }
+                                if let Some(Ok(pages)) = pages {
+                                    self.environment
+                                        .commands
+                                        .mark_displayed(context.actor, &job, &pages)
+                                        .map_err(|error| {
+                                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                                "command observation receipt: {error:?}"
+                                            ))
+                                        })?;
+                                }
+                            }
                             outcome = match self
                                 .resolve_effect(
                                     kernel,
@@ -3795,6 +3875,22 @@ where
                                         WorkbenchOperationDisposition::Committed,
                                     );
                                     outcome
+                                }
+                                Err(ResidentActorWorkbenchError::CommandObservationStopped {
+                                    job,
+                                    reason,
+                                }) => {
+                                    record_workbench_operation(
+                                        unit.operations,
+                                        unit.execution,
+                                        unit.input_unit_index,
+                                        ordinal,
+                                        &effect,
+                                        WorkbenchOperationDisposition::Committed,
+                                    );
+                                    return workbench
+                                        .bind_background_job(context.clone(), job, reason)
+                                        .await;
                                 }
                                 Err(error) => {
                                     record_workbench_operation(
@@ -3942,6 +4038,14 @@ where
 
             let source = request.items[index].clone();
             let mut unit_operations = Vec::new();
+            let mut command_output = Vec::new();
+            // Leave room for a later stop/error receipt without hiding offered command output.
+            let mut display_remaining = (60usize * 1024).saturating_sub(
+                receipts
+                    .iter()
+                    .map(|item| item.output.len() + 1)
+                    .sum::<usize>(),
+            );
             let block = ParsedBlock {
                 ordinal: index + 1,
                 total: request.items.len(),
@@ -3986,6 +4090,8 @@ where
                             input_unit_index: index,
                             total: request.items.len(),
                             operations: &mut unit_operations,
+                            display_remaining: &mut display_remaining,
+                            command_output: &mut command_output,
                         },
                     )
                     .await
@@ -3998,22 +4104,37 @@ where
                             "Haskell workbench failed during unfold admission",
                         )
                         .await;
-                        return Err(workbench_failure_after_operations(
+                        let mut failure = workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
                             source,
                             unit_operations,
-                        ));
+                        );
+                        if let Some(receipt) = failure
+                            .receipts
+                            .last_mut()
+                            .filter(|receipt| receipt.index == index)
+                        {
+                            receipt.output =
+                                format!("{}\n{}", command_output.join("\n"), receipt.output);
+                        }
+                        return Err(failure);
                     }
                 };
             }
+            let command_prefix = command_output.join("\n");
             match step {
                 ResidentWorkbenchStep::Committed {
                     output,
                     warnings,
                     installed_bindings,
                 } => {
+                    let output = if command_prefix.is_empty() {
+                        output
+                    } else {
+                        format!("{command_prefix}\n{output}")
+                    };
                     if self.environment.fork_groups.has_ready(context.actor) {
                         let publication = if self.active_fork_boundary.is_none() {
                             self.environment.fork_groups.publish_ready(context.actor)
@@ -4076,6 +4197,11 @@ where
                     });
                 }
                 ResidentWorkbenchStep::Rejected(output) => {
+                    let output = if command_prefix.is_empty() {
+                        output
+                    } else {
+                        format!("{command_prefix}\n{output}")
+                    };
                     settle_prepared_operations(
                         &mut unit_operations,
                         WorkbenchOperationDisposition::Rejected,
@@ -4110,6 +4236,60 @@ where
                     });
                     return Ok(KernelStep::Continue(workbench_response(
                         WorkbenchRunStatus::Rejected,
+                        receipts,
+                        index,
+                        request.items.len(),
+                    )));
+                }
+                ResidentWorkbenchStep::CommandBackgrounded {
+                    job,
+                    binding,
+                    reason,
+                } => {
+                    let reason =
+                        crate::workbench_display::bounded_output(&reason.to_string(), 1024);
+                    let mut output = format!("Retained command {job}: {reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}");
+                    if !command_prefix.is_empty() {
+                        output.push_str(&format!("\n{command_prefix}"));
+                    }
+                    match self
+                        .environment
+                        .commands
+                        .observation(context.actor, &job)
+                        .await
+                    {
+                        Ok(pages) => {
+                            let rendered = crate::workbench_display::bounded_output(
+                                &crate::workbench_display::command_pages(&pages),
+                                display_remaining.saturating_sub(output.len()),
+                            );
+                            if !rendered.is_empty() {
+                                output.push_str(&rendered);
+                                // Explicit pages remain available even when presentation is shortened.
+                                if let Err(error) = self.environment.commands.mark_displayed(
+                                    context.actor,
+                                    &job,
+                                    &pages,
+                                ) {
+                                    output.push_str(&format!("\nOutput cursor unavailable: {error:?}; explicit reads remain non-consuming."));
+                                }
+                            }
+                        }
+                        Err(error) => output.push_str(&format!(
+                            "\nOutput unavailable: {error:?}; the binding remains usable."
+                        )),
+                    }
+                    receipts.push(WorkbenchItemReceipt {
+                        index,
+                        status: WorkbenchItemStatus::Stopped,
+                        output,
+                        warnings: Vec::new(),
+                        installed_bindings: vec![binding],
+                        operations: unit_operations,
+                        terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
+                    });
+                    return Ok(KernelStep::Continue(workbench_response(
+                        WorkbenchRunStatus::Backgrounded,
                         receipts,
                         index,
                         request.items.len(),
@@ -4924,6 +5104,7 @@ where
                             Some(crate::ActorWorkbenchTransfer::CancellationAcknowledgement)
                         }
                         WorkbenchRunStatus::Committed
+                        | WorkbenchRunStatus::Backgrounded
                         | WorkbenchRunStatus::Rejected
                         | WorkbenchRunStatus::Completed => None,
                     };
@@ -5017,7 +5198,7 @@ where
                         .await?;
                     match boundary {
                         ResidentActorBoundary::Completed => {
-                            return Ok::<_, ResidentActorWorkbenchError>(false)
+                            return Ok::<_, ResidentActorWorkbenchError>(false);
                         }
                         ResidentActorBoundary::ReplyAttempt(attempt) => {
                             match self
@@ -5051,7 +5232,7 @@ where
                                 Err(error) => {
                                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                                         format!("reply rejected: {error:?}"),
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -5708,8 +5889,32 @@ fn workbench_response(
     next_index: usize,
     total: usize,
 ) -> WorkbenchResponse {
+    let essential = items.iter().rposition(|item| {
+        matches!(
+            item.status,
+            WorkbenchItemStatus::Stopped | WorkbenchItemStatus::Rejected
+        )
+    });
+    let reserved = essential.map_or(0, |index| items[index].output.len().min(4096));
+    let mut remaining = 64 * 1024 - reserved;
+    for (index, item) in items.iter_mut().enumerate() {
+        let allowance = if Some(index) == essential {
+            reserved + remaining
+        } else {
+            remaining
+        };
+        item.output = crate::workbench_display::bounded_output(&item.output, allowance);
+        let spent = if Some(index) == essential {
+            item.output.len().saturating_sub(reserved)
+        } else {
+            item.output.len()
+        };
+        remaining = remaining.saturating_sub(spent);
+    }
     let first_not_run = match status {
-        WorkbenchRunStatus::Rejected => next_index.saturating_add(1),
+        WorkbenchRunStatus::Rejected | WorkbenchRunStatus::Backgrounded => {
+            next_index.saturating_add(1)
+        }
         WorkbenchRunStatus::Replied
         | WorkbenchRunStatus::RequestCancelled
         | WorkbenchRunStatus::Completed => next_index,

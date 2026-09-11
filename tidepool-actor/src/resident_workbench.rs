@@ -169,7 +169,28 @@ pub struct ResidentActorWorkbench<H, O> {
 pub(crate) struct ResidentWorkbenchFragment {
     display: WorkbenchDisplay,
     output: Vec<String>,
+    presented: Vec<String>,
     warnings: Vec<String>,
+}
+
+impl ResidentWorkbenchFragment {
+    pub(crate) fn present_command(
+        &mut self,
+        job: String,
+        presentation: tidepool_bridge_effects::CommandPresentation,
+        remaining: &mut usize,
+    ) -> String {
+        if !self.presented.contains(&job) {
+            self.presented.push(job);
+        }
+        if let tidepool_bridge_effects::CommandPresentation::CommandVisible(text) = presentation {
+            let text = crate::workbench_display::bounded_output(&text, *remaining);
+            *remaining = remaining.saturating_sub(text.len() + 1);
+            text
+        } else {
+            String::new()
+        }
+    }
 }
 
 enum WorkbenchDisplay {
@@ -196,6 +217,11 @@ pub(crate) enum ResidentWorkbenchStep {
         installed_bindings: Vec<String>,
     },
     Rejected(String),
+    CommandBackgrounded {
+        job: String,
+        binding: String,
+        reason: CommandObservationStop,
+    },
     Running {
         fragment: ResidentWorkbenchFragment,
         outcome: Box<ResidentOutcome>,
@@ -1273,7 +1299,20 @@ impl<H, O> ResidentActorWorkbench<H, O> {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum CommandObservationStop {
+    #[error("command is still running after 30 seconds")]
+    Deadline,
+    #[error("command completed, but output observation failed: {0:?}")]
+    OutputUnavailable(tidepool_bridge_effects::CommandError),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error("command {job} retained: {reason}")]
+    CommandObservationStopped {
+        job: String,
+        reason: CommandObservationStop,
+    },
     #[error(transparent)]
     CompileView(#[from] ActorCompileViewError),
     #[error("resident machine checkout failed: {0}")]
@@ -1572,6 +1611,48 @@ where
             .await
     }
 
+    /// Install a trusted job reference after stopping a foreground computation.
+    pub(crate) async fn bind_background_job(
+        &self,
+        context: crate::ActorSessionContext,
+        job: String,
+        reason: CommandObservationStop,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        self.access.with_machine(context, move |session, context, source| {
+            let scope = context.placement.lexical_scope;
+            let names: Vec<_> = session.workbench_bindings_in(scope).into_iter().map(|binding| binding.name).collect();
+            let trusted_imports = SourceImports::from_specs([
+                "qualified Tidepool.Command.Types as ShoalCommandBinding",
+                "qualified Data.Text as ShoalCommandText",
+            ]);
+            let literal = tidepool_runtime::session::escape_workbench_haskell_string(&job);
+            let declaration_for = |binding: &str| format!(
+                "{binding} :: ShoalCommandBinding.Job\n{binding} = ShoalCommandBinding.Job (ShoalCommandText.pack \"{literal}\")"
+            );
+            for name in &names {
+                if name.strip_prefix("job").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+                    && session.workbench_declaration_matches_in(scope, name, &declaration_for(name), &trusted_imports)
+                {
+                    return Ok(ResidentWorkbenchStep::CommandBackgrounded { job, binding: name.clone(), reason });
+                }
+            }
+            let mut index = session.val_gen().0;
+            let binding = loop {
+                let name = format!("job{index}");
+                if !names.contains(&name) { break name; }
+                index += 1;
+            };
+            let mut imports = source.workbench_imports.clone();
+            imports.extend(&trusted_imports);
+            let declaration = declaration_for(&binding);
+            session.define_scoped_with_imports_in(scope, &[&declaration], &imports)
+                .map_err(|error| ResidentActorWorkbenchError::InputMount(format!(
+                    "command {job} remains owned, but its automatic binding failed: {error}"
+                )))?;
+            Ok(ResidentWorkbenchStep::CommandBackgrounded { job, binding, reason })
+        }).await
+    }
+
     pub(crate) fn inspection_query(
         &self,
         source: &str,
@@ -1803,6 +1884,7 @@ where
             ResidentWorkbenchFragment {
                 display,
                 output: Vec::new(),
+                presented: Vec::new(),
                 warnings,
             },
             outcome,
@@ -1860,7 +1942,7 @@ where
                         &source,
                         &type_modules,
                         &format!("{name} ()"),
-                        ObservationPurpose::Inspection,
+                        ObservationPurpose::Inspection(fragment.presented.clone()),
                     );
                     let (text, omitted) = match preview {
                         Ok(result) => result,
@@ -1894,8 +1976,9 @@ where
                 WorkbenchDisplay::Binding(names) => names,
                 WorkbenchDisplay::Opaque | WorkbenchDisplay::Observation { .. } => Vec::new(),
             };
+            fragment.output.push(receipt);
             Ok(ResidentWorkbenchStep::Committed {
-                output: receipt,
+                output: fragment.output.join("\n"),
                 warnings: fragment.warnings,
                 installed_bindings,
             })
@@ -1971,7 +2054,7 @@ fn bounded_activation_text(
 }
 
 enum ObservationPurpose {
-    Inspection,
+    Inspection(Vec<String>),
     Assignment,
 }
 
@@ -1994,7 +2077,10 @@ where
     let prepared = source.prepare(&view);
     let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
     let (renderer, opaque) = match purpose {
-        ObservationPurpose::Inspection => ("workbenchDisplay".to_owned(), "(T.pack \"<opaque value>\", True)"),
+        ObservationPurpose::Inspection(keys) => {
+            let keys = keys.iter().map(|key| format!("T.pack \"{}\"", tidepool_runtime::session::escape_workbench_haskell_string(key))).collect::<Vec<_>>().join(",");
+            (format!("workbenchDisplayWithout [{keys}]"), "(T.pack \"<opaque value>\", True)")
+        },
         ObservationPurpose::Assignment => (
             format!("workbenchActivationDisplay {ACTIVATION_INPUT_LIMIT}"),
             "(T.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput; full printing requires Show.\", False)",
@@ -3444,6 +3530,45 @@ where
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    /// End only the suspended computation; the independent command job remains owned.
+    pub(crate) async fn stop_command_observation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        job: String,
+        reason: CommandObservationStop,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let stopped = session.abort(
+                    hole.cont_id(),
+                    "foreground command observation ended".into(),
+                );
+                if session.parked_holes().contains(&hole.cont_id()) {
+                    return match stopped {
+                        Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+                        Ok(_) => Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "command observation continuation remained parked after abort".into(),
+                        )),
+                    };
+                }
+                match stopped {
+                    Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
+                        tidepool_runtime::JitError::Effect(
+                            tidepool_effect::error::EffectError::Handler(_),
+                        ),
+                    ))) => {
+                        Err(ResidentActorWorkbenchError::CommandObservationStopped { job, reason })
+                    }
+                    Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+                    Ok(_) => Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "aborted command observation unexpectedly completed".into(),
+                    )),
+                }
             })
             .await
     }

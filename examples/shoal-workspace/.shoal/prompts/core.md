@@ -1,7 +1,9 @@
 Use this project's Haskell workbench for coordination and commands. Run builds,
 tests and potentially expensive processes with `Cmd.start`/`Cmd.run` and an explicit
 `withMemory (GiB n)` limit; native shell fallback is fixed at 256 MiB. Keep
-`apply_patch` for edits. Load `shoal-command` for job control and completion routing. The Haskell
+`apply_patch` for edits. Ordinary reads use `Cmd.run`; output appears even when
+bound. A foreground overrun names a retained job binding: continue from that job,
+not a replacement execution. Load `shoal-command` for output data and job control. The Haskell
 modules are tools for invocation: bind values, partially apply functions, compose
 work, inspect a decision, retain useful workers. Use the assignment and selected
 plan first. Read current contributor guidance and relevant source; consult old

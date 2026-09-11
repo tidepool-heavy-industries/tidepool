@@ -1444,6 +1444,43 @@ where
         bindings.into_values().collect()
     }
 
+    /// Check exact current declaration source without evaluating a live value.
+    /// Materialized bindings shadow declarations in the resident lexical view.
+    pub fn workbench_declaration_matches_in(
+        &self,
+        scope: ScopeId,
+        name: &str,
+        source: &str,
+        required_imports: &super::SourceImports,
+    ) -> bool {
+        if self.current_binding_in(scope, name).is_some() {
+            return false;
+        }
+        let library = self.core.lib();
+        library
+            .current_declarations_in(scope)
+            .into_iter()
+            .any(|(item, generation)| {
+                matches!(item, super::ExportItem::Value { name: ref declared } if declared == name)
+                    && library
+                        .log
+                        .turns
+                        .get(generation.saturating_sub(1) as usize)
+                        .is_some_and(|turn| {
+                            let [stored] = turn.sources.as_slice() else {
+                                return false;
+                            };
+                            let mut imports = super::SourceImports::new();
+                            imports.extend_declaration_source(stored);
+                            required_imports
+                                .specs()
+                                .iter()
+                                .all(|required| imports.specs().contains(required))
+                                && imports.declaration_source(source) == *stored
+                        })
+            })
+    }
+
     /// Source-only declaration recovery facts for this machine incarnation.
     /// Live values and handles are intentionally absent because they cannot
     /// survive machine replacement.

@@ -28,6 +28,7 @@ const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
 const NAMESPACE: &str = "tidepool_actor";
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
 const DESCRIPTION_LIMIT: usize = 1024;
+pub(crate) const MODEL_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolKind {
@@ -509,19 +510,72 @@ impl CallResponse {
             ToolKind::Function => serialize(value),
         };
         Self {
-            content_items: vec![CallContent::InputText { text }],
+            content_items: vec![CallContent::InputText {
+                text: tidepool_actor::bound_workbench_display(&text, MODEL_OUTPUT_LIMIT),
+            }],
             success: true,
         }
     }
 
     fn failure(error: &HostToolFailure) -> Self {
+        let text = match error {
+            HostToolFailure::Dispatch(ResidentToolError::Invocation(
+                tidepool_actor::KernelInvocationFailure::Workbench(failure),
+            )) => workbench_failure_transcript(failure),
+            _ => tidepool_actor::bound_workbench_display(&error.to_string(), MODEL_OUTPUT_LIMIT),
+        };
         Self {
-            content_items: vec![CallContent::InputText {
-                text: error.to_string(),
-            }],
+            content_items: vec![CallContent::InputText { text }],
             success: false,
         }
     }
+}
+
+fn workbench_failure_transcript(failure: &tidepool_actor::KernelWorkbenchFailure) -> String {
+    let detail = tidepool_actor::bound_workbench_display(&failure.detail, 2048);
+    let mut text = format!(
+        "actor {:?} workbench input unit {} of {} failed: {detail}\n",
+        failure.actor,
+        failure.failed_index + 1,
+        failure.total
+    );
+    // Command observations reserve 4 KiB for diagnostics. Present those
+    // observations before optional operation metadata, without repeating detail.
+    for receipt in &failure.receipts {
+        if receipt.output.is_empty() {
+            continue;
+        }
+        let allowance = MODEL_OUTPUT_LIMIT.saturating_sub(text.len() + 256);
+        if allowance == 0 {
+            text.push_str("\n[additional receipt output omitted]");
+            break;
+        }
+        text.push_str(&tidepool_actor::bound_workbench_display(
+            &receipt.output,
+            allowance,
+        ));
+        text.push('\n');
+    }
+    for operation in failure
+        .receipts
+        .iter()
+        .flat_map(|receipt| &receipt.operations)
+    {
+        let effect = tidepool_actor::bound_workbench_display(&operation.effect, 256);
+        let line = format!(
+            "operation {}:{}:{} {:?} ({effect})\n",
+            operation.id.execution,
+            operation.id.input_unit_index + 1,
+            operation.id.effect_ordinal + 1,
+            operation.disposition
+        );
+        if text.len() + line.len() + 128 > MODEL_OUTPUT_LIMIT {
+            text.push_str("[additional operation receipts omitted]\n");
+            break;
+        }
+        text.push_str(&line);
+    }
+    text
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -590,13 +644,7 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
     }
     let processed = match status {
         "completed" => next_index,
-        "rejected" => {
-            items
-                .last()
-                .and_then(|item| item.get("index"))
-                .and_then(serde_json::Value::as_u64)?
-                + 1
-        }
+        "rejected" | "backgrounded" => next_index.saturating_add(1).min(total),
         _ => total,
     };
     let not_run = total.saturating_sub(processed);
@@ -605,7 +653,7 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
             transcript.push('\n');
         }
         match status {
-            "rejected" => transcript.push_str(&format!(
+            "rejected" | "backgrounded" => transcript.push_str(&format!(
                 "[stopped after GHCi input unit {processed} of {total}; {not_run} not run]"
             )),
             "completed" => transcript.push_str(&format!(
@@ -881,6 +929,82 @@ mod tests {
             validate_description("dynamic tool", "oversized", &too_long).unwrap_err(),
             "dynamic tool `oversized` description exceeds the 1024-character provider limit"
         );
+    }
+
+    #[test]
+    fn every_hosted_result_path_obeys_the_final_display_budget() {
+        let huge = "λ-output\n".repeat(100_000);
+        let responses = [
+            CallResponse::domain(ToolKind::Custom, serde_json::json!({"large": huge})),
+            CallResponse::domain(ToolKind::Function, serde_json::json!({"large": huge})),
+            CallResponse::failure(&HostToolFailure::PanicInFuture(huge.clone())),
+            CallResponse::domain(
+                ToolKind::Custom,
+                serde_json::json!({
+                    "status": "committed", "nextIndex": 2, "total": 2,
+                    "items": [
+                        {"index": 0, "status": "committed", "output": huge},
+                        {"index": 1, "status": "committed", "output": "final evidence"}
+                    ]
+                }),
+            ),
+        ];
+        for response in responses {
+            let CallContent::InputText { text } = &response.content_items[0];
+            assert!(text.len() <= MODEL_OUTPUT_LIMIT, "{}", text.len());
+            assert!(text.contains("bytes not displayed"));
+        }
+    }
+
+    #[test]
+    fn workbench_failure_preserves_command_output_before_large_diagnostics() {
+        use tidepool_runtime::session::{
+            WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
+            WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+        };
+        let output = format!(
+            "begin-command\n{}\nmiddle-evidence\n{}\nend-command\n",
+            "λ".repeat(15_000),
+            "x".repeat(30_000)
+        );
+        let failure = tidepool_actor::KernelWorkbenchFailure {
+            actor: tidepool_actor::ActorRef::first(tidepool_actor::ActorId(7)),
+            failed_index: 1,
+            total: 3,
+            detail: "large diagnostic λ\n".repeat(20_000),
+            receipts: vec![WorkbenchItemReceipt {
+                index: 1,
+                status: WorkbenchItemStatus::Rejected,
+                output: output.clone(),
+                warnings: vec![],
+                installed_bindings: vec![],
+                terminal_transfer: None,
+                operations: (0..1000)
+                    .map(|effect_ordinal| WorkbenchOperationReceipt {
+                        id: WorkbenchOperationId {
+                            execution: WorkbenchExecutionId::from_digest([1; 16]),
+                            input_unit_index: 1,
+                            effect_ordinal,
+                        },
+                        effect: "command observation".repeat(100),
+                        disposition: WorkbenchOperationDisposition::Committed,
+                    })
+                    .collect(),
+            }],
+        };
+        let response =
+            CallResponse::failure(&HostToolFailure::Dispatch(ResidentToolError::Invocation(
+                tidepool_actor::KernelInvocationFailure::Workbench(failure),
+            )));
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert!(!response.success);
+        assert!(text.len() <= MODEL_OUTPUT_LIMIT, "{}", text.len());
+        assert!(
+            text.contains(&output),
+            "command output was clipped by diagnostics"
+        );
+        assert!(text.contains("input unit 2 of 3 failed"));
+        assert!(text.contains("additional operation receipts omitted"));
     }
 
     #[test]

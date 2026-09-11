@@ -95,7 +95,7 @@ compiler checks types; Rust interpreters enforce runtime authority.
 
 Run commands through `Cmd.run` or `Cmd.start`; give builds/tests and other
 potentially expensive commands a realistic `withMemory (GiB n)` hard limit.
-Admission queues automatically. Retain pending jobs, use completion routing when
+Admission queues automatically. Retain background jobs, use completion routing when
 useful, and return the turn when only waiting remains. Native shell tools remain
 a 256 MiB fallback and `apply_patch` remains available for edits. The JavaScript
 tool wrapper is disabled. See the command example in the guide and, when supplied,

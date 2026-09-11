@@ -193,6 +193,20 @@ pub fn commands() -> Effect {
                     ("commandStderr", "stderr", named("CommandPage")),
                 ],
             ),
+            record(
+                "CommandObservation",
+                vec![
+                    ("observedCommandResult", "result", named("CommandResult")),
+                    ("observedCommandOutput", "output", named("CommandOutput")),
+                ],
+            ),
+            sum(
+                "CommandPresentation",
+                vec![
+                    ("CommandVisible", vec![HsType::Text]),
+                    ("CommandQuiet", vec![]),
+                ],
+            ),
             sum(
                 "CommandError",
                 vec![
@@ -229,6 +243,25 @@ pub fn commands() -> Effect {
                     ("milliseconds", HsType::Int, "i64"),
                 ],
                 HsType::either(named("CommandError"), named("CommandStatus")),
+            ),
+            verb(
+                "CommandForegroundWith",
+                "command_foreground_with",
+                vec![("job", HsType::Text, "String")],
+                HsType::either(named("CommandError"), named("CommandObservation")),
+            ),
+            verb(
+                "CommandPresentWith",
+                "command_present_with",
+                vec![
+                    ("job", HsType::Text, "String"),
+                    (
+                        "presentation",
+                        named("CommandPresentation"),
+                        "tidepool_bridge_effects::CommandPresentation",
+                    ),
+                ],
+                HsType::Unit,
             ),
             verb(
                 "CommandOutputWith",

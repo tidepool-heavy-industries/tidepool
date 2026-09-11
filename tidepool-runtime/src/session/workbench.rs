@@ -481,6 +481,7 @@ pub struct WorkbenchOperationReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkbenchTerminalTransfer {
+    CommandBackgrounded,
     ReplyAccepted,
     CancellationAcknowledged,
 }
@@ -489,6 +490,8 @@ pub enum WorkbenchTerminalTransfer {
 #[serde(rename_all = "camelCase")]
 pub enum WorkbenchItemStatus {
     Committed,
+    /// Execution ended before returning; recovery bindings may still be installed.
+    Stopped,
     Diagnostic,
     Rejected,
     NotRun,
@@ -519,6 +522,7 @@ pub struct WorkbenchItemReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkbenchRunStatus {
+    Backgrounded,
     Committed,
     Rejected,
     Replied,

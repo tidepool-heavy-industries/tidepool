@@ -1,39 +1,49 @@
 ---
 name: shoal-command
-description: Run shell commands through resident Haskell; consume structured results, navigate retained output, or control long-running and interactive jobs.
+description: Run shell commands through resident Haskell; consume results as data, navigate retained output, or control background and interactive jobs.
 ---
 
-`Cmd` is already `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB`
-are loaded. `T` is the shared qualified Text import. Commands are reusable,
-inspectable values; effects launch them. Start with an ordinary read:
+`Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB`, `GiB` and qualified
+Text as `T` are loaded. Start with an ordinary read:
 
 ```haskell
 result <- Cmd.run [bash|git status --short|]
-result
 ```
 
-Results display readable output while remaining Haskell values. `Cmd.run` waits
-up to one second, returning `Cmd.Finished`, `Cmd.Pending` or `Cmd.Unavailable`.
-`Cmd.job result` retrieves the same job in every case. When waiting is intended:
+Output appears automatically, including for a bound result. The result remains
+available as Haskell data; displaying it again does not execute the command.
+Use `Cmd.quiet action` when only the data matters. Quiet is scoped to that action
+and does not hide a stopped computation or its recovery receipt. Nonzero process
+exits remain in the retained result even when routine presentation is quiet.
 
 ```haskell
-finished <- Cmd.await (Cmd.job result)
-let lines = T.lines <$> Cmd.stdout finished
-lines
+let changed = T.lines <$> Cmd.stdout result
+changed
 ```
 
-`Cmd.stdout` is pure: complete stdout from exit zero, or an explicit output issue.
-It never waits, reads more, reruns, or turns failure into empty text. Stderr
-completeness and descendant cleanup are separate from successful stdout.
-`Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout finished)` decodes JSON without
-nested error plumbing; `Cmd.asJSON` also accepts ordinary Text. Use `T.lines`
-and normal Haskell functions for filtering. Retain results rather than copying
-rendered output into another shell command.
+`Cmd.stdout` purely extracts complete stdout from exit zero, or an explicit issue.
+It never waits, reads more, reruns, or substitutes empty text. Stderr completeness
+and cleanup are separate. `Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout result)`
+decodes JSON; ordinary Text supports `T.lines`, filtering and other composition.
+If capture is incomplete, `Cmd.readStdout (Cmd.job result)` explicitly reads
+complete retained stdout, or reports why it is unavailable. Repeated `await`
+is not a way to enlarge capture.
 
-Quotations preserve literal Bash, including multiline scripts and heredocs.
-Haskell does not interpolate shell `$variables`, backticks or indentation.
-Bash retains its normal exit/pipeline behavior; choose `set -euo pipefail` when
-appropriate. Pass dynamic values as arguments:
+`Cmd.run command` starts and waits up to 30 seconds; `Cmd.await job` observes an
+existing job for the same window. Both return completed results, including
+nonzero exits. On overrun, the interactive workbench stops the current computation
+and installs a real `jobN :: Cmd.Job` binding, named in its receipt. The command
+continues. The enclosing result is not bound and subsequent statements do not
+run. Inspect `Cmd.status jobN`, read `Cmd.output jobN`, or later `Cmd.await jobN`.
+That later observation does not resume the discarded continuation. Do not rerun
+the command to recover output. Earlier committed bindings remain available.
+A Haskell actor handler instead fails normally; it has no interactive remediation
+binding. Use `Cmd.start` and completion events there for unattended long work.
+
+Commands are reusable values. Quotations preserve literal Bash, including
+multiline scripts, heredocs and indentation. Haskell does not interpolate shell
+variables or backticks. Bash retains ordinary exit/pipeline semantics; choose
+`set -euo pipefail` when appropriate. Pass dynamic values as arguments:
 
 ```haskell
 let preview path = Cmd.withArguments [path] [bash|sed -n '1,20p' -- "$1"|]
@@ -41,58 +51,53 @@ Cmd.describe (preview "a path; not shell syntax")
 ```
 
 `Cmd.argv [program,arg1,arg2]` bypasses Bash. `Cmd.inDirectory` and
-`Cmd.withEnvironment` customize a command value. The native owner resolves the
-directory at launch: omitted means its configured workspace; relative paths are
-relative to that workspace. Constructing a Command does not snapshot a directory
-or inherited environment. Reusing it preserves explicit arguments/overrides, but
-each launch resolves the owner's environment policy again. `Cmd.describe` shows
-intent, not an execution receipt; use `pwd` in the job when location is evidence.
-Ordinary commands use 256 MiB;
-choose explicit realistic memory for substantial work, e.g.
-`Cmd.start (withMemory (GiB 8) [bash|cargo build|])`. The shared pool queues
-admission automatically; memory is both a hard limit and admission weight.
+`Cmd.withEnvironment` customize intent. The native owner resolves the directory
+at launch: omitted means its workspace; relative paths start there. Constructing
+a command does not snapshot inherited environment or location. `Cmd.describe`
+inspects intent without executing. Use `pwd` in a command when location is evidence.
 
-For longer work, bind `job <- Cmd.start command`, do other work, then
-`Cmd.await job`. Interrupting an observation does not cancel the command; inspect
-`Cmd.status job` using the retained handle. `Cmd.cancel job` accepts cancellation
-intent; status/await report the eventual outcome and cleanup. Live handles are
-not a promise of recovery after host restart. The one-second `run` window limits
-observation, not execution or cleanup. No execution-deadline modifier is implied.
+Ordinary commands use 256 MiB. Choose realistic explicit memory for builds/tests,
+e.g. `job <- Cmd.start (withMemory (GiB 8) [bash|cargo build|])`.
+`start` returns immediately; admission queues automatically. Retain the job,
+do other work, and observe it later. Memory is a hard limit and admission weight.
+`traverse Cmd.run commands` works sequentially until completion or a foreground
+stop. To start all first, retain `jobs <- traverse Cmd.start commands`, then
+collect with `traverse Cmd.await jobs`. Collection follows input order; nonzero
+exit does not cancel siblings. Interrupted observation leaves jobs available.
+`Cmd.cancel job` requests cancellation; status/await reports outcome and cleanup.
+Live handles do not promise recovery after host restart.
 
-`traverse Cmd.run commands` launches sequentially, waiting briefly on each; jobs
-that return Pending may overlap. To launch all before waiting, retain
-`jobs <- traverse Cmd.start commands`, then `results <- traverse Cmd.await jobs`.
-Results follow input order. A nonzero exit is a result, not sibling cancellation;
-if collection is interrupted, the retained jobs remain the recovery path.
-
-Each result initially captures an 8 KiB tail per stream. Display shortening is
-separate from capture omission and retention loss. Read more without rerunning:
+Completed results capture up to 1 MiB per stream. Automatic display has a shared
+64 KiB budget per tool response; shortening display does not discard captured
+data. `inspectFull` also has a display allowance; use pages or Haskell projections
+for larger values. Foreground observations skip output already offered, including
+explicitly marked omissions; explicit reads do not consume it. Read without executing again:
 
 ```haskell
-page <- Cmd.readOutput Cmd.Stdout (Cmd.job finished)
-page
-next <- Cmd.nextPage page
-let relevant = filter (T.isInfixOf "error") (T.lines (Cmd.pageText next))
+page <- Cmd.output (Cmd.job result)
+let relevant = filter (T.isInfixOf "error") (T.lines (Cmd.pageText page))
 relevant
+next <- Cmd.next page
 ```
 
-`readOutput` begins at byte zero; `Cmd.tailOutput Cmd.Stderr job` selects a tail.
-Pages are immutable, non-consuming 8 KiB windows. `Cmd.pageDetails` exposes
-positions, loss and fragment markers. Current end while running differs from
-terminal EOF. Positions/counts are bytes, not Text character indices. Valid UTF-8
-is preserved across ordinary forward page boundaries; invalid or already-lost
-boundary bytes display with replacement characters and explicit lossiness.
-`Cmd.stdout` rejects lossy capture. A gap means retention passed the requested cursor; it is not
-recoverable by expanding the display. Retention is 256 KiB per stream and the
-latest 32 completed jobs. Write logs to a chosen file when longer retention is
-needed. Partial text is diagnostic data, not a complete JSON document.
+`output` begins stdout at byte zero; `next` advances the page.
+`Cmd.readOutput Cmd.Stderr job` and `Cmd.tailOutput Cmd.Stderr job` explicitly
+select stderr or a diagnostic tail. Pages are immutable, non-consuming 64 KiB
+windows. `Cmd.pageDetails` reports byte positions, gaps and fragments. Current
+end while running differs from terminal EOF. Valid UTF-8 is preserved across
+forward page boundaries; invalid or lost boundary bytes have replacement text
+and explicit lossiness. Complete-stdout extraction rejects lossy content.
 
-Use `Cmd.withStdin` for a pipe and `Cmd.withTerminal` for a PTY initially sized to
-the owning TUI. Retain the job for `Cmd.sendInput`, `Cmd.closeInput` and
+Retention keeps a 16 MiB prefix plus 256 KiB tail per stream, subject to a
+128 MiB owner budget and the latest 32 completed jobs. Completed logs can be
+evicted; active streams continue draining when retention fills. A reported gap
+cannot be repaired by expanding display. Choose a workspace log file for larger
+or longer-lived evidence. Partial text is diagnostic data, not complete JSON.
+
+`Cmd.withStdin` provides a pipe; `Cmd.withTerminal` provides a PTY initially sized
+to the owning TUI. Retain the job for `Cmd.sendInput`, `Cmd.closeInput` and
 `Cmd.resize`. PTYs use terminal EOF input instead of `closeInput`.
-
 `Cmd.completion job :: R.EventSource Cmd.CommandResult` supplies one retained
-terminal result to a record actor, including attachment after completion.
-Load `shoal-define-actors` when defining a router; ordinary commands need none.
-Captured jobs do not transfer control authority. Finish collectors once their
-remaining obligations are settled.
+terminal event, including attachment after completion. Load `shoal-define-actors`
+for custom routing. Captured handles do not transfer authority; finish collectors
+when their remaining obligations are settled.

@@ -481,6 +481,10 @@ fn command_for(
     command
         .arg("--host-dynamic-tools-socket")
         .arg(&spec.host_tools_socket);
+    // Hosted responses are bounded to 64 KiB, including their recovery receipt.
+    // Codex estimates four bytes per token; retain that response in model history
+    // instead of silently clipping it again after displaying the original in TUI.
+    command.args(["-c", "tool_output_token_limit=16384"]);
     // The host owns the actor tree and reply routing. Native collaboration
     // would create a second, unrelated tree inside this actor's provider thread.
     for feature in [
@@ -1038,6 +1042,10 @@ mod tests {
                 .get("developer_instructions")
                 .and_then(|value| value.as_str())
                 == Some("actor charter")));
+            assert!(overrides.iter().any(|doc| doc
+                .get("tool_output_token_limit")
+                .and_then(|value| value.as_integer())
+                == Some(16384)));
             for feature in ["multi_agent", "multi_agent_v2"] {
                 assert!(command
                     .args

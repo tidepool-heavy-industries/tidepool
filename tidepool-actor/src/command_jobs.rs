@@ -69,8 +69,35 @@ struct Shared {
     backend: Mutex<Option<Arc<dyn CommandBackend>>>,
     sinks: Mutex<Vec<std::sync::Weak<CompletionSink>>>,
     observers: Mutex<HashMap<ActorRef, usize>>,
+    displayed: Mutex<HashMap<ActorRef, [i64; 2]>>,
 }
 impl Shared {
+    /// A settled command with no supplied backend never opened output streams.
+    fn unstarted_output(&self) -> Option<CommandPage> {
+        let phase = self.phase.borrow();
+        if !matches!(
+            &*phase,
+            CommandStatus::CommandFinished(CommandResult {
+                outcome: CommandOutcome::CommandCancelled | CommandOutcome::CommandFailed(_),
+                cleanup: CommandCleanup::CommandClean,
+            })
+        ) {
+            return None;
+        }
+        Some(CommandPage {
+            text: String::new(),
+            start: 0,
+            end: 0,
+            available_end: 0,
+            retained_start: 0,
+            lost_bytes: 0,
+            finished: true,
+            lossy: false,
+            leading_fragment: false,
+            trailing_fragment: false,
+        })
+    }
+
     async fn cleanup(&self, id: &str) -> CommandCleanup {
         let current = self.phase.borrow().clone();
         let CommandStatus::CommandFinished(result) = current else {
@@ -174,6 +201,7 @@ impl CommandJobs {
             backend: Mutex::new(None),
             sinks: Mutex::new(Vec::new()),
             observers: Mutex::new(Default::default()),
+            displayed: Mutex::new(Default::default()),
         });
         let cleanup_shared = shared.clone();
         let cleanup_id = id.clone();
@@ -321,13 +349,19 @@ impl CommandJobs {
         id: &str,
         bytes: usize,
     ) -> Result<CommandOutput, CommandError> {
-        if bytes > 64 * 1024 {
+        if bytes > 1024 * 1024 {
             return Err(CommandError::CommandInvalid(
-                "read at most 65536 output bytes".into(),
+                "read at most 1048576 output bytes per stream".into(),
             ));
         }
         let shared = self.shared(owner, id)?;
         let Some(backend) = shared.backend.lock().clone() else {
+            if let Some(page) = shared.unstarted_output() {
+                return Ok(CommandOutput {
+                    stdout: page.clone(),
+                    stderr: page,
+                });
+            }
             return Err(CommandError::CommandUnavailable(
                 "command backend not ready; retain the job".into(),
             ));
@@ -348,10 +382,86 @@ impl CommandJobs {
             ));
         }
         let shared = self.shared(owner, id)?;
-        let backend = shared.backend.lock().clone().ok_or_else(|| {
-            CommandError::CommandUnavailable("command backend not ready; retain the job".into())
-        })?;
+        let Some(backend) = shared.backend.lock().clone() else {
+            return shared.unstarted_output().ok_or_else(|| {
+                CommandError::CommandUnavailable("command backend not ready; retain the job".into())
+            });
+        };
         backend.read(id, stream, position).await
+    }
+
+    /// Read an observation without consuming explicit pages. The caller advances
+    /// the display cursor only after attaching these pages to its response.
+    pub(crate) async fn observation(
+        &self,
+        owner: ActorRef,
+        id: &str,
+    ) -> Result<Vec<(CommandStream, CommandPage)>, CommandError> {
+        let shared = self.shared(owner, id)?;
+        let cursors = shared
+            .displayed
+            .lock()
+            .get(&owner)
+            .copied()
+            .unwrap_or_default();
+        let mut pages = Vec::new();
+        for (stream, cursor) in [CommandStream::Stdout, CommandStream::Stderr]
+            .into_iter()
+            .zip(cursors)
+        {
+            let page = self
+                .read(
+                    owner,
+                    id,
+                    stream.clone(),
+                    CommandPosition::OutputOffset(cursor),
+                )
+                .await?;
+            let end = page.end;
+            let available = page.available_end;
+            if page.end > cursor || page.lost_bytes > 0 {
+                pages.push((stream.clone(), page));
+            }
+            if end < available {
+                let tail = self
+                    .read(owner, id, stream.clone(), CommandPosition::OutputTail)
+                    .await?;
+                let tail = if tail.start < end {
+                    self.read(
+                        owner,
+                        id,
+                        stream.clone(),
+                        CommandPosition::OutputOffset(end),
+                    )
+                    .await?
+                } else {
+                    tail
+                };
+                if tail.end > end {
+                    pages.push((stream, tail));
+                }
+            }
+        }
+        Ok(pages)
+    }
+
+    pub(crate) fn mark_displayed(
+        &self,
+        owner: ActorRef,
+        id: &str,
+        pages: &[(CommandStream, CommandPage)],
+    ) -> Result<(), CommandError> {
+        let shared = self.shared(owner, id)?;
+        let mut displayed = shared.displayed.lock();
+        let cursors = displayed.entry(owner).or_default();
+        for (stream, page) in pages {
+            let index = match stream {
+                CommandStream::Stdout => 0,
+                CommandStream::Stderr => 1,
+            };
+            cursors[index] = cursors[index].max(page.end);
+        }
+        Ok(())
     }
 
     pub(crate) fn connect(

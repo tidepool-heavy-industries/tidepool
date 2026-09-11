@@ -44,22 +44,27 @@ Register separate watches when results can be integrated independently.
 `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB` are loaded.
 ```haskell
 result <- Cmd.run [bash|git status --short|]
-result
 ```
 
-Commands are values; `Cmd.describe` is optional inspection. Ordinary commands use
-256 MiB; choose explicit `withMemory` for substantial builds/tests. `Cmd.run`
-observes for one second; `Cmd.job result` retains the job whether finished,
-pending or unavailable. `Cmd.await job` waits and returns the same consumable
-result shape. Interrupted observation does not cancel the job.
+Output appears automatically; `result` remains data. `Cmd.quiet action` suppresses
+routine display within that action. Commands are reusable values; `Cmd.describe`
+inspects intent. Ordinary commands use 256 MiB; use `withMemory` for builds/tests.
+
+`Cmd.run` and `Cmd.await job` wait up to 30 seconds for completion. An overrun
+stops the current computation; the interactive workbench names a retained
+`jobN :: Cmd.Job` binding in its receipt. The enclosing result and subsequent
+statements do not run. Use that binding to inspect, read output or await later;
+never rerun for diagnostics. Haskell handlers fail without an interactive binding;
+use `Cmd.start` plus completion routing for their long-running work.
 
 `Cmd.stdout result` purely extracts complete successful stdout or an explicit
-issue; use `T.lines` or `Cmd.decodeWith (Cmd.asJSON @Value)` for data use.
-`Cmd.readOutput Cmd.Stdout job`, `Cmd.tailOutput Cmd.Stderr job` and
-`Cmd.nextPage page` navigate bounded retained output without rerunning commands.
-`Cmd.status job` includes terminal cleanup; `Cmd.cancel job` accepts cancellation
-intent. `Cmd.completion job` supplies terminal metadata to a record actor.
-Load `shoal-command` for exact contracts, safe arguments, paging and interactive jobs.
+issue. Use `T.lines` or `Cmd.decodeWith (Cmd.asJSON @Value)` for data consumption.
+`Cmd.readStdout (Cmd.job result)` explicitly reads more retained complete stdout;
+repeated `await` does not enlarge capture. `Cmd.output job` starts stdout paging,
+`Cmd.next page` advances, and `Cmd.tailOutput Cmd.Stderr job` reads diagnostics.
+`Cmd.status job` includes cleanup; `Cmd.cancel job` requests cancellation.
+`Cmd.completion job` supplies terminal metadata to a record actor.
+Load `shoal-command` for safe arguments, retention, paging and interactive jobs.
 
 ## Construction and handles
 

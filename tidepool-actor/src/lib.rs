@@ -54,6 +54,7 @@ pub use hosted_lifecycle::{
 mod typed_request;
 mod wait;
 mod workbench_display;
+pub use workbench_display::bounded_output as bound_workbench_display;
 
 pub use descriptor::ActorDescriptor;
 pub use external_application::{

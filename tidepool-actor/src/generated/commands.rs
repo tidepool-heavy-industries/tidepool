@@ -16,6 +16,8 @@ pub enum CommandsReq {
     CommandStartWith(tidepool_bridge_effects::CommandSpec),
     CommandStatusWith(String),
     CommandAwaitWith(String, i64),
+    CommandForegroundWith(String),
+    CommandPresentWith(String, tidepool_bridge_effects::CommandPresentation),
     CommandOutputWith(String, i64),
     CommandReadWith(
         String,

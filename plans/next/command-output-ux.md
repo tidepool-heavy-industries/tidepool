@@ -1,73 +1,156 @@
-# Resident command output UX
+# Foreground commands and retained background handoff
 
-Approved scope: ordinary multiline Bash, typed run/await results, complete stdout,
-Text-native compositional display, bounded stream paging and qualified discovery.
-The September 10 usability wave stopped before product fan-out. Retained feedback:
-`plans/parallel-dogfood/next-wave/command-ux-{astra,sol}.md`; original planner
-`28ec1c6eebbf00e7916b0955aeea52ac4e926d1c`. Product branches remain separate.
+Implement on main and the matched native command-jobs continuation. Preserve paused
+product branches and running packages. Launch the next RSI wave only after the
+exact four-file read and foreground handoff pass through an actual TUI with a
+scripted provider. Earlier command-output checks do not prove this revision.
 
-Implementation is on main and the native command-jobs continuation. No live
-package changes or new swarm launch are part of this work. The next runner must
-select a matched native/Tidepool pair: stream-end notification support is required
-before terminal output can be reported with stable cursor positions.
+## Interaction contract
 
-Validation completed:
-- Twelve low-level parser cases/matrices, independent of the Haskell stack.
-- Five byte-window checks: positions, gaps, UTF-8, fragments, empty/live end,
-  and non-consuming reads.
-- Resident nested large Text rendering, strict stdout/JSON extraction, separate
-  stderr completeness, qualified discovery, literal skill examples, retained-job
-  cancellation/routing and recovery after a deliberate display failure without
-  executing the command again.
-- Native completion/stream ordering in both arrival orders and rejection of
-  incomplete stream disposition; generated stable and experimental schemas.
-- Rust/Haskell formatting and skill frontmatter validation.
+`Cmd.run command` and `Cmd.await job` observe for up to 30 seconds and return a
+completed result. Nonzero exits retain ordinary typed results and diagnostics.
+`Cmd.start` is the explicit immediate-background path. Commands remain reusable
+values; reading a result or retained output never reruns a command.
 
-Actual TUI acceptance passed in 181.44 s, exercising the real native/host binaries
-with a scripted provider. Thirteen native boundary tests and scoped lint completed;
-lint also reported preexisting warnings outside the changed mechanism. Native source
-`8c5f5477f0a65cac1144614c75d26d4f2004b248` is pushed.
-The matched runtime is Tidepool `61f40e8bd443fbf6f1aa002a9fe85a18d7a035b0`
-with the native revision above. The frozen package and selection manifest are in
-`/home/inanna/dev/tidepool/target/command-output-runner-20260910/`.
-The wrapper selects immutable native, host, extractor and standard-library store
-paths. The running recipe compiler's executable hash matches the packaged worker.
+When observation expires, the command owner retains the exact job and stops the
+suspended computation without executing its continuation. The active execution
+boundary decides remediation:
 
-Remaining release gate: finish the updated workspace recipe checks. Coordination
-assertions compare typed values inside the resident session, avoiding dependence
-on the display layout. The command's own presentation fixtures test rendering
-separately. No new swarm launch.
-The TUI fixture must execute as the sole process in a fresh systemd scope with
-`--user --scope --slice=swarm.slice --property=Delegate=yes`. Start the compiler
-and test launcher outside that scope; delegating their shared cgroup is invalid.
+- Interactive workbench: install an actual collision-free `jobN :: Cmd.Job`
+  binding through the existing lexical-binding owner. Return its receipt and
+  available output in the current tool response. State that the enclosing result
+  was not installed and later statements did not run. `Cmd.await jobN` observes
+  that job; it never resumes the abandoned computation.
+- Haskell actor handler: propagate a typed failure through ordinary supervision.
+  Do not manufacture interactive bindings or message another model. Retain the
+  command; an observation deadline is not cancellation.
 
-## Additional UX review
+This is an execution-boundary distinction, including synchronous calls from a
+Codex actor into a Haskell handler. It is not a role or model-presence flag.
+Host-controlled stops must not be swallowed by Haskell exception handling.
+Preserve committed prefixes and exact transport-retry receipts. Installation
+failure must preserve the job and must never claim an alias was installed.
+Reuse an existing automatic alias only while it still identifies the exact job;
+respect user shadowing and collisions.
 
-Current guidance must distinguish command intent from resolved execution, viewing
-an existing value from reading retained output from executing again, and sequential
-`run` traversal from start-all/await-all. Native resolution is owned by
-`app-server/src/request_processors/command_exec_processor.rs`: cwd and inherited
-environment are resolved on launch, not while constructing Haskell values.
+## Output and storage
 
-Deferred capabilities: a resolved execution receipt (without dumping inherited
-secrets), explicit execution and cleanup deadlines, secret-aware retained history,
-and a byte-output escape hatch. Design redaction across nested values/errors before
-adding richer history; redaction must never alter execution bytes. Do not add
-Git/Grep/Sed effects. File/event/artifact/diagnostic effects need demonstrated usage
-and must extend the existing owners.
+- Show command results even when bound. Reuse the current tool response, without
+  extra wake messages or duplicate echo. Scoped `Cmd.quiet` suppresses routine
+  output, never necessary handoff information.
+- Share a 64 KiB UTF-8 display budget across one tool response. Medium file reads
+  should display completely; larger output uses line-aligned head/tail with exact
+  omission and navigation information. No implicit LLM summarization.
+- Capture up to 1 MiB per stream in completed results, independent of display.
+- Existing native job ownership retains a file-backed 16 MiB prefix and 256 KiB
+  diagnostic tail per stream, with a 128 MiB aggregate actor allowance. Use
+  private runtime storage outside snapshots. Evict completed output first; bound
+  active writes while continuing pipe drainage. Report retention gaps explicitly.
+  Clean storage through existing lifecycle ownership; promise no restart recovery.
+- `Cmd.stdout` is pure successful, complete stdout extraction. Stderr completeness
+  and cleanup are independent. `Cmd.readStdout job` explicitly retrieves retained
+  complete successful stdout without waiting or rerunning.
+- `Cmd.output job` and `Cmd.next page` navigate stdout from the beginning in
+  64 KiB pages; explicit stream/tail selectors remain available. Preserve byte
+  positions, decoding boundaries and honest gaps.
+- Repeated foreground observations show newly observed bytes; explicit reads
+  remain immutable and non-consuming.
 
-Conversation acceptance uses exact skill examples in the resident workbench plus
-the actual TUI fixture: multiline quotation, retained pending/completed jobs,
-nonzero output, nested Unicode, qualified discovery and paged output. Low-level
-parser and byte-window matrices remain independent of the Haskell engine.
+## Implementation and acceptance checklist
 
-## Declaration latency evidence
+1. Complete typed command observation and workbench-only handoff, binding/receipt
+   settlement and failure paths. Remove public Pending/Unavailable result cases.
+2. Complete native bounded storage, complete capture and read/navigation semantics.
+3. Complete automatic bounded presentation, scoped quiet and observation cursors.
+4. Update shipped guidance, skills and examples in place. Teach cheap reads first;
+   preserve literal multiline Bash, safe arguments, memory, stdin/PTY, cancellation
+   and completion routing. No mandatory inspection or memory ceremony.
+5. Run focused tests covering expression/bind/nested stops, unexecuted suffixes,
+   committed prefixes, exact aliases/collisions/shadowing, repeated observations,
+   finish races, interrupted installation, binding failure, handler failure,
+   retained-session usability and continuation/root cleanup.
+6. Exercise storage quotas, UTF-8, gaps, complete capture, collections and total
+   display budgets. Execute exact conversational examples with resident Haskell.
+   Parser-only behavior stays in low-level parser tests.
+7. Run actual binary/mock-provider acceptance for the four-file launch read and
+   foreground handoff; verify recovery uses the same job without reexecution.
+8. Format, review affected consumers, commit the matched main/native revisions,
+   freeze the package and prepare the next dogfood launch.
 
-The opt-in `command_description_latency_probe` runs five declarations/observations
-in one resident actor without starting subprocesses. September 10 measurement:
-argv-first 5.085 s; quote-first 11.352 s; quote-second 17.380 s; argv-second
-15.449 s; reuse 0.816 s. This does not isolate the compiler's internal phases, but
-it disproves attribution of the recurring delay solely to Bash execution or its
-quoter: fresh argv declarations also cost seconds. Keep command reuse prominent;
-do not introduce fragile Template Haskell name construction to optimize an
-unproven cause. Detailed compiler optimization belongs with the engine owner.
+Current evidence: actor crate and the application library test target compiled.
+Resident tests passed for output-observation failure and the actual 30-second
+deadline: recovery binding usable, committed prefix preserved, nested continuation
+and later statements skipped, command retained without cancellation or rerunning.
+Cancellation before backend admission also passed: awaiting returns a completed
+result with empty output, and late backend supply cannot start the command.
+The handler boundary passed through a synchronous record-actor call: an explicitly
+authorized command observer fails through normal supervision without installing
+interactive recovery bindings, and the caller workbench remains usable.
+Native storage is now wired through the existing job owner: anonymous prefix
+files, bounded diagnostic tails, aggregate accounting and completed-output
+eviction. The five shared byte-paging tests passed after extracting their common
+segment reader. All nine focused TUI storage/ordering tests passed, including
+complete capture beyond tail capacity, explicit gaps, zero allowance, Unicode,
+sustained output bounds and completed-before-active quota eviction. Evidence:
+`/tmp/foreground-native-storage.log`; no real-TUI acceptance claim yet.
+Automatic output, scoped quiet, and retained quiet results passed in the resident
+workbench (`/tmp/command-presentation-test.log`). All four rewritten command-skill
+code blocks executed successfully (`/tmp/command-skill-foreground-test.log`).
+Repeated output-failure handoff now reuses the exact declared alias; materialized
+user shadowing preserves the user's value and installs a fresh alias. The same
+resident test proves recovery still launches only one command
+(`/tmp/command-alias-reuse-test.log`). Four low-level display tests passed,
+including UTF-8 budgets, head/tail preservation and aggregate allowance.
+Resident observation checks passed for repeated awaits, non-consuming explicit
+reads and timeout output (`/tmp/command-observation-cursors-test.log`). Failed
+binding installation preserves the existing job and makes no alias claim
+(`/tmp/command-binding-failure-test.log`).
+
+The native/context audits found that successful hosted custom responses already
+project away receipt metadata, but failures and fallback JSON lacked a final cap.
+A final hosted cap now covers all paths; five context/prefix checks passed
+(`/tmp/command-context-prefix-test.log`). `inspectFull` now retains a renderer and
+uses a finite allowance rather than eagerly serializing with maxBound. The large
+value/JSON fixture passed with bounded display and unchanged retained data.
+Command presentation is retained at the input-unit owner before resuming Haskell,
+so a subsequent failure cannot discard already-completed command output.
+The typed hosted failure projection preserves that output ahead of bounded error
+detail and optional operation metadata. A 60 KB command result plus a large
+diagnostic and 1,000 operation receipts passed the final response-budget check;
+the resident later-failure regression also passed
+(`/tmp/command-failure-display-test.log`, `/tmp/command-final-failure-test.log`).
+A disconnected caller at the observation-to-handoff boundary passed exact retry:
+the returned receipt was unchanged, its installed alias remained usable, and
+only one command executed (`/tmp/command-disconnected-handoff-test.log`). This
+exercises caller cancellation while the kernel retains ownership; it does not
+claim recovery after killing the host or its binding worker.
+The exhausted-display-budget regression also passed: a command hidden after a
+large explicit value inspection remained available to the next foreground
+observation without reexecution (`/tmp/command-hidden-output-test.log`).
+
+Native history applies a separate model policy even when TUI/rollout shows full
+output. The existing `tool_output_token_limit=16384` override is now uniform in
+fresh/resumed/forked hosted launch commands; its focused test passed
+(`/tmp/command-native-history-budget-test.log`). No protocol extension is needed.
+Actual acceptance must inspect the subsequent normalized provider request.
+The real-TUI resource fixture passed against the matched native and Shoal binaries
+(`/tmp/command-full-tui-foreground-acceptance-r2.log`, 228.26 seconds, scripted
+local provider, no paid inference). The next normalized provider request retained
+the exact 59,935-byte four-file read. A real foreground deadline installed a usable
+binding; recovery ran the original job exactly once and left the abandoned suffix
+untouched. The same fixture exercised command OOM, resource admission, stdin,
+cancellation, completion routing and PTY dimensions. Native tail metadata now
+reports the retained prefix accurately; all five focused storage tests passed
+(`/tmp/command-native-tail-metadata-test.log`). The native revision is
+`80e36633f515b03e11189e8516be21065e73335e`, published to the Codex fork and pinned
+by main's flake inputs.
+
+The prepared immutable development runner is
+`/nix/store/crrcqgisalq6h2fca2c0ipj4ggpz3j2v-shoal-command-foreground-runner`.
+Its exact-source selection and package checks belong in
+`target/command-foreground-runner-20260911/`. Commit/push main and complete those
+launch-package checks before declaring the wave ready.
+
+No entirely hidden command presentation may advance its cursor; head/tail
+omissions are explicit intentional skips, not implied full delivery. Historical feedback is in
+`plans/parallel-dogfood/next-wave/command-ux-{astra,sol}.md`.
