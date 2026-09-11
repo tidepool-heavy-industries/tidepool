@@ -209,7 +209,8 @@ impl ResidentWorkbenchFragment {
         if !self.presented.contains(&job) {
             self.presented.push(job);
         }
-        if let tidepool_bridge_effects::CommandPresentation::CommandVisible(text) = presentation {
+        if let tidepool_bridge_effects::CommandPresentation::CommandVisible(text, _) = presentation
+        {
             let text = crate::workbench_display::bounded_output(&text, *remaining);
             *remaining = remaining.saturating_sub(text.len() + 1);
             text

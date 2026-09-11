@@ -127,6 +127,7 @@ fn identity(
     TypeDef {
         name,
         wire_rust: Some(wire_rust),
+        core_module: None,
         shape: TypeShape::Identity {
             payload: IdentityPayload::Int,
             hs_binder: "i",
@@ -227,6 +228,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "EventWatch",
             wire_rust: Some("EvWatch"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -272,6 +274,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "HeadChangeKind",
             wire_rust: Some("EvHeadChangeKind"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -321,6 +324,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "HeadChangeReceipt",
             wire_rust: Some("EvHeadChangeReceipt"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -369,6 +373,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "CommitReceipt",
             wire_rust: Some("EvCommitReceipt"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -427,6 +432,7 @@ fn type_defs() -> Vec<TypeDef> {
             // `EvTick`, so `#[core(name = "Tick")]` is needed here too
             // (`TypeDef::needs_core_name` fires exactly on that mismatch).
             wire_rust: Some("EvTickReceipt"),
+            core_module: None,
             shape: TypeShape::Record {
                 fields: vec![RecordField {
                     hs_name: "firedAtMs",
@@ -447,6 +453,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "RepositoryEvent",
             wire_rust: Some("EvRepositoryEvent"),
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {

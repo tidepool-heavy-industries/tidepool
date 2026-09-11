@@ -44,6 +44,8 @@ pub struct TypeDef {
     /// mirror family is generated, this field drops from every `TypeDef` in
     /// one sweep.
     pub wire_rust: Option<&'static str>,
+    /// Defining Haskell module for nominal bridge lookup, when known.
+    pub core_module: Option<&'static str>,
     /// What kind of declaration this is.
     pub shape: TypeShape,
     /// Which `ToJSON` instance to emit, if any.
@@ -893,6 +895,7 @@ mod tests {
         let type_def = TypeDef {
             name: "Head",
             wire_rust: None,
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -950,6 +953,7 @@ mod tests {
         let type_def = TypeDef {
             name: "Payload",
             wire_rust: None,
+            core_module: None,
             shape,
             json: JsonInstance::None,
             derives: WireDerives(&[]),
@@ -968,6 +972,7 @@ mod tests {
         let type_def = TypeDef {
             name: "Empty",
             wire_rust: None,
+            core_module: None,
             shape: TypeShape::Sum {
                 variants: vec![SumVariant {
                     ctor: "Empty",

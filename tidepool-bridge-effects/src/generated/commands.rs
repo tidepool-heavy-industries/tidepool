@@ -4,12 +4,16 @@ use tidepool_bridge_derive::{FromCore, ToCore};
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandInput {
+    #[core(module = "Tidepool.Effects.Core")]
     ClosedInput,
+    #[core(module = "Tidepool.Effects.Core")]
     PipeInput,
+    #[core(module = "Tidepool.Effects.Core")]
     TerminalInput,
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[core(module = "Tidepool.Effects.Core")]
 pub struct CommandSpec {
     pub argv: Vec<String>,
     pub directory: Option<String>,
@@ -20,22 +24,32 @@ pub struct CommandSpec {
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandOutcome {
+    #[core(module = "Tidepool.Effects.Core")]
     CommandExited(i64),
+    #[core(module = "Tidepool.Effects.Core")]
     CommandSignalled(i64),
+    #[core(module = "Tidepool.Effects.Core")]
     CommandOutOfMemory,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandCancelled,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandFailed(String),
+    #[core(module = "Tidepool.Effects.Core")]
     CommandUnconfirmed(String),
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandCleanup {
+    #[core(module = "Tidepool.Effects.Core")]
     CommandClean,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandRetained,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandCleanupUnknown(String),
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[core(module = "Tidepool.Effects.Core")]
 pub struct CommandResult {
     pub outcome: CommandOutcome,
     pub cleanup: CommandCleanup,
@@ -43,27 +57,38 @@ pub struct CommandResult {
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandStatus {
+    #[core(module = "Tidepool.Effects.Core")]
     CommandQueued,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandStarting,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandRunning,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandStopping,
+    #[core(module = "Tidepool.Effects.Core")]
     CommandFinished(CommandResult),
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandStream {
+    #[core(module = "Tidepool.Effects.Core")]
     Stdout,
+    #[core(module = "Tidepool.Effects.Core")]
     Stderr,
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandPosition {
+    #[core(module = "Tidepool.Effects.Core")]
     OutputBeginning,
+    #[core(module = "Tidepool.Effects.Core")]
     OutputTail,
+    #[core(module = "Tidepool.Effects.Core")]
     OutputOffset(i64),
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[core(module = "Tidepool.Effects.Core")]
 pub struct CommandPage {
     pub text: String,
     pub start: i64,
@@ -78,12 +103,14 @@ pub struct CommandPage {
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[core(module = "Tidepool.Effects.Core")]
 pub struct CommandOutput {
     pub stdout: CommandPage,
     pub stderr: CommandPage,
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[core(module = "Tidepool.Effects.Core")]
 pub struct CommandObservation {
     pub result: CommandResult,
     pub output: CommandOutput,
@@ -91,13 +118,18 @@ pub struct CommandObservation {
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandPresentation {
-    CommandVisible(String),
+    #[core(module = "Tidepool.Effects.Core")]
+    CommandVisible(String, i64),
+    #[core(module = "Tidepool.Effects.Core")]
     CommandQuiet,
 }
 
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandError {
+    #[core(module = "Tidepool.Effects.Core")]
     CommandUnavailable(String),
+    #[core(module = "Tidepool.Effects.Core")]
     CommandInvalid(String),
+    #[core(module = "Tidepool.Effects.Core")]
     CommandUnauthorized,
 }

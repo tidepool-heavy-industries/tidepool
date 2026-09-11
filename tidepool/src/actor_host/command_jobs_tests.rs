@@ -216,6 +216,124 @@ async fn raw_bash_uses_compiled_handler_and_shared_command_owner() {
 }
 
 #[tokio::test]
+async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let call = |name: &str, arguments| {
+        policy.dispatch_boxed(ToolInvocation {
+            context: None,
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        })
+    };
+    let invalid = call(
+        "exec_command",
+        serde_json::json!({"cmd":"never", "yield_time_ms":-1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(invalid["status"], "rejected", "{invalid}");
+    let running = tokio::spawn(call(
+        "exec_command",
+        serde_json::json!({
+            "cmd":"printf literal", "workdir":"src", "environment":{"EXAMPLE":"value"},
+            "memory_mib":64, "stdin":true, "yield_time_ms":0, "max_output_bytes":2048,
+        }),
+    ));
+    let backend = TestCommands::new();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let receipt = running.await.unwrap().unwrap();
+    assert_eq!(receipt["status"], "committed", "{receipt}");
+    let text = receipt["items"][0]["output"].as_str().unwrap();
+    let session = text
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let session = session.to_owned();
+    let first = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["status"], "committed", "{first}");
+    let repeated = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"chars":"","yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !repeated["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("\nresult"),
+        "{repeated}"
+    );
+    let read = call("read_output", serde_json::json!({"session_id":session}))
+        .await
+        .unwrap();
+    assert!(
+        read["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("result"),
+        "{read}"
+    );
+    let input = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"chars":"hello\n","yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(input["status"], "committed", "{input}");
+    backend.finish.send_replace(true);
+    let finished = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"yield_time_ms":1000}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        finished["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("CommandExited 0"),
+        "{finished}"
+    );
+    let foreign = call(
+        "write_stdin",
+        serde_json::json!({"session_id":"unowned","yield_time_ms":0}),
+    )
+    .await;
+    assert!(foreign.is_err(), "{foreign:?}");
+    assert_eq!(
+        *backend.specs.lock(),
+        vec![CommandSpec {
+            argv: vec![
+                "bash".into(),
+                "--noprofile".into(),
+                "--norc".into(),
+                "-c".into(),
+                "printf literal".into(),
+                "shoal-bash".into()
+            ],
+            directory: Some("src".into()),
+            environment: vec![("EXAMPLE".into(), "value".into())],
+            memory: 64 * 1024 * 1024,
+            input: CommandInput::PipeInput,
+        }]
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn raw_bash_oversized_output_retains_a_real_job() {
     let mut campaign = TestCampaign::start().await;
     let backend = TestCommands::new();
@@ -237,6 +355,44 @@ async fn raw_bash_oversized_output_retains_a_real_job() {
     assert!(
         output.contains("BEGIN") && output.contains("END"),
         "{output}"
+    );
+    let session = output
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let page = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "read_output".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({"session_id":session})),
+        })
+        .await
+        .unwrap();
+    let page_text = page["items"][0]["output"].as_str().unwrap();
+    assert!(
+        page_text.contains("BEGIN") && page_text.contains("next_offset: 11994"),
+        "{page_text}"
+    );
+    assert!(page_text.len() <= 32 * 1024);
+    let next_page = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "read_output".into(),
+            arguments: ToolArguments::Structured(
+                serde_json::json!({"session_id":session,"offset":11994}),
+            ),
+        })
+        .await
+        .unwrap();
+    assert!(
+        next_page["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("bytes 11994–23994"),
+        "{next_page}"
     );
     let binding = response["items"][0]["installedBindings"][0]
         .as_str()
@@ -271,6 +427,25 @@ async fn raw_bash_timeout_preserves_the_command_for_haskell_continuation() {
         .supply(Ok(backend.clone()));
     let response = running.await.unwrap().unwrap();
     assert_eq!(response["status"], "backgrounded", "{response}");
+    let output = response["items"][0]["output"].as_str().unwrap();
+    let session = output
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let direct = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "write_stdin".into(),
+            arguments: ToolArguments::Structured(
+                serde_json::json!({"session_id":session,"yield_time_ms":0}),
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(direct["status"], "committed", "{direct}");
     let binding = response["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();

@@ -41,10 +41,11 @@ Register separate watches when results can be integrated independently.
 
 ## Commands
 
-The supplied `bash` tool accepts literal Bash and displays output directly;
-ordinary shell work needs no Haskell binding. It shares `Cmd`'s execution and
-resource owner. Backgrounded or oversized output names a retained `jobN :: Cmd.Job`
-for inspection here. Never rerun a command to recover its output.
+The `tidepool_actor.bash` tool accepts literal Bash and displays output directly.
+In the same namespace, `exec_command` adds memory/cwd/environment/PTY options; `write_stdin` sends input
+or polls a returned `session_id`; `read_output` navigates retained output.
+All use `Cmd`'s execution/resource owner. Ordinary shell work needs no Haskell
+binding. Haskell job bindings additionally support composition and recovery.
 
 `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB` and `GiB` are loaded.
 ```haskell

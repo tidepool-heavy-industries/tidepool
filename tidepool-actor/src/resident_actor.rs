@@ -3832,10 +3832,20 @@ where
                                 _ => None,
                             };
                             if let Some((job, mut presentation)) = presentation {
+                                let limit = match &presentation {
+                                    CommandPresentation::CommandVisible(_, bytes) => {
+                                        usize::try_from(*bytes)
+                                            .unwrap_or(0)
+                                            .min(65536)
+                                            .min(*unit.display_remaining)
+                                    }
+                                    CommandPresentation::CommandQuiet => 0,
+                                };
+                                let mut shortened = false;
                                 let pages = if matches!(
                                     presentation,
-                                    CommandPresentation::CommandVisible(_)
-                                ) && *unit.display_remaining >= 1024
+                                    CommandPresentation::CommandVisible(_, _)
+                                ) && limit >= 1024
                                 {
                                     Some(
                                         self.environment
@@ -3846,7 +3856,8 @@ where
                                 } else {
                                     None
                                 };
-                                if let CommandPresentation::CommandVisible(text) = &mut presentation
+                                if let CommandPresentation::CommandVisible(text, _) =
+                                    &mut presentation
                                 {
                                     *text = crate::workbench_display::bounded_output(text, 512);
                                     match &pages {
@@ -3856,30 +3867,38 @@ where
                                             }
                                 }
                                 if unit.named_tool {
-                                    if let CommandPresentation::CommandVisible(text) =
+                                    if let CommandPresentation::CommandVisible(text, _) =
                                         &mut presentation
                                     {
                                         let incomplete =
                                             pages.as_ref().is_some_and(|pages| match pages {
                                                 Ok(pages) => pages.iter().any(|(_, page)| {
                                                     page.lost_bytes > 0
-                                                        || page.start > 0
                                                         || page.end < page.available_end
                                                 }),
                                                 Err(_) => true,
                                             });
-                                        if text.len() > *unit.display_remaining || incomplete {
+                                        if text.len() > limit || incomplete {
+                                            shortened = text.len() > limit;
                                             let binding = workbench
                                                 .bind_command_job(context.clone(), job.clone())
                                                 .await?;
+                                            shortened |= text.len()
+                                                > (8 * 1024).min(limit).saturating_sub(512);
                                             *text = crate::workbench_display::bounded_output(
                                                 text,
-                                                (8 * 1024).min(*unit.display_remaining),
+                                                (8 * 1024).min(limit).saturating_sub(512),
                                             );
-                                            text.push_str(&format!("\nRetained output: {binding} :: Cmd.Job\nRead with Cmd.output {binding}; Cmd.next continues. Do not rerun to recover output."));
+                                            text.push_str(&format!("\nRetained output: {binding} :: Cmd.Job\nRead with read_output using session_id {job}, or Cmd.output {binding}; Cmd.next continues. Do not rerun to recover output."));
                                             next_fragment.retain_job_binding(binding);
                                         }
                                     }
+                                }
+                                if let CommandPresentation::CommandVisible(text, _) =
+                                    &mut presentation
+                                {
+                                    shortened |= text.len() > limit;
+                                    *text = crate::workbench_display::bounded_output(text, limit);
                                 }
                                 let rendered = next_fragment.present_command(
                                     job.clone(),
@@ -3889,7 +3908,7 @@ where
                                 if !rendered.is_empty() {
                                     unit.command_output.push(rendered);
                                 }
-                                if let Some(Ok(pages)) = pages {
+                                if let Some(Ok(pages)) = pages.filter(|_| !shortened) {
                                     self.environment
                                         .commands
                                         .mark_displayed(context.actor, &job, &pages)
@@ -4349,7 +4368,11 @@ where
                 } => {
                     let reason =
                         crate::workbench_display::bounded_output(&reason.to_string(), 1024);
-                    let mut output = format!("Retained command {job}: {reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}");
+                    let mut output = if request.tool_call().is_some() {
+                        format!("session_id: {job}\n{reason}. Observation ended; the command remains retained. Poll/send input with write_stdin; read_output navigates output. Later handler effects did not run.\nHaskell binding: {binding} :: Cmd.Job")
+                    } else {
+                        format!("Retained command · session_id: {job}\n{reason}. Available binding:\n\n{binding} :: Cmd.Job\n\nThe enclosing result was not bound; subsequent statements did not run.\nContinue with: result <- Cmd.await {binding}")
+                    };
                     if !command_prefix.is_empty() {
                         output.push_str(&format!("\n{command_prefix}"));
                     }

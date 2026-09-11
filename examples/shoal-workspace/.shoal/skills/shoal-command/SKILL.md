@@ -3,17 +3,22 @@ name: shoal-command
 description: Compose shell commands in resident Haskell, consume results as data, or control retained jobs and output from the Bash tool.
 ---
 
-The supplied `bash` tool accepts raw scripts, including multiline Bash and heredocs.
-Use it for ordinary shell work without Haskell wrappers. It shares the same
-256 MiB default, 30-second observation window and command owner as `Cmd`.
-Small output displays directly. Oversized output uses an 8 KiB beginning/end
-preview within a 32 KiB response limit; its receipt names a real `jobN :: Cmd.Job`
-for retained-output navigation. A foreground overrun also retains a job. Inspect
-that job here; do not reexecute a script to recover output.
+Use the `tidepool_actor` tools: `bash` accepts literal scripts, including multiline Bash and
+heredocs. Use `exec_command` for `workdir`, `environment`, `memory_mib`, `tty`
+or piped `stdin`. These are compiled Haskell handlers over the same command
+owner as `Cmd`; ordinary shell use needs no Haskell wrappers.
 
-Use Haskell when the result drives subsequent code, when commands need a larger
-memory limit, or for interactive jobs. `Cmd` is `Tidepool.Command`; `bash`,
-`withMemory`, `MiB`, `GiB` and qualified Text as `T` are loaded:
+Defaults: 256 MiB and a 30-second observation. Give builds/tests a realistic
+`memory_mib`. Execution returns a `session_id`; use `write_stdin` with that ID
+and `chars` to send input, or omit `chars` to poll. Observation expiry leaves the
+command alive. `read_output` reads retained stdout from `offset: 0`; select
+`stream: "Stderr"` for diagnostics. None of these observations reexecutes a script.
+Output limits are byte budgets (`max_output_bytes`), not token counts. Automatic
+responses stay within 32 KiB; oversized command displays use an 8 KiB preview.
+
+Use Haskell for reusable command values, data-dependent follow-ups, or typed
+completion routing. `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB`,
+`GiB` and qualified Text as `T` are loaded:
 
 ```haskell
 result <- Cmd.run [bash|git status --short|]
@@ -48,6 +53,9 @@ That later observation does not resume the discarded continuation. Do not rerun
 the command to recover output. Earlier committed bindings remain available.
 A Haskell actor handler instead fails normally; it has no interactive remediation
 binding. Use `Cmd.start` and completion events there for unattended long work.
+`Cmd.observe (Cmd.Observation 250 8192) job` instead returns the current status
+normally after a bounded wait, displaying available output without stopping the
+enclosing Haskell program.
 
 Commands are reusable values. Quotations preserve literal Bash, including
 multiline scripts, heredocs and indentation. Haskell does not interpolate shell
@@ -79,8 +87,8 @@ Live handles do not promise recovery after host restart.
 Completed results capture up to 1 MiB per stream. Automatic display has a shared
 64 KiB budget per Haskell tool response; shortening display does not discard captured
 data. `inspectFull` also has a display allowance; use pages or Haskell projections
-for larger values. Foreground observations skip output already offered, including
-explicitly marked omissions; explicit reads do not consume it. Read without executing again:
+for larger values. Foreground observations skip fully displayed pages; shortened captures remain
+available for explicit navigation. Explicit reads do not consume output. Read without executing again:
 
 ```haskell
 page <- Cmd.output (Cmd.job result)
@@ -110,3 +118,5 @@ to the owning TUI. Retain the job for `Cmd.sendInput`, `Cmd.closeInput` and
 terminal event, including attachment after completion. Load `shoal-define-actors`
 for custom routing. Captured handles do not transfer authority; finish collectors
 when their remaining obligations are settled.
+
+For project-authored direct tools, see [Defining compiled tools](references/hosted-tools.md).

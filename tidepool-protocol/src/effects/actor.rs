@@ -51,6 +51,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorLaunchRole",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -98,6 +99,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorEffectProfile",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -134,6 +136,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorTerminalStatus",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -166,6 +169,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorCallStatus",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {

@@ -27,6 +27,7 @@ pub fn forks() -> Effect {
             TypeDef {
                 name: "WorkerLaunchPreview",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Record { fields: vec![
                     RecordField { hs_name: "launchModel", rust_name: "launchModel", ty: HsType::maybe(HsType::Text), doc: &[] },
                     RecordField { hs_name: "launchEffort", rust_name: "launchEffort", ty: HsType::Named("ForkEffort"), doc: &[] },
@@ -44,6 +45,7 @@ pub fn forks() -> Effect {
             TypeDef {
                 name: "WorkerLifetime",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: ["ParentOwned", "SwarmOwned"]
                         .into_iter()
@@ -62,6 +64,7 @@ pub fn forks() -> Effect {
             TypeDef {
                 name: "ForkContext",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: ["InheritedContext", "SelectedContext"]
                         .into_iter()
@@ -80,6 +83,7 @@ pub fn forks() -> Effect {
             TypeDef {
                 name: "ForkEffort",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: ["Low", "Medium", "High"]
                         .into_iter()
@@ -98,6 +102,7 @@ pub fn forks() -> Effect {
             TypeDef {
                 name: "ActorEffectKey",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: [
                         "EffectReplies",
@@ -131,6 +136,7 @@ pub fn forks() -> Effect {
             TypeDef {
                 name: "ForkGroupCleanupOutcome",
                 wire_rust: None,
+                core_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
