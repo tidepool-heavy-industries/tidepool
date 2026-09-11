@@ -18,6 +18,9 @@ mod overlay_resource;
 #[cfg(test)]
 #[path = "host_dynamic_tools/tui_resource_tests.rs"]
 mod tui_resource_tests;
+#[cfg(test)]
+#[path = "host_dynamic_tools/tui_sleep_tests.rs"]
+mod tui_sleep_tests;
 mod workspace;
 pub mod workspace_cleanup;
 mod workspace_publication;
