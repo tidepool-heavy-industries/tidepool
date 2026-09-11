@@ -466,5 +466,17 @@ mod tests {
         assert!(RequestDuration::DurationMinutes(i64::MAX)
             .checked()
             .is_err());
+        assert_eq!(
+            RequestDuration::DurationMilliseconds(0)
+                .checked_milliseconds()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            RequestDuration::DurationMinutes(15)
+                .checked_milliseconds()
+                .unwrap(),
+            900_000
+        );
     }
 }

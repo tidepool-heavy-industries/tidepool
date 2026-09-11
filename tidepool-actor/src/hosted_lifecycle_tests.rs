@@ -240,6 +240,105 @@ fn invocation(source: &str, id: &str) -> tidepool_tool::ToolInvocation {
     }
 }
 
+#[tokio::test]
+async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
+    eval_harness::require_extract();
+    let declarations = [tidepool_mcp::sleep_decl()];
+    let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
+    let mut include = effects.include_paths().to_vec();
+    include.push(eval_harness::prelude_path());
+    let preamble = format!(
+        "{}\ntype ActorEffects = '[Sleep, Replies, Watches]\n",
+        tidepool_mcp::build_preamble(&declarations, false)
+    );
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Reply (Replies)");
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
+    let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
+    let root = tempfile::tempdir().unwrap();
+    let boot = match run_turn(TurnRequest {
+        turn_text: "pure (0 :: Int)",
+        templates: &templates,
+        include: &include_refs,
+        session_root: root.path(),
+        inject_modules: &[],
+        gen: 1,
+        verdict: None,
+        target: None,
+    })
+    .unwrap()
+    {
+        TurnResult::Expr { compiled, .. } => Arc::new(compiled),
+        _ => panic!("expected compiled program"),
+    };
+    let session = tidepool_repr::SessionId((u64::from(std::process::id()) << 32) | 206);
+    let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(include.clone());
+    let mut machine = ResidentSession::bootstrap(
+        &boot.expr,
+        boot.table.clone(),
+        NoHandlers,
+        TestSink,
+        include.clone(),
+        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+        Some(lib),
+    )
+    .unwrap();
+    machine.set_effect_execution(
+        EffectRunPolicy::SuspendAll,
+        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    );
+    let (forest, _events) = ResidentForest::new(
+        ActorWorkbenchSource::new(preamble, include),
+        session,
+        machine,
+        None,
+        Incarnation::FIRST,
+    );
+    let sleeper = forest
+        .new_workbench("sleeper".into(), EffectiveRole::coding())
+        .await
+        .unwrap();
+    let sibling = forest
+        .new_workbench("sibling".into(), EffectiveRole::coding())
+        .await
+        .unwrap();
+    let sleeper_policy: Arc<dyn ResidentToolEndpoint> =
+        Arc::new(super::ResidentInteractivePolicy::local(sleeper));
+    let sibling_policy: Arc<dyn ResidentToolEndpoint> =
+        Arc::new(super::ResidentInteractivePolicy::local(sibling));
+
+    tokio::time::pause();
+    let sleeping = tokio::spawn(sleeper_policy.dispatch_boxed(invocation(
+        "sleep (minutes 15)\npure (7 :: Int)",
+        "fifteen-minute-sleep",
+    )));
+    tokio::task::yield_now().await;
+
+    let sibling_result = sibling_policy
+        .dispatch_boxed(invocation("pure (3 :: Int)", "sibling-progress"))
+        .await
+        .unwrap();
+    assert_eq!(
+        sibling_result["status"], "committed",
+        "sibling result: {sibling_result}"
+    );
+    assert!(!sleeping.is_finished());
+
+    tokio::time::advance(Duration::from_secs(899)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !sleeping.is_finished(),
+        "sleep completed before its monotonic deadline"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let sleep_result = sleeping.await.unwrap().unwrap();
+    assert_eq!(sleep_result["status"], "committed");
+    assert_eq!(sleep_result["items"].as_array().unwrap().len(), 2);
+    forest.shutdown().await;
+}
+
 struct UnsupportedEndpoint;
 impl ResidentToolEndpoint for UnsupportedEndpoint {
     fn tools(&self) -> &[tidepool_tool::HostedTool] {
