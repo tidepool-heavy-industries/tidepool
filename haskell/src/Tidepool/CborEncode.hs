@@ -18,7 +18,7 @@ import Tidepool.IR (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..))
 import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Binders
   ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..)
-  , CellAnalysisItem(..), CellSourceSpan(..), CheckedBinderPin(..)
+  , CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..), CheckedBinderPin(..)
   , StmtBinders(..), turnKindWireName )
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
@@ -239,8 +239,9 @@ encodeCellItem CellAnalysisItem
   { cellAnalysisSpan = CellSourceSpan startLine startColumn endLine endColumn
   , cellAnalysisSource = source
   , cellAnalysisVerdict = StmtBinders kind binders items
+  , cellAnalysisSourceItems = sourceItems
   } =
-  encodeListLen 4
+  encodeListLen 5
   <> encodeListLen 4
   <> encodeInt startLine
   <> encodeInt startColumn
@@ -251,6 +252,23 @@ encodeCellItem CellAnalysisItem
   <> (encodeListLen 2
       <> encodeStringList binders
       <> encodeExportItems items)
+  <> encodeListLen (fromIntegral (length sourceItems))
+  <> foldMap encodeCellSourceItem sourceItems
+
+encodeCellSourceItem :: CellAnalysisSourceItem -> Encoding
+encodeCellSourceItem CellAnalysisSourceItem
+  { cellAnalysisSourceOrdinal = ordinal
+  , cellAnalysisSourceSpan = CellSourceSpan startLine startColumn endLine endColumn
+  , cellAnalysisSourceKind = kind
+  } =
+  encodeListLen 3
+  <> encodeInt ordinal
+  <> (encodeListLen 4
+      <> encodeInt startLine
+      <> encodeInt startColumn
+      <> encodeInt endLine
+      <> encodeInt endColumn)
+  <> encodeString (T.pack (turnKindWireName kind))
 
 encodeCheckedBinderPin :: CheckedBinderPin -> Encoding
 encodeCheckedBinderPin CheckedBinderPin

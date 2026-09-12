@@ -16,8 +16,8 @@ use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
     CellCheck, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession,
-    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
     WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     WorkbenchTerminalTransfer,
 };
@@ -352,6 +352,7 @@ fn workbench_failure_after_operations(
             index: failed_index,
             kind: None,
             span: None,
+            source_items: Vec::new(),
             status: WorkbenchItemStatus::Rejected,
             // The failure owns its diagnostic separately; this field retains
             // output committed before the failing continuation.
@@ -4335,6 +4336,7 @@ where
                             index: 0,
                             kind: None,
                             span: None,
+                            source_items: Vec::new(),
                             status: WorkbenchItemStatus::Rejected,
                             output: tidepool_runtime::session::render_cell_compile_error(
                                 &error,
@@ -4379,6 +4381,7 @@ where
                     index,
                     kind: None,
                     span: None,
+                    source_items: Vec::new(),
                     status: WorkbenchItemStatus::Committed,
                     output: self.status_text(kernel, context.actor, status_view),
                     warnings: Vec::new(),
@@ -4397,6 +4400,7 @@ where
                         index,
                         kind: None,
                         span: None,
+                        source_items: Vec::new(),
                         status: WorkbenchItemStatus::Diagnostic,
                         output: output.clone(),
                         warnings: Vec::new(),
@@ -4433,6 +4437,7 @@ where
                             index: receipt_index,
                             kind: None,
                             span: None,
+                            source_items: Vec::new(),
                             status: WorkbenchItemStatus::Committed,
                             output,
                             warnings: Vec::new(),
@@ -4445,6 +4450,7 @@ where
                                 index: receipt_index,
                                 kind: None,
                                 span: None,
+                                source_items: Vec::new(),
                                 status: WorkbenchItemStatus::Diagnostic,
                                 output,
                                 warnings: Vec::new(),
@@ -4644,6 +4650,7 @@ where
                             index,
                             kind: None,
                             span: None,
+                            source_items: Vec::new(),
                             status: WorkbenchItemStatus::Rejected,
                             output: "unfold admission ended without committing every fork group"
                                 .into(),
@@ -4664,6 +4671,7 @@ where
                         index,
                         kind: None,
                         span: None,
+                        source_items: Vec::new(),
                         status: WorkbenchItemStatus::Committed,
                         output,
                         warnings,
@@ -4692,6 +4700,7 @@ where
                             index,
                             kind: None,
                             span: None,
+                            source_items: Vec::new(),
                             status: WorkbenchItemStatus::Diagnostic,
                             output,
                             warnings: Vec::new(),
@@ -4712,6 +4721,7 @@ where
                         index,
                         kind: None,
                         span: None,
+                        source_items: Vec::new(),
                         status: WorkbenchItemStatus::Rejected,
                         output,
                         warnings: Vec::new(),
@@ -4780,6 +4790,7 @@ where
                         index,
                         kind: None,
                         span: None,
+                        source_items: Vec::new(),
                         status: WorkbenchItemStatus::Stopped,
                         output,
                         warnings: Vec::new(),
@@ -4814,6 +4825,7 @@ where
                         index,
                         kind: None,
                         span: None,
+                        source_items: Vec::new(),
                         status: WorkbenchItemStatus::Committed,
                         output: "Reply submitted.".to_owned(),
                         warnings: Vec::new(),
@@ -4956,6 +4968,7 @@ where
                         index,
                         kind: None,
                         span: None,
+                        source_items: Vec::new(),
                         status: WorkbenchItemStatus::Committed,
                         output: String::new(),
                         warnings: Vec::new(),
@@ -6658,15 +6671,25 @@ fn workbench_response(
     total: usize,
     cell_check: Option<&CellCheck>,
 ) -> WorkbenchResponse {
+    let receipt_kind = |kind| match kind {
+        TurnKind::Decl => WorkbenchCellItemKind::Declaration,
+        TurnKind::Bind => WorkbenchCellItemKind::Statement,
+        TurnKind::Expr => WorkbenchCellItemKind::Expression,
+    };
     if let Some(checked) = cell_check {
         for receipt in &mut items {
             if let Some(item) = checked.items.get(receipt.index) {
-                receipt.kind = Some(match item.verdict.kind {
-                    TurnKind::Decl => WorkbenchCellItemKind::Declaration,
-                    TurnKind::Bind => WorkbenchCellItemKind::Statement,
-                    TurnKind::Expr => WorkbenchCellItemKind::Expression,
-                });
+                receipt.kind = Some(receipt_kind(item.verdict.kind));
                 receipt.span = Some(item.span);
+                receipt.source_items = item
+                    .source_items
+                    .iter()
+                    .map(|source| WorkbenchCellSourceItem {
+                        ordinal: source.ordinal,
+                        kind: receipt_kind(source.kind),
+                        span: source.span,
+                    })
+                    .collect();
             }
         }
     }
@@ -6701,25 +6724,36 @@ fn workbench_response(
         | WorkbenchRunStatus::Completed => next_index,
         WorkbenchRunStatus::Committed => total,
     };
-    items.extend((first_not_run..total).map(|index| WorkbenchItemReceipt {
-        index,
-        kind: cell_check.and_then(|checked| {
-            checked
-                .items
-                .get(index)
-                .map(|item| match item.verdict.kind {
-                    TurnKind::Decl => WorkbenchCellItemKind::Declaration,
-                    TurnKind::Bind => WorkbenchCellItemKind::Statement,
-                    TurnKind::Expr => WorkbenchCellItemKind::Expression,
+    items.extend((first_not_run..total).map(|index| {
+        WorkbenchItemReceipt {
+            index,
+            kind: cell_check.and_then(|checked| {
+                checked
+                    .items
+                    .get(index)
+                    .map(|item| receipt_kind(item.verdict.kind))
+            }),
+            span: cell_check.and_then(|checked| checked.items.get(index).map(|item| item.span)),
+            source_items: cell_check
+                .and_then(|checked| checked.items.get(index))
+                .map(|item| {
+                    item.source_items
+                        .iter()
+                        .map(|source| WorkbenchCellSourceItem {
+                            ordinal: source.ordinal,
+                            kind: receipt_kind(source.kind),
+                            span: source.span,
+                        })
+                        .collect()
                 })
-        }),
-        span: cell_check.and_then(|checked| checked.items.get(index).map(|item| item.span)),
-        status: WorkbenchItemStatus::NotRun,
-        output: String::new(),
-        warnings: Vec::new(),
-        installed_bindings: Vec::new(),
-        operations: Vec::new(),
-        terminal_transfer: None,
+                .unwrap_or_default(),
+            status: WorkbenchItemStatus::NotRun,
+            output: String::new(),
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations: Vec::new(),
+            terminal_transfer: None,
+        }
     }));
     WorkbenchResponse {
         status,
@@ -6727,8 +6761,8 @@ fn workbench_response(
             let mut declarations = 0;
             let mut statements = 0;
             let mut displays = 0;
-            for item in &checked.items {
-                match item.verdict.kind {
+            for item in checked.items.iter().flat_map(|item| &item.source_items) {
+                match item.kind {
                     TurnKind::Decl => declarations += 1,
                     TurnKind::Bind => statements += 1,
                     TurnKind::Expr => displays += 1,
@@ -6762,10 +6796,10 @@ mod tests {
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
-        CellAnalysisItem, CellCheck, CellSourceSpan, TurnClassification, TurnKind,
-        WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
-        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-        WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+        CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, TurnClassification,
+        TurnKind, WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt,
+        WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+        WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     };
 
     #[test]
@@ -6797,19 +6831,27 @@ mod tests {
 
     #[test]
     fn rejected_workbench_response_marks_the_unexecuted_suffix() {
-        let item = |kind, line| CellAnalysisItem {
-            span: CellSourceSpan {
+        let item = |kind, line| {
+            let span = CellSourceSpan {
                 start_line: line,
                 start_column: 1,
                 end_line: line,
                 end_column: 8,
-            },
-            source: String::new(),
-            verdict: TurnClassification {
-                kind,
-                binders: Vec::new(),
-                items: Vec::new(),
-            },
+            };
+            CellAnalysisItem {
+                span,
+                source: String::new(),
+                verdict: TurnClassification {
+                    kind,
+                    binders: Vec::new(),
+                    items: Vec::new(),
+                },
+                source_items: vec![CellAnalysisSourceItem {
+                    ordinal: line - 1,
+                    span,
+                    kind,
+                }],
+            }
         };
         let checked = CellCheck {
             items: vec![
@@ -6825,6 +6867,7 @@ mod tests {
             index: 0,
             kind: None,
             span: None,
+            source_items: Vec::new(),
             status: WorkbenchItemStatus::Committed,
             output: "[bound prior]".into(),
             warnings: Vec::new(),
@@ -6840,6 +6883,7 @@ mod tests {
                     index: 1,
                     kind: None,
                     span: None,
+                    source_items: Vec::new(),
                     status: WorkbenchItemStatus::Rejected,
                     output: "<input unit 2>: runtime error: pattern match failure: Just x".into(),
                     warnings: Vec::new(),

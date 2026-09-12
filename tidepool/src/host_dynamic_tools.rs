@@ -1828,6 +1828,7 @@ pub(crate) mod tests {
                 index: 1,
                 kind: None,
                 span: None,
+                source_items: Vec::new(),
                 status: WorkbenchItemStatus::Rejected,
                 output: output.clone(),
                 warnings: vec![],

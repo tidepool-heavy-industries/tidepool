@@ -113,6 +113,16 @@ declarationsBecomeOneCellItem flags =
           assertContains "group includes signature" "evenCell :: Int -> Bool" source
           assertContains "group includes first equation" "evenCell 0 = True" source
           assertContains "group includes mutual reference" "oddCell n = evenCell" source
+          assertEqual
+            "group retains declaration ordinals"
+            [0..5]
+            (map cellAnalysisSourceOrdinal (cellAnalysisSourceItems declaration))
+          assertEqual
+            "group retains declaration starts"
+            [1..6]
+            (map
+              (cellStartLine . cellAnalysisSourceSpan)
+              (cellAnalysisSourceItems declaration))
         [] -> fail "grouped cell returned no declaration item"
   where
     cell = unlines

@@ -1,3 +1,6 @@
+cellIdentity :: CellNominal -> CellNominal
+cellIdentity value = value
+
 data CellNominal = CellNominal Text
   deriving Show
 

@@ -73,10 +73,10 @@ pub use workbench::{
     run_block_sequence, workbench_input_binding, workbench_json_to_haskell, BlockExecution,
     BlockSequenceOutcome, CommittedBlock, GhciInputError, GhciInputKind, GhciInputUnit,
     MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
-    WorkbenchCellItemKind, WorkbenchDiscovery, WorkbenchExecutionId, WorkbenchForkBoundary,
-    WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
-    WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
+    WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{
@@ -85,9 +85,10 @@ pub use turn::{
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
     render_cell_compile_error, render_template, render_turn_compile_error, run_turn,
     run_turn_pinned, turn_user_code_line_range, turn_user_code_offset, BoundBinder,
-    CellAnalysisItem, CellCheck, CellCheckRequest, CellSourceSpan, CheckedBinderPin, CompiledTurn,
-    DeclarationReceipt, ExpressionLift, TemplateSelector, TurnClassification, TurnFailure,
-    TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckRequest, CellSourceSpan,
+    CheckedBinderPin, CompiledTurn, DeclarationReceipt, ExpressionLift, TemplateSelector,
+    TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
+    DECL_TEMPLATE_SOURCE,
 };
 
 /// Host-visible reentry state for one resident session.

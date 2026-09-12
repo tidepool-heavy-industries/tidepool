@@ -110,6 +110,16 @@ pub struct CellAnalysisItem {
     pub span: CellSourceSpan,
     pub source: String,
     pub verdict: TurnClassification,
+    /// Original source items represented by this execution item. A declaration
+    /// group contains every declaration's ordinal and span.
+    pub source_items: Vec<CellAnalysisSourceItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellAnalysisSourceItem {
+    pub ordinal: usize,
+    pub span: CellSourceSpan,
+    pub kind: TurnKind,
 }
 
 /// A post-zonk statement-binder type inferred by the whole-cell check.
@@ -1422,6 +1432,7 @@ fn decode_cell_out(bytes: &[u8]) -> Result<CellCheck, CompileError> {
         .iter()
         .map(decode_cell_item)
         .collect::<Result<Vec<_>, _>>()?;
+    validate_cell_source_items(&items)?;
     let pins = cbor_expect_array(&root[1], "cell pins")?
         .iter()
         .map(decode_checked_binder_pin)
@@ -1434,8 +1445,36 @@ fn decode_cell_out(bytes: &[u8]) -> Result<CellCheck, CompileError> {
     })
 }
 
+fn validate_cell_source_items(items: &[CellAnalysisItem]) -> Result<(), CompileError> {
+    if items.iter().any(|item| item.source_items.is_empty()) {
+        return Err(CompileError::ExtractFailed(
+            "CellOut CBOR: execution item has no source items".into(),
+        ));
+    }
+    if items.iter().any(|item| {
+        item.source_items
+            .iter()
+            .any(|source| source.kind != item.verdict.kind)
+    }) {
+        return Err(CompileError::ExtractFailed(
+            "CellOut CBOR: source item kind does not match its execution item".into(),
+        ));
+    }
+    let mut ordinals = items
+        .iter()
+        .flat_map(|item| item.source_items.iter().map(|source| source.ordinal))
+        .collect::<Vec<_>>();
+    ordinals.sort_unstable();
+    if ordinals.iter().copied().ne(0..ordinals.len()) {
+        return Err(CompileError::ExtractFailed(
+            "CellOut CBOR: source item ordinals are not contiguous and unique".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn decode_cell_item(value: &CborValue) -> Result<CellAnalysisItem, CompileError> {
-    let fields = cbor_expect_array_len(value, 4, "cell item")?;
+    let fields = cbor_expect_array_len(value, 5, "cell item")?;
     let span = cbor_expect_array_len(&fields[0], 4, "cell item span")?;
     let span = CellSourceSpan {
         start_line: cbor_as_usize(&span[0], "cell span start line")?,
@@ -1463,6 +1502,35 @@ fn decode_cell_item(value: &CborValue) -> Result<CellAnalysisItem, CompileError>
             binders: decode_string_array(&verdict[0], "cell item binders")?,
             items: decode_export_items(&verdict[1])?,
         },
+        source_items: cbor_expect_array(&fields[4], "cell source items")?
+            .iter()
+            .map(decode_cell_source_item)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn decode_cell_source_item(value: &CborValue) -> Result<CellAnalysisSourceItem, CompileError> {
+    let fields = cbor_expect_array_len(value, 3, "cell source item")?;
+    let span = cbor_expect_array_len(&fields[1], 4, "cell source item span")?;
+    let kind = match cbor_expect_text(&fields[2], "cell source item kind")? {
+        "decl" => TurnKind::Decl,
+        "bind" => TurnKind::Bind,
+        "expr" => TurnKind::Expr,
+        other => {
+            return Err(CompileError::ExtractFailed(format!(
+                "CellOut CBOR: unknown cell source item kind {other:?}"
+            )))
+        }
+    };
+    Ok(CellAnalysisSourceItem {
+        ordinal: cbor_as_usize(&fields[0], "cell source item ordinal")?,
+        span: CellSourceSpan {
+            start_line: cbor_as_usize(&span[0], "cell source span start line")?,
+            start_column: cbor_as_usize(&span[1], "cell source span start column")?,
+            end_line: cbor_as_usize(&span[2], "cell source span end line")?,
+            end_column: cbor_as_usize(&span[3], "cell source span end column")?,
+        },
+        kind,
     })
 }
 

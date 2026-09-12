@@ -26,6 +26,7 @@ module Tidepool.Binders
   , CellSplitError(..)
   , splitCellWithFlags
   , CellAnalysisItem(..)
+  , CellAnalysisSourceItem(..)
   , analyzeCellWithFlags
   , analyzeCell
   , renderCellCheckSource
@@ -231,6 +232,16 @@ data CellAnalysisItem = CellAnalysisItem
   { cellAnalysisSpan :: CellSourceSpan
   , cellAnalysisSource :: String
   , cellAnalysisVerdict :: StmtBinders
+  , cellAnalysisSourceItems :: [CellAnalysisSourceItem]
+  } deriving (Eq, Show)
+
+-- | One original source item retained beneath its execution item. Declaration
+-- items are compiled as one group, but receipts still need their individual
+-- ordinals and spans.
+data CellAnalysisSourceItem = CellAnalysisSourceItem
+  { cellAnalysisSourceOrdinal :: Int
+  , cellAnalysisSourceSpan :: CellSourceSpan
+  , cellAnalysisSourceKind :: TurnKind
   } deriving (Eq, Show)
 
 -- | A post-zonk type captured for a statement binder during the whole-cell
@@ -251,12 +262,21 @@ analyzeCellWithFlags
   -> String
   -> Either CellSplitError [CellAnalysisItem]
 analyzeCellWithFlags dflags source =
-  fmap groupDeclarations (map classify <$> splitCellWithFlags dflags source)
+  fmap groupDeclarations (zipWith classify [0..] <$> splitCellWithFlags dflags source)
   where
-    classify item = CellAnalysisItem
+    classify ordinal item =
+      let verdict = classifyWithFlags dflags (cellSourceText item)
+       in CellAnalysisItem
       { cellAnalysisSpan = cellSourceSpan item
       , cellAnalysisSource = cellSourceText item
-      , cellAnalysisVerdict = classifyWithFlags dflags (cellSourceText item)
+      , cellAnalysisVerdict = verdict
+      , cellAnalysisSourceItems =
+          [ CellAnalysisSourceItem
+              { cellAnalysisSourceOrdinal = ordinal
+              , cellAnalysisSourceSpan = cellSourceSpan item
+              , cellAnalysisSourceKind = sbKind verdict
+              }
+          ]
       }
     groupDeclarations classified =
       case partition isDeclaration classified of
@@ -283,6 +303,8 @@ analyzeCellWithFlags dflags source =
                 KDecl
                 (nub (concatMap sbBinders verdicts))
                 (concatMap sbDeclItems verdicts)
+            , cellAnalysisSourceItems =
+                concatMap cellAnalysisSourceItems declarations
             }
     declarationGroup [] =
       error "declarationGroup: empty declaration group"

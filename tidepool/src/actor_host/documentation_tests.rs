@@ -32,21 +32,46 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 
     let setup = committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")).await;
     assert_eq!(
-        setup["summary"], "1 declaration, 2 statements, 1 display",
+        setup["summary"], "3 declarations, 2 statements, 1 display",
         "{setup:?}"
     );
     let items = setup["items"].as_array().unwrap();
     assert_eq!(items.len(), 4, "{setup:?}");
     for (item, kind, start_line) in [
         (&items[0], "declaration", 1),
-        (&items[1], "statement", 4),
-        (&items[2], "statement", 6),
-        (&items[3], "expression", 8),
+        (&items[1], "statement", 7),
+        (&items[2], "statement", 9),
+        (&items[3], "expression", 11),
     ] {
         assert_eq!(item["kind"], kind, "{setup:?}");
         assert_eq!(item["span"]["startLine"], start_line, "{setup:?}");
         assert_eq!(item["span"]["startColumn"], 1, "{setup:?}");
     }
+    let declaration_sources = items[0]["sourceItems"].as_array().unwrap();
+    assert_eq!(declaration_sources.len(), 3, "{setup:?}");
+    assert_eq!(
+        declaration_sources
+            .iter()
+            .map(|item| item["ordinal"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "{setup:?}"
+    );
+    assert_eq!(
+        declaration_sources
+            .iter()
+            .map(|item| item["span"]["startLine"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 4],
+        "{setup:?}"
+    );
+    assert!(
+        declaration_sources
+            .iter()
+            .all(|item| item["kind"] == "declaration"),
+        "{setup:?}"
+    );
+    assert_eq!(items[1]["sourceItems"][0]["ordinal"], 3, "{setup:?}");
     assert_eq!(items[3]["status"], "committed", "{setup:?}");
     assert!(
         items[3]["output"]

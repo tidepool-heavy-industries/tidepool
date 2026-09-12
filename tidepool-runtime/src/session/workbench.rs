@@ -565,6 +565,14 @@ pub enum WorkbenchCellItemKind {
     Expression,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchCellSourceItem {
+    pub ordinal: usize,
+    pub kind: WorkbenchCellItemKind,
+    pub span: CellSourceSpan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchItemReceipt {
@@ -573,6 +581,10 @@ pub struct WorkbenchItemReceipt {
     pub kind: Option<WorkbenchCellItemKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<CellSourceSpan>,
+    /// Original cell items represented by this execution step. Declaration
+    /// groups retain one entry per authored declaration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_items: Vec<WorkbenchCellSourceItem>,
     pub status: WorkbenchItemStatus,
     pub output: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1570,6 +1582,7 @@ mod tests {
                 index: 0,
                 kind: None,
                 span: None,
+                source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
                 warnings: Vec::new(),

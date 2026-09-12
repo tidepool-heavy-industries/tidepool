@@ -644,6 +644,7 @@ mod tests {
                 index: 0,
                 kind: None,
                 span: None,
+                source_items: Vec::new(),
                 status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
                 output: "defined spotTaskText at generation 2".into(),
                 warnings: Vec::new(),
