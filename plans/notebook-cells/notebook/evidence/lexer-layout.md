@@ -32,9 +32,11 @@ Coordinator patch obligations:
    exposing the foundation's marker-only `CellLexFailure`;
 3. preserve source-item span/ordinal separately from grouped declaration
    execution steps;
-4. decide whether a standalone pragma attaches to the following declaration
-   during synthesis; the lexer correctly reports it as its own column-one source
-   item and does not own that semantic grouping;
+4. synthesis treats leading module pragmas (`LANGUAGE`/`OPTIONS_GHC`) as
+   cell-wide prologue, in source order, rather than attaching them to the next
+   declaration. A module pragma after the first non-pragma item is rejected at
+   its own span. Declaration pragmas remain ordered declaration items in the
+   grouped declaration source;
 5. retire Pest and `GhciInputUnit::Block` only after the cell consumer is
    integrated and its fixtures migrated.
 
