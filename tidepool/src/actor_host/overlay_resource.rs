@@ -254,6 +254,18 @@ impl OverlayResourceLease {
         &self.storage.path
     }
 
+    pub(super) fn imported_base(&self) -> io::Result<(&Path, OverlaySnapshot)> {
+        if self.layers.len() != 1 || self.layers[0].storage.path != self.storage.path {
+            return Err(io::Error::other("source has no private imported base"));
+        }
+        Ok((
+            &self.layers[0].path,
+            OverlaySnapshot {
+                layers: self.layers.clone().into(),
+            },
+        ))
+    }
+
     /// Import ordinary host source into a private base before any mount exists.
     /// Exclusions are separately owned mount roots, never Git ignore patterns.
     pub(super) fn import_source(
@@ -540,7 +552,7 @@ impl OverlayResourceLease {
 
 /// Detect changes made by external writers outside native/host admission.
 /// Do not follow symlinks or let Git ignore rules omit project files.
-fn source_inventory(
+pub(super) fn source_inventory(
     root: &Path,
     excluded: &[&std::ffi::OsStr],
 ) -> io::Result<std::collections::BTreeMap<PathBuf, SourceStamp>> {
@@ -562,14 +574,137 @@ fn source_inventory(
     Ok(inventory)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct SourceStamp {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SourceStamp {
     device: u64,
     inode: u64,
     mode: u32,
     bytes: u64,
     modified: (i64, i64),
     changed: (i64, i64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SourceManifest(std::collections::BTreeMap<PathBuf, SourceEntry>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceEntry {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    bytes: u64,
+    modified: (i64, i64),
+    data: SourceData,
+    xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+    hardlink_anchor: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceData {
+    File(blake3::Hash),
+    Link(PathBuf),
+    Other,
+}
+
+/// The import and a later source must agree on visible bytes and metadata.
+/// Inode and ctime are deliberately absent: the private copy has new inodes.
+pub(super) fn source_manifest(
+    root: &Path,
+    excluded: &[&std::ffi::OsStr],
+) -> io::Result<SourceManifest> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut entries = std::collections::BTreeMap::new();
+    let mut links: std::collections::BTreeMap<(u64, u64), Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(io::Error::other)?
+            .to_path_buf();
+        let data = if metadata.is_file() {
+            let mut file = std::fs::File::open(&path)?;
+            let mut hash = blake3::Hasher::new();
+            let mut chunk = [0u8; 65_536];
+            loop {
+                let count = file.read(&mut chunk)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&chunk[..count]);
+            }
+            links
+                .entry((metadata.dev(), metadata.ino()))
+                .or_default()
+                .push(relative.clone());
+            SourceData::File(hash.finalize())
+        } else if metadata.file_type().is_symlink() {
+            SourceData::Link(std::fs::read_link(&path)?)
+        } else {
+            SourceData::Other
+        };
+        if SourceStamp::from(&metadata) != SourceStamp::from(&std::fs::symlink_metadata(&path)?) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "source changed while computing its manifest",
+            ));
+        }
+        entries.insert(
+            relative,
+            SourceEntry {
+                mode: metadata.mode(),
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+                bytes: metadata.len(),
+                modified: (metadata.mtime(), metadata.mtime_nsec()),
+                data,
+                xattrs: source_xattrs(&path)?,
+                hardlink_anchor: None,
+            },
+        );
+        if metadata.is_dir() {
+            for child in std::fs::read_dir(&path)? {
+                let child = child?;
+                if path == root && excluded.iter().any(|name| child.file_name() == *name) {
+                    continue;
+                }
+                pending.push(child.path());
+            }
+        }
+    }
+    for group in links.values_mut() {
+        group.sort();
+        let anchor = group[0].clone();
+        for path in group {
+            entries
+                .get_mut(path)
+                .expect("manifest link path inserted")
+                .hardlink_anchor = Some(anchor.clone());
+        }
+    }
+    Ok(SourceManifest(entries))
+}
+
+fn source_xattrs(path: &Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut names = vec![0u8; 65_536];
+    let count = rustix::fs::llistxattr(path, names.as_mut_slice()).map_err(io::Error::from)?;
+    let mut attributes = Vec::new();
+    for name in names[..count]
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let name = std::ffi::CString::new(name).map_err(io::Error::other)?;
+        let mut value = vec![0u8; 65_536];
+        let count = rustix::fs::lgetxattr(path, name.as_c_str(), value.as_mut_slice())
+            .map_err(io::Error::from)?;
+        value.truncate(count);
+        attributes.push((name.as_bytes().to_vec(), value));
+    }
+    attributes.sort();
+    Ok(attributes)
 }
 
 impl From<&std::fs::Metadata> for SourceStamp {

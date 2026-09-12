@@ -3948,6 +3948,7 @@ dependencies = [
  "parking_lot",
  "reqwest 0.13.4",
  "rmcp",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

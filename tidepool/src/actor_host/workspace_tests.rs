@@ -235,6 +235,7 @@ fn source_exclusions_keep_tracked_files_and_untagged_directories() {
         run_namespace: "source-exclusion-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
@@ -265,6 +266,61 @@ fn source_exclusions_keep_tracked_files_and_untagged_directories() {
 }
 
 #[test]
+fn root_import_reuse_requires_matching_content_and_exclusions() {
+    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    repo.writer().commit_file("file", "first", "seed").unwrap();
+    std::fs::write(repo.path().join("dirty"), "dirty").unwrap();
+    std::fs::hard_link(repo.path().join("file"), repo.path().join("linked")).unwrap();
+    std::os::unix::fs::symlink("file", repo.path().join("symlink")).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let mut layout = WorkspaceLayout {
+        run_namespace: "root-import-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let excluded = layout.source_exclusions(repo.path()).unwrap();
+    let source =
+        OverlayResourceLease::allocate_path(layout.resource_root("first").join("source"), None)
+            .unwrap();
+    let excluded_refs = excluded
+        .iter()
+        .map(std::ffi::OsString::as_os_str)
+        .collect::<Vec<_>>();
+    source.import_source(repo.path(), &excluded_refs).unwrap();
+    layout
+        .remember_import(repo.path(), &excluded, &source)
+        .unwrap();
+    drop(source);
+    assert!(layout.reusable_import(repo.path(), &excluded).is_some());
+
+    let original = layout.root_imports.lock().get(repo.path()).unwrap().clone();
+    std::fs::write(repo.path().join("file"), "later").unwrap();
+    assert!(layout.reusable_import(repo.path(), &excluded).is_none());
+    // Simulate identical inventory stamps, including a ctime collision. The
+    // content manifest must still reject the changed bytes.
+    layout.root_imports.lock().insert(
+        repo.path().to_path_buf(),
+        Arc::new(RootImport {
+            inventory: source_inventory(repo.path(), &excluded_refs).unwrap(),
+            exclusions: original.exclusions.clone(),
+            manifest: original.manifest.clone(),
+            snapshot: original.snapshot.clone(),
+        }),
+    );
+    assert!(layout.reusable_import(repo.path(), &excluded).is_none());
+    layout.source_exclude.push("scratch".into());
+    let changed_exclusions = layout.source_exclusions(repo.path()).unwrap();
+    assert!(layout
+        .reusable_import(repo.path(), &changed_exclusions)
+        .is_none());
+}
+
+#[test]
 fn root_workspace_resources_are_isolated_between_runs() {
     let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("file", "source", "seed").unwrap();
@@ -277,6 +333,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
         run_namespace: "first-run".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
@@ -381,6 +438,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         run_namespace: "workspace-test".into(),
         source_root: repo.path().into(),
         source_exclude: Vec::new(),
+        root_imports: Arc::default(),
         worktrees: manager.clone(),
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: backend.clone(),
@@ -599,6 +657,14 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             shell(child.workspace.as_ref().unwrap(), "cat file untracked"),
             "lateruntracked",
             "siblings must inherit the same dirty source before either starts"
+        );
+        let workspace = child.workspace.as_ref().unwrap();
+        assert!(
+            !layout
+                .resource_root(workspace.worktree.as_ref().unwrap().as_str())
+                .join("source/base")
+                .exists(),
+            "unchanged root siblings should reuse the imported base"
         );
     }
     assert_eq!(

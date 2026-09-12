@@ -1286,6 +1286,7 @@ pub async fn run(
                     run_namespace: runtime_namespace(&run_root),
                     source_root: config.workspace.clone(),
                     source_exclude: config.source_exclude.clone(),
+                    root_imports: Arc::default(),
                     worktrees: worktrees.clone(),
                     backend: backend.clone(),
                     base_prompt: FrozenBasePrompt::materialize_selected(
@@ -3108,6 +3109,7 @@ async fn launch_prepared_interactive_application(
                 run_namespace: runtime_namespace(&run_root),
                 source_root: config.workspace.clone(),
                 source_exclude: config.source_exclude.clone(),
+                root_imports: Arc::default(),
                 worktrees: worktrees.clone(),
                 base_prompt: base_prompt.clone(),
                 backend: backend.clone(),

@@ -1,7 +1,9 @@
 //! Prepare one complete workspace before deferred actor/native startup.
 
+use super::overlay_resource::{source_inventory, source_manifest, SourceManifest, SourceStamp};
 use super::workspace_publication::WorkspacePublication;
 use super::*;
+use std::ffi::OsString;
 use std::io;
 use tidepool_bridge_effects::WtWorktreeHandle;
 use tidepool_handlers::handlers::worktree::{handle_to_wire, AuthorizedForkWorkspace};
@@ -44,11 +46,19 @@ struct CapturedSource {
     fallback: Option<SourceFallback>,
 }
 
+pub(super) struct RootImport {
+    inventory: std::collections::BTreeMap<PathBuf, SourceStamp>,
+    exclusions: Vec<OsString>,
+    manifest: SourceManifest,
+    snapshot: OverlaySnapshot,
+}
+
 #[derive(Clone)]
 pub(super) struct WorkspaceLayout {
     pub(super) run_namespace: String,
     pub(super) source_root: PathBuf,
     pub(super) source_exclude: Vec<String>,
+    pub(super) root_imports: Arc<Mutex<std::collections::BTreeMap<PathBuf, Arc<RootImport>>>>,
     pub(super) worktrees: WorktreeManager,
     pub(super) base_prompt: FrozenBasePrompt,
     pub(super) backend: Arc<dyn InteractiveAgentBackend>,
@@ -155,6 +165,69 @@ impl PreparedWorkspace {
 }
 
 impl WorkspaceLayout {
+    fn reusable_import(&self, source: &Path, excluded: &[OsString]) -> Option<OverlaySnapshot> {
+        let candidate = self.root_imports.lock().get(source).cloned()?;
+        if candidate.exclusions != excluded {
+            return None;
+        }
+        let excluded = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+        let before = source_inventory(source, &excluded).ok()?;
+        if before != candidate.inventory {
+            return None;
+        }
+        let manifest = source_manifest(source, &excluded).ok()?;
+        let after = source_inventory(source, &excluded).ok()?;
+        (before == after && manifest == candidate.manifest).then(|| candidate.snapshot.clone())
+    }
+
+    fn remember_import(
+        &self,
+        source_path: &Path,
+        excluded: &[OsString],
+        source: &OverlayResourceLease,
+    ) -> io::Result<()> {
+        let excluded_refs = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+        let before = source_inventory(source_path, &excluded_refs)?;
+        let original = match source_manifest(source_path, &excluded_refs) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::debug!(%error, "source manifest unavailable; import will not be reused");
+                return Ok(());
+            }
+        };
+        let after = source_inventory(source_path, &excluded_refs)?;
+        if before != after {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "source changed while verifying imported base",
+            ));
+        }
+        let (base, snapshot) = source.imported_base()?;
+        let copied = match source_manifest(base, &[]) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::debug!(%error, "imported-base manifest unavailable; import will not be reused");
+                return Ok(());
+            }
+        };
+        if original != copied {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "imported base differs from source",
+            ));
+        }
+        self.root_imports.lock().insert(
+            source_path.to_owned(),
+            Arc::new(RootImport {
+                inventory: after,
+                exclusions: excluded.to_vec(),
+                manifest: original,
+                snapshot,
+            }),
+        );
+        Ok(())
+    }
+
     fn source_exclusions(&self, source: &Path) -> io::Result<Vec<std::ffi::OsString>> {
         let mut excluded = vec![".git".into(), ".shoal".into()];
         let git = self.worktrees.git();
@@ -602,27 +675,33 @@ impl WorkspaceLayout {
                 Err(fallback) => (None, Some(fallback)),
             }
         } else {
-            let source = OverlayResourceLease::allocate_path(source_pathname, None)?;
             let excluded = self.source_exclusions(source_path)?;
-            let excluded_refs = excluded
-                .iter()
-                .map(std::ffi::OsString::as_os_str)
-                .collect::<Vec<_>>();
-            let imported = source
-                .import_source(source_path, &excluded_refs)
-                .and_then(|()| {
-                    if excluded == self.source_exclusions(source_path)? {
-                        Ok(())
-                    } else {
-                        Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "source exclusions changed during import",
-                        ))
-                    }
-                });
-            match imported {
-                Ok(()) => (Some(source), None),
-                Err(error) => (None, Some(SourceFallback::ImportFailed(error.to_string()))),
+            let inherited = self.reusable_import(source_path, &excluded);
+            let source = OverlayResourceLease::allocate_path(source_pathname, inherited.clone())?;
+            if inherited.is_some() {
+                tracing::debug!(path = %source_path.display(), "reused imported source base");
+                (Some(source), None)
+            } else {
+                let excluded_refs = excluded
+                    .iter()
+                    .map(std::ffi::OsString::as_os_str)
+                    .collect::<Vec<_>>();
+                let imported = source
+                    .import_source(source_path, &excluded_refs)
+                    .and_then(|()| {
+                        if excluded == self.source_exclusions(source_path)? {
+                            self.remember_import(source_path, &excluded, &source)
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "source exclusions changed during import",
+                            ))
+                        }
+                    });
+                match imported {
+                    Ok(()) => (Some(source), None),
+                    Err(error) => (None, Some(SourceFallback::ImportFailed(error.to_string()))),
+                }
             }
         };
         if let Some(source) = &source {
