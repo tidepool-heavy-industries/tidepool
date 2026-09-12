@@ -85,6 +85,10 @@ frozen, the parent must extend the probe through the owning resident consumer:
 3. retained constraints/polymorphism, and a negative type mentioning a local
    skolem or otherwise non-replantable name.
 
+The same-cell `G` observation proves harvesting, not general transport. If any
+checked binder type cannot be represented against the installed declaration
+head, cell preflight rejects before declaration installation or user effects.
+
 The Astra consultation returned `NeedEvidence`: harvesting is feasible, but
 transport is not established. It owns the eventual decision between post-zonk
 AST harvesting plus scope-safe replanting and a different representation. If harvest-and-pin cannot

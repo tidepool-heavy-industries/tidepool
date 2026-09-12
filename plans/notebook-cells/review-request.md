@@ -18,14 +18,15 @@ acceptance evidence.
   enumerated 268 in-scope entries and matched a visible polymorphic value with
   `tcMatchTy`, without candidate compilation. Raw `_` zonks to `ZonkAny` and
   needs parsed-AST normalization to explicit quantified variables. The compiled
-  target cannot use an interpreted `IIModule`; production should synthesize query
-  signatures inside the single inspection module.
+  target cannot use an interpreted `IIModule`. Query checking must preserve
+  per-query failure; one compile per query is acceptable, never per candidate.
 
 ## Proposed release and recursive frontier
 
 Approve lookup for its shared protocol/scope scaffold, then recursive protocol,
 hosted-adapter and matching-coverage children. The lookup parent retains matcher
-semantics, exact-scope integration, limits and actual query-to-next-cell proof.
+semantics, exact-scope integration, per-query failure, limits and actual
+query-to-next-cell proof.
 
 Approve notebook only for a narrow owning-consumer transport experiment plus
 independent lexer/layout fixture work. The parent must install a declared type,
@@ -64,3 +65,19 @@ pagination are exercised through hosted tools.
 
 Release scope remains Stage 1 notebook cells, lookup, display/Generic riders,
 `status`, complete corpus migration and hosted acceptance before fresh dogfood.
+
+## Planner decision incorporated
+
+Approved as an asymmetric implementation frontier, not partial product release.
+Lookup may scaffold and recursively fan out. Notebook is limited to its
+owning-consumer nominal transport experiment plus lexer/layout fixtures; its
+parent may release dependent fanout without another planner round only after
+checked transport with unchanged contract. Retain the Astra inference specialist.
+
+Corrections incorporated: per-query lookup failure at the worker boundary;
+authoritative lookup readback; coordinator ownership of shared `Main.hs`,
+ExtractRequest/CBOR, GhcPipeline and actor-workbench seams; demonstrated `read`
+ambiguity rather than numeric limit; nominal harvest is not general transport;
+preflight rejects unrepresentable transport before effects; and executable lookup
+acceptance uses the actual
+`awaitSettled :: Response result -> Await (Settlement result)` signature.

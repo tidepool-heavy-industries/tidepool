@@ -21,6 +21,14 @@ polymorphism, inaccessible tycons/skolems and nominal identity separately.
 If transport fails, staged checking is sound but weakens product inference:
 escalate rather than quietly keeping annotation tax.
 
+The demonstrated `read` ambiguity is the inference regression; the proposed
+numeric-limit case was disproved in the live dialect and must not be used as
+evidence. Harvesting a same-module nominal binder proves harvest feasibility,
+not general transport. The owning-consumer experiment must cover exact installed
+identity, constraints, inaccessible names and shadowing. If a checked binder type
+cannot be represented for staging, reject the whole cell in preflight before any
+user effect or declaration installation.
+
 Verify and reuse declaration Lib.G generation/reexports, Val.G iface injection,
 incarnation sealing, replay and prefix machinery; peer supplied these as source
 leads, not checked conclusions. Checking installs nothing. Do not reinterpret
@@ -31,6 +39,6 @@ and command paging integration before forking renderer/runtime storage work.
 Fresh Astra slot for consequential continuation typing. Record Stage 2 heap
 custody constraints only; no speculative second implementation.
 
-First readback includes failing-today numeric and same-cell nominal-type inference
-fixtures, concrete cell/receipt/next-cell walkthrough and recovery case, actual
-file ownership, child frontier and parent integration checks.
+First readback includes the failing-today `read` ambiguity and same-cell nominal
+harvest fixtures, concrete cell/receipt/next-cell walkthrough and recovery case,
+actual file ownership, child frontier and parent integration checks.

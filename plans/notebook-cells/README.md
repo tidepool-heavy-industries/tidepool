@@ -27,9 +27,14 @@ GADT/existential declarations can derive it.
 
 ## Ownership and execution
 
-Coordinator owns combined delivery, shared tool registration, small status
-migration, common documentation_tests fixture wiring, resulting-source review,
-corpus consistency and release evidence. Initial source inspected:
+Coordinator owns combined delivery and the executing edits in cross-lane files:
+`haskell/app/Main.hs`, `haskell/src/Tidepool/ExtractRequest.hs`, shared
+request/CBOR dispatch in `tidepool-extract-cmd`, shared `GhcPipeline.hs` seams,
+and the common actor-workbench/hosted registration join. Lane leads deliver
+domain interfaces and focused implementations for incorporation; they do not
+fork competing edits in these files. Coordinator also owns small status migration,
+common documentation_tests fixture wiring, resulting-source review, corpus
+consistency and release evidence. Initial source inspected:
 2deae09053fc7ca0fd18e2fd1ef472d91ed65b83; taskSource names the actual committed
 planning baseline. Read current owners and nearest AGENTS before changes.
 
@@ -61,7 +66,10 @@ Fresh Astra consultations return directly to their requesting Sol lead.
 ## Integration waves
 
 1. Parallel lane readbacks and feasibility probes; agree source-item IDs/spans,
-   execution grouping, non-mutating checking, authoritative scope and tool owners.
+   execution grouping, non-mutating checking, authoritative scope and executing
+   file owners. Lookup preserves per-query failures at the worker boundary: one
+   compile per query is acceptable, never one compile per candidate. A one-module
+   batch is not required and must not let one rejected query hide successes.
 2. Checked local scaffolds unlock recursive implementation frontiers. Notebook
    integrates compiler/runtime; lookup integrates resolution/search/hosted output.
 3. Corpus inventory starts early; final migration follows stable interfaces.

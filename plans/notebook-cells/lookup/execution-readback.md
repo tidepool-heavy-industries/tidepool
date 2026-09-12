@@ -46,10 +46,12 @@ substitution is excluded.
 
 The probe's `IIModule Expr` context failed because this compiled target is not
 interpreted; reproducing imports as `IIDecl`s worked but would duplicate scope
-assembly. Production should instead synthesize the normalized query signatures
-inside the one inspection module, harvest their checked types, and match the
-module's reader environment in memory. This also changes the present N source
-files/N compiles into one source/compile for the lookup batch.
+assembly. Production may synthesize normalized query signatures in inspection
+modules, harvest their checked types, and match the reader environment in memory.
+It must retain independent per-query rejection: a batch containing a valid name,
+valid type, and syntactically valid ill-kinded or unknown-type query returns both
+successes. One compile per query is acceptable; never compile per candidate.
+Single-module batching is not a requirement.
 
 ## First shared interface
 
@@ -124,8 +126,8 @@ The first source checkpoint must execute through the inspection worker:
 
 Focused checks then cover:
 
-- `:: Response r -> Await _` finding `awaitSettled` (or reporting the actual
-  callable signature if the plan example is stale);
+- `:: Response result -> Await (Settlement result)` finding the current
+  `awaitSettled`; the assertion is not weakened to an arbitrary result;
 - repeated named variables versus independent anonymous wildcards;
 - exact before usable polymorphic matches and deterministic limiting;
 - qualified/ambiguous names, shadowed Val.G generations, and live-binding label;
@@ -146,3 +148,6 @@ Focused checks then cover:
 Question 1 is a declared fresh-Astra slot if the initial matching corpus does not
 settle it. Questions 2–3 are retained integration engineering for the lookup
 lead.
+
+This file is the authoritative lookup execution readback. The earlier detailed
+feasibility readback was consolidated here and removed to avoid two frontiers.
