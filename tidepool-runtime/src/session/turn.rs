@@ -382,6 +382,28 @@ pub fn render_turn_compile_error(
     )
 }
 
+/// Render whole-cell diagnostics against the submitted cell coordinates.
+/// The worker's `LINE` pragmas already use `<cell>`, so no generated-wrapper
+/// offset is involved.
+#[must_use]
+pub fn render_cell_compile_error(error: &CompileError, cell_text: &str) -> String {
+    let CompileError::Diagnostics(diagnostics) = error else {
+        return crate::classify_compile(error).message;
+    };
+    crate::diag::render_diagnostics(
+        diagnostics,
+        &crate::diag::RenderOpts {
+            anchor: "<cell>",
+            label: "<cell>",
+            user_lines: None,
+            line_offset: 0,
+            col_indent: 0,
+            drop_foreign_gen_warnings_except: None,
+            source: cell_text,
+        },
+    )
+}
+
 /// Locate submitted turn text within one of the shared wrapper templates.
 #[must_use]
 pub fn turn_user_code_offset(source: &str) -> Option<(usize, usize)> {

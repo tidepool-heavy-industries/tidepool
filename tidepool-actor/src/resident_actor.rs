@@ -20,6 +20,7 @@ use tidepool_runtime::session::{
     WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
     WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
+use tidepool_runtime::{classify_compile, FailureClass};
 use tokio::sync::mpsc;
 
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
@@ -4317,10 +4318,34 @@ where
                 .map(tidepool_runtime::session::normalize_workbench_input),
         );
         let cell_check = if let Some(cell_source) = request.cell_source() {
-            let checked = workbench
+            let checked = match workbench
                 .check_cell(context.clone(), cell_source.to_owned())
                 .await
-                .map_err(|source| workbench_failure(&[], 0, 1, source))?;
+            {
+                Ok(checked) => checked,
+                Err(ResidentActorWorkbenchError::Compile(error))
+                    if classify_compile(&error).class == FailureClass::UserHaskell =>
+                {
+                    return Ok(KernelStep::Continue(workbench_response(
+                        WorkbenchRunStatus::Rejected,
+                        vec![WorkbenchItemReceipt {
+                            index: 0,
+                            status: WorkbenchItemStatus::Rejected,
+                            output: tidepool_runtime::session::render_cell_compile_error(
+                                &error,
+                                cell_source,
+                            ),
+                            warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
+                            operations: Vec::new(),
+                            terminal_transfer: None,
+                        }],
+                        0,
+                        1,
+                    )));
+                }
+                Err(source) => return Err(workbench_failure(&[], 0, 1, source)),
+            };
             request.install_cell_items(
                 checked
                     .items

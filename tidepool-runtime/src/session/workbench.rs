@@ -933,15 +933,15 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
          instance {{-# OVERLAPPING #-}} TidepoolWorkbenchTypeError.Unsatisfiable \
            ('TidepoolWorkbenchTypeError.Text \"an Eff action must use the current workbench effect row\") \
            => TidepoolCellPure (Eff effects value)\n\
-         class TidepoolCellExpression value where\n\
-           __tidepoolCellExpression :: value -> Eff {effect_stack} ()\n\
-         instance {{-# OVERLAPPING #-}} TidepoolCellExpression (Eff {effect_stack} value) where\n\
-           __tidepoolCellExpression action = action >> pure ()\n\
-         instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where\n\
-           __tidepoolCellExpression _ = pure ()\n\
-         {{CELL_DECLS}}\n\
+         class TidepoolCellExpression value where {{ \
+           __tidepoolCellExpression :: value -> Eff {effect_stack} () }}\n\
+         instance {{-# OVERLAPPING #-}} TidepoolCellExpression (Eff {effect_stack} value) where {{ \
+           __tidepoolCellExpression action = action >> pure () }}\n\
+         instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where {{ \
+           __tidepoolCellExpression _ = pure () }}\n\
+         {{{{CELL_DECLS}}}}\n\
          __tidepool_cell_check = do {{\n\
-         {{CELL_BODY}}\n\
+         {{{{CELL_BODY}}}}\n\
          ; pure () }}\n"
     )
 }
@@ -1114,6 +1114,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_template_preserves_worker_placeholders() {
+        let template = resident_cell_check_template("module CellCheck where\n", "ActorEffects", "");
+        assert_eq!(template.matches("{{CELL_DECLS}}").count(), 1);
+        assert_eq!(template.matches("{{CELL_BODY}}").count(), 1);
+    }
 
     #[test]
     fn hosted_coordinates_cannot_be_supplied_by_authored_json() {

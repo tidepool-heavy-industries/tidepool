@@ -82,12 +82,12 @@ pub use workbench::{
 pub use turn::{
     assemble_bind_module, assemble_display_expression_module, assemble_expression_module,
     assemble_inspection_module, assemble_opaque_expression_module, check_cell, classify_block,
-    enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt, render_template,
-    render_turn_compile_error, run_turn, run_turn_pinned, turn_user_code_line_range,
-    turn_user_code_offset, BoundBinder, CellAnalysisItem, CellCheck, CellCheckRequest,
-    CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, ExpressionLift,
-    TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
+    render_cell_compile_error, render_template, render_turn_compile_error, run_turn,
+    run_turn_pinned, turn_user_code_line_range, turn_user_code_offset, BoundBinder,
+    CellAnalysisItem, CellCheck, CellCheckRequest, CellSourceSpan, CheckedBinderPin, CompiledTurn,
+    DeclarationReceipt, ExpressionLift, TemplateSelector, TurnClassification, TurnFailure,
+    TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 /// Host-visible reentry state for one resident session.
