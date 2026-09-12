@@ -340,7 +340,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let binding = runtime.path().join("binding.json");
     tidepool_agent::accept_interactive_session_binding(
         &binding,
-        3,
+        tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
         BackendThreadId(uuid::Uuid::new_v4().to_string()),
         None,
     )
@@ -486,6 +486,75 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap();
     assert!(tagged.inheritance_notice.is_none());
     shell(tagged.workspace.as_ref().unwrap(), "test ! -e target");
+    let calls_before_siblings = backend.calls.lock().len();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, resumed) = tokio::sync::oneshot::channel();
+    *backend.begin_pause.lock() = Some((entered, resumed));
+    let first_admission = admission.clone();
+    let first = tokio::spawn(async move {
+        first_admission
+            .admit(root, "root/queued-first".into(), seed(), CODING)
+            .await
+    });
+    ready.await.unwrap();
+    let cancelled_admission = admission.clone();
+    let cancelled = tokio::spawn(async move {
+        cancelled_admission
+            .admit(root, "root/queued-cancelled".into(), seed(), CODING)
+            .await
+    });
+    tokio::task::yield_now().await;
+    cancelled.abort();
+    assert!(matches!(cancelled.await, Err(error) if error.is_cancelled()));
+    let next_admission = admission.clone();
+    let next = tokio::spawn(async move {
+        next_admission
+            .admit(root, "root/queued-next".into(), seed(), CODING)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        backend.calls.lock().len(),
+        calls_before_siblings + 1,
+        "a sibling must wait for publication, not begin another operation"
+    );
+    release.send(()).unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(30), next)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for (actor, prepared) in [(31, first), (32, next)] {
+        let custody = prepared
+            .install(ActorRef::first(tidepool_actor::ActorId(actor)))
+            .unwrap();
+        let child = (custody.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ActorWorkspaceCustody>()
+            .unwrap();
+        assert!(
+            child.inheritance_notice.is_none(),
+            "unexpected sibling fallback: {:?}",
+            child.inheritance_notice
+        );
+        assert_eq!(
+            shell(child.workspace.as_ref().unwrap(), "cat file untracked"),
+            "lateruntracked",
+            "siblings must inherit the same dirty source before either starts"
+        );
+    }
+    assert_eq!(
+        backend.calls.lock()[calls_before_siblings..]
+            .iter()
+            .filter(|(_, operation)| matches!(operation, PublicationOperation::Begin { .. }))
+            .count(),
+        2,
+        "the cancelled waiter must not begin publication"
+    );
     *backend.busy.lock() = true;
     let fallback = admission
         .admit(root, "root/busy".into(), seed(), CODING)

@@ -318,16 +318,32 @@ impl NativeForkAdmission {
             .await
             .map_err(io::Error::other)?;
         };
-        let mut publication = match parent.workspace.publication.clone().try_lock_owned() {
-            Ok(publication) => publication,
-            Err(_) => {
-                return tokio::task::spawn_blocking(move || {
-                    layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy))
-                })
-                .await
-                .map_err(io::Error::other)?
-            }
-        };
+        // Sibling forks queue on the same source publication. Contention here
+        // says nothing about native writers or the source's availability.
+        // A caller cancelled while waiting has not begun an operation.
+        let mut publication = parent.workspace.publication.clone().lock_owned().await;
+        let source_still_owned = self.owners.lock().get(&source_owner).is_some_and(|owner| {
+            owner.terminal.is_none()
+                && owner
+                    .creator_workspace
+                    .as_ref()
+                    .is_some_and(|bound| Arc::ptr_eq(&bound.workspace, &parent.workspace))
+        });
+        if !source_still_owned {
+            drop(publication);
+            return tokio::task::spawn_blocking(move || {
+                layout.prepare_committed(
+                    authorized,
+                    policy,
+                    build,
+                    Some(SourceFallback::Unavailable(
+                        "source owner retired while publication was queued".into(),
+                    )),
+                )
+            })
+            .await
+            .map_err(io::Error::other)?;
+        }
         // The operation task retains its gate and resources even when its caller
         // abandons the await. Host death ends the wave instead of replaying it.
         let backend = self.backend.clone();
@@ -412,7 +428,6 @@ impl NativeForkAdmission {
             parent
                 .settle_publication(&mut publication, backend.as_ref())
                 .await?;
-            drop(publication);
             let (authorized, captured) = captured?;
             let build = if source_owner == creator
                 && policy.native_tools != tidepool_actor::NativeToolClass::InspectionOnly
@@ -426,7 +441,10 @@ impl NativeForkAdmission {
             } else {
                 build
             };
-            tokio::task::spawn_blocking(move || match captured {
+            // Keep siblings queued until the worktree created by this
+            // publication is finalized. Otherwise the next sibling can race
+            // its Git capture against that finalization and fall back cold.
+            let admitted = tokio::task::spawn_blocking(move || match captured {
                 Some(captured) => match captured? {
                     SourceCapture::Ready(captured) => {
                         layout.prepare_captured(captured, policy, build)
@@ -440,7 +458,9 @@ impl NativeForkAdmission {
                 }
             })
             .await
-            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
+            drop(publication);
+            admitted
         })
         .await
         .map_err(io::Error::other)?
