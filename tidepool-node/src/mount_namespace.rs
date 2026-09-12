@@ -6,11 +6,11 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -25,6 +25,10 @@ pub use overlay::{
     PreparedOverlayRotation,
 };
 
+/// Re-exec target after a mount transition's syscall-only pre-exec phase.
+/// Test harnesses accept this as an unmatched filter and exit successfully.
+pub const MOUNT_HELPER_COMMAND: &str = "__tidepool_mount_helper";
+
 /// A retained filesystem view captured from an owned live process.
 ///
 /// This is access to a filesystem, not proof that any process has stopped or
@@ -35,6 +39,20 @@ pub struct MountNamespace {
     descriptors: Arc<Descriptors>,
 }
 
+/// A host-side read path through a pinned namespace root. Keep this guard
+/// alive while walking it; paths derived from it must not escape the guard.
+#[derive(Debug)]
+pub struct RetainedViewPath {
+    _descriptors: Arc<Descriptors>,
+    path: PathBuf,
+}
+
+impl RetainedViewPath {
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[derive(Clone, Copy)]
 enum OwnerRequirement {
     RetainedView,
@@ -43,6 +61,7 @@ enum OwnerRequirement {
 
 #[derive(Debug)]
 struct Descriptors {
+    proc_dir: OwnedFd,
     user: OwnedFd,
     mount: OwnedFd,
     root: OwnedFd,
@@ -73,6 +92,48 @@ impl Descriptors {
 }
 
 impl MountNamespace {
+    pub fn retained_view_path(&self, path: &Path) -> io::Result<RetainedViewPath> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid retained view path",
+            ));
+        }
+        let relative = path.strip_prefix("/").map_err(io::Error::other)?;
+        Ok(RetainedViewPath {
+            _descriptors: self.descriptors.clone(),
+            path: PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                self.descriptors.root.as_raw_fd()
+            ))
+            .join(relative),
+        })
+    }
+
+    /// Open one regular-file candidate through the retained view. The caller
+    /// supplies an absolute path visible inside that view; kernel resolution
+    /// confines symlinks to its root and refuses magic links.
+    pub fn open_view_file(&self, path: &Path) -> io::Result<std::fs::File> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "view file path must be absolute",
+            ));
+        }
+        let fd = rustix::fs::openat2(
+            &self.descriptors.root,
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        )?;
+        Ok(std::fs::File::from(fd))
+    }
+
     /// Detach covered generations after the owning lifecycle has stopped all
     /// users and preserved working files. This is not proof of process cleanup.
     pub fn detach_retired_tree(&self, target: &Path) -> io::Result<()> {
@@ -89,7 +150,7 @@ impl MountNamespace {
             let mut command = unsafe {
                 view.command_with_setup(
                     Path::new("/"),
-                    "/bin/sh".as_ref(),
+                    "/proc/self/exe".as_ref(),
                     OwnerRequirement::RetainedView,
                     move || loop {
                         match rustix::mount::unmount(
@@ -105,7 +166,14 @@ impl MountNamespace {
                     },
                 )?
             };
-            if !command.args(["-c", ":"]).status()?.success() {
+            if !command
+                .arg(MOUNT_HELPER_COMMAND)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?
+                .success()
+            {
                 return Err(io::Error::other("namespace retirement did not complete"));
             }
         }
@@ -183,6 +251,7 @@ impl MountNamespace {
         let namespace = Self {
             preparation: None,
             descriptors: Arc::new(Descriptors {
+                proc_dir: directory,
                 user,
                 mount,
                 root,
@@ -284,35 +353,16 @@ impl MountNamespace {
                 "expected absolute view path",
             ));
         }
-        let path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let mut command = self.host_command(Path::new("/"), "/bin/sh".as_ref())?;
-        // Run after namespace entry and capability dropping, matching Git access.
-        // SAFETY: the callback uses only syscalls and preallocated arguments.
-        // Its one-byte stdout receipt cannot fill the pipe while exec waits.
-        unsafe {
-            command.pre_exec(move || {
-                let exists = match rustix::fs::stat(path.as_c_str()) {
-                    Ok(_) => true,
-                    Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => false,
-                    Err(error) => return Err(error.into()),
-                };
-                let receipt = [u8::from(exists)];
-                loop {
-                    match rustix::io::write(rustix::stdio::stdout(), &receipt) {
-                        Ok(1) => return Ok(()),
-                        Err(rustix::io::Errno::INTR) => continue,
-                        Err(error) => return Err(error.into()),
-                        Ok(_) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
-                    }
-                }
-            });
-        }
-        let output = command.args(["-c", ":"]).output()?;
-        match (output.status.success(), output.stdout.as_slice()) {
-            (true, [0]) => Ok(false),
-            (true, [1]) => Ok(true),
-            _ => Err(io::Error::other("unconfirmed namespace path inspection")),
+        match rustix::fs::openat2(
+            &self.descriptors.root,
+            path,
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        ) {
+            Ok(_found) => Ok(true),
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => Ok(false),
+            Err(error) => Err(error.into()),
         }
     }
 

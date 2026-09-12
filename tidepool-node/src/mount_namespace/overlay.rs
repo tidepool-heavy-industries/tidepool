@@ -10,7 +10,7 @@ use std::process::Stdio;
 use rustix::io::Errno;
 use rustix::mount::MountFlags;
 
-use super::{MountNamespace, OwnerRequirement};
+use super::{MountNamespace, OwnerRequirement, MOUNT_HELPER_COMMAND};
 
 mod observation;
 #[cfg(test)]
@@ -404,6 +404,87 @@ impl OverlayRotation {
 }
 
 impl MountNamespace {
+    /// Replace a prepared read-only merged view before any actor can enter it.
+    /// Bubblewrap leaves upper/work unused, so fsopen owns the writable mount.
+    pub(crate) fn mount_initial_overlay(
+        &self,
+        rotation: OverlayRotation,
+        readonly: bool,
+    ) -> io::Result<()> {
+        self.require_live_owner()?;
+        let previous = self.observe_overlay(&rotation.target)?;
+        if !previous.readonly {
+            return Err(io::Error::other("initial overlay scaffold is writable"));
+        }
+        let descriptors = self.descriptors.clone();
+        let backing = self.descriptors.clone();
+        let mut preserved = std::iter::repeat_with(|| None)
+            .take(rotation.preserved_mounts.len())
+            .collect::<Vec<Option<OwnedFd>>>();
+        let mut metadata = RootMetadata::new();
+        let target = rotation.target.clone();
+        let expected = rotation.clone();
+        // SAFETY: only syscall wrappers and preconstructed data after fork.
+        let mut command = unsafe {
+            self.command_with_setup(
+                Path::new("/"),
+                "/proc/self/exe".as_ref(),
+                OwnerRequirement::LiveProcess,
+                move || {
+                    let source_root = rustix::fs::open(
+                        rotation.target.as_c_str(),
+                        rustix::fs::OFlags::RDONLY
+                            | rustix::fs::OFlags::DIRECTORY
+                            | rustix::fs::OFlags::CLOEXEC,
+                        rustix::fs::Mode::empty(),
+                    )?;
+                    for (path, saved) in rotation.preserved_mounts.iter().zip(&mut preserved) {
+                        *saved = Some(rustix::mount::open_tree(
+                            rustix::fs::CWD,
+                            path.as_c_str(),
+                            rustix::mount::OpenTreeFlags::OPEN_TREE_CLONE
+                                | rustix::mount::OpenTreeFlags::OPEN_TREE_CLOEXEC
+                                | rustix::mount::OpenTreeFlags::AT_RECURSIVE,
+                        )?);
+                    }
+                    rotation.mount_next(
+                        &descriptors,
+                        &backing,
+                        &preserved,
+                        source_root.as_fd(),
+                        &mut metadata,
+                    )?;
+                    if readonly {
+                        rustix::mount::mount_remount(
+                            rotation.target.as_c_str(),
+                            MountFlags::RDONLY,
+                            c"",
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?
+        };
+        if !command
+            .arg(MOUNT_HELPER_COMMAND)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?
+            .success()
+        {
+            return Err(io::Error::other("initial overlay mount helper failed"));
+        }
+        let observed = self.observe_overlay(&target)?;
+        if observed.id == previous.id
+            || !observed.matches(&expected)
+            || observed.readonly != readonly
+        {
+            return Err(io::Error::other("initial overlay mount was not confirmed"));
+        }
+        Ok(())
+    }
+
     /// Freeze and replace an overlay without restarting its workload.
     ///
     /// Call only while the owning native write-admission gate is held. This
@@ -474,7 +555,7 @@ impl MountNamespace {
         let mut command = unsafe {
             self.command_with_setup(
                 Path::new("/"),
-                "/bin/sh".as_ref(),
+                "/proc/self/exe".as_ref(),
                 OwnerRequirement::LiveProcess,
                 move || {
                     if observation::mount_id(target.as_c_str())? != original_id {
@@ -485,7 +566,12 @@ impl MountNamespace {
                 },
             )?
         };
-        let _ = command.args(["-c", ":"]).status();
+        let _ = command
+            .arg(MOUNT_HELPER_COMMAND)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let restored = self.observe_overlay(&rotation.target)?;
         if restored.id == before.id && !restored.readonly {
             Ok(OverlayRotationOutcome::RecoveredOriginal)
@@ -498,11 +584,9 @@ impl MountNamespace {
         &self,
         rotation: OverlayRotation,
     ) -> io::Result<OverlayRotationOutcome> {
-        let (read, write) = rustix::pipe::pipe_with(
-            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
-        )?;
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
         // Command owns/reaps the short helper. All mount work happens in its
-        // pre-exec syscall phase; the shell only exits after capabilities drop.
+        // pre-exec syscall phase; the re-executed binary only exits afterward.
         let descriptors = self.descriptors.clone();
         let backing = self
             .preparation
@@ -517,7 +601,7 @@ impl MountNamespace {
         let mut command = unsafe {
             self.command_with_setup(
                 Path::new("/"),
-                "/bin/sh".as_ref(),
+                "/proc/self/exe".as_ref(),
                 OwnerRequirement::LiveProcess,
                 move || {
                     let result = rotation
@@ -541,19 +625,22 @@ impl MountNamespace {
             )?
         };
         let status = command
-            .args(["-c", ":"])
+            .arg(MOUNT_HELPER_COMMAND)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
         drop(command);
         let mut frame = [0u8; 12];
-        let count = loop {
-            match rustix::io::read(&read, &mut frame) {
+        let mut count = 0;
+        while count < frame.len() {
+            match rustix::io::read(&read, &mut frame[count..]) {
                 Err(Errno::INTR) => continue,
-                result => break result?,
+                Ok(0) => break,
+                Ok(bytes) => count += bytes,
+                Err(error) => return Err(error.into()),
             }
-        };
+        }
         if count != frame.len() {
             return Ok(OverlayRotationOutcome::Unconfirmed(format!(
                 "mount helper returned {count} receipt bytes; process result: {status:?}"

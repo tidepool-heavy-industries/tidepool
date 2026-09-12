@@ -14,12 +14,13 @@ use tidepool_node::{
 pub(super) struct OverlayResourceLease {
     storage: Arc<OverlayStorage>,
     layers: Vec<OverlayLayer>,
+    retired_layers: Vec<OverlayLayer>,
     upper: PathBuf,
     work: PathBuf,
     latest: Arc<Mutex<Option<OverlaySnapshot>>>,
     publication: PublicationState,
     empty_upper: Option<SourceStamp>,
-    claimed: bool,
+    custody: CustodyGuard,
 }
 
 /// Publication is exclusive, but readers of completed generations need not
@@ -64,27 +65,34 @@ impl SharedOverlayResource {
                 return Err(io::Error::other("workspace publication remains unsettled"));
             }
         }
-        if let Some(resource) = slot.take() {
-            *resource.storage.state.lock() = OverlayResourceState::Reclaimable;
-            if resource.claimed {
-                for storage in resource.storages() {
-                    storage
-                        .claims
-                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                }
-            }
+        if let Some(mut resource) = slot.take() {
+            resource.custody.settled = true;
+            // An uncertain descendant retains its backing through Arc custody;
+            // it vetoes reclamation, not retirement of this owner's view.
+            *resource.storage.state.lock() = if resource
+                .storage
+                .uncertain
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                OverlayResourceState::RetainedUnconfirmed
+            } else {
+                OverlayResourceState::Reclaimable
+            };
             resource.latest.lock().take();
             let OverlayResourceLease {
-                storage, layers, ..
+                storage,
+                layers,
+                retired_layers,
+                custody,
+                ..
             } = resource;
             drop(layers);
+            drop(retired_layers);
+            drop(custody);
             if let Ok(mut storage) = Arc::try_unwrap(storage) {
-                if *storage.claims.get_mut() != 0 {
-                    return Err(io::Error::other(
-                        "storage retained by unconfirmed descendant processes",
-                    ));
+                if !storage.uncertain.load(std::sync::atomic::Ordering::Acquire) {
+                    storage.release()?;
                 }
-                storage.release()?;
             }
         }
         Ok(())
@@ -109,7 +117,26 @@ struct OverlayStorage {
     path: PathBuf,
     root: PathBuf,
     state: Mutex<OverlayResourceState>,
-    claims: std::sync::atomic::AtomicUsize,
+    uncertain: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug)]
+struct CustodyGuard {
+    dependencies: Vec<Arc<OverlayStorage>>,
+    exposed: bool,
+    settled: bool,
+}
+
+impl Drop for CustodyGuard {
+    fn drop(&mut self) {
+        if self.exposed && !self.settled {
+            for storage in &self.dependencies {
+                storage
+                    .uncertain
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
 }
 
 /// Offline lifecycle cleanup has proved that no namespace references this tree.
@@ -121,7 +148,7 @@ pub(super) fn remove_unmounted_storage(path: &Path) -> io::Result<()> {
             .ok_or_else(|| io::Error::other("storage lacks parent"))?
             .to_owned(),
         state: Mutex::new(OverlayResourceState::RetainedUnconfirmed),
-        claims: std::sync::atomic::AtomicUsize::new(0),
+        uncertain: std::sync::atomic::AtomicBool::new(false),
     };
     storage.release()
 }
@@ -137,10 +164,6 @@ enum OverlayResourceState {
 #[derive(Debug)]
 enum PublicationState {
     Writable,
-    NeedsRecord {
-        bytes: Vec<u8>,
-        snapshot: OverlaySnapshot,
-    },
     Unconfirmed(Box<PendingRotation>),
 }
 
@@ -151,40 +174,13 @@ struct PendingRotation {
     upper: PathBuf,
     work: PathBuf,
     frozen: Vec<OverlayLayer>,
-    bytes: Vec<u8>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-struct ViewRecord {
-    version: u32,
-    layers: Vec<PathBuf>,
-    upper: PathBuf,
-    work: PathBuf,
-    warm: bool,
-}
-
-impl ViewRecord {
-    fn new(layers: &[OverlayLayer], upper: &Path, work: &Path, warm: bool) -> Self {
-        Self {
-            version: 1,
-            layers: layers.iter().map(|layer| layer.path.clone()).collect(),
-            upper: upper.to_owned(),
-            work: work.to_owned(),
-            warm,
-        }
-    }
-}
-
-fn encode_view(
-    layers: &[OverlayLayer],
-    upper: &Path,
-    work: &Path,
-    warm: bool,
-) -> io::Result<Vec<u8>> {
-    serde_json::to_vec(&ViewRecord::new(layers, upper, work, warm)).map_err(io::Error::other)
 }
 
 impl OverlayResourceLease {
+    // Compaction copies one merged tree per 32 published layers. Older layers
+    // remain leased while descendants use them, so peak storage can rise.
+    const COMPACT_AT_LAYERS: usize = 32;
+
     pub(super) fn allocate_path(
         path: PathBuf,
         inherited: Option<OverlaySnapshot>,
@@ -214,7 +210,7 @@ impl OverlayResourceLease {
             root: parent.to_path_buf(),
             path,
             state: Mutex::new(OverlayResourceState::Unsubmitted),
-            claims: std::sync::atomic::AtomicUsize::new(0),
+            uncertain: std::sync::atomic::AtomicBool::new(false),
         });
         let latest = inherited.clone();
         let layers = match inherited {
@@ -232,26 +228,37 @@ impl OverlayResourceLease {
         let work = storage.path.join("work");
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
-        // Persist dependency paths before any process can acquire these mounts.
-        // This is a new resource-local format; existing unmanifested resources
-        // remain retained and cannot be adopted by exclusive allocation.
-        let bytes = encode_view(&layers, &upper, &work, latest.is_some())?;
-        tidepool_atomic_write::write_durable(&storage.path.join("view.json"), &bytes)?;
+        let empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&upper)?));
+        let custody = CustodyGuard {
+            dependencies: std::iter::once(storage.clone())
+                .chain(layers.iter().map(|layer| layer.storage.clone()))
+                .collect(),
+            exposed: false,
+            settled: false,
+        };
         Ok(Self {
             storage,
             layers,
+            retired_layers: Vec::new(),
             upper,
             work,
             latest: Arc::new(Mutex::new(latest)),
             publication: PublicationState::Writable,
-            empty_upper: None,
-            claimed: false,
+            empty_upper,
+            custody,
         })
     }
 
-    #[cfg(test)]
-    pub(super) fn path(&self) -> &Path {
-        &self.storage.path
+    pub(super) fn imported_base(&self) -> io::Result<(&Path, OverlaySnapshot)> {
+        if self.layers.len() != 1 || self.layers[0].storage.path != self.storage.path {
+            return Err(io::Error::other("source has no private imported base"));
+        }
+        Ok((
+            &self.layers[0].path,
+            OverlaySnapshot {
+                layers: self.layers.clone().into(),
+            },
+        ))
     }
 
     /// Import ordinary host source into a private base before any mount exists.
@@ -292,24 +299,42 @@ impl OverlayResourceLease {
                 "source changed during import",
             ));
         }
-        tidepool_node::copy_overlay_root_metadata(source, &self.layers[0].path)
+        // Mount targets live in the immutable base so Bubblewrap does not
+        // create them in the writable upper during view setup.
+        std::fs::File::create_new(self.layers[0].path.join(".git"))?;
+        std::fs::create_dir(self.layers[0].path.join(".shoal"))?;
+        tidepool_node::copy_overlay_root_metadata(source, &self.layers[0].path)?;
+        *self.latest.lock() = Some(OverlaySnapshot {
+            layers: self.layers.clone().into(),
+        });
+        Ok(())
     }
 
-    pub(super) fn prepare_git_pointer(&self, git_file: &Path) -> io::Result<()> {
-        std::fs::copy(git_file, self.upper.join(".git"))?;
-        std::fs::create_dir_all(self.upper.join(super::ACTOR_BUILD_TARGET))?;
+    pub(super) fn prepare_root_metadata(&mut self) -> io::Result<()> {
         let inherited = self
             .layers
             .last()
             .ok_or_else(|| io::Error::other("source has no base"))?;
-        tidepool_node::copy_overlay_root_metadata(&inherited.path, &self.upper)
+        tidepool_node::copy_overlay_root_metadata(&inherited.path, &self.upper)?;
+        self.empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&self.upper)?));
+        Ok(())
+    }
+
+    /// Bootstrap may update the upper directory's own timestamp while
+    /// installing nested mounts. Capture the baseline before actor code runs.
+    pub(super) fn record_bootstrap_upper(&mut self) -> io::Result<()> {
+        self.empty_upper = if std::fs::read_dir(&self.upper)?.next().is_none() {
+            Some(SourceStamp::from(&std::fs::symlink_metadata(&self.upper)?))
+        } else {
+            None
+        };
+        Ok(())
     }
 
     /// Reconcile only an already-started operation; never rotate a fresh view.
     pub(super) fn settle_pending(&mut self) -> io::Result<()> {
         match &self.publication {
             PublicationState::Writable => Ok(()),
-            PublicationState::NeedsRecord { .. } => self.record_publication(),
             PublicationState::Unconfirmed(pending) => {
                 let outcome = pending.recovery.reconcile();
                 if let OverlayRotationOutcome::Unconfirmed(detail) = &outcome {
@@ -365,25 +390,11 @@ impl OverlayResourceLease {
     }
 
     pub(super) fn process_may_exist(&mut self) {
-        // A lost host drops its in-memory leases while mounted children may
-        // survive. Preserve both this resource and its inherited dependencies.
-        if !self.claimed {
-            *self.storage.state.lock() = OverlayResourceState::RetainedUnconfirmed;
-            for storage in self.storages() {
-                storage
-                    .claims
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            }
-            self.claimed = true;
-        }
-    }
-
-    fn storages(&self) -> Vec<&Arc<OverlayStorage>> {
-        let mut seen = std::collections::BTreeSet::new();
-        std::iter::once(&self.storage)
-            .chain(self.layers.iter().map(|layer| &layer.storage))
-            .filter(|storage| seen.insert(storage.path.clone()))
-            .collect()
+        // A lost host may drop in-memory leases while mounts survive. Mark
+        // every dependency uncertain; explicit retirement or offline mount
+        // proof is required before deletion.
+        self.custody.exposed = true;
+        *self.storage.state.lock() = OverlayResourceState::RetainedUnconfirmed;
     }
 
     /// Caller holds workspace admission across source and optional build rotation.
@@ -393,10 +404,6 @@ impl OverlayResourceLease {
         target: &Path,
         preserved_mounts: &[PathBuf],
     ) -> io::Result<OverlayRotationOutcome> {
-        if matches!(self.publication, PublicationState::NeedsRecord { .. }) {
-            self.record_publication()?;
-            return Ok(OverlayRotationOutcome::Rotated);
-        }
         if let PublicationState::Unconfirmed(pending) = &self.publication {
             let outcome = pending.recovery.reconcile();
             return self.settle_rotation(outcome);
@@ -432,7 +439,6 @@ impl OverlayResourceLease {
         .preserving_mounts(preserved_mounts)?;
         let prepared = namespace.prepare_overlay_rotation(rotation)?;
         // Once prepared, a lost receipt must never cause a second publication.
-        let pending = encode_view(&frozen, &upper, &work, true)?;
         // Preparation failures reclaim their unused directories. Once a mount
         // can exist, only confirmed transition settlement may release storage.
         let next = generation.keep();
@@ -443,9 +449,94 @@ impl OverlayResourceLease {
             upper,
             work,
             frozen,
-            bytes: pending,
         }));
-        self.settle_rotation(outcome)
+        let outcome = self.settle_rotation(outcome)?;
+        if matches!(outcome, OverlayRotationOutcome::Rotated)
+            && self.layers.len() >= Self::COMPACT_AT_LAYERS
+        {
+            if let Err(error) = self.compact_snapshot() {
+                tracing::warn!(%error, layers = self.layers.len(), "overlay compaction skipped");
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn compact_snapshot(&mut self) -> io::Result<()> {
+        let started = std::time::Instant::now();
+        let former_depth = self.layers.len();
+        let stage = tempfile::Builder::new()
+            .prefix("compact-")
+            .tempdir_in(&self.storage.path)?;
+        let view = stage.path().join("view");
+        let upper = stage.path().join("upper");
+        let work = stage.path().join("work");
+        let base = stage.path().join("base");
+        for path in [&view, &upper, &work, &base] {
+            std::fs::create_dir(path)?;
+        }
+        let boundary = ProcessMountBoundary::new(&view, [view.clone()], [view.clone()])
+            .map_err(io::Error::other)?
+            .with_overlay_view(self.layers(), &upper, &work, &view)
+            .map_err(io::Error::other)?
+            .with_read_only_project();
+        let namespace = boundary.prepare_view(
+            tidepool_node::BUBBLEWRAP_PROGRAM,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )?;
+        let visible = namespace.retained_view_path(&view)?;
+        let original = source_manifest(visible.as_path(), &[])?;
+        let output = namespace
+            .host_command(&view, "cp".as_ref())?
+            .args([
+                "--archive",
+                "--reflink=auto",
+                "--sparse=always",
+                "--preserve=links",
+            ])
+            .arg("--")
+            .arg(view.join("."))
+            .arg(&base)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "overlay compaction copy failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        if original != source_manifest(&base, &[])? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compacted base differs from merged view",
+            ));
+        }
+        verify_sparse_copy(visible.as_path(), &base, &original)?;
+        drop(visible);
+        namespace.detach_retired_tree(&view)?;
+        drop(namespace);
+        sync_compacted_tree(&base)?;
+        let compacted = self
+            .storage
+            .path
+            .join(format!("compacted-{}", uuid::Uuid::new_v4()));
+        std::fs::rename(&base, &compacted)?;
+        tidepool_atomic_write::sync_parent_directory(&compacted)?;
+        self.retired_layers.extend(std::mem::replace(
+            &mut self.layers,
+            vec![OverlayLayer {
+                path: compacted,
+                storage: self.storage.clone(),
+            }],
+        ));
+        *self.latest.lock() = Some(OverlaySnapshot {
+            layers: self.layers.clone().into(),
+        });
+        tracing::info!(
+            former_depth,
+            retained_layers = self.retired_layers.len(),
+            compaction_ms = started.elapsed().as_millis() as u64,
+            "overlay layers compacted"
+        );
+        Ok(())
     }
 
     fn settle_rotation(
@@ -467,25 +558,19 @@ impl OverlayResourceLease {
             upper,
             work,
             frozen,
-            bytes,
             ..
         } = *pending;
         match &outcome {
             OverlayRotationOutcome::Rotated => {
-                // Mount state is known even if recording it subsequently fails.
-                // Retry the record, never rotate the filesystem a second time.
                 self.upper = upper;
                 self.work = work;
                 self.layers = frozen;
                 self.empty_upper =
                     Some(SourceStamp::from(&std::fs::symlink_metadata(&self.upper)?));
-                self.publication = PublicationState::NeedsRecord {
-                    bytes,
-                    snapshot: OverlaySnapshot {
-                        layers: self.layers.clone().into(),
-                    },
-                };
-                self.record_publication()?;
+                let previous = self.latest.lock().replace(OverlaySnapshot {
+                    layers: self.layers.clone().into(),
+                });
+                drop(previous);
             }
             OverlayRotationOutcome::Busy
             | OverlayRotationOutcome::RecoveredOriginal
@@ -505,32 +590,26 @@ impl OverlayResourceLease {
         Ok(outcome)
     }
 
-    fn record_publication(&mut self) -> io::Result<()> {
-        let PublicationState::NeedsRecord { bytes, snapshot } = &self.publication else {
-            return Err(io::Error::other(
-                "build publication has no confirmed mount record",
-            ));
-        };
-        tidepool_atomic_write::write_durable(&self.storage.path.join("view.json"), bytes)?;
-        let previous = self.latest.lock().replace(snapshot.clone());
-        drop(previous);
-        self.publication = PublicationState::Writable;
-        Ok(())
-    }
-
     #[cfg(test)]
-    pub(super) fn release(self) -> io::Result<()> {
+    pub(super) fn release(mut self) -> io::Result<()> {
         if *self.storage.state.lock() == OverlayResourceState::RetainedUnconfirmed {
             return Err(io::Error::other(
                 "overlay resource retained: exact process and hosted work cleanup is unconfirmed",
             ));
         }
         // Snapshot and descendant leases still own the directory. Last-owner
-        // reclamation happens in OverlayStorage, never at actor retirement alone.
+        // reclamation is an explicit offline decision if they outlive retirement.
+        self.custody.settled = true;
         let Self {
-            storage, layers, ..
+            storage,
+            layers,
+            retired_layers,
+            custody,
+            ..
         } = self;
         drop(layers);
+        drop(retired_layers);
+        drop(custody);
         match Arc::try_unwrap(storage) {
             Ok(mut storage) => storage.release(),
             Err(_) => Ok(()),
@@ -540,7 +619,7 @@ impl OverlayResourceLease {
 
 /// Detect changes made by external writers outside native/host admission.
 /// Do not follow symlinks or let Git ignore rules omit project files.
-fn source_inventory(
+pub(super) fn source_inventory(
     root: &Path,
     excluded: &[&std::ffi::OsStr],
 ) -> io::Result<std::collections::BTreeMap<PathBuf, SourceStamp>> {
@@ -562,14 +641,179 @@ fn source_inventory(
     Ok(inventory)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct SourceStamp {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SourceStamp {
     device: u64,
     inode: u64,
     mode: u32,
     bytes: u64,
     modified: (i64, i64),
     changed: (i64, i64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SourceManifest(std::collections::BTreeMap<PathBuf, SourceEntry>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceEntry {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    bytes: u64,
+    modified: (i64, i64),
+    data: SourceData,
+    xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+    hardlink_anchor: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceData {
+    File(blake3::Hash),
+    Link(PathBuf),
+    Other,
+}
+
+/// The import and a later source must agree on visible bytes and metadata.
+/// Inode and ctime are deliberately absent: the private copy has new inodes.
+pub(super) fn source_manifest(
+    root: &Path,
+    excluded: &[&std::ffi::OsStr],
+) -> io::Result<SourceManifest> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut entries = std::collections::BTreeMap::new();
+    let mut links: std::collections::BTreeMap<(u64, u64), Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(io::Error::other)?
+            .to_path_buf();
+        let data = if metadata.is_file() {
+            let mut file = std::fs::File::open(&path)?;
+            let mut hash = blake3::Hasher::new();
+            let mut chunk = [0u8; 65_536];
+            loop {
+                let count = file.read(&mut chunk)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&chunk[..count]);
+            }
+            links
+                .entry((metadata.dev(), metadata.ino()))
+                .or_default()
+                .push(relative.clone());
+            SourceData::File(hash.finalize())
+        } else if metadata.file_type().is_symlink() {
+            SourceData::Link(std::fs::read_link(&path)?)
+        } else {
+            SourceData::Other
+        };
+        if SourceStamp::from(&metadata) != SourceStamp::from(&std::fs::symlink_metadata(&path)?) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "source changed while computing its manifest",
+            ));
+        }
+        entries.insert(
+            relative,
+            SourceEntry {
+                mode: metadata.mode(),
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+                bytes: metadata.len(),
+                modified: (metadata.mtime(), metadata.mtime_nsec()),
+                data,
+                xattrs: source_xattrs(&path)?,
+                hardlink_anchor: None,
+            },
+        );
+        if metadata.is_dir() {
+            for child in std::fs::read_dir(&path)? {
+                let child = child?;
+                if path == root && excluded.iter().any(|name| child.file_name() == *name) {
+                    continue;
+                }
+                pending.push(child.path());
+            }
+        }
+    }
+    for group in links.values_mut() {
+        group.sort();
+        let anchor = group[0].clone();
+        for path in group {
+            entries
+                .get_mut(path)
+                .expect("manifest link path inserted")
+                .hardlink_anchor = Some(anchor.clone());
+        }
+    }
+    Ok(SourceManifest(entries))
+}
+
+fn source_xattrs(path: &Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut names = vec![0u8; 65_536];
+    let count = rustix::fs::llistxattr(path, names.as_mut_slice()).map_err(io::Error::from)?;
+    let mut attributes = Vec::new();
+    for name in names[..count]
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let name = std::ffi::CString::new(name).map_err(io::Error::other)?;
+        let mut value = vec![0u8; 65_536];
+        let count = rustix::fs::lgetxattr(path, name.as_c_str(), value.as_mut_slice())
+            .map_err(io::Error::from)?;
+        value.truncate(count);
+        attributes.push((name.as_bytes().to_vec(), value));
+    }
+    attributes.sort();
+    Ok(attributes)
+}
+
+fn verify_sparse_copy(source: &Path, copy: &Path, manifest: &SourceManifest) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    for (relative, entry) in &manifest.0 {
+        if !matches!(entry.data, SourceData::File(_)) {
+            continue;
+        }
+        let original = std::fs::metadata(source.join(relative))?;
+        if original.len() < 4096 || original.blocks().saturating_mul(512) >= original.len() {
+            continue;
+        }
+        let copied = std::fs::metadata(copy.join(relative))?;
+        if copied.blocks().saturating_mul(512) >= copied.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("compaction filled sparse file {}", relative.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sync_compacted_tree(root: &Path) -> io::Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut directories = Vec::new();
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            directories.push(path.clone());
+            for entry in std::fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else if metadata.is_file() {
+            std::fs::File::open(&path)?.sync_all()?;
+        }
+    }
+    for directory in directories.into_iter().rev() {
+        std::fs::File::open(directory)?.sync_all()?;
+    }
+    Ok(())
 }
 
 impl From<&std::fs::Metadata> for SourceStamp {
@@ -625,15 +869,8 @@ impl OverlayStorage {
 
 impl Drop for OverlayStorage {
     fn drop(&mut self) {
-        if *self.claims.get_mut() == 0
-            && matches!(
-                *self.state.get_mut(),
-                OverlayResourceState::Unsubmitted | OverlayResourceState::Reclaimable
-            )
-        {
-            if let Err(error) = self.release() {
-                tracing::warn!(path = %self.path.display(), %error, "overlay storage reclamation failed");
-            }
+        if *self.state.get_mut() != OverlayResourceState::Released {
+            tracing::debug!(path = %self.path.display(), state = ?self.state.get_mut(), "overlay storage retained for explicit cleanup");
         }
     }
 }
@@ -662,6 +899,7 @@ mod tests {
         let mut child =
             OverlayResourceLease::allocate_path(child_path.clone(), parent.latest_snapshot())
                 .unwrap();
+        assert!(child.unchanged_snapshot().unwrap().is_some());
         let (child_worker, child_view) = Worker::start(&mut child, &child_project);
         let parent = SharedOverlayResource::new(parent);
         let child = SharedOverlayResource::new(child);
@@ -684,6 +922,11 @@ mod tests {
             .unwrap();
         child.retire().await.unwrap();
         assert!(!child_path.exists());
+        assert!(
+            parent_path.exists(),
+            "drop never reclaims inherited storage"
+        );
+        remove_unmounted_storage(&parent_path).unwrap();
         assert!(!parent_path.exists());
         child.retire().await.unwrap();
     }
@@ -836,11 +1079,6 @@ mod tests {
         assert_eq!(shell(&namespace, "cat file"), b"after");
         assert!(build.latest_snapshot().is_none());
 
-        // A failed manifest write retains the completed mount and nested views.
-        std::fs::remove_file(source.path().join("view.json")).unwrap();
-        std::fs::create_dir(source.path().join("view.json")).unwrap();
-        assert!(source.publish(&namespace, &project, &preserved).is_err());
-        std::fs::remove_dir(source.path().join("view.json")).unwrap();
         assert!(matches!(
             source.publish(&namespace, &project, &preserved).unwrap(),
             OverlayRotationOutcome::Rotated
@@ -895,10 +1133,12 @@ mod tests {
     }
 
     #[test]
-    fn prelaunch_drop_and_explicit_release_reclaim_exclusive_storage() {
+    fn prelaunch_drop_retains_and_explicit_release_reclaims_exclusive_storage() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("build");
         drop(OverlayResourceLease::allocate_path(path.clone(), None).unwrap());
+        assert!(path.exists());
+        remove_unmounted_storage(&path).unwrap();
         assert!(!path.exists());
         let shared = SharedOverlayResource::new(
             OverlayResourceLease::allocate_path(path.clone(), None).unwrap(),
@@ -916,7 +1156,58 @@ mod tests {
     }
 
     #[test]
+    fn compaction_matches_the_read_only_merged_view() {
+        use std::io::{Seek, SeekFrom};
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let mut source =
+            OverlayResourceLease::allocate_path(directory.path().join("storage"), None).unwrap();
+        let base = &source.layers[0].path;
+        std::fs::write(base.join("kept"), "original").unwrap();
+        std::fs::hard_link(base.join("kept"), base.join("linked")).unwrap();
+        std::fs::write(base.join("removed"), "old").unwrap();
+        let mut sparse = std::fs::File::create(base.join("sparse")).unwrap();
+        sparse.set_len(8 * 1024 * 1024).unwrap();
+        sparse.seek(SeekFrom::End(-1)).unwrap();
+        sparse.write_all(b"x").unwrap();
+        let (mut worker, namespace) = Worker::start(&mut source, &project);
+        let output = namespace
+            .host_command(&project, "/bin/sh".as_ref())
+            .unwrap()
+            .args(["-ec", "rm target/removed; printf new > target/new"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(worker.exchange("write"), "wrote");
+        assert!(matches!(
+            source
+                .publish(&namespace, &project.join("target"), &[])
+                .unwrap(),
+            OverlayRotationOutcome::Rotated
+        ));
+        source.compact_snapshot().unwrap();
+        assert_eq!(source.layers.len(), 1);
+        assert_eq!(source.latest_snapshot().unwrap().layers.len(), 1);
+        let compacted = &source.layers[0].path;
+        assert!(!compacted.join("removed").exists());
+        assert_eq!(
+            std::fs::read_to_string(compacted.join("new")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::metadata(compacted.join("kept")).unwrap().ino(),
+            std::fs::metadata(compacted.join("linked")).unwrap().ino()
+        );
+        let sparse = std::fs::metadata(compacted.join("sparse")).unwrap();
+        assert!(sparse.blocks() * 512 < sparse.len());
+        assert_eq!(worker.exchange("close"), "closed");
+    }
+
+    #[test]
     fn forty_generations_share_artifacts_and_preserve_whiteouts() {
+        use std::io::{Seek, SeekFrom};
         use std::os::unix::fs::MetadataExt;
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
@@ -925,13 +1216,21 @@ mod tests {
                 .unwrap();
         let artifact = parent.layers[0].path.join("artifact");
         std::fs::write(&artifact, vec![42u8; 1024 * 1024]).unwrap();
+        std::fs::hard_link(&artifact, parent.layers[0].path.join("linked-artifact")).unwrap();
+        let sparse_path = parent.layers[0].path.join("sparse");
+        let mut sparse = std::fs::File::create(&sparse_path).unwrap();
+        sparse.set_len(8 * 1024 * 1024).unwrap();
+        sparse.seek(SeekFrom::End(-1)).unwrap();
+        sparse.write_all(b"x").unwrap();
+        std::fs::create_dir(parent.layers[0].path.join("overwritten")).unwrap();
+        std::fs::write(parent.layers[0].path.join("overwritten/old"), "old").unwrap();
         std::fs::write(parent.layers[0].path.join("deleted"), "old").unwrap();
         let original = std::fs::metadata(&artifact).unwrap();
         let (mut worker, namespace) = Worker::start(&mut parent, &project);
         let output = namespace
             .host_command(&project, "/bin/sh".as_ref())
             .unwrap()
-            .args(["-ec", "rm target/deleted; printf preserved > target/kept"])
+            .args(["-ec", "rm target/deleted; rm -rf target/overwritten; mkdir target/overwritten; printf new > target/overwritten/new; printf preserved > target/kept"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -944,7 +1243,8 @@ mod tests {
                 OverlayRotationOutcome::Rotated
             ));
         }
-        assert_eq!(parent.layers.len(), 41);
+        assert!(parent.layers.len() < 32, "deep layers were not compacted");
+        assert!(parent.retired_layers.len() >= 32);
         assert_eq!(std::fs::metadata(&artifact).unwrap().ino(), original.ino());
         assert_eq!(
             std::fs::metadata(&artifact).unwrap().blocks(),
@@ -958,8 +1258,17 @@ mod tests {
                 .count(),
             1
         );
+        let compacted = &parent.layers[0].path;
+        assert_eq!(
+            std::fs::metadata(compacted.join("artifact")).unwrap().ino(),
+            std::fs::metadata(compacted.join("linked-artifact"))
+                .unwrap()
+                .ino()
+        );
+        let sparse = std::fs::metadata(compacted.join("sparse")).unwrap();
+        assert!(sparse.blocks() * 512 < sparse.len());
         let output = namespace.host_command(&project, "/bin/sh".as_ref()).unwrap()
-            .args(["-ec", "test ! -e target/deleted; test \"$(cat target/kept)\" = preserved; test -s target/artifact"]).output().unwrap();
+            .args(["-ec", "test ! -e target/deleted; test ! -e target/overwritten/old; test \"$(cat target/overwritten/new)\" = new; test \"$(cat target/kept)\" = preserved; test -s target/artifact"]).output().unwrap();
         assert!(output.status.success());
         assert_eq!(worker.exchange("hold"), "held");
         assert!(matches!(
@@ -1011,14 +1320,7 @@ mod tests {
                 .path,
             warm_layer
         );
-        // A confirmed mount with a failed manifest write only needs its record
-        // retried. The next attempt must not create another writable generation.
         assert_eq!(worker.exchange("close"), "closed");
-        std::fs::remove_file(parent.path().join("view.json")).unwrap();
-        std::fs::create_dir(parent.path().join("view.json")).unwrap();
-        assert!(parent
-            .publish(&namespace, &project.join("target"), &[])
-            .is_err());
         let layer_count = parent.layers.len();
         assert_eq!(
             parent
@@ -1030,17 +1332,17 @@ mod tests {
                 .path,
             warm_layer
         );
-        std::fs::remove_dir(parent.path().join("view.json")).unwrap();
-        let upper = parent.upper.clone();
         assert!(matches!(
             parent
                 .publish(&namespace, &project.join("target"), &[])
                 .unwrap(),
             OverlayRotationOutcome::Rotated
         ));
-        assert_eq!(parent.layers.len(), layer_count);
-        assert_eq!(parent.upper, upper);
-        assert_eq!(parent.latest_snapshot().unwrap().layers.len(), layer_count);
+        assert_eq!(parent.layers.len(), layer_count + 1);
+        assert_eq!(
+            parent.latest_snapshot().unwrap().layers.len(),
+            layer_count + 1
+        );
         let mut child =
             OverlayResourceLease::allocate_path(root.join("storage/child"), Some(snapshot))
                 .unwrap();

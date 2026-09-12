@@ -18,7 +18,7 @@ pub use inbox::{
 #[cfg(target_os = "linux")]
 pub use mount_namespace::{
     copy_overlay_root_metadata, MountNamespace, NamespaceEntry, OverlayRecovery, OverlayRotation,
-    OverlayRotationOutcome, PreparedOverlayRotation,
+    OverlayRotationOutcome, PreparedOverlayRotation, MOUNT_HELPER_COMMAND,
 };
 pub use process_boundary::service_scope::{
     LaunchRelease, LaunchReservation, PreparedServiceScope, RetainedProcessView, ScopeCapability,

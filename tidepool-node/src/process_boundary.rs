@@ -57,6 +57,12 @@ enum ViewMount<'a> {
     Overlay(&'a OverlayView),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlayMountMode {
+    Direct,
+    Prepared,
+}
+
 impl ViewMount<'_> {
     fn target(&self) -> &Path {
         match self {
@@ -252,6 +258,37 @@ impl ProcessMountBoundary {
         Ok(self)
     }
 
+    /// Return the outermost independently mounted targets beneath an overlay.
+    /// A recursive mount move preserves their nested mounts as part of each tree.
+    pub fn preserved_mounts_under(&self, parent: &Path) -> Vec<PathBuf> {
+        let mut targets = self
+            .read_only_overlays
+            .iter()
+            .map(|(_, target)| target)
+            .chain(self.writable_overlays.iter().map(|(_, target)| target))
+            .chain(self.overlay_views.iter().map(|view| &view.target))
+            .filter(|target| target.starts_with(parent) && target.as_path() != parent)
+            .cloned()
+            .collect::<Vec<_>>();
+        targets.sort_by(|a, b| {
+            a.components()
+                .count()
+                .cmp(&b.components().count())
+                .then_with(|| a.cmp(b))
+        });
+        targets.dedup();
+        let mut outer = Vec::new();
+        for target in targets {
+            if !outer
+                .iter()
+                .any(|ancestor: &PathBuf| target.starts_with(ancestor))
+            {
+                outer.push(target);
+            }
+        }
+        outer
+    }
+
     /// Wrap `command` with Bubblewrap. Broad read-only mounts are emitted
     /// first and narrower writable overrides last, so mount order implements
     /// the boundary directly rather than relying on filesystem permissions.
@@ -260,7 +297,7 @@ impl ProcessMountBoundary {
         bubblewrap: impl Into<String>,
         command: ProcessInvocation,
     ) -> ProcessInvocation {
-        self.wrap_with_options(bubblewrap.into(), command, &[])
+        self.wrap_with_options(bubblewrap.into(), command, &[], OverlayMountMode::Direct)
     }
 
     fn wrap_with_options(
@@ -268,6 +305,7 @@ impl ProcessMountBoundary {
         bubblewrap: String,
         command: ProcessInvocation,
         options: &[String],
+        overlay_mode: OverlayMountMode,
     ) -> ProcessInvocation {
         let mut args = vec![
             "--bind".into(),
@@ -330,15 +368,25 @@ impl ProcessMountBoundary {
                     ]);
                 }
                 ViewMount::Overlay(overlay) => {
+                    // Prepared views use a read-only merged scaffold so
+                    // nested mountpoints exist; fsopen replaces it before
+                    // actor entry. Direct invocations keep Bubblewrap's view.
                     for layer in &overlay.layers {
                         args.extend(["--overlay-src".into(), layer.to_string_lossy().into_owned()]);
                     }
-                    args.extend([
-                        "--overlay".into(),
-                        overlay.upper.to_string_lossy().into_owned(),
-                        overlay.work.to_string_lossy().into_owned(),
-                        overlay.target.to_string_lossy().into_owned(),
-                    ]);
+                    if overlay_mode == OverlayMountMode::Prepared {
+                        args.extend([
+                            "--ro-overlay".into(),
+                            overlay.target.to_string_lossy().into_owned(),
+                        ]);
+                    } else {
+                        args.extend([
+                            "--overlay".into(),
+                            overlay.upper.to_string_lossy().into_owned(),
+                            overlay.work.to_string_lossy().into_owned(),
+                            overlay.target.to_string_lossy().into_owned(),
+                        ]);
+                    }
                 }
             }
         }
@@ -396,6 +444,27 @@ pub enum ProcessBoundaryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserved_mounts_follow_the_actual_nested_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let boundary = ProcessMountBoundary::new(&workspace, [workspace.clone()], Vec::new())
+            .unwrap()
+            .with_read_only_overlay(&source, workspace.join(".git"))
+            .unwrap()
+            .with_read_only_overlay(&source, workspace.join(".shoal"))
+            .unwrap()
+            .with_read_only_overlay(&source, workspace.join(".shoal/build/cargo"))
+            .unwrap();
+        assert_eq!(
+            boundary.preserved_mounts_under(&workspace),
+            vec![workspace.join(".git"), workspace.join(".shoal")]
+        );
+    }
 
     #[test]
     fn broad_read_only_mount_precedes_narrow_writable_workspace() {

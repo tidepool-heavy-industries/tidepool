@@ -1,6 +1,7 @@
 use super::*;
 use crate::{ProcessInvocation, ProcessMountBoundary};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::process::{Child, ChildStdout, Command};
 
 struct Worker {
@@ -83,6 +84,15 @@ fn lost_receipt_after_publication_recovers_the_exact_replacement() {
     let directory = tempfile::tempdir().unwrap();
     let (mut worker, namespace, rotation) = fixture(directory.path());
     assert_eq!(worker.exchange("write"), "wrote");
+    let visible = namespace
+        .retained_view_path(Path::new(std::ffi::OsStr::from_bytes(
+            rotation.target.as_bytes(),
+        )))
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(visible.as_path().join("value")).unwrap(),
+        "1\n"
+    );
     let prepared = namespace
         .prepare_overlay_rotation(rotation.clone())
         .unwrap();

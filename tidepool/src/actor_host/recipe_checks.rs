@@ -96,6 +96,7 @@ impl Driver {
         let defaults = selected.config()?;
         let config = ActorHostConfig {
             systemd_slice: None,
+            source_exclude: defaults.launch.source_exclude,
             command_resources: None,
             shoal_executable: std::env::current_exe()?,
             workspace_inputs: Some(selected),

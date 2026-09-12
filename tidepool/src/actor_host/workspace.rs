@@ -1,7 +1,9 @@
 //! Prepare one complete workspace before deferred actor/native startup.
 
+use super::overlay_resource::{source_inventory, source_manifest, SourceManifest, SourceStamp};
 use super::workspace_publication::WorkspacePublication;
 use super::*;
+use std::ffi::OsString;
 use std::io;
 use tidepool_bridge_effects::WtWorktreeHandle;
 use tidepool_handlers::handlers::worktree::{handle_to_wire, AuthorizedForkWorkspace};
@@ -44,10 +46,19 @@ struct CapturedSource {
     fallback: Option<SourceFallback>,
 }
 
+pub(super) struct RootImport {
+    inventory: std::collections::BTreeMap<PathBuf, SourceStamp>,
+    exclusions: Vec<OsString>,
+    manifest: SourceManifest,
+    snapshot: OverlaySnapshot,
+}
+
 #[derive(Clone)]
 pub(super) struct WorkspaceLayout {
     pub(super) run_namespace: String,
     pub(super) source_root: PathBuf,
+    pub(super) source_exclude: Vec<String>,
+    pub(super) root_imports: Arc<Mutex<std::collections::BTreeMap<PathBuf, Arc<RootImport>>>>,
     pub(super) worktrees: WorktreeManager,
     pub(super) base_prompt: FrozenBasePrompt,
     pub(super) backend: Arc<dyn InteractiveAgentBackend>,
@@ -66,6 +77,7 @@ pub(super) struct PreparedWorkspace {
     pub(super) view: tidepool_node::MountNamespace,
     pub(super) source: Option<SharedOverlayResource>,
     pub(super) build: Option<SharedOverlayResource>,
+    source_preserved_mounts: Vec<PathBuf>,
     pub(super) owns_source: bool,
     pub(super) publication: Arc<tokio::sync::Mutex<WorkspacePublication>>,
 }
@@ -154,6 +166,106 @@ impl PreparedWorkspace {
 }
 
 impl WorkspaceLayout {
+    fn reusable_import(&self, source: &Path, excluded: &[OsString]) -> Option<OverlaySnapshot> {
+        let candidate = self.root_imports.lock().get(source).cloned()?;
+        if candidate.exclusions != excluded {
+            return None;
+        }
+        let excluded = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+        let before = source_inventory(source, &excluded).ok()?;
+        if before != candidate.inventory {
+            return None;
+        }
+        let manifest = source_manifest(source, &excluded).ok()?;
+        let after = source_inventory(source, &excluded).ok()?;
+        (before == after && manifest == candidate.manifest).then(|| candidate.snapshot.clone())
+    }
+
+    fn remember_import(
+        &self,
+        source_path: &Path,
+        excluded: &[OsString],
+        source: &OverlayResourceLease,
+    ) -> io::Result<()> {
+        let excluded_refs = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+        let before = source_inventory(source_path, &excluded_refs)?;
+        let original = match source_manifest(source_path, &excluded_refs) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::debug!(%error, "source manifest unavailable; import will not be reused");
+                return Ok(());
+            }
+        };
+        let after = source_inventory(source_path, &excluded_refs)?;
+        if before != after {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "source changed while verifying imported base",
+            ));
+        }
+        let (base, snapshot) = source.imported_base()?;
+        let copied = match source_manifest(
+            base,
+            &[std::ffi::OsStr::new(".git"), std::ffi::OsStr::new(".shoal")],
+        ) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::debug!(%error, "imported-base manifest unavailable; import will not be reused");
+                return Ok(());
+            }
+        };
+        if original != copied {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "imported base differs from source",
+            ));
+        }
+        self.root_imports.lock().insert(
+            source_path.to_owned(),
+            Arc::new(RootImport {
+                inventory: after,
+                exclusions: excluded.to_vec(),
+                manifest: original,
+                snapshot,
+            }),
+        );
+        Ok(())
+    }
+
+    fn source_exclusions(&self, source: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+        let mut excluded = vec![".git".into(), ".shoal".into()];
+        let git = self.worktrees.git();
+        for name in &self.source_exclude {
+            if crate::shoal::source_directory_has_tracked(git, source, name)? {
+                return Err(io::Error::other(format!(
+                    "configured source exclusion {name:?} contains tracked files"
+                )));
+            }
+            excluded.push(name.into());
+        }
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if excluded.iter().any(|excluded| excluded == &name) || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Ok(tag) = std::fs::read(entry.path().join("CACHEDIR.TAG")) else {
+                continue;
+            };
+            if !tag.starts_with(b"Signature: 8a477f597d28d172789f06886806bc55") {
+                continue;
+            }
+            let Some(name_text) = name.to_str() else {
+                continue;
+            };
+            if !crate::shoal::source_directory_has_tracked(git, source, name_text)? {
+                excluded.push(name);
+            }
+        }
+        excluded.sort();
+        Ok(excluded)
+    }
+
     pub(super) fn resource_root(&self, key: &str) -> PathBuf {
         // Actor IDs restart in each run; retained resources belong to that run.
         self.worktrees
@@ -205,8 +317,12 @@ impl WorkspaceLayout {
                 .with_read_only_overlay(self.base_prompt.directory(), self.base_prompt.directory())
         })
         .map_err(io::Error::other)?;
-        if let Some(source) = &source {
+        if let Some(source) = &mut source {
+            source.prepare_root_metadata()?;
             boundary = source.mount(boundary, &visible).map_err(io::Error::other)?;
+            boundary = boundary
+                .with_read_only_overlay(host_path.join(".git"), visible.join(".git"))
+                .map_err(io::Error::other)?;
         }
         let canonical = self.source_root.join(".shoal");
         if canonical.is_dir() {
@@ -242,10 +358,14 @@ impl WorkspaceLayout {
         for resource in source.iter_mut().chain(build.iter_mut()) {
             resource.process_may_exist();
         }
+        let source_preserved_mounts = boundary.preserved_mounts_under(&visible);
         let view = boundary.prepare_view(
             BUBBLEWRAP_PROGRAM,
             std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT,
         )?;
+        for resource in source.iter_mut().chain(build.iter_mut()) {
+            resource.record_bootstrap_upper()?;
+        }
         if source.is_none() {
             if let Some(id) = &worktree {
                 self.worktrees
@@ -261,6 +381,7 @@ impl WorkspaceLayout {
             view,
             source: source.map(SharedOverlayResource::new),
             build: build.map(SharedOverlayResource::new),
+            source_preserved_mounts,
             owns_source: root || policy.workspace == tidepool_actor::WorkspaceAccess::WritableBound,
             publication: Arc::new(tokio::sync::Mutex::new(WorkspacePublication::default())),
         }))
@@ -313,25 +434,48 @@ impl NativeForkAdmission {
             let reason = (!explicit_ref)
                 .then(|| SourceFallback::Unavailable("no unique live source owner".into()));
             return tokio::task::spawn_blocking(move || {
-                layout.prepare_committed(authorized, policy, build, reason)
+                layout.prepare_committed(authorized, policy, build, reason, None)
             })
             .await
             .map_err(io::Error::other)?;
         };
-        let mut publication = match parent.workspace.publication.clone().try_lock_owned() {
-            Ok(publication) => publication,
-            Err(_) => {
-                return tokio::task::spawn_blocking(move || {
-                    layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy))
-                })
-                .await
-                .map_err(io::Error::other)?
-            }
-        };
+        // Sibling forks queue on the same source publication. Contention here
+        // says nothing about native writers or the source's availability.
+        // A caller cancelled while waiting has not begun an operation.
+        let wait_started = std::time::Instant::now();
+        let mut publication = parent.workspace.publication.clone().lock_owned().await;
+        tracing::info!(
+            publication_wait_ms = wait_started.elapsed().as_millis() as u64,
+            "workspace publication gate acquired"
+        );
+        let source_still_owned = self.owners.lock().get(&source_owner).is_some_and(|owner| {
+            owner.terminal.is_none()
+                && owner
+                    .creator_workspace
+                    .as_ref()
+                    .is_some_and(|bound| Arc::ptr_eq(&bound.workspace, &parent.workspace))
+        });
+        if !source_still_owned {
+            drop(publication);
+            return tokio::task::spawn_blocking(move || {
+                layout.prepare_committed(
+                    authorized,
+                    policy,
+                    build,
+                    Some(SourceFallback::Unavailable(
+                        "source owner retired while publication was queued".into(),
+                    )),
+                    None,
+                )
+            })
+            .await
+            .map_err(io::Error::other)?;
+        }
         // The operation task retains its gate and resources even when its caller
         // abandons the await. Host death ends the wave instead of replaying it.
         let backend = self.backend.clone();
         tokio::spawn(async move {
+            let donor_view = parent.workspace.view.clone();
             if publication.is_pending() {
                 parent
                     .settle_publication(&mut publication, backend.as_ref())
@@ -357,6 +501,7 @@ impl NativeForkAdmission {
                             policy,
                             build,
                             Some(SourceFallback::Busy),
+                            Some(donor_view),
                         )
                     })
                     .await
@@ -369,6 +514,7 @@ impl NativeForkAdmission {
                             policy,
                             build,
                             Some(SourceFallback::Unavailable(detail)),
+                            Some(donor_view),
                         )
                     })
                     .await
@@ -397,13 +543,21 @@ impl NativeForkAdmission {
             };
             let capture_layout = layout.clone();
             let host_path = parent.workspace.host_path.clone();
+            let preserved = parent.workspace.source_preserved_mounts.clone();
             let captured = tokio::task::spawn_blocking(move || {
                 let captured = capture_layout
                     .worktrees
                     .git()
                     .try_capture()
                     .map(|_admission| {
-                        capture_layout.capture(&authorized, &namespace, &host_path, source, cache)
+                        capture_layout.capture(
+                            &authorized,
+                            &namespace,
+                            &host_path,
+                            &preserved,
+                            source,
+                            cache,
+                        )
                     });
                 (authorized, captured)
             })
@@ -412,7 +566,6 @@ impl NativeForkAdmission {
             parent
                 .settle_publication(&mut publication, backend.as_ref())
                 .await?;
-            drop(publication);
             let (authorized, captured) = captured?;
             let build = if source_owner == creator
                 && policy.native_tools != tidepool_actor::NativeToolClass::InspectionOnly
@@ -426,21 +579,34 @@ impl NativeForkAdmission {
             } else {
                 build
             };
-            tokio::task::spawn_blocking(move || match captured {
+            // Keep siblings queued until the worktree created by this
+            // publication is finalized. Otherwise the next sibling can race
+            // its Git capture against that finalization and fall back cold.
+            let admitted = tokio::task::spawn_blocking(move || match captured {
                 Some(captured) => match captured? {
                     SourceCapture::Ready(captured) => {
-                        layout.prepare_captured(captured, policy, build)
+                        layout.prepare_captured(captured, policy, build, Some(donor_view))
                     }
-                    SourceCapture::Fallback(reason) => {
-                        layout.prepare_committed(authorized, policy, build, Some(reason))
-                    }
+                    SourceCapture::Fallback(reason) => layout.prepare_committed(
+                        authorized,
+                        policy,
+                        build,
+                        Some(reason),
+                        Some(donor_view),
+                    ),
                 },
-                None => {
-                    layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy))
-                }
+                None => layout.prepare_committed(
+                    authorized,
+                    policy,
+                    build,
+                    Some(SourceFallback::Busy),
+                    Some(donor_view),
+                ),
             })
             .await
-            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
+            drop(publication);
+            admitted
         })
         .await
         .map_err(io::Error::other)?
@@ -497,6 +663,7 @@ impl WorkspaceLayout {
         authorized: &AuthorizedForkWorkspace,
         namespace: &tidepool_node::MountNamespace,
         source_path: &Path,
+        preserved: &[PathBuf],
         mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
         mut parent_build: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
     ) -> io::Result<SourceCapture> {
@@ -516,13 +683,12 @@ impl WorkspaceLayout {
             let parent_source = parent_source
                 .as_mut()
                 .ok_or_else(|| io::Error::other("source workspace retired"))?;
-            let preserved = [PathBuf::from(ACTOR_PROJECT_ROOT).join(".shoal")];
             let snapshot = match parent_source.unchanged_snapshot()? {
                 Some(snapshot) => Ok(snapshot),
                 None => match parent_source.publish(
                     namespace,
                     Path::new(ACTOR_PROJECT_ROOT),
-                    &preserved,
+                    preserved,
                 )? {
                     tidepool_node::OverlayRotationOutcome::Rotated => {
                         Ok(parent_source.latest_snapshot().ok_or_else(|| {
@@ -547,25 +713,43 @@ impl WorkspaceLayout {
                 Err(fallback) => (None, Some(fallback)),
             }
         } else {
-            let source = OverlayResourceLease::allocate_path(source_pathname, None)?;
-            // Exclude Cargo's tagged cache, not ordinary source named target.
-            // The native private target lives under the separate .shoal mount.
-            let mut excluded = vec![std::ffi::OsStr::new(".git"), std::ffi::OsStr::new(".shoal")];
-            if source_path.join("Cargo.toml").is_file()
-                && std::fs::read(source_path.join("target/CACHEDIR.TAG")).is_ok_and(|tag| {
-                    tag.starts_with(b"Signature: 8a477f597d28d172789f06886806bc55")
-                })
-            {
-                excluded.push(std::ffi::OsStr::new("target"));
-            }
-            match source.import_source(source_path, &excluded) {
-                Ok(()) => (Some(source), None),
-                Err(error) => (None, Some(SourceFallback::ImportFailed(error.to_string()))),
+            let excluded = self.source_exclusions(source_path)?;
+            let inherited = self.reusable_import(source_path, &excluded);
+            let source = OverlayResourceLease::allocate_path(source_pathname, inherited.clone())?;
+            if inherited.is_some() {
+                tracing::info!(path = %source_path.display(), "reused imported source base");
+                (Some(source), None)
+            } else {
+                let import_started = std::time::Instant::now();
+                let excluded_refs = excluded
+                    .iter()
+                    .map(std::ffi::OsString::as_os_str)
+                    .collect::<Vec<_>>();
+                let imported = source
+                    .import_source(source_path, &excluded_refs)
+                    .and_then(|()| {
+                        if excluded == self.source_exclusions(source_path)? {
+                            self.remember_import(source_path, &excluded, &source)
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "source exclusions changed during import",
+                            ))
+                        }
+                    });
+                match imported {
+                    Ok(()) => {
+                        tracing::info!(
+                            path = %source_path.display(),
+                            import_ms = import_started.elapsed().as_millis() as u64,
+                            "imported source base"
+                        );
+                        (Some(source), None)
+                    }
+                    Err(error) => (None, Some(SourceFallback::ImportFailed(error.to_string()))),
+                }
             }
         };
-        if let Some(source) = &source {
-            source.prepare_git_pointer(&git.git_file())?;
-        }
         if let Some(build) = &mut parent_build {
             let build = build
                 .as_mut()
@@ -594,6 +778,7 @@ impl WorkspaceLayout {
         captured: CapturedSource,
         policy: tidepool_actor::ForkWorkspacePolicy,
         build: Option<OverlaySnapshot>,
+        donor: Option<MountNamespace>,
     ) -> io::Result<AdmittedWorkspace> {
         let CapturedSource {
             git,
@@ -603,10 +788,12 @@ impl WorkspaceLayout {
         let id = git.receipt().worktree_id.clone();
         let path = git.receipt().cwd.clone();
         if source.is_none() {
+            tracing::info!(?fallback, "using committed source fallback");
             let handle = self
                 .worktrees
                 .finish_committed_source(git)
                 .map_err(io::Error::other)?;
+            self.restore_fallback_mtimes(&handle, donor.as_ref());
             let workspace = self.prepare(
                 path,
                 Some(id.clone()),
@@ -648,11 +835,23 @@ impl WorkspaceLayout {
         policy: tidepool_actor::ForkWorkspacePolicy,
         build: Option<OverlaySnapshot>,
         fallback: Option<SourceFallback>,
+        donor: Option<MountNamespace>,
     ) -> io::Result<AdmittedWorkspace> {
+        if fallback.is_some() {
+            tracing::info!(?fallback, "using committed source fallback");
+        }
         let handle = authorized
             .materialize_committed()
             .map_err(|error| io::Error::other(format!("{error:?}")))?;
         let id = WorktreeId::from_raw(&handle.handle_receipt.tree_id.raw);
+        if let Some(donor) = donor.as_ref() {
+            let domain_handle = self
+                .worktrees
+                .lookup(&id)
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("materialized checkout missing from registry"))?;
+            self.restore_fallback_mtimes(&domain_handle, Some(donor));
+        }
         let workspace = self.prepare(
             PathBuf::from(&handle.handle_receipt.cwd),
             Some(id.clone()),
@@ -667,6 +866,25 @@ impl WorkspaceLayout {
             workspace,
             notice: fallback.map(|reason| reason.notice()),
         })
+    }
+
+    fn restore_fallback_mtimes(
+        &self,
+        handle: &tidepool_worktree::WorktreeHandle,
+        donor: Option<&MountNamespace>,
+    ) {
+        if let Some(donor) = donor {
+            match self.worktrees.restore_matching_mtimes_from_view(
+                handle,
+                donor,
+                Path::new(ACTOR_PROJECT_ROOT),
+            ) {
+                Ok(restored) => tracing::debug!(restored, "restored matching checkout mtimes"),
+                Err(error) => {
+                    tracing::warn!(%error, "committed checkout mtime restoration skipped")
+                }
+            }
+        }
     }
 }
 

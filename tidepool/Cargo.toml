@@ -64,6 +64,7 @@ frunk.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
 blake3.workspace = true
+rustix = { version = "1", features = ["fs"] }
 thiserror.workspace = true
 parking_lot.workspace = true
 

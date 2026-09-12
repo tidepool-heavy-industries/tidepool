@@ -162,7 +162,7 @@ fn shell(workspace: &PreparedWorkspace, script: &str) -> String {
         .unwrap();
     assert!(
         output.status.success(),
-        "{}",
+        "script {script:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
@@ -213,6 +213,114 @@ const CODING: ForkWorkspacePolicy = ForkWorkspacePolicy {
 };
 
 #[test]
+fn source_exclusions_keep_tracked_files_and_untagged_directories() {
+    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    repo.writer()
+        .commit_file("tracked/source", "source", "seed")
+        .unwrap();
+    for name in ["tracked", "node_modules", "ordinary"] {
+        std::fs::create_dir_all(repo.path().join(name)).unwrap();
+        std::fs::write(repo.path().join(name).join("asset"), name).unwrap();
+    }
+    for name in ["tracked", "node_modules"] {
+        std::fs::write(
+            repo.path().join(name).join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+    }
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let mut layout = WorkspaceLayout {
+        run_namespace: "source-exclusion-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let excluded = layout.source_exclusions(repo.path()).unwrap();
+    assert!(excluded.contains(&"node_modules".into()));
+    assert!(!excluded.contains(&"tracked".into()));
+    assert!(!excluded.contains(&"ordinary".into()));
+    layout.source_exclude.push("ordinary".into());
+    assert!(layout
+        .source_exclusions(repo.path())
+        .unwrap()
+        .contains(&"ordinary".into()));
+    layout.source_exclude.push("tracked".into());
+    assert!(layout.source_exclusions(repo.path()).is_err());
+    repo.git()
+        .try_run(repo.path(), &["rm", "--cached", "--", "tracked/source"])
+        .unwrap();
+    assert!(
+        layout.source_exclusions(repo.path()).is_err(),
+        "HEAD must still protect a staged deletion"
+    );
+    let mut config = crate::shoal::LaunchConfig::default();
+    for invalid in ["../outside", "", ".git", "build*"] {
+        config.source_exclude = vec![invalid.into()];
+        assert!(config.validate().is_err(), "{invalid:?}");
+    }
+}
+
+#[test]
+fn root_import_reuse_requires_matching_content_and_exclusions() {
+    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    repo.writer().commit_file("file", "first", "seed").unwrap();
+    std::fs::write(repo.path().join("dirty"), "dirty").unwrap();
+    std::fs::hard_link(repo.path().join("file"), repo.path().join("linked")).unwrap();
+    std::os::unix::fs::symlink("file", repo.path().join("symlink")).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let mut layout = WorkspaceLayout {
+        run_namespace: "root-import-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let excluded = layout.source_exclusions(repo.path()).unwrap();
+    let source =
+        OverlayResourceLease::allocate_path(layout.resource_root("first").join("source"), None)
+            .unwrap();
+    let excluded_refs = excluded
+        .iter()
+        .map(std::ffi::OsString::as_os_str)
+        .collect::<Vec<_>>();
+    source.import_source(repo.path(), &excluded_refs).unwrap();
+    layout
+        .remember_import(repo.path(), &excluded, &source)
+        .unwrap();
+    drop(source);
+    assert!(layout.reusable_import(repo.path(), &excluded).is_some());
+
+    let original = layout.root_imports.lock().get(repo.path()).unwrap().clone();
+    std::fs::write(repo.path().join("file"), "later").unwrap();
+    assert!(layout.reusable_import(repo.path(), &excluded).is_none());
+    // Simulate identical inventory stamps, including a ctime collision. The
+    // content manifest must still reject the changed bytes.
+    layout.root_imports.lock().insert(
+        repo.path().to_path_buf(),
+        Arc::new(RootImport {
+            inventory: source_inventory(repo.path(), &excluded_refs).unwrap(),
+            exclusions: original.exclusions.clone(),
+            manifest: original.manifest.clone(),
+            snapshot: original.snapshot.clone(),
+        }),
+    );
+    assert!(layout.reusable_import(repo.path(), &excluded).is_none());
+    layout.source_exclude.push("scratch".into());
+    let changed_exclusions = layout.source_exclusions(repo.path()).unwrap();
+    assert!(layout
+        .reusable_import(repo.path(), &changed_exclusions)
+        .is_none());
+}
+
+#[test]
 fn root_workspace_resources_are_isolated_between_runs() {
     let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("file", "source", "seed").unwrap();
@@ -224,6 +332,8 @@ fn root_workspace_resources_are_isolated_between_runs() {
     let mut layout = WorkspaceLayout {
         run_namespace: "first-run".into(),
         source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
@@ -327,6 +437,8 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let layout = WorkspaceLayout {
         run_namespace: "workspace-test".into(),
         source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        root_imports: Arc::default(),
         worktrees: manager.clone(),
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: backend.clone(),
@@ -340,7 +452,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let binding = runtime.path().join("binding.json");
     tidepool_agent::accept_interactive_session_binding(
         &binding,
-        3,
+        tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
         BackendThreadId(uuid::Uuid::new_v4().to_string()),
         None,
     )
@@ -381,8 +493,29 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let child = (custody.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
         .unwrap();
-    assert!(child.inheritance_notice.is_none());
+    assert!(
+        child.inheritance_notice.is_none(),
+        "{:?}",
+        child.inheritance_notice
+    );
     let child = child.workspace.as_ref().unwrap();
+    {
+        let source = child.source.as_ref().unwrap().publication.lock().await;
+        let source = source.as_ref().unwrap();
+        assert!(source.unchanged_snapshot().unwrap().is_some());
+    }
+    assert!(child
+        .build
+        .as_ref()
+        .unwrap()
+        .publication
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .unchanged_snapshot()
+        .unwrap()
+        .is_some());
     assert_eq!(shell(child, "cat target/source"), "ordinary source");
     let layout = admission.native.as_ref().unwrap().layout.as_ref().unwrap();
     let allocated = |path: PathBuf| {
@@ -486,6 +619,83 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap();
     assert!(tagged.inheritance_notice.is_none());
     shell(tagged.workspace.as_ref().unwrap(), "test ! -e target");
+    let calls_before_siblings = backend.calls.lock().len();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, resumed) = tokio::sync::oneshot::channel();
+    *backend.begin_pause.lock() = Some((entered, resumed));
+    let first_admission = admission.clone();
+    let first = tokio::spawn(async move {
+        first_admission
+            .admit(root, "root/queued-first".into(), seed(), CODING)
+            .await
+    });
+    ready.await.unwrap();
+    let cancelled_admission = admission.clone();
+    let cancelled = tokio::spawn(async move {
+        cancelled_admission
+            .admit(root, "root/queued-cancelled".into(), seed(), CODING)
+            .await
+    });
+    tokio::task::yield_now().await;
+    cancelled.abort();
+    assert!(matches!(cancelled.await, Err(error) if error.is_cancelled()));
+    let next_admission = admission.clone();
+    let next = tokio::spawn(async move {
+        next_admission
+            .admit(root, "root/queued-next".into(), seed(), CODING)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        backend.calls.lock().len(),
+        calls_before_siblings + 1,
+        "a sibling must wait for publication, not begin another operation"
+    );
+    release.send(()).unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(30), next)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    for (actor, prepared) in [(31, first), (32, next)] {
+        let custody = prepared
+            .install(ActorRef::first(tidepool_actor::ActorId(actor)))
+            .unwrap();
+        let child = (custody.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ActorWorkspaceCustody>()
+            .unwrap();
+        assert!(
+            child.inheritance_notice.is_none(),
+            "unexpected sibling fallback: {:?}",
+            child.inheritance_notice
+        );
+        assert_eq!(
+            shell(child.workspace.as_ref().unwrap(), "cat file untracked"),
+            "lateruntracked",
+            "siblings must inherit the same dirty source before either starts"
+        );
+        let workspace = child.workspace.as_ref().unwrap();
+        assert!(
+            !layout
+                .resource_root(workspace.worktree.as_ref().unwrap().as_str())
+                .join("source/base")
+                .exists(),
+            "unchanged root siblings should reuse the imported base"
+        );
+    }
+    assert_eq!(
+        backend.calls.lock()[calls_before_siblings..]
+            .iter()
+            .filter(|(_, operation)| matches!(operation, PublicationOperation::Begin { .. }))
+            .count(),
+        2,
+        "the cancelled waiter must not begin publication"
+    );
     *backend.busy.lock() = true;
     let fallback = admission
         .admit(root, "root/busy".into(), seed(), CODING)
@@ -507,6 +717,25 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             "cat file; test ! -e untracked; test ! -e ignored"
         ),
         "committed"
+    );
+    assert_eq!(
+        shell(
+            fallback.workspace.as_ref().unwrap(),
+            "stat -c '%y' src/main.rs"
+        ),
+        shell(&workspace, "stat -c '%y' src/main.rs"),
+        "matching tracked source should retain the donor mtime"
+    );
+    assert_ne!(
+        shell(fallback.workspace.as_ref().unwrap(), "stat -c '%y' file"),
+        shell(&workspace, "stat -c '%y' file"),
+        "different working bytes must keep the committed checkout's fresh mtime"
+    );
+    assert!(
+        build(fallback.workspace.as_ref().unwrap())
+            .iter()
+            .all(|fresh| *fresh),
+        "committed fallback should reuse its inherited build artifacts"
     );
     *backend.busy.lock() = false;
     *backend.lose_finish.lock() = true;

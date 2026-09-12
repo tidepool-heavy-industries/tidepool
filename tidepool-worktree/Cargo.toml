@@ -25,3 +25,4 @@ camino.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
+rustix = { version = "1", features = ["fs"] }

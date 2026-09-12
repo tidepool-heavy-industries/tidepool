@@ -188,6 +188,7 @@ impl LaunchReservation {
                     self.bubblewrap.to_string_lossy().into_owned(),
                     self.command,
                     &options,
+                    super::OverlayMountMode::Direct,
                 );
                 let mut command = Command::new(invocation.program);
                 command.args(invocation.args);
