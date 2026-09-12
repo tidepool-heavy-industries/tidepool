@@ -58,7 +58,10 @@ fn mounted_reference(storage: &Path) -> io::Result<Option<String>> {
         let mut inspect = || -> io::Result<Option<String>> {
             namespaces.insert(fs::read_link(directory.join("ns/mnt"))?);
             let mounts = fs::read_to_string(directory.join("mountinfo"))?;
-            if mounts.contains(needle) {
+            if mounts
+                .lines()
+                .any(|line| mount_references_storage(line, needle))
+            {
                 return Ok(Some(format!("referenced by {}", directory.display())));
             }
             for fd in fs::read_dir(directory.join("fd"))? {
@@ -94,10 +97,50 @@ fn mounted_reference(storage: &Path) -> io::Result<Option<String>> {
     Ok(None)
 }
 
+fn mount_references_storage(line: &str, storage: &str) -> bool {
+    let fields = line.split(' ').collect::<Vec<_>>();
+    let Some(separator) = fields.iter().position(|field| *field == "-") else {
+        return false;
+    };
+    if fields.get(separator + 1) != Some(&"overlay") {
+        return false;
+    }
+    let Some(options) = fields.get(separator + 3) else {
+        return false;
+    };
+    options.split(',').any(|option| {
+        let Some((key, value)) = option.split_once('=') else {
+            return false;
+        };
+        matches!(
+            key,
+            "upperdir" | "workdir" | "lowerdir" | "lowerdir+" | "datadir+"
+        ) && value.split(':').any(|path| {
+            path == storage
+                || path
+                    .strip_prefix(storage)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::File;
+
+    #[test]
+    fn mount_reference_matches_path_components_not_substrings() {
+        let storage = "/tmp/resource/build";
+        let line = "1 0 0:1 / /mnt rw - overlay overlay rw,lowerdir+=/tmp/resource/build/base,upperdir=/tmp/resource/build/upper";
+        assert!(mount_references_storage(line, storage));
+        assert!(!mount_references_storage(line, "/tmp/resource/buil"));
+        assert!(!mount_references_storage(line, "/tmp/resource/build-other"));
+        assert!(!mount_references_storage(
+            "1 0 0:1 / /mnt rw - tmpfs tmpfs rw,lowerdir+=/tmp/resource/build/base",
+            storage
+        ));
+    }
 
     fn fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let id = uuid::Uuid::new_v4().to_string();

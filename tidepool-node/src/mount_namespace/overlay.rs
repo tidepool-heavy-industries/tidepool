@@ -498,9 +498,7 @@ impl MountNamespace {
         &self,
         rotation: OverlayRotation,
     ) -> io::Result<OverlayRotationOutcome> {
-        let (read, write) = rustix::pipe::pipe_with(
-            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
-        )?;
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
         // Command owns/reaps the short helper. All mount work happens in its
         // pre-exec syscall phase; the shell only exits after capabilities drop.
         let descriptors = self.descriptors.clone();
@@ -548,12 +546,15 @@ impl MountNamespace {
             .status();
         drop(command);
         let mut frame = [0u8; 12];
-        let count = loop {
-            match rustix::io::read(&read, &mut frame) {
+        let mut count = 0;
+        while count < frame.len() {
+            match rustix::io::read(&read, &mut frame[count..]) {
                 Err(Errno::INTR) => continue,
-                result => break result?,
+                Ok(0) => break,
+                Ok(bytes) => count += bytes,
+                Err(error) => return Err(error.into()),
             }
-        };
+        }
         if count != frame.len() {
             return Ok(OverlayRotationOutcome::Unconfirmed(format!(
                 "mount helper returned {count} receipt bytes; process result: {status:?}"
