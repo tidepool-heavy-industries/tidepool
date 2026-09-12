@@ -2,10 +2,12 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::unix::process::CommandExt;
+use std::io::Read;
+use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use rustix::fs::{AtFlags, StatxFlags};
+use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags};
 use rustix::io::Errno;
 
 use super::{MountNamespace, OverlayRotation};
@@ -49,60 +51,38 @@ pub(super) fn mount_id(path: &std::ffi::CStr) -> rustix::io::Result<u64> {
 
 impl MountNamespace {
     pub(super) fn observe_overlay(&self, target: &CString) -> io::Result<Observation> {
-        let target = target.clone();
+        self.require_live_owner()?;
         let expected_target = target.clone();
-        let proc =
-            crate::process_boundary::service_scope::checked_proc().map_err(io::Error::other)?;
-        let mut command = self.host_command(Path::new("/"), "cat".as_ref())?;
-        // SAFETY: runs after namespace entry with preallocated arguments and
-        // syscalls only. The nine-byte header cannot fill the stdout pipe while
-        // Command waits for exec; cat subsequently appends its own mountinfo.
-        unsafe {
-            command.pre_exec(move || {
-                // This helper retains its caller's PID namespace. The target's
-                // procfs may not contain it; resolve self through caller procfs.
-                let mountinfo = rustix::fs::openat(
-                    &proc,
-                    c"self/mountinfo",
-                    rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-                    rustix::fs::Mode::empty(),
-                )?;
-                rustix::stdio::dup2_stdin(&mountinfo)?;
-                let id = mount_id(target.as_c_str())?;
-                let flags = rustix::fs::statvfs(target.as_c_str())?.f_flag;
-                let mut header = [0u8; 9];
-                header[..8].copy_from_slice(&id.to_le_bytes());
-                header[8] = u8::from(flags.contains(rustix::fs::StatVfsMountFlags::RDONLY));
-                loop {
-                    match rustix::io::write(rustix::stdio::stdout(), &header) {
-                        Ok(9) => return Ok(()),
-                        Err(Errno::INTR) => continue,
-                        Err(error) => return Err(error.into()),
-                        Ok(_) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
-                    }
-                }
-            });
+        let path = Path::new(std::ffi::OsStr::from_bytes(target.as_bytes()));
+        let mounted = rustix::fs::openat2(
+            &self.descriptors.root,
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        )?;
+        let stat = rustix::fs::statx(&mounted, c"", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)?;
+        if stat.stx_mask & StatxFlags::MNT_ID.bits() == 0 {
+            return Err(Errno::OPNOTSUPP.into());
         }
-        let output = command.output()?;
-        if !output.status.success() || output.stdout.len() < 9 {
-            return Err(io::Error::other(format!(
-                "mount inspection failed: status={}; header_bytes={}; stderr={}",
-                output.status,
-                output.stdout.len().min(9),
-                String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(2048)])
-            )));
+        let id = stat.stx_mnt_id;
+        let readonly = rustix::fs::fstatvfs(mounted.as_fd())?
+            .f_flag
+            .contains(rustix::fs::StatVfsMountFlags::RDONLY);
+        let mountinfo = rustix::fs::openat(
+            &self.descriptors.proc_dir,
+            c"mountinfo",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut bytes = Vec::new();
+        std::fs::File::from(mountinfo)
+            .take(8 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Err(invalid("mountinfo exceeds inspection limit"));
         }
-        let id = u64::from_le_bytes(
-            output.stdout[..8]
-                .try_into()
-                .map_err(|_| invalid("mount identity"))?,
-        );
-        let readonly = match output.stdout[8] {
-            0 => false,
-            1 => true,
-            _ => return Err(invalid("mount flags")),
-        };
-        let record = output.stdout[9..]
+        let record = bytes
             .split(|byte| *byte == b'\n')
             .find(|line| {
                 line.split(|byte| *byte == b' ')

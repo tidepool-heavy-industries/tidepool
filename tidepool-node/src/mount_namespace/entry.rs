@@ -23,7 +23,7 @@ pub struct NamespaceEntry {
     boot: String,
     holder: u32,
     start_ticks: u64,
-    descriptors: [i32; 3],
+    descriptors: [i32; 4],
     identity: ViewIdentity,
 }
 
@@ -36,7 +36,7 @@ impl MountNamespace {
             Mode::empty(),
         )?;
         Ok(NamespaceEntry {
-            version: 2,
+            version: 3,
             preparation: self
                 .preparation
                 .as_ref()
@@ -56,6 +56,7 @@ impl MountNamespace {
                 self.descriptors.user.as_raw_fd(),
                 self.descriptors.mount.as_raw_fd(),
                 self.descriptors.root.as_raw_fd(),
+                self.descriptors.proc_dir.as_raw_fd(),
             ],
             identity: self.view_identity()?,
         })
@@ -71,7 +72,7 @@ impl NamespaceEntry {
 
     /// Acquire the retained view after checking the exporting process and FDs.
     pub fn acquire(&self) -> io::Result<MountNamespace> {
-        if self.version != 2
+        if self.version != 3
             || self.boot != std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
             || self.descriptors.iter().any(|fd| *fd < 0)
         {
@@ -110,6 +111,7 @@ impl NamespaceEntry {
                 user: open(self.descriptors[0], OFlags::RDONLY)?,
                 mount: open(self.descriptors[1], OFlags::RDONLY)?,
                 root: open(self.descriptors[2], OFlags::PATH | OFlags::DIRECTORY)?,
+                proc_dir: open(self.descriptors[3], OFlags::PATH | OFlags::DIRECTORY)?,
                 process,
             }),
         };
