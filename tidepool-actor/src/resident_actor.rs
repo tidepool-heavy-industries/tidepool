@@ -4363,6 +4363,9 @@ where
                 WorkbenchRunStatus::Committed,
                 vec![WorkbenchItemReceipt {
                     index: 0,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
                     status: WorkbenchItemStatus::Committed,
                     output: response.render_text(),
                     warnings: Vec::new(),
@@ -4372,6 +4375,7 @@ where
                 }],
                 1,
                 1,
+                None,
             )));
         }
         let cell_check = if let Some(cell_source) = request.cell_source() {
