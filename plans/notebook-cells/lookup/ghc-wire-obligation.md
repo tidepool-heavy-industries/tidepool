@@ -3,7 +3,8 @@
 Lookup-owned source supplies:
 
 - `normalizeLookupWildcards :: ParsedModule -> ParsedModule`;
-- `searchTypeMatches :: GlobalRdrEnv -> Type -> m [TypeMatch]`;
+- `searchTypeMatches :: GlobalRdrEnv -> Name -> Type -> m [TypeMatch]`
+  (the `Name` excludes the reserved query binder from its own results);
 - closed exact/usable quality and deterministic result ordering;
 - `introspection-search-test`, covering repeated variables, independent
   anonymous wildcards, exact/usable matching and order.
@@ -28,14 +29,19 @@ ordinary compilation:
 6. Preserve `Main.runInspectionMode`'s per-query compile/rejection boundary so
    `[valid name, invalid type, valid type]` returns both successes.
 
-Before incorporation, reconcile the declared Astra matching decision with the
-current deliberately symmetric usable test:
+The GHC 9.12 matrix in `probes/MatcherMatrix.hs` supports the current
+conservative rule:
 
 ```haskell
-tcMatchTy queryBody candidateBody
-  <|> tcMatchTy candidateBody queryBody
+null queryPredicates
+  && null candidatePredicates
+  && (tcMatchTy queryBody candidateBody
+      <|> tcMatchTy candidateBody queryBody)
 ```
 
-Symmetry admits a candidate more general than the requested type, which is
-often useful, but constraints and higher-rank types require corpus evidence.
-The coordinator/lookup parent owns any narrowed direction or quality split.
+Full-sigma `tcMatchTy`/`tcUnifyTy` matched only alpha-equivalent polymorphic
+types in the tested specialization cases. Body matching admitted useful
+specialization in one direction and a more-general candidate in the other.
+Predicates are therefore retained as a gate: only full-type alpha equality is
+accepted when either side is constrained. Nested foralls stay in the body and
+must match there; a rank-2 query does not match a monomorphic argument.

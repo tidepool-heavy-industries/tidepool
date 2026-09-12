@@ -112,10 +112,13 @@ searchTypeMatches rdrEnv queryBinder query = do
       | otherwise = Nothing
 
     matchesEitherDirection left right =
-      let (_, _, leftBody) = tcSplitSigmaTy left
-          (_, _, rightBody) = tcSplitSigmaTy right
-       in isJust (tcMatchTy leftBody rightBody)
-            || isJust (tcMatchTy rightBody leftBody)
+      let (_, leftPredicates, leftBody) = tcSplitSigmaTy left
+          (_, rightPredicates, rightBody) = tcSplitSigmaTy right
+       in null leftPredicates
+            && null rightPredicates
+            && ( isJust (tcMatchTy leftBody rightBody)
+                   || isJust (tcMatchTy rightBody leftBody)
+               )
 
     toMatch name candidate quality =
       TypeMatch

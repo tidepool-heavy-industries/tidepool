@@ -20,27 +20,29 @@ main = do
   let source = root </> "LookupFixture.hs"
   writeFile source fixture
   libdir <- trim <$> readProcess "ghc" ["--print-libdir"] ""
-  (repeatMatches, wildMatches) <- runGhc (Just libdir) $ do
-    flags <- getSessionDynFlags
-    _ <- setSessionDynFlags
-      flags
-        { importPaths = root : importPaths flags,
-          hiDir = Just root,
-          objectDir = Just root
-        }
-    target <- guessTarget source Nothing Nothing
-    setTargets [target]
-    _ <- load LoadAllTargets
-    summary <- getModSummary (mkModuleName "LookupFixture")
-    parsed <- normalizeLookupWildcards <$> parseModule summary
-    typed <- typecheckModule parsed
-    let (tcEnv, _) = tm_internals_ typed
-        rdrEnv = tcg_rdr_env tcEnv
-    (repeatBinder, queryRepeat) <- findId rdrEnv "queryRepeat"
-    (wildBinder, queryWild) <- findId rdrEnv "queryWild"
-    (,)
-      <$> searchTypeMatches rdrEnv repeatBinder queryRepeat
-      <*> searchTypeMatches rdrEnv wildBinder queryWild
+  (repeatMatches, wildMatches, numMatches, plainMatches, rankMatches) <-
+    runGhc (Just libdir) $ do
+      flags <- getSessionDynFlags
+      _ <- setSessionDynFlags
+        flags
+          { importPaths = root : importPaths flags,
+            hiDir = Just root,
+            objectDir = Just root
+          }
+      target <- guessTarget source Nothing Nothing
+      setTargets [target]
+      _ <- load LoadAllTargets
+      summary <- getModSummary (mkModuleName "LookupFixture")
+      parsed <- normalizeLookupWildcards <$> parseModule summary
+      typed <- typecheckModule parsed
+      let (tcEnv, _) = tm_internals_ typed
+          rdrEnv = tcg_rdr_env tcEnv
+      repeatMatches <- matchesFor rdrEnv "queryRepeat"
+      wildMatches <- matchesFor rdrEnv "queryWild"
+      numMatches <- matchesFor rdrEnv "queryNum"
+      plainMatches <- matchesFor rdrEnv "queryPlain"
+      rankMatches <- matchesFor rdrEnv "queryRank"
+      pure (repeatMatches, wildMatches, numMatches, plainMatches, rankMatches)
   let repeatNames = map typeMatchName repeatMatches
       wildNames = map typeMatchName wildMatches
   unless ("queryRepeat" `notElem` repeatNames && "queryWild" `notElem` wildNames) $
@@ -59,6 +61,16 @@ main = do
     fail ("independent wildcards missed wildUseful: " ++ show wildMatches)
   unless (isSorted (map matchKey repeatMatches) && isSorted (map matchKey wildMatches)) $
     fail "matches were not deterministic by quality/name/module/signature"
+  unless (isExact "candidateNum" numMatches) $
+    fail ("alpha-equivalent constrained signature was not exact: " ++ show numMatches)
+  unless ("candidatePlain" `notElem` map typeMatchName numMatches) $
+    fail ("constrained query matched unconstrained candidate: " ++ show numMatches)
+  unless ("candidateNum" `notElem` map typeMatchName plainMatches) $
+    fail ("unconstrained query matched constrained candidate: " ++ show plainMatches)
+  unless (isExact "candidateRank" rankMatches) $
+    fail ("alpha-equivalent nested forall was not exact: " ++ show rankMatches)
+  unless ("candidateMonoRank" `notElem` map typeMatchName rankMatches) $
+    fail ("nested forall matched monomorphic argument: " ++ show rankMatches)
   where
     trim = reverse . dropWhile (`elem` ['\n', '\r']) . reverse
     matchKey result =
@@ -67,6 +79,14 @@ main = do
         typeMatchModule result,
         typeMatchSignature result
       )
+    isExact wanted =
+      any
+        (\result -> typeMatchName result == wanted && typeMatchQuality result == TypeMatchExact)
+
+matchesFor :: (GhcMonad m) => GlobalRdrEnv -> String -> m [TypeMatch]
+matchesFor rdrEnv wanted = do
+  (binder, query) <- findId rdrEnv wanted
+  searchTypeMatches rdrEnv binder query
 
 findId :: (GhcMonad m) => GlobalRdrEnv -> String -> m (Name, Type)
 findId rdrEnv wanted = do
@@ -87,6 +107,7 @@ fixture :: String
 fixture =
   unlines
     [ "{-# LANGUAGE PartialTypeSignatures #-}",
+      "{-# LANGUAGE RankNTypes #-}",
       "module LookupFixture where",
       "queryRepeat :: a -> (a, a)",
       "queryRepeat value = (value, value)",
@@ -97,5 +118,19 @@ fixture =
       "queryWild :: _ -> Maybe _",
       "queryWild = undefined",
       "wildUseful :: Int -> Maybe String",
-      "wildUseful = undefined"
+      "wildUseful = undefined",
+      "queryNum :: Num a => a -> a",
+      "queryNum = id",
+      "candidateNum :: Num b => b -> b",
+      "candidateNum = id",
+      "candidatePlain :: b -> b",
+      "candidatePlain = id",
+      "queryPlain :: a -> a",
+      "queryPlain = id",
+      "queryRank :: (forall a. a -> a) -> Int",
+      "queryRank _ = 0",
+      "candidateRank :: (forall b. b -> b) -> Int",
+      "candidateRank _ = 0",
+      "candidateMonoRank :: (Int -> Int) -> Int",
+      "candidateMonoRank _ = 0"
     ]
