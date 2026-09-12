@@ -25,6 +25,7 @@ import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
   , analyzeCell, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
+  , CellSourcePlan(..), installCellDisplayDeclarations
   , declarationSourceWithTemplate, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
@@ -34,7 +35,7 @@ import Tidepool.Artifacts
   , writeWholeModuleClosed, runMultiTargetClosed, renderAsksJson )
 import Tidepool.GhcPipeline
   ( runPipelineSessionFor, CompilePurpose(..), PipelineResult(..), dumpCore
-  , withResidentPipeline )
+  , withResidentPipeline, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
@@ -195,7 +196,7 @@ spliceHarnessProfilePragma args = case requestFiles args of
 -- to the runtime-owned canonical eval dialect.
 harnessProfilePragmaLine :: String
 harnessProfilePragmaLine =
-  "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
+  "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
 
 -- | The shared epilogue every dispatch arm ends on: render the fixed-shape
 -- JSON diagnostics report to stdout from a captured extraction result, with a
@@ -548,26 +549,43 @@ runCellMode compiler args cellPath = do
     cellSource <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
     template <- readFile templatePath
-    analyzed <- analyzeCell template cellSource >>= either throwCellSplitError pure
-    checkedSource <- either fail pure (renderCellCheckSource template analyzed)
+    initialPlan <- analyzeCell template cellSource >>= either throwCellSplitError pure
+    initialSource <- either fail pure (renderCellCheckSource template initialPlan)
     let outDir = fromMaybe
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
           (requestOutDir args)
-        moduleName' = fromMaybe "CellCheck" (extractModuleName checkedSource)
+        moduleName' = fromMaybe "CellCheck" (extractModuleName initialSource)
         modulePath = outDir </> moduleName' ++ ".hs"
         scope = if hasSessionScope args
           then Just (scopeFromWorkerRequest args)
           else Nothing
     createDirectoryIfMissing True outDir
-    writeFile modulePath checkedSource
     out <- requireArg "--cell-out" (requestCellOut args)
-    -- Preserve GHC's source plan even when checking reports diagnostics.
-    BS.writeFile out (encodeCellOut analyzed [] checkedSource)
-    compiled <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+    (analyzed, provisional) <- checkCellInstances (\plan -> do
+      rendered <- either fail pure (renderCellCheckSource template plan)
+      writeFile modulePath rendered
+      -- Preserve GHC's source plan even when checking reports diagnostics.
+      BS.writeFile out (encodeCellOut plan [] rendered)
+      compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)) initialPlan
+    checkedSource <- either fail pure (renderCellCheckSource template analyzed)
+    (finalPlan, finalSource, compiled) <- if null (cellPlanDisplayTargets analyzed)
+      then pure (analyzed, checkedSource, provisional)
+      else do
+        contextDeclarations <- cellDisplayDeclarations DisplayInstanceContexts provisional analyzed
+        let contextual = installCellDisplayDeclarations contextDeclarations analyzed
+        contextualSource <- either fail pure (renderCellCheckSource template contextual)
+        writeFile modulePath contextualSource
+        contextChecked <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        declarations <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
+        let finalized = installCellDisplayDeclarations declarations analyzed
+        finalizedSource <- either fail pure (renderCellCheckSource template finalized)
+        writeFile modulePath finalizedSource
+        finalizedResult <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        pure (finalized, finalizedSource, finalizedResult)
     -- Statement preparation checks these rendered pins in their actual value
     -- modules before any declaration commits or effect runs.
     BS.writeFile out
-      (encodeCellOut analyzed (prCheckedBinderPins compiled) checkedSource)
+      (encodeCellOut finalPlan (prCheckedBinderPins compiled) finalSource)
   reportDiags res
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same

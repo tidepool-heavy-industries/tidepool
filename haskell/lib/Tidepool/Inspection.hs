@@ -1,3 +1,6 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE MonoLocalBinds #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -11,14 +14,27 @@ module Tidepool.Inspection
     WorkbenchDisplay (..),
     FullInspection,
     FullDisplay (inspectFull),
+    DisplayTree (..),
+    treeParts,
+    DisplayPage,
+    text,
+    more,
+    pageHasMore,
+    pageUnavailable,
+    PageDisplay (..),
+    pageWithContinuation,
+    emptyPage,
+    cellDisplay,
   )
 where
 
 import Control.Monad.Freer (Eff, Member, send)
+import GHC.Records (HasField (getField))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
+import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core (Console (Print))
 import Prelude hiding (print)
 
@@ -47,43 +63,68 @@ class WorkbenchDisplay a where
 -- | Budgeted text rendering. Containers pass their remaining budget to children.
 class Display a where
   displayWith :: Int -> a -> (Text, Bool)
+  displayWith budget value =
+    let (rendered, remaining, unavailable) = renderTree budget (displayTree value)
+    in (rendered, maybe False (const True) remaining || unavailable)
+
+  -- | Structural renderers retain the unconsumed tree. Existing custom
+  -- displayWith instances remain bounded, but must implement this method to
+  -- offer resumable detail rather than an explicitly unavailable remainder.
+  displayTree :: a -> DisplayTree
+  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
+
+  {-# MINIMAL displayWith | displayTree #-}
 
   displayWithout :: [Text] -> Int -> a -> (Text, Bool)
   displayWithout _ = displayWith
 
 renderText :: Int -> Text -> (Text, Bool)
-renderText budget value = (Text.take (max 0 budget) value, Text.length value > max 0 budget)
+renderText budget value =
+  let (prefix, suffix) = Text.splitAt (max 0 budget) value
+  in (prefix, not (Text.null suffix))
 
 instance {-# OVERLAPPABLE #-} (Show a) => Display a where
+  displayTree = StringLeaf . show
   displayWith budget value =
     let limit = max 0 (min (maxBound - 1) budget)
         prefix = take (limit + 1) (show value)
      in (Text.pack (take limit prefix), length prefix > limit)
 
 instance Display Text where
+  displayTree = TextLeaf
   displayWith = renderText
 
+instance Display (a -> b) where
+  displayTree _ = TextLeaf "<function>"
+
 instance (Display a) => Display (Maybe a) where
+  displayTree Nothing = TextLeaf "Nothing"
+  displayTree (Just value) = treeParts "Just (" ")" [displayTree value]
   displayWithout _ budget Nothing = renderText budget "Nothing"
   displayWithout keys budget (Just value) = renderParts budget "Just " "" [\n -> displayWithout keys n value]
   displayWith budget Nothing = renderText budget "Nothing"
   displayWith budget (Just value) = renderParts budget "Just " "" [\n -> displayWith n value]
 
 instance (Display a, Display b) => Display (Either a b) where
+  displayTree (Left value) = treeParts "Left (" ")" [displayTree value]
+  displayTree (Right value) = treeParts "Right (" ")" [displayTree value]
   displayWithout keys budget (Left value) = renderParts budget "Left " "" [\n -> displayWithout keys n value]
   displayWithout keys budget (Right value) = renderParts budget "Right " "" [\n -> displayWithout keys n value]
   displayWith budget (Left value) = renderParts budget "Left " "" [\n -> displayWith n value]
   displayWith budget (Right value) = renderParts budget "Right " "" [\n -> displayWith n value]
 
 instance {-# OVERLAPPING #-} (Display a) => Display [a] where
+  displayTree = treeParts "[" "]" . map displayTree
   displayWithout keys budget values = renderParts budget "[" "]" (map (\value n -> displayWithout keys n value) values)
   displayWith budget values = renderParts budget "[" "]" (map (\value n -> displayWith n value) values)
 
 instance (Display a, Display b) => Display (a, b) where
+  displayTree (a, b) = treeParts "(" ")" [displayTree a, displayTree b]
   displayWithout keys budget (a, b) = renderParts budget "(" ")" [\n -> displayWithout keys n a, \n -> displayWithout keys n b]
   displayWith budget (a, b) = renderParts budget "(" ")" [\n -> displayWith n a, \n -> displayWith n b]
 
 instance (Display a, Display b, Display c) => Display (a, b, c) where
+  displayTree (a, b, c) = treeParts "(" ")" [displayTree a, displayTree b, displayTree c]
   displayWithout keys budget (a, b, c) = renderParts budget "(" ")" [\n -> displayWithout keys n a, \n -> displayWithout keys n b, \n -> displayWithout keys n c]
   displayWith budget (a, b, c) = renderParts budget "(" ")" [\n -> displayWith n a, \n -> displayWith n b, \n -> displayWith n c]
 
@@ -115,7 +156,7 @@ instance WorkbenchDisplay Text where
     let prefix = Text.take (limit + 1) value
      in (Text.take limit prefix, Text.length prefix > limit)
 
-newtype FullInspection = FullInspection ([Text] -> Int -> (Text, Bool))
+data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree
 
 -- | Retain the value and render only the display allowance when observed.
 -- Explicit inspection uses a larger preview, not an unbounded serialization.
@@ -123,15 +164,15 @@ class FullDisplay a where
   inspectFull :: a -> FullInspection
 
 instance {-# OVERLAPPABLE #-} (Display a) => FullDisplay a where
-  inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value)
+  inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value) (displayTree value)
 
 instance FullDisplay Text where
-  inspectFull value = FullInspection (\_ budget -> renderText budget value)
+  inspectFull value = FullInspection (\_ budget -> renderText budget value) (TextLeaf value)
 
 instance WorkbenchDisplay FullInspection where
-  workbenchDisplay (FullInspection render) = render [] 65536
-  workbenchDisplayWithout keys (FullInspection render) = render keys 65536
-  workbenchActivationDisplay budget (FullInspection render) = render [] budget
+  workbenchDisplay (FullInspection render _) = render [] 65536
+  workbenchDisplayWithout keys (FullInspection render _) = render keys 65536
+  workbenchActivationDisplay budget (FullInspection render _) = render [] budget
 
 instance WorkbenchDisplay (ResponseResult a) where
   workbenchDisplay value =
@@ -162,3 +203,96 @@ instance WorkbenchDisplay (ProgressState a) where
   workbenchDisplay (ProgressRejected reason) =
     let (text, omitted) = workbenchDisplay reason
      in ("ProgressRejected · " <> text, omitted)
+
+
+-- | The previous display and an ordinary action that continues its retained
+-- rendering. An exhausted page has an empty, exhausted successor.
+-- The representation is a closure so the resident binding owner retains it
+-- without deep-forcing the tree or the recursively available future pages.
+newtype DisplayPage effects = DisplayPage (() -> (Text, Eff effects (DisplayPage effects), Bool, Bool))
+
+text :: DisplayPage effects -> Text
+text (DisplayPage page) = let (value, _, _, _) = page () in value
+
+more :: DisplayPage effects -> Eff effects (DisplayPage effects)
+more (DisplayPage page) = let (_, continuation, _, _) = page () in continuation
+
+pageHasMore :: DisplayPage effects -> Bool
+pageHasMore (DisplayPage page) = let (_, _, pending, _) = page () in pending
+
+pageUnavailable :: DisplayPage effects -> Bool
+pageUnavailable (DisplayPage page) = let (_, _, _, unavailable) = page () in unavailable
+
+instance HasField "text" (DisplayPage effects) Text where
+  getField = text
+
+instance HasField "more" (DisplayPage effects) (Eff effects (DisplayPage effects)) where
+  getField = more
+
+-- | Before the first display, each actor starts with an empty page. A retained
+-- actor-local value shadows this polymorphic default after a successful display.
+cellDisplay :: DisplayPage effects
+cellDisplay = emptyPage
+
+emptyPage :: DisplayPage effects
+emptyPage = DisplayPage (\() -> ("", pure emptyPage, False, False))
+
+-- | The host supplies the remaining cell allowance. Subsequent pages receive
+-- a fresh allowance without rerunning the expression that produced the value.
+class PageDisplay effects a where
+  displayPage :: Int -> a -> DisplayPage effects
+
+  displayPageWithout :: [Text] -> Int -> a -> DisplayPage effects
+  displayPageWithout _ = displayPage
+
+instance {-# OVERLAPPABLE #-} Display a => PageDisplay effects a where
+  displayPage budget value = pageWithContinuation budget (displayTree value) Nothing
+
+instance PageDisplay effects FullInspection where
+  displayPage budget (FullInspection _ tree) = pageWithContinuation budget tree Nothing
+
+instance PageDisplay effects (DisplayPage effects) where
+  displayPage budget page =
+    let continuation = if pageHasMore page then Just (more page) else Nothing
+        rendered = pageWithContinuation budget (TextLeaf (text page)) continuation
+    in DisplayPage (\() -> (text rendered, more rendered, pageHasMore rendered,
+                            pageUnavailable page || pageUnavailable rendered))
+
+pageWithContinuation :: Int -> DisplayTree -> Maybe (Eff effects (DisplayPage effects)) -> DisplayPage effects
+pageWithContinuation budget tree continuation =
+  let (rendered, remaining, unavailable) = renderTree budget tree
+      next = case remaining of
+        Just suffix -> pure (pageWithContinuation 8192 suffix continuation)
+        Nothing -> maybe (pure emptyPage) id continuation
+      pending = case remaining of
+        Just _ -> True
+        Nothing -> maybe False (const True) continuation
+  in DisplayPage (\() -> (rendered, next, pending, unavailable))
+
+instance Display a => Display (ResponseResult a) where
+  displayTree value = treeParts "ResponseResult {" "}"
+    [ Concat [TextLeaf "responseValue = ", displayTree (responseValue value)]
+    , Concat [TextLeaf "responseExecution = ", displayTree (responseExecution value)]
+    , Concat [TextLeaf "responseWorktree = ", displayTree (responseWorktree value)]
+    ]
+
+instance Display a => Display (ResponseState a) where
+  displayTree ResponsePending = TextLeaf "ResponsePending"
+  displayTree (ResponseCancellationPending reason) = treeParts "ResponseCancellationPending (" ")" [displayTree reason]
+  displayTree (ResponseReady value) = treeParts "ResponseReady (" ")" [displayTree value]
+  displayTree (ResponseUnavailable reason) = treeParts "ResponseUnavailable (" ")" [displayTree reason]
+
+instance Display a => Display (WatchState a) where
+  displayTree WatchPending = TextLeaf "WatchPending"
+  displayTree (WatchReady value) = treeParts "WatchReady (" ")" [displayTree value]
+  displayTree (WatchUnavailable reason) = treeParts "WatchUnavailable (" ")" [displayTree reason]
+
+instance Display a => Display (Settlement a) where
+  displayTree (ReplyAvailable value) = treeParts "ReplyAvailable (" ")" [displayTree value]
+  displayTree (ReplyUnavailable reason) = treeParts "ReplyUnavailable (" ")" [displayTree reason]
+
+instance Display a => Display (ProgressState a) where
+  displayTree ProgressPending = TextLeaf "ProgressPending"
+  displayTree (ProgressUpdate cursor value) = treeParts "ProgressUpdate (" ")" [displayTree cursor, displayTree value]
+  displayTree ProgressClosed = TextLeaf "ProgressClosed"
+  displayTree (ProgressRejected reason) = treeParts "ProgressRejected (" ")" [displayTree reason]

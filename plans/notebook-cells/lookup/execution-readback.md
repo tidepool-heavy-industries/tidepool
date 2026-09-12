@@ -143,7 +143,7 @@ Focused checks then cover:
    an imported value? Module generation metadata may need to travel into the
    inspection request rather than infer provenance from rendered module names.
 3. What default limit fits the hosted output budget, and how is truncation
-   continued without coupling this release to notebook `last.more`?
+   continued without coupling this release to notebook `cellDisplay.more`?
 
 Question 1 is a declared fresh-Astra slot if the initial matching corpus does not
 settle it. Questions 2–3 are retained integration engineering for the lookup

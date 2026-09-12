@@ -129,3 +129,73 @@ fn successor_replays_only_root_source_independent_of_resident_values() {
         "retracted, child-scoped, resident-dependent and downstream declarations must stay absent"
     );
 }
+
+#[test]
+fn successor_replays_shadowed_nominal_types_with_their_original_functions() {
+    let lib_dir = setup();
+    let cache_root = tempfile::tempdir().unwrap();
+    // SAFETY: this integration test owns its process and sets the cache root
+    // before compiling either incarnation.
+    unsafe { std::env::set_var("XDG_CACHE_HOME", cache_root.path()) };
+
+    let durable = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("nominal-declarations.json");
+    let first_root = tempfile::tempdir().unwrap();
+    let mut first = SessionLib::open(
+        SessionId(72),
+        first_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(vec![lib_dir.clone()]);
+    first.attach_recovery_manifest(&manifest).unwrap();
+
+    let old_type = first
+        .define("data Version = Old Int")
+        .expect("define original Version");
+    let old_reader = first
+        .define("readOld :: Version -> Int\nreadOld (Old value) = value")
+        .expect("define original Version reader");
+    let new_type = first
+        .define("data Version = New T.Text")
+        .expect("shadow Version with a distinct nominal type");
+    let new_reader = first
+        .define("readNew :: Version -> Int\nreadNew (New _) = 4")
+        .expect("define shadowed Version reader");
+    assert_eq!(
+        (old_type, old_reader, new_type, new_reader),
+        (Generation(1), Generation(2), Generation(3), Generation(4),)
+    );
+
+    let successor_root = tempfile::tempdir().unwrap();
+    let mut successor = SessionLib::open(
+        SessionId(73),
+        successor_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(vec![lib_dir.clone()]);
+    let report = successor.attach_recovery_manifest(&manifest).unwrap();
+    assert_eq!(report.replayed.len(), 4, "{report:?}");
+    assert!(report.lost.is_empty(), "{report:?}");
+
+    let source = format!(
+        "module Probe where\n\
+         import qualified Data.Text as T\n\
+         import qualified Tidepool.Session.Lib.G{old_reader} as OldGeneration\n\
+         import qualified Tidepool.Session.Lib.G{new_reader} as NewGeneration\n\
+         result :: Int\n\
+         result = OldGeneration.readOld (OldGeneration.Old 3) + NewGeneration.readNew (NewGeneration.New (T.pack \"fresh\"))\n"
+    );
+    let result = compile_and_run_pure_salted(
+        &source,
+        "result",
+        &[successor.include_dir(), lib_dir.as_path()],
+        Some(&successor.cache_salt()),
+    )
+    .unwrap_or_else(|error| {
+        panic!("recovered nominal probe failed:\n{source}\n--- error ---\n{error}")
+    });
+    let json: serde_json::Value = (&result).into();
+    assert_eq!(json, serde_json::json!(7));
+}

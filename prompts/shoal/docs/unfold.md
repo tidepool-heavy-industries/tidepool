@@ -1,5 +1,5 @@
 `unfold` admits persistent context forks and returns their handles now. Children
-start after the entire enclosing tool block finishes, including statements after
+start after the entire enclosing cell finishes, including statements after
 `unfold`. All forks queued in that block inherit its final committed Haskell
 bindings and the conversation through the actual tool result.
 
@@ -8,11 +8,9 @@ let campaign = "my-project" :: CampaignLabel
 let wave = "first-wave" :: ForkGroupLabel
 let domainLabel = "domain" :: Label
 let consumerLabel = "consumer-tests" :: Label
-:{
 workers <- unfold (batch campaign wave) $
   (,) <$> child (coding @Report projectHead (assignment domainLabel domainPlan))
       <*> child (withEffort Low (coding @Report projectHead (assignment consumerLabel consumerPlan)))
-:}
 let sharedAfterUnfold = ("ready" :: Text)
 ```
 
@@ -30,15 +28,15 @@ earlier unfolds. Children inherit the last committed bindings and the real tool
 result describing the failure. Failed admission cancels only its own group.
 
 You may enqueue requests, poll, and register watches after `unfold` in the same
-block. Do not synchronously call or wait for a queued child: it cannot start
-until this block returns. Register a watch or wait in a later tool call.
+cell. Do not synchronously call or wait for a queued child: it cannot start
+until this cell returns. Register the watch in this cell, then end the model
+turn while waiting for its wake.
 If the host reconnects before completion is acknowledged, queued children are
 cancelled with an explicit failure; already started children are unaffected.
 
 `withEffort Low`, `Medium`, or `High` requests the child's initial reasoning
-effort. Omission selects Low, independently of the parent setting. The request alone is not evidence
-of provider application or cache reuse; inspect provider observations before
-claiming either. The consumer branch above inherits the same committed context
+effort. Omission uses the launch selector's inherited default. Inspect provider
+observations when checking the effective selection or cache reuse. The consumer branch above inherits the same committed context
 while explicitly selecting Low for a bounded obligation against an agreed interface.
 Keep more effort for shared design choices and uncertain integration work.
 `withEffort` applies at context-fork construction; it is not an API for steering

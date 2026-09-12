@@ -76,7 +76,20 @@ test-suite cell-splitter-test
   build-depends:
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
+    directory,
+    filepath,
     tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+
+test-suite display-tree-test
+  type:             exitcode-stdio-1.0
+  main-is:          DisplayTreeTest.hs
+  hs-source-dirs:   lib test-display-tree
+  other-modules:    Tidepool.Inspection.Tree
+  build-depends:
+    base >= 4.20 && < 5,
+    text
   default-language: GHC2024
   ghc-options:      -Wall
 

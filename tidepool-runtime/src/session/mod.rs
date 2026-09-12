@@ -66,18 +66,18 @@ pub use resident::{
     ResidentSession, RootCustody, RootedValueRef, SessionRunContext,
 };
 
-pub use view::{SessionCompileView, SourceImports};
+pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
 
 pub use workbench::{
     classify_workbench_item, escape_workbench_haskell_string, normalize_workbench_input,
-    parse_ghci_input, resident_cell_check_template, resident_workbench_templates,
-    run_block_sequence, workbench_input_binding, workbench_json_to_haskell, BlockExecution,
-    BlockSequenceOutcome, CommittedBlock, GhciInputError, GhciInputKind, GhciInputUnit,
-    MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
-    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId,
-    WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
-    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    resident_cell_check_template, resident_workbench_templates, run_block_sequence,
+    workbench_input_binding, workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome,
+    CommittedBlock, MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchBinding,
+    WorkbenchBindingKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchDiscovery,
+    WorkbenchExecutionId, WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 
 pub use turn::{
@@ -118,7 +118,7 @@ use std::path::{Path, PathBuf};
 
 use tidepool_codegen::scope::ScopeId;
 use tidepool_extract_cmd::ExtractCmd;
-use tidepool_repr::{Generation, SessionId, SessionModule};
+use tidepool_repr::{Generation, SessionId, SessionModule, SessionVarId};
 
 pub use render::{
     subtract_import_list_names, DeclLog, DeclTurn, DeclarationKind, ExportItem, ModuleEnv,
@@ -238,6 +238,10 @@ pub enum SessionError {
     /// declaration — a stale or forged `ScopeId`.
     #[error("scope {0:?} is not live (never minted, or already retired)")]
     DeadScope(ScopeId),
+    #[error(
+        "staged declaration no longer matches this session's live declaration or value environment"
+    )]
+    StaleStagedDeclaration,
     /// A mount ([`super::resident::ResidentSession::mount_handle_in`])
     /// targeted a `(scope, name)` pair that resolves to no live binding — the
     /// throwaway placeholder bind that mints the `name`'s identity was never
@@ -305,9 +309,45 @@ pub struct SessionLib {
 /// the live declaration log or scope tip.
 #[derive(Clone, Debug)]
 pub struct StagedDeclaration {
-    pub generation: Generation,
-    pub module: SessionModule,
-    pub receipt: DeclarationReceipt,
+    generation: Generation,
+    module: SessionModule,
+    receipt: DeclarationReceipt,
+    session_id: SessionId,
+    root: PathBuf,
+    scope: ScopeId,
+    base_generation: Generation,
+    base_tip: Generation,
+    turn: DeclTurn,
+    import_modules: Vec<String>,
+    inject_modules: Vec<String>,
+    visible_values: Vec<(SessionVarId, String)>,
+}
+
+impl StagedDeclaration {
+    #[must_use]
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+    #[must_use]
+    pub fn module(&self) -> SessionModule {
+        self.module
+    }
+    #[must_use]
+    pub fn receipt(&self) -> &DeclarationReceipt {
+        &self.receipt
+    }
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+    #[must_use]
+    pub fn items(&self) -> &[ExportItem] {
+        &self.turn.items
+    }
+    pub(crate) fn with_visible_values(mut self, values: Vec<(SessionVarId, String)>) -> Self {
+        self.visible_values = values;
+        self
+    }
 }
 
 impl SessionLib {
@@ -905,7 +945,7 @@ impl SessionLib {
         let sources = vec![receipt.source.replay_source(external)];
         let workbench_imports = receipt.source.prologue.workbench_imports();
         let mut log = self.log.clone();
-        let generation = log.push(DeclTurn {
+        let turn = DeclTurn {
             normalized: receipt.source.clone(),
             external_imports: external.clone(),
             sources,
@@ -913,7 +953,8 @@ impl SessionLib {
             items: receipt.items.clone(),
             retracts: Vec::new(),
             parent: (self.scope_tip(scope).0 > 0).then_some(self.scope_tip(scope)),
-        });
+        };
+        let generation = log.push(turn.clone());
         let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
         self.write_module(&rendered)?;
         if let Err(error) = self.validate_candidate(&rendered, inject_modules) {
@@ -924,11 +965,52 @@ impl SessionLib {
             generation,
             module: rendered.module,
             receipt: receipt.clone(),
+            session_id: self.id,
+            root: self.root.clone(),
+            scope,
+            base_generation: self.log.generation(),
+            base_tip: self.scope_tip(scope),
+            turn,
+            import_modules: import_modules.to_vec(),
+            inject_modules: inject_modules.to_vec(),
+            visible_values: Vec::new(),
         })
     }
 
+    pub(crate) fn adopt_staged_batch_with_receipt_and_vals_in(
+        &mut self,
+        staged: StagedDeclaration,
+        visible_values: &[(SessionVarId, String)],
+    ) -> Result<Generation, SessionError> {
+        if staged.session_id != self.id
+            || staged.root != self.root
+            || staged.base_generation != self.log.generation()
+            || staged.base_tip != self.scope_tip(staged.scope)
+            || staged.generation != self.log.generation().next()
+            || staged.module != self.next_module()
+            || staged.visible_values != visible_values
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let generation = self.push_turn_in(staged.scope, staged.turn.clone());
+        if staged.scope == ScopeId::ROOT {
+            self.record_recovery_turn(recovery::RecoveryTurn::new(
+                self.id.0,
+                generation.0,
+                staged.turn.sources,
+                Vec::new(),
+                staged.import_modules.is_empty() && staged.inject_modules.is_empty(),
+            ));
+        }
+        Ok(generation)
+    }
+
     pub(crate) fn discard_staged(&self, staged: &StagedDeclaration) {
-        if staged.generation == self.log.generation().next() {
+        if staged.session_id == self.id
+            && staged.root == self.root
+            && staged.base_generation == self.log.generation()
+            && staged.generation == self.log.generation().next()
+        {
             self.discard_module_artifacts(staged.module);
         }
     }
@@ -1305,5 +1387,98 @@ mod tests {
         let lib2 =
             SessionLib::open(SessionId(2), dir.path(), ModuleEnv::standalone_default()).unwrap();
         assert_ne!(lib1.cache_salt(), lib2.cache_salt());
+    }
+
+    fn validated_staged_declaration(lib: &SessionLib, source: &str) -> StagedDeclaration {
+        let receipt = lib
+            .declaration_receipt(&[source])
+            .expect("extract declaration receipt")
+            .expect("non-empty declaration receipt");
+        lib.stage_batch_with_receipt_and_vals_in(
+            ScopeId::ROOT,
+            &SourceImports::new(),
+            &receipt,
+            &[],
+            &[],
+        )
+        .expect("stage and validate declaration")
+    }
+
+    fn validated_staged_answer(lib: &SessionLib) -> StagedDeclaration {
+        validated_staged_declaration(lib, "answer :: Int\nanswer = 42")
+    }
+
+    fn staged_test_lib(root: &tempfile::TempDir) -> SessionLib {
+        tidepool_testing::eval_harness::require_extract();
+        SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default())
+            .expect("open declaration library")
+            .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
+    }
+
+    #[test]
+    fn adopting_a_validated_candidate_commits_it_once_and_keeps_its_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("recovery.json");
+        let mut lib = staged_test_lib(&root);
+        lib.attach_recovery_manifest(&manifest)
+            .expect("attach empty recovery manifest");
+        let staged = validated_staged_answer(&lib);
+        let module_path = root.path().join(staged.module().relative_hs_path());
+        assert!(
+            module_path.exists(),
+            "validation wrote the candidate module"
+        );
+
+        assert_eq!(
+            lib.adopt_staged_batch_with_receipt_and_vals_in(staged.clone(), &[])
+                .expect("adopt the validated candidate"),
+            Generation(1)
+        );
+        assert_eq!(lib.generation(), Generation(1));
+        assert!(
+            manifest.exists(),
+            "adoption records the durable recovery turn"
+        );
+        assert!(lib.recovery_manifest_warning().is_none());
+
+        lib.discard_staged(&staged);
+        assert!(
+            module_path.exists(),
+            "a copied post-adoption token cannot delete a committed module"
+        );
+    }
+
+    #[test]
+    fn stale_candidate_cannot_remove_a_sibling_committed_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = staged_test_lib(&root);
+        let stale = validated_staged_declaration(&lib, "stale :: Int\nstale = 1");
+        // A second checkout prepares and commits the same next generation
+        // before the first candidate can adopt. Its module supersedes the
+        // provisional artifact at that generation.
+        let sibling = validated_staged_declaration(&lib, "winner :: Int\nwinner = 7");
+        let module_path = root.path().join(sibling.module().relative_hs_path());
+        assert_eq!(
+            lib.adopt_staged_batch_with_receipt_and_vals_in(sibling, &[])
+                .expect("adopt sibling candidate"),
+            Generation(1)
+        );
+        assert!(
+            std::fs::read_to_string(&module_path)
+                .expect("read sibling module")
+                .contains("winner = 7"),
+            "the sibling committed source owns G1"
+        );
+        assert!(matches!(
+            lib.adopt_staged_batch_with_receipt_and_vals_in(stale.clone(), &[]),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        lib.discard_staged(&stale);
+        assert!(
+            std::fs::read_to_string(&module_path)
+                .expect("read sibling module after stale discard")
+                .contains("winner = 7"),
+            "a stale candidate cannot delete its sibling's committed module"
+        );
     }
 }

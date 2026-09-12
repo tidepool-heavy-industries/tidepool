@@ -1,16 +1,19 @@
-Run GHCi-style input in this actor's persistent workbench. Each nonblank line is
-one unit; `:{` through `:}` forms one unit. Sequence effects in `do`; use one
-tuple or record binding to retain several results. Units run in order. Failed
-observations are local; a rejected Haskell/effect unit stops the suffix. Prior
-units and effects remain committed.
+```haskell
+data Finding = Finding Text
+summarize (Finding path) = prefix <> path
+  where prefix = "checked: "
+paths <- pure ["src", "tests"]
+labels <- pure (map (summarize . Finding) paths)
+labels
+```
 
-Use `:doc topics`, `:type`, `:info`, or `:bindings` to resolve missing context.
-On watch wake, poll the retained handle; skip repeated orientation.
-Request activations expose `sessionInput`, `sessionReply`, and `respond`.
-Ending the model response ends the turn; watches and normal steering can wake it.
-Typed handles and receipts are authoritative; `:status` reports queues.
+Send notebook cells of raw Haskell. GHC checks the complete cell before effects;
+declarations are mutually recursive, later statements see earlier bindings, and
+each expression displays. Ordinary data types display without deriving; truncated
+output offers `cellDisplay.more`. Typecheck rejection changes nothing. Runtime failure retains
+its completed prefix and marks the suffix not run. Declarations and bindings persist.
 
-Progress requests expose `reportProgress`. Use typed source actors for ongoing
-routing without rearming. `pollProgress`/finite watches observe snapshots.
-`:status!` shows provider health. Failed provider turns leave requests pending;
-inspect before steering or retirement.
+Use hosted `lookup` for names, `::type` queries, and documentation; use `status`
+for actor state. Activations expose `sessionInput`, `sessionReply`, and `respond`.
+Ending the model response ends the turn; watches and steering can wake it. Failed
+provider turns leave requests pending; inspect handles and receipts before action.

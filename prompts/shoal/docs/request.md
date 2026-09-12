@@ -75,7 +75,7 @@ without a `Show` conversion, quoting, or escaping. Opaque inputs remain valid:
 use their types to select fields or apply them. Other values use `Show` by default.
 
 The reply type's GHC declaration is captured at its typed request site when
-available and capped at 4 KiB, with a direct `:info` cue if truncated. Reply-type
+available and capped at 4 KiB, with a direct lookup cue if truncated. Reply-type
 dependencies are not expanded automatically; no second type lookup is performed
 at activation. Older artifacts without a captured declaration still show the
 exact reply type. Presentation does not settle the request.

@@ -4076,8 +4076,8 @@ where
                                     text,
                                     (*unit.display_remaining).min(32768),
                                 );
-                                *unit.display_remaining =
-                                    unit.display_remaining.saturating_sub(rendered.len() + 1);
+                                let rendered =
+                                    next_fragment.present_output(&rendered, unit.display_remaining);
                                 if !rendered.is_empty() {
                                     unit.command_output.push(rendered);
                                 }
@@ -4504,106 +4504,10 @@ where
         } else {
             None
         };
-        let mut receipts = Vec::new();
+        let mut receipts: Vec<WorkbenchItemReceipt> = Vec::new();
+        let mut cell_display_remaining = 8192usize;
         let mut index = 0;
         while index < request.items.len() {
-            let command = request.items[index].trim();
-            let status_view = match command {
-                ":status" => Some(StatusView::Concise),
-                ":status!" => Some(StatusView::Expanded),
-                ":lineage" => Some(StatusView::Lineage),
-                ":trace" => Some(StatusView::Trace),
-                _ => None,
-            };
-            if let Some(status_view) = status_view {
-                receipts.push(WorkbenchItemReceipt {
-                    index,
-                    kind: None,
-                    span: None,
-                    source_items: Vec::new(),
-                    status: WorkbenchItemStatus::Committed,
-                    output: self.status_text(kernel, context.actor, status_view),
-                    warnings: Vec::new(),
-                    installed_bindings: Vec::new(),
-                    operations: Vec::new(),
-                    terminal_transfer: None,
-                });
-                index += 1;
-                continue;
-            }
-            let inspection =
-                workbench.inspection_query(&request.items[index], request.input_kind(index));
-            if let Err(output) = &inspection {
-                if request.item_is_observational(index) {
-                    receipts.push(WorkbenchItemReceipt {
-                        index,
-                        kind: None,
-                        span: None,
-                        source_items: Vec::new(),
-                        status: WorkbenchItemStatus::Diagnostic,
-                        output: output.clone(),
-                        warnings: Vec::new(),
-                        installed_bindings: Vec::new(),
-                        operations: Vec::new(),
-                        terminal_transfer: None,
-                    });
-                    index += 1;
-                    continue;
-                }
-            }
-            if let Ok(Some(first)) = inspection {
-                let mut queries = vec![first];
-                while index + queries.len() < request.items.len() {
-                    let candidate = index + queries.len();
-                    match workbench
-                        .inspection_query(&request.items[candidate], request.input_kind(candidate))
-                    {
-                        Ok(Some(query)) => queries.push(query),
-                        Ok(None) | Err(_) => break,
-                    }
-                }
-                let batch_len = queries.len();
-                let outputs = workbench
-                    .inspect_items(context.clone(), queries)
-                    .await
-                    .map_err(|source| {
-                        workbench_failure(&receipts, index, request.items.len(), source)
-                    })?;
-                for (offset, output) in outputs.into_iter().enumerate() {
-                    let receipt_index = index + offset;
-                    match output {
-                        Ok(output) => receipts.push(WorkbenchItemReceipt {
-                            index: receipt_index,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Committed,
-                            output,
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: Vec::new(),
-                            terminal_transfer: None,
-                        }),
-                        Err(output) => {
-                            receipts.push(WorkbenchItemReceipt {
-                                index: receipt_index,
-                                kind: None,
-                                span: None,
-                                source_items: Vec::new(),
-                                status: WorkbenchItemStatus::Diagnostic,
-                                output,
-                                warnings: Vec::new(),
-                                installed_bindings: Vec::new(),
-                                operations: Vec::new(),
-                                terminal_transfer: None,
-                            });
-                        }
-                    }
-                }
-                index += batch_len;
-                continue;
-            }
-
             let source = request.items[index].clone();
             let mut unit_operations = Vec::new();
             let mut command_output = Vec::new();
@@ -4619,6 +4523,9 @@ where
                     .map(|item| item.output.len() + 1)
                     .sum::<usize>(),
             );
+            if request.tool_call().is_none() {
+                display_remaining = display_remaining.min(cell_display_remaining);
+            }
             let block = ParsedBlock {
                 ordinal: index + 1,
                 total: request.items.len(),
@@ -4654,14 +4561,17 @@ where
                                 )
                             })?;
                             workbench
-                                .begin_prepared_cell_item(context.clone(), block, prepared)
+                                .begin_prepared_cell_item(
+                                    context.clone(),
+                                    block,
+                                    prepared,
+                                    cell_display_remaining,
+                                )
                                 .await
                         }
-                        None => {
-                            workbench
-                                .begin_item(context.clone(), block, request.input_kind(index))
-                                .await
-                        }
+                        None => Err(ResidentActorWorkbenchError::CompileInfrastructure(
+                            "authored cell reached execution without compiler preparation".into(),
+                        )),
                     }
                 };
             let mut step = match started {
@@ -4745,6 +4655,16 @@ where
                     } else {
                         format!("{command_prefix}\n{output}")
                     };
+                    if let Some(checked) = &cell_check {
+                        let spent = if checked.items[index].verdict.kind
+                            == tidepool_runtime::session::TurnKind::Expr
+                        {
+                            output.chars().count()
+                        } else {
+                            command_prefix.chars().count()
+                        };
+                        cell_display_remaining = cell_display_remaining.saturating_sub(spent);
+                    }
                     if self.environment.fork_groups.has_ready(context.actor) {
                         let publication = if self.active_fork_boundary.is_none() {
                             self.environment.fork_groups.publish_ready(context.actor)
@@ -4828,22 +4748,6 @@ where
                         &mut unit_operations,
                         WorkbenchOperationDisposition::Rejected,
                     );
-                    if request.item_is_observational(index) {
-                        receipts.push(WorkbenchItemReceipt {
-                            index,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Diagnostic,
-                            output,
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: unit_operations,
-                            terminal_transfer: None,
-                        });
-                        index += 1;
-                        continue;
-                    }
                     self.abort_incomplete_groups(
                         kernel,
                         context.actor,
@@ -7294,7 +7198,7 @@ mod tests {
                     span: None,
                     source_items: Vec::new(),
                     status: WorkbenchItemStatus::Rejected,
-                    output: "<input unit 2>: runtime error: pattern match failure: Just x".into(),
+                    output: "<cell item 2>: runtime error: pattern match failure: Just x".into(),
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
@@ -7344,8 +7248,7 @@ mod tests {
             });
         let original = WorkbenchExecutionId::from_digest([1; 16]);
         let successor = WorkbenchExecutionId::from_digest([2; 16]);
-        let request = WorkbenchRequest::from_ghci_input("effectfulAction")
-            .unwrap()
+        let request = WorkbenchRequest::from_cell_input("effectfulAction")
             .with_execution_id(original.clone());
         let mut journal = WorkbenchExecutions::default();
         journal.begin(&original, request.clone(), Some(&invocation));
@@ -7354,8 +7257,7 @@ mod tests {
             journal.lookup(&successor, &retry, Some(&invocation)),
             Err(super::WorkbenchReplayFailure::Unconfirmed)
         );
-        let changed = WorkbenchRequest::from_ghci_input("differentAction")
-            .unwrap()
+        let changed = WorkbenchRequest::from_cell_input("differentAction")
             .with_execution_id(successor.clone());
         assert_eq!(
             journal.lookup(&successor, &changed, Some(&invocation)),
@@ -7368,8 +7270,7 @@ mod tests {
     #[test]
     fn actor_owned_workbench_retry_returns_only_the_exact_committed_call() {
         let execution = WorkbenchExecutionId::from_digest([7; 16]);
-        let request = WorkbenchRequest::from_ghci_input("effectfulAction")
-            .unwrap()
+        let request = WorkbenchRequest::from_cell_input("effectfulAction")
             .with_execution_id(execution.clone());
         let reply = Ok(WorkbenchResponse {
             status: WorkbenchRunStatus::Committed,
@@ -7399,8 +7300,7 @@ mod tests {
             completed.cancellation(execution.clone(), None),
             crate::WorkbenchCancellationOutcome::Expired { .. }
         ));
-        let different = WorkbenchRequest::from_ghci_input("differentAction")
-            .unwrap()
+        let different = WorkbenchRequest::from_cell_input("differentAction")
             .with_execution_id(execution.clone());
         assert_eq!(
             completed.lookup(&execution, &different, None),
@@ -7423,9 +7323,8 @@ mod tests {
                 namespace: None,
             });
         let execution = WorkbenchExecutionId::from_digest([3; 16]);
-        let request = WorkbenchRequest::from_ghci_input("unfold work")
-            .unwrap()
-            .with_execution_id(execution.clone());
+        let request =
+            WorkbenchRequest::from_cell_input("unfold work").with_execution_id(execution.clone());
         let reply = Ok(WorkbenchResponse {
             status: WorkbenchRunStatus::Committed,
             summary: None,

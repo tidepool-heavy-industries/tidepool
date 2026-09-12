@@ -50,16 +50,16 @@ progressive unfold branches use `childWithProgress @Progress @Result`.
 The target's mounted `reportProgress` publishes an arbitrary typed value.
 Observers use independent revision cursors with `pollProgress` or
 `awaitProgressAfter`; updates coalesce and ready watches retain stable
-snapshots. See `:doc watch` for the channel contract.
+snapshots. Use hosted `lookup` with `doc watch` for the channel contract.
 
 Provider failures leave requests pending and notify the exact supervisor.
 Inspect typed roster health and disposition before recovery or cleanup.
 `IdleRetained` is the retirement candidate; cleanup revalidates it.
-`:status!` separates requested and provider-confirmed model settings and shows
+The detailed `status` view separates requested and provider-confirmed model settings and shows
 the verified backend installation. Hosted shells expose that executable in
 `TIDEPOOL_INTERACTIVE_CODEX_BIN`. Use Shoal communication rather than native
 collaboration, and explicitly stop workers whose rejected history cannot be
-recovered. See `:doc recovery` and `:doc cleanup`.
+recovered. Use `lookup` with `doc recovery` and `doc cleanup`.
 
 Durable inbox readers accept legacy numeric acknowledgement cursors and rows
 without publication stamps. New acknowledgements store a JSON checkpoint with
@@ -68,31 +68,19 @@ is a forward migration: older binaries cannot read the new checkpoint format.
 Rebuilding the host is required to use these additions; a running host retains
 its loaded prompt and API catalog.
 
-Start by inspecting the actual environment:
-
-```haskell
-:browse
-:bindings
-:status
-:type sessionInput
-```
-
-Use `:type` and `:info` when a name or constructor is unclear. `:show imports`
-reports the effective module environment. The supported meta-command set is
-intentionally smaller than full GHCi. `:status` emphasizes active work,
-`:status!` includes terminal history, `:lineage` isolates ancestry, and
-`:trace` adds exact prompt/cache samples and identifiers.
+Start from the assignment and inspect only a missing fact. Hosted `lookup`
+answers a name, `::type` searches callable names, `doc` lists guides, and
+`doc <topic>` returns one. The `status` tool defaults to `summary`; `detailed`,
+`lineage`, `trace`, `recovery`, and `bindings` provide focused runtime views.
 Actor observations include `rosterWorkbenchPosture`, which distinguishes a
 running Haskell input unit from suspension at a named Rust-handled effect.
 This state is runtime-owned; elapsed time and notification prose are not.
 
-The workbench executes input units in order. A failed observational command
-such as `:type`, `:info`, or `:browse` is a local `Diagnostic`, so later
-independent observations still run. A rejected Haskell/effectful unit stops the
-suffix and marks it `NotRun`; earlier successful declarations and bindings
-remain committed. Effects already performed by the rejected unit are not
-rolled back. Put a declaration group or one effect sequence inside `:{` / `:}`
-and persist several results with one outer tuple or record binding.
+The workbench checks an entire notebook cell before effects. Declarations are
+mutually recursive and visible to its statements; later statements see earlier
+bindings. A rejected cell changes nothing. A runtime failure marks its suffix
+not run while retaining earlier bindings and effects. Use one outer tuple or
+record binding when several effect results belong together.
 
 Compiler diagnostics are part of the interaction interface. Interactive
 compilation keeps warnings as warnings rather than promoting incomplete
@@ -197,15 +185,9 @@ workers with `stopAgent`. `withLifetime SwarmOwned` creates a selected-context
 independent worker from a top-level actor; otherwise supervision follows its
 creator. Swarm shutdown still owns independent worker retirement.
 
-The target activation carries the task as an ordinary User message. Its
-request scope mounts visibly distinct input and output authority:
-
-```haskell
-:type sessionInput
-:type sessionReply
-:type respond
-respond (ReviewReport findings)
-```
+The target activation carries the task as an ordinary User message. Its request
+scope mounts `sessionInput`, `sessionReply`, and `respond`; use targeted `lookup`
+when a type is missing, then settle with the requested value.
 
 Submitting a type error rejects only that workbench input. Correct it in the
 same persistent actor application. Ending a model response without replying leaves
@@ -250,8 +232,8 @@ Coding actors can scaffold, fork, and integrate within their effective row and
 remaining descendant budget. Scaffolding selects a different prompt emphasis
 with the same capabilities. Each recursive launch consumes one depth level;
 a narrowed row or exhausted budget still prevents recursion. Shared handles do
-not transfer worktree or response ownership. See `:doc tree` and
-`:doc refinement` for selective folds and reviewer-driven typed repair.
+not transfer worktree or response ownership. Use `lookup` with `doc tree` and
+`doc refinement` for selective folds and reviewer-driven typed repair.
 
 `Unfold` is deliberately applicative, not monadic: the runtime can see and
 reserve the complete sibling shape before it publishes any assignment. Statements
@@ -279,8 +261,8 @@ launch.
 
 Branches use readable hierarchical paths such as
 `shoal/normalization/implementation/domain`, with deterministic numeric
-suffixes on collision. `BranchReceipt`, `me`, `listAgents`, and
-`:status` retain exact actor/worktree identities beneath those readable names.
+suffixes on collision. `BranchReceipt`, `me`, `listAgents`, and `status` retain
+exact actor/worktree identities beneath those readable names.
 Request settlement also records the starting head and committed, staged,
 unstaged, and untracked submission evidence before response/watch readiness.
 Set `guidance` and `deadline` on its `Assignment` to refine one branch without
@@ -296,7 +278,6 @@ before printing results; retain the original typed state for failure and Git
 evidence inspection. Define the report and view before dispatch:
 
 ```haskell
-:{
 data ChangeReport = ChangeReport
   { changeCommit :: Text, changeSummary :: Text, changeChecks :: [Text] }
 data ChangeView
@@ -312,7 +293,6 @@ changeView state = case state of
   WatchReady (ReplyAvailable result) ->
     let report = responseValue result
     in ChangeReady (changeCommit report) (changeSummary report) (changeChecks report)
-:}
 ```
 
 For example, assign two independent review tasks against a clean source head.
@@ -327,11 +307,9 @@ let domainReview = "domain" :: Label
 let uiReview = "ui" :: Label
 let domainTask = "Review domain invariants. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
 let uiTask = "Review presentation behavior. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
-:{
 forks <- unfold (batch reviewCampaign reviewWave) $
   (,) <$> child (coding @ChangeReport projectHead (assignment domainReview domainTask))
       <*> child (coding @ChangeReport projectHead (assignment uiReview uiTask))
-:}
 ```
 
 Register the independent watches in the same block or a later call:
@@ -428,7 +406,7 @@ no `complete`, `yield`, or `park`, and only its supervisor terminates the actor.
 Successful `respond` transfers result custody and closes that request's current
 workbench activation without running an effectful suffix.
 
-Use `:status` for runtime-owned application, response, and watch state. Typed
+Use `status` for runtime-owned application, response, and watch state. Typed
 handles and `pollResponse`/`pollWatch` remain authoritative; activation prose
 and tmux panes are diagnosis surfaces.
 
@@ -464,8 +442,8 @@ a meaningful integration boundary.
   accepted pure root declaration source is replayed through GHC from a
   versioned, content-hashed manifest. Arbitrary values, closures, lenses,
   responses, watches, replies, and old handles are intentionally not
-  serialized or revived. Use `:recovery` for the exact replay/loss report and
-  `:bindings` for successor truth before acting on transcript references.
+  serialized or revived. Use the `recovery` and `bindings` status views before
+  acting on transcript references.
 - Linked worktrees share Git objects and configuration but not working files,
   indexes, or `HEAD`. Use the repository's matched extractor/toolchain path;
   stale inherited endpoints can otherwise compile a different checkout.
@@ -483,10 +461,10 @@ explicit refusal-bearing retention cleanup, labeled applicative watches,
 typed request and branch deadlines, typed stop and truthful lifecycle
 observation, role-specific effect rows, atomic cache-preserving unfold,
 recursive scaffold and fold, server-filtered managed worktree queries, and
-runtime `:status`/`Tidepool.Actors.Observe.actorContext` facts, activation-scoped provider usage,
+runtime `status`/`Tidepool.Actors.Observe.actorContext` facts, activation-scoped provider usage,
 versioned prompt fingerprints, structured workbench item receipts, typed
 campaign snapshots and cleanup, source-checkout integration custody, and
-honest source-only root recovery. Workbench posture is visible in `:status`
+honest source-only root recovery. Workbench posture is visible in `status`
 and typed roster observations. Supervisor lineage is recorded for every
 child; context-parent lineage is additionally recorded only for actual context
 forks.
@@ -529,7 +507,7 @@ Inspect both the Host and Root panes before dispatch, while workers run, and
 after settlement. The next live boundary is queued reuse of one persistent
 worker through replies and watches:
 
-1. In the root workbench, inspect `:browse`, `:bindings`, and `:status`; define
+1. In the root workbench, use targeted `lookup` and `status`; define
    one small report ADT. A root has no `sessionInput` outside a request scope.
 2. Create one managed worktree with `allowDirtySnapshot` if the console source
    is dirty, start one `codingAgent`, and submit two real code-and-test requests
@@ -555,8 +533,8 @@ worker through replies and watches:
 Submit both requests before waiting. A representative shape is:
 
 ```haskell
-responseA <- request @Text agent firstLabel ()
-responseB <- request @CanaryReport agent secondLabel ()
+responseA <- request @Text agent (assignment firstLabel ())
+responseB <- request @CanaryReport agent (assignment secondLabel ())
 both <- watch bothLabel ((,) <$> awaitResponse responseA <*> awaitResponse responseB)
 ```
 

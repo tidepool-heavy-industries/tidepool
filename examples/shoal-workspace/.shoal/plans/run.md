@@ -21,7 +21,7 @@ it does not override that live checkout selection. Commit coherent work for Git
 integration and restart recovery, even though ordinary unfold inherits working files.
 
 Use `withContext (selected taskContext)` for an independent component or fresh
-inspection; use `atRef (GitRef source)` with the source variant for an exact
+inspection; use `atRef (GitRef (renderGitOid source))` with the source variant for an exact
 committed checkout. Context/source/model/lifetime stay separate choices. Review
 helpers deliberately select fresh context and the exact candidate commit.
 
@@ -84,6 +84,7 @@ obligation has an owner, drain that old router:
 
 ```haskell
 previousAttempt <- finishWork reviewWave
+inspectFull previousAttempt
 ```
 
 The next attempt has new source handles, so it gets a new router. `replaceActor`
@@ -96,7 +97,8 @@ accepted Task/Candidate intact. A reviewed head and the lead's resulting checked
 head are different facts. Once the lead has checked its resulting checkout:
 
 ```haskell
-respond (Produced (Delivered accepted head checks))
+let delivery = Delivered accepted head checks
+respond (Produced delivery)
 ```
 
 Here accepted is the actual ReviewedCandidate, and head/checks describe resulting
@@ -141,6 +143,7 @@ request owner's retained response, for example the initial review:
 
 ```haskell
 delivery <- updateRequest reviewer (decisionContext decision)
+pollRequestUpdate delivery
 ```
 
 Handle Left explicitly; on Right retain the RequestUpdate handle and poll when

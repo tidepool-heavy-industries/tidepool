@@ -1,7 +1,8 @@
 # Shoal Haskell API
 
-Use ordinary GHCi-style Haskell. Bind handles and values in one cell, then use
-them in later cells. The default scope is `Tidepool.Actors.Shoal`; workspace
+Use ordinary Haskell in notebook cells. One cell may contain
+declarations, bindings, and expressions; declarations are mutually recursive
+and visible throughout the cell. The default scope is `Tidepool.Actors.Shoal`; workspace
 modules such as `Project.Work` provide project policy.
 
 ```haskell
@@ -12,8 +13,12 @@ worker <- unfold (batch "cleanup" "implementation") $
       assignment "remove-stale-path" task
 
 ready <- watch "implementation-ready" (awaitSettled worker)
-pollWatch ready
+ready
 ```
+
+The final expression displays the watch handle. End the model turn while waiting.
+Truncated displays offer `cellDisplay.more`, which reads retained output without
+repeating the original effect.
 
 An `unfold` is applicative. It constructs every child before submitting any
 assignment, and children start after the cell commits. Combine independent
@@ -46,6 +51,10 @@ state <- pollWatch ready
 inspectFull (fmap settledValue state)
 ```
 
+`lookup` provides name information and type search (`::type`); `doc` lists its
+topics and `doc <topic>` returns one guide. `status` defaults to `summary` and
+also provides `detailed`, `recovery`, `lineage`, `trace`, and `bindings` views.
+
 `pollResponse` distinguishes pending, cancellation pending, ready, and
 unavailable responses. A wake is a reason to inspect retained handles; it does
 not prove success. A typed reply is evidence of execution, not integration.
@@ -63,5 +72,29 @@ Use `sendMessage me text` only when steering the current actor is intended.
 
 Cancellation is acknowledged by the target through its activation binding.
 Stopping actors and releasing groups remain explicit supervision decisions.
-Inspect failure values instead of reconstructing work blindly; earlier effects
-in a rejected or interrupted cell may already have completed.
+Inspect failure values before retrying. Typecheck rejection runs no effects;
+runtime failure or interruption keeps the completed prefix.
+
+Common signatures (reference, not a cell to execute):
+
+```haskell signatures
+assignment :: Label -> input -> Assignment input
+coding :: WorktreeSeed -> Assignment input -> Branch CodingEffects input result
+researching :: WorktreeSeed -> Assignment input -> Branch ResearchEffects input result
+child :: (KnownEffects child, Subset child parent)
+      => Branch child input result -> Unfold parent (Response result)
+unfold :: (Member Forks effects, Member Replies effects, Member AgentInspection effects)
+       => ForkGroupPath -> Unfold effects result -> Eff effects result
+request :: Member Replies effects
+        => AgentRef -> Assignment input -> Eff effects (Response result)
+awaitSettled :: Response result -> Await (Settlement result)
+watch :: Member Watches effects => WatchLabel -> Await result -> Eff effects (Watch result)
+pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState result)
+pollResponse :: Member Replies effects => Response result -> Eff effects (ResponseState result)
+```
+
+`Map.`, `Set.`, and `T.` provide maps, sets, and text. `Cmd.` provides command
+composition; `R.` provides record actors. `traverse`, `for`, `forM`, `forM_`,
+and `for_` are already in scope. Use a type application such as `request @Report`
+when the result type is otherwise unconstrained; later statements in the same
+cell can often determine it.

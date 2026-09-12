@@ -56,7 +56,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         // caller bug (never the user's declaration, never an environment or
         // wire-format problem) surfacing while the engine is driving a turn —
         // the same "failed while running" shape `Runtime` already covers.
-        SessionError::DeadScope(_) => {
+        SessionError::DeadScope(_) | SessionError::StaleStagedDeclaration => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
         // Same shape as `DeadScope`: a caller bug in the mount seam (a stale

@@ -100,6 +100,7 @@ fn binder_parse_pragmas_is_exact_subset_of_eval_pragmas() {
         "MultilineStrings",
         "DeriveGeneric",
         "DeriveAnyClass",
+        "StandaloneDeriving",
         "DuplicateRecordFields",
         "OverloadedRecordDot",
     ]

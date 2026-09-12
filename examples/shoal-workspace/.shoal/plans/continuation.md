@@ -64,6 +64,7 @@ verdicts or retained actionable blockers:
 
 ```haskell
 retiredFlow <- R.finish reviewBox
+inspectFull retiredFlow
 ```
 
 Keep the returned exit and the reviewer agent independently. `R.finish` does not

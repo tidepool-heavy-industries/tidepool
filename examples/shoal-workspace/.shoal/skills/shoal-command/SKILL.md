@@ -59,6 +59,7 @@ completion routing. `Cmd` is `Tidepool.Command`; `bash`, `withMemory`, `MiB`,
 
 ```haskell
 result <- Cmd.run [bash|git status --short|]
+let changed = T.lines <$> Cmd.stdout result
 ```
 
 Output appears automatically, including for a bound result. The result remains

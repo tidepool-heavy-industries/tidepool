@@ -1789,7 +1789,7 @@ fn compile_root(
     );
     Ok((
         ActorWorkbenchSource::new(preamble, include)
-            .with_default_browse_module(WORKBENCH_SURFACE_MODULE)
+            .with_imports(WORKBENCH_SURFACE_MODULE)
             .with_imports("qualified Tidepool.Actor.Record as R")
             .with_imports("qualified Tidepool.Command as Cmd")
             .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
@@ -4974,21 +4974,18 @@ mod tests {
             let observed =
                 dispatch_haskell_script(policy, include_str!("actor_host/roster_observe.hs")).await;
             assert_eq!(observed["status"], "committed", "{observed:?}");
+            let roster_type = dispatch_lookup(policy, &["AgentRosterEntry"]).await;
             assert!(
-                observed["items"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|item| item["output"]
-                        .as_str()
-                        .is_some_and(|output| output.contains("rosterActorId"))),
-                "{observed:?}"
+                roster_type["items"][0]["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("rosterActorId")),
+                "{roster_type:?}"
             );
             let next = dispatch_haskell_script(policy, "40 + 2 :: Int").await;
             assert_eq!(next["status"], "committed", "{next:?}");
             assert_eq!(next["items"][0]["output"], "42", "{next:?}");
         }
-        let status = dispatch_haskell_script(root.as_ref(), ":status!").await;
+        let status = dispatch_status(root.as_ref(), "detailed").await;
         assert_ne!(status["status"], "failed", "{status:?}");
         campaign.forest.shutdown().await;
         campaign.hosted.await.unwrap();
@@ -5145,8 +5142,7 @@ mod tests {
             actor
                 .address()
                 .send_message(tidepool_actor::KernelMessage::Workbench {
-                    request: tidepool_runtime::session::WorkbenchRequest::from_ghci_input(source)
-                        .unwrap(),
+                    request: tidepool_runtime::session::WorkbenchRequest::from_cell_input(source),
                     control: None,
                     reply: reply.into(),
                 })
@@ -5759,6 +5755,55 @@ mod tests {
             .await
             .expect("recorded tool completion");
         result
+    }
+
+    async fn dispatch_structured_tool(
+        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let call_id = uuid::Uuid::new_v4().simple().to_string();
+        let result = endpoint
+            .dispatch_boxed(ToolInvocation {
+                context: Some(ToolInvocationContext {
+                    context_call_id: Some(call_id.clone()),
+                    thread_id: "actor-host-vertical".into(),
+                    turn_id: call_id.clone(),
+                    call_id: call_id.clone(),
+                    namespace: Some(name.into()),
+                }),
+                name: name.into(),
+                arguments: ToolArguments::Structured(arguments),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{name} tool failed: {error}"));
+        endpoint
+            .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: "actor-host-vertical".into(),
+                call_id,
+            })
+            .await
+            .expect("recorded tool completion");
+        result
+    }
+
+    pub(super) async fn dispatch_lookup(
+        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        queries: &[&str],
+    ) -> serde_json::Value {
+        dispatch_structured_tool(
+            endpoint,
+            "lookup",
+            serde_json::json!({ "queries": queries }),
+        )
+        .await
+    }
+
+    pub(super) async fn dispatch_status(
+        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        view: &str,
+    ) -> serde_json::Value {
+        dispatch_structured_tool(endpoint, "status", serde_json::json!({ "view": view })).await
     }
 
     #[tokio::test]
@@ -7171,12 +7216,9 @@ mod tests {
             answer.to_string().contains("original assignment"),
             "{answer:?}"
         );
-        let root_reply = dispatch_haskell_script(root.as_ref(), ":type respond").await;
+        let root_reply = dispatch_lookup(root.as_ref(), &["respond"]).await;
         assert!(
-            root_reply
-                .to_string()
-                .to_lowercase()
-                .contains("not in scope"),
+            root_reply.to_string().to_lowercase().contains("no match"),
             "{root_reply:?}"
         );
         let idle_setup = dispatch_haskell_script(
@@ -7230,10 +7272,9 @@ mod tests {
         let admitted = idle_send.await.unwrap();
         assert_eq!(admitted["status"], "committed", "{admitted:?}");
         for name in ["respond", "sessionReply", "sessionInput"] {
-            let absent =
-                dispatch_haskell_script(idle.policy.as_ref(), &format!(":type {name}")).await;
+            let absent = dispatch_lookup(idle.policy.as_ref(), &[name]).await;
             assert!(
-                absent.to_string().to_lowercase().contains("not in scope"),
+                absent.to_string().to_lowercase().contains("no match"),
                 "idle recipient gained {name}: {absent:?}"
             );
         }
@@ -7991,29 +8032,33 @@ mod tests {
             ..
         } = test_campaign::TestCampaign::start().await;
 
+        let inspected = dispatch_lookup(
+            root_installation.policy.as_ref(),
+            &["DefinitelyMissingFromShoal", "request", "fmt"],
+        )
+        .await;
+        assert_eq!(inspected["status"], "committed", "{inspected:?}");
+        let inspection_text = inspected["items"][0]["output"].as_str().unwrap();
+        assert!(inspection_text.contains("no match"), "{inspected:?}");
+        assert!(inspection_text.contains("request"), "{inspected:?}");
+        assert!(inspection_text.contains("fmt"), "{inspected:?}");
+        let status = dispatch_status(root_installation.policy.as_ref(), "summary").await;
+        assert_eq!(status["status"], "committed", "{status:?}");
         let ergonomics = dispatch_haskell_script(
             root_installation.policy.as_ref(),
             include_str!("actor_host_fixtures/generic_actor/workbench_ergonomics.hs"),
         )
         .await;
         assert_eq!(ergonomics["status"], "committed", "{ergonomics:?}");
-        assert_eq!(ergonomics["items"][0]["status"], "diagnostic");
-        assert_eq!(ergonomics["items"][1]["status"], "committed");
-        assert_eq!(ergonomics["items"][2]["status"], "committed");
-        assert_eq!(ergonomics["items"][3]["status"], "committed");
-        assert!(ergonomics["items"][3]["warnings"]
+        assert_eq!(ergonomics["items"][0]["status"], "committed");
+        assert!(ergonomics["items"][0]["warnings"]
             .as_array()
             .is_some_and(|warnings| !warnings.is_empty()));
-        assert_eq!(ergonomics["items"][4]["status"], "committed");
-        assert_eq!(ergonomics["items"][5]["output"], "7");
-        assert_eq!(ergonomics["items"][6]["output"], "value=7");
-        for index in 7..=8 {
-            let item = &ergonomics["items"][index];
-            assert_eq!(item["status"], "committed", "{item:?}");
-        }
+        assert_eq!(ergonomics["items"][1]["status"], "committed");
+        assert_eq!(ergonomics["items"][2]["output"], "7");
+        assert_eq!(ergonomics["items"][3]["output"], "value=7");
 
-        // Execute the mounted documentation itself, including its real
-        // multiline delimiters, rather than a separately maintained example.
+        // Execute the mounted documentation itself.
         let workbench_doc = include_str!("../../prompts/shoal/docs/workbench.md");
         let (_, example) = workbench_doc.split_once("```haskell\n").unwrap();
         let (example, _) = example.split_once("```").unwrap();
@@ -8145,8 +8190,7 @@ mod tests {
                 .as_array()
                 .is_some_and(|operations| !operations.is_empty()))));
 
-        let pending_status =
-            dispatch_haskell_script(root_installation.policy.as_ref(), ":status").await;
+        let pending_status = dispatch_status(root_installation.policy.as_ref(), "summary").await;
         let pending_status = pending_status["items"][0]["output"]
             .as_str()
             .expect("status output");
@@ -8172,7 +8216,7 @@ mod tests {
                 && pending_status.contains("bound_worktree=Some("),
             "{pending_status}"
         );
-        let lineage = dispatch_haskell_script(root_installation.policy.as_ref(), ":lineage").await;
+        let lineage = dispatch_status(root_installation.policy.as_ref(), "lineage").await;
         let lineage = lineage["items"][0]["output"]
             .as_str()
             .expect("lineage output");
@@ -8247,17 +8291,23 @@ mod tests {
         assert_eq!(witness_activation.input_type, "Text");
         assert_eq!(scaffold_activation.input_type, "Text");
 
+        let reply_bindings = dispatch_lookup(
+            worker_installation.policy.as_ref(),
+            &["sessionReply", "respond"],
+        )
+        .await;
+        assert_eq!(reply_bindings["status"], "committed", "{reply_bindings:?}");
         let replied = dispatch_haskell_script(
             worker_installation.policy.as_ref(),
-            ":type sessionReply\n:type respond\nrespond (ReplyReport (sessionInput + sharedDelta))",
+            "respond (ReplyReport (sessionInput + sharedDelta))",
         )
         .await;
         assert_eq!(replied["status"], "replied", "{replied:?}");
         assert_eq!(
-            replied["items"][2]["terminalTransfer"], "replyAccepted",
+            replied["items"][0]["terminalTransfer"], "replyAccepted",
             "{replied:?}"
         );
-        assert!(replied["items"][2]["operations"]
+        assert!(replied["items"][0]["operations"]
             .as_array()
             .is_some_and(|operations| operations.iter().any(|operation| {
                 operation["effect"] == "reply" && operation["disposition"] == "committed"
@@ -8336,8 +8386,7 @@ mod tests {
         );
         assert_eq!(group_observation["items"][0]["output"], "Just 3");
 
-        let ready_status =
-            dispatch_haskell_script(root_installation.policy.as_ref(), ":status").await;
+        let ready_status = dispatch_status(root_installation.policy.as_ref(), "summary").await;
         let ready_status = ready_status["items"][0]["output"]
             .as_str()
             .expect("status output");
@@ -8726,7 +8775,7 @@ mod tests {
 
         let folded = dispatch_haskell_script(
             scaffold_installation.policy.as_ref(),
-            ":{\nevidenceOf :: ResponseResult a -> (WorktreeReceipt, GitOid)\nevidenceOf result = case responseWorktree result of { WorktreeObserved receipt _ submission -> (receipt, case submittedHead submission of { OnBranch _ oid -> oid; Detached oid -> oid }); _ -> error \"expected worktree evidence\" }\nmergeObserved :: WorktreeHandle -> Text -> ResponseResult a -> Eff CodingEffects (Either WorktreeError MergeOutcome)\nmergeObserved target message result = let (receipt, source) = evidenceOf result in tryMerge MergeRequest { mergeSourceHead = source, mergeSourceBranch = Just (branch receipt), mergeTargetWorktree = worktreeId target, mergeMessage = message }\n:}\nnestedObserved <- pollWatch nestedReady\nlet nestedResults = case nestedObserved of { WatchReady values -> values; _ -> error \"expected ready nested watch\" }\ntargetResult <- boundWorktree\nlet targetTree = case targetResult of { Right value -> value; Left _ -> error \"expected bound scaffold tree\" }\nmergeImplementation <- mergeObserved targetTree \"merge nested implementation\" (fst nestedResults)\nmergeVerification <- mergeObserved targetTree \"merge nested verification\" (snd nestedResults)\nrespond (ScaffoldReport \"folded\")",
+            include_str!("actor_host/nested_merge_fold.hs"),
         )
         .await;
         assert_eq!(folded["status"], "replied", "{folded:?}");

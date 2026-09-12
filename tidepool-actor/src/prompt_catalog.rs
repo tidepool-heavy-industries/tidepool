@@ -102,10 +102,10 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "lineage" | "status" | "trace" => Ok(include_str!("../../prompts/shoal/docs/lineage.md")),
         "recovery" | "recover" => Ok(include_str!("../../prompts/shoal/docs/recovery.md")),
         "help" | "topics" => Ok(
-            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery. Use `:doc <topic>`.",
+            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery. Use hosted `lookup` with `doc <topic>`.",
         ),
         other => Err(format!(
-            "unknown Shoal documentation topic `{other}`; use `:doc topics`"
+            "unknown Shoal documentation topic `{other}`; use hosted `lookup` with `doc`"
         )),
     }
 }
@@ -130,7 +130,7 @@ mod tests {
         );
         let description = PromptId::HaskellToolDescription.body();
         assert!(description.contains("`sessionReply`"));
-        assert!(description.contains("`:status`"));
+        assert!(description.contains("`status`"));
         assert!(description.contains("Ending the model response ends the turn"));
         assert!(artifacts
             .iter()
@@ -140,8 +140,8 @@ mod tests {
         assert!(workbench_doc("refinement")
             .unwrap()
             .contains("retained handles"));
-        assert!(workbench_doc("lineage").unwrap().contains(":trace"));
-        assert!(workbench_doc("recovery").unwrap().contains(":recovery"));
+        assert!(workbench_doc("lineage").unwrap().contains("trace"));
+        assert!(workbench_doc("recovery").unwrap().contains("recovery"));
         assert_eq!(hosted_prompt_fingerprint().len(), 64);
         assert!(workbench_doc("missing").is_err());
     }

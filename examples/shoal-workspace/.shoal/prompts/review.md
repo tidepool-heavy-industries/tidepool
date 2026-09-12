@@ -44,7 +44,8 @@ For acceptance, bind assignment to the current checked Task, checks and conclusi
 to your actual evidence, then:
 
 ```haskell
-respond (Produced (Accepted (ReviewedCandidate assignment latest checks conclusion)))
+let reviewed = ReviewedCandidate assignment latest checks conclusion
+respond (Produced (Accepted reviewed))
 ```
 
 The reviewed candidate is the single source of its reviewed revision. Keep source

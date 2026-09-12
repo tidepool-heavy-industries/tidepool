@@ -60,7 +60,7 @@ obligation across this checkpoint and subsequent local waves.
 
 The initial source is the app checkout after this .shoal package is committed.
 Resolve and record the exact commit before launch. `component campaign part
-(GitRef exactCommit)` constructs a Task with source, scope, rationale and acceptance.
+exactCommit` constructs a Task with source, scope, rationale and acceptance.
 Attach relevant checked decisions with withDecision before selecting fresh workers.
 The integration owner owns the final app branch; a component delivery publishes
 evidence-bearing commits and does not silently update that branch.
@@ -72,7 +72,7 @@ notes describe an older Astra tree or inherited-context dogfood run. App source
 ownership and verification guidance still apply. This wave changes the app;
 harness diagnosis, deployment and runtime migration are separate engineering work.
 Do not browse Tidepool implementation merely to learn the Haskell interface.
-Use the shipped guide, `:doc` and these modules; report a missing usage contract.
+Use the shipped guide, hosted `lookup` documentation, and these modules; report a missing usage contract.
 
 Sol may refactor within owned scope and improve tests/idioms without changing
 acceptance. Exact semantics, interface corrections and scope discoveries should

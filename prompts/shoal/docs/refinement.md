@@ -8,11 +8,11 @@ With `interfaceWorker`, `revisionLabel`, and a task-specific `revisionPlan`
 already bound, and `RevisionReport` defined as your desired result type:
 
 ```haskell
-:{
 revision <- requestWith @RevisionReport (responseActor interfaceWorker) $
   (assignment revisionLabel revisionPlan)
     { guidance = Just "Address only the accepted review findings." }
-:}
+let revisionActor = responseActor revision
+revisionActor
 ```
 
 The new response has its own identity and worktree evidence. Settling either

@@ -1,17 +1,14 @@
-Send raw GHCi-style source. Nonblank lines are units; :{ / :} encloses a
-multiline unit. Bind useful results.
-Rejected units stop the suffix; successful work and effects are not undone.
-A new call is new intent; exact transport retries return the retained receipt.
+Send raw Haskell as a notebook cell. GHC checks it before effects. Declarations
+are mutually recursive and visible to statements; later statements see earlier
+bindings. Declarations and bindings persist. Typecheck rejection runs no effects.
+Runtime failure retains its prefix and stops the suffix. An exact retry returns
+its receipt. Imports persist; leading pragmas are cell-local. No colon commands.
 
-Read the assignment in its activation. For omitted prose, use
-inspectFull sessionInput directly. Opaque inputs need selection or application.
-Use the shared API guide first; :type, :info, and :doc fill gaps.
-:bindings locates needed names; never use it as a startup inventory.
-Use :status! for lifecycle uncertainty and :recovery after recreation.
+Read the activation; use `inspectFull sessionInput` for omitted prose. Hosted
+`lookup` answers names, `::type` searches callable names, and `doc` finds guides.
+`status` has `summary`, `detailed`, `recovery`, `lineage`, `trace`, and `bindings`.
 
-unfold starts children after the tool block returns. request queues new work;
-updateRequest clarifies an owned active response. respond value settles the
-request; ending the model response only ends the turn. Roots have no reply.
-When only waiting remains, register a watch and end the turn; poll on wake.
-Expand saved observations with their displayed expression.
-Use shell tools for repository work.
+`unfold` starts children after the cell returns. `request` queues new work;
+`updateRequest` clarifies an owned active response; `respond` settles it. Register
+a watch when waiting, then end the model turn. Failed provider turns leave requests
+pending; inspect before steering or retirement. Use shell tools for repository work.

@@ -4426,8 +4426,6 @@ dependencies = [
  "glob",
  "log",
  "parking_lot",
- "pest",
- "pest_derive",
  "proptest",
  "schemars 1.2.2",
  "serde",

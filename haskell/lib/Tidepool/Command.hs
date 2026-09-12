@@ -1,3 +1,6 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
@@ -83,7 +86,10 @@ import Tidepool.Effects.Core
     CommandStream (..),
     Commands (..),
   )
-import Tidepool.Inspection (Display (..), WorkbenchDisplay (..), renderText)
+import Tidepool.Inspection
+  ( Display (..), DisplayTree (..), DisplayPage, PageDisplay (..)
+  , WorkbenchDisplay (..), pageWithContinuation, renderText
+  )
 import Tidepool.QQ.Bash (bash)
 
 data RunResult
@@ -252,6 +258,8 @@ instance WorkbenchDisplay CommandOutput where
   workbenchDisplay = displayWith 65536
 
 instance Display RunResult where
+  displayTree Finished {commandResult = outcome, capturedOutput = captured} =
+    Concat [TextLeaf (resultHeading outcome <> "\n"), displayTree captured]
   displayWithout keys budget result@Finished {completedJob = Job key, commandResult = outcome}
     | key `elem` keys = renderText budget (resultHeading outcome <> " · output retained")
     | otherwise = displayWith budget result
@@ -263,13 +271,20 @@ instance Display RunResult where
        in (text, omitted || clipped)
 
 instance Display OutputPage where
+  displayTree OutputPage {pageStream = stream, pageDetails = details} =
+    TextLeaf (outputHeading (T.pack (show stream)) details)
   displayWith budget OutputPage {pageStream = stream, pageDetails = details} =
     renderText budget (outputHeading (T.pack (show stream)) details)
 
 instance Display CommandOutput where
+  displayTree captured = Concat
+    [ TextLeaf (outputHeading "stdout" (commandStdout captured))
+    , TextLeaf (outputHeading "stderr" (commandStderr captured))
+    ]
   displayWith = displayOutput
 
 instance Display CommandPage where
+  displayTree = TextLeaf . outputHeading "output"
   displayWith budget = renderText budget . outputHeading "output"
 
 displayOutput :: Int -> CommandOutput -> (Text, Bool)
@@ -329,3 +344,41 @@ instance Display OutputIssue where
     StillRunning retained ->
       "Command still running: " <> T.pack (show retained) <> ". Continue observing the same job with Cmd.await."
     other -> T.pack (show other)
+
+
+-- Reading a continuation uses the retained job and cursor. It never calls run,
+-- start, or await, and drains this page's text before requesting another page.
+instance Member Commands effects => PageDisplay effects OutputPage where
+  displayPage budget page = outputDisplayPage budget page Nothing
+
+outputDisplayPage :: Member Commands effects => Int -> OutputPage -> Maybe (Eff effects (DisplayPage effects)) -> DisplayPage effects
+outputDisplayPage budget page following =
+  let details = pageDetails page
+      unread = outputEnd details < outputAvailableEnd details || not (outputFinished details)
+      continuation = if unread
+        then Just (do later <- next page; pure (outputDisplayPage 8192 later following))
+        else following
+  in pageWithContinuation budget (displayTree page) continuation
+
+instance Member Commands effects => PageDisplay effects RunResult where
+  displayPage budget result@Finished {completedJob = retained, capturedOutput = captured} =
+    pageWithContinuation budget (displayTree result) (remainingOutput retained captured)
+  displayPageWithout keys budget result@Finished {completedJob = retained@(Job key), commandResult = outcome}
+    | key `elem` keys =
+        let stderr = Just (do page <- readOutput Stderr retained; pure (outputDisplayPage 8192 page Nothing))
+            allOutput = Just (do page <- output retained; pure (outputDisplayPage 8192 page stderr))
+        in pageWithContinuation budget (TextLeaf (resultHeading outcome <> " · output retained")) allOutput
+    | otherwise = displayPage budget result
+
+remainingOutput :: Member Commands effects => Job -> CommandOutput -> Maybe (Eff effects (DisplayPage effects))
+remainingOutput retained captured = missing Stdout (commandStdout captured)
+  (missing Stderr (commandStderr captured) Nothing)
+  where
+    missing stream details following
+      | outputStart details > 0 = Just (do
+          page <- readOutput stream retained
+          pure (outputDisplayPage 8192 page following))
+      | outputEnd details < outputAvailableEnd details || not (outputFinished details) = Just (do
+          page <- readPage retained stream (OutputOffset (outputEnd details))
+          pure (outputDisplayPage 8192 page following))
+      | otherwise = following

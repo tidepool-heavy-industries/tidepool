@@ -17,7 +17,8 @@ they claim to establish; a compile-only demonstration does not prove execution.
 When a bounded source amendment is useful, commit it and return:
 
 ```haskell
-respond (AmendPlan (PlanAmendment base head paths reason obligations checks))
+let amendment = PlanAmendment base head paths reason obligations checks
+respond (AmendPlan amendment)
 ```
 
 The owner accepts, incorporates and checks the proposal before dependent work.

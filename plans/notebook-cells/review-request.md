@@ -40,7 +40,7 @@ After the notebook wire is checked, recursively fork:
 
 1. extractor lexer/classification and synthesis/diagnostics/type transport;
 2. runtime/actor receipts, prefix installation, recovery and terminal `respond`;
-3. Generic display eligibility and rendering-tree/`last.more` work after its
+3. Generic display eligibility and rendering-tree/`cellDisplay.more` work after its
    exact typed contract is resolved by the declared fresh Astra slot.
 
 Notebook parent retains the real `ResidentActorRunner::run_workbench_step` join.
@@ -58,7 +58,7 @@ pagination are exercised through hosted tools.
    experiment?
 2. Is any product behavior changed by the readbacks? Recommendation: no. Keep
    terminal middle-`respond` with tail `NotRun`, search only next-cell scope,
-   canonical batch lookup input, latest-successful-display `last`, and Stage 1
+   canonical batch lookup input, latest-successful-display `cellDisplay`, and Stage 1
    inference promise.
 3. Any correction to shared-file ownership or the concrete second-level branches
    before the coordinator steers both pending leads?

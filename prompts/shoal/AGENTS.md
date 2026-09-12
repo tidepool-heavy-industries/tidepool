@@ -13,8 +13,9 @@ This file guides contributors; it is not part of the shipped model prompt.
   Inherited bindings and descriptions do not transfer permissions or reply ownership.
 - Teach scaffold, exact-context fork, independent review and checked integration.
   Delivery of a baseline is not acknowledgment or verified incorporation.
-- Describe Low as the omitted fork effort and native Codex goals as disabled on
-  all Shoal nodes. Do not introduce a different policy in prompt prose.
+- Describe omitted fork effort through the native launch selector's inherited
+  default; native Codex goals remain disabled on all Shoal nodes. Verify policy
+  against the production selector, not the fallback launch helper.
 - Preserve active-update admission/presentation/incorporation distinctions and
   retained failure receipts. Never suggest silently queuing a replacement update.
 - Keep `haskell-tool-instructions.md` within its provider size limit. Prompt

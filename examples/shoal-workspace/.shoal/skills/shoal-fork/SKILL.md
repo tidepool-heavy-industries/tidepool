@@ -4,9 +4,10 @@ description: Compose Shoal implementation children in resident Haskell, choosing
 ---
 
 Use the resident Haskell tool. The selected package imports Project.Types, Work,
-Plan, Routing and Observe. Read a relevant skill before related forks so children
-inherit useful API knowledge. Their request-local bindings still come from their
-own assignment, not the parent's history.
+Plan, Routing and Observe. An inherited fork carries conversation, not skill
+contents. A child using `withContext (selected taskContext)` reads relevant skills
+itself or receives the needed facts in its assignment. Its request-local bindings
+come from its own assignment, not the parent's history.
 
 `solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
 builds a branch value. `Task` is a record, not a module; use `taskSource`,
@@ -22,7 +23,7 @@ let branch = withEffort Medium $ withContext (selected taskContext) $ solTaskFro
 ```
 
 Choose `source = boundHead` for your current bound checkout, `projectHead` at the
-original root, or `atRef (GitRef commit)` for a deliberate committed seed. Omit
+original root, or `atRef (GitRef (renderGitOid commit))` for a deliberate committed seed. Omit
 `withContext (selected taskContext)` when related children should inherit your
 completed reasoning. Fresh context is useful after bulky reconciliation or for
 independent review; descendants within a focused subtree can inherit.

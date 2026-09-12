@@ -36,7 +36,7 @@ providers, scheduling, resources, persistence, and argument parsing.
 - Keep model-facing Haskell familiar, typed, and small. Optimize it as an LLM
   interaction surface, not as a comprehensive mirror of low-level runtime
   failures.
-- GHCi-style fenced Haskell is the primary resident-agent interaction surface.
+- Notebook cells of raw Haskell are the primary resident-agent interaction surface.
   Do not add JSON/tool-call ceremony where ordinary Haskell syntax suffices.
 - Prefer `Member Effect effects` constraints to naming or depending on a
   concrete effect-stack order. Effects are ordinary extensible API, not a

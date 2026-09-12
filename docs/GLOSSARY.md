@@ -77,5 +77,5 @@ merge of model contexts.
 3. Let types carry concepts: show the effect list, show
    `Either InvocationExit T`, say `ContextRef` is runtime-issued and
    unforgeable.
-4. Prefer the vocabulary models already know: GHCi, Haskell,
+4. Prefer the vocabulary models already know: notebook cells, Haskell,
    `Control.Concurrent.Async`.

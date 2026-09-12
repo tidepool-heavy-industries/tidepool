@@ -25,7 +25,7 @@ after checked incorporation there and an explicit next-swarm selection.
 `[haskell].checks` in config.toml names ordinary Haskell entry points. Keep these
 separate from `[haskell].modules`, which are imported into working actors. The
 prepared checks live in Project.Checks, Project.CollaborationChecks and
-Project.RoutingChecks; their GHCi expressions are adjacent in .shoal/checks.
+Project.RoutingChecks; their notebook cells are adjacent in .shoal/checks.
 Edit a helper, its guidance and its checks together, then run:
 
 ```sh
@@ -39,7 +39,7 @@ not run the application's product tests or prove a live model followed its promp
 Runtime/log directories are excluded. The candidate source and live swarm stay intact.
 
 Use Tidepool.Check only in those check entry points: root/activation identify exact
-resident actors; turn evaluates ordinary GHCi source at its completed tool boundary;
+resident actors; turn evaluates a Haskell cell at its completed tool boundary;
 git/readFile/writeFile operate in a check actor's temporary checkout. check asserts
 a named fact. present/notPresented/unconfirmed exercise the existing native update
 presentation seam. restart deliberately closes the model-free swarm and captures

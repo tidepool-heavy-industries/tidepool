@@ -8,6 +8,7 @@ Given the current `sessionInput :: Task` and your committed `candidate :: Candid
 
 ```haskell
 (reviewer, reviewProgress) <- reviewCandidate sessionInput OwnerRepairs candidate
+let reviewerRef = responseActor reviewer
 ```
 
 This returns a retained reviewer plus progress. `OwnerRepairs` means you repair
@@ -20,7 +21,8 @@ with `checks :: [Text]` naming the actual checks and `scope :: Text` describing 
 those checks establish:
 
 ```haskell
-respond (Produced (Accepted (ReviewedCandidate (reviewAssignment sessionInput) (reviewInput sessionInput) checks scope)))
+let reviewed = ReviewedCandidate (reviewAssignment sessionInput) (reviewInput sessionInput) checks scope
+respond (Produced (Accepted reviewed))
 ```
 
 For defects, return `Produced (Repair (reviewInput sessionInput) findings)` instead.

@@ -24,7 +24,8 @@ Bind head to the exact checked commit, checks to actual commands/evidence there,
 and gates to remaining product limits. For implement's Outcome Candidate:
 
 ```haskell
-respond (Produced (Candidate head checks gates))
+let candidate = Candidate head checks gates
+respond (Produced candidate)
 ```
 
 Remain available for repair. Use WorkProgress to publish candidate evidence and the current unresolved

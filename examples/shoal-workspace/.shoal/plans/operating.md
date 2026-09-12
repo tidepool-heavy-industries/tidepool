@@ -86,7 +86,7 @@ being delivered. Root-owned UI/API wiring is a deliverable with a recipient and 
 provide it early enough for dependent lanes to exercise the actual consumer.
 A branch awaiting its second scaffold need not stop a sibling's third wave.
 
-For example, inside a lead, bind `source :: Text` to its actual checked integration
+For example, inside a lead, bind `source :: GitOid` to its actual checked integration
 hash and `leftTask`/`rightTask` to two current independent assignments, with accepted
 decisions already incorporated. Both get that source; their obligations remain
 distinct. These bindings prepare branches and launch nothing:
@@ -140,7 +140,7 @@ also does not establish provider cache reuse; report the observed coverage.
 
 ## Source, evidence and handoffs
 
-`taskSource`, `candidateCommit` and `decisionSource` are currently Text fields with
+`taskSource`, `candidateCommit` and `decisionSource` are GitOid fields with
 specific source meanings. Resolve actual Git hashes; put explanatory prose in
 rationale, evidence or the obligation. Prefer existing constructors or a small
 record update to reconstructing an entire Task. A corrected AcceptedDecision must

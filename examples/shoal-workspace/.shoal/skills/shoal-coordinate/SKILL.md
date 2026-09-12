@@ -8,7 +8,8 @@ installs `reportProgress`. Given `candidate :: Candidate`, publish useful eviden
 without ending the request:
 
 ```haskell
-reportProgress (WorkProgress [candidate] [])
+let update = WorkProgress [candidate] []
+reportProgress update
 ```
 
 The list of questions is the current unresolved set, not only newly opened ones.

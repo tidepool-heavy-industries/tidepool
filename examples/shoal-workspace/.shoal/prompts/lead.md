@@ -64,7 +64,8 @@ resulting integration head; review semantic integration changes. Bind accepted,
 head and checks to that actual evidence, then:
 
 ```haskell
-respond (Produced (Delivered accepted head checks))
+let delivery = Delivered accepted head checks
+respond (Produced delivery)
 ```
 
 Preserve product gates and the parent's remaining integration obligation. Return

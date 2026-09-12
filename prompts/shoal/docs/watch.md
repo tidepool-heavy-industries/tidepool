@@ -5,10 +5,9 @@ settlement sources still need `report = Silent`.
 
 ```haskell
 let joinLabel = "first-wave-results" :: WatchLabel
-:{
 joined <- watch joinLabel $
   (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
-:}
+pollWatch joined
 ```
 
 A combined watch is appropriate when the next decision needs both results.
@@ -31,9 +30,8 @@ finite observation. `ReplyAvailable` carries a typed result and its evidence;
 dependency must succeed. Polling a settled watch repeatedly returns its state
 without consuming it. Compose dependencies before registration.
 
-`pollWatch joined` displays a compact lifecycle summary and saves the observation.
-Its output names the exact `inspectFull (...)` expression for the saved result.
-To keep evidence beyond the latest eight automatic observations, bind it:
+`pollWatch joined` displays the retained state. Truncated output offers
+`cellDisplay.more` without polling again. Bind evidence you need to keep:
 
 ```haskell
 joinedState <- pollWatch joined
@@ -44,11 +42,9 @@ Expansion does not poll or repeat effects. For a smaller task-specific view of
 the two `Text` reports above, this projection preserves pending and failure states:
 
 ```haskell
-:{
 reportPairView :: WatchState (Settlement Text, Settlement Text)
                -> WatchState (Either ResponseFailure Text, Either ResponseFailure Text)
 reportPairView = fmap (\(left, right) -> (settledValue left, settledValue right))
-:}
 joinedState <- pollWatch joined
 inspectFull (reportPairView joinedState)
 ```
@@ -113,13 +109,15 @@ containing exact commits, purposes, and consequential discoveries, a worker
 launched with progress type `[Increment]` can publish in separate tool calls:
 
 ```haskell
-reportProgress [interfaceIncrement]
+let initialPublication = [interfaceIncrement]
+reportProgress initialPublication
 ```
 
 Later, while retaining its original delivery request:
 
 ```haskell
-reportProgress [interfaceIncrement, implementationIncrement]
+let completePublication = [interfaceIncrement, implementationIncrement]
+reportProgress completePublication
 ```
 
 A coordinator that misses the first update still sees both publications. Keep

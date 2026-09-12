@@ -110,7 +110,7 @@ notebook lead (retains analysis/execution agreement and hosted actor join)
 │  └─ Lib/Val installation, shadowing, recovery, terminal respond
 └─ display and declared types
    ├─ Generic eligibility/generic Display including opaque functions
-   └─ rendering tree, latest-display `last`, typed paging continuation
+   └─ rendering tree, latest-display `cellDisplay`, typed paging continuation
 ```
 
 The parent integrates each checked child against
@@ -126,9 +126,9 @@ owned; this lane supplies notebook fixtures and final cell-facing descriptions.
   `Lib.G` module boundary owns this invariant.
 * Keep `respond` terminal with the tail `NotRun`. Do not statically reject a
   middle `respond`; examples place it last.
-* `last` is changed only by a successful display; rejected/no-display cells
+* `cellDisplay` is changed only by a successful display; rejected/no-display cells
   leave it unchanged. Before implementation, the display child must show the
-  exact types of `last` and `last.more`, whether repeated expansion advances,
+  exact types of `cellDisplay` and `cellDisplay.more`, whether repeated expansion advances,
   and how multiple expression displays share a cell budget. A fresh Astra
   consultation resolves any consequential typing tradeoff.
 * Generic eligibility must come from parsed declarations. Existing `Generic`

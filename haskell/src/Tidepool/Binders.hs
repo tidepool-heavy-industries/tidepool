@@ -31,6 +31,11 @@ module Tidepool.Binders
   , SourcePrologue(..)
   , DeclarationSource(..)
   , CellSourcePlan(..)
+  , CellDisplayTarget(..)
+  , CellGenericDeclaration(..)
+  , installCellDisplayDeclarations
+  , omitCellGenericDeclarations
+  , omitCellDisplayDeclarations
   , declarationSourceWithTemplate
   , renderDeclarationForTemplate
   , splitCellWithFlags
@@ -71,7 +76,7 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString)
 import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.Name.Reader (rdrNameOcc)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence (occNameString, isSymOcc)
 import GHC.Types.Error (errorsFound)
 import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
@@ -278,7 +283,52 @@ data DeclarationSource = DeclarationSource
 data CellSourcePlan = CellSourcePlan
   { cellPlanPrologue :: SourcePrologue
   , cellPlanItems :: [CellAnalysisItem]
+  , cellPlanDisplayTargets :: [CellDisplayTarget]
+  , cellPlanDisplayAlias :: String
+  , cellPlanDeclarationBase :: String
+  , cellPlanGenericDeclarations :: [CellGenericDeclaration]
+  , cellPlanDisplayDeclarations :: String
   } deriving (Eq, Show)
+
+data CellGenericDeclaration = CellGenericDeclaration
+  { genericDeclarationTarget :: String
+  , genericDeclarationSource :: String
+  } deriving (Eq, Show)
+
+data CellDisplayTarget = CellDisplayTarget
+  { displayTargetName :: String
+  , displayTargetApplication :: String
+  } deriving (Eq, Show)
+
+-- Generated instances do not introduce authored source items or receipt ordinals.
+installCellDisplayDeclarations :: String -> CellSourcePlan -> CellSourcePlan
+installCellDisplayDeclarations generated plan = plan
+  { cellPlanItems = map replaceDeclaration (cellPlanItems plan)
+  , cellPlanDisplayDeclarations = generated }
+  where
+    replaceDeclaration item
+      | sbKind (cellAnalysisVerdict item) == KDecl = item
+          { cellAnalysisSource = cellPlanDeclarationBase plan
+              ++ concatMap genericDeclarationSource (cellPlanGenericDeclarations plan) ++ generated }
+      | otherwise = item
+
+omitCellGenericDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
+omitCellGenericDeclarations targets plan =
+  installCellDisplayDeclarations (cellPlanDisplayDeclarations plan) plan
+    { cellPlanGenericDeclarations = filter ((`notElem` targets) . genericDeclarationTarget)
+        (cellPlanGenericDeclarations plan) }
+
+omitCellDisplayDeclarations :: [String] -> CellSourcePlan -> CellSourcePlan
+omitCellDisplayDeclarations targets plan =
+  let retained = plan { cellPlanDisplayTargets = filter ((`notElem` targets) . displayTargetName)
+                         (cellPlanDisplayTargets plan) }
+   in installCellDisplayDeclarations
+        (concatMap (opaqueDisplayInstance (cellPlanDisplayAlias retained)) (cellPlanDisplayTargets retained)) retained
+
+opaqueDisplayInstance :: String -> CellDisplayTarget -> String
+opaqueDisplayInstance qualifier target = "\ninstance {-# OVERLAPPABLE #-} " ++ qualifier ++ ".Display "
+  ++ displayTargetApplication target ++ " where\n  displayTree _ = "
+  ++ qualifier ++ ".TextLeaf (" ++ qualifier ++ "Text.pack \"<opaque>\")\n"
 
 emptyPrologue :: SourcePrologue
 emptyPrologue = SourcePrologue [] []
@@ -439,12 +489,33 @@ analyzeCellWithFlags dflags template source = do
         bodySource = blankBeforeLine firstBodyLine source
     body <- splitCellWithFlags effective bodySource
     let classified = zipWith (classify effective) [length headerItems..] body
-        grouped = groupDeclarations headerItems classified
-    pure CellSourcePlan
-      { cellPlanPrologue = prologue
-      , cellPlanItems = grouped
-      }
+        genericAlias = freshAlias "TidepoolCompilerGeneric" source
+        displayAlias = freshAlias "TidepoolCompilerDisplay" source
+        generated = automaticGenericDeclarations effective genericAlias classified
+        grouped = groupDeclarations headerItems classified ""
+        targets = automaticDisplayTargets effective classified
+        generatedImports =
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias)
+          | not (null generated) ] ++
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection as " ++ displayAlias)
+          | not (null targets) ] ++
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Data.Text as " ++ displayAlias ++ "Text")
+          | not (null targets) ]
+        plan = CellSourcePlan
+          { cellPlanPrologue = prologue { prologueImports = prologueImports prologue ++ generatedImports }
+          , cellPlanItems = grouped
+          , cellPlanDisplayTargets = targets
+          , cellPlanDisplayAlias = displayAlias
+          , cellPlanDeclarationBase = concat
+              [ cellAnalysisSource item | item <- grouped, sbKind (cellAnalysisVerdict item) == KDecl ]
+          , cellPlanGenericDeclarations = generated
+          , cellPlanDisplayDeclarations = ""
+          }
+    pure (installCellDisplayDeclarations (concatMap (opaqueDisplayInstance displayAlias) targets) plan)
   where
+    freshAlias candidate authoredSource
+      | candidate `isInfixOf` authoredSource = freshAlias (candidate ++ "X") authoredSource
+      | otherwise = candidate
     classify effective ordinal item =
       let verdict = classifyWithFlagsExact effective (cellSourceText item)
        in CellAnalysisItem
@@ -459,13 +530,13 @@ analyzeCellWithFlags dflags template source = do
               }
           ]
       }
-    groupDeclarations headerItems classified =
+    groupDeclarations headerItems classified generated =
       case partition isDeclaration classified of
         ([], executable) | null headerItems -> executable
-        (declarations, executable) -> declarationGroup headerItems declarations : executable
+        (declarations, executable) -> declarationGroup headerItems declarations generated : executable
     isDeclaration =
       (== KDecl) . sbKind . cellAnalysisVerdict
-    declarationGroup headerItems declarations =
+    declarationGroup headerItems declarations generated =
       case headerItems ++ concatMap cellAnalysisSourceItems declarations of
         [] -> error "declarationGroup requires a source item"
         sourceItems@(firstSource : _) ->
@@ -481,7 +552,7 @@ analyzeCellWithFlags dflags template source = do
                 , cellEndLine = cellEndLine lastSpan'
                 , cellEndColumn = cellEndColumn lastSpan'
                 }
-            , cellAnalysisSource = concatMap locatedDeclaration declarations
+            , cellAnalysisSource = concatMap locatedDeclaration declarations ++ generated
             , cellAnalysisVerdict = StmtBinders
                 KDecl
                 (nub (concatMap sbBinders verdicts))
@@ -496,6 +567,67 @@ analyzeCellWithFlags dflags template source = do
           || last (cellAnalysisSource item) == '\n'
         then ""
         else "\n"
+
+-- | Append standalone 'Generic' instances to the declaration item rather than
+-- inventing source items. The original source coordinates and ordinals remain
+-- the public receipt protocol; the generated declarations are compiled in both
+-- the whole-cell check and the later staged declaration source.
+automaticGenericDeclarations :: DynFlags -> String -> [CellAnalysisItem] -> [CellGenericDeclaration]
+automaticGenericDeclarations flags _ _ | not (xopt StandaloneDeriving flags) = []
+automaticGenericDeclarations flags qualifier declarations =
+  case unP GHC.Parser.parseModule parserState of
+    POk _ parsed ->
+      let parsedDecls = hsmodDecls (unLoc parsed)
+          targets = mapMaybe genericTarget parsedDecls
+       in map renderTarget targets
+    PFailed _ -> []
+  where
+    source = concatMap cellAnalysisSource (filter ((== KDecl) . sbKind . cellAnalysisVerdict) declarations)
+    parserState = initParserState (initParserOpts flags)
+      (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<cell>") 1 1)
+    renderTarget target = CellGenericDeclaration (targetName target)
+      ("deriving instance " ++ qualifier ++ ".Generic " ++ targetApplication target ++ "\n")
+
+automaticDisplayTargets :: DynFlags -> [CellAnalysisItem] -> [CellDisplayTarget]
+automaticDisplayTargets flags declarations = case unP GHC.Parser.parseModule parserState of
+  PFailed _ -> []
+  POk _ parsed ->
+    let decls = hsmodDecls (unLoc parsed)
+     in [ CellDisplayTarget (targetName target) (targetApplication target)
+        | target <- mapMaybe genericTarget decls ]
+  where
+    source = concatMap cellAnalysisSource (filter ((== KDecl) . sbKind . cellAnalysisVerdict) declarations)
+    parserState = initParserState (initParserOpts flags)
+      (stringToStringBuffer source) (mkRealSrcLoc (mkFastString "<cell>") 1 1)
+
+data GenericTarget = GenericTarget
+  { targetName :: String
+  , targetApplication :: String
+  }
+
+genericTarget :: LHsDecl GhcPs -> Maybe GenericTarget
+genericTarget declaration = case unLoc declaration of
+  TyClD _ DataDecl { tcdLName = name, tcdTyVars = variables, tcdDataDefn = definition }
+    | eligibleDataDefinition definition ->
+        let typeName = occStr (unLoc name)
+            appliedName = if isSymOcc (rdrNameOcc (unLoc name)) then "(" ++ typeName ++ ")" else typeName
+            variableSource = showSDocOneLine defaultSDocContext (ppr variables)
+            application = "(" ++ unwords (appliedName : words variableSource) ++ ")"
+         in Just (GenericTarget typeName application)
+  _ -> Nothing
+
+eligibleDataDefinition :: HsDataDefn GhcPs -> Bool
+eligibleDataDefinition HsDataDefn
+  { dd_ctxt = Nothing
+  , dd_cType = Nothing
+  , dd_cons = constructors
+  } = all eligibleConstructor (toList constructors)
+eligibleDataDefinition _ = False
+
+eligibleConstructor :: LConDecl GhcPs -> Bool
+eligibleConstructor constructor = case unLoc constructor of
+  ConDeclH98 { con_forall = False, con_ex_tvs = [], con_mb_cxt = Nothing } -> True
+  _ -> False
 
 analyzeCell :: String -> String -> IO (Either CellSplitError CellSourcePlan)
 analyzeCell template source = do

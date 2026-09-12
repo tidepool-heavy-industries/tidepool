@@ -67,14 +67,17 @@ send in another project. Replace refs with accessible actual source/artifacts:
 
 ```haskell
 correction <- updateRequest response "contract/native.md: private relay; no public schema. Own relay + v1 vectors; reject stale generation/canonical mismatch. Medium."
+pollRequestUpdate correction
 ```
 
 ```haskell
 correction <- updateRequest response "16@1 cancelled; provider Active; cleanup unknown. Retain bound worktree + socket/build artifacts. Same owner inspect settlement; no duplicate/teardown."
+pollRequestUpdate correction
 ```
 
 ```haskell
 correction <- updateRequest response "Envelope: mutable mode/target behind cached digest. Privatize; validate persisted reconstruction; reject mismatch before admission."
+pollRequestUpdate correction
 ```
 
 Handle `Left` and retain the returned receipt. Poll when its state changes your
@@ -87,6 +90,7 @@ update must not become a new queued assignment. An already checked
 
 ```haskell
 correction <- updateDecision response decision
+pollRequestUpdate correction
 ```
 
 ## One local router per wave
@@ -165,6 +169,7 @@ and put remaining obligations with a concrete owner, then:
 
 ```haskell
 finishedWave <- finishWork wave
+inspectFull finishedWave
 ```
 
 Drain closes admission and processes accepted messages; finishedWave retains the
@@ -176,6 +181,7 @@ For a behavior bug, keep the same ordered source names and handles and replace:
 
 ```haskell
 wave <- R.replace wave (workDefinition sources correctedSink)
+inspectFull wave
 ```
 
 Expected notification failures are retained values, not handler exceptions.

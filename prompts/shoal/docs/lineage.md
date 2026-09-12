@@ -1,15 +1,9 @@
 Shoal tracks distinct supervisor, context-parent, provider-parent, fork-group,
-and Git branch relationships. Use the compact view first:
-
-```text
-:lineage
-```
-
-Use `:status` for current work and failed actors, `:status!` for full terminal
-history, and `:trace`
-for provider usage samples, prompt fingerprints, exact identities, and deeper
-diagnostics. The canonical workspace path is actor-relative; actor, worktree,
-and branch identities establish custody.
+and Git branch relationships. Use the `status` tool's `lineage` view for those
+relationships, `summary` for current work, `detailed` for terminal history, and
+`trace` for provider usage samples, prompt fingerprints, and exact identities.
+The canonical workspace path is actor-relative; actor, worktree, and branch
+identities establish custody.
 
 First and latest provider observations are distinct: inspect `contextFirstUsage`
 and `contextLatestUsage` on `Tidepool.Actors.Observe.actorContext`, or `rosterFirstUsage` and
@@ -37,7 +31,7 @@ One observed response can give zero subsequent usage without proving the thread
 will do no more work. An actor request or provider turn may contain several
 provider responses; this split measures provider responses.
 
-Use `:lineage` for first/latest source IDs and `:trace` for sample history and
+Use the `lineage` status view for first/latest source IDs and `trace` for sample history and
 thread/latest-turn summaries. Typed access is available through
 `contextFirstUsage`, `contextLatestUsage`, `contextUsageSummary`, and
 `contextLatestTurnUsage` on `actorContext` from `Tidepool.Actors.Observe`; inspect their types before composing

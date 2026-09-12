@@ -31,11 +31,13 @@ and exact committed-source inspection are explicit choices; see plans/run.md.
 Workspace modules are already loaded. Use Project.Routing for ordinary collection;
 load shoal-define-actors for custom typed joins and continuations. Actor handlers
 route known results; model turns decide and integrate. Start with supplied expressions;
-:type, :info or :doc resolve a particular missing signature. This is a GHCi-style
-surface with documented commands, not full GHCi: :module/:load/:reload are not
-available. Use let for a value/function and <- to run an effect and retain its
-result. Successful input units survive later failure; inspect the receipt and
-retained work before retrying new intent.
+hosted `lookup` resolves a particular missing signature and `status` answers runtime
+questions. Send notebook cells: declarations are mutually recursive, later statements
+see earlier bindings, and typecheck rejection changes nothing. Use let for a
+value/function and <- to run an effect and retain its result. Successful prefixes
+survive runtime failure; inspect the receipt before retrying new intent.
+Truncated displays offer `cellDisplay.more` to read retained output without
+repeating its original effect.
 
 taskSource records an exact committed Git revision, not provenance prose.
 The branch source independently selects live working files or a committed ref. A source

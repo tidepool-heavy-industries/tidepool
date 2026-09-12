@@ -1,85 +1,44 @@
-Send raw Haskell to the tool. Outside `:{` / `:}`, each nonblank line is one
-input unit. Use the delimiters for a multiline declaration group or binding.
-Inside a declaration group, use `name = value` alongside `data` and function
-definitions; do not mix in GHCi `let` statements. Use a separate unit for those.
-These calls need no repository setup:
+Send one notebook cell of ordinary Haskell. A cell may contain
+declarations, bindings, and expressions. GHC splits declarations from statements
+and checks the entire cell before any effect runs. Declarations are mutually
+recursive and visible to all statements; a declaration cannot depend on a binding
+introduced by a statement in that same cell. Later statements can use earlier
+bindings, and every expression displays its value.
 
 ```haskell
-:{
 data Candidate = Candidate { candidateScore :: Int }
 score candidate = candidateScore candidate
-:}
-let candidate = Candidate 7
-let judge = \value -> score value >= 5
-:type judge
-judge candidate
-[fmt|score={score candidate:d}|]
-```
-
-An opaque function is a useful value, not a rendering failure. Ask for its
-type or apply a pure projection. `:info fmt` and `:type [fmt|hello|]` use the
-same quasiquoter imports as execution. Use `:bindings` to inspect current
-names and `:browse` for library declarations.
-
-Bare expressions save their result and display a compact observation. Ready
-responses, watches, and progress updates show lifecycle facts without rendering
-their payload. `Text` displays a bounded text prefix, preserving line breaks.
-Other values demand at most 513 characters of `Show` and display
-at most 512. This bounds the requested prefix, not the time or allocation of an
-arbitrary `Show` instance before producing it. A preview failure leaves the saved
-result available; lifecycle summaries do not call the payload's `Show` at all.
-
-Omitted detail is explicit and includes the exact expansion expression, such as
-`inspectFull (observation12 ())`. This inspects that saved observation; it does
-not poll again or repeat the original effects. `:bindings` and the tool receipt's
-installed bindings expose automatic references even when their display fits.
-Names are unique within the actor's visible scope.
-
-The latest eight automatic observations remain available per actor scope. Use
-`let evidence = observation12 ()` before expiry to retain one under the normal
-binding lifetime, or bind directly with `evidence <- pollWatch joined`.
-`inspectFull evidence` returns `Text` directly; other values use complete `Show`
-output by default, which may be large, expensive, or fail. Text inspection avoids
-quoting, escaping, and conversion through a character list. Projections remain
-useful when choosing specific evidence:
-
-```haskell
-let scores = map candidateScore
 let candidates = [Candidate 7, Candidate 3]
-scores candidates
-scores (filter judge candidates)
+let approved = filter ((>= 5) . score) candidates
+map score approved
 ```
 
-The view is ordinary Haskell, so you can change it as the question changes.
-Automatic reference expiry releases unused binding roots. Dependencies retained
-by explicit bindings, effects, or forked contexts remain live; declarations
-conservatively retain their visible observation environment. Root release does
-not immediately reclaim old-space storage. These are session values, not a
-durable archive across process restarts.
+The cell summary counts declarations, statements, and expressions. Typecheck rejection
+installs no bindings and runs no effects. If a statement fails at runtime, its
+earlier bindings and completed effects remain committed and the suffix is marked
+not run. Inspect that receipt before deciding whether a new cell is new intent.
 
-Declarations and bindings persist between calls. Earlier closures keep the
-definitions they captured; later definitions do not rewrite old values or
-children. A retained recipient needs the new decision delta when you change
-your vocabulary. Do not interpret same-spelled type names from distinct
-scopes or declaration generations as interchangeable.
+Imports persist for later cells. Leading `LANGUAGE` and `OPTIONS_GHC` pragmas are
+normalized by GHC and apply only to this cell. Put neither pragmas nor imports
+after executable source. CPP and custom preprocessors are unavailable. Cells do
+not accept colon commands or `:{` / `:}` delimiters.
 
-A rejected effectful input unit stops the remaining executable suffix.
-Previously completed effects are not rolled back, and the failed unit's
-projected bindings are not installed. Inspect its receipt before retrying:
-exact transport retries retain the original result, while submitting the
-same source in a new call is new intent. `:recovery` describes the supported
-source-replay boundary; it does not restore arbitrary lost live values.
+Opaque functions are useful values. Ask hosted `lookup` for a name or use a
+`::type` query to search callable names. Query `doc` for the available guides or
+`doc workbench` for this one. The `status` tool defaults to `summary`; its
+`detailed`, `recovery`, `lineage`, `trace`, and `bindings` views answer runtime
+questions without disturbing the cell.
 
-For native commands, use the `workspace_path` shown in `:status`. Hosted actors
-see their assigned checkout at one stable path; different actors can therefore
-report the same `pwd`. `host_storage_path` (and worktree receipt `cwd`) names
-the backing checkout on the host, not the preferred native-tool working directory.
-Status also shows the assigned worktree and expected branch when available.
-Check `git branch --show-current` and Git worktree identity against that assignment
-before diagnosing a routing problem. The expected branch is launch evidence;
-an intentional checkout change can make current Git state differ.
+Expressions share a bounded display allowance per cell. A truncated display
+offers `cellDisplay.more`, which reads its next retained page without repeating the
+original effect. Throughout a cell, `cellDisplay` refers to the previous cell's final
+display; a cell with no display leaves it unchanged. A runtime failure retains
+the last completed display in its prefix. Bind evidence you need to keep.
 
-The concise status roster shows each actor's actual `supervisor` identity.
-Actor labels are names, not proof of ancestry; `:lineage` exposes supervision
-and context ancestry separately. Request settlement and runtime posture do not
-establish that a parent has reviewed, accepted, or integrated a submission.
+Ordinary `data` and `newtype` declarations get structural displays automatically.
+Fields with a `Display` instance use it; unsupported fields are opaque, and
+function fields show `<function>`. Explicit instances are preserved. GADT and
+existential declarations require an authored instance when structural display
+is needed.
+Declarations and bindings persist between cells. Earlier closures retain the
+definitions they captured; rebinding a name does not rewrite them.

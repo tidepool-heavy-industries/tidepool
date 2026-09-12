@@ -272,6 +272,28 @@ pub struct BindingLease {
     cleanup: Arc<CustodyCleanup>,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum BindingAliasError {
+    #[error("binding alias lease belongs to a different resident session")]
+    ForeignLease,
+    #[error("binding alias source {0:?} is not retained by its lease")]
+    SourceNotLeased(SessionVarId),
+    #[error("binding alias source {0:?} is not materialized")]
+    MissingSource(SessionVarId),
+    #[error("binding alias source {binding:?} belongs to scope {actual:?}, not {expected:?}")]
+    WrongScope {
+        binding: SessionVarId,
+        actual: ScopeId,
+        expected: ScopeId,
+    },
+    #[error("binding alias identity {0:?} is already materialized")]
+    IdentityInUse(SessionVarId),
+    #[error("binding alias compiler module does not match its reserved generation")]
+    WrongModule,
+    #[error("binding alias generation does not supersede the visible name")]
+    StaleGeneration,
+}
+
 impl Drop for BindingLease {
     fn drop(&mut self) {
         self.cleanup
@@ -499,6 +521,8 @@ pub enum ResidentOutcome {
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
+    #[error(transparent)]
+    BindingAlias(#[from] BindingAliasError),
     /// A rooted value minted by another resident session was presented to
     /// this machine. Handle ids are session-local and must never be resolved
     /// by numeric coincidence.
@@ -745,6 +769,13 @@ where
             .commit_declaration_receipt_in(scope, receipt, imports)
     }
 
+    pub fn adopt_staged_declaration_in(
+        &mut self,
+        staged: super::StagedDeclaration,
+    ) -> Result<super::DeclarationPlaneCommit, SessionError> {
+        self.core.adopt_staged_declaration_in(staged)
+    }
+
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
         self.core.discard_staged_declaration(staged);
     }
@@ -799,6 +830,86 @@ where
             retained,
             cleanup: Arc::clone(&self.custody_cleanup),
         }
+    }
+
+    /// Publish a GHC-typed alias of an already captured value in this actor's
+    /// lexical scope. The compiled alias interface supplies the new name,
+    /// identity, module and type; this path shares the source's registered
+    /// root slot and never evaluates or roots the value again. The source and
+    /// its dependencies remain leased until the caller drops `lease`, after
+    /// which the binding table's alias dependency tracks the current name.
+    pub fn publish_captured_alias_in(
+        &mut self,
+        scope: ScopeId,
+        source: SessionVarId,
+        alias: &BoundBinder,
+        generation: Generation,
+        lease: &BindingLease,
+    ) -> Result<super::ValuePlaneCommit, ResidentError> {
+        self.settle_dropped_custody();
+        if !self.core.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        if !Arc::ptr_eq(&lease.cleanup, &self.custody_cleanup) {
+            return Err(BindingAliasError::ForeignLease.into());
+        }
+        if !lease.retained.contains(&source) {
+            return Err(BindingAliasError::SourceNotLeased(source).into());
+        }
+        let source_entry = self
+            .core
+            .bindings()
+            .get(source)
+            .ok_or(BindingAliasError::MissingSource(source))?;
+        if source_entry.scope != scope {
+            return Err(BindingAliasError::WrongScope {
+                binding: source,
+                actual: source_entry.scope,
+                expected: scope,
+            }
+            .into());
+        }
+        let value = source_entry.value;
+        let id = SessionVarId::from_extract(alias.var_id);
+        if self.core.bindings().get(id).is_some() {
+            return Err(BindingAliasError::IdentityInUse(id).into());
+        }
+        let module = SessionModule::val(generation);
+        if alias.module != module.module_name() {
+            return Err(BindingAliasError::WrongModule.into());
+        }
+        if self
+            .core
+            .resolve_in(scope, &alias.name)
+            .is_some_and(|entry| entry.module.gen().0 >= generation.0)
+        {
+            return Err(BindingAliasError::StaleGeneration.into());
+        }
+        let provenance = self.binding_provenance.get(&source.raw()).cloned();
+        let committed = self.core.publish_alias_in(
+            scope,
+            BindingEntry {
+                name: BindingName(alias.name.clone()),
+                id,
+                module,
+                value,
+                type_display: Some(alias.type_display.clone()),
+                defining_expr: None,
+                scope,
+            },
+            source,
+        )?;
+        self.core.set_val_gen(generation);
+        if let Some(provenance) = provenance {
+            self.binding_provenance.insert(id.raw(), provenance);
+        }
+        self.binding_provenance.retain(|id, _| {
+            self.core
+                .bindings()
+                .get(SessionVarId::from_extract(*id))
+                .is_some()
+        });
+        Ok(committed)
     }
 
     /// Reserve identities for compiled cell values before releasing exclusive
@@ -3072,6 +3183,38 @@ mod tests {
         assert_eq!(session.custody_cleanup.binding_leases.lock().len(), 1);
         assert_eq!(session.settle_dropped_custody(), 0);
         assert!(session.custody_cleanup.binding_leases.lock().is_empty());
+    }
+
+    #[test]
+    fn captured_alias_rejects_missing_and_foreign_sources_without_publishing() {
+        let mut session = bootstrap_trivial_session();
+        let source = SessionVarId::from_extract((0xFE << 56) | 41);
+        let alias = BoundBinder {
+            name: "cellDisplay".to_string(),
+            var_id: (0xFE << 56) | 42,
+            module: SessionModule::val(Generation(1)).module_name(),
+            tier: ValueTier::Tier0Data,
+            type_display: "DisplayPage ActorEffects".to_string(),
+        };
+        let lease = session.lease_bindings(&[source.var()]);
+        assert!(matches!(
+            session.publish_captured_alias_in(ScopeId::ROOT, source, &alias, Generation(1), &lease),
+            Err(ResidentError::BindingAlias(BindingAliasError::MissingSource(id))) if id == source
+        ));
+        assert!(session
+            .core
+            .resolve_in(ScopeId::ROOT, "cellDisplay")
+            .is_none());
+
+        let mut other = bootstrap_trivial_session();
+        assert!(matches!(
+            other.publish_captured_alias_in(ScopeId::ROOT, source, &alias, Generation(1), &lease),
+            Err(ResidentError::BindingAlias(BindingAliasError::ForeignLease))
+        ));
+        assert!(other
+            .core
+            .resolve_in(ScopeId::ROOT, "cellDisplay")
+            .is_none());
     }
 
     #[test]

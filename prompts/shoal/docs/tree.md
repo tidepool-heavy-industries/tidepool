@@ -27,7 +27,7 @@ requests a bounded subtree; `previewBranch` shows effective policy before launch
 is an explicit inspection-only leaf. Neither runs builds or tests. Use a coding
 actor for a reviewer who must run tests. Explicitly narrowed rows
 and exhausted descendant budgets can still make an actor a leaf. Role names
-do not replace runtime authority; inspect `:status`.
+do not replace runtime authority; inspect the `status` tool.
 
 Compile-only fragments and tests that fail against an explicit stub can be
 valid intermediate submissions. Record exactly what passed, only compiled,
@@ -35,7 +35,7 @@ failed, or remains unimplemented. Removing a TODO marker is not acceptance.
 Children may introduce internal obligations but cannot weaken the contract owed
 to their parent. Return a typed decision need when that contract must change.
 
-Use `:doc unfold` for dispatch and `:doc watch` for observation. Watch independent
+Use `lookup` with `doc unfold` for dispatch and `doc watch` for observation. Watch independent
 submissions separately when you can integrate them separately. A fold includes
 your judgment: inspect exact commits, validate claims, integrate through ordinary
 Git or the conservative merge, and run checks for the integrated revision.
@@ -44,7 +44,7 @@ Retain discoveries that change the shared design, not every debugging exchange.
 A reviewer forked after implementation returns inherits your newer context.
 Supply the exact candidate, issued contract, and implementer reference. The
 reviewer can drive typed repairs directly while your watch waits for a verdict.
-See `:doc refinement`. Integration and contract changes remain your decisions.
+Use `lookup` with `doc refinement`. Integration and contract changes remain your decisions.
 
 Keep specialists for focused follow-ups; send the new candidate and decision
 delta. Fork again when your newer context is the better starting point. A

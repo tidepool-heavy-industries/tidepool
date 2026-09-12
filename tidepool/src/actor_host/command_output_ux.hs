@@ -8,16 +8,15 @@ let large = captured (T.replicate 32768 "λ") (T.replicate 32768 "z")
 let rendering = Inspection.workbenchDisplay (inspectFull (Just [Right large :: Either Text Cmd.RunResult]))
 let rendered = fst rendering
 let bounded = Inspection.displayWith 1024 [large, large, large]
-if T.length rendered <= 65536 && snd rendering && Cmd.stdout large == Right (T.replicate 32768 "λ") && T.isInfixOf (T.replicate 1024 "λ") rendered && T.isInfixOf (T.replicate 1024 "z") rendered && T.length (fst bounded) <= 1024 && snd bounded then pure ("large-display-ok" :: Text) else error "large display failed"
+if T.length rendered <= 65536 && snd rendering && Cmd.stdout large == Right (T.replicate 32768 "λ") && T.isInfixOf (T.replicate 1024 "λ") rendered && T.isInfixOf (T.replicate 1024 "z") rendered && T.length (fst bounded) <= 1024 && snd bounded then ("large-display-ok" :: Text) else error "large display failed"
 let goodJSON = Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout (captured "{\"ok\":true}" ""))
-case goodJSON of { Right _ -> pure ("json-ok" :: Text); Left _ -> error "JSON decode failed" }
+case goodJSON of { Right _ -> ("json-ok" :: Text); Left _ -> error "JSON decode failed" }
 let partial = (page "true") { Cmd.outputStart = 100, Cmd.outputEnd = 104, Cmd.outputAvailableEnd = 104 }
 let incomplete = Cmd.Finished retained outcome (Cmd.CommandOutput partial (page ""))
-case Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout incomplete) of { Left (Cmd.OutputProblem _) -> pure ("partial-rejected" :: Text); _ -> error "partial JSON accepted" }
+case Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout incomplete) of { Left (Cmd.OutputProblem _) -> ("partial-rejected" :: Text); _ -> error "partial JSON accepted" }
 let stderrPartial = Cmd.Finished retained outcome (Cmd.CommandOutput (page "true") partial)
-case Cmd.stdout stderrPartial of { Right "true" -> pure ("streams-independent" :: Text); _ -> error "stderr invalidated stdout" }
-case Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout (captured "{" "")) of { Left (Cmd.DecodeProblem _) -> pure ("decode-error-distinct" :: Text); _ -> error "decode error lost" }
-:info Cmd.RunResult
+case Cmd.stdout stderrPartial of { Right "true" -> ("streams-independent" :: Text); _ -> error "stderr invalidated stdout" }
+case Cmd.decodeWith (Cmd.asJSON @Value) (Cmd.stdout (captured "{" "")) of { Left (Cmd.DecodeProblem _) -> ("decode-error-distinct" :: Text); _ -> error "decode error lost" }
 let lost = (page (T.replicate 12000 "x")) { Cmd.outputStart = 1000, Cmd.outputEnd = 13000, Cmd.outputAvailableEnd = 13000, Cmd.outputRetainedStart = 1000 }
 let shortened = fst (Inspection.displayWith 1024 (Cmd.CommandOutput lost (page "")))
-if T.isInfixOf "retention loss" shortened && T.isInfixOf "display tail" shortened && not (T.isInfixOf "earlier available" shortened) then pure ("omission-kinds-preserved" :: Text) else error "omission metadata lost"
+if T.isInfixOf "retention loss" shortened && T.isInfixOf "display tail" shortened && not (T.isInfixOf "earlier available" shortened) then ("omission-kinds-preserved" :: Text) else error "omission metadata lost"

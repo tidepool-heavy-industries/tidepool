@@ -158,11 +158,14 @@ pub struct BindingTable {
     retired_owners: HashSet<SessionVarId>,
     next_tip: u64,
     observations: HashMap<SessionVarId, ObservationBinding>,
+    next_observation_order: u64,
+    scope_local_aliases: HashSet<SessionVarId>,
 }
 
 struct ObservationBinding {
     dependencies: Vec<SessionVarId>,
-    recent: bool,
+    recent: Option<u64>,
+    retain_while_current: bool,
 }
 
 impl Default for BindingTable {
@@ -176,6 +179,8 @@ impl Default for BindingTable {
             retired_owners: HashSet::new(),
             next_tip: 1,
             observations: HashMap::new(),
+            next_observation_order: 0,
+            scope_local_aliases: HashSet::new(),
         }
     }
 }
@@ -211,25 +216,31 @@ impl BindingTable {
             .map(SessionVarId::from_var)
             .filter(|id| self.observations.contains_key(id))
             .collect();
+        // Cells reserve compilation generations before execution. A result can
+        // therefore complete after pages compiled with newer generations; only
+        // save order expresses which observations are recent.
+        let order = self.next_observation_order;
+        self.next_observation_order = order.checked_add(1).expect("observation order exhausted");
         self.observations.insert(
             id,
             ObservationBinding {
                 dependencies,
-                recent: true,
+                recent: Some(order),
+                retain_while_current: false,
             },
         );
         let mut recent: Vec<_> = self
             .observations
             .iter()
-            .filter(|(_, observation)| observation.recent)
-            .filter_map(|(id, _)| {
+            .filter_map(|(id, observation)| {
+                let order = observation.recent?;
                 self.live
                     .get(id)
                     .filter(|entry| entry.scope == scope)
-                    .map(|entry| (entry.module.gen(), *id))
+                    .map(|_| (order, *id))
             })
             .collect();
-        recent.sort_by_key(|(generation, _)| generation.0);
+        recent.sort_by_key(|(order, _)| *order);
         let expired = recent.len().saturating_sub(limit);
         for (_, id) in recent.into_iter().take(expired) {
             #[allow(
@@ -240,7 +251,7 @@ impl BindingTable {
                 .observations
                 .get_mut(&id)
                 .expect("existing observation");
-            observation.recent = false;
+            observation.recent = None;
             if let Some(entry) = self.live.get(&id) {
                 if let Some(frame) = self.current.get_mut(&entry.scope) {
                     if frame.get(&entry.name) == Some(&id) {
@@ -275,7 +286,15 @@ impl BindingTable {
             .observations
             .iter()
             .filter(|(id, observation)| {
-                observation.recent || self.leases.get(id).copied().unwrap_or(0) > 0
+                observation.recent.is_some()
+                    || self.leases.get(id).copied().unwrap_or(0) > 0
+                    || (observation.retain_while_current
+                        && self.live.get(id).is_some_and(|entry| {
+                            self.current
+                                .get(&entry.scope)
+                                .and_then(|frame| frame.get(&entry.name))
+                                == Some(id)
+                        }))
             })
             .map(|(id, _)| *id)
             .collect();
@@ -365,6 +384,38 @@ impl BindingTable {
         id
     }
 
+    /// Publish an alias of an existing root through the ordinary scoped name
+    /// map. Its source remains live while the alias is current, captured by
+    /// another observation, or externally leased. Replacing the alias lets
+    /// ordinary observation collection release the old entry and its source
+    /// when nothing else reaches them. Both entries share one registered slot.
+    pub fn bind_alias_in(
+        &mut self,
+        scope: ScopeId,
+        entry: BindingEntry,
+        source: SessionVarId,
+    ) -> Option<(SessionVarId, Vec<BindingEntry>)> {
+        if !self
+            .live
+            .get(&source)
+            .is_some_and(|source_entry| source_entry.scope == scope)
+            || self.live.contains_key(&entry.id)
+        {
+            return None;
+        }
+        let id = self.bind_in(scope, entry);
+        self.scope_local_aliases.insert(id);
+        self.observations.insert(
+            id,
+            ObservationBinding {
+                dependencies: vec![source],
+                recent: None,
+                retain_while_current: true,
+            },
+        );
+        Some((id, self.collect_observations()))
+    }
+
     /// Drop `name` from the ROOT frame so `iter_current`/`resolve` no longer
     /// see it (its `live` entry + root are retained for fragments compiled
     /// against the old gen). Used when a pure decl of the same name supersedes
@@ -418,6 +469,7 @@ impl BindingTable {
                 frame.remove(&entry.name);
             }
         }
+        self.scope_local_aliases.remove(&id);
         Some(entry)
     }
 
@@ -444,6 +496,7 @@ impl BindingTable {
             if self.leases.get(&id).copied().unwrap_or(0) > 0 {
                 self.retired_owners.insert(id);
             } else if let Some(entry) = self.live.remove(&id) {
+                self.scope_local_aliases.remove(&id);
                 released.push(entry);
             }
         }
@@ -463,12 +516,18 @@ impl BindingTable {
         if let Some(tip) = self.tips.get(&child) {
             return tip.id;
         }
-        let visible: HashMap<BindingName, SessionVarId> = self
+        let inherited: Vec<_> = self
             .iter_current_in(tree, parent)
             .into_iter()
             .map(|(name, entry)| (name.clone(), entry.id))
             .collect();
-        let retained = self.acquire_leases(visible.values().copied());
+        // Keep the parent's exact value identities rooted for inherited code,
+        // but do not give a fresh actor its parent's local display alias name.
+        let retained = self.acquire_leases(inherited.iter().map(|(_, id)| *id));
+        let visible = inherited
+            .into_iter()
+            .filter(|(_, id)| !self.scope_local_aliases.contains(id))
+            .collect();
         let id = BindingTipId(self.next_tip);
         self.next_tip += 1;
         self.tips.insert(
@@ -532,6 +591,7 @@ impl BindingTable {
                 self.leases.remove(&id);
                 if self.retired_owners.remove(&id) {
                     if let Some(entry) = self.live.remove(&id) {
+                        self.scope_local_aliases.remove(&id);
                         released.push(entry);
                     }
                 }
@@ -587,6 +647,9 @@ impl BindingTable {
         }
         for s in tree.lookup_chain(scope) {
             if let Some(id) = self.current.get(&s).and_then(|frame| frame.get(&key)) {
+                if s != scope && self.scope_local_aliases.contains(id) {
+                    continue;
+                }
                 return self.live.get(id);
             }
         }
@@ -666,6 +729,9 @@ impl BindingTable {
                 // Nearest frame wins: a name already taken from a DEEPER frame
                 // shadows this one.
                 if seen.iter().any(|(n, _)| *n == name) {
+                    continue;
+                }
+                if s != scope && self.scope_local_aliases.contains(id) {
                     continue;
                 }
                 if let Some(e) = self.live.get(id) {
@@ -794,6 +860,151 @@ mod tests {
     }
 
     #[test]
+    fn replacing_local_alias_releases_uncaptured_history() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut bindings = BindingTable::new();
+        let mut previous = None;
+        for n in 1..=24 {
+            let source = bindings.bind(entry("page", n * 2 - 1, (0xFE << 56) | (n * 2 - 1), slot));
+            bindings.save_observation(source, &[], 1);
+            let alias_id = SessionVarId::from_extract((0xFE << 56) | (n * 2));
+            let (published, _) = bindings
+                .bind_alias_in(
+                    ScopeId::ROOT,
+                    entry("cellDisplay", n * 2, alias_id.raw(), slot),
+                    source,
+                )
+                .expect("source is live and alias identity is fresh");
+            assert_eq!(published, alias_id);
+            assert_eq!(
+                bindings.resolve("cellDisplay").map(|entry| entry.id),
+                Some(alias_id)
+            );
+            if let Some(old) = previous {
+                assert!(
+                    bindings.get(old).is_none(),
+                    "uncaptured alias {old:?} expired"
+                );
+            }
+            assert!(
+                bindings.len() <= 3,
+                "old pages and aliases must not accumulate"
+            );
+            previous = Some(alias_id);
+        }
+    }
+
+    #[test]
+    fn captured_previous_alias_survives_replacement_until_lease_release() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut bindings = BindingTable::new();
+        let first_source = bindings.bind(entry("page", 1, (0xFE << 56) | 1, slot));
+        bindings.save_observation(first_source, &[], 1);
+        let first_alias = SessionVarId::from_extract((0xFE << 56) | 2);
+        bindings
+            .bind_alias_in(
+                ScopeId::ROOT,
+                entry("cellDisplay", 2, first_alias.raw(), slot),
+                first_source,
+            )
+            .expect("first alias");
+        let captured = bindings.acquire_leases([first_alias]);
+        let second_source = bindings.bind(entry("page", 3, (0xFE << 56) | 3, slot));
+        bindings.save_observation(second_source, &[], 1);
+        let second_alias = SessionVarId::from_extract((0xFE << 56) | 4);
+        bindings
+            .bind_alias_in(
+                ScopeId::ROOT,
+                entry("cellDisplay", 4, second_alias.raw(), slot),
+                second_source,
+            )
+            .expect("second alias");
+        assert_eq!(
+            bindings.resolve("cellDisplay").map(|entry| entry.id),
+            Some(second_alias)
+        );
+        assert!(bindings.get(first_alias).is_some());
+        assert!(bindings.get(first_source).is_some());
+        assert!(bindings.release_leases(captured).is_empty());
+        let expired = bindings.collect_observations();
+        assert_eq!(expired.len(), 2);
+        assert!(bindings.get(first_alias).is_none());
+        assert!(bindings.get(first_source).is_none());
+        assert!(bindings.get(second_alias).is_some());
+    }
+
+    #[test]
+    fn new_page_dependency_keeps_previous_alias_until_latest_page_replaced() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut bindings = BindingTable::new();
+        let first_source = bindings.bind(entry("page", 1, (0xFE << 56) | 1, slot));
+        bindings.save_observation(first_source, &[], 1);
+        let first_alias = SessionVarId::from_extract((0xFE << 56) | 2);
+        bindings
+            .bind_alias_in(
+                ScopeId::ROOT,
+                entry("cellDisplay", 2, first_alias.raw(), slot),
+                first_source,
+            )
+            .expect("first alias");
+
+        let second_source = bindings.bind(entry("page", 3, (0xFE << 56) | 3, slot));
+        bindings.save_observation(second_source, &[first_alias.var()], 1);
+        let second_alias = SessionVarId::from_extract((0xFE << 56) | 4);
+        bindings
+            .bind_alias_in(
+                ScopeId::ROOT,
+                entry("cellDisplay", 4, second_alias.raw(), slot),
+                second_source,
+            )
+            .expect("second alias");
+        assert!(bindings.get(first_alias).is_some());
+        assert!(bindings.get(first_source).is_some());
+
+        let third_source = bindings.bind(entry("page", 5, (0xFE << 56) | 5, slot));
+        bindings.save_observation(third_source, &[], 1);
+        let third_alias = SessionVarId::from_extract((0xFE << 56) | 6);
+        bindings
+            .bind_alias_in(
+                ScopeId::ROOT,
+                entry("cellDisplay", 6, third_alias.raw(), slot),
+                third_source,
+            )
+            .expect("third alias");
+        assert_eq!(bindings.len(), 2);
+        assert!(bindings.get(first_alias).is_none());
+        assert!(bindings.get(first_source).is_none());
+    }
+
+    #[test]
+    fn local_alias_name_is_not_inherited_but_its_identity_is_leased() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut tree = ScopeTree::new();
+        let owner = tree.mint_child(ScopeId::ROOT).unwrap();
+        let child = tree.mint_child(owner).unwrap();
+        let mut bindings = BindingTable::new();
+        let source = bindings.bind_in(owner, entry("page", 1, (0xFE << 56) | 1, slot));
+        bindings.save_observation(source, &[], 1);
+        let alias_id = SessionVarId::from_extract((0xFE << 56) | 2);
+        bindings
+            .bind_alias_in(owner, entry("cellDisplay", 2, alias_id.raw(), slot), source)
+            .expect("local alias");
+        bindings.seed_scope(&tree, owner, child);
+        assert!(bindings.resolve_in(&tree, child, "cellDisplay").is_none());
+        assert!(!bindings
+            .iter_current_in(&tree, child)
+            .iter()
+            .any(|(name, _)| name.0 == "cellDisplay"));
+        assert!(bindings.get(alias_id).is_some());
+        assert!(bindings.leases.contains_key(&alias_id));
+        assert!(bindings.resolve_in(&tree, owner, "cellDisplay").is_some());
+    }
+
+    #[test]
     fn prepared_and_fork_leases_share_scope_retirement() {
         let mut pointer = std::ptr::null_mut();
         let slot = fake_slot(&mut pointer);
@@ -812,6 +1023,28 @@ mod tests {
         assert_eq!(released[0].id, value);
         assert!(bindings.is_empty());
         assert!(bindings.leases.is_empty());
+    }
+
+    #[test]
+    fn observation_recency_tracks_completion_not_compilation_generation() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut bindings = BindingTable::new();
+        let first = bindings.bind(entry("first", 100, (0xFE << 56) | 100, slot));
+        bindings.save_observation(first, &[], 2);
+        let page = bindings.bind(entry("page", 200, (0xFE << 56) | 200, slot));
+        bindings.save_observation(page, &[], 2);
+        let precompiled = bindings.bind(entry("precompiled", 101, (0xFE << 56) | 101, slot));
+        let expired = bindings.save_observation(precompiled, &[], 2);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, first);
+        assert!(bindings.resolve("precompiled").is_some());
+        let older = bindings.bind(entry("older", 99, (0xFE << 56) | 99, slot));
+        let expired = bindings.save_observation(older, &[], 2);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, page);
+        assert!(bindings.resolve("precompiled").is_some());
+        assert!(bindings.resolve("older").is_some());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Focused execution of the published examples through the real resident tool.
 
 use super::test_campaign::TestCampaign;
-use super::tests::dispatch_haskell_script;
+use super::tests::{dispatch_haskell_script, dispatch_lookup, dispatch_status};
 use super::*;
 use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
@@ -23,6 +23,216 @@ async fn committed(
     let result = dispatch_haskell_script(policy, source).await;
     assert_eq!(result["status"], "committed", "{result:?}");
     result
+}
+
+#[tokio::test]
+async fn colon_commands_and_ghci_groups_are_rejected_as_haskell_cells() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    for source in [":status", ":{\ncolonOnly = 1\n:}"] {
+        let result = dispatch_haskell_script(policy, source).await;
+        assert_eq!(result["status"], "rejected", "source={source}: {result}");
+    }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_display_pages_large_text_and_exhausts_continuation() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let first = committed(policy, include_str!("notebook_display_large_text.hs")).await;
+    let output = first["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap();
+    let marker = "\n[display continues: cellDisplay.more]";
+    assert!(output.ends_with(marker), "{first}");
+    let page = output.strip_suffix(marker).unwrap();
+    assert_eq!(page.len(), 8192, "{first}");
+    assert!(page.bytes().all(|byte| byte == b'x'), "{first}");
+    assert!(!output.contains("Display failed"), "{first}");
+
+    let second = committed(policy, "cellDisplay.more").await;
+    let remainder = second["items"][0]["output"].as_str().unwrap();
+    assert_eq!(remainder.len(), 1808, "{second}");
+    assert!(remainder.bytes().all(|byte| byte == b'x'), "{second}");
+    let exhausted = committed(policy, "TidepoolInspection.pageHasMore cellDisplay").await;
+    assert_eq!(exhausted["items"][0]["output"], "False", "{exhausted}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_display_shares_one_allowance_between_console_and_result() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let first = committed(policy, include_str!("notebook_display_console_budget.hs")).await;
+    assert_eq!(first["items"][0]["kind"], "declaration", "{first}");
+    let output = first["items"][1]["output"].as_str().unwrap();
+    let marker = "\n[display continues: cellDisplay.more]";
+    assert!(output.ends_with(marker), "{first}");
+    assert!(!output.contains("Display failed"), "{first}");
+    let visible = output.strip_suffix(marker).unwrap();
+    let printed = visible.bytes().filter(|byte| *byte == b'p').count();
+    let shown = visible.bytes().filter(|byte| *byte == b'v').count();
+    assert_eq!(printed, 6000, "{first}");
+    assert!(shown > 0 && printed + shown <= 8192, "{first}");
+
+    let continued = committed(policy, "cellDisplay.more").await;
+    let suffix = continued["items"][0]["output"].as_str().unwrap();
+    assert!(!suffix.contains('p'), "print ran again: {continued}");
+    assert_eq!(
+        suffix.bytes().filter(|byte| *byte == b'v').count(),
+        6000 - shown,
+        "{continued}"
+    );
+    assert!(suffix.bytes().all(|byte| byte == b'v'), "{continued}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_display_keeps_previous_cell_display_lexical_and_publishes_prefix() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let initial = committed(policy, "\"old page\" :: Text").await;
+    assert_eq!(initial["items"][0]["output"], "old page", "{initial}");
+
+    let same_cell = committed(
+        policy,
+        include_str!("notebook_display_previous_cell_display.hs"),
+    )
+    .await;
+    assert_eq!(same_cell["items"][0]["output"], "new page", "{same_cell}");
+    assert_eq!(same_cell["items"][1]["output"], "old page", "{same_cell}");
+
+    let prefix =
+        dispatch_haskell_script(policy, include_str!("notebook_display_prefix_failure.hs")).await;
+    assert_eq!(prefix["status"], "rejected", "{prefix}");
+    assert_eq!(prefix["items"][0]["status"], "committed", "{prefix}");
+    assert_eq!(prefix["items"][0]["output"], "prefix page", "{prefix}");
+    assert_eq!(prefix["items"][1]["status"], "rejected", "{prefix}");
+    let after_prefix = committed(policy, "cellDisplay.text").await;
+    assert_eq!(
+        after_prefix["items"][0]["output"], "prefix page",
+        "{after_prefix}"
+    );
+
+    let invalid = dispatch_haskell_script(policy, "absentDisplayName").await;
+    assert_eq!(invalid["status"], "rejected", "{invalid}");
+    let after_rejection = committed(policy, "cellDisplay.text").await;
+    assert_eq!(
+        after_rejection["items"][0]["output"], "prefix page",
+        "{after_rejection}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_display_uses_generated_generic_and_explicit_custom_renderers() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let generic = committed(policy, include_str!("notebook_display_generic.hs")).await;
+    let output = generic["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap();
+    assert!(output.contains("NotebookPlain"), "{generic}");
+    assert!(output.contains('3'), "{generic}");
+    assert!(output.contains("<function>"), "{generic}");
+    assert!(!output.contains("Display failed"), "{generic}");
+
+    let custom = committed(policy, include_str!("notebook_display_custom.hs")).await;
+    assert_eq!(
+        custom["items"].as_array().unwrap().last().unwrap()["output"],
+        "custom-display-wins",
+        "{custom}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_display_page_capture_survives_observation_window() {
+    let campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.as_ref();
+    let first = committed(policy, include_str!("notebook_display_large_text.hs")).await;
+    assert!(
+        first["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("[display continues: cellDisplay.more]"),
+        "{first}"
+    );
+    committed(policy, "savedPage <- pure cellDisplay").await;
+    let window = committed(policy, include_str!("notebook_display_retention.hs")).await;
+    let items = window["items"].as_array().unwrap();
+    assert_eq!(items.len(), 9, "{window}");
+    for (index, item) in items.iter().enumerate() {
+        assert_eq!(item["output"], (index + 1).to_string(), "{window}");
+    }
+    let resumed = committed(policy, "savedPage.more").await;
+    let remainder = resumed["items"][0]["output"].as_str().unwrap();
+    assert_eq!(remainder.len(), 1808, "{resumed}");
+    assert!(remainder.bytes().all(|byte| byte == b'x'), "{resumed}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_display_cell_display_is_child_local_but_parent_capture_remains_callable() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let initial = committed(root.as_ref(), "\"parent page\" :: Text").await;
+    assert_eq!(initial["items"][0]["output"], "parent page", "{initial}");
+    committed(
+        root.as_ref(),
+        "capturedPageText <- pure (\\() -> cellDisplay.text)",
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        include_str!("notebook_display_child_unfold.hs"),
+    )
+    .await;
+    let child = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match campaign.deployments.recv().await {
+                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                    return installation;
+                }
+                Some(_) => {}
+                None => panic!("deployment channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("child policy installation timed out");
+    let _binding = open_test_fork(&campaign, &child);
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match campaign.deployments.recv().await {
+                Some(LocalResidentDeployment::SessionReady { .. }) => return,
+                Some(_) => {}
+                None => panic!("deployment channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("child session did not become ready");
+    committed(
+        child.policy.as_ref(),
+        "initialPageText () = cellDisplay.text\nsetProbe = Set.size (Set.fromList [1 :: Int, 2])",
+    )
+    .await;
+    let local = committed(child.policy.as_ref(), "initialPageText ()").await;
+    assert_eq!(local["items"][0]["output"], "", "{local}");
+    let set = committed(child.policy.as_ref(), "setProbe").await;
+    assert_eq!(set["items"][0]["output"], "2", "{set}");
+    let capture = committed(child.policy.as_ref(), "capturedPageText ()").await;
+    assert_eq!(capture["items"][0]["output"], "parent page", "{capture}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
@@ -535,7 +745,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     assert!(guide_examples.next().is_none(), "untested guide example");
     assert_eq!(
         success["items"][1]["output"],
-        "WatchReady (Right \"Remove the stale path and report the focused check.\")"
+        "WatchReady (Right (Remove the stale path and report the focused check.))"
     );
 
     committed(
@@ -549,7 +759,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
         "state <- pollWatch retainedFailureReady\ninspectFull (fmap (either (const True) (const False) . settledValue) state)",
     )
     .await;
-    assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
+    assert_eq!(unavailable["items"][1]["output"], "WatchReady (True)");
     let outer_unavailable = committed(
         root.as_ref(),
         "state <- pollWatch outerFailureReady\ninspectFull (guideIsUnavailable state)",
@@ -691,13 +901,10 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             .message
             .contains("`reportProgress` is unavailable"));
         if label == "preview-text" {
-            let unavailable = dispatch_haskell_script(
-                child.as_ref().unwrap().policy.as_ref(),
-                ":type reportProgress",
-            )
-            .await;
+            let unavailable =
+                dispatch_lookup(child.as_ref().unwrap().policy.as_ref(), &["reportProgress"]).await;
             assert!(
-                unavailable.to_string().contains("not in scope"),
+                unavailable.to_string().contains("no match"),
                 "{unavailable}"
             );
         }
@@ -790,16 +997,7 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     let saved = first["items"][0]["installedBindings"][0].as_str().unwrap();
     let output = first["items"][0]["output"].as_str().unwrap();
     assert!(output.starts_with("WatchReady"), "{first}");
-    assert!(output.len() < 800, "{first}");
-    assert!(
-        output.contains(&format!("inspectFull ({saved} ())")),
-        "{first}"
-    );
-    let full = committed(root.as_ref(), &format!("inspectFull ({saved} ())")).await;
-    let full_text = full["items"][0]["output"].as_str().unwrap();
-    assert!(full_text.contains("candidate-9828") && full_text.contains("tested-6c6c"));
-    assert!(full_text.contains("LIMITATION-MUST-REMAIN-AVAILABLE"));
-    assert!(full_text.len() > 50_000);
+    assert!(!output.contains("Display failed"), "{first}");
     committed(root.as_ref(), &format!("let retained = {saved} ()")).await;
     committed(root.as_ref(), &format!("declaredEvidence = {saved} ()")).await;
     let second = committed(root.as_ref(), "pollWatch ready").await;
@@ -822,34 +1020,11 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     }
     let expired = dispatch_haskell_script(root.as_ref(), &format!("{expiring} ()")).await;
     assert_eq!(expired["status"], "rejected", "{expired}");
-    let retained = committed(root.as_ref(), "inspectFull retained").await;
-    assert_eq!(retained["items"][0]["output"], full["items"][0]["output"]);
-    let declared = committed(root.as_ref(), "inspectFull declaredEvidence").await;
-    assert_eq!(declared["items"][0]["output"], full["items"][0]["output"]);
-    let generic = committed(root.as_ref(), "delivery").await;
-    assert!(generic["items"][0]["output"].as_str().unwrap().len() < 900);
-    let infinite = committed(root.as_ref(), "repeat 'x'").await;
-    assert!(infinite["items"][0]["output"].as_str().unwrap().len() < 900);
-    let lifecycle = committed(root.as_ref(), "WatchReady (Costly 8)").await;
-    assert!(lifecycle["items"][0]["output"]
-        .as_str()
-        .unwrap()
-        .starts_with("WatchReady"));
-    let broken = committed(root.as_ref(), "Costly 7").await;
-    assert!(
-        broken["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("preview unavailable"),
-        "{broken}"
-    );
-    let broken_name = broken["items"][0]["installedBindings"][0].as_str().unwrap();
-    let recovered = committed(
-        root.as_ref(),
-        &format!("case {broken_name} () of Costly n -> n"),
-    )
-    .await;
-    assert_eq!(recovered["items"][0]["output"], "7");
+    for name in ["retained", "declaredEvidence"] {
+        let source = include_str!("quiet_observation_exact_probe.hs").replace("__NAME__", name);
+        let exact = committed(root.as_ref(), &source).await;
+        assert_eq!(exact["items"][0]["output"], "True", "{exact}");
+    }
     let before = campaign
         .forest
         .inspect_graph(campaign.actor.identity())
@@ -976,7 +1151,8 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         },
     )
     .await;
-    committed(root.as_ref(), ":type (undefined :: Review)").await;
+    let review_type = dispatch_lookup(root.as_ref(), &["Review"]).await;
+    assert_eq!(review_type["status"], "committed", "{review_type:?}");
     let extra_group = if groups == 2 {
         include_str!("../actor_host_fixtures/generic_actor/second_queued_unfold.hs")
     } else {
@@ -1215,7 +1391,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             .await
             .unwrap();
     }
-    let status = committed(root.as_ref(), ":status").await;
+    let status = dispatch_status(root.as_ref(), "summary").await;
     let status = status["items"][0]["output"].as_str().unwrap();
     assert!(
         status.contains("terminal:Failed")
@@ -1326,8 +1502,8 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
         } else {
             assert_eq!(child.context_parent, None);
             assert_eq!(child.fork_effort, Some(tidepool_actor::ForkEffort::Medium));
-            let missing = dispatch_haskell_script(child.policy.as_ref(), ":type parentOnly").await;
-            assert!(missing.to_string().contains("not in scope"), "{missing}");
+            let missing = dispatch_lookup(child.policy.as_ref(), &["parentOnly"]).await;
+            assert!(missing.to_string().contains("no match"), "{missing}");
         }
         let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
         assert_eq!(reply["status"], "replied", "{reply}");
@@ -1478,7 +1654,7 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
     let policy = campaign.root_installation.policy.as_ref();
     let result = committed(policy, "saved <- pure candidate\ninspectFull saved").await;
     assert_eq!(result["items"][1]["output"], "Preparation 7");
-    let declaration = committed(policy, ":{\nreadDelivery :: Delivery -> Int\nreadDelivery (Preparation n) = n\nreadDelivery (Complete n) = n\n:}\ninspectFull (readDelivery candidate)").await;
+    let declaration = committed(policy, "readDelivery :: Delivery -> Int\nreadDelivery (Preparation n) = n\nreadDelivery (Complete n) = n\ninspectFull (readDelivery candidate)").await;
     assert_eq!(declaration["items"][1]["output"], "7");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -1585,7 +1761,11 @@ async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() 
 async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
     let campaign = workspace_campaign().await;
     let policy = campaign.root_installation.policy.as_ref();
-    let result = committed(policy, "observed <- snapshot\ninspectFull (swarmUsage observed)\n:type (implement, reviewCandidate, reviewAgain, repair, withDecision, followWork)").await;
+    let result = committed(
+        policy,
+        "observed <- snapshot\ninspectFull (swarmUsage observed)",
+    )
+    .await;
     assert!(
         result["items"][1]["output"]
             .as_str()
@@ -1593,7 +1773,19 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
             .contains("unknownActors = [("),
         "{result}"
     );
-    assert_eq!(result["items"][2]["status"], "committed", "{result}");
+    let lookup = dispatch_lookup(
+        policy,
+        &[
+            "implement",
+            "reviewCandidate",
+            "reviewAgain",
+            "repair",
+            "withDecision",
+            "followWork",
+        ],
+    )
+    .await;
+    assert_eq!(lookup["status"], "committed", "{lookup}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -1747,7 +1939,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
             .len(),
         1
     );
-    let status = committed(observer.policy.as_ref(), ":lineage").await;
+    let status = dispatch_status(observer.policy.as_ref(), "lineage").await;
     assert!(
         !status["items"][0]["output"]
             .as_str()
@@ -1778,7 +1970,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
             .len(),
         2
     );
-    let status = committed(observer.policy.as_ref(), ":lineage").await;
+    let status = dispatch_status(observer.policy.as_ref(), "lineage").await;
     assert!(
         status["items"][0]["output"]
             .as_str()
@@ -2017,7 +2209,10 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
     let result = committed(reviewer.policy.as_ref(), "state <- pollWatch repaired\ninspectFull (fmap (either (const False) (const True) . settledValue) state)").await;
-    assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
+    assert_eq!(
+        result["items"][1]["output"], "WatchReady (True)",
+        "{result}"
+    );
     committed(
         reviewer.policy.as_ref(),
         include_str!("../../../examples/shoal-workspace/.shoal/checks/project_design_question.hs"),

@@ -1,5 +1,5 @@
 use super::test_campaign::TestCampaign;
-use super::tests::dispatch_haskell_script;
+use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
 use tidepool_actor::command_jobs::{CommandBackend, CommandControl};
 use tidepool_bridge_effects::*;
@@ -582,11 +582,51 @@ async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() 
         "streams-independent",
         "decode-error-distinct",
         "omission-kinds-preserved",
-        "data RunResult",
     ] {
         assert!(text.contains(marker), "missing {marker}: {text}");
     }
+    let info = dispatch_lookup(
+        campaign.root_installation.policy.as_ref(),
+        &["Cmd.RunResult"],
+    )
+    .await;
+    assert!(info.to_string().contains("data RunResult"), "{info}");
     assert!(!text.contains("Display failed"), "{text}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn command_result_pages_retained_stdout_without_launching_again() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    let launched = tokio::spawn(async move {
+        dispatch_haskell_script(policy.as_ref(), "paged <- Cmd.run [bash|printf Q|]").await
+    });
+    let backend = TestCommands::completed(&"Q".repeat(10000));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let run = launched.await.unwrap();
+    assert_eq!(run["status"], "committed", "{run}");
+    assert_eq!(backend.specs.lock().len(), 1);
+
+    let first = committed(&campaign, "paged").await;
+    let first_output = first["items"][0]["output"].as_str().unwrap();
+    assert!(
+        first_output.contains("[display continues: cellDisplay.more]"),
+        "{first}"
+    );
+    assert!(!first_output.contains("Display failed"), "{first}");
+    let second = committed(&campaign, "cellDisplay.more").await;
+    let second_output = second["items"][0]["output"].as_str().unwrap();
+    assert!(!second_output.contains("Display failed"), "{second}");
+    assert_eq!(
+        first_output.matches('Q').count() + second_output.matches('Q').count(),
+        10000,
+        "{first}\n{second}"
+    );
+    assert_eq!(backend.specs.lock().len(), 1, "paging reran the command");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

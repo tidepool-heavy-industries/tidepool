@@ -16,12 +16,12 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    check_cell, classify_workbench_item, insert_preamble_imports, render_turn_compile_error,
+    check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_error,
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
     run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, DeclarationReceipt,
-    GhciInputKind, InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, SourceImports,
-    TurnClassification, TurnKind, TurnRequest, TurnResult, WorkbenchDiscovery, WorkbenchItem,
+    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
+    ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
+    TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -107,7 +107,6 @@ fn cell_module_preamble(
 pub struct ActorWorkbenchSource {
     preamble: Arc<str>,
     base_include: Arc<[PathBuf]>,
-    default_browse_module: Option<Arc<str>>,
     workbench_imports: SourceImports,
     tools: Option<Arc<str>>,
 }
@@ -125,10 +124,11 @@ struct WorkbenchCompilation {
 impl ActorWorkbenchSource {
     fn prepare(&self, scope: &crate::ActorCompileView) -> WorkbenchCompilation {
         WorkbenchCompilation {
-            preamble: insert_preamble_imports(
-                &scope.shadow_preamble(&self.preamble),
-                "qualified Tidepool.Inspection as TidepoolInspection\nTidepool.Inspection (print)",
-            ),
+            preamble: scope.shadow_preamble(&hide_preamble_exports(
+                &self.preamble,
+                &["print"]
+                    .map(|name| tidepool_runtime::session::ExportItem::Value { name: name.into() }),
+            )),
             imports: scope.turn_imports(),
             include: scope.include_paths(&self.base_include),
             injected: scope.injected_module_names(),
@@ -140,18 +140,13 @@ impl ActorWorkbenchSource {
         Self {
             preamble: preamble.into(),
             base_include: base_include.into(),
-            default_browse_module: None,
-            workbench_imports: SourceImports::new(),
+            workbench_imports: SourceImports::from_specs([
+                "qualified Data.Set as Set",
+                "qualified Tidepool.Inspection as TidepoolInspection",
+                "Tidepool.Inspection (print, cellDisplay)",
+            ]),
             tools: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_default_browse_module(mut self, module: impl Into<Arc<str>>) -> Self {
-        let module = module.into();
-        self.workbench_imports.extend_text(module.as_ref());
-        self.default_browse_module = Some(module);
-        self
     }
 
     /// Preload the small quasiquoter vocabulary promised by a hosted
@@ -240,6 +235,17 @@ impl ResidentWorkbenchFragment {
         self.recovered_jobs.push(binding);
     }
 
+    /// Charge streamed output and the eventual value display to the same
+    /// allowance. Transport limits count bytes; Haskell tree limits count chars.
+    pub(crate) fn present_output(&mut self, text: &str, remaining: &mut usize) -> String {
+        let text = crate::workbench_display::bounded_output(text, *remaining);
+        *remaining = remaining.saturating_sub(text.len() + 1);
+        if let WorkbenchDisplay::Observation { budget, .. } = &mut self.display {
+            *budget = budget.saturating_sub(text.chars().count() + 1);
+        }
+        text
+    }
+
     pub(crate) fn present_command(
         &mut self,
         job: String,
@@ -251,9 +257,7 @@ impl ResidentWorkbenchFragment {
         }
         if let tidepool_bridge_effects::CommandPresentation::CommandVisible(text, _) = presentation
         {
-            let text = crate::workbench_display::bounded_output(&text, *remaining);
-            *remaining = remaining.saturating_sub(text.len() + 1);
-            text
+            self.present_output(&text, remaining)
         } else {
             String::new()
         }
@@ -266,6 +270,7 @@ enum WorkbenchDisplay {
     Tool,
     Observation {
         name: String,
+        budget: usize,
         source: ActorWorkbenchSource,
         type_modules: Vec<String>,
     },
@@ -1633,7 +1638,6 @@ where
                         type_modules: &[],
                     },
                     block,
-                    GhciInputKind::Code,
                     None,
                 )?;
                 let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -1854,9 +1858,8 @@ where
         let input = match self
             .access
             .with_machine(context, move |session, context, _| {
-                render_observation(
+                render_activation_observation(
                     session, context, &source, &type_modules, "sessionInput",
-                    ObservationPurpose::Assignment,
                 )
             })
             .await
@@ -1864,14 +1867,14 @@ where
             Ok((text, omitted)) => bounded_activation_text(
                 text, ACTIVATION_INPUT_LIMIT, omitted, "inspectFull sessionInput",
             ),
-            Err(_) => "<input rendering unavailable; use `:type sessionInput` and select or apply the value; `inspectFull sessionInput` requires Show>".into(),
+            Err(_) => "<input rendering unavailable; use lookup for sessionInput, then select or apply the value>".into(),
         };
         let reply = reply_declaration.unwrap_or_else(|| {
             format!("{reply_type} (no declaration captured at the request site)")
         });
         (
             input,
-            bounded_activation_text(reply, 4 * 1024, false, &format!(":info {reply_type}")),
+            bounded_activation_text(reply, 4 * 1024, false, &format!("lookup {reply_type}")),
         )
     }
 
@@ -1977,11 +1980,7 @@ where
                 }
                 .into();
                 source.preamble = actor_preamble(&source.preamble, context).into();
-                let command = match discovery {
-                    crate::status_tool::StatusDiscovery::Recovery => WorkbenchDiscovery::Recovery,
-                    crate::status_tool::StatusDiscovery::Bindings => WorkbenchDiscovery::Bindings,
-                };
-                run_discovery_command(session, context, &source, &type_modules, command)?
+                run_status_discovery(session, context, &source, &type_modules, discovery)?
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)
             })
             .await
@@ -2043,49 +2042,12 @@ where
             .await
     }
 
-    /// Compile and begin one actor-local workbench item. Declarations commit
-    /// immediately; executable items retain their fragment realm so the host
-    /// can route any actor effects through the ordinary actor driver.
-    pub(crate) async fn begin_item(
-        &self,
-        context: crate::ActorSessionContext,
-        block: ParsedBlock,
-        kind: GhciInputKind,
-    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        let response = self.response.clone();
-        let request = self.request;
-        let type_modules = Arc::clone(&self.type_modules);
-        let mut turn_source = self.access.source.clone();
-        turn_source.preamble = format!(
-            "{}{}",
-            turn_source.preamble,
-            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
-        )
-        .into();
-        self.access
-            .with_machine(context, move |session, context, _| {
-                begin_fragment(
-                    session,
-                    context,
-                    &turn_source,
-                    RequestWorkbenchScope {
-                        response: response.as_ref(),
-                        request,
-                        type_modules: &type_modules,
-                    },
-                    block,
-                    kind,
-                    None,
-                )
-            })
-            .await
-    }
-
     pub(crate) async fn begin_prepared_cell_item(
         &self,
         context: crate::ActorSessionContext,
         block: ParsedBlock,
         prepared: PreparedCellItem,
+        display_budget: usize,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         let ready = match prepared.ready {
             PreparedCellStep::Executable(ready) => ready,
@@ -2138,6 +2100,7 @@ where
                     },
                     block,
                     ready,
+                    display_budget,
                 )
             })
             .await
@@ -2198,53 +2161,6 @@ where
         }).await
     }
 
-    pub(crate) fn inspection_query(
-        &self,
-        source: &str,
-        kind: GhciInputKind,
-    ) -> Result<Option<InspectionQuery>, String> {
-        inspection_query(&self.access.source, source, kind)
-    }
-
-    pub(crate) async fn inspect_items(
-        &self,
-        context: crate::ActorSessionContext,
-        queries: Vec<InspectionQuery>,
-    ) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError> {
-        let type_modules = Arc::clone(&self.type_modules);
-        let mut turn_source = self.access.source.clone();
-        let preamble = match (&self.response, self.request) {
-            (Some(response), Some(request)) => response.request_preamble(
-                &turn_source.preamble,
-                request,
-                &context.haskell_effects_alias,
-            ),
-            (None, None) => turn_source.preamble.to_string(),
-            _ => unreachable!("request workbench scope is constructed atomically"),
-        };
-        let preamble = actor_preamble(&preamble, &context);
-        turn_source.preamble = format!(
-            "{}{}",
-            preamble,
-            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
-        )
-        .into();
-        let snapshot_source = turn_source.clone();
-        let compile_view = self
-            .access
-            .with_machine(context, move |session, context, _| {
-                actor_compile_view(session, context, &snapshot_source, &type_modules)
-            })
-            .await?;
-        // Inspection consumes immutable compiler inputs and never touches live
-        // Haskell values. Other actors may use the machine while GHC answers.
-        tokio::task::spawn_blocking(move || {
-            inspect_compile_view(&compile_view, &turn_source, &queries)
-        })
-        .await
-        .map_err(ResidentActorWorkbenchError::Join)?
-    }
-
     /// Settle a resumed fragment outcome. Nominal suspensions retain
     /// the same realm and return to the host for nominal actor dispatch.
     pub(crate) async fn settle_item(
@@ -2267,7 +2183,6 @@ fn begin_fragment<H, O>(
     source: &ActorWorkbenchSource,
     scope: RequestWorkbenchScope<'_>,
     block: ParsedBlock,
-    kind: GhciInputKind,
     pins: Option<&[CheckedBinderPin]>,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
@@ -2284,16 +2199,6 @@ where
     }
     .into();
     source.preamble = actor_preamble(&source.preamble, context).into();
-    if kind == GhciInputKind::Command {
-        return match run_discovery(session, context, &source, scope.type_modules, &block)? {
-            Ok(output) => Ok(ResidentWorkbenchStep::Committed {
-                output,
-                warnings: Vec::new(),
-                installed_bindings: Vec::new(),
-            }),
-            Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
-        };
-    }
     let compiled = match compile_block(
         session,
         context,
@@ -2308,7 +2213,7 @@ where
             return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
         }
     };
-    begin_ready_block(session, context, &source, scope, block, *compiled)
+    begin_ready_block(session, context, &source, scope, block, *compiled, 8192)
 }
 
 fn begin_ready_block<H, O>(
@@ -2318,6 +2223,7 @@ fn begin_ready_block<H, O>(
     scope: RequestWorkbenchScope<'_>,
     block: ParsedBlock,
     compiled: ReadyBlock,
+    display_budget: usize,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -2332,39 +2238,40 @@ where
     } = compiled;
     match result {
         TurnResult::Decl(receipt) => {
-            let result = match session.define_scoped_with_imports_in(
-                context.placement.lexical_scope,
-                &[&declaration_source],
-                &declaration_imports,
-            ) {
-                Ok(generation) => ResidentWorkbenchStep::Committed {
-                    output: format!(
-                        "defined {} at generation {}",
-                        if receipt.binders.is_empty() {
-                            "declaration".to_string()
-                        } else {
-                            receipt.binders.join(", ")
-                        },
-                        generation.0
-                    ),
-                    warnings: Vec::new(),
-                    installed_bindings: receipt.binders.clone(),
-                },
-                Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
-                    ResidentWorkbenchStep::Rejected(failure.render_for_input(
-                        &format!("<input unit {}>", block.ordinal),
-                        &block.source,
-                    ))
-                }
-                Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
-                    ResidentWorkbenchStep::Rejected(classify_session(&error).message)
-                }
-                Err(error) => {
-                    return Err(ResidentActorWorkbenchError::Resident(
-                        ResidentError::Session(error),
-                    ))
-                }
-            };
+            let result =
+                match session.define_scoped_with_imports_in(
+                    context.placement.lexical_scope,
+                    &[&declaration_source],
+                    &declaration_imports,
+                ) {
+                    Ok(generation) => ResidentWorkbenchStep::Committed {
+                        output: format!(
+                            "defined {} at generation {}",
+                            if receipt.binders.is_empty() {
+                                "declaration".to_string()
+                            } else {
+                                receipt.binders.join(", ")
+                            },
+                            generation.0
+                        ),
+                        warnings: Vec::new(),
+                        installed_bindings: receipt.binders.clone(),
+                    },
+                    Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
+                        ResidentWorkbenchStep::Rejected(failure.render_for_input(
+                            &format!("<cell item {}>", block.ordinal),
+                            &block.source,
+                        ))
+                    }
+                    Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
+                        ResidentWorkbenchStep::Rejected(classify_session(&error).message)
+                    }
+                    Err(error) => {
+                        return Err(ResidentActorWorkbenchError::Resident(
+                            ResidentError::Session(error),
+                        ))
+                    }
+                };
             Ok(result)
         }
         TurnResult::Bind {
@@ -2413,6 +2320,7 @@ where
             let display = if let Some(name) = observation {
                 WorkbenchDisplay::Observation {
                     name,
+                    budget: display_budget,
                     source: source.clone(),
                     type_modules: scope.type_modules.to_vec(),
                 }
@@ -2472,7 +2380,7 @@ fn render_runtime_rejection(
         }
         _ => error.to_string(),
     };
-    format!("<input unit {input_ordinal}>: runtime error: {detail}")
+    format!("<cell item {input_ordinal}>: runtime error: {detail}")
 }
 
 fn settle_fragment<H, O>(
@@ -2500,26 +2408,17 @@ where
                 WorkbenchDisplay::Tool => String::from_value(result.value(), result.table())?,
                 WorkbenchDisplay::Observation {
                     name,
+                    budget,
                     source,
                     type_modules,
                 } => {
-                    let preview = render_observation(
-                        session,
-                        context,
-                        &source,
-                        &type_modules,
-                        &format!("{name} ()"),
-                        ObservationPurpose::Inspection(fragment.presented.clone()),
-                    );
-                    let (text, omitted) = match preview {
-                        Ok(result) => result,
-                        Err(error) => (format!("Display failed: {error}\nValue remains bound as {name} (). Inspect a smaller field or projection; execution was not repeated."), false),
-                    };
-                    let mut text = crate::workbench_display::layout(&text);
-                    if omitted {
-                        text.push_str(&format!("\nDisplay shortened; captured value retained. Saved: {name} ()\nExpand: inspectFull ({name} ())\nKept among this actor's latest 8 automatic observations; bind explicitly to retain longer."));
+                    match render_cell_observation(
+                        session, context, &source, &type_modules,
+                        &name, budget.saturating_sub(fragment.output.iter().map(|text| text.chars().count()).sum::<usize>()), &fragment.presented,
+                    ) {
+                        Ok(text) => text,
+                        Err(error) => format!("Display failed: {error}\nValue remains bound as {name} (). Inspect a smaller field or projection; execution was not repeated."),
                     }
-                    text
                 }
             };
             let mut transcript = fragment.output.join("\n");
@@ -2592,8 +2491,8 @@ mod activation_preview_tests {
             "a\n<additional detail omitted; expand with `inspectFull sessionInput`>"
         );
         assert_eq!(
-            bounded_activation_text("data R".into(), 4, false, ":info R"),
-            "data\n<additional detail omitted; expand with `:info R`>"
+            bounded_activation_text("data R".into(), 4, false, "lookup R"),
+            "data\n<additional detail omitted; expand with `lookup R`>"
         );
     }
 }
@@ -2624,19 +2523,38 @@ fn bounded_activation_text(
     text
 }
 
-enum ObservationPurpose {
-    Inspection(Vec<String>),
-    Assignment,
-}
-
-fn render_observation<H, O>(
+fn render_activation_observation<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     type_modules: &[String],
     expression: &str,
-    purpose: ObservationPurpose,
 ) -> Result<(String, bool), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let renderer = format!("workbenchActivationDisplay {ACTIVATION_INPUT_LIMIT}");
+    let opaque = "(T.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)";
+    let render = format!("TidepoolInspection.{renderer} ({expression})");
+    inspect_rendered_value(
+        session,
+        context,
+        source,
+        type_modules,
+        expression,
+        &[render, opaque.into()],
+    )
+}
+
+fn inspect_rendered_value<H, O, T: FromCore>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    expression: &str,
+    renderings: &[String],
+) -> Result<T, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
@@ -2647,30 +2565,19 @@ where
     let view = actor_compile_view(session, context, source, type_modules)?;
     let prepared = source.prepare(&view);
     let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-    let (renderer, opaque) = match purpose {
-        ObservationPurpose::Inspection(keys) => {
-            let keys = keys.iter().map(|key| format!("T.pack \"{}\"", tidepool_runtime::session::escape_workbench_haskell_string(key))).collect::<Vec<_>>().join(",");
-            (format!("workbenchDisplayWithout [{keys}]"), "(T.pack \"<opaque value>\", True)")
-        },
-        ObservationPurpose::Assignment => (
-            format!("workbenchActivationDisplay {ACTIVATION_INPUT_LIMIT}"),
-            "(T.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput; full printing requires Show.\", False)",
-        ),
-    };
-    let render = format!("TidepoolInspection.{renderer} ({expression})");
-    let templates: Vec<_> = [render.as_str(), opaque]
-        .into_iter()
-        .map(|expression| TurnTemplate {
+    let templates = renderings
+        .iter()
+        .map(|rendering| TurnTemplate {
             kind: TemplateSelector::Expr,
             source: assemble_expression_module(
                 &preamble,
                 "__result",
                 &context.haskell_effects_alias,
-                expression,
+                rendering,
                 ExpressionLift::Pure,
             ),
         })
-        .collect();
+        .collect::<Vec<_>>();
     let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
     let result = run_turn(TurnRequest {
         turn_text: expression,
@@ -2703,14 +2610,167 @@ where
         .run_inspection_with_sites(&compiled.expr, &compiled.table, &compiled.asks)
         .map_err(ResidentActorWorkbenchError::Resident)?
     {
-        ResidentOutcome::Completed { result, .. } => {
-            <(String, bool)>::from_value(result.value(), result.table())
-                .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string()))
-        }
+        ResidentOutcome::Completed { result, .. } => T::from_value(result.value(), result.table())
+            .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string())),
         _ => Err(ResidentActorWorkbenchError::Inspection(
             "pure preview unexpectedly suspended".into(),
         )),
     }
+}
+
+/// Build a retained page from an already captured result. The two small
+/// generated bindings contain no authored effects: page construction is pure,
+/// and publishing its alias shares the page's existing custody.
+fn render_cell_observation<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    observation: &str,
+    budget: usize,
+    presented: &[String],
+) -> Result<String, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let page_name = format!(
+        "__tidepoolPage{}",
+        actor_compile_view(session, context, source, type_modules)?
+            .next_value_generation()
+            .0
+    );
+    let keys = presented
+        .iter()
+        .map(|key| {
+            format!(
+                "T.pack \"{}\"",
+                tidepool_runtime::session::escape_workbench_haskell_string(key)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let rendered =
+        format!("TidepoolInspection.displayPageWithout [{keys}] {budget} ({observation} ())");
+    let opaque = format!("TidepoolInspection.pageWithContinuation {budget} (TidepoolInspection.TextLeaf (T.pack \"<opaque value>\")) Nothing");
+    let mut candidate = None;
+    for rendering in [rendered, opaque] {
+        let block = ParsedBlock {
+            ordinal: 1,
+            total: 1,
+            source: format!(
+                "{page_name} <- pure (({rendering}) :: TidepoolInspection.DisplayPage {})",
+                context.haskell_effects_alias
+            ),
+        };
+        match compile_block(
+            session,
+            context,
+            source,
+            &context.haskell_effects_alias,
+            type_modules,
+            &block,
+            None,
+        )? {
+            CompiledBlock::Ready(ready) => {
+                candidate = Some(ready);
+                break;
+            }
+            CompiledBlock::Rejected(_) => continue,
+        }
+    }
+    let Some(ready) = candidate else {
+        return Err(ResidentActorWorkbenchError::Inspection(
+            "display page could not be compiled".into(),
+        ));
+    };
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = ready.result
+    else {
+        return Err(ResidentActorWorkbenchError::Inspection(
+            "display page did not produce a binding".into(),
+        ));
+    };
+    let [page] = bound.as_slice() else {
+        return Err(ResidentActorWorkbenchError::Inspection(
+            "display page must bind exactly one value".into(),
+        ));
+    };
+    let outcome = session
+        .run_observation_with_sites(
+            &compiled.expr,
+            &compiled.table,
+            page,
+            ready.generation,
+            &compiled.asks,
+            false,
+        )
+        .map_err(ResidentActorWorkbenchError::Resident)?;
+    if !matches!(outcome, ResidentOutcome::Completed { .. }) {
+        return Err(ResidentActorWorkbenchError::Inspection(
+            "pure display page construction unexpectedly suspended".into(),
+        ));
+    }
+    let lease = session.lease_bindings(&[tidepool_repr::VarId(page.var_id)]);
+    let metadata = format!("(TidepoolInspection.text {page_name}, TidepoolInspection.pageHasMore {page_name}, TidepoolInspection.pageUnavailable {page_name})");
+    let (text, more, unavailable): (String, bool, bool) = inspect_rendered_value(
+        session,
+        context,
+        source,
+        type_modules,
+        &metadata,
+        &[metadata.clone()],
+    )?;
+    let alias_block = ParsedBlock {
+        ordinal: 1,
+        total: 1,
+        source: format!("cellDisplay <- pure {page_name}"),
+    };
+    let alias = match compile_block(
+        session,
+        context,
+        source,
+        &context.haskell_effects_alias,
+        type_modules,
+        &alias_block,
+        None,
+    )? {
+        CompiledBlock::Ready(ready) => ready,
+        CompiledBlock::Rejected(diagnostic) => {
+            return Err(ResidentActorWorkbenchError::Inspection(diagnostic))
+        }
+    };
+    let TurnResult::Bind { bound: aliases, .. } = alias.result else {
+        return Err(ResidentActorWorkbenchError::Inspection(
+            "display alias did not produce a binding".into(),
+        ));
+    };
+    let [cell_display] = aliases.as_slice() else {
+        return Err(ResidentActorWorkbenchError::Inspection(
+            "display alias must bind exactly one value".into(),
+        ));
+    };
+    // All authored items already pin the previous display identity. Publishing at
+    // each successful display therefore preserves that lexical view while
+    // making the display part of the committed prefix, including cancellation.
+    session
+        .publish_captured_alias_in(
+            context.placement.lexical_scope,
+            tidepool_repr::SessionVarId::from_extract(page.var_id),
+            cell_display,
+            alias.generation,
+            &lease,
+        )
+        .map_err(ResidentActorWorkbenchError::Resident)?;
+    let mut output = text;
+    if more {
+        output.push_str("\n[display continues: cellDisplay.more]");
+    }
+    if unavailable {
+        output.push_str("\n[custom renderer omitted detail without a continuation]");
+    }
+    Ok(output)
 }
 
 impl<H, O> ResidentActorRunner<H, O>
@@ -5181,7 +5241,7 @@ where
         None
     };
     let mut compile_view = match &staged {
-        Some(staged) => base_view.with_staged_library(staged.module, &staged.receipt.items),
+        Some(staged) => base_view.with_staged_library(staged.module(), staged.items()),
         None => base_view,
     };
     let prepared = (|| {
@@ -5196,7 +5256,7 @@ where
                 })?;
                 result.push(PreparedCellItem {
                     ready: PreparedCellStep::Executable(ReadyBlock {
-                        result: TurnResult::Decl(staged.receipt.clone()),
+                        result: TurnResult::Decl(staged.receipt().clone()),
                         generation: compile_view.next_value_generation(),
                         declaration_source: item.source.clone(),
                         declaration_imports: declaration_imports.clone(),
@@ -5275,16 +5335,12 @@ where
         if let PreparedCell::Ready { items, .. } = &mut prepared {
             if let (Some((_, declaration)), Some(staged)) = (declaration, staged.as_ref()) {
                 let generation = session
-                    .commit_declaration_receipt_in(
-                        context.placement.lexical_scope,
-                        &staged.receipt,
-                        &declaration_imports,
-                    )
+                    .adopt_staged_declaration_in(staged.clone())
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?
                     .generation;
-                if generation != staged.generation {
+                if generation != staged.generation() {
                     return Err(ResidentActorWorkbenchError::CompileInfrastructure(
                         "cell declaration generation changed during exclusive preparation".into(),
                     ));
@@ -5396,25 +5452,13 @@ where
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let mut verdict = if let Some(checked) = checked_verdict {
-        Some(checked.clone())
-    } else {
-        match classify_workbench_item(&block.source) {
-            Ok(WorkbenchItem::Declaration(_)) => Some(TurnClassification {
-                kind: TurnKind::Decl,
-                binders: Vec::new(),
-                items: Vec::new(),
-            }),
-            Ok(WorkbenchItem::Haskell(_) | WorkbenchItem::Command(_)) => None,
-            Err(diagnostic) => return Ok(CompiledBlock::Rejected(diagnostic)),
-        }
-    };
-    if verdict.is_none() {
-        verdict = tidepool_runtime::session::classify_block(&[&block.source])
+    let mut verdict = match checked_verdict {
+        Some(checked) => Some(checked.clone()),
+        None => tidepool_runtime::session::classify_block(&[&block.source])
             .map_err(|error| ResidentActorWorkbenchError::CompileInfrastructure(error.to_string()))?
             .into_iter()
-            .next();
-    }
+            .next(),
+    };
     let observation = if verdict
         .as_ref()
         .is_some_and(|verdict| verdict.kind == TurnKind::Expr)
@@ -5494,7 +5538,7 @@ where
             observation,
         }))),
         Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
-            let label = format!("<input unit {}>", block.ordinal);
+            let label = format!("<cell item {}>", block.ordinal);
             Ok(CompiledBlock::Rejected(render_turn_compile_error(
                 &failure.error,
                 failure.attempted_source.as_deref(),
@@ -5508,57 +5552,19 @@ where
     }
 }
 
-fn run_discovery<H, O>(
+fn run_status_discovery<H, O>(
     session: &ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     type_modules: &[String],
-    block: &ParsedBlock,
-) -> Result<Result<String, String>, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let line = match MetaCommandLine::parse(&block.source) {
-        Ok(line) => line,
-        Err(diagnostic) => return Ok(Err(diagnostic)),
-    };
-    let command = match line.discovery() {
-        Ok(Some(command)) => command,
-        Ok(None) => {
-            return Ok(Err(format!(
-            "unknown actor workbench command `:{}` (supported: :status, :status!, :lineage, :trace, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :recovery, :show imports, :doc)",
-            line.name
-        )))
-        }
-        Err(diagnostic) => return Ok(Err(diagnostic)),
-    };
-    run_discovery_command(session, context, source, type_modules, command)
-}
-
-fn run_discovery_command<H, O>(
-    session: &ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    type_modules: &[String],
-    command: WorkbenchDiscovery,
+    command: crate::status_tool::StatusDiscovery,
 ) -> Result<Result<String, String>, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
     match command {
-        WorkbenchDiscovery::ShowImports => {
-            let imports = actor_compile_view(session, context, source, &[])?
-                .workbench_imports()
-                .source_lines();
-            Ok(Ok(if imports.is_empty() {
-                "no persistent imports".into()
-            } else {
-                imports.join("\n")
-            }))
-        }
-        WorkbenchDiscovery::Bindings => {
+        crate::status_tool::StatusDiscovery::Bindings => {
             let bindings = session.workbench_bindings_in(context.placement.lexical_scope);
             let queries = bindings
                 .iter()
@@ -5593,7 +5599,7 @@ where
                 lines.join("\n")
             }))
         }
-        WorkbenchDiscovery::Recovery => {
+        crate::status_tool::StatusDiscovery::Recovery => {
             let Some(report) = session.declaration_recovery_report() else {
                 return Ok(Ok("declaration recovery is not configured".into()));
             };
@@ -5626,84 +5632,7 @@ where
             }));
             Ok(Ok(lines.join("\n")))
         }
-        WorkbenchDiscovery::Doc(topic) => Ok(crate::prompt_catalog::workbench_doc(&topic)
-            .map(str::trim)
-            .map(str::to_owned)),
-        WorkbenchDiscovery::Info(name) => inspect_actor(
-            session,
-            context,
-            source,
-            type_modules,
-            InspectionQuery::Info(name),
-        ),
-        WorkbenchDiscovery::Type(expression) => inspect_actor(
-            session,
-            context,
-            source,
-            type_modules,
-            InspectionQuery::TypeOf(expression),
-        ),
-        WorkbenchDiscovery::Browse { module, expanded } => {
-            let module = match module
-                .or_else(|| source.default_browse_module.as_deref().map(str::to_owned))
-            {
-                Some(module) => module,
-                None => return Ok(Err(":browse has no configured actor API module".into())),
-            };
-            inspect_actor(
-                session,
-                context,
-                source,
-                type_modules,
-                InspectionQuery::Browse { module, expanded },
-            )
-        }
     }
-}
-
-fn inspection_query(
-    source: &ActorWorkbenchSource,
-    raw: &str,
-    kind: GhciInputKind,
-) -> Result<Option<InspectionQuery>, String> {
-    if kind != GhciInputKind::Command {
-        return Ok(None);
-    }
-    let line = MetaCommandLine::parse(raw)?;
-    match line.discovery()? {
-        Some(WorkbenchDiscovery::Type(expression)) => Ok(Some(InspectionQuery::TypeOf(expression))),
-        Some(WorkbenchDiscovery::Info(name)) => Ok(Some(InspectionQuery::Info(name))),
-        Some(WorkbenchDiscovery::Browse { module, expanded }) => {
-            let module = module
-                .or_else(|| source.default_browse_module.as_deref().map(str::to_owned))
-                .ok_or_else(|| ":browse has no configured actor API module".to_string())?;
-            Ok(Some(InspectionQuery::Browse { module, expanded }))
-        }
-        Some(
-            WorkbenchDiscovery::Bindings
-            | WorkbenchDiscovery::Recovery
-            | WorkbenchDiscovery::ShowImports
-            | WorkbenchDiscovery::Doc(_),
-        )
-        | None => Ok(None),
-    }
-}
-
-fn inspect_actor<H, O>(
-    session: &ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    type_modules: &[String],
-    query: InspectionQuery,
-) -> Result<Result<String, String>, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let mut results = inspect_actor_batch(session, context, source, type_modules, &[query])?;
-    Ok(results
-        .pop()
-        .unwrap_or_else(|| Err("inspection returned no result".into())))
 }
 
 fn inspect_actor_batch<H, O>(
@@ -5944,13 +5873,13 @@ mod request_tests {
         )));
         assert_eq!(
             render_runtime_rejection(4, &error),
-            "<input unit 4>: runtime error: pattern match failure: Expr.hs:35:7-55|Just x"
+            "<cell item 4>: runtime error: pattern match failure: Expr.hs:35:7-55|Just x"
         );
         let error =
             tidepool_runtime::RuntimeError::Jit(JitError::InvalidSuspensionState("missing"));
         assert_eq!(
             render_runtime_rejection(2, &error),
-            "<input unit 2>: runtime error: invalid suspension state: missing"
+            "<cell item 2>: runtime error: invalid suspension state: missing"
         );
     }
 
@@ -5986,33 +5915,5 @@ mod request_tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn bare_browse_resolves_the_actor_incarnations_configured_api_module() {
-        let source = ActorWorkbenchSource::new("module Expr where\n", Vec::new())
-            .with_default_browse_module("Tidepool.Actors.Shoal");
-        assert_eq!(
-            source.workbench_imports.source_lines(),
-            ["import Tidepool.Actors.Shoal"]
-        );
-        assert_eq!(
-            inspection_query(&source, ":browse", GhciInputKind::Command).unwrap(),
-            Some(InspectionQuery::Browse {
-                module: "Tidepool.Actors.Shoal".into(),
-                expanded: false,
-            })
-        );
-        assert_eq!(
-            inspection_query(&source, ":browse!", GhciInputKind::Command).unwrap(),
-            Some(InspectionQuery::Browse {
-                module: "Tidepool.Actors.Shoal".into(),
-                expanded: true,
-            })
-        );
-        assert_eq!(
-            inspection_query(&source, ":browse", GhciInputKind::Code).unwrap(),
-            None
-        );
     }
 }

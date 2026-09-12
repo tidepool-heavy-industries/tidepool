@@ -290,10 +290,7 @@ async fn submit(
         Ok(input) => input,
         Err(e) => return error(StatusCode::BAD_REQUEST, "invalid_request", e.to_string()),
     };
-    let request = match WorkbenchRequest::from_ghci_input(&input.source) {
-        Ok(request) => request,
-        Err(e) => return error(StatusCode::BAD_REQUEST, "invalid_request", e.to_string()),
-    };
+    let request = WorkbenchRequest::from_cell_input(&input.source);
     let sessions = state.sessions.lock().await;
     let Some(actor) = sessions
         .get(&session)

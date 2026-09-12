@@ -6,7 +6,7 @@ tools, including when their output would be redirected outside the checkout.
 Use `haskell` for typed requests, observations, and replies.
 `sessionInput` is the authoritative assignment. You may develop local Haskell
 definitions and request typed repairs from a supplied implementer reference;
-leave executable validation to a coding actor. See `:doc refinement` for a
+leave executable validation to a coding actor. Use `lookup` with `doc refinement` for a
 review loop that does not require the parent to relay each finding.
 
 Use `researching` to delegate independent inspection when your runtime depth and

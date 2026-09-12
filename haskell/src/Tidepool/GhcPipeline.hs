@@ -4,11 +4,13 @@ module Tidepool.GhcPipeline
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
+  , CellDisplayPass(..), cellDisplayDeclarations
+  , checkCellInstances
     -- * Resident session
   , withResidentPipeline
   ) where
 
-import GHC
+import GHC hiding (typeKind)
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env))
@@ -17,9 +19,12 @@ import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, addToHp
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
 import GHC.Types.SourceFile (HscSource(..))
-import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), mkLocMessage)
+import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic)
+import GHC.Types.SourceError (SourceError, srcErrorMessages)
+import GHC.Driver.Errors.Types (GhcMessage(..))
+import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction)
-import GHC.Data.FastString (unpackFS)
+import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
@@ -49,25 +54,39 @@ import GHC.Core.Type
   , splitAppTy_maybe
   , splitTyConApp_maybe
   , splitFunTy_maybe
+  , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy
   )
-import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique)
-import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey)
-import GHC.Core.DataCon (dataConOrigArgTys)
+import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName, tyConVisibleTyVars)
+import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
+import GHC.Core.Class (className)
+import GHC.Core.InstEnv (is_cls, is_tys)
+import GHC.Core.FamInstEnv (fi_fam, fi_tys)
+import GHC.Core.Predicate (mkClassPred)
+import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
+import GHC.Core.DataCon (dataConOrigArgTys, dataConName)
+import GHC.Types.FieldLabel (flLabel)
+import Language.Haskell.Syntax.Basic (field_label)
+import GHC.Data.Bag (listToBag)
+import GHC.Tc.Solver (tcCheckGivens, tcCheckWanteds)
+import GHC.Tc.Solver.InertSet (emptyInert)
+import GHC.Tc.Utils.Monad (initTcWithGbl)
+import GHC.Tc.Utils.TcMType (newEvVars)
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
-import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Tc.Types (TcGblEnv, tcg_binds, tcg_rdr_env, tcg_type_env)
+import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
+import GHC.Tc.Types (TcGblEnv, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
-import GHC.Types.Var (mkTyVarBinder, setVarName)
+import GHC.Types.Var (mkTyVarBinder, setVarName, tyVarKind, varName)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
+import Control.Exception (try, throwIO)
 import Data.Maybe (fromMaybe, isNothing)
-import Data.List (isPrefixOf, nub, sortOn)
+import Data.List (isPrefixOf, nub, sortOn, intercalate)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
@@ -75,7 +94,8 @@ import System.IO (hPutStrLn, stderr)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Data (Data, cast, gmapQ)
-import Tidepool.Binders (CheckedBinderPin(..))
+import Data.Foldable (toList)
+import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
@@ -123,7 +143,137 @@ data PipelineResult = PipelineResult
   -- | GHC's resolved reader environment for the target module. Inspection
   -- uses this exact scope rather than reconstructing visibility from source.
   , prTargetRdrEnv :: GlobalRdrEnv
+  , prTargetTcGblEnv :: TcGblEnv
   }
+
+-- | The first pass installs the final instance contexts with opaque bodies.
+-- The second solves field predicates against those same instance heads. Only
+-- the final generated source is extracted and published by the cell owner.
+data CellDisplayPass = DisplayInstanceContexts | DisplayInstanceFields
+  deriving (Eq, Show)
+
+checkCellInstances
+  :: (CellSourcePlan -> IO PipelineResult)
+  -> CellSourcePlan
+  -> IO (CellSourcePlan, PipelineResult)
+checkCellInstances compile plan = do
+  attempted <- try (compile plan)
+  case attempted of
+    Right result -> pure (plan, result)
+    Left failure -> case rejectedCellInstances plan failure of
+      [] -> throwIO failure
+      rejected -> checkCellInstances compile
+        (omitCellDisplayDeclarations [name | (AutomaticDisplay, name) <- rejected]
+          (omitCellGenericDeclarations [name | (AutomaticGeneric, name) <- rejected] plan))
+
+data AutomaticInstance = AutomaticGeneric | AutomaticDisplay
+  deriving (Eq)
+
+-- GHC owns class identity, including qualified imports and reexports. A retry
+-- removes only generated candidates; remaining authored errors still fail.
+rejectedCellInstances :: CellSourcePlan -> SourceError -> [(AutomaticInstance, String)]
+rejectedCellInstances plan failure = nub
+  [ (kind, occurrence)
+  | envelope <- toList (getMessages (srcErrorMessages failure))
+  , GhcTcRnMessage diagnostic <- [errMsgDiagnostic envelope]
+  , (kind, ty) <- rejectedTypes diagnostic
+  , Just (constructor, _) <- [splitTyConApp_maybe ty]
+  , let occurrence = occNameString (nameOccName (tyConName constructor))
+  , occurrence `elem` candidates kind
+  ]
+  where
+    candidates AutomaticGeneric = map genericDeclarationTarget (cellPlanGenericDeclarations plan)
+    candidates AutomaticDisplay = map displayTargetName (cellPlanDisplayTargets plan)
+    rejectedTypes (TcRnMessageWithInfo _ (TcRnMessageDetailed _ message)) = rejectedTypes message
+    rejectedTypes (TcRnWithHsDocContext _ message) = rejectedTypes message
+    rejectedTypes (TcRnCannotDeriveInstance cls types _ _ (DerivErrGenerics _))
+      | nameUnique (className cls) == genClassKey = [(AutomaticGeneric, ty) | ty <- types]
+    rejectedTypes (TcRnDupInstanceDecls _ instances) =
+      [ (kind, ty) | instance' <- toList instances
+      , kind <- if nameUnique (className (is_cls instance')) == genClassKey
+          then [AutomaticGeneric] else [AutomaticDisplay | isDisplayClass (is_cls instance')]
+      , ty <- is_tys instance' ]
+    rejectedTypes (TcRnConflictingFamInstDecls instances) =
+      [ (AutomaticGeneric, ty) | instance' <- toList instances
+      , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance' ]
+    rejectedTypes _ = []
+
+isDisplayClass :: Class -> Bool
+isDisplayClass cls =
+  let name = className cls
+   in occNameString (nameOccName name) == "Display"
+      && fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "Tidepool.Inspection"
+
+cellDisplayDeclarations :: CellDisplayPass -> PipelineResult -> CellSourcePlan -> IO String
+cellDisplayDeclarations pass result plan = do
+  displayClass <- case
+      [ is_cls instance'
+      | instance' <- tcg_insts environment
+      , isDisplayClass (is_cls instance')
+      ] of
+    found : _ -> pure found
+    [] -> fail "cell display preparation has no compiler-qualified Display instance"
+  fmap concat $ forM (cellPlanDisplayTargets plan) $ \target -> do
+    constructor <- case
+        [ tycon | tycon <- typeEnvTyCons (tcg_type_env environment)
+        , occNameString (nameOccName (tyConName tycon)) == displayTargetName target ] of
+      found : _ -> pure found
+      [] -> fail "cell display target missing from its checked type environment"
+    let variables = filter (isLiftedTypeKind . tyVarKind) (tyConVisibleTyVars constructor)
+        predicates = map (mkClassPred displayClass . pure . mkTyVarTy) variables
+        context = case variables of
+          [] -> ""
+          _ -> "(" ++ intercalate ", "
+            [ qualifier ++ ".Display " ++ occNameString (nameOccName (varName variable))
+            | variable <- variables ] ++ ") => "
+        header = "\ninstance {-# OVERLAPPABLE #-} " ++ context ++ qualifier ++ ".Display "
+          ++ displayTargetApplication target ++ " where\n"
+    if pass == DisplayInstanceContexts
+      then pure (header ++ "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<opaque>" ++ "\n")
+      else do
+        constructors <- maybe (fail "cell display target is not an algebraic datatype") pure
+          (tyConDataCons_maybe constructor)
+        methods <- forM constructors $ \dataConstructor -> do
+          let fields = [ ty | Scaled _ ty <- dataConOrigArgTys dataConstructor ]
+              labels = map (unpackFS . field_label . flLabel) (dataConFieldLabels dataConstructor)
+              constructorName = occNameString (nameOccName (dataConName dataConstructor))
+              names = [ "__tidepoolDisplayField" ++ show index | index <- [0 :: Int .. length fields - 1] ]
+          (_, checked) <- initTcWithGbl (prHscEnv result) environment
+            (mkRealSrcSpan (mkRealSrcLoc (mkFastString "<cell display>") 1 1)
+              (mkRealSrcLoc (mkFastString "<cell display>") 1 1)) $ do
+              givens <- newEvVars predicates
+              inert <- tcCheckGivens emptyInert (listToBag givens)
+              case inert of
+                Nothing -> fail "generated Display instance has contradictory givens"
+                Just solved -> mapM (\ty -> if isTauTy ty && isLiftedTypeKind (typeKind ty)
+                    then tcCheckWanteds solved [mkClassPred displayClass [ty]]
+                    else pure False) fields
+          selections <- maybe (fail "cell display field solver failed") pure checked
+          let renderField index name supported =
+                let value = if supported then qualifier ++ ".displayTree " ++ name
+                      else qualifier ++ ".TextLeaf " ++ textLiteral "<opaque>"
+                 in case drop index labels of
+                   label : _ -> qualifier ++ ".Concat [" ++ qualifier ++ ".TextLeaf "
+                     ++ textLiteral (label ++ " = ") ++ ", " ++ value ++ "]"
+                   [] -> value
+              rendered = [ renderField index name supported
+                         | (index, (name, supported)) <- zip [0..] (zip names selections) ]
+              opening = constructorName ++ if null names then "" else if null labels then " " else " {"
+              closing = if null labels then ("" :: String) else "}"
+              patternName = case constructorName of
+                ':' : _ -> "(" ++ constructorName ++ ")"
+                _ -> constructorName
+              patternFields = zipWith (\name supported -> if supported then name else "_") names selections
+          pure ("  displayTree (" ++ unwords (patternName : patternFields) ++ ") = "
+            ++ qualifier ++ ".treeParts " ++ textLiteral opening ++ " " ++ textLiteral closing
+            ++ " [" ++ intercalate ", " rendered ++ "]\n")
+        pure (header ++ if null methods
+          then "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<empty>" ++ "\n"
+          else concat methods)
+  where
+    environment = prTargetTcGblEnv result
+    qualifier = cellPlanDisplayAlias plan
+    textLiteral value = "(" ++ qualifier ++ "Text.pack " ++ show value ++ ")"
 
 -- | The normal one-shot extraction. This is exactly
 -- @runPipelineSession Nothing@, so no session
@@ -690,7 +840,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
     -- the dependencies-then-target order it used to build by hand.
     let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
         allTyCons = concatMap (mg_tcs . mfDesugared) fronts
-    targetRdrEnv <- case [ tcg_rdr_env (mfTcGblEnv front)
+    targetEnvironment <- case [ mfTcGblEnv front
                          | front <- fronts
                          , ms_mod_name (mfSummary front) == targetModName' ] of
       env : _ -> pure env
@@ -708,7 +858,8 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
       , prCheckedBinderPins = checkedBinderPins
       , prResultType   = resultTy
       , prWarnings     = warnings
-      , prTargetRdrEnv = targetRdrEnv
+      , prTargetRdrEnv = tcg_rdr_env targetEnvironment
+      , prTargetTcGblEnv = targetEnvironment
       }
 
 

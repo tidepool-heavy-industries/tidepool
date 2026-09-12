@@ -3,15 +3,22 @@
 module Main where
 
 import Control.Monad (unless)
+import Control.Exception (bracket, try)
 import Control.Monad.IO.Class (liftIO)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf, tails)
 import GHC
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Parser.Header (getOptions)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.GhcPipeline
+import System.Directory (getTemporaryDirectory, createDirectory, removeFile, removeDirectoryRecursive)
+import System.FilePath ((</>))
+import System.IO (openTempFile, hClose)
+import System.Environment (getArgs)
 
 main :: IO ()
 main = do
@@ -28,6 +35,76 @@ main = do
       commentsPragmasAndLayout lexicalFlags
       declarationsBecomeOneCellItem flags
       prologuePlans flags
+      automaticGenericPlans flags
+      noStandaloneDerivingLeavesCellUntouched flags
+  getArgs >>= \case
+    [] -> pure ()
+    ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
+    _ -> fail "expected optional --structural-display EFFECTS_INCLUDE"
+
+structuralDisplayCompilation :: FilePath -> IO ()
+structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
+  source <- readFile "test-cell-splitter/DisplayFields.cell.hs"
+  plan <- analyzeCell template source >>= either (fail . renderCellSplitError) pure
+  let includes = ["lib", "test-cell-splitter", effectsRoot]
+  withResidentPipeline includes $ \compiler -> do
+    let compile current = do
+          rendered <- either fail pure (renderCellCheckSource template current)
+          let path = root </> "CellCheck.hs"
+          writeFile path rendered
+          compiler GeneralCompile Nothing path includes Nothing
+    (accepted, provisional) <- checkCellInstances compile plan
+    assertEqual "resolved authored Display instances retained" False
+      (any (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Custom", "Reexported"])
+    assertEqual "resolved authored Generic instances retained" False
+      (any (`elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted)) ["Authored", "Standalone", "Reexported"])
+    assertEqual "unrelated qualified classes do not suppress generated instances" True
+      ("ForeignClass" `elem` map displayTargetName (cellPlanDisplayTargets accepted)
+        && "ForeignClass" `elem` map genericDeclarationTarget (cellPlanGenericDeclarations accepted))
+    assertEqual "specialized custom instance preserves general structure" True
+      ("Special" `elem` map displayTargetName (cellPlanDisplayTargets accepted))
+    assertEqual "unsupported automatic Generic derivations omitted" False
+      (any ((`elem` ["Poly", "HiddenPoly", "Unboxed"]) . genericDeclarationTarget) (cellPlanGenericDeclarations accepted))
+    contextual <- cellDisplayDeclarations DisplayInstanceContexts provisional accepted
+    assertContains "parameter context" "Display a) =>" contextual
+    typed <- compile (installCellDisplayDeclarations contextual accepted)
+    finalized <- cellDisplayDeclarations DisplayInstanceFields typed accepted
+    assertContains "unsupported imported field is not evaluated"
+      "displayTree (Fields __tidepoolDisplayField0 _ __tidepoolDisplayField2 __tidepoolDisplayField3)" finalized
+    assertContains "unsupported field remains named" "unknown = " finalized
+    assertContains "recursive field remains displayable" ".displayTree __tidepoolDisplayField0" finalized
+    assertContains "custom instance field remains displayable" ".displayTree __tidepoolDisplayField2" finalized
+    assertContains "function field uses its opaque Display instance"
+      "displayTree (Functions __tidepoolDisplayField0)" finalized
+    assertContains "higher-kinded unsupported field is not evaluated" "displayTree (Higher _)" finalized
+    assertContains "symbolic datatype instance head" ".Display ((:+:) a b)" finalized
+    assertContains "rank-n field remains opaque" "displayTree (Poly _)" finalized
+    assertContains "alias-hidden rank-n field remains opaque" "displayTree (HiddenPoly _)" finalized
+    assertContains "unlifted unsupported field remains opaque" "displayTree (Unboxed _)" finalized
+    _ <- compile (installCellDisplayDeclarations finalized accepted)
+    invalidSource <- readFile "test-cell-splitter/ExplicitInvalidGeneric.cell.hs"
+    invalidPlan <- analyzeCell template invalidSource >>= either (fail . renderCellSplitError) pure
+    invalid <- try (checkCellInstances compile invalidPlan)
+      :: IO (Either SourceError (CellSourcePlan, PipelineResult))
+    case invalid of
+      Left _ -> pure ()
+      Right _ -> fail "explicit invalid Generic instance must remain a user error"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-cell-display"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+    template = unlines
+      [ "{-# LANGUAGE OverloadedStrings, DeriveGeneric, StandaloneDeriving, FlexibleInstances, FlexibleContexts, UndecidableInstances #-}"
+      , "{{CELL_PRAGMAS}}"
+      , "module CellCheck where"
+      , "{{CELL_IMPORTS}}"
+      , "{{CELL_DECLS}}"
+      , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
+      ]
 
 lexicalIslands :: DynFlags -> IO ()
 lexicalIslands flags = do
@@ -150,13 +227,65 @@ declarationsBecomeOneCellItem flags = do
 
 checkTemplate :: String
 checkTemplate = unlines
-  [ "{-# LANGUAGE LambdaCase, QuasiQuotes, MultilineStrings #-}"
+  [ "{-# LANGUAGE LambdaCase, QuasiQuotes, MultilineStrings, StandaloneDeriving #-}"
   , "{{CELL_PRAGMAS}}"
   , "module CellCheck where"
+  , "import GHC.Generics (Generic)"
   , "{{CELL_IMPORTS}}"
   , "{{CELL_DECLS}}"
   , "__tidepool_cell_check = do { {{CELL_BODY}} }"
   ]
+
+automaticGenericPlans :: DynFlags -> IO ()
+automaticGenericPlans flags = do
+  result <- analyzeCellWithFlags flags checkTemplate source
+  case result of
+    Left failure -> fail ("automatic Generic plan failed: " ++ renderCellSplitError failure)
+    Right plan -> case cellPlanItems plan of
+      declaration : _ -> do
+        let rendered = cellAnalysisSource declaration
+        assertContains "parameterized data instance" "deriving instance TidepoolCompilerGeneric.Generic (Packet a)" rendered
+        assertContains "parameterized newtype instance" "deriving instance TidepoolCompilerGeneric.Generic (Wrapper a)" rendered
+        assertEqual "generated instances are not receipt items" [0..7]
+          (map cellAnalysisSourceOrdinal (cellAnalysisSourceItems declaration))
+        assertContains "authored class identity is deferred to GHC" "Generic (Explicit)" rendered
+        assertEqual "standalone candidate awaits typed identity resolution" 2
+          (occurrences "Generic (Manual a)" rendered)
+        unless (not ("Generic (Witness a)" `isInfixOf` rendered)) $
+          fail "GADT received an automatic Generic instance"
+        unless (not ("Generic (Hidden a)" `isInfixOf` rendered)) $
+          fail "existential received an automatic Generic instance"
+        checked <- either fail pure (renderCellCheckSource checkTemplate plan)
+        assertContains "check source carries generated declaration"
+          "deriving instance TidepoolCompilerGeneric.Generic (Packet a)" checked
+      [] -> fail "automatic Generic cell omitted declaration item"
+  where
+    source = unlines
+      [ "{-# LANGUAGE GADTs, StandaloneDeriving, ExistentialQuantification #-}"
+      , "data Packet a = Packet (a -> a) a"
+      , "newtype Wrapper a = Wrapper (Packet a)"
+      , "data Explicit = Explicit deriving Generic"
+      , "data Manual a = Manual a"
+      , "deriving instance Generic (Manual a)"
+      , "data Witness a where"
+      , "  Witness :: Int -> Witness Int"
+      , "data Hidden a = forall b. Hidden b"
+      ]
+
+noStandaloneDerivingLeavesCellUntouched :: DynFlags -> IO ()
+noStandaloneDerivingLeavesCellUntouched flags = do
+  result <- analyzeCellWithFlags flags checkTemplate source
+  case result of
+    Right plan -> case cellPlanItems plan of
+      declaration : _ -> unless (not ("deriving instance Generic" `isInfixOf` cellAnalysisSource declaration)) $
+        fail "NoStandaloneDeriving must suppress generated Generic syntax"
+      [] -> fail "NoStandaloneDeriving cell omitted declaration item"
+    Left failure -> fail ("NoStandaloneDeriving plan failed: " ++ renderCellSplitError failure)
+  where
+    source = unlines
+      [ "{-# LANGUAGE NoStandaloneDeriving #-}"
+      , "data Local = Local Int"
+      ]
 
 prologuePlans :: DynFlags -> IO ()
 prologuePlans flags = do
@@ -195,7 +324,7 @@ prologuePlans flags = do
       assertContains "rendered cell import" "import qualified Data.Map.Strict as Map" checked
   importOnly <- analyzeCellWithFlags flags checkTemplate "import Data.List\n"
   case importOnly of
-    Right (CellSourcePlan _ [item]) -> do
+    Right (CellSourcePlan { cellPlanItems = [item] }) -> do
       assertEqual "import-only kind" KDecl (sbKind (cellAnalysisVerdict item))
       assertEqual "import-only body" "" (cellAnalysisSource item)
       assertEqual "import-only ordinals" [0]
@@ -214,14 +343,14 @@ prologuePlans flags = do
     other -> fail ("late pragma should be rejected: " ++ show other)
   pragmaOnly <- analyzeCellWithFlags flags checkTemplate "{-# LANGUAGE NoLambdaCase #-}\n"
   case pragmaOnly of
-    Right (CellSourcePlan _ [item]) -> do
+    Right (CellSourcePlan { cellPlanItems = [item] }) -> do
       assertEqual "pragma-only kind" KDecl (sbKind (cellAnalysisVerdict item))
       assertEqual "pragma-only body" "" (cellAnalysisSource item)
     other -> fail ("pragma-only plan: " ++ show other)
   disabled <- analyzeCellWithFlags flags checkTemplate
     "{-# LANGUAGE NoQuasiQuotes #-}\nf = [bash|echo hello|]\n"
   case disabled of
-    Right (CellSourcePlan _ [_, item]) ->
+    Right (CellSourcePlan { cellPlanItems = [_, item] }) ->
       assertEqual "NoQuasiQuotes survives classification" KExpr
         (sbKind (cellAnalysisVerdict item))
     other -> fail ("NoQuasiQuotes plan: " ++ show other)
@@ -315,3 +444,6 @@ assertContains :: String -> String -> String -> IO ()
 assertContains label needle haystack =
   unless (needle `isInfixOf` haystack) $
     fail (label ++ ": missing " ++ show needle ++ " in " ++ show haystack)
+
+occurrences :: String -> String -> Int
+occurrences needle = length . filter (isPrefixOf needle) . tails

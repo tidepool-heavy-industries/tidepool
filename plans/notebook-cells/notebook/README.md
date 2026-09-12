@@ -34,7 +34,7 @@ incarnation sealing, replay and prefix machinery; peer supplied these as source
 leads, not checked conclusions. Checking installs nothing. Do not reinterpret
 parked continuations as permission to run the tail after respond.
 
-Display parent/child establishes last type, expansion semantics, per-cell budget
+Display parent/child establishes cellDisplay type, expansion semantics, per-cell budget
 and command paging integration before forking renderer/runtime storage work.
 Fresh Astra slot for consequential continuation typing. Record Stage 2 heap
 custody constraints only; no speculative second implementation.

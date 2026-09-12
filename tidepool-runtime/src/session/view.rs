@@ -11,6 +11,29 @@ use std::path::{Path, PathBuf};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionId, SessionModule};
 
+/// Apply a frontend's explicit vocabulary replacements to generated imports.
+/// Qualified imports remain available; authored imports are normalized by GHC.
+#[must_use]
+pub fn hide_preamble_exports(preamble: &str, exports: &[super::ExportItem]) -> String {
+    let heads = exports.iter().collect::<Vec<_>>();
+    preamble
+        .split_inclusive('\n')
+        .map(|line| {
+            if line.trim_start().starts_with("import ") {
+                let rewritten =
+                    super::render::hide_session_heads(line.trim_end_matches('\n'), &heads);
+                if line.ends_with('\n') {
+                    format!("{rewritten}\n")
+                } else {
+                    rewritten
+                }
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect()
+}
+
 /// Ordered external import specifications for model-authored source.
 ///
 /// Entries omit the leading `import`, matching Tidepool's template builders.
@@ -130,23 +153,7 @@ impl SessionCompileView {
     /// just as they do in persisted declaration modules.
     #[must_use]
     pub fn shadow_preamble(&self, preamble: &str) -> String {
-        let heads = self.shadowing.iter().collect::<Vec<_>>();
-        preamble
-            .split_inclusive('\n')
-            .map(|line| {
-                if line.trim_start().starts_with("import ") {
-                    let rewritten =
-                        super::render::hide_session_heads(line.trim_end_matches('\n'), &heads);
-                    if line.ends_with('\n') {
-                        format!("{rewritten}\n")
-                    } else {
-                        rewritten
-                    }
-                } else {
-                    line.to_owned()
-                }
-            })
-            .collect()
+        hide_preamble_exports(preamble, &self.shadowing)
     }
 
     #[must_use]

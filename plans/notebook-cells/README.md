@@ -19,8 +19,8 @@ polymorphic matches and wildcards, exact matches first; no fuzzy-search or Haddo
 dependency required. Canonical input is {"queries":[...]}; lenient raw-string
 acceptance is contingent on the real hosted boundary.
 
-last means latest displayed result, unchanged by rejected/no-display cells.
-last.more is a typed continuation, not a receipt ID. Multiple displays do not
+cellDisplay means latest displayed result, unchanged by rejected/no-display cells.
+cellDisplay.more is a typed continuation, not a receipt ID. Multiple displays do not
 require a heterogeneous cell-result concept. Define continuation advancement and
 display exceptions before implementation. Automatic Generic does not imply all
 GADT/existential declarations can derive it.
@@ -94,7 +94,7 @@ binder types; late type error executes nothing; runtime failure preserves prefix
 quasiquotes/multiline strings with column-one content and blank lines; where
 layout; let sees earlier bind; declaration capture gets actionable error;
 respond skips tail; shadowing/recovery preserve nominal identity; Generic without
-duplicate instances and documented exceptions; bounded display last.more returns
+duplicate instances and documented exceptions; bounded display cellDisplay.more returns
 command next page; lookup batch isolates failures and wildcard query finds a
 function subsequently invoked. Diagnostics retain source spans; receipt summarizes
 declarations/statements/displays and distinguishes source items from execution

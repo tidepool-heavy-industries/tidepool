@@ -16,6 +16,9 @@ discovery, cache policy, and artifact decoding.
   in `tidepool-protocol`/`tidepool-mcp`, not handwritten duplicates here.
 - Do not preserve persisted values by inventing syntactic bans. Let GHC check
   whether a value can be used in the receiving effect row.
+- For conditional typed adapters, ask GHC to solve the actual constraint in
+  scope; see [compiler constraint queries](../docs/compiler-constraint-queries.md).
+  Do not infer capability from a matching instance head or diagnostic text.
 - After translation or serialization changes, run the canonical fixture check;
   never hand-edit or selectively omit generated CBOR artifacts.
 - Do not share `dist-newstyle` between worktrees. Use Nix plus a worktree-local

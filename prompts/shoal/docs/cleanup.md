@@ -11,6 +11,7 @@ Inspect this result, then execute in a separate hosted call:
 
 ```haskell
 cleanupReceipt <- executeCleanup cleanupPlan
+cleanupReceiptPlan cleanupReceipt
 ```
 
 Execution honors the inspected actor incarnations and activity revisions.

@@ -11,7 +11,7 @@ Choose an unused campaign label for each new wave; Git branches from earlier
 waves are retained. The label below is a first-run example, not a name to replay
 on every restart. Use subgroup for work scoped under an existing actor.
 
-In native tools resolve `git rev-parse HEAD`, then bind `baseline :: GitRef` to that
+In native tools resolve `git rev-parse HEAD`, then bind `baseline :: GitOid` to that
 exact app commit. The wave router sends notifications to `me`.
 These expressions run in the Sol root's resident environment:
 
@@ -53,7 +53,7 @@ identifies a missing fact. Accept within-plan choices locally and take consequen
 scope/acceptance changes to the human. Incorporate/check shared semantics and
 record them in the committed contract before dependent branches start.
 
-Bind `resolved :: Question`, `head :: Text`, `summary :: Text`, and `checks ::
+Bind `resolved :: Question`, `head :: GitOid`, `summary :: Text`, and `checks ::
 [Text]` to the accepted question, actual incorporated revision, decision and evidence:
 
 ```haskell
@@ -69,7 +69,7 @@ receipt from a proposed commit you have not incorporated.
 ## Incorporate the contract, then work on independent consumers
 
 The owner incorporates the reviewed contract and checks the resulting revision.
-Bind `acceptedContract :: GitRef` there and the relevant checked decision(s) from
+Bind `acceptedContract :: GitOid` there and the relevant checked decision(s) from
 acceptedAssignment. Include them in both new Tasks using withDecision after updating
 decisionSource to the actual incorporated baseline. Read the committed contract too.
 
@@ -102,14 +102,15 @@ inspectFull (workSummary projectionEvidence)
 inspectFull (usageDelta before later)
 ```
 
-Bind source to the exact integrated app commit, question to the human's improvement
-request and evidence to precise friction/artifact references, all as Text/[Text].
+Bind `source :: GitOid` to the exact integrated app commit, `question :: Text` to
+the human's improvement request, and `evidence :: [Text]` to precise
+friction/artifact references.
 
 ```haskell
 let packet = RsiInput source question [projectionEvidence, controlsEvidence] before later evidence
 let improvements = "requested-improvement" :: ForkGroupLabel
 let improvementLabel = "workspace-style" :: Label
-improvement <- unfold (batch campaign improvements) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef source)) packet)))
+improvement <- unfold (batch campaign improvements) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef (renderGitOid source))) packet)))
 let improvementReadyLabel = "improvement-ready" :: WatchLabel
 improvementReady <- watch improvementReadyLabel (awaitSettled improvement)
 ```

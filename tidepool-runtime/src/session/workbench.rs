@@ -1,224 +1,21 @@
 //! Frontend-neutral mechanics for a resident Haskell workbench.
 //!
 //! This module owns the pieces every resident frontend needs before it can
-//! apply its own policy: source-item classification, meta-command tokenization,
+//! apply its own policy: compiler-prepared cell requests, operator command tokenization,
 //! and prefix-preserving ordered execution. It deliberately does not know
 //! about MCP response shapes, actor conversations, effect settlement, or
 //! presentation.
 
 use std::future::Future;
 
-use pest::Parser;
-use pest_derive::Parser;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::turn::CellSourceSpan;
 use super::{
     assemble_bind_module, assemble_display_expression_module, assemble_opaque_expression_module,
     insert_preamble_imports, ExpressionLift, TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
-
-#[derive(Parser)]
-#[grammar = "session/ghci_input.pest"]
-struct GhciScriptParser;
-
-/// One independently executed unit in a GHCi-style script payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GhciInputUnit {
-    /// One nonblank top-level Haskell input line.
-    Code { source: String, line: usize },
-    /// One reserved, colon-prefixed workbench command.
-    Command {
-        source: String,
-        line: usize,
-        command: MetaCommandLine,
-    },
-    /// One multiline Haskell input delimited by exact `:{` and `:}` lines.
-    Block {
-        source: String,
-        start_line: usize,
-        end_line: usize,
-    },
-}
-
-impl GhciInputUnit {
-    #[must_use]
-    pub fn source(&self) -> &str {
-        match self {
-            Self::Code { source, .. }
-            | Self::Command { source, .. }
-            | Self::Block { source, .. } => source,
-        }
-    }
-
-    #[must_use]
-    pub fn kind(&self) -> GhciInputKind {
-        match self {
-            Self::Command { .. } => GhciInputKind::Command,
-            Self::Code { .. } | Self::Block { .. } => GhciInputKind::Code,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GhciInputKind {
-    Code,
-    Command,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum GhciInputError {
-    #[error("line {line}: unexpected `:}}` without a matching `:{{`")]
-    UnexpectedBlockClose { line: usize },
-    #[error("line {line}: nested `:{{` is not supported; close the current GHCi input unit first")]
-    NestedBlockOpen { line: usize },
-    #[error("line {line}: unterminated `:{{` GHCi input unit; add a `:}}` line")]
-    UnterminatedBlock { line: usize },
-    #[error("could not parse GHCi input: {0}")]
-    Grammar(String),
-}
-
-/// Parse one custom-tool payload as a small GHCi-style script.
-///
-/// The grammar reserves colon-prefixed lines for workbench commands, treats
-/// every other nonblank line as Haskell, joins more-indented continuation
-/// lines to their preceding Haskell unit, and recognizes `:{` / `:}` as one
-/// explicit multiline unit. Block contents retain their exact decoded text;
-/// the delimiters themselves do not become Haskell source.
-pub fn parse_ghci_input(source: &str) -> Result<Vec<GhciInputUnit>, GhciInputError> {
-    let script = GhciScriptParser::parse(Rule::script, source)
-        .map_err(|error| GhciInputError::Grammar(error.to_string()))?
-        .next()
-        .ok_or_else(|| GhciInputError::Grammar("parser returned no script".into()))?;
-    let mut units = Vec::new();
-    for pair in script.into_inner() {
-        let line = pair.as_span().start_pos().line_col().0;
-        match pair.as_rule() {
-            Rule::code_unit => {
-                let source = pair
-                    .into_inner()
-                    .find(|part| part.as_rule() == Rule::code_source)
-                    .ok_or_else(|| GhciInputError::Grammar("code unit contained no source".into()))?
-                    .as_str()
-                    .to_owned();
-                let indent = leading_indent(&source);
-                let extends_previous = matches!(
-                    units.last(),
-                    Some(GhciInputUnit::Code { source: previous, .. })
-                        if indent > leading_indent(previous)
-                );
-                if extends_previous {
-                    let Some(GhciInputUnit::Code {
-                        source: previous, ..
-                    }) = units.last_mut()
-                    else {
-                        unreachable!("extends_previous only matches a code unit");
-                    };
-                    previous.push('\n');
-                    previous.push_str(&source);
-                } else {
-                    units.push(GhciInputUnit::Code { source, line });
-                }
-            }
-            Rule::command_unit => {
-                let command_pair = pair
-                    .into_inner()
-                    .find(|part| part.as_rule() == Rule::command)
-                    .ok_or_else(|| {
-                        GhciInputError::Grammar("command unit contained no command".into())
-                    })?;
-                let command = meta_command_from_pair(command_pair.clone())?;
-                units.push(GhciInputUnit::Command {
-                    source: command_pair.as_str().to_owned(),
-                    line,
-                    command,
-                });
-            }
-            Rule::multiline_unit => {
-                let mut body = None;
-                let mut end_line = line;
-                for part in pair.into_inner() {
-                    match part.as_rule() {
-                        Rule::block_body => {
-                            if let Some(nested) = part
-                                .clone()
-                                .into_inner()
-                                .find(|row| row.as_rule() == Rule::nested_block_open)
-                            {
-                                return Err(GhciInputError::NestedBlockOpen {
-                                    line: nested.as_span().start_pos().line_col().0,
-                                });
-                            }
-                            body = Some(strip_one_line_ending(part.as_str()).to_owned());
-                        }
-                        Rule::block_close => {
-                            end_line = part.as_span().start_pos().line_col().0;
-                        }
-                        _ => {}
-                    }
-                }
-                units.push(GhciInputUnit::Block {
-                    source: body.unwrap_or_default(),
-                    start_line: line,
-                    end_line,
-                });
-            }
-            Rule::stray_block_close => {
-                return Err(GhciInputError::UnexpectedBlockClose { line });
-            }
-            Rule::unterminated_multiline_unit => {
-                return Err(GhciInputError::UnterminatedBlock { line });
-            }
-            Rule::invalid_colon_unit => {
-                return Err(GhciInputError::Grammar(format!(
-                    "line {line}: colon-prefixed input is reserved for GHCi commands"
-                )));
-            }
-            Rule::EOI => {}
-            _ => unreachable!("script exposes only complete input units"),
-        }
-    }
-    Ok(units)
-}
-
-fn strip_one_line_ending(source: &str) -> &str {
-    source
-        .strip_suffix("\r\n")
-        .or_else(|| source.strip_suffix('\n'))
-        .unwrap_or(source)
-}
-
-fn leading_indent(source: &str) -> usize {
-    source
-        .chars()
-        .take_while(|character| matches!(character, ' ' | '\t'))
-        .fold(0, |column, character| {
-            if character == '\t' {
-                column + (8 - column % 8)
-            } else {
-                column + 1
-            }
-        })
-}
-
-fn meta_command_from_pair(
-    pair: pest::iterators::Pair<'_, Rule>,
-) -> Result<MetaCommandLine, GhciInputError> {
-    let mut name = None;
-    let mut arguments = String::new();
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::command_name => name = Some(part.as_str().to_owned()),
-            Rule::command_arguments => arguments = part.as_str().trim().to_owned(),
-            _ => {}
-        }
-    }
-    Ok(MetaCommandLine {
-        name: name.ok_or_else(|| GhciInputError::Grammar("empty workbench command".into()))?,
-        arguments,
-    })
-}
 
 /// Normalize the one extra JSON-string layer some MCP clients apply to a
 /// structured tool argument. Plain strings remain strings unless they parse
@@ -320,42 +117,26 @@ pub struct WorkbenchForkBoundary {
 ///
 /// MCP, provider-native fenced execution, tests, and other frontends share
 /// item sequencing and input mounting through this transport-neutral value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkbenchRequest {
-    /// GHCi-capable items run in source order. Execution stops at the first
-    /// rejected or suspended item while preserving earlier commits.
+    /// Compiler-prepared cell items or one trusted hosted tool invocation.
     pub items: Vec<String>,
     /// Optional structured payload mounted as @input :: Aeson.Value@.
-    #[serde(default)]
     pub input: Option<serde_json::Value>,
     /// Request the frontend's expanded diagnostic receipt when supported.
-    #[serde(default)]
     pub verbose: Option<bool>,
-    /// Parser-owned classification for raw GHCi scripts. Structured callers
-    /// omit it and retain the historical per-item classifier.
-    #[serde(skip)]
-    #[schemars(skip)]
-    input_kinds: Vec<GhciInputKind>,
     /// Runtime-minted identity for one exact hosted tool call.
     ///
     /// This is not accepted from JSON. The transport owner derives it from
     /// authenticated call coordinates before actor dispatch, allowing the
     /// actor to return a committed receipt when that exact call is retried.
-    #[serde(skip)]
-    #[schemars(skip)]
     execution_id: Option<WorkbenchExecutionId>,
     /// Trusted transport coordinates; never accepted from authored JSON.
-    #[serde(skip)]
-    #[schemars(skip)]
     fork_boundary: Option<WorkbenchForkBoundary>,
     /// Trusted named-handler selection; arguments are data, never Haskell source.
-    #[serde(skip)]
-    #[schemars(skip)]
     tool_call: Option<WorkbenchToolCall>,
     /// Raw notebook cell awaiting GHC split/classify/preflight in the owning
     /// actor session.
-    #[serde(skip)]
-    #[schemars(skip)]
     cell_source: Option<String>,
 }
 
@@ -371,7 +152,6 @@ impl WorkbenchRequest {
             items: vec![name.clone()],
             input: None,
             verbose: None,
-            input_kinds: Vec::new(),
             execution_id: None,
             fork_boundary: None,
             tool_call: Some(WorkbenchToolCall { name, arguments }),
@@ -383,27 +163,12 @@ impl WorkbenchRequest {
         self.tool_call.as_ref()
     }
 
-    pub fn from_ghci_input(source: &str) -> Result<Self, GhciInputError> {
-        let units = parse_ghci_input(source)?;
-        Ok(Self {
-            items: units.iter().map(|unit| unit.source().to_owned()).collect(),
-            input: None,
-            verbose: None,
-            input_kinds: units.iter().map(GhciInputUnit::kind).collect(),
-            execution_id: None,
-            fork_boundary: None,
-            tool_call: None,
-            cell_source: None,
-        })
-    }
-
     #[must_use]
     pub fn from_cell_input(source: &str) -> Self {
         Self {
             items: Vec::new(),
             input: None,
             verbose: None,
-            input_kinds: Vec::new(),
             execution_id: None,
             fork_boundary: None,
             tool_call: None,
@@ -417,7 +182,6 @@ impl WorkbenchRequest {
     }
 
     pub fn install_cell_items(&mut self, items: Vec<String>) {
-        self.input_kinds = vec![GhciInputKind::Code; items.len()];
         self.items = items;
         self.cell_source = None;
     }
@@ -442,29 +206,6 @@ impl WorkbenchRequest {
     #[must_use]
     pub fn fork_boundary(&self) -> Option<&WorkbenchForkBoundary> {
         self.fork_boundary.as_ref()
-    }
-
-    #[must_use]
-    pub fn input_kind(&self, index: usize) -> GhciInputKind {
-        self.input_kinds.get(index).copied().unwrap_or_else(|| {
-            if self
-                .items
-                .get(index)
-                .is_some_and(|source| source.trim_start().starts_with(':'))
-            {
-                GhciInputKind::Command
-            } else {
-                GhciInputKind::Code
-            }
-        })
-    }
-
-    #[must_use]
-    pub fn item_is_observational(&self, index: usize) -> bool {
-        self.input_kind(index) == GhciInputKind::Command
-            && self.items.get(index).is_some_and(|source| {
-                MetaCommandLine::parse(source).is_ok_and(|command| command.is_observational())
-            })
     }
 }
 
@@ -710,20 +451,16 @@ impl MetaCommandLine {
     /// Parse a command with an optional leading colon.
     pub fn parse(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
-        let normalized = if trimmed.starts_with(':') {
-            trimmed.to_owned()
-        } else {
-            format!(":{trimmed}")
-        };
-        let root = GhciScriptParser::parse(Rule::standalone_command, &normalized)
-            .map_err(|error| format!("invalid workbench command: {error}"))?
-            .next()
-            .ok_or_else(|| "invalid workbench command: parser returned no command".to_string())?;
-        let command = root
-            .into_inner()
-            .find(|pair| pair.as_rule() == Rule::command)
-            .ok_or_else(|| "invalid workbench command: missing command".to_string())?;
-        meta_command_from_pair(command).map_err(|error| error.to_string())
+        let command = trimmed.strip_prefix(':').unwrap_or(trimmed);
+        if command.is_empty() || command.starts_with([' ', '\t']) || command.contains(['\r', '\n'])
+        {
+            return Err("invalid workbench command: expected one command line".into());
+        }
+        let boundary = command.find([' ', '\t']).unwrap_or(command.len());
+        Ok(Self {
+            name: command[..boundary].to_owned(),
+            arguments: command[boundary..].trim().to_owned(),
+        })
     }
 
     /// Interpret this line when it names the common discovery subset.
@@ -1154,30 +891,18 @@ mod tests {
     }
 
     #[test]
-    fn hosted_coordinates_cannot_be_supplied_by_authored_json() {
-        let authored: WorkbenchRequest = serde_json::from_value(serde_json::json!({
-            "items": ["pure ()"],
-            "execution_id": "forged-execution",
-            "fork_boundary": {"thread_id": "another-parent", "call_id": "another-call"},
-            "tool_call": {"name": "bash", "arguments": "forged input"}
-        }))
-        .unwrap();
-        assert!(authored.execution_id().is_none());
-        assert!(authored.fork_boundary().is_none());
-        assert!(authored.tool_call().is_none());
-
-        let trusted = authored.with_fork_boundary(WorkbenchForkBoundary {
-            thread_id: "parent-thread".into(),
-            call_id: "hosted-call".into(),
-        });
-        assert_eq!(trusted.fork_boundary().unwrap().call_id, "hosted-call");
-        let serialized = serde_json::to_value(trusted).unwrap();
-        assert!(serialized.get("fork_boundary").is_none());
-        assert!(serialized.get("execution_id").is_none());
-        let schema = serde_json::to_value(schemars::schema_for!(WorkbenchRequest)).unwrap();
-        assert!(schema["properties"].get("fork_boundary").is_none());
-        assert!(schema["properties"].get("execution_id").is_none());
-        assert!(schema["properties"].get("tool_call").is_none());
+    fn cell_source_and_tool_arguments_have_distinct_replay_identity() {
+        let cell = WorkbenchRequest::from_cell_input("pure ()");
+        assert!(cell.items.is_empty());
+        assert_eq!(cell.cell_source(), Some("pure ()"));
+        assert!(cell.tool_call().is_none());
+        assert!(cell.execution_id().is_none());
+        assert!(cell.fork_boundary().is_none());
+        assert_ne!(cell, WorkbenchRequest::from_cell_input("pure 1"));
+        assert_ne!(
+            cell,
+            WorkbenchRequest::for_tool("pure ()".into(), serde_json::Value::Null)
+        );
     }
 
     #[test]
@@ -1195,11 +920,6 @@ mod tests {
             request,
             WorkbenchRequest::for_tool("other".into(), script.into())
         );
-        let wire = serde_json::to_value(&request).unwrap();
-        assert!(wire.get("tool_call").is_none());
-        let decoded: WorkbenchRequest = serde_json::from_value(wire).unwrap();
-        assert!(decoded.tool_call().is_none());
-        assert_ne!(request, decoded);
     }
 
     #[test]
@@ -1301,234 +1021,6 @@ mod tests {
         assert!(!MetaCommandLine::parse(":set -XGADTs")
             .unwrap()
             .is_observational());
-    }
-
-    #[test]
-    fn ghci_script_parses_lines_and_exact_multiline_units() {
-        assert_eq!(
-            parse_ghci_input(
-                ":info ActionFailure\r\n\r\n:{\r\ndata Example\r\n  = First\r\n  | 第二\r\n:}\r\n:type Example\r\n"
-            )
-            .unwrap(),
-            vec![
-                GhciInputUnit::Command {
-                    source: ":info ActionFailure".into(),
-                    line: 1,
-                    command: MetaCommandLine {
-                        name: "info".into(),
-                        arguments: "ActionFailure".into(),
-                    },
-                },
-                GhciInputUnit::Block {
-                    source: "data Example\r\n  = First\r\n  | 第二".into(),
-                    start_line: 3,
-                    end_line: 7,
-                },
-                GhciInputUnit::Command {
-                    source: ":type Example".into(),
-                    line: 8,
-                    command: MetaCommandLine {
-                        name: "type".into(),
-                        arguments: "Example".into(),
-                    },
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn ghci_script_preserves_multiline_quasiquotes_and_following_units() {
-        let quotation = include_str!("fixtures/multiline-command.hs").trim_end_matches('\n');
-        let input = format!("{quotation}\nresult <- Cmd.run command\n:info Cmd.RunResult\n");
-        let units = parse_ghci_input(&input).unwrap();
-        assert_eq!(units.len(), 3);
-        assert_eq!(units[0].source(), quotation);
-        assert_eq!(units[1].source(), "result <- Cmd.run command");
-        assert_eq!(units[2].source(), ":info Cmd.RunResult");
-    }
-
-    #[test]
-    fn ghci_script_ignores_quotation_openers_in_haskell_lexical_islands() {
-        let input = "let text = \"[bash|\"\n-- [bash|\nlet char = '['\n{- [bash| {- nested -} -}\nnext <- pure text\n";
-        let units = parse_ghci_input(input).unwrap();
-        assert_eq!(units.len(), 5);
-        assert_eq!(units[4].source(), "next <- pure text");
-    }
-
-    #[test]
-    fn ghci_script_quasiquote_boundary_matrix() {
-        let quotations = [
-            "[bash|\nprintf '%s' \"$HOME\"\n|]",
-            "[Cmd.bash|\n# comment\n\ntrue\n|]",
-            "[bash|printf 'a'|] <> [bash|\nprintf 'b'\n|]",
-            "[bash|\ncat <<-END\n\ttabs stay tabs\n\tEND\n|]",
-            "[bash|\nprintf '%s' '[notAnotherQuote|'\n|]",
-        ];
-        for quotation in quotations {
-            for newline in ["\n", "\r\n"] {
-                let declaration = format!("let command = {quotation}").replace('\n', newline);
-                let input =
-                    format!("{declaration}{newline}result <- Cmd.run command{newline}:type result");
-                let units = parse_ghci_input(&input).unwrap();
-                assert_eq!(units.len(), 3, "{input:?}");
-                assert_eq!(units[0].source(), declaration, "quotation bytes changed");
-                assert_eq!(units[1].source(), "result <- Cmd.run command");
-                assert_eq!(units[2].source(), ":type result");
-                assert!(matches!(&units[1], GhciInputUnit::Code { line, .. }
-                    if *line == declaration.lines().count() + 1));
-            }
-        }
-    }
-
-    #[test]
-    fn ghci_script_unclosed_quasiquote_keeps_suffix_for_ghc_rejection() {
-        let input = "let command = [bash|\n:info literal\nrunDangerousEffect\n";
-        let units = parse_ghci_input(input).unwrap();
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].source(), input);
-    }
-
-    #[test]
-    fn ghci_script_explicit_block_preserves_quoted_block_delimiters() {
-        let quotation = include_str!("fixtures/multiline-command.hs").trim_end_matches('\n');
-        let input = format!(":{{\n{quotation}\n:}}\nnext <- pure ()");
-        let units = parse_ghci_input(&input).unwrap();
-        assert_eq!(units.len(), 2);
-        assert_eq!(units[0].source(), quotation);
-        assert!(matches!(&units[0], GhciInputUnit::Block { .. }));
-        assert_eq!(units[1].source(), "next <- pure ()");
-    }
-
-    #[test]
-    fn ghci_script_escaped_strings_and_nested_comments_do_not_open_quotes() {
-        for source in [
-            r#"let text = "escaped \" [bash| still string""#,
-            "let primed' = '\\'' -- [bash| not code",
-            "{- outer {- [bash| -} still a comment -} let x = 1",
-            "let bracket = '['",
-        ] {
-            let input = format!("{source}\nnext <- pure ()");
-            let units = parse_ghci_input(&input).unwrap();
-            assert_eq!(units.len(), 2, "{input:?}");
-            assert_eq!(units[0].source(), source);
-            assert_eq!(units[1].source(), "next <- pure ()");
-        }
-    }
-
-    #[test]
-    fn ghci_script_groups_indented_layout_before_following_reply() {
-        assert_eq!(
-            parse_ghci_input(
-                "let findings =\n  [ \"first\"\n  , \"second\"\n  ]\nrespond findings\n"
-            )
-            .unwrap(),
-            vec![
-                GhciInputUnit::Code {
-                    source: "let findings =\n  [ \"first\"\n  , \"second\"\n  ]".into(),
-                    line: 1,
-                },
-                GhciInputUnit::Code {
-                    source: "respond findings".into(),
-                    line: 5,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn ghci_script_keeps_same_indent_haskell_as_separate_units() {
-        assert_eq!(
-            parse_ghci_input("  first = 1\n  second = 2\n").unwrap(),
-            vec![
-                GhciInputUnit::Code {
-                    source: "  first = 1".into(),
-                    line: 1,
-                },
-                GhciInputUnit::Code {
-                    source: "  second = 2".into(),
-                    line: 2,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn ghci_script_compares_indentation_at_tab_stops() {
-        assert_eq!(
-            parse_ghci_input("          first = 1\n   \tsecond = 2\n").unwrap(),
-            vec![
-                GhciInputUnit::Code {
-                    source: "          first = 1".into(),
-                    line: 1,
-                },
-                GhciInputUnit::Code {
-                    source: "   \tsecond = 2".into(),
-                    line: 2,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn explicit_multiline_layout_still_precedes_following_reply() {
-        assert_eq!(
-            parse_ghci_input(
-                ":{\nlet findings =\n  [ \"first\"\n  , \"second\"\n  ]\n:}\nrespond findings\n"
-            )
-            .unwrap(),
-            vec![
-                GhciInputUnit::Block {
-                    source: "let findings =\n  [ \"first\"\n  , \"second\"\n  ]".into(),
-                    start_line: 1,
-                    end_line: 6,
-                },
-                GhciInputUnit::Code {
-                    source: "respond findings".into(),
-                    line: 7,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn ghci_script_reports_structural_errors() {
-        assert_eq!(
-            parse_ghci_input(":}\n").unwrap_err(),
-            GhciInputError::UnexpectedBlockClose { line: 1 }
-        );
-        assert_eq!(
-            parse_ghci_input(":{\nx = 1\n").unwrap_err(),
-            GhciInputError::UnterminatedBlock { line: 1 }
-        );
-        assert_eq!(
-            parse_ghci_input(":{\n:{\n:}\n").unwrap_err(),
-            GhciInputError::NestedBlockOpen { line: 2 }
-        );
-        assert!(parse_ghci_input(": not-a-command\n")
-            .unwrap_err()
-            .to_string()
-            .contains("colon-prefixed input is reserved"));
-    }
-
-    #[test]
-    fn ghci_grammar_classification_survives_into_the_workbench_request() {
-        let request = WorkbenchRequest::from_ghci_input(
-            "  value = 42\n:info value\n:{\ntext = \"embedded :} and :{ stay Haskell\"\n:}\n",
-        )
-        .unwrap();
-        assert_eq!(request.items.len(), 3);
-        assert_eq!(request.items[0], "  value = 42");
-        assert_eq!(
-            request.items[2],
-            "text = \"embedded :} and :{ stay Haskell\""
-        );
-        assert_eq!(request.input_kind(0), GhciInputKind::Code);
-        assert_eq!(request.input_kind(1), GhciInputKind::Command);
-        assert_eq!(request.input_kind(2), GhciInputKind::Code);
-        assert!(WorkbenchRequest::from_ghci_input(" \t\n  ")
-            .unwrap()
-            .items
-            .is_empty());
     }
 
     #[test]
@@ -1642,11 +1134,10 @@ mod tests {
 
     #[tokio::test]
     async fn failed_layout_unit_never_invokes_following_reply() {
-        let blocks = parse_ghci_input("let findings =\n  [ missing\n  ]\nrespond findings\n")
-            .unwrap()
-            .into_iter()
-            .map(|unit| unit.source().to_owned())
-            .collect();
+        let blocks = vec![
+            "let findings =\n  [ missing\n  ]".into(),
+            "respond findings".into(),
+        ];
         let mut invoked = Vec::new();
         let outcome = run_block_sequence(blocks, |block| {
             invoked.push(block.source.clone());

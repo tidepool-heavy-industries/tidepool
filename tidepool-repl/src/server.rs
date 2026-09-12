@@ -26,7 +26,6 @@ use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl, EffectRos
 use tidepool_repr::{MonotonicIdIssuer, SessionId};
 use tidepool_runtime::session::{
     classify_workbench_item, GraceOutcome, ModuleEnv, TurnSupervisor, WorkbenchItem,
-    WorkbenchRequest,
 };
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
@@ -195,8 +194,43 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 // Request types
 // ---------------------------------------------------------------------------
 
-/// Backward-compatible public name for the shared workbench request.
-pub type SessionBlockRequest = WorkbenchRequest;
+/// MCP transport accepted by the standalone REPL's `session_run` tool.
+///
+/// This frontend owns the wire shape because the actor's
+/// [`WorkbenchRequest`](tidepool_runtime::session::WorkbenchRequest)
+/// carries trusted execution identity, fork boundaries, and prepared-cell
+/// state that must never be deserialized from a client request.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SessionBlockRequest {
+    /// Ordered standalone REPL items. Each is classified by the shared GHCi
+    /// command lexer and GHC-backed block classifier before execution.
+    pub items: Vec<String>,
+    /// Optional JSON value mounted as `input` for this block.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    /// Request the standalone REPL's expanded diagnostic response.
+    #[serde(default)]
+    pub verbose: Option<bool>,
+}
+
+impl SessionBlockRequest {
+    fn into_command(self) -> Result<(SessionCommand, Option<serde_json::Value>), String> {
+        let mut items = Vec::with_capacity(self.items.len());
+        for source in self.items {
+            let item = classify_item(&source)
+                .map_err(|error| format!("failed to classify item {source:?}: {error}"))?;
+            items.push(item);
+        }
+        let input = self.input.as_ref().map(tidepool_mcp::normalize_input);
+        Ok((
+            SessionCommand::Block {
+                items,
+                verbose: self.verbose.unwrap_or(false),
+            },
+            input,
+        ))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionResumeRequest {
@@ -521,34 +555,15 @@ impl TidepoolReplServer {
             "session_run" => {
                 let req: SessionBlockRequest = serde_json::from_value(parse(args))
                     .map_err(|e| McpError::invalid_params(format!("invalid params: {e}"), None))?;
-                let mut block_items: Vec<BlockItem> = Vec::with_capacity(req.items.len());
-                for item_text in &req.items {
-                    match classify_item(item_text) {
-                        Ok(item) => block_items.push(item),
-                        Err(e) => {
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "session_run: failed to classify item {item_text:?}: {e}"
-                            ))]))
-                        }
+                let (command, input) = match req.into_command() {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "session_run: {error}"
+                        ))]))
                     }
-                }
-                // MCP clients stringify the `input` param (a JSON object/array
-                // arrives double-encoded as a String); unwrap one level so
-                // `input :: Aeson.Value` is the structured value, matching the
-                // stateless `eval` tool exactly.
-                let input = req.input.as_ref().map(tidepool_mcp::normalize_input);
-                let verbose = req.verbose.unwrap_or(false);
-                Ok(self
-                    .run_command(
-                        "session_run",
-                        SessionCommand::Block {
-                            items: block_items,
-                            verbose,
-                        },
-                        input,
-                        ct,
-                    )
-                    .await)
+                };
+                Ok(self.run_command("session_run", command, input, ct).await)
             }
             "session_resume" => {
                 let req: SessionResumeRequest = serde_json::from_value(parse(args))
@@ -1361,6 +1376,33 @@ pub struct EmptyRequest {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_block_transport_keeps_wire_data_out_of_workbench_authority() {
+        let request: SessionBlockRequest = serde_json::from_value(serde_json::json!({
+            "items": ["let answer = 42", "answer"],
+            "input": "{\"project\":\"shoal\"}",
+            "verbose": true
+        }))
+        .expect("decode standalone session request");
+        let (command, input) = request.into_command().expect("prepare standalone block");
+        assert_eq!(input, Some(serde_json::json!({"project": "shoal"})));
+        assert!(matches!(
+            command,
+            SessionCommand::Block { items, verbose: true }
+                if matches!(items.as_slice(), [BlockItem::Auto(_), BlockItem::Auto(_)])
+        ));
+
+        let schema = schemars::schema_for!(SessionBlockRequest);
+        let encoded = serde_json::to_value(schema).expect("encode standalone schema");
+        assert!(encoded.to_string().contains("items"));
+        for forbidden in ["executionId", "forkBoundary", "cellSource", "toolCall"] {
+            assert!(
+                !encoded.to_string().contains(forbidden),
+                "standalone schema must not expose actor authority: {forbidden}"
+            );
+        }
+    }
 
     /// A server with a session root under `dir` and NO background reaper (both
     /// TTLs `None`, so `spawn_reaper` returns early) — the wedge tests below

@@ -1183,7 +1183,7 @@ impl PersistentSession {
             .iter()
             .flat_map(super::ExportItem::all_names)
             .collect::<Vec<_>>();
-        let mut import_modules = self
+        let visible_values = self
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
@@ -1192,7 +1192,11 @@ impl PersistentSession {
                     .iter()
                     .any(|replaced| replaced == &name.0.as_str())
             })
-            .map(|(_, entry)| entry.module.module_name())
+            .map(|(_, entry)| (entry.id, entry.module.module_name()))
+            .collect::<Vec<_>>();
+        let mut import_modules = visible_values
+            .iter()
+            .map(|(_, module)| module.clone())
             .collect::<Vec<_>>();
         import_modules.sort();
         import_modules.dedup();
@@ -1203,6 +1207,64 @@ impl PersistentSession {
             &import_modules,
             &self.live_val_modules(),
         )
+        .map(|staged| staged.with_visible_values(visible_values))
+    }
+
+    /// Adopt a declaration candidate which this session already rendered and
+    /// validated. The opaque candidate carries its normalized source, imports,
+    /// and declaration/value environment; this entry point only accepts it
+    /// while that exact live environment still exists.
+    pub fn adopt_staged_declaration_in(
+        &mut self,
+        staged: super::StagedDeclaration,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        let scope = staged.scope();
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let mut replaced_names: Vec<String> = staged
+            .items()
+            .iter()
+            .flat_map(super::ExportItem::all_names)
+            .map(str::to_owned)
+            .collect();
+        replaced_names.sort();
+        replaced_names.dedup();
+        let mut evicted_values: Vec<String> = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .filter(|(name, _)| replaced_names.iter().any(|replaced| replaced == &name.0))
+            .map(|(name, _)| name.0.clone())
+            .collect();
+        evicted_values.sort();
+        let visible_values = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .filter(|(name, _)| !replaced_names.iter().any(|replaced| replaced == &name.0))
+            .map(|(_, entry)| (entry.id, entry.module.module_name()))
+            .collect::<Vec<_>>();
+        let captured_values = visible_values
+            .iter()
+            .map(|(id, _)| id.var())
+            .collect::<Vec<_>>();
+        let items = staged.items().to_vec();
+        let generation = self
+            .lib
+            .as_mut()
+            .expect("decl plane present")
+            .adopt_staged_batch_with_receipt_and_vals_in(staged, &visible_values)?;
+        self.bindings.preserve_observations(&captured_values);
+        for name in &replaced_names {
+            self.bindings.remove_current_in(scope, name);
+        }
+        Ok(DeclarationPlaneCommit {
+            generation,
+            module: SessionModule::lib(generation),
+            items,
+            evicted_values,
+        })
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -1329,6 +1391,32 @@ impl PersistentSession {
             .into_iter()
             .next()
             .expect("one materialization receipt"))
+    }
+
+    /// Publish a compiler-typed alias of an already registered binding root.
+    /// The slot belongs to the source binding, so a failed declaration retract
+    /// must never pass it through the new-root cleanup path used by a bind.
+    pub(crate) fn publish_alias_in(
+        &mut self,
+        scope: ScopeId,
+        entry: BindingEntry,
+        source: SessionVarId,
+    ) -> Result<ValuePlaneCommit, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let name = entry.name.0.clone();
+        self.retract_many_in(scope, std::slice::from_ref(&name))?;
+        let receipt = ValuePlaneCommit {
+            name,
+            module: entry.module,
+        };
+        let (_, expired) = self
+            .bindings
+            .bind_alias_in(scope, entry, source)
+            .expect("source and alias identity validated before declaration retraction");
+        self.release_binding_roots(expired);
+        Ok(receipt)
     }
 
     /// Root-scope [`Self::bind_replacing_decl_in`].

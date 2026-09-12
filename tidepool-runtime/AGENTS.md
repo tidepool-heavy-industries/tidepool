@@ -8,9 +8,10 @@ session checkout, turn supervision, and runtime/session failure classification.
   machine, run it, and manually put it back.
 - Checkout epochs fence stale timeout, panic, or cancellation settlement. Every
   path settles exactly once.
-- `session::workbench` owns frontend-neutral source classification,
-  meta-command tokenization, turn templates, and ordered cursors. Frontends own
-  presentation and command policy; do not duplicate the classifier.
+- `session::workbench` owns cell requests, turn templates, and ordered cursors.
+  The extractor owns authored Haskell splitting and classification. Resident
+  cells always pass whole-cell preparation; lookup and status are separate
+  hosted tools. Standalone operator frontends retain their command policy.
 - Toolchain discovery, fingerprints, diagnostics, and compiled-artifact cache
   policy belong to `tidepool-toolchain`, even when compatibility modules are
   re-exported here.
