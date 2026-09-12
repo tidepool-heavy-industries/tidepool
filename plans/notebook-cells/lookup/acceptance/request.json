@@ -1,0 +1,11 @@
+{
+  "queries": [
+    "awaitSettled",
+    ":: Response result -> Await (Settlement result)",
+    ":: NotInScope -> Int",
+    ":: Maybe -> Int",
+    ":: _ -> _",
+    ":: a -> a",
+    "choose"
+  ]
+}

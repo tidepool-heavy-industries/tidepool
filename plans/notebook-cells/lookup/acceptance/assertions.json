@@ -1,0 +1,42 @@
+{
+  "ordered": true,
+  "results": [
+    {
+      "query": "awaitSettled",
+      "status": "found",
+      "contains_name": "awaitSettled"
+    },
+    {
+      "query": ":: Response result -> Await (Settlement result)",
+      "status": "found",
+      "contains_name": "awaitSettled",
+      "quality": "exact"
+    },
+    {
+      "query": ":: NotInScope -> Int",
+      "status": "rejected"
+    },
+    {
+      "query": ":: Maybe -> Int",
+      "status": "rejected"
+    },
+    {
+      "query": ":: _ -> _",
+      "status": "found",
+      "contains_name": "awaitSettled"
+    },
+    {
+      "query": ":: a -> a",
+      "status": "found",
+      "excludes_name": "awaitSettled"
+    },
+    {
+      "query": "choose",
+      "status": "ambiguous",
+      "candidate_modules": [
+        "LookupAmbiguousA",
+        "LookupAmbiguousB"
+      ]
+    }
+  ]
+}
