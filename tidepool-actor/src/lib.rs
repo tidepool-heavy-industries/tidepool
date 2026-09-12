@@ -32,6 +32,7 @@ mod interactive_session;
 mod kernel;
 mod lineage;
 mod local_actor;
+pub(crate) mod lookup_tool;
 mod mailbox;
 mod mount;
 mod notification;
