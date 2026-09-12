@@ -53,7 +53,7 @@ enum AdmissionKind {
     CompletionOrRead,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostBoundaryState {
     Active,
     Reconciling,
@@ -625,8 +625,8 @@ async fn completed(
                 | HostBoundaryState::Pending,
             ) => {
                 return Err((
-                    StatusCode::CONFLICT,
-                    "tool completion boundary is still active".into(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "tool completion boundary is still settling; retry acknowledgment".into(),
                 ));
             }
             previous => {
@@ -1398,6 +1398,60 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn completion_during_interruption_is_retryable_until_settled() {
+        let (endpoint, _) = cancellation_endpoint();
+        let state = challenged_cancellation_state(endpoint).await;
+        let thread_id = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
+        let key = (thread_id.to_owned(), "call-a".to_owned());
+        for boundary_state in [
+            HostBoundaryState::Active,
+            HostBoundaryState::Reconciling,
+            HostBoundaryState::Pending,
+        ] {
+            state
+                .boundaries
+                .lock()
+                .await
+                .insert(key.clone(), boundary_state);
+            let error = completed(
+                State(state.clone()),
+                Json(CompletionRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    thread_id: thread_id.into(),
+                    context_call_id: "call-a".into(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                state.boundaries.lock().await.get(&key),
+                Some(&boundary_state)
+            );
+        }
+        state
+            .boundaries
+            .lock()
+            .await
+            .insert(key.clone(), HostBoundaryState::Recoverable);
+        let response = completed(
+            State(state.clone()),
+            Json(CompletionRequest {
+                protocol_version: PROTOCOL_VERSION,
+                thread_id: thread_id.into(),
+                context_call_id: "call-a".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0, serde_json::Value::Null);
+        assert_eq!(
+            state.boundaries.lock().await.get(&key),
+            Some(&HostBoundaryState::Settled)
+        );
     }
 
     #[tokio::test]
