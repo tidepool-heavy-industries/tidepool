@@ -158,6 +158,67 @@ pub(crate) struct ShoalConfig {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct LaunchConfig {
     pub(crate) systemd_slice: tidepool_node::systemd_slice::SystemdSlice,
+    pub(crate) source_exclude: Vec<String>,
+}
+
+impl LaunchConfig {
+    pub(crate) fn validate(&self) -> std::io::Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in &self.source_exclude {
+            if name.is_empty()
+                || matches!(name.as_str(), "." | ".." | ".git" | ".shoal")
+                || name.contains(['/', '\0', '*', '?', '[', ']'])
+                || !seen.insert(name)
+            {
+                return Err(std::io::Error::other(format!(
+                    "invalid [launch].source_exclude directory name {name:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_tracked_exclusions(workspace: &Path, excluded: &[String]) -> std::io::Result<()> {
+    if excluded.is_empty() {
+        return Ok(());
+    }
+    let git = tidepool_worktree::GitCli::new();
+    for name in excluded {
+        if source_directory_has_tracked(&git, workspace, name)? {
+            return Err(std::io::Error::other(format!(
+                "[launch].source_exclude {name:?} contains tracked source"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn source_directory_has_tracked(
+    git: &tidepool_worktree::GitCli,
+    workspace: &Path,
+    name: &str,
+) -> std::io::Result<bool> {
+    let path = format!("{name}/");
+    let staged = git
+        .try_run(workspace, &["ls-files", "--cached", "-z", "--", &path])
+        .map_err(std::io::Error::other)?;
+    if !staged.stdout.is_empty() {
+        return Ok(true);
+    }
+    if git
+        .try_run(workspace, &["rev-parse", "--verify", "HEAD"])
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let committed = git
+        .try_run(
+            workspace,
+            &["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", &path],
+        )
+        .map_err(std::io::Error::other)?;
+    Ok(!committed.stdout.is_empty())
 }
 
 /// Initialize the smallest repository that can host a Shoal ensemble.
@@ -245,6 +306,8 @@ fn read_project_config(
             path.display()
         ))
     })?;
+    config.launch.validate()?;
+    validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {
         runtime_error(format!(
             "invalid command resources in {}: {error}",
@@ -892,6 +955,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
             systemd_slice: Some(slice),
+            source_exclude: configuration.launch.source_exclude,
             command_resources: Some(command_resources),
             shoal_executable: std::env::current_exe()?,
             workspace: options.workspace.clone(),
@@ -1561,6 +1625,40 @@ mod tests {
                 .to_string()
                 .contains("invalid Shoal configuration"));
         }
+    }
+
+    #[test]
+    fn source_exclusion_rejects_tracked_files_at_config_load() {
+        let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+        repo.writer()
+            .commit_file("tracked/file", "source", "seed")
+            .unwrap();
+        let config = repo.path().join(SHOAL_CONFIG);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let write_config = |excluded: &str| {
+            std::fs::write(
+                &config,
+                format!(
+                    "[defaults]\nmodel = \"test-model\"\n[launch]\nsource_exclude = [\"{excluded}\"]\n"
+                ),
+            )
+            .unwrap();
+        };
+        write_config("tracked");
+        assert!(ensure_project_config(repo.path())
+            .unwrap_err()
+            .to_string()
+            .contains("contains tracked source"));
+        write_config("scratch");
+        assert_eq!(
+            ensure_project_config(repo.path())
+                .unwrap()
+                .launch
+                .source_exclude,
+            ["scratch"]
+        );
+        write_config("../outside");
+        assert!(ensure_project_config(repo.path()).is_err());
     }
 
     #[test]

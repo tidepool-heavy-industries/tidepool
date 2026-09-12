@@ -48,6 +48,7 @@ struct CapturedSource {
 pub(super) struct WorkspaceLayout {
     pub(super) run_namespace: String,
     pub(super) source_root: PathBuf,
+    pub(super) source_exclude: Vec<String>,
     pub(super) worktrees: WorktreeManager,
     pub(super) base_prompt: FrozenBasePrompt,
     pub(super) backend: Arc<dyn InteractiveAgentBackend>,
@@ -154,6 +155,40 @@ impl PreparedWorkspace {
 }
 
 impl WorkspaceLayout {
+    fn source_exclusions(&self, source: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+        let mut excluded = vec![".git".into(), ".shoal".into()];
+        let git = self.worktrees.git();
+        for name in &self.source_exclude {
+            if crate::shoal::source_directory_has_tracked(git, source, name)? {
+                return Err(io::Error::other(format!(
+                    "configured source exclusion {name:?} contains tracked files"
+                )));
+            }
+            excluded.push(name.into());
+        }
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if excluded.iter().any(|excluded| excluded == &name) || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Ok(tag) = std::fs::read(entry.path().join("CACHEDIR.TAG")) else {
+                continue;
+            };
+            if !tag.starts_with(b"Signature: 8a477f597d28d172789f06886806bc55") {
+                continue;
+            }
+            let Some(name_text) = name.to_str() else {
+                continue;
+            };
+            if !crate::shoal::source_directory_has_tracked(git, source, name_text)? {
+                excluded.push(name);
+            }
+        }
+        excluded.sort();
+        Ok(excluded)
+    }
+
     pub(super) fn resource_root(&self, key: &str) -> PathBuf {
         // Actor IDs restart in each run; retained resources belong to that run.
         self.worktrees
@@ -568,17 +603,24 @@ impl WorkspaceLayout {
             }
         } else {
             let source = OverlayResourceLease::allocate_path(source_pathname, None)?;
-            // Exclude Cargo's tagged cache, not ordinary source named target.
-            // The native private target lives under the separate .shoal mount.
-            let mut excluded = vec![std::ffi::OsStr::new(".git"), std::ffi::OsStr::new(".shoal")];
-            if source_path.join("Cargo.toml").is_file()
-                && std::fs::read(source_path.join("target/CACHEDIR.TAG")).is_ok_and(|tag| {
-                    tag.starts_with(b"Signature: 8a477f597d28d172789f06886806bc55")
-                })
-            {
-                excluded.push(std::ffi::OsStr::new("target"));
-            }
-            match source.import_source(source_path, &excluded) {
+            let excluded = self.source_exclusions(source_path)?;
+            let excluded_refs = excluded
+                .iter()
+                .map(std::ffi::OsString::as_os_str)
+                .collect::<Vec<_>>();
+            let imported = source
+                .import_source(source_path, &excluded_refs)
+                .and_then(|()| {
+                    if excluded == self.source_exclusions(source_path)? {
+                        Ok(())
+                    } else {
+                        Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "source exclusions changed during import",
+                        ))
+                    }
+                });
+            match imported {
                 Ok(()) => (Some(source), None),
                 Err(error) => (None, Some(SourceFallback::ImportFailed(error.to_string()))),
             }

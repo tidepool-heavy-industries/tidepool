@@ -213,6 +213,58 @@ const CODING: ForkWorkspacePolicy = ForkWorkspacePolicy {
 };
 
 #[test]
+fn source_exclusions_keep_tracked_files_and_untagged_directories() {
+    let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+    repo.writer()
+        .commit_file("tracked/source", "source", "seed")
+        .unwrap();
+    for name in ["tracked", "node_modules", "ordinary"] {
+        std::fs::create_dir_all(repo.path().join(name)).unwrap();
+        std::fs::write(repo.path().join(name).join("asset"), name).unwrap();
+    }
+    for name in ["tracked", "node_modules"] {
+        std::fs::write(
+            repo.path().join(name).join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+    }
+    let runtime = tempfile::tempdir().unwrap();
+    let (manager, _) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
+    let mut layout = WorkspaceLayout {
+        run_namespace: "source-exclusion-test".into(),
+        source_root: repo.path().into(),
+        source_exclude: Vec::new(),
+        worktrees: manager,
+        base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
+        backend: Arc::new(Backend::default()),
+    };
+    let excluded = layout.source_exclusions(repo.path()).unwrap();
+    assert!(excluded.contains(&"node_modules".into()));
+    assert!(!excluded.contains(&"tracked".into()));
+    assert!(!excluded.contains(&"ordinary".into()));
+    layout.source_exclude.push("ordinary".into());
+    assert!(layout
+        .source_exclusions(repo.path())
+        .unwrap()
+        .contains(&"ordinary".into()));
+    layout.source_exclude.push("tracked".into());
+    assert!(layout.source_exclusions(repo.path()).is_err());
+    repo.git()
+        .try_run(repo.path(), &["rm", "--cached", "--", "tracked/source"])
+        .unwrap();
+    assert!(
+        layout.source_exclusions(repo.path()).is_err(),
+        "HEAD must still protect a staged deletion"
+    );
+    let mut config = crate::shoal::LaunchConfig::default();
+    for invalid in ["../outside", "", ".git", "build*"] {
+        config.source_exclude = vec![invalid.into()];
+        assert!(config.validate().is_err(), "{invalid:?}");
+    }
+}
+
+#[test]
 fn root_workspace_resources_are_isolated_between_runs() {
     let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
     repo.writer().commit_file("file", "source", "seed").unwrap();
@@ -224,6 +276,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
     let mut layout = WorkspaceLayout {
         run_namespace: "first-run".into(),
         source_root: repo.path().into(),
+        source_exclude: Vec::new(),
         worktrees: manager,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
@@ -327,6 +380,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let layout = WorkspaceLayout {
         run_namespace: "workspace-test".into(),
         source_root: repo.path().into(),
+        source_exclude: Vec::new(),
         worktrees: manager.clone(),
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: backend.clone(),

@@ -384,6 +384,7 @@ fn fork_workspace_admission(
 #[derive(Clone)]
 pub struct ActorHostConfig {
     pub systemd_slice: Option<tidepool_node::systemd_slice::SystemdSlice>,
+    pub source_exclude: Vec<String>,
     pub command_resources: Option<Arc<tidepool_node::command_resources::CommandResourceClient>>,
     /// This Shoal installation provides the internal namespace-entry executable.
     pub shoal_executable: PathBuf,
@@ -1284,6 +1285,7 @@ pub async fn run(
                 layout: Some(WorkspaceLayout {
                     run_namespace: runtime_namespace(&run_root),
                     source_root: config.workspace.clone(),
+                    source_exclude: config.source_exclude.clone(),
                     worktrees: worktrees.clone(),
                     backend: backend.clone(),
                     base_prompt: FrozenBasePrompt::materialize_selected(
@@ -3105,6 +3107,7 @@ async fn launch_prepared_interactive_application(
             let layout = WorkspaceLayout {
                 run_namespace: runtime_namespace(&run_root),
                 source_root: config.workspace.clone(),
+                source_exclude: config.source_exclude.clone(),
                 worktrees: worktrees.clone(),
                 base_prompt: base_prompt.clone(),
                 backend: backend.clone(),

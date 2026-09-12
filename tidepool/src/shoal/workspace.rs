@@ -221,7 +221,9 @@ impl FrozenWorkspace {
     }
 
     pub(crate) fn config(&self) -> Result<super::ShoalConfig> {
-        Ok(toml::from_str(&self.config)?)
+        let config: super::ShoalConfig = toml::from_str(&self.config)?;
+        config.launch.validate()?;
+        Ok(config)
     }
 }
 
