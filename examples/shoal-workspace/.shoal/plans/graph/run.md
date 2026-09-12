@@ -12,7 +12,7 @@ waves are retained. The label below is a first-run example, not a name to replay
 on every restart. Use subgroup for work scoped under an existing actor.
 
 In native tools resolve `git rev-parse HEAD`, then bind `baseline :: GitRef` to that
-exact app commit. Capture the Sol owner with actorContext before creating its wave router.
+exact app commit. The wave router sends notifications to `me`.
 These expressions run in the Sol root's resident environment:
 
 ```haskell
@@ -24,7 +24,6 @@ let Right contractTask = component campaign RelationContract baseline
 before <- snapshot
 contractWork <- unfold (batch campaign leads) (childWithProgress @WorkProgress @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom contractLabel projectHead contractTask))))
 let (contract, contractQuestions) = contractWork
-owner <- actorContext
 contractWave <- followWork [("contract", contract, contractQuestions)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))
 ```
 

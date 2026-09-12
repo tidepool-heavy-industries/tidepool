@@ -80,6 +80,8 @@ instance Applicative Await where
 newtype WatchId = WatchId Int
   deriving (Show, Eq, Ord)
 
+-- Data ensures registration's constructor match forces an IsString validator
+-- before the watch effect is sent across the bridge.
 data WatchLabel = WatchLabel Text
   deriving (Show, Eq, Ord)
 

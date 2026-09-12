@@ -38,12 +38,11 @@ Bind task to the current assignment, initially sessionInput. Carry incorporated
 changes with withDecision before fresh consumers. Bind the checked commit/checks/
 gates as candidate. When independent review is warranted by the boundary or plan,
 use the existing reviewer flow; do not add a review actor for every trivial edit.
-Use one local wave router for progress and results; capture your context before
-creating it so notifications return to your TUI:
+Use one local wave router for progress and results; its notifications return to
+your TUI through `me`:
 
 ```haskell
 (reviewer, progress) <- reviewCandidate task OwnerRepairs candidate
-owner <- actorContext
 reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMessage reviewSummary))
 ```
 

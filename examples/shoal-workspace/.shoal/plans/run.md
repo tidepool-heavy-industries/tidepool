@@ -45,7 +45,6 @@ let group = batch campaign owners
 let task = Task group plan source outcome why paths criterion decisions
 work <- unfold group (childWithProgress @WorkProgress @Delivery (withContext (selected taskContext) (componentLeadFrom label projectHead task)))
 let (lead, progress) = work
-owner <- actorContext
 wave <- followWork [("component-a", lead, progress)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))
 ```
 
@@ -66,7 +65,6 @@ scaffold/fork/integration, bind the exact checked commit as candidate:
 
 ```haskell
 (reviewer, progress) <- reviewCandidate task OwnerRepairs candidate
-owner <- actorContext
 reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMessage reviewSummary))
 ```
 
@@ -77,7 +75,7 @@ checks, bind `revised :: Candidate` and reuse the retained reviewer:
 ```haskell
 let retryLabel = "review-repaired" :: Label
 (attempt, retryProgress) <- reviewAgain (responseActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
-retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork owner (workMessage reviewSummary))
+retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork me (workMessage reviewSummary))
 ```
 
 Retain the prior attempt's receipt and any unanswered questions before replacing

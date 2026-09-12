@@ -1345,6 +1345,18 @@ impl RequestRegistry {
             }
             touched.insert(record.target);
         }
+        // A response watch or route now owns this actor's settlement wake.
+        // Progress-only dependencies do not replace the terminal notice.
+        // A notice already emitted before registration cannot be retracted.
+        for dependency in &dependencies {
+            if matches!(dependency.requirement, WatchRequirement::Response { .. }) {
+                state
+                    .requests
+                    .get_mut(&dependency.request)
+                    .unwrap()
+                    .notify_owner = false;
+            }
+        }
         for actor in touched {
             *state.cleanup_revision.entry(actor).or_default() += 1;
         }
@@ -1842,6 +1854,34 @@ mod tests {
             SettlementTransition::Unavailable(ResponseFailure::TargetUnavailable)
         );
         assert!(registry.take_settlement_notifications().is_empty());
+    }
+
+    #[test]
+    fn response_watch_takes_over_settlement_notice_after_valid_registration() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let watched = registry.reserve(owner, target);
+        let progress_only = registry.reserve(owner, target);
+
+        assert!(matches!(
+            registry.register_watch(actor(3), vec![watched]),
+            Err(ReplyError::Unauthorized)
+        ));
+        registry.register_watch(owner, vec![watched]).unwrap();
+        registry
+            .register_watch_requirements(
+                owner,
+                "progress".into(),
+                vec![(progress_only, WatchRequirement::ProgressAfter(0))],
+            )
+            .unwrap();
+
+        registry.mark_target_unavailable(owner, watched);
+        registry.mark_target_unavailable(owner, progress_only);
+        let notices = registry.take_settlement_notifications();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].request, progress_only);
     }
 
     #[test]

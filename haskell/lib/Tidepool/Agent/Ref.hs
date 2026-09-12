@@ -42,7 +42,9 @@ agentIdentity (AgentRef target _) = actorAddress target
 agentBoundWorktree :: AgentRef -> Maybe WorktreeHandle
 agentBoundWorktree (AgentRef _ tree) = tree
 
--- | Trusted workbench construction for its own exact incarnation.
+-- | Trusted workbench construction for its own exact incarnation. The exit
+-- cell is a permanently pending placeholder; use this reference for its
+-- address, not for observing the actor's exit.
 internalAgentRef :: Int -> Int -> AgentRef
 internalAgentRef actor incarnation =
   AgentRef (ActorRef actor incarnation (newExitCell ())) Nothing

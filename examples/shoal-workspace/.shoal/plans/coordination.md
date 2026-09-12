@@ -98,9 +98,8 @@ question keys in different sources stay distinct. Closing progress does not clea
 questions or substitute for the later terminal response.
 
 ```haskell
-owner <- actorContext
 let sources = [("api", api, apiProgress), ("ui", ui, uiProgress)]
-wave <- followWork sources (notifyWork owner (withCheckpoints (workMessage deliverySummary)))
+wave <- followWork sources (notifyWork me (withCheckpoints (workMessage deliverySummary)))
 ```
 
 Here both workers return Delivery. A wave of `Outcome Candidate` or review results

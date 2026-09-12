@@ -140,7 +140,9 @@ import Tidepool.Effects.Core
   )
 import Tidepool.Worktree (worktreeId)
 
+-- Data makes the constructor match force its IsString validator before the fork effect.
 data CampaignLabel = CampaignLabel Text
+-- Data makes the constructor match force its IsString validator before the fork effect.
 data ForkGroupLabel = ForkGroupLabel Text
 data ForkGroupPath = ForkGroupPath Bool Text
   deriving (Show, Eq)

@@ -230,9 +230,9 @@ watch and finish the tool call so admitted children can start. `traverse` over
 retained handle after wake, inspect unavailable settlements as well as replies,
 and retire only the actors whose work is finished.
 
-Requests notify their owner when they settle. Set `report = Silent` on an
-assignment when a watch, route, or record actor already owns settlement delivery;
-progress remains explicit and project-specific.
+Requests notify their owner when they settle unless a watch or route takes over
+that response. A record actor subscribed to settlement still needs
+`report = Silent`; progress remains explicit and project-specific.
 
 To send a **new assignment** to a retained specialist, use
 `next <- request @Text (responseActor worker) (assignment "revision" nextTask)` and

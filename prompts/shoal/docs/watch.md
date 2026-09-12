@@ -1,6 +1,7 @@
-Requests wake their owner at terminal settlement by default. A labeled
-`Watch a` retains a finite applicative join; set `report = Silent` on requests
-whose settlement is already owned by that watch or by a record actor.
+A labeled `Watch a` retains a finite applicative join. Registering it before
+settlement takes over the wake for its response dependencies; progress-only
+dependencies leave the default settlement notice intact. Record actor
+settlement sources still need `report = Silent`.
 
 ```haskell
 let joinLabel = "first-wave-results" :: WatchLabel

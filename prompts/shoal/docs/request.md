@@ -12,8 +12,9 @@ is your declared result type. The explicit result type keeps submission
 unambiguous before any consumer is defined. Set `guidance` or a dimensional
 `deadline` through an `Assignment` record update.
 Replying settles this request, not the actor, so the same `AgentRef` can accept
-later refinements. Terminal settlement wakes the requester by default; use
-`report = Silent` when a watch, route, or record actor already owns that signal.
+later refinements. Terminal settlement wakes the requester by default. A watch
+or route takes over that wake when registered for the response; use
+`report = Silent` for a record actor settlement source.
 
 An actor serves one request at a time. A follow-up to a busy actor queues another
 assignment; do not assume it steers the active request. Establish coordination

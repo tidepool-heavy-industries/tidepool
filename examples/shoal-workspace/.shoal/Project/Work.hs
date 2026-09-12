@@ -175,7 +175,7 @@ consultDesign slot question = do
     withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
     withModel (specialistModel slot) $ withEffort (specialistEffort slot) $
     coding (atRef (GitRef (renderGitOid (questionSource question))))
-      ((assignment (specialistLabel slot) question) { report = Silent })
+      (assignment (specialistLabel slot) question)
   ready <- watch (specialistWatch slot) (awaitSettled expert)
   pure (expert, ready)
 

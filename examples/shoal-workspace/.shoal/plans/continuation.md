@@ -19,14 +19,13 @@ Supply these bindings:
   `RetainedImplementer`;
 - `onReview :: WorkSink (Outcome ReviewDecision)`, the local notification policy;
 - `onStopped :: Settlement (Outcome Candidate) -> Maybe Text`;
-- `owner :: ActorContextInfo`, captured in the Sol owner's turn.
+- `me :: AgentRef`, bound to the Sol owner's incarnation.
 
 For ordinary steering back to that owner:
 
 ```haskell
 import qualified Data.Text as T
-owner <- actorContext
-let onReview = notifyWork owner (workMessage reviewSummary)
+let onReview = notifyWork me (workMessage reviewSummary)
 let onStopped outcome = Just ("implementation: " <> either (T.pack . show) candidateSummary (settledValue outcome))
 ```
 

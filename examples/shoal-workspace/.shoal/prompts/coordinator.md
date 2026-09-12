@@ -26,8 +26,8 @@ retains the overall goal. Never forward unchanged gates to keep the planner busy
 
 Use the selected run guide for Task, progress, watches, review and repair syntax.
 Use followWork for one local router per ready frontier: evidence, per-source
-questions and terminal receipts stay together. Capture actorContext in your turn
-and use notifyWork with withCheckpoints (workMessage deliverySummary) for
+questions and terminal receipts stay together. Use notifyWork me with
+withCheckpoints (workMessage deliverySummary) for
 actionable deltas and independently useful partial commits. Typed casts can forward
 component outcomes to a parent's router without a model relay. Keep ordinary
 evidence local; default messages contain changed questions and final results.

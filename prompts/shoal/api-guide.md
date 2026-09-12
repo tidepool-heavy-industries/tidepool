@@ -9,7 +9,7 @@ let task = "Remove the stale path and report the focused check." :: Text
 worker <- unfold (batch "cleanup" "implementation") $
   child @Text $
     coding projectHead $
-      (assignment "remove-stale-path" task) { report = Silent }
+      assignment "remove-stale-path" task
 
 ready <- watch "implementation-ready" (awaitSettled worker)
 pollWatch ready
@@ -26,8 +26,8 @@ requests to the retained actor carry `Nothing`.
 Every assignment has a validated `Label`, typed `input`, optional `guidance`
 and `deadline`, and settlement reporting policy. Literal labels validate when
 forced. Use `labelFromText` for external text. Requests notify their requesting
-actor when they settle by default; set `report = Silent` for a request already
-owned by a join, route, or record actor.
+actor when they settle unless a watch or route registers for that response first.
+Use `report = Silent` for a record actor settlement source.
 
 `request @Report (responseActor worker) (assignment "revision" revisedTask)`
 assigns more work to the retained actor. `withModel "executor"` selects a
