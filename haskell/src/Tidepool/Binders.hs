@@ -25,6 +25,11 @@ module Tidepool.Binders
   , CellSourceItem(..)
   , CellSplitError(..)
   , splitCellWithFlags
+  , CellAnalysisItem(..)
+  , analyzeCellWithFlags
+  , analyzeCell
+  , renderCellCheckSource
+  , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
   , TemplateSelector(..)
   , templateSelectorForVerdict
@@ -56,7 +61,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
-import Data.List (intercalate, nub, sort)
+import Data.List (intercalate, isInfixOf, isPrefixOf, nub, sort)
 import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -217,6 +222,116 @@ data CellSourceItem = CellSourceItem
 
 data CellSplitError = CellLexFailure
   deriving (Eq, Show)
+
+-- | One GHC-classified item of a notebook cell. The source and span always
+-- refer to the submitted cell; generated checking scaffolds never become the
+-- public coordinate system.
+data CellAnalysisItem = CellAnalysisItem
+  { cellAnalysisSpan :: CellSourceSpan
+  , cellAnalysisSource :: String
+  , cellAnalysisVerdict :: StmtBinders
+  } deriving (Eq, Show)
+
+-- | A post-zonk type captured for a statement binder during the whole-cell
+-- check. The rendered type is replanted into the later staged compile while
+-- nominal heads let the consumer distinguish same-cell declarations from
+-- already-installed names.
+data CheckedBinderPin = CheckedBinderPin
+  { checkedPinKey :: String
+  , checkedPinType :: String
+  , checkedPinHeads :: [NominalHead]
+  } deriving (Eq, Show)
+
+-- | Split and classify a cell in one GHC session. Classification is deliberately
+-- separate from execution: callers may reject the complete cell before any
+-- declaration or effect is committed.
+analyzeCellWithFlags
+  :: DynFlags
+  -> String
+  -> Either CellSplitError [CellAnalysisItem]
+analyzeCellWithFlags dflags source =
+  fmap (map classify) (splitCellWithFlags dflags source)
+  where
+    classify item = CellAnalysisItem
+      { cellAnalysisSpan = cellSourceSpan item
+      , cellAnalysisSource = cellSourceText item
+      , cellAnalysisVerdict = classifyWithFlags dflags (cellSourceText item)
+      }
+
+analyzeCell :: String -> IO (Either CellSplitError [CellAnalysisItem])
+analyzeCell source = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    liftIO (evaluate (analyzeCellWithFlags dflags source))
+
+-- | Fill the runtime-authored whole-cell checking template. The template owns
+-- imports, the exact effect row, and expression admissibility; this function
+-- only places GHC-classified source and compiler-reserved pin aliases.
+--
+-- The two literal placeholders are intentionally the entire template
+-- vocabulary. Missing or duplicate placeholders are rejected by the worker
+-- entry point before compilation.
+renderCellCheckSource :: String -> [CellAnalysisItem] -> Either String String
+renderCellCheckSource template items = do
+  withDecls <- replaceOnce "{{CELL_DECLS}}" declarations template
+  replaceOnce "{{CELL_BODY}}" body withDecls
+  where
+    declarations = concat
+      [ linePragma item ++ cellAnalysisSource item ++ trailingNewline (cellAnalysisSource item)
+      | item <- items
+      , sbKind (cellAnalysisVerdict item) == KDecl
+      ]
+    executable =
+      [ (index, item)
+      | (index, item) <- zip [(0 :: Int)..] items
+      , sbKind (cellAnalysisVerdict item) /= KDecl
+      ]
+    body = case executable of
+      [] -> "pure ()\n"
+      values -> intercalate "\n; " (map renderExecutable values) ++ "\n"
+
+    renderExecutable (index, item) =
+      linePragma item
+      ++ case cellAnalysisVerdict item of
+        StmtBinders KBind binders _ ->
+          cellAnalysisSource item
+          ++ trailingNewline (cellAnalysisSource item)
+          ++ if null binders
+            then ""
+            else "; let { "
+              ++ intercalate "; "
+                [ pinKey index binder ++ " = " ++ binder
+                | binder <- binders
+                ]
+              ++ " }\n"
+        StmtBinders KExpr _ _ ->
+          "__tidepoolCellExpression (\n"
+          ++ cellAnalysisSource item
+          ++ trailingNewline (cellAnalysisSource item)
+          ++ ")\n"
+        StmtBinders KDecl _ _ -> ""
+
+    linePragma item =
+      "{-# LINE " ++ show (cellStartLine (cellAnalysisSpan item)) ++ " \"<cell>\" #-}\n"
+    pinKey index binder = "__tidepool_cell_pin_" ++ show index ++ "_" ++ binder
+    trailingNewline text = if null text || last text == '\n' then "" else "\n"
+
+    replaceOnce needle replacement haystack =
+      case breakOn needle haystack of
+        Nothing -> Left ("cell check template is missing " ++ needle)
+        Just (before, after)
+          | needle `isInfixOf` after ->
+              Left ("cell check template contains " ++ needle ++ " more than once")
+          | otherwise -> Right (before ++ replacement ++ after)
+
+    breakOn needle = go []
+      where
+        go _ [] = Nothing
+        go prefix rest
+          | needle `isPrefixOf` rest =
+              Just (reverse prefix, drop (length needle) rest)
+          | char : more <- rest = go (char : prefix) more
 
 -- | Split a notebook cell at real tokens beginning in column one on a later
 -- line. GHC's lexer, not a second Haskell grammar, decides which newlines are

@@ -54,7 +54,7 @@ import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Tc.Types (TcGblEnv, tcg_rdr_env, tcg_type_env)
+import GHC.Tc.Types (TcGblEnv, tcg_binds, tcg_rdr_env, tcg_type_env)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
@@ -70,6 +70,9 @@ import System.FilePath (takeBaseName, takeFileName)
 import System.IO (hPutStrLn, stderr)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
+import Data.Data (Data, cast, gmapQ)
+import Tidepool.Binders (CheckedBinderPin(..))
+import Tidepool.TypePolicy (nominalHeadsOfType)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
@@ -94,6 +97,10 @@ data PipelineResult = PipelineResult
   -- | Rendered types of compiler-only inspection bindings, keyed by their
   -- generated top-level names. A batch of @:type@ queries shares one compile.
   , prCapturedTypes :: Map.Map String String
+  -- | Post-zonk types of compiler-reserved local aliases emitted by the cell
+  -- checker. These are structured separately from display-only inspection
+  -- strings because the runtime replants them into staged statement compiles.
+  , prCheckedBinderPins :: [CheckedBinderPin]
   -- | The GHC 'Type' of the target module's @result@ binding, captured for the
   -- value-binding mode. For @result = do { x <- action;
   -- pure x } :: Eff stack T@ this is the FULL @Eff stack T@; 'stripMonadHead'
@@ -206,6 +213,7 @@ data ModuleFront = ModuleFront
   , mfTcGblEnv   :: TcGblEnv
   , mfDesugared  :: ModGuts
   , mfCapturedTypes :: Map.Map String String
+  , mfCheckedBinderPins :: [CheckedBinderPin]
   , mfResultType :: Maybe Type
   }
 
@@ -271,8 +279,9 @@ data GutsMemoEntry = GutsMemoEntry
     -- registration REDONE (cheaply — no recompilation, just 'hscTidy' +
     -- 'mkIfaceTc' over already-computed guts) whenever it is deferred again
     -- in a LATER cycle.
-  , gmeResult     :: (ModGuts, Map.Map String String, Maybe Type)
-    -- ^ Post-externalize triple, exactly the shape 'results' carries.
+  , gmeResult     ::
+      (ModGuts, Map.Map String String, [CheckedBinderPin], Maybe Type)
+    -- ^ Post-externalize result, exactly the shape 'results' carries.
   }
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
@@ -417,6 +426,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
               -- live on the Id in the typechecked type env; our CBOR drops
               -- them downstream (Translate.hs).
               capturedTypes = capturedTopLevelTypes tcGblEnv
+              checkedBinderPins = capturedCellBinderPins tcGblEnv
               -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
               -- the one-shot eval wrapper names @result@ while resident-turn
               -- templates use the scaffold-reserved @__result@.
@@ -433,6 +443,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
                            , mfTcGblEnv   = tcGblEnv
                            , mfDesugared  = desugared
                            , mfCapturedTypes = capturedTypes
+                           , mfCheckedBinderPins = checkedBinderPins
                            , mfResultType = mResTy }
         -- The per-module back half: the optimized-Core pass, the
         -- variant's post-compile hook (session: HPT registration of a
@@ -449,7 +460,14 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
           liftIO (modifyIORef' moduleMsRef
                     (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
           cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
-          pure (simplified, (externalizeInternalTops simplified, mfCapturedTypes mf, mfResultType mf))
+          pure
+            ( simplified
+            , ( externalizeInternalTops simplified
+              , mfCapturedTypes mf
+              , mfCheckedBinderPins mf
+              , mfResultType mf
+              )
+            )
     -- Module names do not identify generated content across independent
     -- requests. A memo hit therefore requires both the current source hash
     -- and valid direct home-module imports. Summaries are visited in
@@ -627,10 +645,18 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
     cpBeforeMerge plan loadFlag capturedErrors
     -- Merge: dependency module bindings first, target module last
     let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
-        fst3 (g, _, _) = g
-        allGuts = map fst3 results
-    (targetGuts, depGuts, capturedTypes, resultTy) <- case filter (isTargetMod . fst3) results of
-      ((tgt, types, rty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], types, rty)
+        resultGuts (g, _, _, _) = g
+        allGuts = map resultGuts results
+    (targetGuts, depGuts, capturedTypes, checkedBinderPins, resultTy) <-
+      case filter (isTargetMod . resultGuts) results of
+      ((tgt, types, pins, rty):_) ->
+        return
+          ( tgt
+          , [g | g <- allGuts, mg_module g /= mg_module tgt]
+          , types
+          , pins
+          , rty
+          )
       []      -> liftIO $ ioError $ userError $
         pvLabel variant ++ ": target module '" ++ targetModName
         ++ "' not found among compiled modules: "
@@ -661,6 +687,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
       , prHscEnv = cpFinalEnv plan hscFinal
       , prCapturedType = Map.lookup evalUserBinder capturedTypes
       , prCapturedTypes = capturedTypes
+      , prCheckedBinderPins = checkedBinderPins
       , prResultType   = resultTy
       , prWarnings     = warnings
       , prTargetRdrEnv = targetRdrEnv
@@ -1080,6 +1107,38 @@ capturedTopLevelTypes tcg = Map.fromList
   , let occ = occNameString (nameOccName (idName i))
   , occ == evalUserBinder || "__tidepool_inspect_" `isPrefixOf` occ
   ]
+
+-- | Harvest the compiler-reserved aliases that the whole-cell source builder
+-- places immediately after statement binders. They are local to a @do@
+-- expression, so unlike inspection probes they never appear in
+-- 'tcg_type_env'. Walking the typechecked bind tree is the owning GHC
+-- boundary: every occurrence of one alias carries the same zonked 'Id', and
+-- the map removes repeated occurrences without relying on source spelling for
+-- identity.
+capturedCellBinderPins :: TcGblEnv -> [CheckedBinderPin]
+capturedCellBinderPins tcg =
+  [ CheckedBinderPin
+      { checkedPinKey = occurrence
+      , checkedPinType = renderType (idType identifier)
+      , checkedPinHeads = nominalHeadsOfType (idType identifier)
+      }
+  | (occurrence, identifier) <- Map.toAscList unique
+  ]
+  where
+    unique = Map.fromList
+      [ (occurrence, identifier)
+      | identifier <- collectDataIds (tcg_binds tcg)
+      , let occurrence = occNameString (nameOccName (idName identifier))
+      , "__tidepool_cell_pin_" `isPrefixOf` occurrence
+      ]
+
+-- Stop at an 'Id': descending through its type/name graph is both unnecessary
+-- and dramatically larger than the typechecked syntax tree that owns it.
+collectDataIds :: Data value => value -> [Id]
+collectDataIds value =
+  case cast value of
+    Just identifier -> [identifier]
+    Nothing -> concat (gmapQ collectDataIds value)
 
 -- | Read the GHC 'Type' (NOT a rendered string) of the named top-level binding
 -- out of a module's typechecked type env. Binding mode uses it to grab

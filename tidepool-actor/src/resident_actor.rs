@@ -4256,7 +4256,7 @@ where
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
-        request: WorkbenchRequest,
+        mut request: WorkbenchRequest,
     ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
         let execution = request.execution_id().cloned();
         let tool_dispatch = if let Some(call) = request.tool_call() {
@@ -4316,6 +4316,22 @@ where
                 .as_ref()
                 .map(tidepool_runtime::session::normalize_workbench_input),
         );
+        let cell_check = if let Some(cell_source) = request.cell_source() {
+            let checked = workbench
+                .check_cell(context.clone(), cell_source.to_owned())
+                .await
+                .map_err(|source| workbench_failure(&[], 0, 1, source))?;
+            request.install_cell_items(
+                checked
+                    .items
+                    .iter()
+                    .map(|item| item.source.clone())
+                    .collect(),
+            );
+            Some(checked)
+        } else {
+            None
+        };
         let mut receipts = Vec::new();
         let mut index = 0;
         while index < request.items.len() {
@@ -4441,9 +4457,34 @@ where
                         )
                         .await
                 } else {
-                    workbench
-                        .begin_item(context.clone(), block, request.input_kind(index))
-                        .await
+                    let pins = cell_check
+                        .as_ref()
+                        .filter(|checked| {
+                            checked.items[index].verdict.kind
+                                == tidepool_runtime::session::TurnKind::Bind
+                        })
+                        .map(|checked| checked.pins_for_item(index))
+                        .transpose()
+                        .map_err(|source| {
+                            workbench_failure(
+                                &receipts,
+                                index,
+                                request.items.len(),
+                                ResidentActorWorkbenchError::Compile(source),
+                            )
+                        })?;
+                    match pins {
+                        Some(pins) => {
+                            workbench
+                                .begin_cell_item(context.clone(), block, pins)
+                                .await
+                        }
+                        None => {
+                            workbench
+                                .begin_item(context.clone(), block, request.input_kind(index))
+                                .await
+                        }
+                    }
                 };
             let mut step = match started {
                 Ok(step) => step,

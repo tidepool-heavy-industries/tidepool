@@ -69,23 +69,25 @@ pub use view::{SessionCompileView, SourceImports};
 
 pub use workbench::{
     classify_workbench_item, escape_workbench_haskell_string, normalize_workbench_input,
-    parse_ghci_input, resident_workbench_templates, run_block_sequence, workbench_input_binding,
-    workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome, CommittedBlock,
-    GhciInputError, GhciInputKind, GhciInputUnit, MetaCommandLine, ParsedBlock, WorkSequence,
-    WorkbenchBinding, WorkbenchBindingKind, WorkbenchDiscovery, WorkbenchExecutionId,
-    WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
-    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    parse_ghci_input, resident_cell_check_template, resident_workbench_templates,
+    run_block_sequence, workbench_input_binding, workbench_json_to_haskell, BlockExecution,
+    BlockSequenceOutcome, CommittedBlock, GhciInputError, GhciInputKind, GhciInputUnit,
+    MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchBinding, WorkbenchBindingKind,
+    WorkbenchDiscovery, WorkbenchExecutionId, WorkbenchForkBoundary, WorkbenchItem,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 
 pub use turn::{
     assemble_bind_module, assemble_display_expression_module, assemble_expression_module,
-    assemble_inspection_module, assemble_opaque_expression_module, classify_block,
+    assemble_inspection_module, assemble_opaque_expression_module, check_cell, classify_block,
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt, render_template,
-    render_turn_compile_error, run_turn, turn_user_code_line_range, turn_user_code_offset,
-    BoundBinder, CompiledTurn, DeclarationReceipt, ExpressionLift, TemplateSelector,
-    TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
-    DECL_TEMPLATE_SOURCE,
+    render_turn_compile_error, run_turn, run_turn_pinned, turn_user_code_line_range,
+    turn_user_code_offset, BoundBinder, CellAnalysisItem, CellCheck, CellCheckRequest,
+    CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, ExpressionLift,
+    TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult,
+    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 /// Host-visible reentry state for one resident session.

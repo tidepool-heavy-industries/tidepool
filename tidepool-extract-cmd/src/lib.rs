@@ -494,6 +494,30 @@ impl ExtractCmd {
         self
     }
 
+    /// Select whole-cell split/classify/typecheck mode.
+    pub fn cell(&mut self) -> &mut Self {
+        self.request.cell();
+        self
+    }
+
+    /// Runtime-authored module template containing the two cell placeholders.
+    pub fn cell_template(&mut self, path: &Path) -> &mut Self {
+        self.request.cell_template(path);
+        self
+    }
+
+    /// CBOR output path for whole-cell analysis.
+    pub fn cell_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
+        self.request.cell_out(path);
+        self
+    }
+
+    /// Pin a bind turn's returned binder tuple to whole-cell inferred types.
+    pub fn turn_pin(&mut self, pin: &str) -> &mut Self {
+        self.request.turn_pin(pin);
+        self
+    }
+
     /// `--build-products-dir <dir>` — a persistent, shared `-fwrite-interface`
     /// output dir the extract points `hiDir`/`objectDir` at, so a LATER spawn's
     /// `load'` can skip an unchanged home module via GHC's own `checkOldIface`

@@ -351,6 +351,11 @@ pub struct WorkbenchRequest {
     #[serde(skip)]
     #[schemars(skip)]
     tool_call: Option<WorkbenchToolCall>,
+    /// Raw notebook cell awaiting GHC split/classify/preflight in the owning
+    /// actor session.
+    #[serde(skip)]
+    #[schemars(skip)]
+    cell_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -369,6 +374,7 @@ impl WorkbenchRequest {
             execution_id: None,
             fork_boundary: None,
             tool_call: Some(WorkbenchToolCall { name, arguments }),
+            cell_source: None,
         }
     }
 
@@ -386,7 +392,33 @@ impl WorkbenchRequest {
             execution_id: None,
             fork_boundary: None,
             tool_call: None,
+            cell_source: None,
         })
+    }
+
+    #[must_use]
+    pub fn from_cell_input(source: &str) -> Self {
+        Self {
+            items: Vec::new(),
+            input: None,
+            verbose: None,
+            input_kinds: Vec::new(),
+            execution_id: None,
+            fork_boundary: None,
+            tool_call: None,
+            cell_source: Some(source.to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn cell_source(&self) -> Option<&str> {
+        self.cell_source.as_deref()
+    }
+
+    pub fn install_cell_items(&mut self, items: Vec<String>) {
+        self.input_kinds = vec![GhciInputKind::Code; items.len()];
+        self.items = items;
+        self.cell_source = None;
     }
 
     #[must_use]
@@ -883,6 +915,35 @@ pub fn resident_workbench_templates(
             ),
         },
     ]
+}
+
+/// Runtime-authored module template for GHC's whole-cell preflight. The
+/// compiler worker only fills the declaration/body placeholders after its own
+/// lexer and parser classify the submitted source.
+#[must_use]
+pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports: &str) -> String {
+    let preamble = insert_preamble_imports(
+        &insert_preamble_imports(preamble, imports),
+        "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
+    );
+    format!(
+        "{preamble}\n\
+         class TidepoolCellPure value\n\
+         instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value\n\
+         instance {{-# OVERLAPPING #-}} TidepoolWorkbenchTypeError.Unsatisfiable \
+           ('TidepoolWorkbenchTypeError.Text \"an Eff action must use the current workbench effect row\") \
+           => TidepoolCellPure (Eff effects value)\n\
+         class TidepoolCellExpression value where\n\
+           __tidepoolCellExpression :: value -> Eff {effect_stack} ()\n\
+         instance {{-# OVERLAPPING #-}} TidepoolCellExpression (Eff {effect_stack} value) where\n\
+           __tidepoolCellExpression action = action >> pure ()\n\
+         instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where\n\
+           __tidepoolCellExpression _ = pure ()\n\
+         {{CELL_DECLS}}\n\
+         __tidepool_cell_check = do {{\n\
+         {{CELL_BODY}}\n\
+         ; pure () }}\n"
+    )
 }
 
 /// Suspension-safe cursor over one ordered unit of work.

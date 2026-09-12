@@ -94,6 +94,88 @@ pub struct TurnClassification {
     pub items: Vec<ExportItem>,
 }
 
+/// One-based source coordinates reported by GHC for a notebook-cell item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellSourceSpan {
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+/// One item classified during whole-cell preflight.
+#[derive(Clone, Debug)]
+pub struct CellAnalysisItem {
+    pub span: CellSourceSpan,
+    pub source: String,
+    pub verdict: TurnClassification,
+}
+
+/// A post-zonk statement-binder type inferred by the whole-cell check.
+#[derive(Clone, Debug)]
+pub struct CheckedBinderPin {
+    /// Compiler-reserved alias key. It encodes the item index and binder name
+    /// but is never parsed for control flow by the compiler worker.
+    pub key: String,
+    /// GHC-rendered type replanted into the staged bind wrapper.
+    pub ty: String,
+    /// Nominal heads used by relocation/preflight to identify same-cell names.
+    pub heads: Vec<NominalHead>,
+}
+
+/// Successful whole-cell preflight result.
+#[derive(Clone, Debug)]
+pub struct CellCheck {
+    pub items: Vec<CellAnalysisItem>,
+    pub pins: Vec<CheckedBinderPin>,
+    /// Exact generated module GHC checked.
+    pub checked_source: String,
+}
+
+impl CellCheck {
+    /// Resolve pins for one classified bind without parsing compiler output.
+    /// Expected keys are derived from the source item and GHC-reported binder
+    /// names; missing or duplicate pins reject preflight.
+    pub fn pins_for_item(&self, item_index: usize) -> Result<Vec<CheckedBinderPin>, CompileError> {
+        let item = self.items.get(item_index).ok_or_else(|| {
+            CompileError::ExtractFailed(format!("cell item index {item_index} is out of range"))
+        })?;
+        if item.verdict.kind != TurnKind::Bind {
+            return Ok(Vec::new());
+        }
+        item.verdict
+            .binders
+            .iter()
+            .map(|binder| {
+                let key = format!("__tidepool_cell_pin_{item_index}_{binder}");
+                let mut matches = self.pins.iter().filter(|pin| pin.key == key);
+                let pin = matches.next().cloned().ok_or_else(|| {
+                    CompileError::ExtractFailed(format!(
+                        "whole-cell check returned no type for binder {binder:?} in item {}",
+                        item_index + 1
+                    ))
+                })?;
+                if matches.next().is_some() {
+                    return Err(CompileError::ExtractFailed(format!(
+                        "whole-cell check returned duplicate type pins for {binder:?} in item {}",
+                        item_index + 1
+                    )));
+                }
+                Ok(pin)
+            })
+            .collect()
+    }
+}
+
+/// Runtime-owned inputs to the compiler worker's whole-cell request.
+pub struct CellCheckRequest<'a> {
+    pub cell_text: &'a str,
+    pub template: &'a str,
+    pub include: &'a [&'a Path],
+    pub session_root: &'a Path,
+    pub inject_modules: &'a [String],
+}
+
 /// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
 /// a `Bind` verdict maps to one of two distinct template shapes depending on
 /// whether it actually binds a name (`binders.is_empty()`) — a discarding
@@ -828,6 +910,40 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
     }
 }
 
+/// Run GHC's split/classify/whole-cell check before any declaration or user
+/// effect is installed. The runtime supplies the exact next-cell scope as a
+/// source template; the worker owns Haskell parsing and post-zonk binder
+/// harvesting.
+pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CompileError> {
+    let temp = TempDir::new()?;
+    let cell_path = temp.path().join("cell.txt");
+    let template_path = temp.path().join("CellCheckTemplate.hs");
+    let out_path = temp.path().join("cell.cbor");
+    std::fs::write(&cell_path, req.cell_text)?;
+    std::fs::write(&template_path, req.template)?;
+
+    let mut cmd = extract_cmd()?;
+    cmd.input(&cell_path)
+        .cell()
+        .cell_template(&template_path)
+        .cell_out(&out_path)
+        .output_dir(temp.path())
+        .includes(req.include)
+        .session_root(req.session_root)
+        .inject_vals(req.inject_modules);
+    let endpoint = cmd.bind().map_err(map_notfound)?;
+    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    let run = endpoint.execute(&cmd).map_err(map_notfound)?;
+    let output = &run.output;
+    if let Err(error) =
+        crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
+    {
+        return Err(error);
+    }
+    let bytes = std::fs::read(&out_path)?;
+    decode_cell_out(&bytes)
+}
+
 /// The one entry point for a session-eval turn. Writes the turn text and
 /// every supplied wrapper template to a [`TempDir`], then performs exactly
 /// ONE `tidepool-extract --turn` spawn: `--turn-template <kind>=<path>` per
@@ -841,6 +957,51 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
+    run_turn_with_pin(req, None)
+}
+
+/// Compile one staged bind using the types inferred by 'check_cell'. This is
+/// the join that prevents statement-at-a-time compilation from defaulting or
+/// generalizing a binder differently from the accepted whole cell.
+pub fn run_turn_pinned(
+    req: TurnRequest<'_>,
+    pins: &[CheckedBinderPin],
+) -> Result<TurnResult, TurnFailure> {
+    let Some(TurnClassification {
+        kind: TurnKind::Bind,
+        binders,
+        ..
+    }) = req.verdict.as_ref()
+    else {
+        return Err(CompileError::ExtractFailed(
+            "checked binder pins require an explicit bind verdict".into(),
+        )
+        .into());
+    };
+    if pins.len() != binders.len() {
+        return Err(CompileError::ExtractFailed(format!(
+            "checked binder pin count {} does not match binder count {}",
+            pins.len(),
+            binders.len()
+        ))
+        .into());
+    }
+    let pin = if binders.len() == 1 {
+        format!("{} :: {}", binders[0], pins[0].ty)
+    } else {
+        format!(
+            "({}) :: ({})",
+            binders.join(", "),
+            pins.iter()
+                .map(|pin| pin.ty.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    run_turn_with_pin(req, Some(&pin))
+}
+
+fn run_turn_with_pin(req: TurnRequest<'_>, pin: Option<&str>) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
             #[allow(
@@ -887,6 +1048,9 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     }
     if let Some(arg) = verdict_arg {
         cmd.turn_verdict(arg);
+    }
+    if let Some(pin) = pin {
+        cmd.turn_pin(pin);
     }
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
@@ -1226,6 +1390,68 @@ fn decode_asks(v: &CborValue) -> Result<Vec<YieldSite>, CompileError> {
         .collect()
 }
 
+fn decode_cell_out(bytes: &[u8]) -> Result<CellCheck, CompileError> {
+    let value: CborValue = ciborium::de::from_reader(bytes).map_err(|error| {
+        CompileError::ExtractFailed(format!("CellOut CBOR: malformed: {error}"))
+    })?;
+    let root = cbor_expect_array_len(&value, 3, "CellOut")?;
+    let items = cbor_expect_array(&root[0], "cell items")?
+        .iter()
+        .map(decode_cell_item)
+        .collect::<Result<Vec<_>, _>>()?;
+    let pins = cbor_expect_array(&root[1], "cell pins")?
+        .iter()
+        .map(decode_checked_binder_pin)
+        .collect::<Result<Vec<_>, _>>()?;
+    let checked_source = cbor_expect_text(&root[2], "checked cell source")?.to_owned();
+    Ok(CellCheck {
+        items,
+        pins,
+        checked_source,
+    })
+}
+
+fn decode_cell_item(value: &CborValue) -> Result<CellAnalysisItem, CompileError> {
+    let fields = cbor_expect_array_len(value, 4, "cell item")?;
+    let span = cbor_expect_array_len(&fields[0], 4, "cell item span")?;
+    let span = CellSourceSpan {
+        start_line: cbor_as_usize(&span[0], "cell span start line")?,
+        start_column: cbor_as_usize(&span[1], "cell span start column")?,
+        end_line: cbor_as_usize(&span[2], "cell span end line")?,
+        end_column: cbor_as_usize(&span[3], "cell span end column")?,
+    };
+    let kind = match cbor_expect_text(&fields[1], "cell item kind")? {
+        "decl" => TurnKind::Decl,
+        "bind" => TurnKind::Bind,
+        "expr" => TurnKind::Expr,
+        other => {
+            return Err(CompileError::ExtractFailed(format!(
+                "CellOut CBOR: unknown cell item kind {other:?}"
+            )))
+        }
+    };
+    let source = cbor_expect_text(&fields[2], "cell item source")?.to_owned();
+    let verdict = cbor_expect_array_len(&fields[3], 2, "cell item verdict")?;
+    Ok(CellAnalysisItem {
+        span,
+        source,
+        verdict: TurnClassification {
+            kind,
+            binders: decode_string_array(&verdict[0], "cell item binders")?,
+            items: decode_export_items(&verdict[1])?,
+        },
+    })
+}
+
+fn decode_checked_binder_pin(value: &CborValue) -> Result<CheckedBinderPin, CompileError> {
+    let fields = cbor_expect_array_len(value, 3, "checked binder pin")?;
+    Ok(CheckedBinderPin {
+        key: cbor_expect_text(&fields[0], "checked binder pin key")?.to_owned(),
+        ty: cbor_expect_text(&fields[1], "checked binder pin type")?.to_owned(),
+        heads: decode_nominal_heads(&fields[2], "checked binder pin heads")?,
+    })
+}
+
 /// Decode the bare (no `TPLR` header — that belongs to the tree wire format
 /// only) `TurnOut` CBOR value: a tagged 2-element list `[tag, payload]`. A
 /// shape mismatch (wrong tag, wrong arity, wrong type) is a clean
@@ -1531,6 +1757,189 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    #[test]
+    fn whole_cell_check_harvests_downstream_fixed_local_type() {
+        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
+            return;
+        };
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        let template = concat!(
+            "{-# LANGUAGE NoImplicitPrelude #-}\n",
+            "module CellCheck where\n",
+            "import Prelude\n",
+            "__tidepoolCellExpression :: value -> IO ()\n",
+            "__tidepoolCellExpression _ = pure ()\n",
+            "{{CELL_DECLS}}\n",
+            "__cell = do {\n",
+            "{{CELL_BODY}}\n",
+            "; pure () }\n",
+        );
+        let cell = concat!(
+            "h <- pure (read \"1\")\n",
+            "let value = h + (1 :: Int)\n",
+            "value\n",
+        );
+        let checked = check_cell(CellCheckRequest {
+            cell_text: cell,
+            template,
+            include: &[],
+            session_root: root.path(),
+            inject_modules: &[],
+        })
+        .unwrap();
+        assert_eq!(checked.items.len(), 3);
+        assert_eq!(checked.items[0].verdict.binders, ["h"]);
+        let pin = checked
+            .pins
+            .iter()
+            .find(|pin| pin.key == "__tidepool_cell_pin_0_h")
+            .unwrap();
+        assert_eq!(pin.ty, "Int");
+
+        let bind_template = |imports: &str| TurnTemplate {
+            kind: TemplateSelector::Bind,
+            source: format!(
+                "{{-# LANGUAGE NoImplicitPrelude #-}}\n\
+                 module SessionBind where\n\
+                 import Prelude\n\
+                 {imports}\
+                 __result :: IO Int\n\
+                 __result = do {{\n\
+                 {{{{TURN_STMT}}}}\n\
+                 ; pure ({{{{BINDERS}}}}) }}\n"
+            ),
+        };
+        let first_templates = [bind_template("")];
+        let first_pins = checked.pins_for_item(0).unwrap();
+        let first = run_turn_pinned(
+            TurnRequest {
+                turn_text: &checked.items[0].source,
+                templates: &first_templates,
+                include: &[],
+                session_root: root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: Some(checked.items[0].verdict.clone()),
+                target: None,
+            },
+            &first_pins,
+        )
+        .unwrap();
+        let TurnResult::Bind { bound, .. } = first else {
+            panic!("first staged item was not a bind");
+        };
+        assert_eq!(bound[0].type_display, "Int");
+
+        let injected = vec![bound[0].module.clone()];
+        let second_templates = [bind_template(&format!("import {}\n", injected[0]))];
+        let second_pins = checked.pins_for_item(1).unwrap();
+        let second = run_turn_pinned(
+            TurnRequest {
+                turn_text: &checked.items[1].source,
+                templates: &second_templates,
+                include: &[],
+                session_root: root.path(),
+                inject_modules: &injected,
+                gen: 2,
+                verdict: Some(checked.items[1].verdict.clone()),
+                target: None,
+            },
+            &second_pins,
+        )
+        .unwrap();
+        let TurnResult::Bind { bound, .. } = second else {
+            panic!("second staged item was not a bind");
+        };
+        assert_eq!(bound[0].type_display, "Int");
+    }
+
+    #[test]
+    fn whole_cell_check_harvests_same_cell_nominal_type() {
+        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
+            return;
+        };
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        let template = concat!(
+            "{-# LANGUAGE NoImplicitPrelude #-}\n",
+            "module CellCheck where\n",
+            "import Prelude\n",
+            "__tidepoolCellExpression :: value -> IO ()\n",
+            "__tidepoolCellExpression _ = pure ()\n",
+            "{{CELL_DECLS}}\n",
+            "__cell = do {\n",
+            "{{CELL_BODY}}\n",
+            "; pure () }\n",
+        );
+        let cell = concat!(
+            "data G = G Int\n",
+            "h <- pure Nothing\n",
+            "let fixed = h :: Maybe G\n",
+            "fixed\n",
+        );
+        let checked = check_cell(CellCheckRequest {
+            cell_text: cell,
+            template,
+            include: &[],
+            session_root: root.path(),
+            inject_modules: &[],
+        })
+        .unwrap();
+        let pins = checked.pins_for_item(1).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].ty, "Maybe G");
+        assert!(pins[0]
+            .heads
+            .iter()
+            .any(|head| head.module == "CellCheck" && head.name == "G"));
+
+        let session = tidepool_repr::SessionId((u64::from(std::process::id()) << 32) | 0x4345_4c4c);
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let mut declarations = crate::session::SessionLib::open(
+            session,
+            root.path(),
+            crate::session::ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(vec![prelude.clone()]);
+        let generation = declarations.define("data G = G Int").unwrap();
+        let lib_module = format!("Tidepool.Session.Lib.G{}", generation.0);
+        let templates = [TurnTemplate {
+            kind: TemplateSelector::Bind,
+            source: format!(
+                "{{-# LANGUAGE NoImplicitPrelude #-}}\n\
+                 module SessionNominalBind where\n\
+                 import Prelude\n\
+                 import {lib_module}\n\
+                 __result :: IO (Maybe G)\n\
+                 __result = do {{\n\
+                 {{{{TURN_STMT}}}}\n\
+                 ; pure ({{{{BINDERS}}}}) }}\n"
+            ),
+        }];
+        let staged = run_turn_pinned(
+            TurnRequest {
+                turn_text: &checked.items[1].source,
+                templates: &templates,
+                include: &[root.path(), prelude.as_path()],
+                session_root: root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: Some(checked.items[1].verdict.clone()),
+                target: None,
+            },
+            &pins,
+        )
+        .unwrap();
+        let TurnResult::Bind { bound, .. } = staged else {
+            panic!("same-cell nominal staged item was not a bind");
+        };
+        assert_eq!(bound[0].type_display, "Maybe G");
     }
 
     /// [`PREAMBLE_DEFAULT_MARKER`] is duplicated (not depended-on) from

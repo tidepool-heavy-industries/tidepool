@@ -24,6 +24,7 @@ import qualified Data.Text as T
 import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
+  , analyzeCell, renderCellCheckSource
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderVerdictsJson )
@@ -49,7 +50,7 @@ import Tidepool.Translate
   , collectTransitiveDCons, collectUsedDataCons, mergeMetaPreserving
   , targetBindingHasIO, translateBinds, translateModuleClosed
   , wiredInDataCons )
-import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
+import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 
@@ -114,6 +115,7 @@ dispatch compiler timing args =
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
         -- Classification consumes every input; all other modes use the first.
+        | requestCell args                        -> runCellMode compiler args file
         | requestClassify args                    -> runClassifyMode timing args
         | not (null (requestInspections args))    -> runInspectionMode compiler args file
         -- A turn may also carry session fields, so it precedes session dispatch.
@@ -407,7 +409,9 @@ runTurnMode compiler args path = do
     -- honest report rather than a phantom 0ms line.
     sb        <- maybe (timePhase timing "classify" (extractStmtBinders turnSrc)) return mVerdict
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
-        bindersStr = intercalate ", " (sbBinders sb)
+        bindersStr = fromMaybe
+          (intercalate ", " (sbBinders sb))
+          (requestTurnPin args)
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
         -- module name derived from its own @module X where@ header. The
@@ -507,6 +511,35 @@ runClassifyMode timing args =
           hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
       )
       >>= reportDiags
+
+-- | Split, classify, and typecheck one notebook cell in a single worker
+-- request. Rust authors the module template (scope/import/effect-row policy);
+-- GHC owns every Haskell decision and returns post-zonk statement binder pins.
+runCellMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
+runCellMode compiler args cellPath = do
+  res <- try $ do
+    cellSource <- readFile cellPath
+    templatePath <- requireArg "--cell-template" (requestCellTemplate args)
+    template <- readFile templatePath
+    analyzed <- analyzeCell cellSource >>= either
+      (const (fail "GHC could not lex the notebook cell"))
+      pure
+    checkedSource <- either fail pure (renderCellCheckSource template analyzed)
+    let outDir = fromMaybe
+          (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
+          (requestOutDir args)
+        moduleName' = fromMaybe "CellCheck" (extractModuleName checkedSource)
+        modulePath = outDir </> reverse (takeWhile (/= '.') (reverse moduleName')) ++ ".hs"
+        scope = if hasSessionScope args
+          then Just (scopeFromWorkerRequest args)
+          else Nothing
+    createDirectoryIfMissing True outDir
+    writeFile modulePath checkedSource
+    compiled <- compiler scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+    out <- requireArg "--cell-out" (requestCellOut args)
+    BS.writeFile out
+      (encodeCellOut analyzed (prCheckedBinderPins compiled) checkedSource)
+  reportDiags res
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'extractStmtBinders' would have produced, so the rest of

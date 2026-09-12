@@ -1,4 +1,9 @@
-module Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut) where
+module Tidepool.CborEncode
+  ( encodeTree
+  , encodeMetadata
+  , encodeTurnOut
+  , encodeCellOut
+  ) where
 
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
@@ -11,7 +16,10 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Tidepool.IR (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..))
 import Tidepool.Metadata (DCMeta(..))
-import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..))
+import Tidepool.Binders
+  ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..)
+  , CellAnalysisItem(..), CellSourceSpan(..), CheckedBinderPin(..)
+  , StmtBinders(..), turnKindWireName )
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 3.0.
@@ -208,6 +216,52 @@ encodeTurnOut turnOut = toStrictByteString $ case turnOut of
         <> encodeInt var
         <> encodeAsks aks
         <> encodeString wrapped)
+
+-- | Whole-cell analysis wire. Independent from the frozen Core format and
+-- deliberately positional like 'TurnOut':
+-- @[items, pins, checked_source]@. The checked source is retained as exact
+-- evidence for diagnostic remapping and staged-wrapper review.
+encodeCellOut
+  :: [CellAnalysisItem]
+  -> [CheckedBinderPin]
+  -> String
+  -> ByteString
+encodeCellOut items pins checkedSource = toStrictByteString $
+  encodeListLen 3
+  <> encodeListLen (fromIntegral (length items))
+  <> foldMap encodeCellItem items
+  <> encodeListLen (fromIntegral (length pins))
+  <> foldMap encodeCheckedBinderPin pins
+  <> encodeString (T.pack checkedSource)
+
+encodeCellItem :: CellAnalysisItem -> Encoding
+encodeCellItem CellAnalysisItem
+  { cellAnalysisSpan = CellSourceSpan startLine startColumn endLine endColumn
+  , cellAnalysisSource = source
+  , cellAnalysisVerdict = StmtBinders kind binders items
+  } =
+  encodeListLen 4
+  <> encodeListLen 4
+  <> encodeInt startLine
+  <> encodeInt startColumn
+  <> encodeInt endLine
+  <> encodeInt endColumn
+  <> encodeString (T.pack (turnKindWireName kind))
+  <> encodeString (T.pack source)
+  <> (encodeListLen 2
+      <> encodeStringList binders
+      <> encodeExportItems items)
+
+encodeCheckedBinderPin :: CheckedBinderPin -> Encoding
+encodeCheckedBinderPin CheckedBinderPin
+  { checkedPinKey = key
+  , checkedPinType = ty
+  , checkedPinHeads = heads
+  } =
+  encodeListLen 3
+  <> encodeString (T.pack key)
+  <> encodeString (T.pack ty)
+  <> encodeHeads heads
 
 encodeTextList :: [Text] -> Encoding
 encodeTextList xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeString xs

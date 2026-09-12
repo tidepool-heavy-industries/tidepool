@@ -2,10 +2,7 @@
 
 use std::sync::Arc;
 
-use tidepool_runtime::session::{
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus,
-};
+use tidepool_runtime::session::WorkbenchRequest;
 use tidepool_tool::{CustomToolDeclaration, HostedTool, ToolArguments, ToolInvocation};
 
 use crate::prompt_catalog::PromptId;
@@ -191,26 +188,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     "actor Haskell tool received structured arguments".into(),
                 ));
             };
-            let request = match WorkbenchRequest::from_ghci_input(&source) {
-                Ok(request) => request,
-                Err(error) => {
-                    return serde_json::to_value(WorkbenchResponse {
-                        status: WorkbenchRunStatus::Rejected,
-                        items: vec![WorkbenchItemReceipt {
-                            index: 0,
-                            status: WorkbenchItemStatus::Rejected,
-                            output: error.to_string(),
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: Vec::new(),
-                            terminal_transfer: None,
-                        }],
-                        next_index: 0,
-                        total: 1,
-                    })
-                    .map_err(ResidentToolError::Encoding);
-                }
-            };
+            let request = WorkbenchRequest::from_cell_input(&source);
             client.dispatch_workbench(request, invocation.context).await
         })
     }

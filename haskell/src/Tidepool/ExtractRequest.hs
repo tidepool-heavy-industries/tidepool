@@ -34,6 +34,10 @@ data RequestField
   | TurnVerdict String
   | Classify
   | ClassifyOut FilePath
+  | Cell
+  | CellTemplate FilePath
+  | CellOut FilePath
+  | TurnPin String
   | HarnessProfile
   | BuildProductsDir FilePath
   | InspectType String
@@ -63,6 +67,10 @@ data WorkerRequest = WorkerRequest
   , requestTurnVerdict :: Maybe String
   , requestClassify :: Bool
   , requestClassifyOut :: Maybe FilePath
+  , requestCell :: Bool
+  , requestCellTemplate :: Maybe FilePath
+  , requestCellOut :: Maybe FilePath
+  , requestTurnPin :: Maybe String
   , requestHarnessProfile :: Bool
   , requestBuildProductsDir :: Maybe FilePath
   , requestInspections :: [InspectionRequest]
@@ -89,6 +97,10 @@ emptyWorkerRequest = WorkerRequest
   , requestTurnVerdict = Nothing
   , requestClassify = False
   , requestClassifyOut = Nothing
+  , requestCell = False
+  , requestCellTemplate = Nothing
+  , requestCellOut = Nothing
+  , requestTurnPin = Nothing
   , requestHarnessProfile = False
   , requestBuildProductsDir = Nothing
   , requestInspections = []
@@ -123,6 +135,10 @@ requestFromFields = foldl apply emptyWorkerRequest
       TurnVerdict verdict -> request { requestTurnVerdict = Just verdict }
       Classify -> request { requestClassify = True }
       ClassifyOut path -> request { requestClassifyOut = Just path }
+      Cell -> request { requestCell = True }
+      CellTemplate path -> request { requestCellTemplate = Just path }
+      CellOut path -> request { requestCellOut = Just path }
+      TurnPin pin -> request { requestTurnPin = Just pin }
       HarnessProfile -> request { requestHarnessProfile = True }
       BuildProductsDir path -> request { requestBuildProductsDir = Just path }
       InspectType expression -> request
@@ -136,7 +152,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       InspectOut path -> request { requestInspectOut = Just path }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v5"
+workerRequestFlag = "--worker-request-v6"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -155,7 +171,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ005"
+  if magic /= "TPREQ006"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -165,7 +181,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ005" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ006" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -193,6 +209,10 @@ encodeField field = case field of
   InspectOut value -> taggedText 28 value
   InspectBrowse value -> taggedText 29 value
   InspectBrowseExpanded value -> taggedText 30 value
+  Cell -> BS.singleton 31
+  CellTemplate value -> taggedText 32 value
+  CellOut value -> taggedText 33 value
+  TurnPin value -> taggedText 34 value
 
 taggedText :: Word8 -> String -> BS.ByteString
 taggedText tag value = BS.singleton tag <> textFrame value
@@ -253,6 +273,10 @@ pField bytes = do
     28 -> mapParser InspectOut pText rest
     29 -> mapParser InspectBrowse pText rest
     30 -> mapParser InspectBrowseExpanded pText rest
+    31 -> Right (Cell, rest)
+    32 -> mapParser CellTemplate pText rest
+    33 -> mapParser CellOut pText rest
+    34 -> mapParser TurnPin pText rest
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

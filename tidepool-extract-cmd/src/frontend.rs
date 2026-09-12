@@ -355,7 +355,7 @@ mod tests {
     fn typed_worker_payload_must_decode() {
         let error = worker_payload(&[
             WORKER_REQUEST_FLAG.into(),
-            "54505245513030350100000009".into(),
+            "54505245513030360100000009".into(),
         ])
         .unwrap_err();
         assert!(matches!(

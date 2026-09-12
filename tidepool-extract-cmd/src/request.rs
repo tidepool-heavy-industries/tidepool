@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v5";
-const MAGIC: &[u8; 8] = b"TPREQ005";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v6";
+const MAGIC: &[u8; 8] = b"TPREQ006";
 
 #[derive(Clone, Debug)]
 enum Field {
@@ -20,6 +20,10 @@ enum Field {
     TurnVerdict(OsString),
     Classify,
     ClassifyOut(OsString),
+    Cell,
+    CellTemplate(PathBuf),
+    CellOut(OsString),
+    TurnPin(String),
     BuildProductsDir(OsString),
     SessionRoot(OsString),
     InjectVal(OsString),
@@ -75,6 +79,12 @@ impl ExtractRequest {
                 Some("--turn-verdict") => request.turn_verdict(value(&mut args, "--turn-verdict")?),
                 Some("--classify") => request.classify(),
                 Some("--classify-out") => request.classify_out(value(&mut args, "--classify-out")?),
+                Some("--cell") => request.cell(),
+                Some("--cell-template") => {
+                    request.cell_template(Path::new(value(&mut args, "--cell-template")?))
+                }
+                Some("--cell-out") => request.cell_out(value(&mut args, "--cell-out")?),
+                Some("--turn-pin") => request.turn_pin(text_value(&mut args, "--turn-pin")?),
                 Some("--build-products-dir") => {
                     request.build_products_dir(value(&mut args, "--build-products-dir")?)
                 }
@@ -166,6 +176,10 @@ impl ExtractRequest {
                 28 => Field::InspectOut(decoder.os_string()?),
                 29 => Field::InspectBrowse(decoder.string()?),
                 30 => Field::InspectBrowseExpanded(decoder.string()?),
+                31 => Field::Cell,
+                32 => Field::CellTemplate(PathBuf::from(decoder.os_string()?)),
+                33 => Field::CellOut(decoder.os_string()?),
+                34 => Field::TurnPin(decoder.string()?),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -266,6 +280,22 @@ impl ExtractRequest {
             .push(Field::ClassifyOut(value.as_ref().to_owned()));
     }
 
+    pub(crate) fn cell(&mut self) {
+        self.fields.push(Field::Cell);
+    }
+
+    pub(crate) fn cell_template(&mut self, value: &Path) {
+        self.fields.push(Field::CellTemplate(value.to_owned()));
+    }
+
+    pub(crate) fn cell_out(&mut self, value: impl AsRef<OsStr>) {
+        self.fields.push(Field::CellOut(value.as_ref().to_owned()));
+    }
+
+    pub(crate) fn turn_pin(&mut self, value: &str) {
+        self.fields.push(Field::TurnPin(value.to_owned()));
+    }
+
     pub(crate) fn build_products_dir(&mut self, value: impl AsRef<OsStr>) {
         self.fields
             .push(Field::BuildProductsDir(value.as_ref().to_owned()));
@@ -331,6 +361,12 @@ impl ExtractRequest {
                 Field::TurnVerdict(value) => flag(&mut flags, "--turn-verdict", value),
                 Field::Classify => flags.push("--classify".into()),
                 Field::ClassifyOut(value) => flag(&mut flags, "--classify-out", value),
+                Field::Cell => flags.push("--cell".into()),
+                Field::CellTemplate(value) => {
+                    flag(&mut flags, "--cell-template", value.as_os_str())
+                }
+                Field::CellOut(value) => flag(&mut flags, "--cell-out", value),
+                Field::TurnPin(value) => flag(&mut flags, "--turn-pin", OsStr::new(value)),
                 Field::BuildProductsDir(value) => flag(&mut flags, "--build-products-dir", value),
                 Field::SessionRoot(value) => flag(&mut flags, "--session-root", value),
                 Field::InjectVal(value) => flag(&mut flags, "--inject-val", value),
@@ -453,7 +489,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v5 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v6 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -516,6 +552,10 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::TurnVerdict(value) => tagged_frame(out, 19, value),
         Field::Classify => out.push(20),
         Field::ClassifyOut(value) => tagged_frame(out, 21, value),
+        Field::Cell => out.push(31),
+        Field::CellTemplate(value) => tagged_frame(out, 32, value.as_os_str()),
+        Field::CellOut(value) => tagged_frame(out, 33, value),
+        Field::TurnPin(value) => tagged_frame(out, 34, OsStr::new(value)),
         Field::BuildProductsDir(value) => tagged_frame(out, 25, value),
         Field::SessionRoot(value) => tagged_frame(out, 12, value),
         Field::InjectVal(value) => tagged_frame(out, 13, value),

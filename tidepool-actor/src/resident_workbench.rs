@@ -16,8 +16,9 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    classify_workbench_item, insert_preamble_imports, render_turn_compile_error,
-    resident_workbench_templates, run_inspections, run_turn, GhciInputKind, InspectionQuery,
+    check_cell, classify_workbench_item, insert_preamble_imports, render_turn_compile_error,
+    resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
+    run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, GhciInputKind, InspectionQuery,
     InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock, ResidentError, ResidentHole,
     ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
     TurnRequest, TurnResult, WorkbenchDiscovery, WorkbenchItem,
@@ -1601,6 +1602,7 @@ where
                     },
                     block,
                     GhciInputKind::Code,
+                    None,
                 )?;
                 let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                     let detail = match step {
@@ -1764,6 +1766,7 @@ where
                     &context.haskell_effects_alias,
                     &type_modules,
                     &block,
+                    None,
                 )? {
                     CompiledBlock::Ready(compiled) => compiled,
                     CompiledBlock::Rejected(diagnostic) => {
@@ -1840,6 +1843,58 @@ where
         )
     }
 
+    pub(crate) async fn check_cell(
+        &self,
+        context: crate::ActorSessionContext,
+        cell_source: String,
+    ) -> Result<CellCheck, ResidentActorWorkbenchError> {
+        let response = self.response.clone();
+        let request = self.request;
+        let type_modules = Arc::clone(&self.type_modules);
+        let mut source = self.access.source.clone();
+        source.preamble = format!(
+            "{}{}",
+            source.preamble,
+            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
+        )
+        .into();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                source.preamble = match (response.as_ref(), request) {
+                    (Some(response), Some(request)) => response.request_preamble(
+                        &source.preamble,
+                        request,
+                        &context.haskell_effects_alias,
+                    ),
+                    (None, None) => source.preamble.to_string(),
+                    _ => unreachable!("request workbench scope is constructed atomically"),
+                }
+                .into();
+                source.preamble = actor_preamble(&source.preamble, context).into();
+                let compile_view = actor_compile_view(session, context, &source, &type_modules)?;
+                let prepared = source.prepare(&compile_view);
+                let template = resident_cell_check_template(
+                    &prepared.preamble,
+                    &context.haskell_effects_alias,
+                    &prepared.imports,
+                );
+                let include = prepared
+                    .include
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>();
+                check_cell(CellCheckRequest {
+                    cell_text: &cell_source,
+                    template: &template,
+                    include: &include,
+                    session_root: compile_view.session_root(),
+                    inject_modules: &prepared.injected,
+                })
+                .map_err(ResidentActorWorkbenchError::Compile)
+            })
+            .await
+    }
+
     /// Compile and begin one actor-local workbench item. Declarations commit
     /// immediately; executable items retain their fragment realm so the host
     /// can route any actor effects through the ordinary actor driver.
@@ -1872,6 +1927,42 @@ where
                     },
                     block,
                     kind,
+                    None,
+                )
+            })
+            .await
+    }
+
+    pub(crate) async fn begin_cell_item(
+        &self,
+        context: crate::ActorSessionContext,
+        block: ParsedBlock,
+        pins: Vec<CheckedBinderPin>,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        let response = self.response.clone();
+        let request = self.request;
+        let type_modules = Arc::clone(&self.type_modules);
+        let mut turn_source = self.access.source.clone();
+        turn_source.preamble = format!(
+            "{}{}",
+            turn_source.preamble,
+            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
+        )
+        .into();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                begin_fragment(
+                    session,
+                    context,
+                    &turn_source,
+                    RequestWorkbenchScope {
+                        response: response.as_ref(),
+                        request,
+                        type_modules: &type_modules,
+                    },
+                    block,
+                    GhciInputKind::Code,
+                    Some(&pins),
                 )
             })
             .await
@@ -2002,6 +2093,7 @@ fn begin_fragment<H, O>(
     scope: RequestWorkbenchScope<'_>,
     block: ParsedBlock,
     kind: GhciInputKind,
+    pins: Option<&[CheckedBinderPin]>,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -2034,6 +2126,7 @@ where
         &context.haskell_effects_alias,
         scope.type_modules,
         &block,
+        pins,
     )? {
         CompiledBlock::Ready(compiled) => compiled,
         CompiledBlock::Rejected(diagnostic) => {
@@ -4855,6 +4948,7 @@ fn compile_block<H, O>(
     effect_stack: &str,
     type_modules: &[String],
     block: &ParsedBlock,
+    pins: Option<&[CheckedBinderPin]>,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -4935,7 +5029,11 @@ where
         verdict,
         target: None,
     };
-    match run_turn(request) {
+    let compiled = match pins {
+        Some(pins) => run_turn_pinned(request, pins),
+        None => run_turn(request),
+    };
+    match compiled {
         Ok(result) => Ok(CompiledBlock::Ready(Box::new(ReadyBlock {
             result,
             generation: compile_view.next_value_generation(),
