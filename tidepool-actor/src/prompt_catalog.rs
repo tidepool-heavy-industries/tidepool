@@ -135,7 +135,7 @@ mod tests {
         assert!(artifacts
             .iter()
             .all(|artifact| artifact.body.chars().count() <= HOSTED_DESCRIPTION_LIMIT));
-        assert!(workbench_doc("unfold").unwrap().contains("Forked a"));
+        assert!(workbench_doc("unfold").unwrap().contains("Response a"));
         assert!(workbench_doc("cleanup").unwrap().contains("executeCleanup"));
         assert!(workbench_doc("refinement")
             .unwrap()

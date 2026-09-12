@@ -254,6 +254,9 @@ fn custody_event_description(event: &LocalResidentDeployment) -> String {
         LocalResidentDeployment::WatchChanged { notification } => {
             format!("WatchChanged {notification:?}")
         }
+        LocalResidentDeployment::SettlementChanged { notification } => {
+            format!("SettlementChanged {notification:?}")
+        }
         LocalResidentDeployment::RequestCancellation { notification } => {
             format!("RequestCancellation {notification:?}")
         }
@@ -268,11 +271,9 @@ async fn custody_assert_request(
     expression: &str,
     activation: &tidepool_actor::ResidentActivation,
 ) {
-    let result = tests::dispatch_haskell_script(
-        policy,
-        &format!("inspectFull (requestId (forkedResponse {expression}))"),
-    )
-    .await;
+    let result =
+        tests::dispatch_haskell_script(policy, &format!("inspectFull (requestId {expression})"))
+            .await;
     assert_eq!(result["status"], "committed", "{result:?}");
     assert_eq!(
         result["items"][0]["output"].as_str().unwrap().trim(),
@@ -460,7 +461,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     custody_assert_request(installed[0].policy.as_ref(), "nested", &activation).await;
     let watch = tests::dispatch_haskell_script(
         installed[0].policy.as_ref(),
-        "let readyLabel = \"custody-leaf-ready\" :: WatchLabel\nleafReady <- watch readyLabel (awaitFork nested)",
+        "let readyLabel = \"custody-leaf-ready\" :: WatchLabel\nleafReady <- watch readyLabel (awaitResponse nested)",
     )
     .await;
     assert_eq!(watch["status"], "committed", "{watch:?}");
@@ -707,7 +708,7 @@ async fn cancel_at_install_phase(phase: InstallPhase) {
     assert_eq!(launched.await.unwrap()["status"], "committed");
     let policy = campaign.root_installation.policy.clone();
     let stopped = tokio::spawn(async move {
-        tests::dispatch_haskell_script(policy.as_ref(), "stopAgent (forkedActor worker)").await
+        tests::dispatch_haskell_script(policy.as_ref(), "stopAgent (responseActor worker)").await
     });
     // On this current-thread executor the stop handler runs from publishing
     // this posture through recording shutdown intent before its first await.

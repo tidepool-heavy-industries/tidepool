@@ -1,7 +1,7 @@
 data ProgressNote = ProgressNote Int (Int -> Int)
 worker <- startAgent (readonlyAgent "progress-worker")
-let progressRequestLabel = "progress-request" :: RequestLabel
-(answer, updates) <- requestWithProgress @ProgressNote @Int worker (requestOptions progressRequestLabel (10 :: Int))
+let progressLabel = "progress-request" :: Label
+(answer, updates) <- requestWithProgress @ProgressNote @Int worker (assignment progressLabel (10 :: Int))
 let progressWatchLabel = "progress-update" :: WatchLabel
 observedUpdate <- watch progressWatchLabel (awaitProgressAfter updates (ProgressCursor 0))
 let combinedLabel = "progress-and-answer" :: WatchLabel

@@ -1,17 +1,18 @@
-Polling is authoritative and never wakes an idle model by itself. A labeled
-`Watch a` retains one finite applicative observation.
+Requests wake their owner at terminal settlement by default. A labeled
+`Watch a` retains a finite applicative join; set `report = Silent` on requests
+whose settlement is already owned by that watch or by a record actor.
 
 ```haskell
 let joinLabel = "first-wave-results" :: WatchLabel
 :{
 joined <- watch joinLabel $
-  (,) <$> awaitSettledFork (fst workers) <*> awaitSettledFork (snd workers)
+  (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
 :}
 ```
 
 A combined watch is appropriate when the next decision needs both results.
-For independently integrable work, a wave router can consume each settlement
-as it arrives; a finite single-result watch also suits an isolated obligation.
+Independently integrable work can use the default settlement notices. A wave
+router remains useful when project code must retain progress or apply custom policy.
 
 End the model response normally. When the watch becomes terminal, Tidepool
 reactivates the actor. `pollWatch joined` returns its retained typed observation.
@@ -25,7 +26,7 @@ routine progress. Source completion does not terminate the collector.
 
 `Await a` is the pure dependency description; `Watch a` is its registered
 finite observation. `ReplyAvailable` carries a typed result and its evidence;
-`ReplyUnavailable` carries a typed failure. Use `awaitFork` instead when every
+`ReplyUnavailable` carries a typed failure. Use `awaitResponse` instead when every
 dependency must succeed. Polling a settled watch repeatedly returns its state
 without consuming it. Compose dependencies before registration.
 
@@ -68,18 +69,16 @@ do not resubmit the original work merely because another notice arrived.
 
 `requestWithProgress @Progress @Result actor options` returns a response and
 a `Progress Progress` handle. `childWithProgress @Progress @Result branch`
-returns the corresponding `(Forked Result, Progress Progress)` inside an
+returns the corresponding `(Response Result, Progress Progress)` inside an
 unfold. The target receives `reportProgress :: Progress -> Eff effects ()`.
 Payloads can contain session-defined ADTs and closures; no `Show` or encoding
 instance is required.
 
-For a retained `lead :: AgentRef`, construct options with exported
-`requestOptions`, not the private `RequestOptions` data constructor. This complete
-setup requests cumulative nonterminal findings (`[Text]`) and a final `Text` reply:
+For a retained `lead :: AgentRef`, this requests cumulative nonterminal
+findings (`[Text]`) and a final `Text` reply:
 
 ```haskell
-let progressRequestLabel = "lead-findings" :: RequestLabel
-let progressOptions = requestOptions progressRequestLabel ("Publish cumulative findings; then return your final report." :: Text)
+let progressOptions = assignment "lead-findings" ("Publish cumulative findings; then return your final report." :: Text)
 (leadResponse, leadProgress) <- requestWithProgress @[Text] @Text lead progressOptions
 let findingsLabel = "lead-findings-ready" :: WatchLabel
 findingsReady <- watch findingsLabel (awaitProgressAfter leadProgress (ProgressCursor 0))

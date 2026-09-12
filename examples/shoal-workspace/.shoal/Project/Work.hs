@@ -34,7 +34,7 @@ projectPrompt name = case workspacePrompt name of
 taskContext :: Task -> Text
 taskContext task = Text.unlines $
   [ "Plan: " <> planPath task
-  , "Source: " <> taskSource task
+  , "Source: " <> renderGitOid (taskSource task)
   , "Obligation: " <> obligation task
   , "Why: " <> rationale task
   , "Owned source: " <> Text.intercalate ", " (ownedPaths task)
@@ -66,10 +66,10 @@ resolveQuestion decision = filter (/= decisionQuestion decision)
 -- evidence remains recoverable from the retained question and named source.
 decisionContext :: AcceptedDecision -> Text
 decisionContext decision = Text.unlines
-  [ questionKey question <> " @" <> questionSource details <> " " <> questionPlan details
+  [ questionKey question <> " @" <> renderGitOid (questionSource details) <> " " <> questionPlan details
   , questionFinding details
   , decisionSummary decision
-  , "incorporated " <> decisionSource decision
+  , "incorporated " <> renderGitOid (decisionSource decision)
   , Text.intercalate "; " (decisionEvidence decision)
   ]
   where
@@ -81,26 +81,26 @@ updateDecision
   => Response result -> AcceptedDecision -> Eff effects (Either ReplyError RequestUpdate)
 updateDecision response = updateRequest response . decisionContext
 
-solTask :: BranchLabel -> Task -> Branch CodingEffects Task result
+solTask :: Label -> Task -> Branch CodingEffects Task result
 solTask label = solTaskFrom label boundHead
 
 -- Source and context are independent choices. Roots use projectHead; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
-solTaskFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task result
+solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label source task = withInstructions (projectPrompt "task") $
-  withContext inherited $ withModel "gpt-5.6-sol" $ withEffort Medium $
-  coding label source task
+  withContext inherited $ withModel "executor" $ withEffort Medium $
+  coding source ((assignment label task) { report = Silent })
 
 implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Task -> Eff effects (Forked (Outcome Candidate), Progress WorkProgress)
+  => Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
   childWithProgress @WorkProgress @(Outcome Candidate) (solTask "implement" task)
 
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
   [ taskContext (reviewAssignment task)
-  , "Candidate: " <> candidateCommit (reviewInput task)
+  , "Candidate: " <> renderGitOid (candidateCommit (reviewInput task))
   , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput task))
   , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput task))
   , case repairOwner task of
@@ -111,11 +111,12 @@ reviewContext task = Text.unlines
 
 reviewCandidate
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Task -> RepairOwner -> Candidate -> Eff effects (Forked (Outcome ReviewDecision), Progress WorkProgress)
+  => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
 reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
-  withModel "gpt-5.6-sol" $ withEffort Medium $
-  coding "review" (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
+  withModel "executor" $ withEffort Medium $
+  coding (atRef (GitRef (renderGitOid (candidateCommit candidate))))
+    ((assignment "review" (ReviewTask task candidate owner)) { report = Silent })
 
 -- This project's automatic review edge selects the committed submission head.
 -- Other authored flows may deliberately select earlier artifacts instead.
@@ -123,37 +124,36 @@ candidateAtSubmission :: Candidate -> WorktreeEvidence -> Either Text Candidate
 candidateAtSubmission candidate evidence = case evidence of
   WorktreeObserved _ _ observation
     | actual == candidateCommit candidate -> Right candidate
-    | otherwise -> Left ("candidate " <> candidateCommit candidate <> "; submitted " <> actual)
-    where actual = renderGitOid (headOid (submittedHead observation))
+    | otherwise -> Left ("candidate " <> renderGitOid (candidateCommit candidate) <> "; submitted " <> renderGitOid actual)
+    where actual = headOid (submittedHead observation)
   NoBoundWorktree -> Left "candidate has no bound-source evidence"
   WorktreeObservationFailed failure -> Left (renderWorktreeError failure)
 
 -- A completed review attempt leaves its actor available for the revised candidate.
 reviewAgain
   :: Member Replies effects
-  => AgentRef -> RequestLabel -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+  => AgentRef -> Label -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
 reviewAgain actor label task = requestWithProgress @WorkProgress @(Outcome ReviewDecision) actor $
-  withRequestGuidance (projectPrompt "review") $
-  requestOptions label task
+  (assignment label task) { guidance = Just (projectPrompt "review"), report = Silent }
 
 -- Left is the useful verdict to return to the implementing owner; Right is a
 -- separate request to an available implementer. No queue is created for Left.
 repair
   :: Member Replies effects
-  => RequestLabel -> ReviewTask -> Candidate -> [Text]
+  => Label -> ReviewTask -> Candidate -> [Text]
   -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))
 repair label task candidate findings = case repairOwner task of
   OwnerRepairs -> pure (Left (Repair candidate findings))
   RetainedImplementer actor -> Right <$> requestWith actor
-    (withRequestGuidance (projectPrompt "repair") $
-      requestOptions label (RepairTask (reviewAssignment task) candidate findings))
+    ((assignment label (RepairTask (reviewAssignment task) candidate findings))
+      { guidance = Just (projectPrompt "repair"), report = Silent })
 
 requestIncorporation
   :: Member Replies effects
-  => AgentRef -> RequestLabel -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
-requestIncorporation recipient label assignment amendment = requestWith recipient $
-  withRequestGuidance (projectPrompt "incorporate") $
-  requestOptions label (IncorporationTask assignment amendment)
+  => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
+requestIncorporation recipient label task amendment = requestWith recipient $
+  (assignment label (IncorporationTask task amendment))
+    { guidance = Just (projectPrompt "incorporate"), report = Silent }
 
 -- Build a complete packet from evidence already bound in the workbench. Record
 -- updates add alternatives or narrow the unblocked obligation when needed.
@@ -169,20 +169,21 @@ designQuestion task candidate finding = DesignQuestion
 
 consultDesign
   :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => DesignSlot -> DesignQuestion -> Eff effects (Forked DesignAnswer, Watch (Settlement DesignAnswer))
+  => DesignSlot -> DesignQuestion -> Eff effects (Response DesignAnswer, Watch (Settlement DesignAnswer))
 consultDesign slot question = do
   expert <- unfold (specialistGroup slot) $ child $
     withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
     withModel (specialistModel slot) $ withEffort (specialistEffort slot) $
-    coding (specialistLabel slot) (atRef (GitRef (questionSource question))) question
-  ready <- watch (specialistWatch slot) (awaitSettledFork expert)
+    coding (atRef (GitRef (renderGitOid (questionSource question))))
+      ((assignment (specialistLabel slot) question) { report = Silent })
+  ready <- watch (specialistWatch slot) (awaitSettled expert)
   pure (expert, ready)
 
 designContext :: DesignSlot -> DesignQuestion -> Text
 designContext slot question = Text.unlines
   [ "Declared specialist plan: " <> specialistPlan slot
   , "Waiting component: " <> questionPlan question
-  , "Source: " <> questionSource question
+  , "Source: " <> renderGitOid (questionSource question)
   , "Finding: " <> questionFinding question
   , "Evidence: " <> Text.intercalate "; " (questionEvidence question)
   , "Alternatives: " <> Text.intercalate "; " (questionAlternatives question)

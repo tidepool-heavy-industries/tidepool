@@ -8,7 +8,7 @@ module Tidepool.Check
   ( RecipeCheck, CheckActor, Activation (..)
   , root, turn, activation, git, writeFile, readFile
   , present, notPresented, unconfirmed, check, restart
-  , output, lastOutput, literal, checkpoint, awaitOutput
+  , output, lastOutput, literal, gitOidLiteral, checkpoint, awaitOutput
   ) where
 
 import Prelude hiding (readFile, writeFile)
@@ -89,6 +89,10 @@ outputs _ = []
 
 literal :: Text -> Text
 literal = Text.pack . show
+
+-- | Render trusted `git rev-parse` output as a typed expression for a fixture cell.
+gitOidLiteral :: Text -> Text
+gitOidLiteral value = "GitOid " <> literal value
 
 checkpoint :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Text -> Eff effects Text
 checkpoint actor path contents message = do

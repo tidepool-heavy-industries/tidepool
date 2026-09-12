@@ -12,9 +12,9 @@ candidate-result source. It uses `coordinationActor`, the project's selected
 Supply these bindings:
 
 - `task :: Task`, the incorporated assignment;
-- `worker :: Forked (Outcome Candidate)`, the pending implementer;
-- `reviewer :: Forked (Outcome ReviewDecision)`, an available retained reviewer;
-- `reviewLabel, repairLabel :: RequestLabel`, labels for the exact requests;
+- `worker :: Response (Outcome Candidate)`, the pending implementer;
+- `reviewer :: Response (Outcome ReviewDecision)`, an available retained reviewer;
+- `reviewLabel, repairLabel :: Label`, labels for the exact requests;
 - `repairPolicy :: RepairOwner`, `OwnerRepairs` or an explicitly selected available
   `RetainedImplementer`;
 - `onReview :: WorkSink (Outcome ReviewDecision)`, the local notification policy;

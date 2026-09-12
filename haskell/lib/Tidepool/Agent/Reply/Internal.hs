@@ -6,9 +6,6 @@
 -- | Engine-private representation of persistent-agent requests and replies.
 module Tidepool.Agent.Reply.Internal
   ( RequestId (..)
-  , RequestLabel (..)
-  , RequestLabelError (..)
-  , requestLabel
   , Response (..)
   , Reply (..)
   , Replies (..)
@@ -39,6 +36,9 @@ module Tidepool.Agent.Reply.Internal
   , newRequestHandles
   , fillResponse
   , responseRequestId
+  , responseActor
+  , responseLaunch
+  , withResponseLaunch
   , replyRequestId
   , readResponse
   , attemptReply
@@ -53,14 +53,14 @@ module Tidepool.Agent.Reply.Internal
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
-import Data.Char (isAsciiLower, isDigit)
 import Data.Kind (Type)
-import Data.String (IsString (fromString))
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Data.Void (Void)
 import Prelude
-import Tidepool.Duration (RequestDeadline)
+import Tidepool.Duration (Duration)
+import Tidepool.Agent.Assignment (Label, SettlementReporting (..), labelText)
+import Tidepool.Agent.Ref (AgentRef)
+import Tidepool.Agent.Launch (BranchReceipt, allocatedPath)
 
 import Tidepool.Internal.ExitCell
   ( ExitCell
@@ -73,34 +73,14 @@ import Tidepool.Effects.Core (GitOid, SubmissionObservation, WorktreeError, Work
 newtype RequestId = RequestId Int
   deriving (Show, Eq, Ord)
 
-newtype RequestLabel = RequestLabel Text
-  deriving (Show, Eq, Ord)
-
-data RequestLabelError
-  = EmptyRequestLabel
-  | InvalidRequestLabel Text
-  | RequestLabelTooLong Text
-  deriving (Show, Eq)
-
-instance IsString RequestLabel where
-  fromString = either (error . show) id . requestLabel . Text.pack
-
-requestLabel :: Text -> Either RequestLabelError RequestLabel
-requestLabel value
-  | Text.null value = Left EmptyRequestLabel
-  | Text.length value > 48 = Left (RequestLabelTooLong value)
-  | Text.head value == '-' || Text.last value == '-' = Left (InvalidRequestLabel value)
-  | "--" `Text.isInfixOf` value = Left (InvalidRequestLabel value)
-  | Text.all valid value = Right (RequestLabel value)
-  | otherwise = Left (InvalidRequestLabel value)
-  where
-    valid character = isAsciiLower character || isDigit character || character == '-'
 
 data Response result where
-  Response :: RequestId -> ExitCell pending (ResponseResult result) -> Response result
+  Response :: RequestId -> AgentRef -> Maybe BranchReceipt -> ExitCell pending (ResponseResult result) -> Response result
 
 instance Show (Response result) where
-  show (Response request _) = "Response " <> show request
+  show (Response request actor launch _) =
+    "Response { request = " <> show request <> ", actor = " <> show actor
+      <> maybe "" (\receipt -> ", path = " <> show (allocatedPath receipt)) launch <> " }"
 
 newtype Reply result = Reply RequestId
   deriving (Show, Eq)
@@ -242,8 +222,8 @@ data RawReplyObservation
   | RawReplyRejected ReplyError
 
 data Replies a where
-  ReserveRequestWith :: Text -> (Int, Int) -> Replies Int
-  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe RequestDeadline -> Replies ()
+  ReserveRequestWith :: Text -> (Int, Int) -> Bool -> Replies Int
+  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Duration -> Replies ()
   AttemptReplyWith :: Int -> result -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
@@ -272,34 +252,47 @@ pollProgress
   -> Eff effs (ProgressState progress)
 pollProgress (Progress (RequestId request)) = send (ObserveProgressWith request)
 
-reserveRequest :: Member Replies effs => RequestLabel -> (Int, Int) -> Eff effs RequestId
-reserveRequest (RequestLabel label) target = RequestId <$> send (ReserveRequestWith label target)
+reserveRequest :: Member Replies effs => Label -> (Int, Int) -> SettlementReporting -> Eff effs RequestId
+reserveRequest label target reporting =
+  -- Keep validation on the Haskell side of request admission. The effect
+  -- bridge does not currently force every payload field before dispatch.
+  labelText label `seq`
+    RequestId <$> send (ReserveRequestWith (labelText label) target (reporting == NotifyOwner))
 
 submitRequest
   :: Member Replies effs
   => RequestId
   -> (Int, Int)
   -> request
-  -> Maybe RequestDeadline
+  -> Maybe Duration
   -> Eff effs ()
 submitRequest (RequestId request) target requestPayload deadline =
   send (SubmitRequestWith request requestPayload target deadline)
 
-newRequestHandles :: pending -> RequestId -> (Response result, Reply result)
-newRequestHandles pending request =
-  (Response request (newExitCell pending), Reply request)
+newRequestHandles :: pending -> RequestId -> AgentRef -> (Response result, Reply result)
+newRequestHandles pending request actor =
+  (Response request actor Nothing (newExitCell pending), Reply request)
 
 fillResponse :: Response result -> ResponseResult result -> ()
-fillResponse (Response _ cell) = fillExitCell cell
+fillResponse (Response _ _ _ cell) = fillExitCell cell
 
 responseRequestId :: Response result -> RequestId
-responseRequestId (Response request _) = request
+responseRequestId (Response request _ _ _) = request
+
+responseActor :: Response result -> AgentRef
+responseActor (Response _ actor _ _) = actor
+
+responseLaunch :: Response result -> Maybe BranchReceipt
+responseLaunch (Response _ _ launch _) = launch
+
+withResponseLaunch :: BranchReceipt -> Response result -> Response result
+withResponseLaunch launch (Response request actor _ cell) = Response request actor (Just launch) cell
 
 replyRequestId :: Reply result -> RequestId
 replyRequestId (Reply request) = request
 
 readResponse :: Response result -> Maybe (ResponseResult result)
-readResponse (Response _ cell) = readExitCell () cell
+readResponse (Response _ _ _ cell) = readExitCell () cell
 
 attemptReply
   :: Member Replies effs
@@ -316,7 +309,7 @@ pollResponse
   :: Member Replies effs
   => Response result
   -> Eff effs (ResponseState result)
-pollResponse response@(Response (RequestId request) _) = do
+pollResponse response@(Response (RequestId request) _ _ _) = do
   observation <- send (ObserveResponseWith request)
   pure $ case observation of
     RawResponsePending -> ResponsePending
@@ -333,19 +326,19 @@ cancelRequest
   :: Member Replies effs
   => Response result
   -> Eff effs CancelRequestOutcome
-cancelRequest (Response (RequestId request) _) = send (CancelRequestWith request)
+cancelRequest (Response (RequestId request) _ _ _) = send (CancelRequestWith request)
 
 abandonResponse
   :: Member Replies effs
   => Response result
   -> Eff effs AbandonOutcome
-abandonResponse (Response (RequestId request) _) = send (AbandonResponseWith request)
+abandonResponse (Response (RequestId request) _ _ _) = send (AbandonResponseWith request)
 
 forgetResponse
   :: Member Replies effs
   => Response result
   -> Eff effs ForgetResponseOutcome
-forgetResponse (Response (RequestId request) _) = send (ForgetResponseWith request)
+forgetResponse (Response (RequestId request) _ _ _) = send (ForgetResponseWith request)
 
 pollReply :: Member Replies effs => Reply result -> Eff effs ReplyState
 pollReply (Reply (RequestId request)) = do

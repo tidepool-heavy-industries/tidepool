@@ -10,8 +10,8 @@ let startReview = (\own result -> do
           Right receipt | Produced candidate <- responseValue receipt -> case candidateAtSubmission candidate (responseWorktree receipt) of
             Right selected -> do
               _ <- requestWithProgressInto @WorkProgress @(Outcome ReviewDecision)
-                (forkedActor reviewer)
-                (withRequestGuidance (projectPrompt "review") (requestOptions reviewLabel (ReviewTask task selected repairPolicy))) $ R.send (reviewStarted (own :: ReviewFlow Self))
+                (responseActor reviewer)
+                ((assignment reviewLabel (ReviewTask task selected repairPolicy)) { guidance = Just (projectPrompt "review"), report = Silent }) $ R.send (reviewStarted (own :: ReviewFlow Self))
               pure ()
             Left reason -> do
               modify' (\state -> state { sourceProblems = sourceProblems state ++ [(responseExecution receipt, reason)] })
@@ -47,7 +47,7 @@ let reviewBoxDefinition = coordinationActor "review-handoff" ReviewFlow
                 (RetainedImplementer implementer, Right receipt) | Produced (Repair candidate findings) <- responseValue receipt -> do
                   own <- R.self @ReviewFlow
                   _ <- requestWithProgressInto @WorkProgress @(Outcome Candidate) implementer
-                    (withRequestGuidance (projectPrompt "repair") (requestOptions repairLabel (RepairTask task candidate findings)))
+                    ((assignment repairLabel (RepairTask task candidate findings)) { guidance = Just (projectPrompt "repair"), report = Silent })
                     (R.send (repairStarted own))
                   pure ()
                 _ -> pure ()
@@ -59,7 +59,7 @@ let reviewBoxDefinition = coordinationActor "review-handoff" ReviewFlow
       , repairDone = \result -> do
           own <- R.self @ReviewFlow
           startReview own result
-      , candidateDone = R.on (R.settlement (forkedResponse worker)) $ \result -> do
+      , candidateDone = R.on (R.settlement worker) $ \result -> do
           own <- R.self @ReviewFlow
           startReview own result
       }

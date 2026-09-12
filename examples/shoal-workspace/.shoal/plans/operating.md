@@ -94,8 +94,8 @@ distinct. These bindings prepare branches and launch nothing:
 ```haskell
 let wave = "wave-2" :: ForkGroupLabel
 let group = subgroup wave
-let leftLabel = "generator" :: BranchLabel
-let rightLabel = "consumer" :: BranchLabel
+let leftLabel = "generator" :: Label
+let rightLabel = "consumer" :: Label
 let left = leftTask { taskGroup = group, taskSource = source }
 let right = rightTask { taskGroup = group, taskSource = source }
 let leftBranch = solTask leftLabel left :: Branch CodingEffects Task (Outcome Candidate)

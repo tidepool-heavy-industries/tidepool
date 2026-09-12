@@ -16,32 +16,6 @@ fn examples(document: &str) -> impl Iterator<Item = &str> {
         .map(|block| block.split_once("```").unwrap().0)
 }
 
-/// Check the reference signatures from the published guide itself, without
-/// maintaining a second list of API types in a fixture.
-fn guide_signature_query(document: &str) -> String {
-    let mut signatures: Vec<(String, String)> = Vec::new();
-    for block in document.split("```text\n").skip(1) {
-        for line in block.split_once("```").unwrap().0.lines() {
-            if let Some((name, signature)) = line.split_once("::") {
-                signatures.push((name.trim().into(), signature.trim().into()));
-            } else if line.trim_start().starts_with("=>") || line.trim_start().starts_with("->") {
-                let (_, signature) = signatures.last_mut().unwrap();
-                signature.push(' ');
-                signature.push_str(line.trim());
-            }
-        }
-    }
-    assert!(!signatures.is_empty(), "guide has no signature references");
-    format!(
-        ":type ({})",
-        signatures
-            .iter()
-            .map(|(name, signature)| format!("({name} :: {signature})"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
 async fn committed(
     policy: &dyn tidepool_actor::ResidentToolEndpoint,
     source: &str,
@@ -98,6 +72,16 @@ async fn published_unfold_watch_and_request_examples_execute() {
 async fn invalid_label_literals_fail_before_actor_side_effects() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
+    let me = committed(root.as_ref(), "inspectFull (agentIdentity me)").await;
+    let identity = campaign.root_installation.actor.identity();
+    assert_eq!(
+        me["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .collect::<String>(),
+        format!("({},{})", identity.id.0, identity.incarnation.0)
+    );
 
     let invalid_watch = dispatch_haskell_script(
         root.as_ref(),
@@ -134,8 +118,8 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         root.as_ref(),
         concat!(
             "badWorkers <- unfold (batch \"literal-errors\" \"branches\") $ ",
-            "(,) <$> child (researching @Text \"valid\" projectHead ()) ",
-            "<*> child (researching @Text \"Bad Label\" projectHead ())",
+            "(,) <$> child (researching @Text projectHead (assignment \"valid\" ())) ",
+            "<*> child (researching @Text projectHead (assignment \"Bad Label\" ()))",
         ),
     )
     .await;
@@ -157,44 +141,50 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
         root.as_ref(),
         concat!(
             "worker <- unfold (batch \"literal-errors\" \"request\") ",
-            "(child (researching @Text \"target\" projectHead ()))\n",
-            "before <- listAgents\n",
-            "let requestCount target rows = sum [length (rosterCurrentRequests row) | ",
-            "row <- rows, (rosterActorId row, rosterActorIncarnation row) == target]\n",
-            "let beforeRequests = requestCount (agentIdentity (forkedActor worker)) before",
+            "(child (researching @Text projectHead (assignment \"target\" ())))",
         ),
     )
     .await;
-    let rendered = committed(root.as_ref(), "inspectFull (forkedActor worker, worker)").await;
+    let (_worker_installation, _worker_custody) = next_project_worker(&mut campaign).await;
+    committed(root.as_ref(), "before <- listAgents").await;
+    committed(
+        root.as_ref(),
+        concat!(
+            "let requestCount target rows = sum [length (rosterCurrentRequests row) | ",
+            "row <- rows, (rosterActorId row, rosterActorIncarnation row) == target]",
+        ),
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        "let beforeRequests = requestCount (agentIdentity (responseActor worker)) before",
+    )
+    .await;
+    let rendered = committed(root.as_ref(), "inspectFull worker").await;
     let rendered = rendered["items"][0]["output"].as_str().unwrap();
     assert!(rendered.contains("AgentRef ("), "{rendered}");
-    assert!(
-        rendered.contains("Forked { actor = AgentRef ("),
-        "{rendered}"
-    );
+    assert!(rendered.contains("actor = AgentRef ("), "{rendered}");
     assert!(rendered.contains("path = ActorPath"), "{rendered}");
-    assert!(rendered.contains("response = Response"), "{rendered}");
+    assert!(rendered.contains("Response { request ="), "{rendered}");
     let invalid_request = dispatch_haskell_script(
         root.as_ref(),
-        "badResponse <- request @Text (forkedActor worker) (\"Bad Label\" :: RequestLabel) ()",
+        "badResponse <- request @Text (responseActor worker) (assignment (\"Bad Label\" :: Label) ())",
     )
     .await;
     assert_eq!(invalid_request["status"], "rejected", "{invalid_request}");
     assert!(
         invalid_request
             .to_string()
-            .contains("InvalidRequestLabel \\\"Bad Label\\\""),
+            .contains("InvalidKebabName \\\"Bad Label\\\""),
         "{invalid_request}"
     );
+    committed(root.as_ref(), "after <- listAgents").await;
     let unchanged = committed(
         root.as_ref(),
-        concat!(
-            "after <- listAgents\n",
-            "requestCount (agentIdentity (forkedActor worker)) after == beforeRequests",
-        ),
+        "requestCount (agentIdentity (responseActor worker)) after == beforeRequests",
     )
     .await;
-    assert_eq!(unchanged["items"][1]["output"], "True", "{unchanged}");
+    assert_eq!(unchanged["items"][0]["output"], "True", "{unchanged}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -206,12 +196,6 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let root = campaign.root_installation.policy.clone();
     let guide = include_str!("../../../prompts/shoal/api-guide.md");
     let mut guide_examples = examples(guide);
-    let signatures = committed(root.as_ref(), &guide_signature_query(guide)).await;
-    // Diagnostic errors do not reject a whole tool block; inspect the unit too.
-    assert_eq!(
-        signatures["items"][0]["status"], "committed",
-        "{signatures}"
-    );
     committed(root.as_ref(), guide_examples.next().unwrap()).await;
     let mut binding = None;
     let child = tokio::time::timeout(Duration::from_secs(120), async {
@@ -223,7 +207,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
                     child = Some(installation);
                 }
                 Some(LocalResidentDeployment::SessionReady { activation }) => {
-                    assert!(activation.message.contains("Check the hit targets."));
+                    assert!(activation.message.contains("Remove the stale path"));
                     return child.unwrap();
                 }
                 Some(_) => {}
@@ -239,21 +223,10 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
     let success = committed(root.as_ref(), guide_examples.next().unwrap()).await;
-    let command_example = guide_examples.next().unwrap();
-    let command = tokio::spawn({
-        let root = root.clone();
-        async move { committed(root.as_ref(), command_example).await }
-    });
-    super::command_jobs_tests::backend_request(&mut campaign)
-        .await
-        .supply(Ok(super::command_jobs_tests::TestCommands::completed("")));
-    command.await.unwrap();
-    let output = committed(root.as_ref(), "fmap T.null (Cmd.stdout result)").await;
-    assert_eq!(output["items"][0]["output"], "Right True");
     assert!(guide_examples.next().is_none(), "untested guide example");
     assert_eq!(
         success["items"][1]["output"],
-        "WatchReady (Right \"Check the hit targets.\")"
+        "WatchReady (Right \"Remove the stale path and report the focused check.\")"
     );
 
     committed(
@@ -288,7 +261,7 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
     )
     .await;
     let snippets: Vec<_> = examples(include_str!("../../../prompts/shoal/docs/watch.md"))
-        .filter(|snippet| snippet.contains("let progressOptions = requestOptions"))
+        .filter(|snippet| snippet.contains("let progressOptions = assignment"))
         .collect();
     assert_eq!(snippets.len(), 1, "one complete documented progress setup");
     committed(root.as_ref(), snippets[0]).await;
@@ -386,7 +359,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "case sessionInput of BrokenPreview n -> respond (Report n)",
         ),
     ] {
-        committed(root.as_ref(), &format!("let previewLabel = \"{label}\" :: RequestLabel\npreviewResponse <- request @Report worker previewLabel {input}")).await;
+        committed(root.as_ref(), &format!("let previewLabel = \"{label}\" :: Label\npreviewResponse <- request @Report worker (assignment previewLabel {input})")).await;
         let activation = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
                 match campaign.deployments.recv().await {
@@ -875,12 +848,12 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         .contains("ReplyAvailable"));
     committed(
         root.as_ref(),
-        "context <- actorContext\ncontextFirstUsage context\ncontextLatestUsage context",
+        "import Tidepool.Actors.Observe (actorContext)\ncontext <- actorContext\ncontextFirstUsage context\ncontextLatestUsage context",
     )
     .await;
     committed(
         root.as_ref(),
-        "let worker = forkedActor (fst workers)\nlet task = 9 :: Int",
+        "let worker = responseActor (fst workers)\nlet task = 9 :: Int",
     )
     .await;
     let domain = children
@@ -1155,8 +1128,8 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     assert_eq!(foreign["items"][1]["output"], "0", "{foreign}");
     let reply = dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
-    committed(root.as_ref(), "stopAgent (forkedActor producer)").await;
-    committed(root.as_ref(), "unavailable <- requestWith @Text (forkedActor producer) (requestOptions forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
+    committed(root.as_ref(), "stopAgent (responseActor producer)").await;
+    committed(root.as_ref(), "unavailable <- requestWith @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
     let handled = committed(
         root.as_ref(),
         "pollRoute handled\nforgetRoute forwarding\nforgetRoute broken",
@@ -1440,11 +1413,8 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         worker.creator,
         Some(campaign.root_installation.actor.identity())
     );
-    let result = dispatch_haskell_script(
-        worker.policy.as_ref(),
-        "reply sessionReply (\"ready\" :: Text)",
-    )
-    .await;
+    let result =
+        dispatch_haskell_script(worker.policy.as_ref(), "respond (\"ready\" :: Text)").await;
     assert_eq!(result["status"], "replied", "{result}");
     committed(
         root.as_ref(),
@@ -1478,7 +1448,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     );
     let shared = committed(
         root.as_ref(),
-        "shareObservation (forkedActor peerObserver) (forkedActor peer)",
+        "shareObservation (responseActor peerObserver) (responseActor peer)",
     )
     .await;
     assert_eq!(
@@ -1507,11 +1477,8 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
             .contains(&worker.label),
         "{status}"
     );
-    let result = dispatch_haskell_script(
-        observer.policy.as_ref(),
-        "reply sessionReply (\"ready\" :: Text)",
-    )
-    .await;
+    let result =
+        dispatch_haskell_script(observer.policy.as_ref(), "respond (\"ready\" :: Text)").await;
     assert_eq!(result["status"], "replied", "{result}");
     campaign
         .root_installation
@@ -1524,7 +1491,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .unwrap();
     assert!(worker.actor.terminal().get().is_none());
     assert!(observer.actor.terminal().get().is_none());
-    committed(observer.policy.as_ref(), "let followupLabel = \"peer-followup\" :: RequestLabel\nfollowup <- request @Text retainedPeer followupLabel (\"after planner retirement\" :: Text)").await;
+    committed(observer.policy.as_ref(), "let followupLabel = \"peer-followup\" :: Label\nfollowup <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text))").await;
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if let Some(LocalResidentDeployment::SessionReady { activation }) =
@@ -1540,7 +1507,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     .unwrap();
     let result = dispatch_haskell_script(
         worker.policy.as_ref(),
-        "reply sessionReply (sessionInput <> \" accepted\" :: Text)",
+        "respond (sessionInput <> \" accepted\" :: Text)",
     )
     .await;
     assert_eq!(result["status"], "replied", "{result}");
@@ -1680,7 +1647,11 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         include_str!("../../../examples/shoal-workspace/.shoal/checks/project_review_repair.hs"),
     )
     .await;
-    let pending = committed(reviewer.policy.as_ref(), "pollReply sessionReply").await;
+    let pending = committed(
+        reviewer.policy.as_ref(),
+        "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
+    )
+    .await;
     assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
@@ -1979,7 +1950,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     );
     let original = committed(
         root.as_ref(),
-        "original <- pollResponse (forkedResponse worker)\ninspectFull original",
+        "original <- pollResponse worker\ninspectFull original",
     )
     .await;
     assert!(
@@ -2019,7 +1990,11 @@ async fn route_reply_case(cancel: bool) {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), "let routeCampaign = \"route-reply\" :: Text").await;
+    committed(
+        root.as_ref(),
+        "let routeCampaign = \"route-reply\" :: CampaignLabel",
+    )
+    .await;
     committed(
         root.as_ref(),
         include_str!("../../../examples/shoal-workspace/.shoal/checks/route-reply-setup.hs"),
@@ -2033,7 +2008,7 @@ async fn route_reply_case(cancel: bool) {
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
     if cancel {
-        let result = committed(root.as_ref(), "cancelRequest (forkedResponse lead)").await;
+        let result = committed(root.as_ref(), "cancelRequest lead").await;
         assert!(
             result.to_string().contains("CancellationRequested"),
             "{result}"
@@ -2053,7 +2028,7 @@ async fn route_reply_case(cancel: bool) {
             } else {
                 committed(
                     root.as_ref(),
-                    "answer <- pollResponse (forkedResponse lead)\ninspectFull answer",
+                    "answer <- pollResponse lead\ninspectFull answer",
                 )
                 .await
             };
@@ -2071,7 +2046,11 @@ async fn route_reply_case(cancel: bool) {
             outcome.to_string().contains("CancellationRequested"),
             "{outcome}"
         );
-        let pending = committed(lead.policy.as_ref(), "pollReply destination").await;
+        let pending = committed(
+            lead.policy.as_ref(),
+            "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
+        )
+        .await;
         assert!(
             pending.to_string().contains("ReplyCancellationRequested"),
             "{pending}"
@@ -2155,7 +2134,11 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )
     .await;
     assert_eq!(verdict["status"], "replied", "{verdict}");
-    let pending = committed(lead.policy.as_ref(), "pollReply sessionReply").await;
+    let pending = committed(
+        lead.policy.as_ref(),
+        "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
+    )
+    .await;
     assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
     // Repair is performed by this already-active lead, not queued behind it.
     let revised = campaign
@@ -2232,7 +2215,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     assert_eq!(delivered["status"], "replied", "{delivered}");
     let delivery = committed(
         root.as_ref(),
-        "delivered <- pollResponse (forkedResponse lead)\ninspectFull delivered",
+        "delivered <- pollResponse lead\ninspectFull delivered",
     )
     .await;
     for expected in [
@@ -2297,7 +2280,11 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     let result = dispatch_haskell_script(rsi.policy.as_ref(), &format!(
         "respond (Produced (Candidate \"{}\" [\"reviewed authored task guidance\"] [\"activate at next swarm boundary\"]))", improvement_commit.as_str())).await;
     assert_eq!(result["status"], "replied", "{result}");
-    let receipt = committed(root.as_ref(), "improvementReceipt <- pollResponse (forkedResponse improvement)\ninspectFull improvementReceipt").await;
+    let receipt = committed(
+        root.as_ref(),
+        "improvementReceipt <- pollResponse improvement\ninspectFull improvementReceipt",
+    )
+    .await;
     assert!(
         receipt.to_string().contains(improvement_commit.as_str()),
         "{receipt}"
@@ -2354,78 +2341,6 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
     assert_eq!(
         result["items"][0]["output"], "Just [1,102,0,57,10,34,92,9,955,127]",
         "{result}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn worker_preview_resolves_frozen_host_selection_and_checks_lifetime() {
-    let mut campaign = workspace_campaign().await;
-    campaign._repository.writer().stage(".shoal").unwrap();
-    campaign
-        ._repository
-        .writer()
-        .commit_empty("workspace program")
-        .unwrap();
-    // Future source edits must not change either preview or the late child.
-    std::fs::write(
-        campaign._repository.path().join(".shoal/prompts/task.md"),
-        "mutated prompt",
-    )
-    .unwrap();
-    let result = committed(
-        campaign.root_installation.policy.as_ref(),
-        include_str!("fixtures/worker_launch_preview.hs"),
-    )
-    .await;
-    let outputs = result["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|item| item["output"].as_str())
-        .collect::<Vec<_>>();
-    for expected in [
-        "(True,True,True,True,True,True,True,True,True)",
-        "Right (Just (Nothing,Low))",
-        "Right (Just (Just \"test-model\",Low))",
-        "a swarm-owned worker requires a selected context",
-    ] {
-        assert!(
-            outputs.iter().any(|output| output.contains(expected)),
-            "missing {expected}: {result}"
-        );
-    }
-    let (worker, _custody) = next_project_worker(&mut campaign).await;
-    assert_eq!(worker.model.as_deref(), Some("gpt-5.6-sol"));
-    assert_eq!(worker.fork_effort, Some(tidepool_actor::ForkEffort::Low));
-    assert_eq!(
-        worker.instructions.as_deref(),
-        Some(include_str!(
-            "../../../examples/shoal-workspace/.shoal/prompts/task.md"
-        ))
-    );
-    let root_identity = committed(
-        campaign.root_installation.policy.as_ref(),
-        "inspectFull workspaceIdentity",
-    )
-    .await;
-    let child_identity = committed(worker.policy.as_ref(), "inspectFull workspaceIdentity").await;
-    assert_eq!(
-        root_identity["items"][0]["output"],
-        child_identity["items"][0]["output"]
-    );
-    let instructions = committed(
-        campaign.root_installation.policy.as_ref(),
-        "inspectFull (launchInstructions selectedLaunch)",
-    )
-    .await;
-    let mut expected =
-        append_effective_role(worker.instructions.clone().unwrap(), &worker.effective_role);
-    append_inheritance_authority(&mut expected);
-    assert_eq!(
-        instructions["items"][0]["output"].as_str(),
-        Some(expected.as_str())
     );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

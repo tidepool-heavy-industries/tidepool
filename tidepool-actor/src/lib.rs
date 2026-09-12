@@ -99,8 +99,8 @@ pub use request::{
     ReplyObservation, RequestCancellationNotification, RequestDeadline, RequestId,
     RequestUpdateCorrelation, RequestUpdateDelivery, RequestUpdateId, RequestUpdatePresentation,
     RequestUpdateReconciler, RequestUpdateState, ResponseFailure, ResponseObservation,
-    UpdateReconciliationError, WatchId, WatchNotification, WatchObservation, WatchStateProjection,
-    WatchTransition,
+    SettlementNotification, SettlementTransition, UpdateReconciliationError, WatchId,
+    WatchNotification, WatchObservation, WatchStateProjection, WatchTransition,
 };
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_in_incarnation,
@@ -128,8 +128,8 @@ pub use runtime_observation::{
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
-    ActorStartCaptureError, ForkContext, ForkEffort, ResidentActorStart, WorkerLaunchPreview,
-    WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime,
+    ActorStartCaptureError, ForkContext, ForkEffort, Model, ResidentActorStart,
+    WorkerLaunchPreview, WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime,
 };
 pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,

@@ -82,7 +82,7 @@ installSource (CommandSource (Job job) project) =
   send (ActorInstallCommandSourceWith job (sourceEntry project))
 installSource (ProgressSource (Progress (RequestId request)) project) =
   send (ActorInstallProgressSourceWith request (sourceEntry project))
-installSource (SettlementSource response@(Response (RequestId request) _) project) =
+installSource (SettlementSource response@(Response (RequestId request) _ _ _) project) =
   send (ActorInstallSettlementSourceWith request
     (sourceEntry (project . settledResponse response)))
 installSource (LifecycleSource (ActorRef actor incarnation _) project) =

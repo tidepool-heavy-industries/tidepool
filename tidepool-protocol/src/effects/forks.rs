@@ -25,6 +25,19 @@ pub fn forks() -> Effect {
         extra_imports: &[],
         type_defs: vec![
             TypeDef {
+                name: "Model",
+                wire_rust: None,
+                core_module: None,
+                shape: TypeShape::Sum { variants: vec![
+                    SumVariant { ctor: "Alias", fields: VariantFields::Positional(vec![HsType::Text]), doc: &[] },
+                    SumVariant { ctor: "Literal", fields: VariantFields::Positional(vec![HsType::Text]), doc: &[] },
+                ] },
+                json: JsonInstance::None,
+                derives: WireDerives(&[]),
+                domain: None,
+                doc: &["A frozen workspace alias or an explicit provider model name."],
+            },
+            TypeDef {
                 name: "WorkerLaunchPreview",
                 wire_rust: None,
                 core_module: None,
@@ -236,8 +249,8 @@ pub fn forks() -> Effect {
                 });
                 args.push(Arg {
                     name: "model",
-                    ty: HsType::maybe(HsType::Text),
-                    rust: RustBinding::Path("Option<String>"),
+                    ty: HsType::maybe(HsType::Named("Model")),
+                    rust: RustBinding::Path("Option<crate::Model>"),
                 });
                 args.push(Arg {
                     name: "context",
@@ -286,7 +299,7 @@ pub fn forks() -> Effect {
                         ty: HsType::maybe(HsType::Tuple(vec![HsType::Int, HsType::Int])),
                         rust: RustBinding::Path("Option<(i64, i64)>"),
                     },
-                    Arg { name: "model", ty: HsType::maybe(HsType::Text), rust: RustBinding::Path("Option<String>") },
+                    Arg { name: "model", ty: HsType::maybe(HsType::Named("Model")), rust: RustBinding::Path("Option<crate::Model>") },
                     Arg { name: "effort", ty: HsType::maybe(HsType::Named("ForkEffort")), rust: RustBinding::Path("Option<crate::ForkEffort>") },
                     Arg { name: "context", ty: HsType::Named("ForkContext"), rust: RustBinding::Path("crate::ForkContext") },
                     Arg { name: "instructions", ty: HsType::maybe(HsType::Text), rust: RustBinding::Path("Option<String>") },

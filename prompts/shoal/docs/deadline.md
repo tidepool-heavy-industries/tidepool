@@ -4,16 +4,11 @@ time, not bare integers. Given an existing `worker`, declared `Report`, and
 input `task`:
 
 ```haskell
-let label = "bounded-review" :: RequestLabel
-:{
-options = withRequestDeadline (after (minutes 10))
-        $ requestOptions label task
-:}
-response <- requestWith @Report worker options
+response <- request @Report worker $
+  (assignment "bounded-review" task) { deadline = Just (minutes 10) }
 ```
 
-`milliseconds`, `seconds`, and `minutes` construct `Duration`; `after`
-constructs a `RequestDeadline`. Status preserves the authored unit and shows
+`milliseconds`, `seconds`, and `minutes` construct `Duration`. Status preserves the authored unit and shows
 absolute and remaining time.
 
 Expiry makes the response unavailable with `ResponseDeadlineExceeded` and

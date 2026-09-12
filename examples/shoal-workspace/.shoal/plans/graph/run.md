@@ -19,13 +19,13 @@ These expressions run in the Sol root's resident environment:
 import qualified Tidepool.Actor as Actor
 let campaign = "graph-relations" :: CampaignLabel
 let leads = "leads" :: ForkGroupLabel
-let contractLabel = "contract" :: BranchLabel
+let contractLabel = "contract" :: Label
 let Right contractTask = component campaign RelationContract baseline
 before <- snapshot
 contractWork <- unfold (batch campaign leads) (childWithProgress @WorkProgress @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom contractLabel projectHead contractTask))))
 let (contract, contractQuestions) = contractWork
 owner <- actorContext
-contractWave <- followWork [("contract", forkedResponse contract, contractQuestions)] (notifyWork owner (withCheckpoints (workMessage deliverySummary)))
+contractWave <- followWork [("contract", contract, contractQuestions)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))
 ```
 
 The owner can now end its turn. SwarmOwned selected leads have independent
@@ -79,8 +79,8 @@ let Right controlsBase = component campaign RelationControls acceptedContract
 let projectionTask = withDecision contractDecision projectionBase
 let controlsTask = withDecision contractDecision controlsBase
 let products = "product" :: ForkGroupLabel
-let projectionLabel = "projection" :: BranchLabel
-let controlsLabel = "controls" :: BranchLabel
+let projectionLabel = "projection" :: Label
+let controlsLabel = "controls" :: Label
 (projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @WorkProgress @Delivery (componentLeadFrom projectionLabel projectHead projectionTask) <*> childWithProgress @WorkProgress @Delivery (componentLeadFrom controlsLabel projectHead controlsTask))
 ```
 
@@ -108,10 +108,10 @@ request and evidence to precise friction/artifact references, all as Text/[Text]
 ```haskell
 let packet = RsiInput source question [projectionEvidence, controlsEvidence] before later evidence
 let improvements = "requested-improvement" :: ForkGroupLabel
-let improvementLabel = "workspace-style" :: BranchLabel
+let improvementLabel = "workspace-style" :: Label
 improvement <- unfold (batch campaign improvements) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef source)) packet)))
 let improvementReadyLabel = "improvement-ready" :: WatchLabel
-improvementReady <- watch improvementReadyLabel (awaitSettledFork improvement)
+improvementReady <- watch improvementReadyLabel (awaitSettled improvement)
 ```
 
 Snapshots preserve unknown usage coverage, exact identities and provider staleness.

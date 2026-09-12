@@ -80,7 +80,7 @@ instance Applicative Await where
 newtype WatchId = WatchId Int
   deriving (Show, Eq, Ord)
 
-newtype WatchLabel = WatchLabel Text
+data WatchLabel = WatchLabel Text
   deriving (Show, Eq, Ord)
 
 data WatchLabelError

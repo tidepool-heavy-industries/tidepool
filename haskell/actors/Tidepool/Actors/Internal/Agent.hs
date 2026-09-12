@@ -12,7 +12,6 @@ module Tidepool.Actors.Internal.Agent
   ( AgentSpec
   , AgentRef
   , Response
-  , Reply
   , codingAgent
   , readonlyAgent
   , readonlyWorktreeAgent
@@ -23,16 +22,15 @@ module Tidepool.Actors.Internal.Agent
   , roleCode
   , request
   , requestSited
-  , RequestOptions
+  , Assignment (..)
+  , Label
+  , SettlementReporting (..)
   , Duration
-  , RequestDeadline
   , milliseconds
   , seconds
   , minutes
-  , after
-  , requestOptions
-  , withRequestGuidance
-  , withRequestDeadline
+  , assignment
+  , labelFromText
   , requestWith
   , requestWithSited
   , requestWithProgress
@@ -50,7 +48,6 @@ module Tidepool.Actors.Internal.Agent
   , forgetAgent
   , StopOutcome (..)
   , stopAgent
-  , MessageRecipient
   , sendMessage
   , pollNotification
   , NotificationReceipt
@@ -67,11 +64,9 @@ import qualified Tidepool.Actor.Internal as ActorInternal
 import Tidepool.Actor.Source (installSource)
 import Tidepool.Actors.Role (AgentControl, AgentInspection, AgentLaunch, Forks)
 import Tidepool.Agent.Reply.Internal
-  ( Reply
-  , Progress (..)
+  ( Progress (..)
   , responseRequestId
   , Replies
-  , RequestLabel (..)
   , RequestId (..)
   , Response
   , fillResponse
@@ -83,6 +78,16 @@ import Tidepool.Agent.Reply.Internal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   )
+import Tidepool.Agent.Ref
+  ( AgentRef (..)
+  , AgentProtocol (..)
+  , agentIdentity
+  , agentBoundWorktree
+  )
+import Tidepool.Agent.Assignment
+  ( Assignment (..), Label, SettlementReporting (..)
+  , assignment, labelFromText, labelText
+  )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Agent.Session
   ( attachAgent
@@ -93,6 +98,7 @@ import Tidepool.Effects.Core
   , ActorEffectKey
   , ForkEffort
   , ForkContext
+  , Model
   , WorkerLifetime
   , ActorEffectProfile (..)
   , ActorKernel (..)
@@ -116,8 +122,6 @@ import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ExitCell (fillExitCell, newExitCell)
 import Tidepool.Duration
   ( Duration
-  , RequestDeadline
-  , after
   , milliseconds
   , minutes
   , seconds
@@ -137,13 +141,6 @@ data AgentSpec
   | ScaffoldingAgent WorktreeHandle
   | IntegrationAgent WorktreeHandle
 
-data AgentRef = AgentRef
-  (Actor.ActorRef AgentProtocol ())
-  (Maybe WorktreeHandle)
-
-instance Show AgentRef where
-  show agent = "AgentRef " <> show (agentIdentity agent)
-
 -- | Repeatable lifecycle observation of one exact actor incarnation.
 data AgentState
   = AgentRunning
@@ -161,12 +158,6 @@ data AgentObservation = AgentObservation
   , observedWorktree :: Maybe WorktreeHandle
   }
   deriving (Show, Eq)
-
-agentIdentity :: AgentRef -> (Int, Int)
-agentIdentity (AgentRef target _) = actorAddress target
-
-agentBoundWorktree :: AgentRef -> Maybe WorktreeHandle
-agentBoundWorktree (AgentRef _ tree) = tree
 
 observeAgent
   :: Member AgentInspection effs
@@ -216,30 +207,6 @@ forgetAgent (AgentRef target _) = do
       AgentForgetRetained (map RequestId requests) (map WatchId watches)
     Core.AgentForgetUnavailable -> AgentForgetUnavailable
 
-data AgentProtocol result where
-  RunRequest
-    :: Eff (Actor.ReadOnlyEffects AgentProtocol) ()
-    -> AgentProtocol ()
-
-data RequestOptions input = RequestOptions
-  { requestOptionsLabel :: RequestLabel
-  , requestOptionsInput :: input
-  , requestOptionsGuidance :: Maybe Text
-  , requestOptionsDeadline :: Maybe RequestDeadline
-  }
-  deriving (Show, Eq)
-
-requestOptions :: RequestLabel -> input -> RequestOptions input
-requestOptions label input = RequestOptions label input Nothing Nothing
-
-withRequestGuidance :: Text -> RequestOptions input -> RequestOptions input
-withRequestGuidance guidance options =
-  options { requestOptionsGuidance = Just guidance }
-
-withRequestDeadline :: RequestDeadline -> RequestOptions input -> RequestOptions input
-withRequestDeadline deadline options =
-  options { requestOptionsDeadline = Just deadline }
-
 -- | Configure a long-lived coding agent around one managed worktree.
 codingAgent :: WorktreeHandle -> AgentSpec
 codingAgent = CodingAgent
@@ -275,7 +242,7 @@ startForkedAgent
   -> [ActorEffectKey]
   -> Maybe ForkEffort
   -> Maybe (Int, Int)
-  -> Maybe Text
+  -> Maybe Model
   -> ForkContext
   -> Maybe Text
   -> WorkerLifetime
@@ -306,8 +273,7 @@ request
   :: forall result input effs
    . Member Replies effs
   => AgentRef
-  -> RequestLabel
-  -> input
+  -> Assignment input
   -> Eff effs (Response result)
 request = requestSited @result @input 0
 
@@ -319,18 +285,17 @@ requestSited
    . Member Replies effs
   => Int
   -> AgentRef
-  -> RequestLabel
-  -> input
+  -> Assignment input
   -> Eff effs (Response result)
-requestSited site (AgentRef target targetWorktree) label@(RequestLabel renderedLabel) input = do
-  requestConfiguredSited site target targetWorktree label Nothing Nothing input (const (pure ()))
+requestSited site (AgentRef target targetWorktree) options = do
+  requestConfiguredSited site target targetWorktree options (const (pure ()))
 
 {-# OPAQUE requestWith #-}
 requestWith
   :: forall result input effs
    . Member Replies effs
   => AgentRef
-  -> RequestOptions input
+  -> Assignment input
   -> Eff effs (Response result)
 requestWith = requestWithSited @result @input 0
 
@@ -339,7 +304,7 @@ requestWithProgress
   :: forall progress result input effs
    . Member Replies effs
   => AgentRef
-  -> RequestOptions input
+  -> Assignment input
   -> Eff effs (Response result, Progress progress)
 requestWithProgress = requestWithProgressSited @progress @result @input 0
 
@@ -349,7 +314,7 @@ requestWithProgressSited
    . Member Replies effs
   => Int
   -> AgentRef
-  -> RequestOptions input
+  -> Assignment input
   -> Eff effs (Response result, Progress progress)
 requestWithProgressSited site actor options = do
   response <- requestWithSited @result @input site actor options
@@ -363,7 +328,7 @@ requestWithProgressSited site actor options = do
 requestWithProgressInto
   :: forall progress result input effs. Member Replies effs
   => AgentRef
-  -> RequestOptions input
+  -> Assignment input
   -> ((Response result, Progress progress) -> Eff effs ())
   -> Eff effs (Response result, Progress progress)
 requestWithProgressInto = requestWithProgressIntoSited @progress @result @input 0
@@ -373,14 +338,13 @@ requestWithProgressIntoSited
   :: forall progress result input effs. Member Replies effs
   => Int
   -> AgentRef
-  -> RequestOptions input
+  -> Assignment input
   -> ((Response result, Progress progress) -> Eff effs ())
   -> Eff effs (Response result, Progress progress)
 requestWithProgressIntoSited site (AgentRef target targetWorktree) options retain = do
   let handles response = (response, Progress (responseRequestId response))
   response <- requestConfiguredSited site target targetWorktree
-    (requestOptionsLabel options) (requestOptionsGuidance options)
-    (requestOptionsDeadline options) (requestOptionsInput options) (retain . handles)
+    options (retain . handles)
   pure (handles response)
 
 {-# OPAQUE requestWithSited #-}
@@ -389,17 +353,14 @@ requestWithSited
    . Member Replies effs
   => Int
   -> AgentRef
-  -> RequestOptions input
+  -> Assignment input
   -> Eff effs (Response result)
 requestWithSited site (AgentRef target targetWorktree) options =
   requestConfiguredSited
     site
     target
     targetWorktree
-    (requestOptionsLabel options)
-    (requestOptionsGuidance options)
-    (requestOptionsDeadline options)
-    (requestOptionsInput options)
+    options
     (const (pure ()))
 
 requestConfiguredSited
@@ -408,21 +369,22 @@ requestConfiguredSited
   => Int
   -> Actor.ActorRef AgentProtocol ()
   -> Maybe WorktreeHandle
-  -> RequestLabel
-  -> Maybe Text
-  -> Maybe RequestDeadline
-  -> input
+  -> Assignment input
   -> (Response result -> Eff effs ())
   -> Eff effs (Response result)
-requestConfiguredSited site target targetWorktree label@(RequestLabel renderedLabel) guidance deadline input retain = do
-  requestId <- reserveRequest label (actorAddress target)
-  let (response, reply) = newRequestHandles input requestId
+requestConfiguredSited site target targetWorktree options retain = do
+  requestId <- reserveRequest (label options) (actorAddress target) (report options)
+  let renderedLabel = labelText (label options)
+      requestInput = input options
+      responseGuidance = guidance options
+      requestDeadline = deadline options
+      (response, reply) = newRequestHandles requestInput requestId (AgentRef target targetWorktree)
   retain response
   submitRequest
     requestId
     (actorAddress target)
     (RunRequest (runRequest (actorAddress target) targetWorktree response reply))
-    deadline
+    requestDeadline
   pure response
   where
     runRequest (targetActorId, targetIncarnation) targetTree response replyHandle = do
@@ -433,7 +395,7 @@ requestConfiguredSited site target targetWorktree label@(RequestLabel renderedLa
         Just tree -> Just <$> worktreeHead tree
       result <-
         requestSessionSited @result @input
-          site requestId (Just (activationGuidance renderedLabel guidance)) input
+          site requestId (Just (activationGuidance (labelText (label options)) (guidance options))) (input options)
       evidence <- case (targetTree, start) of
         (Nothing, _) -> pure NoBoundWorktree
         (Just tree, Just startHead) -> do
@@ -529,7 +491,7 @@ launchForkedActor
   -> [ActorEffectKey]
   -> Maybe ForkEffort
   -> Maybe (Int, Int)
-  -> Maybe Text
+  -> Maybe Model
   -> ForkContext
   -> Maybe Text
   -> WorkerLifetime
@@ -672,26 +634,14 @@ agentRole (IntegrationAgent _) = Actor.IntegrationRole
 -- | Observation locator only. Rust checks the caller and exact inbox row.
 newtype NotificationReceipt = NotificationReceipt ((Int, Int), ((Int, Int), (Text, Int)))
 
--- | An address observation, not a grant. Rust checks the sending principal and
--- exact recipient. Capture actorContext in the model's turn before using it in
--- a child router. The handler runs as the router, not the capturing model.
-class MessageRecipient recipient where
-  messageAddress :: recipient -> (Int, Int)
-
-instance MessageRecipient AgentRef where
-  messageAddress = agentIdentity
-
-instance MessageRecipient ActorContextInfo where
-  messageAddress context = (contextActorId context, contextActorIncarnation context)
-
 -- | Admit normal steering into the existing TUI conversation. The receipt is
 -- admission evidence, not incorporation or successful execution. No response
 -- obligation is created, and uncertain presentation must not be retried blindly.
 sendMessage
-  :: (MessageRecipient recipient, Member Notifications effs)
-  => recipient -> Text -> Eff effs (Either NotificationError NotificationReceipt)
+  :: Member Notifications effs
+  => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)
 sendMessage recipient message =
-  fmap (fmap NotificationReceipt) (send (NotifyWith (messageAddress recipient) message))
+  fmap (fmap NotificationReceipt) (send (NotifyWith (agentIdentity recipient) message))
 
 pollNotification :: Member Notifications effs => NotificationReceipt -> Eff effs (Either NotificationError NotificationState)
 pollNotification (NotificationReceipt receipt) = send (PollNotificationWith receipt)

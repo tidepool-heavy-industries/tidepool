@@ -10,4 +10,4 @@ parent <- R.start parentDefinition
 let forwardFinal = (\event -> case event of
       WorkFinished _ _ -> do { R.send (componentFinished (R.client parent)) event; pure Nothing }
       _ -> pure Nothing) :: WorkSink Delivery
-handoff <- followWork [("left", forkedResponse left, leftProgress), ("right", forkedResponse right, rightProgress)] forwardFinal
+handoff <- followWork [("left", left, leftProgress), ("right", right, rightProgress)] forwardFinal

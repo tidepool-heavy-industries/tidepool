@@ -9,9 +9,9 @@ import Tidepool.Actors.Shoal
 
 result
   :: ForkGroupPath
-  -> BranchLabel
-  -> BranchLabel
-  -> Eff ResearchEffects (Forked Text, Forked Text)
+  -> Label
+  -> Label
+  -> Eff ResearchEffects (Response Text, Response Text)
 result group coordinator leaf = unfold group $
-  (,) <$> child (researching @Text coordinator boundHead ())
-      <*> child (researchingLeaf @Text leaf boundHead ())
+  (,) <$> child (researching @Text boundHead (assignment coordinator ()))
+      <*> child (researchingLeaf @Text boundHead (assignment leaf ()))

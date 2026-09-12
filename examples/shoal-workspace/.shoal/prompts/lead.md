@@ -44,7 +44,7 @@ creating it so notifications return to your TUI:
 ```haskell
 (reviewer, progress) <- reviewCandidate task OwnerRepairs candidate
 owner <- actorContext
-reviewWave <- followWork [("review", forkedResponse reviewer, progress)] (notifyWork owner (workMessage reviewSummary))
+reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMessage reviewSummary))
 ```
 
 Continue independent engineering while review is pending; end the turn when

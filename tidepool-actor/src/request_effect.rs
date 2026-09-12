@@ -41,9 +41,9 @@ impl RequestDuration {
 #[allow(dead_code, clippy::enum_variant_names)]
 pub(crate) enum RepliesReq {
     #[core(module = "Tidepool.Agent.Reply.Internal")]
-    ReserveRequestWith(String, (i64, i64)),
+    ReserveRequestWith(String, (i64, i64), bool),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
-    // GHC erases the RequestDeadline newtype; its Core representation is Duration.
+    // Duration reaches Core through its generated constructor representation.
     SubmitRequestWith(i64, Value, (i64, i64), Option<RequestDuration>),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     AttemptReplyWith(i64, Value),
@@ -113,6 +113,7 @@ pub(crate) struct RequestReservation {
     pub continuation: ResidentHole,
     pub target: ActorRef,
     pub label: String,
+    pub notify_owner: bool,
 }
 
 pub(crate) struct RequestSubmission {

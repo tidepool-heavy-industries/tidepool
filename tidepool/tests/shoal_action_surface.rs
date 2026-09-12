@@ -99,6 +99,17 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
     assert!(failure.message.contains("requestDeadline"));
 
+    for hidden in ["reply", "pollReply", "actorContext"] {
+        let source = format!(
+            "module ShoalHidden where\nimport qualified Tidepool.Actors.Shoal as Shoal\nresult = Shoal.{hidden}\n"
+        );
+        let error = compile_haskell(&source, "result", &include_refs)
+            .expect_err("the default Shoal facade exposed a hidden operation");
+        let failure = tidepool_runtime::classify_compile(&error);
+        assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
+        assert!(failure.message.contains(hidden), "{}", failure.message);
+    }
+
     compile_haskell(
         include_str!("shoal_action_surface/coding_can_unfold.hs"),
         "result",

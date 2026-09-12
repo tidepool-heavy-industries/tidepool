@@ -418,7 +418,7 @@ fn resolve_worker_launch(
     config: &ActorHostConfig,
     request: &tidepool_actor::WorkerLaunchRequest,
     base_fingerprint: &str,
-) -> tidepool_actor::WorkerLaunchPreview {
+) -> Result<tidepool_actor::WorkerLaunchPreview, String> {
     let mut instructions = developer_instructions_selected(
         &request.role,
         &InteractiveLaunchMode::Fresh,
@@ -426,12 +426,28 @@ fn resolve_worker_launch(
         request.instructions.as_deref(),
     );
     append_inheritance_authority(&mut instructions);
-    tidepool_actor::WorkerLaunchPreview {
-        model: request.model.clone().or_else(|| {
+    let model = match &request.model {
+        Some(tidepool_actor::Model::Alias(alias)) => Some(
+            config
+                .workspace_inputs
+                .as_ref()
+                .and_then(|workspace| workspace.models.get(alias))
+                .cloned()
+                .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}"))?,
+        ),
+        Some(tidepool_actor::Model::Literal(model)) => Some(model.clone()),
+        None => None,
+    };
+    Ok(tidepool_actor::WorkerLaunchPreview {
+        model: model.or_else(|| {
             (request.context == tidepool_actor::ForkContext::SelectedContext)
                 .then(|| config.model.clone())
         }),
-        effort: request.effort.unwrap_or(tidepool_actor::ForkEffort::Low),
+        effort: request.effort.unwrap_or(match config.effort {
+            ReasoningEffort::Low => tidepool_actor::ForkEffort::Low,
+            ReasoningEffort::Medium => tidepool_actor::ForkEffort::Medium,
+            ReasoningEffort::High => tidepool_actor::ForkEffort::High,
+        }),
         instructions,
         base_fingerprint: base_fingerprint.into(),
         workspace_identity: config
@@ -443,7 +459,7 @@ fn resolve_worker_launch(
             .as_ref()
             .map(|inputs| inputs.import_modules().map(str::to_owned).collect())
             .unwrap_or_default(),
-    }
+    })
 }
 
 fn append_inheritance_authority(instructions: &mut String) {
@@ -612,6 +628,10 @@ enum TypedActorEvent {
         #[serde(flatten)]
         notification: tidepool_actor::WatchNotification,
     },
+    SettlementChanged {
+        #[serde(flatten)]
+        notification: tidepool_actor::SettlementNotification,
+    },
     RequestCancellation {
         #[serde(flatten)]
         notification: tidepool_actor::RequestCancellationNotification,
@@ -669,6 +689,13 @@ impl DurableActorEvent {
                 notification.label,
                 notification.previous,
                 notification.current,
+                elapsed(notification.occurred_at_unix_ms),
+            ),
+            Self::Typed(TypedActorEvent::SettlementChanged { notification }) => format!(
+                "request {} {:?} settled {:?} ({}). Inspect its retained `Response` with `pollResponse`; settlement is not integration.",
+                notification.request.0,
+                notification.label,
+                notification.transition,
                 elapsed(notification.occurred_at_unix_ms),
             ),
             Self::Typed(TypedActorEvent::RequestCancellation { notification }) => format!(
@@ -2420,6 +2447,21 @@ async fn run_interactive_applications(
                             }),
                         ));
                     }
+                    LocalResidentDeployment::SettlementChanged { notification } => {
+                        let Some(application) = deployments
+                            .iter()
+                            .find(|app| app.actor == notification.owner)
+                        else {
+                            continue;
+                        };
+                        notifications.spawn(publish_inbox_event_for(
+                            notification.owner,
+                            Arc::clone(&application.inbox),
+                            DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+                                notification,
+                            }),
+                        ));
+                    }
                     LocalResidentDeployment::RequestCancellation { notification } => {
                         let Some(application) = deployments
                             .iter()
@@ -3169,25 +3211,31 @@ async fn launch_prepared_interactive_application(
     };
     runtime_observation.publish_workspace(workspace_observation);
     runtime_observation.publish_launch_role(installation.effective_role.clone(), current_time_ms());
-    let resolved_worker = installation.creator.map(|_| {
-        resolve_worker_launch(
-            &config,
-            &tidepool_actor::WorkerLaunchRequest {
-                role: installation.effective_role.clone(),
-                model: installation.model.clone(),
-                effort: installation.fork_effort,
-                context: if matches!(launch_mode, InteractiveLaunchMode::Fork { .. }) {
-                    tidepool_actor::ForkContext::InheritedContext
-                } else {
-                    tidepool_actor::ForkContext::SelectedContext
+    let resolved_worker = installation
+        .creator
+        .map(|_| {
+            resolve_worker_launch(
+                &config,
+                &tidepool_actor::WorkerLaunchRequest {
+                    role: installation.effective_role.clone(),
+                    model: installation.model.clone(),
+                    effort: installation.fork_effort,
+                    context: if matches!(launch_mode, InteractiveLaunchMode::Fork { .. }) {
+                        tidepool_actor::ForkContext::InheritedContext
+                    } else {
+                        tidepool_actor::ForkContext::SelectedContext
+                    },
+                    instructions: installation.instructions.clone(),
                 },
-                instructions: installation.instructions.clone(),
-            },
-            &blake3::hash(base_prompt.body().as_bytes())
-                .to_hex()
-                .to_string(),
-        )
-    });
+                &blake3::hash(base_prompt.body().as_bytes())
+                    .to_hex()
+                    .to_string(),
+            )
+        })
+        .transpose()
+        .map_err(|detail| {
+            application_error(actor_identity, InteractiveOperation::BuildCommand, detail)
+        })?;
     let developer_instructions = if let Some(resolved) = &resolved_worker {
         resolved.instructions.clone()
     } else {
@@ -3230,10 +3278,14 @@ async fn launch_prepared_interactive_application(
         )
     } else {
         (
-            installation.model.clone().or_else(|| {
-                (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. }))
-                    .then(|| config.model.clone())
-            }),
+            installation
+                .model
+                .as_ref()
+                .map(|model| model.value().to_owned())
+                .or_else(|| {
+                    (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. }))
+                        .then(|| config.model.clone())
+                }),
             launch_effort(&launch_mode, config.effort, installation.fork_effort),
         )
     };
@@ -6158,6 +6210,29 @@ mod tests {
         let encoded = serde_json::to_value(&watch).expect("serialize typed watch event");
         assert_eq!(encoded["type"], "watchChanged");
         assert_eq!(encoded["watch"], 9);
+
+        let settlement = DurableActorEvent::Typed(TypedActorEvent::SettlementChanged {
+            notification: tidepool_actor::SettlementNotification {
+                owner: tidepool_actor::ActorRef {
+                    id: tidepool_actor::ActorId(1),
+                    incarnation: tidepool_actor::Incarnation(1),
+                },
+                request: tidepool_actor::RequestId(11),
+                label: "implementation".into(),
+                transition: tidepool_actor::SettlementTransition::Unavailable(
+                    tidepool_actor::ResponseFailure::TargetUnavailable,
+                ),
+                occurred_at_unix_ms: 754_000,
+                sequence: tidepool_actor::ActorEventSequence(4),
+                watermark: tidepool_actor::ActorEventSequence(4),
+            },
+        });
+        let rendered = settlement.render(Some(0));
+        assert!(rendered.contains("request 11 \"implementation\" settled Unavailable"));
+        assert!(rendered.contains("pollResponse"));
+        let encoded = serde_json::to_value(&settlement).expect("serialize settlement event");
+        assert_eq!(encoded["type"], "settlementChanged");
+        assert_eq!(encoded["request"], 11);
         assert_eq!(
             serde_json::from_value::<DurableActorEvent>(serde_json::json!("old notice"))
                 .expect("decode legacy actor event"),
@@ -8109,7 +8184,7 @@ mod tests {
         }
         let launch_receipt = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "(forkedLaunch (first3 workers), forkedLaunch (second3 workers), forkedLaunch (third3 workers))",
+            "(responseLaunch (first3 workers), responseLaunch (second3 workers), responseLaunch (third3 workers))",
         )
         .await;
         let launch_receipt = launch_receipt["items"][0]["output"]
@@ -8124,7 +8199,7 @@ mod tests {
         );
         let scaffold_watch = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "scaffoldReadiness <- watch (case watchLabel \"scaffold-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) (awaitSettledFork (third3 workers))",
+            "scaffoldReadiness <- watch \"scaffold-ready\" (awaitSettled (third3 workers))",
         )
         .await;
         assert_eq!(scaffold_watch["status"], "committed", "{scaffold_watch:?}");
@@ -8211,7 +8286,7 @@ mod tests {
 
         let observed = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "inspectFull <$> pollResponse (forkedResponse (first3 workers))\ninspectFull <$> pollResponse (forkedResponse (second3 workers))\ninspectFull <$> pollWatch readiness",
+            "inspectFull <$> pollResponse (first3 workers)\ninspectFull <$> pollResponse (second3 workers)\ninspectFull <$> pollWatch readiness",
         )
         .await;
         assert_eq!(observed["status"], "committed", "{observed:?}");
@@ -8378,7 +8453,7 @@ mod tests {
         let nested_submitted = tokio::spawn(async move {
             dispatch_haskell_script(
                 scaffold_policy.as_ref(),
-                "nested <- unfold (subgroup (case forkGroupLabel \"leaves\" of { Right value -> value; Left _ -> error \"fixture subgroup\" })) ((,) <$> child (coding @ReplyReport (case branchLabel \"implementation\" of { Right value -> value; Left _ -> error \"fixture leaf\" }) boundHead (7 :: Int)) <*> child (coding @EchoReport (case branchLabel \"verification\" of { Right value -> value; Left _ -> error \"fixture leaf\" }) boundHead (\"nested\" :: Text)))",
+                "nested <- unfold (subgroup \"leaves\") ((,) <$> child (coding @ReplyReport boundHead (assignment \"implementation\" (7 :: Int))) <*> child (coding @EchoReport boundHead (assignment \"verification\" (\"nested\" :: Text))))",
             )
             .await
         });
@@ -8482,7 +8557,7 @@ mod tests {
         );
         let nested_watch = dispatch_haskell_script(
             scaffold_installation.policy.as_ref(),
-            "nestedReady <- watch (case watchLabel \"leaves-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) ((,) <$> awaitFork (fst nested) <*> awaitFork (snd nested))",
+            "nestedReady <- watch \"leaves-ready\" ((,) <$> awaitResponse (fst nested) <*> awaitResponse (snd nested))",
         )
         .await;
         assert_eq!(nested_watch["status"], "committed", "{nested_watch:?}");

@@ -201,8 +201,8 @@ through a concise handoff and a fresh fork when that is the better starting poin
 keep the old context available for consultation while it remains valuable.
 Existing specialists share their fork prefix, not the parent's later reasoning.
 
-Unspecified fork effort defaults to Low. Select Medium or High explicitly when
-uncertainty and consequence justify it. Once the scaffold resolves
+Unspecified fork effort inherits the parent's effective effort. Select a different
+effort explicitly when uncertainty and consequence justify it. Once the scaffold resolves
 important choices, `withEffort Low` can give a precise implementation or test
 obligation the same inherited context at lower initial effort. Keep more effort
 for shared architecture, uncertain event routing, difficult diagnosis, or proving
@@ -222,7 +222,7 @@ Use the shared API guide and `:doc unfold` for the executable fork/watch example
 String literals construct validated campaign, group, branch, request, and watch
 labels. Use the named validators when text arrives dynamically and validation
 failure must remain a value. Labels describe work; retain and pass the actual
-`Forked`, `AgentRef`, `Response`, and `Watch` handles.
+`AgentRef`, `Response`, and `Watch` handles.
 
 Combine independent `child` plans applicatively in one `unfold`, then register a
 watch and finish the tool call so admitted children can start. `traverse` over
@@ -230,11 +230,15 @@ watch and finish the tool call so admitted children can start. `traverse` over
 retained handle after wake, inspect unavailable settlements as well as replies,
 and retire only the actors whose work is finished.
 
+Requests notify their owner when they settle. Set `report = Silent` on an
+assignment when a watch, route, or record actor already owns settlement delivery;
+progress remains explicit and project-specific.
+
 To send a **new assignment** to a retained specialist, use
-`next <- request @Text (forkedActor worker) "revision" nextTask` and
+`next <- request @Text (responseActor worker) (assignment "revision" nextTask)` and
 `nextReady <- watch "revision-ready" (awaitResponse next)`. This is queued if the
 specialist is busy. For a **clarification of its current assignment**, use
-`updateRequest (forkedResponse worker) "changed requirement"`, retain the `Right`
+`updateRequest worker "changed requirement"`, retain the `Right`
 handle on success, and inspect `pollRequestUpdate` on it. Handle `Left` as a
 rejection; do not silently substitute a queued request. After a follow-up starts,
 target its `next` response instead. Only the request owner can steer that request.
@@ -246,7 +250,7 @@ ends that turn; it neither replies nor retires the actor. A peer holding your
 `AgentRef` can request work, but does not gain authority over someone else's
 response. Use these distinct operations for communication; there is no generic
 fire-and-forget message implied by an actor's label. When a specialist is no
-longer needed, `stopAgent (forkedActor worker)` retires it.
+longer needed, `stopAgent (responseActor worker)` retires it.
 
 # Keep obligations distinct from model turns
 

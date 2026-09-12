@@ -3,17 +3,17 @@ handle is durable while its resident Haskell machine lives; readiness alone
 does not spend another model turn.
 
 ```haskell
-let label = "review-change" :: RequestLabel
-response <- request @Report worker label task
+response <- request @Report worker (assignment "review-change" task)
 pollResponse response
 ```
 
 Here `worker` is an existing `AgentRef`, `task` is your typed input, and `Report`
 is your declared result type. The explicit result type keeps submission
-unambiguous before any consumer is defined. Use `requestWith` to add guidance
-or a dimensional deadline to the labeled request.
+unambiguous before any consumer is defined. Set `guidance` or a dimensional
+`deadline` through an `Assignment` record update.
 Replying settles this request, not the actor, so the same `AgentRef` can accept
-later refinements.
+later refinements. Terminal settlement wakes the requester by default; use
+`report = Silent` when a watch, route, or record actor already owns that signal.
 
 An actor serves one request at a time. A follow-up to a busy actor queues another
 assignment; do not assume it steers the active request. Establish coordination
@@ -53,7 +53,8 @@ An assignment that is still queued returns `Left ReplyStale`; send its eventual
 clarification once it is active. Update observations live with the response's
 metadata; forgetting the response makes its update handles stale.
 
-During delivery, `attemptReply` and `attemptAcknowledgeCancellation` return
+Low-level target-side reply inspection lives in `Tidepool.Agent.Reply`. During
+delivery, `attemptReply` and `attemptAcknowledgeCancellation` return
 `Left ReplyUpdatePending`. After an unconfirmed delivery they remain fenced so
 late input cannot affect the next assignment. You can request cancellation or
 stop the actor; stopping it is the recovery path for unresolved delivery.

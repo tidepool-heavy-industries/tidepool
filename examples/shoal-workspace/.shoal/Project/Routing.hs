@@ -25,6 +25,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Tidepool.Actor as Actor
 import Tidepool.Actors.Shoal
+import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (Actor)
 import Project.Types
 import Project.Actors (CoordinationEffects, coordinationActor)
@@ -190,7 +191,7 @@ putSource source state = state { collectedWork =
 
 -- Use another projection when partial evidence unlocks a known consumer. The
 -- default wakes only for question deltas, source failure and terminal results.
-notifyWork :: MessageRecipient recipient => recipient -> (WorkEvent value -> Maybe Text) -> WorkSink value
+notifyWork :: AgentRef -> (WorkEvent value -> Maybe Text) -> WorkSink value
 notifyWork owner render event = case render event of
   Nothing -> pure Nothing
   Just message -> Just <$> sendMessage owner message
@@ -201,7 +202,7 @@ workMessage render event = case event of
     let opened = openedQuestions delta
         closed = resolvedQuestions delta
         ref q = questionPlan (questionDetails q) <> "#" <> questionKey q
-          <> "@" <> questionSource (questionDetails q)
+          <> "@" <> renderGitOid (questionSource (questionDetails q))
         added q = "+" <> ref q <> " " <> questionFinding (questionDetails q)
         removed q = "-" <> ref q
         parts = map added opened ++ map removed closed
@@ -225,5 +226,5 @@ withCheckpoints render event = case (render event, checkpoints event) of
     checkpoints (WorkChanged name delta) =
       case addedEvidence delta of
         [] -> Nothing
-        fresh -> Just (name <> ": checkpoint " <> Text.intercalate "," (map candidateCommit fresh))
+        fresh -> Just (name <> ": checkpoint " <> Text.intercalate "," (map (renderGitOid . candidateCommit) fresh))
     checkpoints _ = Nothing

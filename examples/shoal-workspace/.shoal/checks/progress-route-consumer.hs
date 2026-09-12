@@ -1,2 +1,2 @@
-let consumerLabel = "consumer" :: BranchLabel
-consumer <- unfold (batch campaignLabelValue wave) (child (coding @Text consumerLabel projectHead ([] :: Attention)))
+let consumerLabel = "consumer" :: Label
+consumer <- unfold (batch campaignLabelValue wave) (child (coding @Text projectHead (assignment consumerLabel ([] :: Attention))))

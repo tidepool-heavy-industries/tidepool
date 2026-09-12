@@ -13,6 +13,7 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Shoal
+import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (AgentInspection)
 import Shoal.Workspace (workspaceIdentity)
 import Project.Types
@@ -33,12 +34,12 @@ data WorkObservation = WorkObservation
 
 observeWork
   :: (Member AgentInspection effects, Member Replies effects)
-  => Task -> (Forked Delivery, Progress WorkProgress) -> Eff effects WorkObservation
+  => Task -> (Response Delivery, Progress WorkProgress) -> Eff effects WorkObservation
 observeWork task (worker, progress) = do
   current <- snapshot
-  result <- pollResponse (forkedResponse worker)
+  result <- pollResponse worker
   observation <- pollProgress progress
-  let owner = agentIdentity (forkedActor worker)
+  let owner = agentIdentity (responseActor worker)
   let scope = creationTree owner current
   pure $ WorkObservation task workspaceIdentity owner
     (any (\actor -> (rosterActorId actor, rosterActorIncarnation actor) == owner) (snapshotActors scope))
@@ -54,7 +55,7 @@ candidateSummary (Produced candidate) = candidateRef candidate
 reviewSummary :: Outcome ReviewDecision -> Text
 reviewSummary (Blocked reason evidence) = blockedSummary reason evidence
 reviewSummary (Produced (Repair candidate findings)) =
-  "repair " <> candidateCommit candidate <> ": " <> Text.intercalate "; " findings
+  "repair " <> renderGitOid (candidateCommit candidate) <> ": " <> Text.intercalate "; " findings
 reviewSummary (Produced (Accepted accepted)) =
   "accepted " <> candidateRef (reviewedCandidate accepted)
     <> "; review checks " <> shown (length (reviewChecks accepted))
@@ -62,11 +63,11 @@ reviewSummary (Produced (Accepted accepted)) =
 deliverySummary :: Delivery -> Text
 deliverySummary (Blocked reason evidence) = blockedSummary reason evidence
 deliverySummary (Produced (Delivered accepted head checks)) =
-  head <> "; reviewed " <> candidateRef (reviewedCandidate accepted)
+  renderGitOid head <> "; reviewed " <> candidateRef (reviewedCandidate accepted)
     <> "; integration checks " <> shown (length checks)
 
 candidateRef :: Candidate -> Text
-candidateRef candidate = candidateCommit candidate
+candidateRef candidate = renderGitOid (candidateCommit candidate)
   <> "; checks " <> shown (length (checkedCommands candidate))
   <> (if null (remainingGates candidate) then ""
       else "; gates " <> Text.intercalate "; " (remainingGates candidate))
@@ -76,7 +77,7 @@ blockedSummary reason evidence = "blocked " <> reason <> "; " <> Text.intercalat
 
 workSummary :: WorkObservation -> Text
 workSummary observed = Text.unlines
-  [ "Plan: " <> planPath (observedAssignment observed) <> "; source: " <> taskSource (observedAssignment observed)
+  [ "Plan: " <> planPath (observedAssignment observed) <> "; source: " <> renderGitOid (taskSource (observedAssignment observed))
   , "Definitions: " <> observedDefinition observed
   , "Owner: " <> shown (observedOwner observed) <> "; visible: " <> shown (observedOwnerVisible observed)
   , "Outcome: " <> case observedResult observed of
@@ -96,11 +97,11 @@ workSummary observed = Text.unlines
 
 -- Small views for the next decision. Keep original values for full evidence.
 attentionSummary :: Attention -> [(Text, Text, Text)]
-attentionSummary = map (\q -> (questionKey q, questionSource (questionDetails q), questionFinding (questionDetails q)))
+attentionSummary = map (\q -> (questionKey q, renderGitOid (questionSource (questionDetails q)), questionFinding (questionDetails q)))
 
 progressSummary :: WorkProgress -> ([(Text, [Text])], [(Text, Text, Text)])
 progressSummary progress =
-  ([(candidateCommit candidate, remainingGates candidate) | candidate <- workEvidence progress]
+  ([(renderGitOid (candidateCommit candidate), remainingGates candidate) | candidate <- workEvidence progress]
   , attentionSummary (workQuestions progress))
 
 -- Render the existing collector without copying its state or consuming notices.
@@ -115,7 +116,7 @@ workSnapshotSummary render state = Text.unlines (map sourceLine (collectedWork s
             name == sourceName source, candidate `elem` addedEvidence delta]
         | candidate <- outstandingEvidence state source]
       <> "; questions " <> Text.intercalate ", "
-        [questionKey q <> "@" <> questionSource (questionDetails q)
+        [questionKey q <> "@" <> renderGitOid (questionSource (questionDetails q))
         | q <- workQuestions (sourceProgress source)]
       <> "; result " <> case sourceResult source of
         Nothing -> "pending"
@@ -149,7 +150,7 @@ actorSummary current =
 
 -- The human's question selects a useful view, not a permanent monitoring actor.
 data RsiInput = RsiInput
-  { rsiSource :: Text
+  { rsiSource :: GitOid
   , rsiQuestion :: Text
   , rsiWork :: [WorkObservation]
   , rsiBefore :: SwarmSnapshot
@@ -160,12 +161,12 @@ data RsiInput = RsiInput
 rsiContext :: RsiInput -> Text
 rsiContext input = Text.unlines $
   [ "Question: " <> rsiQuestion input
-  , "Source: " <> rsiSource input
+  , "Source: " <> renderGitOid (rsiSource input)
   , "Current definitions: " <> workspaceIdentity
   , "Usage interval (newly visible history is separate): " <> shown (usageDelta (rsiBefore input) (rsiAfter input))
   ] ++ map workSummary (rsiWork input) ++ rsiEvidence input
 
-rsiBranch :: BranchLabel -> WorktreeSeed -> RsiInput -> Branch CodingEffects RsiInput (Outcome Candidate)
+rsiBranch :: Label -> WorktreeSeed -> RsiInput -> Branch CodingEffects RsiInput (Outcome Candidate)
 rsiBranch label seed input = withInstructions (projectPrompt "rsi") $
-  withContext (selected rsiContext) $ withModel "gpt-6-astra" $ withEffort Medium $
-  coding label seed input
+  withContext (selected rsiContext) $ withModel "planner" $ withEffort Medium $
+  coding seed (assignment label input)

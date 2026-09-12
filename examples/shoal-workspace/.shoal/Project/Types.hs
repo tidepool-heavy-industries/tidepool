@@ -1,13 +1,14 @@
 module Project.Types where
 
 import Data.Text (Text)
-import Tidepool.Actors.Shoal (AgentRef, BranchLabel, ForkGroupPath, ForkEffort, WatchLabel)
+import Tidepool.Actors.Shoal (AgentRef, Label, ForkGroupPath, ForkEffort, GitOid, Model, WatchLabel)
+import Tidepool.Worktree (renderGitOid)
 
 -- A task is the understanding handed to a fresh context, not a workflow stage.
 data Task = Task
   { taskGroup :: ForkGroupPath
   , planPath :: Text
-  , taskSource :: Text
+  , taskSource :: GitOid
   , obligation :: Text
   , rationale :: Text
   , ownedPaths :: [Text]
@@ -19,13 +20,13 @@ data Task = Task
 -- This is evidence-bearing task data; the record grants no runtime authority.
 data AcceptedDecision = AcceptedDecision
   { decisionQuestion :: Question
-  , decisionSource :: Text
+  , decisionSource :: GitOid
   , decisionSummary :: Text
   , decisionEvidence :: [Text]
   } deriving (Show, Eq)
 
 data Candidate = Candidate
-  { candidateCommit :: Text
+  { candidateCommit :: GitOid
   , checkedCommands :: [Text]
   , remainingGates :: [Text]
   } deriving (Show, Eq)
@@ -63,19 +64,26 @@ data RepairTask = RepairTask
 data Outcome value = Produced value | Blocked Text [Text]
   deriving (Show, Eq)
 
-data CheckedDelivery = Delivered ReviewedCandidate Text [Text]
+data CheckedDelivery = Delivered ReviewedCandidate GitOid [Text]
   deriving (Show, Eq)
 
 type Delivery = Outcome CheckedDelivery
 
 data DesignQuestion = DesignQuestion
   { questionPlan :: Text
-  , questionSource :: Text
+  , questionSource :: GitOid
   , questionFinding :: Text
   , questionEvidence :: [Text]
   , questionAlternatives :: [Text]
   , questionUnblocks :: [Text]
-  } deriving (Show, Eq, Ord)
+  } deriving (Show, Eq)
+
+instance Ord DesignQuestion where
+  compare left right = compare
+    (questionPlan left, renderGitOid (questionSource left), questionFinding left,
+      questionEvidence left, questionAlternatives left, questionUnblocks left)
+    (questionPlan right, renderGitOid (questionSource right), questionFinding right,
+      questionEvidence right, questionAlternatives right, questionUnblocks right)
 
 data DesignAnswer
   = Decision Text [Text]
@@ -84,8 +92,8 @@ data DesignAnswer
   deriving (Show, Eq)
 
 data PlanAmendment = PlanAmendment
-  { amendmentBase :: Text
-  , amendmentCommit :: Text
+  { amendmentBase :: GitOid
+  , amendmentCommit :: GitOid
   , amendmentPaths :: [Text]
   , amendmentReason :: Text
   , amendmentObligations :: [Text]
@@ -105,9 +113,9 @@ data Incorporation
 data DesignSlot = DesignSlot
   { specialistPlan :: Text
   , specialistGroup :: ForkGroupPath
-  , specialistLabel :: BranchLabel
+  , specialistLabel :: Label
   , specialistWatch :: WatchLabel
-  , specialistModel :: Text
+  , specialistModel :: Model
   , specialistEffort :: ForkEffort
   }
 

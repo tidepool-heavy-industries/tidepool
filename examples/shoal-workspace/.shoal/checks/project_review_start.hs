@@ -1,4 +1,4 @@
-initialState <- pollResponse (forkedResponse worker)
+initialState <- pollResponse worker
 let ResponseReady initialAnswer = initialState
 let Produced initialCandidate = responseValue initialAnswer
-(reviewer, reviewQuestions) <- reviewCandidate task (RetainedImplementer (forkedActor worker)) initialCandidate
+(reviewer, reviewQuestions) <- reviewCandidate task (RetainedImplementer (responseActor worker)) initialCandidate

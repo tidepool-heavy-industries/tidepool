@@ -8,6 +8,7 @@ import Control.Monad.Freer (Eff)
 import Data.Text (Text)
 import Prelude
 import Tidepool.Actors.Shoal
+import Tidepool.Actors.Observe (actorContext)
 
 startCoding :: WorktreeHandle -> Eff ActorEffects AgentRef
 startCoding = startAgent . codingAgent
@@ -17,35 +18,35 @@ startReview = startAgent . readonlyAgent
 
 submit
   :: AgentRef
-  -> RequestLabel
+  -> Label
   -> input
   -> Eff ActorEffects (Response result)
-submit = request
+submit actor name value = request actor (assignment name value)
 
 submitProgress
   :: AgentRef
-  -> RequestOptions input
+  -> Assignment input
   -> Eff ActorEffects (Response result, Progress progress)
 submitProgress = requestWithProgress
 
 submitWithOnlyReplies
   :: AgentRef
-  -> RequestLabel
+  -> Label
   -> input
   -> Eff '[Replies] (Response result)
-submitWithOnlyReplies = request
+submitWithOnlyReplies actor name value = request actor (assignment name value)
 
 submitConfigured
   :: AgentRef
-  -> RequestLabel
-  -> RequestDeadline
+  -> Label
+  -> Duration
   -> input
   -> Eff ActorEffects (Response result)
-submitConfigured actor label deadline input =
-  requestWith actor $
-    withRequestDeadline deadline $
-      withRequestGuidance "inspect the typed input before acting" $
-        requestOptions label input
+submitConfigured actor name timeout value =
+  requestWith actor ((assignment name value)
+    { guidance = Just "inspect the typed input before acting"
+    , deadline = Just timeout
+    })
 
 compose
   :: Response left
@@ -72,15 +73,15 @@ inspectAll = listAgents
 inspectSelf :: Eff ActorEffects ActorContextInfo
 inspectSelf = actorContext
 
-inspectFork
-  :: Forked result
-  -> Eff ActorEffects (ForkObservation result)
-inspectFork = observeFork
+inspectResponseActor :: Response result -> Eff ActorEffects AgentObservation
+inspectResponseActor = observeAgent . responseActor
 
 inspectForkGroup
-  :: Forked result
+  :: Response result
   -> Eff '[AgentInspection] (Maybe ForkGroupSnapshot)
-inspectForkGroup = observeForkGroup . forkGroupHandle
+inspectForkGroup response = case forkGroupHandle response of
+  Nothing -> pure Nothing
+  Just group -> observeForkGroup group
 
 cacheFacts
   :: AgentRosterEntry
@@ -118,8 +119,10 @@ retainedAgentDependencies outcome =
     AgentForgetRunning -> ([], [])
     AgentForgetUnavailable -> ([], [])
 
-inspectCleanup :: Forked result -> Eff '[AgentInspection] CleanupPlan
-inspectCleanup = planCleanup . forkGroupHandle
+inspectCleanup :: Response result -> Eff '[AgentInspection] (Maybe CleanupPlan)
+inspectCleanup response = case forkGroupHandle response of
+  Nothing -> pure Nothing
+  Just group -> Just <$> planCleanup group
 
 runCleanup :: CleanupPlan -> Eff '[AgentControl] CleanupReceipt
 runCleanup = executeCleanup
@@ -136,92 +139,90 @@ safeHead
 safeHead = worktreeHead
 
 launchFacts
-  :: Forked result
+  :: Response result
   -> (Int, Int, ForkRole, ForkWorkspaceAccess, WorktreeReceipt)
-launchFacts worker =
-  let receipt = forkedLaunch worker
-  in ( launchedActorId receipt
-     , launchedActorIncarnation receipt
-     , launchedRole receipt
-     , launchedWorkspaceAccess receipt
-     , launchedWorktree receipt
-     )
+launchFacts worker = case responseLaunch worker of
+  Nothing -> error "response was not created by child"
+  Just receipt ->
+    ( launchedActorId receipt
+    , launchedActorIncarnation receipt
+    , launchedRole receipt
+    , launchedWorkspaceAccess receipt
+    , launchedWorktree receipt
+    )
 
 heterogeneousUnfold
   :: ForkGroupPath
-  -> BranchLabel
-  -> BranchLabel
-  -> Eff ActorEffects (Forked Text, Forked Int)
+  -> Label
+  -> Label
+  -> Eff ActorEffects (Response Text, Response Int)
 heterogeneousUnfold group textLeaf intLeaf =
   unfold group $
     (,)
-      <$> child (withEffort High (researching @Text textLeaf projectHead ()))
-      <*> child (withEffort Low (coding @Int intLeaf projectHead ()))
+      <$> child (withEffort High (researching @Text projectHead (assignment textLeaf ())))
+      <*> child (withEffort Low (coding @Int projectHead (assignment intLeaf ())))
 
 progressiveUnfold
   :: ForkGroupPath
-  -> BranchLabel
-  -> Eff ActorEffects (Forked Text, Progress Int)
+  -> Label
+  -> Eff ActorEffects (Response Text, Progress Int)
 progressiveUnfold group leaf =
   unfold group $
-    childWithProgress @Int (researching @Text leaf projectHead ())
+    childWithProgress @Int (researching @Text projectHead (assignment leaf ()))
 
 homogeneousUnfold
   :: ForkGroupPath
-  -> [BranchLabel]
-  -> Eff ActorEffects [Forked Text]
+  -> [Label]
+  -> Eff ActorEffects [Response Text]
 homogeneousUnfold group leaves =
   unfold group $
     traverse
-      (\leaf -> child (researching @Text leaf projectHead ()))
+      (\leaf -> child (researching @Text projectHead (assignment leaf ())))
       leaves
 
 recoverableUnfold
   :: ForkGroupPath
-  -> BranchLabel
-  -> Eff ActorEffects (Either UnfoldError (Forked Text))
+  -> Label
+  -> Eff ActorEffects (Either UnfoldError (Response Text))
 recoverableUnfold group leaf =
   attemptUnfold group $
-    child (researching @Text leaf projectHead ())
+    child (researching @Text projectHead (assignment leaf ()))
 
 configuredBranch
-  :: RequestDeadline
-  -> BranchLabel
+  :: Duration
+  -> Label
   -> Branch ResearchEffects () Text
-configuredBranch deadline leaf =
-  withEffort Medium $ withBranchDeadline deadline $
-    withBranchGuidance "inspect only" $
-      researching @Text leaf projectHead ()
+configuredBranch timeout leaf =
+  withEffort Medium $
+    researching @Text projectHead ((assignment leaf ())
+      { guidance = Just "inspect only", deadline = Just timeout })
 
-tenMinuteDeadline :: RequestDeadline
-tenMinuteDeadline = after (minutes 10)
+tenMinuteDeadline :: Duration
+tenMinuteDeadline = minutes 10
 
-tenMinuteDeadlineInSeconds :: RequestDeadline
-tenMinuteDeadlineInSeconds = after (seconds 600)
+tenMinuteDeadlineInSeconds :: Duration
+tenMinuteDeadlineInSeconds = seconds 600
 
 subSecondRequest
   :: AgentRef
-  -> RequestLabel
+  -> Label
   -> Eff ActorEffects (Response Text)
 subSecondRequest actor label =
-  requestWith actor $
-    withRequestDeadline (after (milliseconds 25)) $
-      requestOptions label ()
+  requestWith actor ((assignment label ()) { deadline = Just (milliseconds 25) })
 
 type TinyResearchEffects = '[Replies, ActorContext]
 
 narrowResearch
   :: ForkGroupPath
-  -> BranchLabel
-  -> Eff ActorEffects (Forked Text)
+  -> Label
+  -> Eff ActorEffects (Response Text)
 narrowResearch group leaf =
   unfold group $
     child $
       narrowed
         (knownEffects @TinyResearchEffects)
         (inspectionPolicy projectHead)
-        leaf
-        ()
+        (assignment leaf ())
 
 usageTotals :: ActorContextInfo -> Maybe (ProviderUsageScope, ProviderUsageCompleteness, Int, Int, Int)
 usageTotals context = fmap project (contextUsageSummary context)

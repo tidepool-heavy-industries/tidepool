@@ -10,8 +10,8 @@ third3 (_, _, value) = value
 -- TIDEPOOL-ITEM --
 sharedDelta <- pure (1 :: Int)
 -- TIDEPOOL-ITEM --
-workers <- unfold (batch "reply-watch" "roundtrip") ((,,) <$> child (withBranchDeadline (after (minutes 5)) (researching @ReplyReport "worker" projectHead (41 :: Int))) <*> child (researching @EchoReport "witness" projectHead ("cache" :: Text)) <*> child (coding @ScaffoldReport "scaffold" projectHead ("recursive" :: Text)))
+workers <- unfold (batch "reply-watch" "roundtrip") ((,,) <$> child (researching @ReplyReport projectHead ((assignment "worker" (41 :: Int)) { deadline = Just (minutes 5) })) <*> child (researching @EchoReport projectHead (assignment "witness" ("cache" :: Text))) <*> child (coding @ScaffoldReport projectHead (assignment "scaffold" ("recursive" :: Text))))
 -- TIDEPOOL-ITEM --
-initially <- (,) <$> pollResponse (forkedResponse (first3 workers)) <*> pollResponse (forkedResponse (second3 workers))
+initially <- (,) <$> pollResponse (first3 workers) <*> pollResponse (second3 workers)
 -- TIDEPOOL-ITEM --
-readiness <- watch "both-ready" ((,) <$> awaitResponse (forkedResponse (first3 workers)) <*> awaitResponse (forkedResponse (second3 workers)))
+readiness <- watch "both-ready" ((,) <$> awaitResponse (first3 workers) <*> awaitResponse (second3 workers))

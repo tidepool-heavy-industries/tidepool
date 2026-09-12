@@ -196,6 +196,23 @@ pub struct WatchNotification {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SettlementTransition {
+    Ready,
+    Unavailable(ResponseFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementNotification {
+    pub owner: ActorRef,
+    pub request: RequestId,
+    pub label: String,
+    pub transition: SettlementTransition,
+    pub occurred_at_unix_ms: u64,
+    pub sequence: ActorEventSequence,
+    pub watermark: ActorEventSequence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestCancellationNotification {
     pub target: ActorRef,
     pub request: RequestId,
@@ -238,6 +255,8 @@ struct RequestRecord {
     owner_state: OwnerState,
     deadline: Option<ActiveRequestDeadline>,
     progress: Option<ProgressSnapshot>,
+    notify_owner: bool,
+    settlement_notified: bool,
 }
 
 /// Snapshots share custody, not a consumption cursor. Replacing the latest
@@ -342,6 +361,7 @@ struct RequestStateTable {
     cleaning: std::collections::HashSet<ActorRef>,
     requests: HashMap<RequestId, RequestRecord>,
     watches: HashMap<WatchId, WatchRecord>,
+    settlement_notifications: Vec<SettlementNotification>,
 }
 
 /// One process-local owner for request identity, terminal state, and watch
@@ -747,11 +767,22 @@ impl RequestRegistry {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_labeled(
         &self,
         owner: ActorRef,
         target: ActorRef,
         label: String,
+    ) -> RequestId {
+        self.reserve_labeled_with_reporting(owner, target, label, true)
+    }
+
+    pub(crate) fn reserve_labeled_with_reporting(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+        notify_owner: bool,
     ) -> RequestId {
         let mut state = self.state.lock();
         state.next_request = state.next_request.saturating_add(1);
@@ -768,9 +799,15 @@ impl RequestRegistry {
                 owner_state: OwnerState::Observing,
                 deadline: None,
                 progress: None,
+                notify_owner,
+                settlement_notified: false,
             },
         );
         id
+    }
+
+    pub(crate) fn take_settlement_notifications(&self) -> Vec<SettlementNotification> {
+        std::mem::take(&mut self.state.lock().settlement_notifications)
     }
 
     /// Remove request identities which never crossed the admission commit.
@@ -1576,12 +1613,38 @@ fn identity_error(expected: ActorRef, actual: ActorRef) -> ReplyError {
 }
 
 fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
-    for record in state.requests.values_mut() {
+    let mut settlements = Vec::new();
+    for (request, record) in &mut state.requests {
         record.publish_source_closure();
         if record.owner_state != OwnerState::Observing || record.target_state == TargetState::Closed
         {
             record.progress = None;
         }
+        if record.notify_owner && !record.settlement_notified {
+            let transition = match &record.owner_state {
+                OwnerState::Ready => Some(SettlementTransition::Ready),
+                OwnerState::Unavailable(failure) => {
+                    Some(SettlementTransition::Unavailable(failure.clone()))
+                }
+                OwnerState::Observing | OwnerState::Abandoned => None,
+            };
+            if let Some(transition) = transition {
+                record.settlement_notified = true;
+                settlements.push((record.owner, *request, record.label.clone(), transition));
+            }
+        }
+    }
+    for (owner, request, label, transition) in settlements {
+        let sequence = next_event_sequence(state, owner);
+        state.settlement_notifications.push(SettlementNotification {
+            owner,
+            request,
+            label,
+            transition,
+            occurred_at_unix_ms: unix_time_ms(),
+            sequence,
+            watermark: sequence,
+        });
     }
     let mut notifications = Vec::new();
     for (watch_id, watch) in &mut state.watches {
@@ -1739,6 +1802,46 @@ mod tests {
         registry.present(target, request).unwrap();
         assert_eq!(registry.received_counts(target), (1, 0));
         assert_eq!(registry.received_counts(owner), (0, 0));
+    }
+
+    #[test]
+    fn settlement_reporting_is_terminal_exact_and_suppressible() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let ready_target = actor(2);
+        let silent_target = actor(3);
+        let failed_target = actor(4);
+
+        let ready =
+            registry.reserve_labeled_with_reporting(owner, ready_target, "ready".into(), true);
+        registry.mark_queued(owner, ready_target, ready).unwrap();
+        registry.present(ready_target, ready).unwrap();
+        registry.begin_reply(ready_target, ready).unwrap();
+        registry.finish_reply(ready);
+
+        let silent =
+            registry.reserve_labeled_with_reporting(owner, silent_target, "silent".into(), false);
+        registry.mark_queued(owner, silent_target, silent).unwrap();
+        registry.present(silent_target, silent).unwrap();
+        registry.begin_reply(silent_target, silent).unwrap();
+        registry.finish_reply(silent);
+
+        let failed =
+            registry.reserve_labeled_with_reporting(owner, failed_target, "failed".into(), true);
+        registry.mark_target_unavailable(owner, failed);
+
+        let notices = registry.take_settlement_notifications();
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].request, ready);
+        assert_eq!(notices[0].label, "ready");
+        assert_eq!(notices[0].transition, SettlementTransition::Ready);
+        assert_eq!(notices[1].request, failed);
+        assert_eq!(notices[1].label, "failed");
+        assert_eq!(
+            notices[1].transition,
+            SettlementTransition::Unavailable(ResponseFailure::TargetUnavailable)
+        );
+        assert!(registry.take_settlement_notifications().is_empty());
     }
 
     #[test]

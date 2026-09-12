@@ -26,7 +26,7 @@ routing = do
   script owner "progress-route-consumer"
   consumer <- activation
   script (checkActor consumer) "layout-reply"
-  void $ turn owner "layoutReceipt <- pollResponse (forkedResponse consumer)"
+  void $ turn owner "layoutReceipt <- pollResponse consumer"
   layoutResult <- turn owner "(== (Just \"ready; layout preserved\")) (case layoutReceipt of { ResponseReady result -> Just (responseValue result); _ -> Nothing })"
   check "an indented finding list reaches the actual reply" (output layoutResult == "True")
   script owner "progress-route"
@@ -41,7 +41,7 @@ routing = do
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,second])"
   second <- turn owner "(== ([[\"question-a\",\"question-b\"]])) . map (map questionKey . workQuestions . sourceProgress) . collectedWork <$> readWork forwarding"
   check "later publications arrive without rearming" (output second == "True")
-  pending <- turn (checkActor producer) "pollReply sessionReply"
+  pending <- turn (checkActor producer) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
   check "publishing progress preserves the original reply" (output pending == "ReplyOpen")
   void $ turn (checkActor producer) "respond (\"finished\" :: Text)"
   closed <- turn owner "(== ([WorkClosed])) . map sourceStatus . collectedWork <$> readWork forwarding"
@@ -58,14 +58,14 @@ twoLaneHandoff :: Member RecipeCheck effects => Eff effects ()
 twoLaneHandoff = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let sourceHead = " <> literal baseline <> " :: Text")
+  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "handoff-setup"
   left <- activation
   void $ turn owner "(right, rightProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery (coding rightLabel projectHead task))"
   right <- activation
   script owner "handoff-router"
   partial <- checkpoint (checkActor left) "left.txt" "partial\n" "left partial checkpoint"
-  void $ turn (checkActor left) ("reportProgress (WorkProgress [Candidate " <> literal partial <> " [] [\"final source pending\"]] [])")
+  void $ turn (checkActor left) ("reportProgress (WorkProgress [Candidate " <> gitOidLiteral partial <> " [] [\"final source pending\"]] [])")
   initial <- turn owner "view <- readWork handoff\ninspectFull (collectedWork view)"
   check "partial checkpoint is retained before final publication" (partial `Text.isInfixOf` output initial)
   before <- turn owner "length <$> R.call (handoffSnapshot (R.client parent)) ()"
@@ -111,14 +111,14 @@ reviewCycle :: Member RecipeCheck effects => Bool -> Bool -> Eff effects ()
 reviewCycle failAfterAdmission automaticRepair = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let sourceHead = " <> literal baseline <> " :: Text")
+  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "review-flow-setup"
   reviewer <- activation
   void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
   void $ turn owner "(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom workerLabel projectHead task))"
   worker <- activation
-  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nowner <- actorContext\nlet repairPolicy = OwnerRepairs\nlet repairLabel = \"repair-produced-candidate\" :: RequestLabel"
-  if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (forkedActor worker)" else pure ()
+  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nlet owner = me\nlet repairPolicy = OwnerRepairs\nlet repairLabel = \"repair-produced-candidate\" :: Label"
+  if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (responseActor worker)" else pure ()
   if failAfterAdmission then do
     source <- readFile owner ".shoal/checks/review-continuation.hs"
     let withoutStart = fst (Text.breakOn "reviewBox <-" source)
@@ -128,7 +128,7 @@ reviewCycle failAfterAdmission automaticRepair = do
     void $ turn owner (withoutStart <> "\n" <> faulty <> "\nreviewBox <- R.start failingDefinition")
   else script owner "review-continuation"
   candidate <- checkpoint (checkActor worker) "feature.txt" "candidate feature\n" "candidate for automatic review"
-  void $ turn (checkActor worker) ("respond (Produced (Candidate " <> literal candidate <> " [\"read feature\"] [\"integration pending\"]))")
+  void $ turn (checkActor worker) ("respond (Produced (Candidate " <> gitOidLiteral candidate <> " [\"read feature\"] [\"integration pending\"]))")
   reviewing <- activation
   check "settlement submits to the available retained reviewer without a model relay" (checkActor reviewing == checkActor reviewer)
   if failAfterAdmission then do
@@ -148,7 +148,7 @@ reviewCycle failAfterAdmission automaticRepair = do
     repairInput <- turn (checkActor repairing) "inspectFull (repairInput sessionInput, repairFindings sessionInput)"
     check "the repair carries the exact candidate and finding" (candidate `Text.isInfixOf` output repairInput && "repair the feature" `Text.isInfixOf` output repairInput)
     repaired <- checkpoint (checkActor repairing) "feature.txt" "repaired feature\n" "repair reviewed candidate"
-    void $ turn (checkActor repairing) ("respond (Produced (Candidate " <> literal repaired <> " [\"read repaired feature\"] [\"integration pending\"]))")
+    void $ turn (checkActor repairing) ("respond (Produced (Candidate " <> gitOidLiteral repaired <> " [\"read repaired feature\"] [\"integration pending\"]))")
     repeated <- activation
     check "the repaired candidate returns to the same reviewer automatically" (checkActor repeated == checkActor reviewer)
     void $ git (checkActor repeated) ["merge", "--ff-only", repaired]
@@ -183,7 +183,7 @@ reviewCycle failAfterAdmission automaticRepair = do
     mismatched <- activation
     script owner "review-continuation"
     actual <- checkpoint (checkActor mismatched) "different.txt" "actual submitted source\n" "source evidence differs from claim"
-    void $ turn (checkActor mismatched) ("respond (Produced (Candidate " <> literal baseline <> " [] []))")
+    void $ turn (checkActor mismatched) ("respond (Produced (Candidate " <> gitOidLiteral baseline <> " [] []))")
     _ <- awaitOutput owner "flow <- R.call (reviewView (R.client reviewBox)) ()\nnot (null (sourceProblems flow))" (Text.isSuffixOf "True")
     let expectedProblem = "candidate " <> baseline <> "; submitted " <> actual
     rejected <- turn owner
@@ -226,8 +226,8 @@ candidateHistory = do
   script owner "progress-route-producer"
   producer <- activation
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner "collection <- followWork [(\"producer\", forkedResponse producer, updates)] keepWork"
-  let candidates = "let firstCandidate = Candidate " <> literal baseline <> " [\"first check\"] []\nlet secondCandidate = firstCandidate { checkedCommands = [\"different check\"] }"
+  void $ turn owner "collection <- followWork [(\"producer\", producer, updates)] keepWork"
+  let candidates = "let firstCandidate = Candidate " <> gitOidLiteral baseline <> " [\"first check\"] []\nlet secondCandidate = firstCandidate { checkedCommands = [\"different check\"] }"
   void $ turn (checkActor producer) (candidates <> "\nreportProgress (WorkProgress [firstCandidate] [])\nreportProgress (WorkProgress [secondCandidate] [])")
   before <- turn owner "view <- readWork collection\n(== ((2,2))) (length (workEvidence (sourceProgress (head (collectedWork view)))), length (workHistory view))"
   check "same-commit changed evidence remains distinct and ordered" (lastOutput before == "True")
@@ -248,8 +248,8 @@ notificationRetention = do
   producer <- activation
   script owner "progress-route-consumer"
   _ <- activation
-  void $ turn owner "stopAgent (forkedActor consumer)"
-  void $ turn owner "import qualified Tidepool.Actor as Actor\ncollection <- followWork [(\"producer\", forkedResponse producer, updates)] (notifyWork (forkedActor consumer) (workMessage id))"
+  void $ turn owner "stopAgent (responseActor consumer)"
+  void $ turn owner "import qualified Tidepool.Actor as Actor\ncollection <- followWork [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id))"
   script (checkActor producer) "progress-route-questions"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first])"
   retained <- turn owner "view <- readWork collection\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
@@ -261,14 +261,14 @@ notificationRetention = do
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,first])"
   once <- turn owner "inspectFull . length . workNotices <$> readWork collection"
   check "repeated questions do not retry failed notification" (output once == "1")
-  void $ turn owner "collection <- R.replace collection (workDefinition [(\"producer\", forkedResponse producer, updates)] (notifyWork (forkedActor consumer) (workMessage id)))"
+  void $ turn owner "collection <- R.replace collection (workDefinition [(\"producer\", producer, updates)] (notifyWork (responseActor consumer) (workMessage id)))"
   preserved <- turn owner "(\\view -> (== ((1,[[\"question-a\"]]))) (length (workNotices view), map (map questionKey . workQuestions . sourceProgress) (collectedWork view))) <$> readWork collection"
   check "replacement preserves failed notification evidence without replay" (output preserved == "True")
   -- Exercise uncertainty as typed sink data. No external send is claimed here.
   script owner "uncertain-route"
   uncertain <- turn owner "view <- readWork uncertain\ninspectFull (collectedWork view, [failure | Notice _ (Left failure) <- workNotices view])"
   check "uncertain admission preserves the observed question" ("question-a" `Text.isInfixOf` output uncertain && "NotificationAdmissionUnconfirmed" `Text.isInfixOf` output uncertain)
-  void $ turn owner "uncertain <- R.replace uncertain (workDefinition [(\"producer\", forkedResponse producer, updates)] keepWork)"
+  void $ turn owner "uncertain <- R.replace uncertain (workDefinition [(\"producer\", producer, updates)] keepWork)"
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [])"
   resolved <- turn owner "(\\view -> (== (([[]],2))) (map (workQuestions . sourceProgress) (collectedWork view), length (workNotices view))) <$> readWork collection"
   check "resolving the final question produces its own delta" (output resolved == "True")
@@ -294,7 +294,7 @@ independentSources = do
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [first,second])"
   first <- turn owner "(\\view -> (== ([(\"left\",[\"same-key\",\"second\"],WorkOpen),(\"right\",[],WorkOpen)])) [(sourceName s, map questionKey (workQuestions (sourceProgress s)), sourceStatus s) | s <- collectedWork view]) <$> readWork collection"
   check "left progresses while right is silent" (output first == "True")
-  void $ turn owner "collection <- R.replace collection (workDefinition [(\"left\", forkedResponse left, leftProgress), (\"right\", forkedResponse right, rightProgress)] countChanges)"
+  void $ turn owner "collection <- R.replace collection (workDefinition [(\"left\", left, leftProgress), (\"right\", right, rightProgress)] countChanges)"
   void $ turn (checkActor left) "reportProgress (WorkProgress [] [second,first,first])"
   void $ turn owner "readWork collection"
   count <- turn owner "Actor.call wakes (RoutingCount 0 id)"
@@ -324,7 +324,7 @@ forwardCandidate disposition = do
         LoseProducer -> "route-unavailable"
   void $ turn owner ("let routeCampaign = " <> literal campaign <> " :: Text")
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let sourceHead = " <> literal baseline <> " :: Text")
+  void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "route-reply-setup"
   lead <- activation
   shared <- checkpoint (checkActor lead) "contract.txt" "shared contract\n" "establish shared contract"
@@ -338,19 +338,19 @@ forwardCandidate disposition = do
   candidate <- checkpoint (checkActor worker) "feature.txt" "routed candidate\n" "prepare candidate"
   source <- readFile (checkActor worker) "feature.txt"
   check "the routed candidate has actual source evidence" (source == "routed candidate\n")
-  if disposition == CancelDestination then void (turn owner "cancelRequest (forkedResponse lead)") else pure ()
-  if disposition == LoseProducer then void (turn (checkActor lead) "stopAgent (forkedActor candidate)")
-  else void $ turn (checkActor worker) ("respond (Candidate " <> literal candidate <> " [\"read exact feature\"] [\"independent review remains\"])")
+  if disposition == CancelDestination then void (turn owner "cancelRequest lead") else pure ()
+  if disposition == LoseProducer then void (turn (checkActor lead) "stopAgent (responseActor candidate)")
+  else void $ turn (checkActor worker) ("respond (Candidate " <> gitOidLiteral candidate <> " [\"read exact feature\"] [\"independent review remains\"])")
   if disposition == CancelDestination then do
     failure <- awaitOutput (checkActor lead) "pollRoute forwarding" (Text.isInfixOf "RouteFailed")
     check "cancellation remains a retained callback failure" ("CancellationRequested" `Text.isInfixOf` failure)
-    obligation <- turn (checkActor lead) "pollReply destination"
+    obligation <- turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
     check "a cancelled destination cannot silently receive success" ("ReplyCancellationRequested" `Text.isInfixOf` output obligation)
   else if disposition == LoseProducer then do
     failure <- awaitOutput (checkActor lead) "pollRoute forwarding" (Text.isInfixOf "RouteFailed")
     check "lost execution remains explicit in the retained route" ("RouteFailed" `Text.isInfixOf` failure)
-    obligation <- turn (checkActor lead) "pollReply destination"
+    obligation <- turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
     check "lost execution does not become a successful candidate" (output obligation == "ReplyOpen")
   else do
-    result <- awaitOutput owner "answer <- pollResponse (forkedResponse lead)\ninspectFull answer" (Text.isInfixOf candidate)
+    result <- awaitOutput owner "answer <- pollResponse lead\ninspectFull answer" (Text.isInfixOf candidate)
     check "routing forwards exact evidence without a lead relay turn" ("independent review remains" `Text.isInfixOf` result)

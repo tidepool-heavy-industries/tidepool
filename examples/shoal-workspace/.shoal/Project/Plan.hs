@@ -8,7 +8,7 @@ module Project.Plan
 
 import Data.Text (Text)
 import Tidepool.Actors.Shoal
-import Tidepool.Effects.Core (GitRef (..))
+import Tidepool.Effects.Core (GitOid)
 import Project.Types
 import Project.Work (projectPrompt, solTaskFrom)
 
@@ -20,8 +20,8 @@ componentName RelationContract = "contract"
 componentName RelationProjection = "projection"
 componentName RelationControls = "controls"
 
-component :: CampaignLabel -> GraphComponent -> GitRef -> Either NameError Task
-component campaign part (GitRef source) = do
+component :: CampaignLabel -> GraphComponent -> GitOid -> Either NameError Task
+component campaign part source = do
   group <- forkGroupLabel (componentName part)
   pure $ Task (batch campaign group)
     (".shoal/plans/graph/" <> componentName part <> "/README.md") source
@@ -45,14 +45,14 @@ component campaign part (GitRef source) = do
 
 -- The lead implements useful work itself and commissions independent review.
 -- withLifetime remains an ordinary caller choice when admitting this branch.
-componentLead :: BranchLabel -> Task -> Branch CodingEffects Task Delivery
+componentLead :: Label -> Task -> Branch CodingEffects Task Delivery
 componentLead label = componentLeadFrom label boundHead
 
-componentLeadFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task Delivery
+componentLeadFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task Delivery
 componentLeadFrom label source task = withEffort Medium $ withInstructions (projectPrompt "lead") $
   solTaskFrom label source task
 
 relationDesign :: CampaignLabel -> DesignSlot
 relationDesign campaign = DesignSlot ".shoal/plans/graph/contract/design.md"
   (batch campaign "relation-design") "forest-semantics" "relation-design-ready"
-  "gpt-6-astra" Medium
+  "planner" Medium

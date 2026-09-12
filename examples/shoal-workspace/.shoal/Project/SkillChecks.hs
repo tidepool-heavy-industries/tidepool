@@ -22,18 +22,18 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet task = Task (batch campaign group) \".shoal/skills/shoal-fork/SKILL.md\" " <> literal baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
+  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet task = Task (batch campaign group) \".shoal/skills/shoal-fork/SKILL.md\" " <> gitOidLiteral baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
   void $ example owner "shoal-fork" 0
   worker <- activation
   check "skill launches a fresh Sol Medium worker" (checkModel worker == Just "gpt-5.6-sol" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)
-  early <- turn owner "cleanup <- releaseGroup (forkGroupHandle worker)\ninspectFull cleanup"
+  early <- turn owner "let Just group = forkGroupHandle worker\ncleanup <- releaseGroup group\ninspectFull cleanup"
   check "scoped release retains the pending worker instead of cancelling its request" ("CleanupBlocked" `Text.isInfixOf` lastOutput early)
   void $ example owner "shoal-define-actors" 0
   joined <- turn owner "(== Just (\"abc123\",4)) <$> R.call (joined endpoints) ()"
   check "record skill joins differently typed inputs" (lastOutput joined == "True")
   initialResults <- example owner "shoal-define-actors" 1
   check "record skill attaches the exact pending request" (lastOutput initialResults == "0")
-  void $ turn (checkActor worker) ("let candidate = Candidate " <> literal baseline <> " [\"example check\"] [\"product acceptance remains\"]")
+  void $ turn (checkActor worker) ("let candidate = Candidate " <> gitOidLiteral baseline <> " [\"example check\"] [\"product acceptance remains\"]")
   void $ example (checkActor worker) "shoal-coordinate" 0
   observed <- example owner "shoal-coordinate" 1
   check "compact snapshot shows candidate and pending result" (baseline `Text.isInfixOf` output observed && "result pending" `Text.isInfixOf` output observed)

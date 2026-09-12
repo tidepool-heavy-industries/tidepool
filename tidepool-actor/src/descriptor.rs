@@ -21,7 +21,7 @@ pub struct ActorDescriptor {
     actor_path: Option<tidepool_repr::ActorPath>,
     fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
-    model: Option<String>,
+    model: Option<crate::Model>,
     instructions: Option<String>,
     fork_budget: Option<(i64, i64)>,
     fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -57,12 +57,17 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
+    pub fn model(&self) -> Option<&crate::Model> {
+        self.model.as_ref()
     }
 
     #[must_use]
-    pub fn with_model(mut self, model: Option<String>) -> Self {
+    pub fn model_name(&self) -> Option<&str> {
+        self.model.as_ref().map(crate::Model::value)
+    }
+
+    #[must_use]
+    pub fn with_model(mut self, model: Option<crate::Model>) -> Self {
         self.model = model;
         self
     }

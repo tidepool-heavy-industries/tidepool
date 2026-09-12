@@ -99,7 +99,7 @@ questions or substitute for the later terminal response.
 
 ```haskell
 owner <- actorContext
-let sources = [("api", forkedResponse api, apiProgress), ("ui", forkedResponse ui, uiProgress)]
+let sources = [("api", api, apiProgress), ("ui", ui, uiProgress)]
 wave <- followWork sources (notifyWork owner (withCheckpoints (workMessage deliverySummary)))
 ```
 

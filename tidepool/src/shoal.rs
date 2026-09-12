@@ -147,6 +147,8 @@ pub(crate) struct ShoalConfig {
     #[serde(default)]
     pub(crate) research: tidepool_actor::ResearchPolicy,
     #[serde(default)]
+    pub(crate) models: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
     haskell: workspace::HaskellConfig,
     #[serde(default)]
     prompts: workspace::PromptConfig,

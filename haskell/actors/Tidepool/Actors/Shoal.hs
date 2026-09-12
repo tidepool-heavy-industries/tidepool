@@ -29,13 +29,11 @@ module Tidepool.Actors.Shoal
   , ActorContextRole (..)
   , ActorNativeTools (..)
   , ActorWorkspaceAccess (..)
-  , actorContext
   , AgentLaunch
   , AgentInspection
   , AgentControl
   , Notifications
   , Actor
-  , MessageRecipient
   , sendMessage
   , pollNotification
   , NotificationReceipt
@@ -52,12 +50,16 @@ module Tidepool.Actors.Shoal
   , Subset
   , CampaignLabel
   , ForkGroupLabel
-  , BranchLabel
+  , Label
+  , NameError (..)
+  , Assignment (..)
+  , SettlementReporting (..)
+  , assignment
+  , labelFromText
   , ActorPath
   , GitBranchPrefix
   , actorGitBranchPrefix
   , ForkGroupPath
-  , NameError (..)
   , WorktreeSeed
   , projectHead
   , boundHead
@@ -66,16 +68,14 @@ module Tidepool.Actors.Shoal
   , snapshotDirty
   , campaignLabel
   , forkGroupLabel
-  , branchLabel
   , batch
   , subgroup
   , Branch
-  , withBranchGuidance
   , withInstructions
   , withLifetime
   , WorkerLifetime (..)
-  , withBranchDeadline
   , ForkEffort (..)
+  , Model (..)
   , withEffort
   , withModel
   , WorkerContext
@@ -104,16 +104,10 @@ module Tidepool.Actors.Shoal
   , Unfold
   , child
   , childWithProgress
-  , Forked
-  , forkedActor
-  , forkedResponse
-  , forkedLaunch
   , BranchReceipt (..)
   , ForkGroupHandle
   , forkGroupHandle
   , forkGroupGitBranchPrefix
-  , ForkObservation (..)
-  , observeFork
   , ForkGroupSnapshot (..)
   , observeForkGroup
   , CleanupPlan (..)
@@ -123,8 +117,8 @@ module Tidepool.Actors.Shoal
   , CleanupStepReceipt (..)
   , planCleanup
   , executeCleanup
-  , awaitFork
-  , awaitSettledFork
+  , responseActor
+  , responseLaunch
   , UnfoldError (..)
   , attemptUnfold
   , unfold
@@ -162,21 +156,14 @@ module Tidepool.Actors.Shoal
   , AgentForgetOutcome (..)
   , forgetAgent
   , Response
-  , Reply
   , codingAgent
   , readonlyAgent
   , startAgent
   , request
-  , RequestOptions
   , Duration
-  , RequestDeadline
   , milliseconds
   , seconds
   , minutes
-  , after
-  , requestOptions
-  , withRequestGuidance
-  , withRequestDeadline
   , requestWith
   , requestWithProgress
   , requestWithProgressInto
@@ -187,9 +174,6 @@ module Tidepool.Actors.Shoal
   , StopOutcome (..)
   , stopAgent
   , RequestId
-  , RequestLabel
-  , RequestLabelError (..)
-  , requestLabel
   , Replies
   , RequestUpdate
   , RequestUpdateState (..)
@@ -205,16 +189,11 @@ module Tidepool.Actors.Shoal
   , CancelRequestOutcome (..)
   , AbandonOutcome (..)
   , ForgetResponseOutcome (..)
-  , ReplyState (..)
   , requestId
-  , attemptReply
-  , reply
   , pollResponse
   , cancelRequest
   , abandonResponse
   , forgetResponse
-  , pollReply
-  , attemptAcknowledgeCancellation
   , acknowledgeCancellation
   , Await
   , Watch
@@ -257,7 +236,7 @@ module Tidepool.Actors.Shoal
   , mkBranchName
   , GitRef
   , InProgressKind (..)
-  , GitOid
+  , GitOid (..)
   , worktreeId
   , worktreeBranch
   , worktreeHead
@@ -293,7 +272,6 @@ import Tidepool.Actors.Internal.Agent
   , AgentObservation (..)
   , AgentSpec
   , AgentState (..)
-  , Reply
   , Response
   , codingAgent
   , agentBoundWorktree
@@ -304,28 +282,26 @@ import Tidepool.Actors.Internal.Agent
   , forgetAgent
   , readonlyAgent
   , request
+  , Assignment (..)
+  , Label
+  , SettlementReporting (..)
+  , assignment
+  , labelFromText
   , Duration
-  , RequestDeadline
-  , RequestOptions
   , milliseconds
   , seconds
   , minutes
-  , after
-  , requestOptions
   , requestWith
   , requestWithProgress
   , requestWithProgressInto
   , StopOutcome (..)
   , startAgent
   , stopAgent
-  , MessageRecipient
   , sendMessage
   , pollNotification
   , NotificationReceipt
   , NotificationError (..)
   , NotificationState (..)
-  , withRequestDeadline
-  , withRequestGuidance
   )
 import Tidepool.Actors.Role
 import Tidepool.Actors.Observe
@@ -349,7 +325,7 @@ import Tidepool.Effects.Core
   , ProviderUsageCompleteness (..)
   , ProviderUsageSummary (..)
   , CacheBoundaryReason (..)
-  , actorContext
+  , GitOid (..)
   )
 import Tidepool.Worktree hiding
   ( boundWorktree
@@ -360,4 +336,5 @@ import Tidepool.Worktree hiding
   , tryMerge
   , worktreeBranch
   , worktreeHead
+  , GitOid
   )

@@ -72,7 +72,7 @@ pub struct LocalResidentInstallation {
     pub worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     pub effective_role: crate::EffectiveRole,
     pub fork_effort: Option<crate::ForkEffort>,
-    pub model: Option<String>,
+    pub model: Option<crate::Model>,
     pub instructions: Option<String>,
     pub creator: Option<crate::ActorRef>,
     pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -103,6 +103,9 @@ pub enum LocalResidentDeployment {
     },
     WatchChanged {
         notification: crate::request::WatchNotification,
+    },
+    SettlementChanged {
+        notification: crate::request::SettlementNotification,
     },
     RequestCancellation {
         notification: crate::RequestCancellationNotification,
@@ -816,6 +819,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .deployments
                 .send(LocalResidentDeployment::WatchChanged { notification });
         }
+        for notification in self.environment.requests.take_settlement_notifications() {
+            let _ = self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::SettlementChanged { notification });
+        }
     }
 
     fn publish_request_cancellation(
@@ -1366,6 +1375,12 @@ where
             mut launch_worktrees,
             fork_workspace,
         } = child;
+        if descriptor.model().is_none() {
+            descriptor = descriptor.with_model(self.descriptor.model().cloned());
+        }
+        if descriptor.fork_effort().is_none() {
+            descriptor = descriptor.with_fork_effort(self.descriptor.fork_effort());
+        }
         let fork_group = descriptor.fork_group();
         let root_admission = self.environment.root_admission_closed.clone();
         let _root_admission = if descriptor.supervisor_parent().is_none() {
@@ -2282,25 +2297,31 @@ where
                             .map(|role| {
                                 let budget = role.descendants();
                                 let row = role.haskell_effects_type();
-                                let launch =
-                                    self.environment.launch_resolver.as_ref().map(|resolve| {
+                                let launch = self
+                                    .environment
+                                    .launch_resolver
+                                    .as_ref()
+                                    .map(|resolve| {
                                         resolve(&crate::WorkerLaunchRequest {
                                             role,
-                                            model,
-                                            effort,
+                                            model: model
+                                                .or_else(|| self.descriptor.model().cloned()),
+                                            effort: effort.or(self.descriptor.fork_effort()),
                                             context: fork_context,
                                             instructions,
                                         })
-                                    });
-                                (
+                                    })
+                                    .transpose()?;
+                                Ok((
                                     (
                                         row,
                                         i64::from(budget.maximum_depth),
                                         budget.maximum_active_children.map(i64::from),
                                     ),
                                     launch,
-                                )
+                                ))
                             })
+                            .and_then(|value| value)
                     });
                 self.environment
                     .runner
@@ -2708,10 +2729,11 @@ where
                         "invalid request label: {error}"
                     ))
                 })?;
-                let request = self.environment.requests.reserve_labeled(
+                let request = self.environment.requests.reserve_labeled_with_reporting(
                     context.actor,
                     reservation.target,
                     reservation.label,
+                    reservation.notify_owner,
                 );
                 self.environment
                     .runner
@@ -3143,7 +3165,7 @@ where
                             worktree_custody: self.worktree_custody.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
                             fork_effort: self.descriptor.fork_effort(),
-                            model: self.descriptor.model().map(str::to_owned),
+                            model: self.descriptor.model().cloned(),
                             instructions: self.descriptor.instructions().map(str::to_owned),
                             creator: self.descriptor.creator(),
                             fork_boundary: self.descriptor.fork_boundary().cloned(),
@@ -3333,7 +3355,7 @@ where
             worktree_custody: self.worktree_custody.clone(),
             effective_role: self.descriptor.effective_role().clone(),
             fork_effort: self.descriptor.fork_effort(),
-            model: self.descriptor.model().map(str::to_owned),
+            model: self.descriptor.model().cloned(),
             instructions: self.descriptor.instructions().map(str::to_owned),
             creator: self.descriptor.creator(),
             fork_boundary: self.descriptor.fork_boundary().cloned(),

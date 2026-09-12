@@ -2,6 +2,10 @@
 model = "gpt-5.6-sol"
 effort = "medium"
 
+[models]
+planner = "gpt-6-astra"
+executor = "gpt-5.6-sol"
+
 [launch]
 systemd_slice = "swarm.slice"
 

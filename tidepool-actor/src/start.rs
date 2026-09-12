@@ -41,6 +41,29 @@ pub enum ForkContext {
     SelectedContext,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+pub enum Model {
+    Alias(String),
+    Literal(String),
+}
+
+impl Model {
+    #[must_use]
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Alias(value) | Self::Literal(value) => value,
+        }
+    }
+}
+
+impl std::ops::Deref for Model {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.value()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
 pub enum WorkerLifetime {
     ParentOwned,
@@ -56,7 +79,7 @@ pub(crate) struct ActorStartRequest {
     pub fork_workspace: Option<crate::ForkWorkspaceSeed>,
     pub effect_keys: Option<Vec<ActorEffectKeyWire>>,
     pub fork_effort: Option<ForkEffort>,
-    pub model: Option<String>,
+    pub model: Option<Model>,
     pub instructions: Option<String>,
     pub context: ForkContext,
     pub lifetime: WorkerLifetime,
@@ -288,10 +311,9 @@ impl ResidentActorStart {
             session_id,
             parent_actor,
         } = request;
-        if model
-            .as_ref()
-            .is_some_and(|model| model.is_empty() || model.chars().any(char::is_whitespace))
-        {
+        if model.as_ref().is_some_and(|model| {
+            model.value().is_empty() || model.value().chars().any(char::is_whitespace)
+        }) {
             return Err(ActorStartCaptureError::InvalidModel);
         }
         let (profile, effect_keys) = profile.resolve(effect_keys)?;
@@ -507,7 +529,7 @@ mod tests {
 /// provider defaults and frozen prompts; the actor runtime owns admission.
 pub struct WorkerLaunchRequest {
     pub role: crate::EffectiveRole,
-    pub model: Option<String>,
+    pub model: Option<Model>,
     pub effort: Option<ForkEffort>,
     pub context: ForkContext,
     pub instructions: Option<String>,
@@ -525,5 +547,6 @@ pub struct WorkerLaunchPreview {
 }
 
 /// Installed once when constructing a forest. No provider call or file reload.
-pub type WorkerLaunchResolver =
-    std::sync::Arc<dyn Fn(&WorkerLaunchRequest) -> WorkerLaunchPreview + Send + Sync>;
+pub type WorkerLaunchResolver = std::sync::Arc<
+    dyn Fn(&WorkerLaunchRequest) -> Result<WorkerLaunchPreview, String> + Send + Sync,
+>;

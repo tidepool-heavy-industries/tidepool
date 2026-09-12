@@ -1,6 +1,6 @@
 # Declared Astra leaf: faithful relation forests
 
-Placement: `gpt-6-astra`, Medium, fresh selected context through `relationDesign`.
+Placement: the `planner` model alias, Medium, fresh selected context through `relationDesign`.
 Owner: the Sol contract lead; result: `DesignAnswer`. This is the wave's planned
 expert placement, not permission to start an expert tree.
 

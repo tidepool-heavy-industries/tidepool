@@ -4,4 +4,4 @@ let sinkDefinition = coordinationActor "result-sink" ResultSink { sinkState = 0,
 sink <- R.start sinkDefinition
 let oldDestination = acceptResult (R.client sink)
 sink <- R.replace sink sinkDefinition
-forwarding <- R.forwardResult (forkedResponse producer) oldDestination
+forwarding <- R.forwardResult producer oldDestination

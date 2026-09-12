@@ -60,6 +60,15 @@ impl ResponseExpectation {
     }
 }
 
+fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> String {
+    let preamble =
+        insert_preamble_imports(preamble, "qualified Tidepool.Agent.Ref as TidepoolAgentRef");
+    format!(
+        "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = TidepoolAgentRef.internalAgentRef {} {}\n",
+        context.actor.id.0, context.actor.incarnation.0
+    )
+}
+
 /// Trusted source environment supplied by actor deployment. The canonical
 /// `ActorEffects` alias itself lives in the imported Haskell facade; Rust does
 /// not reflect or authorize its row entries.
@@ -590,7 +599,7 @@ fn agent_roster_value(
                 .runtime
                 .requested_model
                 .as_deref()
-                .or(entry.descriptor.model())
+                .or(entry.descriptor.model_name())
                 .map(str::to_owned)
                 .to_value(table)?,
             entry.runtime.confirmed_model.to_value(table)?,
@@ -927,7 +936,7 @@ pub(crate) enum ForkGroupBoundary {
         role: crate::ActorLaunchRoleWire,
         effect_keys: Vec<crate::ActorEffectKeyWire>,
         budget: Option<(i64, i64)>,
-        model: Option<String>,
+        model: Option<crate::Model>,
         effort: Option<crate::ForkEffort>,
         context: crate::ForkContext,
         instructions: Option<String>,
@@ -1805,6 +1814,7 @@ where
                 .request_preamble(&source.preamble, request, &context.haskell_effects_alias)
                 .into();
         }
+        source.preamble = actor_preamble(&source.preamble, &context).into();
         let type_modules = self.type_modules.clone();
         let input = match self
             .access
@@ -1946,6 +1956,7 @@ where
             (None, None) => turn_source.preamble.to_string(),
             _ => unreachable!("request workbench scope is constructed atomically"),
         };
+        let preamble = actor_preamble(&preamble, &context);
         turn_source.preamble = format!(
             "{}{}",
             preamble,
@@ -2005,6 +2016,7 @@ where
         _ => unreachable!("request workbench scope is constructed atomically"),
     }
     .into();
+    source.preamble = actor_preamble(&source.preamble, context).into();
     if kind == GhciInputKind::Command {
         return match run_discovery(session, context, &source, scope.type_modules, &block)? {
             Ok(output) => Ok(ResidentWorkbenchStep::Committed {
@@ -2910,11 +2922,12 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
-                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address)) => Ok(
+                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address, notify_owner)) => Ok(
                         ResidentActorBoundary::RequestReservation(RequestReservation {
                             continuation: hole,
                             target: crate::wait::decode_address(address.0, address.1)?,
                             label,
+                            notify_owner,
                         }),
                     ),
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(

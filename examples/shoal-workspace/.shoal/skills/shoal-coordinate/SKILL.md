@@ -16,13 +16,12 @@ Successful progress is evidence, not a Question. A plain `child` request has no
 progress stream; use its requested final `respond` or ordinary steering when useful.
 A parent's `reportProgress` in inherited history does not belong to the child.
 
-In the parent, given `worker :: Forked (Outcome Candidate)` and its `progress`
+In the parent, given `worker :: Response (Outcome Candidate)` and its `progress`
 handle, keep one local collector. The handler receives changes without rearming:
 
 ```haskell
 import qualified Tidepool.Actor as Actor
-owner <- actorContext
-router <- followWork [("implementation", forkedResponse worker, progress)] (notifyWork owner (workMessage candidateSummary))
+router <- followWork [("implementation", worker, progress)] (notifyWork me (workMessage candidateSummary))
 state <- readWork router
 inspectFull (workSnapshotSummary candidateSummary state)
 ```
@@ -34,7 +33,7 @@ for delivery receipts when needed. Call it for a decision, not as a polling ritu
 `withCheckpoints (workMessage candidateSummary)` additionally notifies on candidate
 publications when the parent needs to act on them before the final response.
 
-`sendMessage` is ordinary steering; `updateRequest (forkedResponse worker)` is
+`sendMessage` is ordinary steering; `updateRequest worker` is
 for a correction that must fence that pending request. Inspect delivery when the
 next action depends on it. Neither admission nor presentation proves the requested
 change happened. Reply only with information needed for the next decision.
@@ -52,7 +51,8 @@ cleanup owner to release workers you no longer need, retaining uncertain members
 
 ```haskell
 retiredWork <- finishWork router
-released <- releaseGroup (forkGroupHandle worker)
+let Just group = forkGroupHandle worker
+released <- releaseGroup group
 inspectFull released
 ```
 

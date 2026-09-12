@@ -5,11 +5,9 @@
 -- constructors accept 'Natural', so negative durations are not representable.
 module Tidepool.Duration
   ( Duration
-  , RequestDeadline
   , milliseconds
   , seconds
   , minutes
-  , after
   ) where
 
 import Numeric.Natural (Natural)
@@ -21,8 +19,6 @@ data Duration
   | DurationMinutes Int
   deriving (Show, Eq, Ord)
 
-newtype RequestDeadline = RequestDeadline Duration
-  deriving (Show, Eq, Ord)
 
 milliseconds :: Natural -> Duration
 milliseconds = DurationMilliseconds . bounded
@@ -32,9 +28,6 @@ seconds = DurationSeconds . bounded
 
 minutes :: Natural -> Duration
 minutes = DurationMinutes . bounded
-
-after :: Duration -> RequestDeadline
-after = RequestDeadline
 
 bounded :: Natural -> Int
 bounded value

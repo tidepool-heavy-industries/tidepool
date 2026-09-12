@@ -3,9 +3,6 @@
 -- | Typed request observation and one-shot target settlement.
 module Tidepool.Agent.Reply
   ( RequestId
-  , RequestLabel
-  , RequestLabelError (..)
-  , requestLabel
   , Response
   , Reply
   , Replies
@@ -29,6 +26,8 @@ module Tidepool.Agent.Reply
   , ForgetResponseOutcome (..)
   , ReplyState (..)
   , requestId
+  , responseActor
+  , responseLaunch
   , attemptReply
   , reply
   , pollResponse
@@ -53,8 +52,6 @@ import Tidepool.Agent.Reply.Internal
   , pollRequestUpdate
   , ReplyError (..)
   , RequestId
-  , RequestLabel
-  , RequestLabelError (..)
   , Response
   , ResponseFailure (..)
   , ResponseResult (..)
@@ -76,7 +73,8 @@ import Tidepool.Agent.Reply.Internal
   , acknowledgeCancellation
   , reply
   , responseRequestId
-  , requestLabel
+  , responseActor
+  , responseLaunch
   )
 
 requestId :: Response result -> RequestId

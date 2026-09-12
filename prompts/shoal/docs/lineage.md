@@ -12,7 +12,7 @@ diagnostics. The canonical workspace path is actor-relative; actor, worktree,
 and branch identities establish custody.
 
 First and latest provider observations are distinct: inspect `contextFirstUsage`
-and `contextLatestUsage` on `actorContext`, or `rosterFirstUsage` and
+and `contextLatestUsage` on `Tidepool.Actors.Observe.actorContext`, or `rosterFirstUsage` and
 `rosterLatestUsage` in a group roster. Each observation retains its source ID,
 optional provider timestamp, and cached/uncached input counts. `Nothing` means
 unavailable, not zero reuse. Later hits cannot establish first-inference reuse;
@@ -40,7 +40,7 @@ provider responses; this split measures provider responses.
 Use `:lineage` for first/latest source IDs and `:trace` for sample history and
 thread/latest-turn summaries. Typed access is available through
 `contextFirstUsage`, `contextLatestUsage`, `contextUsageSummary`, and
-`contextLatestTurnUsage` on `actorContext`; inspect their types before composing
+`contextLatestTurnUsage` on `actorContext` from `Tidepool.Actors.Observe`; inspect their types before composing
 a query. Aggregates deduplicate provider response IDs and can be `UsagePartial`:
 missing usage, unfinished turns, or inconsistent records must not imply zero
 cost. Legacy token-count notifications supply samples but no reliable aggregate.

@@ -40,13 +40,13 @@ runs as the router, not as the capturing model.
 import qualified Tidepool.Actor as Actor
 let campaign = "current-goal" :: CampaignLabel
 let owners = "owners" :: ForkGroupLabel
-let label = "component-a" :: BranchLabel
+let label = "component-a" :: Label
 let group = batch campaign owners
 let task = Task group plan source outcome why paths criterion decisions
 work <- unfold group (childWithProgress @WorkProgress @Delivery (withContext (selected taskContext) (componentLeadFrom label projectHead task)))
 let (lead, progress) = work
 owner <- actorContext
-wave <- followWork [("component-a", forkedResponse lead, progress)] (notifyWork owner (withCheckpoints (workMessage deliverySummary)))
+wave <- followWork [("component-a", lead, progress)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))
 ```
 
 Continue the parent's independent engineering after attaching the wave router.
@@ -67,7 +67,7 @@ scaffold/fork/integration, bind the exact checked commit as candidate:
 ```haskell
 (reviewer, progress) <- reviewCandidate task OwnerRepairs candidate
 owner <- actorContext
-reviewWave <- followWork [("review", forkedResponse reviewer, progress)] (notifyWork owner (workMessage reviewSummary))
+reviewWave <- followWork [("review", reviewer, progress)] (notifyWork me (workMessage reviewSummary))
 ```
 
 The reviewer returns Produced (Repair latest findings) for defects the lead must
@@ -75,8 +75,8 @@ repair. Its attempt settles; the lead's delivery stays open. After local repair 
 checks, bind `revised :: Candidate` and reuse the retained reviewer:
 
 ```haskell
-let retryLabel = "review-repaired" :: RequestLabel
-(attempt, retryProgress) <- reviewAgain (forkedActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
+let retryLabel = "review-repaired" :: Label
+(attempt, retryProgress) <- reviewAgain (responseActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
 retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork owner (workMessage reviewSummary))
 ```
 
@@ -107,9 +107,9 @@ Blocked is an honest terminal product result when the obligation cannot continue
 
 Open broad independent implementation frontiers when a usable scaffold makes
 them productive, repeating the pattern inside substantial children. `implement
-part` returns `(Forked (Outcome Candidate), Progress WorkProgress)`. Attach
+part` returns `(Response (Outcome Candidate), Progress WorkProgress)`. Attach
 its response and progress to the local wave router. After
-that worker returns, reviewCandidate part (RetainedImplementer (forkedActor worker))
+that worker returns, reviewCandidate part (RetainedImplementer (responseActor worker))
 latest lets the reviewer request repairs directly. The worker is then available;
 queuing repairs behind a lead's pending delivery would deadlock it.
 
@@ -142,7 +142,7 @@ question, checked incorporation source, supported summary and evidence, as in op
 request owner's retained response, for example the initial review:
 
 ```haskell
-delivery <- updateRequest (forkedResponse reviewer) (decisionContext decision)
+delivery <- updateRequest reviewer (decisionContext decision)
 ```
 
 Handle Left explicitly; on Right retain the RequestUpdate handle and poll when
@@ -151,7 +151,7 @@ presentation while independent work or checked incorporation already answers it.
 UpdatePresented means the steering was presented, not that code was incorporated.
 UpdateUnconfirmed/UpdateNotPresented/UpdateTooLate require examining that receipt
 and current work before intervention; do not silently enqueue a replacement request.
-For the retained attempt use attempt itself instead of forkedResponse reviewer.
+For the retained attempt use `attempt` itself instead of the original `reviewer` response.
 Send through the response owner that can act; do not relay the same packet up and
 down the tree merely to keep ancestors informed.
 

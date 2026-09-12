@@ -14,6 +14,7 @@ module Tidepool.Actors.Observe
   , swarmUsage
   , usageByRequestedModel
   , usageDelta
+  , actorContext
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)

@@ -9,9 +9,9 @@ already bound, and `RevisionReport` defined as your desired result type:
 
 ```haskell
 :{
-revision <- requestWith @RevisionReport (forkedActor interfaceWorker) $
-  withRequestGuidance "Address only the accepted review findings." $
-  requestOptions revisionLabel revisionPlan
+revision <- requestWith @RevisionReport (responseActor interfaceWorker) $
+  (assignment revisionLabel revisionPlan)
+    { guidance = Just "Address only the accepted review findings." }
 :}
 ```
 

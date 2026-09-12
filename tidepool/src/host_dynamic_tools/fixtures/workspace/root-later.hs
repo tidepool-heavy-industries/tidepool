@@ -1,2 +1,2 @@
-let laterLabel = "sibling" :: BranchLabel
-siblingWork <- unfold (batch campaign group) (child @Text (coding laterLabel projectHead ("fixture-sibling" :: Text)))
+let laterLabel = "sibling" :: Label
+siblingWork <- unfold (batch campaign group) (child @Text (coding projectHead (assignment laterLabel ("fixture-sibling" :: Text))))

@@ -8,7 +8,7 @@ Plan, Routing and Observe. Read a relevant skill before related forks so childre
 inherit useful API knowledge. Their request-local bindings still come from their
 own assignment, not the parent's history.
 
-`solTaskFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
+`solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result`
 builds a branch value. `Task` is a record, not a module; use `taskSource`,
 `planPath`, `obligation`, and `acceptedDecisions` directly.
 
@@ -16,7 +16,7 @@ Given your authored `task :: Task` and `source :: WorktreeSeed`, this launches a
 fresh Sol Medium owner returning `Outcome Candidate`, with a progress stream:
 
 ```haskell
-let workerLabel = "implementation" :: BranchLabel
+let workerLabel = "implementation" :: Label
 let branch = withEffort Medium $ withContext (selected taskContext) $ solTaskFrom workerLabel source task
 (worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) branch)
 ```

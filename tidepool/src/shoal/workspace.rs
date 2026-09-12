@@ -43,6 +43,8 @@ pub struct FrozenWorkspace {
     #[serde(default)]
     pub(crate) tools: Option<String>,
     pub(crate) prompts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) models: BTreeMap<String, String>,
     files: BTreeMap<PathBuf, String>,
     config: String,
     library_identity: String,
@@ -73,6 +75,11 @@ impl FrozenWorkspace {
             return Ok(frozen);
         }
         let (config, config_text) = super::read_project_config(workspace)?;
+        for (alias, model) in &config.models {
+            if alias.trim().is_empty() || model.trim().is_empty() {
+                return Err("model aliases and provider model names must be non-empty".into());
+            }
+        }
         let base = workspace.join(".shoal");
         std::fs::create_dir_all(&directory)?;
         let mut files = BTreeMap::new();
@@ -190,6 +197,7 @@ impl FrozenWorkspace {
             checks: config.haskell.checks,
             tools: config.haskell.tools,
             prompts,
+            models: config.models,
             files,
             config: config_text,
             library_identity,

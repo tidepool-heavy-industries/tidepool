@@ -350,7 +350,11 @@ impl Driver {
                     .ok_or("activation without installation")?;
                 cx.respond((
                     self.actor_key(actor.actor.identity())?,
-                    (actor.label.clone(), activation.message, actor.model.clone()),
+                    (
+                        actor.label.clone(),
+                        activation.message,
+                        actor.model.as_ref().map(|model| model.value().to_owned()),
+                    ),
                 ))?
             }
             RecipeGit(actor, arguments) => cx.respond(

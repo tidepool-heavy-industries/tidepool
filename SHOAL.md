@@ -128,8 +128,8 @@ than low-level actor construction:
 data AgentSpec
 data AgentRef
 data Response result
-data Reply result
-data RequestLabel
+data Assignment input
+data Label
 
 codingAgent   :: WorktreeHandle -> AgentSpec
 readonlyAgent :: Text -> AgentSpec
@@ -138,7 +138,7 @@ startAgent    :: Member AgentLaunch effs => AgentSpec -> Eff effs AgentRef
 request
   :: forall result input effs
    . Member Replies effs
-  => AgentRef -> RequestLabel -> input -> Eff effs (Response result)
+  => AgentRef -> Assignment input -> Eff effs (Response result)
 
 stopAgent
   :: (Member AgentControl effs, Member AgentInspection effs)
@@ -154,14 +154,14 @@ put the requested result type at the dispatch site when the reply crosses
 workbench input units:
 
 ```haskell
-let reviewLabel = "review-a" :: RequestLabel
-let testLabel = "test-b" :: RequestLabel
+let reviewLabel = "review-a" :: Label
+let testLabel = "test-b" :: Label
 let bothLabel = "review-and-test" :: WatchLabel
 reviewerA <- startAgent (codingAgent treeA)
 reviewerB <- startAgent (codingAgent treeB)
 
-responseA <- request @ReviewReport reviewerA reviewLabel candidateA
-responseB <- request @ReviewReport reviewerB testLabel candidateB
+responseA <- request @ReviewReport reviewerA (assignment reviewLabel candidateA)
+responseB <- request @ReviewReport reviewerB (assignment testLabel candidateB)
 
 both <- watch bothLabel $
   (,) <$> awaitResponse responseA <*> awaitResponse responseB
@@ -170,7 +170,7 @@ both <- watch bothLabel $
 `AgentRef` identifies one persistent actor, Codex context, Haskell scope,
 worktree authority, and place in the recursive ownership tree. A
 `Response result` belongs to the requester and supports repeatable typed
-observation. The dual `Reply result` belongs to the target and authorizes one
+observation. The target receives a prebound `respond` operation authorizing one
 settlement. Same-machine inputs and results may contain closures and types
 declared in the caller's live session; they are not serialized.
 
@@ -239,11 +239,11 @@ authority.
 ```haskell
 let campaign = "normalization" :: CampaignLabel
 let wave = "implementation" :: ForkGroupLabel
-let domain = "domain" :: BranchLabel
-let ui = "ui" :: BranchLabel
+let domain = "domain" :: Label
+let ui = "ui" :: Label
 forks <- unfold (batch campaign wave) $
-  (,) <$> child (coding @DomainReport domain projectHead domainTask)
-      <*> child (coding @UiReport ui projectHead uiTask)
+  (,) <$> child (coding @DomainReport projectHead (assignment domain domainTask))
+      <*> child (coding @UiReport projectHead (assignment ui uiTask))
 ```
 
 Coding actors can scaffold, fork, and integrate within their effective row and
@@ -279,14 +279,14 @@ launch.
 
 Branches use readable hierarchical paths such as
 `shoal/normalization/implementation/domain`, with deterministic numeric
-suffixes on collision. `BranchReceipt`, `actorContext`, `listAgents`, and
+suffixes on collision. `BranchReceipt`, `me`, `listAgents`, and
 `:status` retain exact actor/worktree identities beneath those readable names.
 Request settlement also records the starting head and committed, staged,
 unstaged, and untracked submission evidence before response/watch readiness.
-Use `withBranchGuidance` and `withBranchDeadline` to refine one branch without
-changing the applicative tree or inventing a scheduler. Runtime descendant
-budgets remain the concurrency/fan-out boundary; `awaitFork` versus
-`awaitSettledFork` remains the typed fold-time failure choice.
+Set `guidance` and `deadline` on its `Assignment` to refine one branch without
+changing the applicative tree. Runtime descendant budgets remain the
+concurrency/fan-out boundary; `awaitResponse` fails a join early while
+`awaitSettled` retains dependency failure as a value for a fold.
 
 ## Replies, watches, and model turns
 
@@ -323,14 +323,14 @@ Admit the review branches:
 ```haskell
 let reviewCampaign = "review" :: CampaignLabel
 let reviewWave = "owners" :: ForkGroupLabel
-let domainReview = "domain" :: BranchLabel
-let uiReview = "ui" :: BranchLabel
+let domainReview = "domain" :: Label
+let uiReview = "ui" :: Label
 let domainTask = "Review domain invariants. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
 let uiTask = "Review presentation behavior. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
 :{
 forks <- unfold (batch reviewCampaign reviewWave) $
-  (,) <$> child (coding @ChangeReport domainReview projectHead domainTask)
-      <*> child (coding @ChangeReport uiReview projectHead uiTask)
+  (,) <$> child (coding @ChangeReport projectHead (assignment domainReview domainTask))
+      <*> child (coding @ChangeReport projectHead (assignment uiReview uiTask))
 :}
 ```
 
@@ -339,8 +339,8 @@ Register the independent watches in the same block or a later call:
 ```haskell
 let domainReadyLabel = "domain-ready" :: WatchLabel
 let uiReadyLabel = "ui-ready" :: WatchLabel
-domainReady <- watch domainReadyLabel (awaitSettledFork (fst forks))
-uiReady <- watch uiReadyLabel (awaitSettledFork (snd forks))
+domainReady <- watch domainReadyLabel (awaitSettled (fst forks))
+uiReady <- watch uiReadyLabel (awaitSettled (snd forks))
 ```
 
 End the response normally. On each wake, poll the corresponding retained
@@ -355,13 +355,13 @@ Inspect the original `domainState` through further projections when needed;
 `responseWorktree` carries runtime submission evidence, while `changeChecks`
 is the worker's authored claim. Verify the exact submitted head and checks
 before integrating. Retain the actor for a focused follow-up via
-`forkedActor (fst forks)`. A combined watch is useful when a decision actually
+`responseActor (fst forks)`. A combined watch is useful when a decision actually
 depends on both results:
 
 ```haskell
 let pairReadyLabel = "pair-ready" :: WatchLabel
 pairReady <- watch pairReadyLabel $
-  (,) <$> awaitSettledFork (fst forks) <*> awaitSettledFork (snd forks)
+  (,) <$> awaitSettled (fst forks) <*> awaitSettled (snd forks)
 ```
 
 The detailed architecture and verification record are retained in
@@ -394,8 +394,8 @@ acknowledgement makes cancellation terminal, so work cannot continue invisibly
 after a caller has been told it stopped. `abandonResponse` instead releases the
 owner's interest without stopping target execution.
 
-No deadline is the default. When work really must be bounded, use dimensional
-time such as `after (seconds 30)` or `after (minutes 10)`. Bare millisecond
+No deadline is the default. When work really must be bounded, set an assignment's
+deadline with dimensional time such as `Just (seconds 30)` or `Just (minutes 10)`. Bare millisecond
 integers are not part of the public request or unfold surface; status preserves
 the authored unit and shows absolute and remaining time.
 
@@ -483,7 +483,7 @@ explicit refusal-bearing retention cleanup, labeled applicative watches,
 typed request and branch deadlines, typed stop and truthful lifecycle
 observation, role-specific effect rows, atomic cache-preserving unfold,
 recursive scaffold and fold, server-filtered managed worktree queries, and
-runtime `:status`/`actorContext` facts, activation-scoped provider usage,
+runtime `:status`/`Tidepool.Actors.Observe.actorContext` facts, activation-scoped provider usage,
 versioned prompt fingerprints, structured workbench item receipts, typed
 campaign snapshots and cleanup, source-checkout integration custody, and
 honest source-only root recovery. Workbench posture is visible in `:status`
@@ -602,7 +602,7 @@ These defaults apply when the section is absent. The first researcher receives
 one generation by default. A launcher can explicitly request a deeper subtree:
 
 ```haskell
-let proposal = withForkBudget (ForkBudget 3 6) (researching @Text researchLabel boundHead assignment)
+let proposal = withForkBudget (ForkBudget 3 6) (researching @Text boundHead (assignment researchLabel task))
 previewBranch proposal
 ```
 

@@ -1,5 +1,5 @@
-let destination = sessionReply
+let destination = respond
 let wave = "implementation" :: ForkGroupLabel
-let label = "feature" :: BranchLabel
+let label = "feature" :: Label
 candidate <- unfold (subgroup wave) (child @Candidate (solTask label sessionInput))
-forwarding <- route (awaitSettledFork candidate) (\settled -> case settled of { ReplyAvailable answer -> do { _ <- reply destination (responseValue answer); pure () }; ReplyUnavailable failure -> error (T.pack (show failure)) })
+forwarding <- route (awaitSettled candidate) (\settled -> case settled of { ReplyAvailable answer -> destination (responseValue answer); ReplyUnavailable failure -> error (T.pack (show failure)) })

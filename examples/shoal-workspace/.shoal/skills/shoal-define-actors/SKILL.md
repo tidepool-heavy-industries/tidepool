@@ -42,14 +42,14 @@ For fixed subscriptions, declare `mode :- Event input`, and supply
 data Results mode = Results { resultState :: mode :- State [Either ResponseFailure (ResponseResult (Outcome Candidate))], arrived :: mode :- Event (Either ResponseFailure (ResponseResult (Outcome Candidate))), resultCount :: mode :- Call () (R.Reply Int) } deriving Generic
 let resultDefinition = coordinationActor "candidate-results" Results
       { resultState = []
-      , arrived = R.on (R.settlement (forkedResponse worker)) (\result -> modify' (++ [result]))
+      , arrived = R.on (R.settlement worker) (\result -> modify' (++ [result]))
       , resultCount = \() -> gets length
       }
 results <- R.start resultDefinition
 R.call (resultCount (R.client results)) ()
 ```
 
-This block assumes `worker :: Forked (Outcome Candidate)` from the current
+This block assumes `worker :: Response (Outcome Candidate)` from the current
 session. `R.progress p` carries `ProgressState progress`; `R.settlement response`
 carries the exact typed terminal result, including failure and execution evidence.
 `Cmd.completion job` carries `Cmd.CommandResult` for a command owned by the

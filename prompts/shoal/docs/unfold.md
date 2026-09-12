@@ -6,18 +6,18 @@ bindings and the conversation through the actual tool result.
 ```haskell
 let campaign = "my-project" :: CampaignLabel
 let wave = "first-wave" :: ForkGroupLabel
-let domainLabel = "domain" :: BranchLabel
-let consumerLabel = "consumer-tests" :: BranchLabel
+let domainLabel = "domain" :: Label
+let consumerLabel = "consumer-tests" :: Label
 :{
 workers <- unfold (batch campaign wave) $
-  (,) <$> child (coding @Report domainLabel projectHead domainPlan)
-      <*> child (withEffort Low (coding @Report consumerLabel projectHead consumerPlan))
+  (,) <$> child (coding @Report projectHead (assignment domainLabel domainPlan))
+      <*> child (withEffort Low (coding @Report projectHead (assignment consumerLabel consumerPlan)))
 :}
 let sharedAfterUnfold = ("ready" :: Text)
 ```
 
-Each `Forked a` contains its retained `AgentRef`, `Response a`, and immutable
-launch/worktree receipt. The handles name admitted children; they do not mean
+Each `Response a` contains its target actor and, on the launch request, its
+immutable launch/worktree receipt. The handles name admitted children; they do not mean
 that child inference has started. In this example both children can inspect
 `sharedAfterUnfold`, although it was defined after `unfold`. Multiple unfolds
 in one block share its final scope; later parent tool calls cannot change it.
