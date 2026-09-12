@@ -10,7 +10,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Reader (GlobalRdrEnv, globalRdrEnvElts, greName)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
 import System.FilePath ((</>))
-import System.Process (readProcess)
+import System.Process (callProcess, readProcess)
 import Tidepool.Introspection
 
 main :: IO ()
@@ -18,9 +18,12 @@ main = do
   root <- (</> "tidepool-introspection-search-test") <$> getTemporaryDirectory
   createDirectoryIfMissing True root
   let source = root </> "LookupFixture.hs"
+  writeFile (root </> "QualifiedSource.hs") qualifiedFixture
+  writeFile (root </> "AmbigA.hs") ambiguousAFixture
+  writeFile (root </> "AmbigB.hs") ambiguousBFixture
   writeFile source fixture
   libdir <- trim <$> readProcess "ghc" ["--print-libdir"] ""
-  (repeatMatches, wildMatches, anyMatches, collisionMatches, numMatches, plainMatches, rankMatches) <-
+  (repeatMatches, wildMatches, anyMatches, collisionMatches, numMatches, plainMatches, rankMatches, qualifiedMatches, ambiguousMatches) <-
     runGhc (Just libdir) $ do
       flags <- getSessionDynFlags
       _ <- setSessionDynFlags
@@ -44,6 +47,8 @@ main = do
       numMatches <- matchesFor rdrEnv "queryNum"
       plainMatches <- matchesFor rdrEnv "queryPlain"
       rankMatches <- matchesFor rdrEnv "queryRank"
+      qualifiedMatches <- matchesFor rdrEnv "queryQualified"
+      ambiguousMatches <- matchesFor rdrEnv "queryAmbiguous"
       pure
         ( repeatMatches,
           wildMatches,
@@ -51,7 +56,9 @@ main = do
           collisionMatches,
           numMatches,
           plainMatches,
-          rankMatches
+          rankMatches,
+          qualifiedMatches,
+          ambiguousMatches
         )
   let repeatNames = map typeMatchName repeatMatches
       wildNames = map typeMatchName wildMatches
@@ -87,6 +94,23 @@ main = do
     fail ("alpha-equivalent nested forall was not exact: " ++ show rankMatches)
   unless ("candidateMonoRank" `notElem` map typeMatchName rankMatches) $
     fail ("nested forall matched monomorphic argument: " ++ show rankMatches)
+  let qualifiedNames =
+        filter (== "Q.onlyQualified") (map typeMatchName qualifiedMatches)
+      ambiguousNames =
+        filter (`elem` ["A.clash", "B.clash"]) (map typeMatchName ambiguousMatches)
+  unless (qualifiedNames == ["Q.onlyQualified"]) $
+    fail ("qualified-only import did not retain its usable alias: " ++ show qualifiedMatches)
+  let operatorNames = filter (== "(Q.%%)") (map typeMatchName qualifiedMatches)
+  unless (operatorNames == ["(Q.%%)"]) $
+    fail ("qualified operator was not a usable expression: " ++ show qualifiedMatches)
+  unless (ambiguousNames == ["A.clash", "B.clash"]) $
+    fail ("ambiguous imports did not choose qualified spellings: " ++ show ambiguousMatches)
+  let returnedUse = root </> "ReturnedUse.hs"
+  qualified <- case qualifiedNames of
+    [name] -> pure name
+    _ -> fail "qualified result changed after validation"
+  writeFile returnedUse (returnedFixture qualified (ambiguousNames ++ operatorNames))
+  callProcess "ghc" ["-fno-code", "-i" ++ root, returnedUse]
   where
     trim = reverse . dropWhile (`elem` ['\n', '\r']) . reverse
     matchKey result =
@@ -125,6 +149,11 @@ fixture =
     [ "{-# LANGUAGE PartialTypeSignatures #-}",
       "{-# LANGUAGE RankNTypes #-}",
       "module LookupFixture where",
+      "import qualified QualifiedSource as Q",
+      "import AmbigA",
+      "import AmbigB",
+      "import qualified AmbigA as A",
+      "import qualified AmbigB as B",
       "queryRepeat :: a -> (a, a)",
       "queryRepeat value = (value, value)",
       "same :: b -> (b, b)",
@@ -156,5 +185,54 @@ fixture =
       "candidateRank :: (forall b. b -> b) -> Int",
       "candidateRank _ = 0",
       "candidateMonoRank :: (Int -> Int) -> Int",
-      "candidateMonoRank _ = 0"
+      "candidateMonoRank _ = 0",
+      "queryQualified :: Int -> Bool",
+      "queryQualified = undefined",
+      "queryAmbiguous :: Int -> Bool",
+      "queryAmbiguous = undefined"
     ]
+
+qualifiedFixture :: String
+qualifiedFixture =
+  unlines
+    [ "module QualifiedSource (onlyQualified, (%%)) where",
+      "onlyQualified :: Int -> Bool",
+      "onlyQualified = undefined",
+      "(%%) :: Int -> Bool",
+      "(%%) = undefined"
+    ]
+
+ambiguousAFixture :: String
+ambiguousAFixture =
+  unlines
+    [ "module AmbigA (clash) where",
+      "clash :: Int -> Bool",
+      "clash = undefined"
+    ]
+
+ambiguousBFixture :: String
+ambiguousBFixture =
+  unlines
+    [ "module AmbigB (clash) where",
+      "clash :: Int -> Bool",
+      "clash = undefined"
+    ]
+
+returnedFixture :: String -> [String] -> String
+returnedFixture qualified ambiguous =
+  unlines $
+    [ "module ReturnedUse where",
+      "import qualified QualifiedSource as Q",
+      "import AmbigA",
+      "import AmbigB",
+      "import qualified AmbigA as A",
+      "import qualified AmbigB as B",
+      "qualifiedResult :: Int -> Bool",
+      "qualifiedResult = " ++ qualified
+    ]
+      ++ concat
+        [ [ "ambiguousResult" ++ show index ++ " :: Int -> Bool",
+            "ambiguousResult" ++ show index ++ " = " ++ spelling
+          ]
+        | (index, spelling) <- zip [(1 :: Int) ..] ambiguous
+        ]

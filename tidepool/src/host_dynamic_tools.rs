@@ -1751,6 +1751,64 @@ pub(crate) mod tests {
         );
     }
 
+    struct WorkbenchFunctionEndpoint {
+        tools: Vec<HostedTool>,
+    }
+
+    impl ResidentToolEndpoint for WorkbenchFunctionEndpoint {
+        fn tools(&self) -> &[HostedTool] {
+            &self.tools
+        }
+
+        fn output_format(&self) -> tidepool_actor::ResidentToolOutput {
+            tidepool_actor::ResidentToolOutput::Workbench
+        }
+
+        fn instructions(&self) -> Option<&str> {
+            None
+        }
+
+        fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
+            assert!(matches!(invocation.arguments, ToolArguments::Structured(_)));
+            Box::pin(async {
+                Ok(serde_json::json!({
+                    "status": "committed",
+                    "nextIndex": 1,
+                    "total": 1,
+                    "items": [{
+                        "index": 0,
+                        "status": "committed",
+                        "output": ":: Int -> Int\n  id :: a -> a"
+                    }]
+                }))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn workbench_function_result_uses_endpoint_owned_text_boundary() {
+        let endpoint = Arc::new(WorkbenchFunctionEndpoint {
+            tools: vec![HostedTool::Function(ToolDeclaration {
+                name: "lookup".into(),
+                description: "Search current Haskell scope; returns deterministic text.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"queries": {"type": "array"}},
+                    "required": ["queries"]
+                }),
+                output_schema: None,
+                kind: tidepool_tool::ToolKind::Call,
+            })],
+        });
+        let state = attached_state(endpoint).await;
+        let mut request = call_request(serde_json::json!({"queries": [":: Int -> Int"]}));
+        request.tool = "lookup".into();
+        let response = call(State(state), Json(request)).await.0;
+        assert!(response.success);
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(text, ":: Int -> Int\n  id :: a -> a");
+    }
+
     #[test]
     fn flat_registration_rejects_cross_kind_name_collisions() {
         let duplicate = Arc::new(EchoEndpoint {

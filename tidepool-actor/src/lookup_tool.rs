@@ -11,7 +11,8 @@ pub(crate) const LOOKUP_TOOL: &str = "lookup";
 
 const LOOKUP_DESCRIPTION: &str = "Look up names or Haskell types in the current \
 actor scope. Pass several queries together; prefix a type query with `::`. \
-Each query reports independently, so one bad query does not hide other results.";
+Each query reports independently in deterministic text, so one bad query does \
+not hide other results.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,14 +59,7 @@ pub(crate) fn declaration() -> HostedTool {
             "required": ["queries"],
             "additionalProperties": false
         }),
-        output_schema: Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "results": {"type": "array"}
-            },
-            "required": ["results"],
-            "additionalProperties": false
-        })),
+        output_schema: None,
         kind: ToolKind::Call,
     })
 }
@@ -288,6 +282,7 @@ mod tests {
             function.input_schema["properties"]["queries"]["minItems"],
             1
         );
+        assert_eq!(function.output_schema, None);
     }
 
     #[test]

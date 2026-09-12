@@ -19,7 +19,7 @@ import Data.ByteString qualified as BS
 import Data.Generics (everything, everywhereM, mkM, mkQ)
 import Data.List (nubBy, sortOn)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, listToMaybe)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC
@@ -27,7 +27,7 @@ import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Unify (tcMatchTy)
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (mkTyVarOcc, occNameString)
+import GHC.Types.Name.Occurrence (isSymOcc, mkTyVarOcc, occNameString)
 import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual, rdrNameOcc)
 import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
@@ -108,19 +108,59 @@ normalizeLookupWildcards parsed =
 -- callers compile the query once, never once per candidate.
 searchTypeMatches :: (GhcMonad m) => GlobalRdrEnv -> Name -> Type -> m [TypeMatch]
 searchTypeMatches rdrEnv queryBinder query = do
-  let names =
-        filter (/= queryBinder) $
-          nubBy (==) (map greName (globalRdrEnvElts rdrEnv))
-  things <- fmap catMaybes $ forM names $ \name -> do
+  let entries =
+        filter ((/= queryBinder) . greName) (globalRdrEnvElts rdrEnv)
+      spellingOwners =
+        Map.fromListWith Set.union
+          [ (spelling, Set.singleton (greName entry))
+          | entry <- entries,
+            (_, spelling) <- sourceSpellings entry
+          ]
+      namedEntries =
+        nubBy (\(left, _) (right, _) -> greName left == greName right) $
+          catMaybes
+            [ fmap (\spelling -> (entry, spelling)) (usableSpelling spellingOwners entry)
+            | entry <- entries
+            ]
+  things <- fmap catMaybes $ forM namedEntries $ \(entry, spelling) -> do
+    let name = greName entry
     found <- lookupName name
     pure $ case found of
-      Just (AnId identifier) -> Just (name, idType identifier)
+      Just (AnId identifier) -> Just (name, spelling, idType identifier)
       _ -> Nothing
   pure . sortOn matchKey . catMaybes $
-    [ toMatch name candidate <$> matchQuality query candidate
-    | (name, candidate) <- things
+    [ toMatch name spelling candidate <$> matchQuality query candidate
+    | (name, spelling, candidate) <- things
     ]
   where
+    sourceSpellings entry =
+      [ (priority, expressionSpelling rdrName)
+      | rdrName <- greRdrNames entry,
+        priority <- case rdrName of
+          Unqual _ -> [0 :: Int]
+          Qual _ _ -> [1]
+          Orig _ _ -> []
+          Exact _ -> []
+      ]
+
+    -- Return an expression that can be applied, including qualified operators.
+    expressionSpelling rdrName =
+      let spelling = renderWithContext defaultSDocContext (ppr rdrName)
+       in if isSymOcc (rdrNameOcc rdrName)
+            then "(" ++ spelling ++ ")"
+            else spelling
+
+    usableSpelling owners entry =
+      snd
+        <$> listToMaybe
+          [ candidate
+          | candidate@(_, spelling) <-
+              sortOn
+                (\(priority, rendered) -> (priority, length rendered, rendered))
+                (sourceSpellings entry),
+            Map.lookup spelling owners == Just (Set.singleton (greName entry))
+          ]
+
     matchQuality expected candidate
       | eqType expected candidate = Just TypeMatchExact
       | matchesEitherDirection expected candidate = Just TypeMatchUsable
@@ -135,9 +175,9 @@ searchTypeMatches rdrEnv queryBinder query = do
                    || isJust (tcMatchTy rightBody leftBody)
                )
 
-    toMatch name candidate quality =
+    toMatch name spelling candidate quality =
       TypeMatch
-        { typeMatchName = occNameString (nameOccName name),
+        { typeMatchName = spelling,
           typeMatchModule = moduleNameString . moduleName <$> nameModule_maybe name,
           typeMatchSignature =
             renderWithContext defaultSDocContext (ppr candidate),

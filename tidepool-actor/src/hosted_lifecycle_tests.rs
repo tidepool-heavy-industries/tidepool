@@ -262,6 +262,7 @@ async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
     let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
+    include.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../haskell/actors"));
     let preamble = format!(
         "{}\ntype ActorEffects = '[Notifications, Replies, Watches]\n",
         insert_preamble_imports(
@@ -274,6 +275,8 @@ async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
         &preamble,
         "Tidepool.Agent.Watch (Await, Settlement, Watches, awaitSettled)",
     );
+    let preamble =
+        insert_preamble_imports(&preamble, "Tidepool.Actors.Shoal (assignment, request)");
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().unwrap();
@@ -319,6 +322,15 @@ async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
         .unwrap();
     let policy = super::ResidentInteractivePolicy::local(actor);
 
+    let response = policy
+        .dispatch_boxed(invocation(
+            "probe <- request @Int me (assignment \"lookup-probe\" ())",
+            "create-response",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["status"], "committed", "{response}");
+
     let lookup = policy
         .dispatch_boxed(lookup_invocation(
             &[
@@ -338,9 +350,22 @@ async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
         output.contains("Response result -> Await (Settlement result)"),
         "{output}"
     );
+    let returned = output
+        .split("\n\n")
+        .find(|section| {
+            section
+                .lines()
+                .next()
+                .is_some_and(|line| line == ":: Response result -> Await (Settlement result)")
+        })
+        .and_then(|section| section.lines().nth(1))
+        .and_then(|line| line.trim().split_once(" :: "))
+        .map(|(name, _)| name)
+        .expect("type query must return a callable spelling");
 
+    let source = format!("({returned} probe :: Await (Settlement Int))");
     let next = policy
-        .dispatch_boxed(invocation("let picked = awaitSettled\npicked", "next-cell"))
+        .dispatch_boxed(invocation(&source, "next-cell"))
         .await
         .unwrap();
     assert_eq!(next["status"], "committed", "{next}");
