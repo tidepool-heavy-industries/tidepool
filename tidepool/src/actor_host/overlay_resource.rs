@@ -197,6 +197,7 @@ impl OverlayResourceLease {
         let work = storage.path.join("work");
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
+        let empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&upper)?));
         Ok(Self {
             storage,
             layers,
@@ -204,7 +205,7 @@ impl OverlayResourceLease {
             work,
             latest: Arc::new(Mutex::new(latest)),
             publication: PublicationState::Writable,
-            empty_upper: None,
+            empty_upper,
             claimed: false,
         })
     }
@@ -259,17 +260,36 @@ impl OverlayResourceLease {
                 "source changed during import",
             ));
         }
-        tidepool_node::copy_overlay_root_metadata(source, &self.layers[0].path)
+        // Mount targets live in the immutable base so Bubblewrap does not
+        // create them in the writable upper during view setup.
+        std::fs::File::create_new(self.layers[0].path.join(".git"))?;
+        std::fs::create_dir(self.layers[0].path.join(".shoal"))?;
+        tidepool_node::copy_overlay_root_metadata(source, &self.layers[0].path)?;
+        *self.latest.lock() = Some(OverlaySnapshot {
+            layers: self.layers.clone().into(),
+        });
+        Ok(())
     }
 
-    pub(super) fn prepare_git_pointer(&self, git_file: &Path) -> io::Result<()> {
-        std::fs::copy(git_file, self.upper.join(".git"))?;
-        std::fs::create_dir_all(self.upper.join(super::ACTOR_BUILD_TARGET))?;
+    pub(super) fn prepare_root_metadata(&mut self) -> io::Result<()> {
         let inherited = self
             .layers
             .last()
             .ok_or_else(|| io::Error::other("source has no base"))?;
-        tidepool_node::copy_overlay_root_metadata(&inherited.path, &self.upper)
+        tidepool_node::copy_overlay_root_metadata(&inherited.path, &self.upper)?;
+        self.empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&self.upper)?));
+        Ok(())
+    }
+
+    /// Bootstrap may update the upper directory's own timestamp while
+    /// installing nested mounts. Capture the baseline before actor code runs.
+    pub(super) fn record_bootstrap_upper(&mut self) -> io::Result<()> {
+        self.empty_upper = if std::fs::read_dir(&self.upper)?.next().is_none() {
+            Some(SourceStamp::from(&std::fs::symlink_metadata(&self.upper)?))
+        } else {
+            None
+        };
+        Ok(())
     }
 
     /// Reconcile only an already-started operation; never rotate a fresh view.
@@ -726,6 +746,7 @@ mod tests {
         let mut child =
             OverlayResourceLease::allocate_path(child_path.clone(), parent.latest_snapshot())
                 .unwrap();
+        assert!(child.unchanged_snapshot().unwrap().is_some());
         let (child_worker, child_view) = Worker::start(&mut child, &child_project);
         let parent = SharedOverlayResource::new(parent);
         let child = SharedOverlayResource::new(child);

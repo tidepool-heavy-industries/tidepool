@@ -162,7 +162,7 @@ fn shell(workspace: &PreparedWorkspace, script: &str) -> String {
         .unwrap();
     assert!(
         output.status.success(),
-        "{}",
+        "script {script:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
@@ -493,8 +493,29 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     let child = (custody.as_ref() as &dyn std::any::Any)
         .downcast_ref::<ActorWorkspaceCustody>()
         .unwrap();
-    assert!(child.inheritance_notice.is_none());
+    assert!(
+        child.inheritance_notice.is_none(),
+        "{:?}",
+        child.inheritance_notice
+    );
     let child = child.workspace.as_ref().unwrap();
+    {
+        let source = child.source.as_ref().unwrap().publication.lock().await;
+        let source = source.as_ref().unwrap();
+        assert!(source.unchanged_snapshot().unwrap().is_some());
+    }
+    assert!(child
+        .build
+        .as_ref()
+        .unwrap()
+        .publication
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .unchanged_snapshot()
+        .unwrap()
+        .is_some());
     assert_eq!(shell(child, "cat target/source"), "ordinary source");
     let layout = admission.native.as_ref().unwrap().layout.as_ref().unwrap();
     let allocated = |path: PathBuf| {

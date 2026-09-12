@@ -77,6 +77,7 @@ pub(super) struct PreparedWorkspace {
     pub(super) view: tidepool_node::MountNamespace,
     pub(super) source: Option<SharedOverlayResource>,
     pub(super) build: Option<SharedOverlayResource>,
+    source_preserved_mounts: Vec<PathBuf>,
     pub(super) owns_source: bool,
     pub(super) publication: Arc<tokio::sync::Mutex<WorkspacePublication>>,
 }
@@ -203,7 +204,10 @@ impl WorkspaceLayout {
             ));
         }
         let (base, snapshot) = source.imported_base()?;
-        let copied = match source_manifest(base, &[]) {
+        let copied = match source_manifest(
+            base,
+            &[std::ffi::OsStr::new(".git"), std::ffi::OsStr::new(".shoal")],
+        ) {
             Ok(manifest) => manifest,
             Err(error) => {
                 tracing::debug!(%error, "imported-base manifest unavailable; import will not be reused");
@@ -313,8 +317,12 @@ impl WorkspaceLayout {
                 .with_read_only_overlay(self.base_prompt.directory(), self.base_prompt.directory())
         })
         .map_err(io::Error::other)?;
-        if let Some(source) = &source {
+        if let Some(source) = &mut source {
+            source.prepare_root_metadata()?;
             boundary = source.mount(boundary, &visible).map_err(io::Error::other)?;
+            boundary = boundary
+                .with_read_only_overlay(host_path.join(".git"), visible.join(".git"))
+                .map_err(io::Error::other)?;
         }
         let canonical = self.source_root.join(".shoal");
         if canonical.is_dir() {
@@ -350,10 +358,14 @@ impl WorkspaceLayout {
         for resource in source.iter_mut().chain(build.iter_mut()) {
             resource.process_may_exist();
         }
+        let source_preserved_mounts = boundary.preserved_mounts_under(&visible);
         let view = boundary.prepare_view(
             BUBBLEWRAP_PROGRAM,
             std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT,
         )?;
+        for resource in source.iter_mut().chain(build.iter_mut()) {
+            resource.record_bootstrap_upper()?;
+        }
         if source.is_none() {
             if let Some(id) = &worktree {
                 self.worktrees
@@ -369,6 +381,7 @@ impl WorkspaceLayout {
             view,
             source: source.map(SharedOverlayResource::new),
             build: build.map(SharedOverlayResource::new),
+            source_preserved_mounts,
             owns_source: root || policy.workspace == tidepool_actor::WorkspaceAccess::WritableBound,
             publication: Arc::new(tokio::sync::Mutex::new(WorkspacePublication::default())),
         }))
@@ -525,13 +538,21 @@ impl NativeForkAdmission {
             };
             let capture_layout = layout.clone();
             let host_path = parent.workspace.host_path.clone();
+            let preserved = parent.workspace.source_preserved_mounts.clone();
             let captured = tokio::task::spawn_blocking(move || {
                 let captured = capture_layout
                     .worktrees
                     .git()
                     .try_capture()
                     .map(|_admission| {
-                        capture_layout.capture(&authorized, &namespace, &host_path, source, cache)
+                        capture_layout.capture(
+                            &authorized,
+                            &namespace,
+                            &host_path,
+                            &preserved,
+                            source,
+                            cache,
+                        )
                     });
                 (authorized, captured)
             })
@@ -637,6 +658,7 @@ impl WorkspaceLayout {
         authorized: &AuthorizedForkWorkspace,
         namespace: &tidepool_node::MountNamespace,
         source_path: &Path,
+        preserved: &[PathBuf],
         mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
         mut parent_build: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
     ) -> io::Result<SourceCapture> {
@@ -656,13 +678,12 @@ impl WorkspaceLayout {
             let parent_source = parent_source
                 .as_mut()
                 .ok_or_else(|| io::Error::other("source workspace retired"))?;
-            let preserved = [PathBuf::from(ACTOR_PROJECT_ROOT).join(".shoal")];
             let snapshot = match parent_source.unchanged_snapshot()? {
                 Some(snapshot) => Ok(snapshot),
                 None => match parent_source.publish(
                     namespace,
                     Path::new(ACTOR_PROJECT_ROOT),
-                    &preserved,
+                    preserved,
                 )? {
                     tidepool_node::OverlayRotationOutcome::Rotated => {
                         Ok(parent_source.latest_snapshot().ok_or_else(|| {
@@ -716,9 +737,6 @@ impl WorkspaceLayout {
                 }
             }
         };
-        if let Some(source) = &source {
-            source.prepare_git_pointer(&git.git_file())?;
-        }
         if let Some(build) = &mut parent_build {
             let build = build
                 .as_mut()
