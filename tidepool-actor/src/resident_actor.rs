@@ -28,8 +28,8 @@ use tokio::sync::mpsc;
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
 use crate::request::RequestRegistry;
 use crate::resident_workbench::{
-    ForkGroupBoundary, ResidentActorBoundary, ResidentActorStartupStep, ResidentKernelBoundary,
-    ResidentWorkbenchFragment, ResidentWorkbenchStep,
+    ForkGroupBoundary, PreparedCell, ResidentActorBoundary, ResidentActorStartupStep,
+    ResidentKernelBoundary, ResidentWorkbenchFragment, ResidentWorkbenchStep,
 };
 use crate::{
     ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
@@ -4378,9 +4378,11 @@ where
                 None,
             )));
         }
+        let mut prepared_cell = None;
+        let mut _cell_dependencies = None;
         let cell_check = if let Some(cell_source) = request.cell_source() {
-            let checked = match workbench
-                .check_cell(context.clone(), cell_source.to_owned())
+            let (checked, prepared) = match workbench
+                .prepare_cell(context.clone(), cell_source.to_owned())
                 .await
             {
                 Ok(checked) => checked,
@@ -4418,6 +4420,46 @@ where
                     .map(|item| item.source.clone())
                     .collect(),
             );
+            match prepared {
+                PreparedCell::Ready {
+                    items,
+                    dependencies,
+                } => {
+                    _cell_dependencies = Some(dependencies);
+                    prepared_cell = Some(items.into_iter().map(Some).collect::<Vec<_>>());
+                }
+                PreparedCell::Rejected { index, diagnostic } => {
+                    let items = (0..=index)
+                        .map(|prior| WorkbenchItemReceipt {
+                            index: prior,
+                            kind: None,
+                            span: None,
+                            source_items: Vec::new(),
+                            status: if prior == index {
+                                WorkbenchItemStatus::Rejected
+                            } else {
+                                WorkbenchItemStatus::NotRun
+                            },
+                            output: if prior == index {
+                                diagnostic.clone()
+                            } else {
+                                String::new()
+                            },
+                            warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
+                            operations: Vec::new(),
+                            terminal_transfer: None,
+                        })
+                        .collect();
+                    return Ok(KernelStep::Continue(workbench_response(
+                        WorkbenchRunStatus::Rejected,
+                        items,
+                        index,
+                        request.items.len(),
+                        Some(&checked),
+                    )));
+                }
+            }
             Some(checked)
         } else {
             None
@@ -4559,26 +4601,20 @@ where
                         )
                         .await
                 } else {
-                    let pins = cell_check
-                        .as_ref()
-                        .filter(|checked| {
-                            checked.items[index].verdict.kind
-                                == tidepool_runtime::session::TurnKind::Bind
-                        })
-                        .map(|checked| checked.pins_for_item(index))
-                        .transpose()
-                        .map_err(|source| {
-                            workbench_failure(
-                                &receipts,
-                                index,
-                                request.items.len(),
-                                ResidentActorWorkbenchError::Compile(source),
-                            )
-                        })?;
-                    match pins {
-                        Some(pins) => {
+                    match prepared_cell.as_mut() {
+                        Some(items) => {
+                            let prepared = items[index].take().ok_or_else(|| {
+                                workbench_failure(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    ResidentActorWorkbenchError::CompileInfrastructure(
+                                        "prepared cell item was already consumed".into(),
+                                    ),
+                                )
+                            })?;
                             workbench
-                                .begin_cell_item(context.clone(), block, pins)
+                                .begin_prepared_cell_item(context.clone(), block, prepared)
                                 .await
                         }
                         None => {

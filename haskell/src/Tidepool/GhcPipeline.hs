@@ -11,7 +11,7 @@ module Tidepool.GhcPipeline
 import GHC
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT)
-import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
+import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, addToHpt)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
@@ -39,7 +39,9 @@ import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import GHC.Platform (genericPlatform)
-import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
+import GHC.Utils.Outputable
+  ( renderWithContext, defaultSDocContext, ppr, SDocContext(..)
+  , mkUserStyle, NamePprCtx(..), QualifyName(..), Depth(..), PromotionTickContext(..) )
 import GHC.Types.Id (idName)
 import GHC.Core.Type
   ( mkInvisForAllTys
@@ -57,6 +59,7 @@ import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Tc.Types (TcGblEnv, tcg_binds, tcg_rdr_env, tcg_type_env)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
+import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
 import GHC.Types.Var (mkTyVarBinder, setVarName)
@@ -73,7 +76,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Data (Data, cast, gmapQ)
 import Tidepool.Binders (CheckedBinderPin(..))
-import Tidepool.TypePolicy (nominalHeadsOfType)
+import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
@@ -441,7 +444,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
               -- live on the Id in the typechecked type env; our CBOR drops
               -- them downstream (Translate.hs).
               capturedTypes = capturedTopLevelTypes tcGblEnv
-              checkedBinderPins = capturedCellBinderPins tcGblEnv
+              checkedBinderPins = capturedCellBinderPins hscEnv tcGblEnv
               -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
               -- the one-shot eval wrapper names @result@ while resident-turn
               -- templates use the scaffold-reserved @__result@.
@@ -1132,22 +1135,39 @@ capturedTopLevelTypes tcg = Map.fromList
 -- boundary: every occurrence of one alias carries the same zonked 'Id', and
 -- the map removes repeated occurrences without relying on source spelling for
 -- identity.
-capturedCellBinderPins :: TcGblEnv -> [CheckedBinderPin]
-capturedCellBinderPins tcg =
+capturedCellBinderPins :: HscEnv -> TcGblEnv -> [CheckedBinderPin]
+capturedCellBinderPins hsc tcg =
   [ CheckedBinderPin
       { checkedPinKey = occurrence
-      , checkedPinType = renderType (idType identifier)
-      , checkedPinHeads = nominalHeadsOfType (idType identifier)
+      , checkedPinType = renderCellPinType names stableType
+      , checkedPinHeads = nominalHeadsOfType stableType
       }
   | (occurrence, identifier) <- Map.toAscList unique
+  , let stableType = stabilizeEffectRows (idType identifier)
   ]
   where
+    names = mkNamePprCtx (PromTickCtx True True) (hsc_unit_env hsc) (tcg_rdr_env tcg)
     unique = Map.fromList
       [ (occurrence, identifier)
       | identifier <- collectDataIds (tcg_binds tcg)
       , let occurrence = occNameString (nameOccName (idName identifier))
       , "__tidepool_cell_pin_" `isPrefixOf` occurrence
       ]
+
+-- A cell's pins are compiled again after the declaration module is staged.
+-- Session types must retain their defining generation even when a newer
+-- declaration shadows the same occurrence name.
+renderCellPinType :: NamePprCtx -> Type -> String
+renderCellPinType originalNames = renderWithContext context . ppr
+  where
+    context = defaultSDocContext
+      { sdocStyle = mkUserStyle names AllTheWay }
+    names = originalNames
+      { queryQualifyName = \modu occurrence ->
+          case parseSessionModule (moduleNameString (moduleName modu)) of
+            Just _ -> NameQual (moduleName modu)
+            Nothing -> queryQualifyName originalNames modu occurrence
+      }
 
 -- Stop at an 'Id': descending through its type/name graph is both unnecessary
 -- and dramatically larger than the typechecked syntax tree that owns it.

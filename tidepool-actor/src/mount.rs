@@ -115,6 +115,26 @@ impl ActorCompileView {
     pub fn next_value_generation(&self) -> Generation {
         self.session.next_value_generation()
     }
+
+    #[must_use]
+    pub(crate) fn with_staged_library(
+        mut self,
+        module: tidepool_repr::SessionModule,
+        declared: &[tidepool_runtime::session::ExportItem],
+    ) -> Self {
+        self.session = self.session.with_staged_library(module, declared);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_staged_values(
+        mut self,
+        module: tidepool_repr::SessionModule,
+        names: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.session = self.session.with_staged_values(module, names);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

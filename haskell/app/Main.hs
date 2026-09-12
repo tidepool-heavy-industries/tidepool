@@ -533,7 +533,7 @@ runCellMode compiler args cellPath = do
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
           (requestOutDir args)
         moduleName' = fromMaybe "CellCheck" (extractModuleName checkedSource)
-        modulePath = outDir </> reverse (takeWhile (/= '.') (reverse moduleName')) ++ ".hs"
+        modulePath = outDir </> moduleName' ++ ".hs"
         scope = if hasSessionScope args
           then Just (scopeFromWorkerRequest args)
           else Nothing

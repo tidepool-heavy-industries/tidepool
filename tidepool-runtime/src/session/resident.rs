@@ -261,9 +261,30 @@ impl Drop for RootCustody {
     }
 }
 
+/// Retains exact binding identities while compiled work waits to execute.
+/// Drop uses the session's custody cleanup queue, including cancellation before
+/// prepared work is returned. Reclamation occurs on the next session entry or
+/// at teardown, as it does for dropped value custody.
+#[must_use]
+#[derive(Debug)]
+pub struct BindingLease {
+    retained: Vec<SessionVarId>,
+    cleanup: Arc<CustodyCleanup>,
+}
+
+impl Drop for BindingLease {
+    fn drop(&mut self) {
+        self.cleanup
+            .binding_leases
+            .lock()
+            .push(std::mem::take(&mut self.retained));
+    }
+}
+
 #[derive(Debug, Default)]
 struct CustodyCleanup {
     abandoned: Mutex<Vec<ValueHandle>>,
+    binding_leases: Mutex<Vec<Vec<SessionVarId>>>,
 }
 
 impl CustodyCleanup {
@@ -705,6 +726,20 @@ where
             .define_scoped_with_imports_in(scope, decls, imports)
     }
 
+    pub fn stage_declarations_in(
+        &self,
+        scope: ScopeId,
+        declarations: &[&str],
+        imports: &super::SourceImports,
+    ) -> Result<super::StagedDeclaration, SessionError> {
+        self.core
+            .stage_declarations_in(scope, declarations, imports)
+    }
+
+    pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
+        self.core.discard_staged_declaration(staged);
+    }
+
     /// The current decl-plane module name (`Tidepool.Session.Lib.G<g>`) a later
     /// turn imports to see accumulated declarations, or `None` before any decl.
     pub fn session_import_module(&self) -> Option<String> {
@@ -722,6 +757,11 @@ where
             .map(|m| m.module_name())
     }
 
+    #[must_use]
+    pub fn next_declaration_module(&self) -> Option<tidepool_repr::SessionModule> {
+        self.core.next_lib_module()
+    }
+
     /// The decl-plane include directory to add to a later turn's compile search
     /// path (so `import Lib.G<g>` resolves), or `None` with no decl plane.
     pub fn lib_include_dir(&self) -> Option<PathBuf> {
@@ -734,6 +774,28 @@ where
     /// (via a [`ResidentHole::Binding`]) materialize at the same `g`.
     pub fn val_gen(&self) -> Generation {
         self.core.val_gen()
+    }
+
+    /// Retain dependencies of prepared Core through the existing binding owner.
+    /// Reserved future bindings can be leased before they materialize.
+    pub fn lease_bindings(&mut self, referenced: &[tidepool_repr::VarId]) -> BindingLease {
+        self.settle_dropped_custody();
+        let retained = self
+            .core
+            .bindings_mut()
+            .acquire_leases(referenced.iter().copied().map(SessionVarId::from_var))
+            .into_iter()
+            .collect();
+        BindingLease {
+            retained,
+            cleanup: Arc::clone(&self.custody_cleanup),
+        }
+    }
+
+    /// Reserve identities for compiled cell values before releasing exclusive
+    /// session access. Aborted cells leave gaps; reserved identities are never reused.
+    pub fn reserve_value_generations_through(&mut self, generation: Generation) {
+        self.core.set_val_gen(generation);
     }
 
     /// The live `Val.G<g>` module names to inject (`--inject-val`) so a turn can
@@ -2756,6 +2818,13 @@ where
     /// Release affine roots whose custody was dropped while the machine was
     /// checked into a registry or otherwise unavailable to the token itself.
     fn settle_dropped_custody(&mut self) -> usize {
+        let leases = std::mem::take(&mut *self.custody_cleanup.binding_leases.lock());
+        let mut released = Vec::new();
+        for retained in leases {
+            released.extend(self.core.bindings_mut().release_leases(retained));
+        }
+        released.extend(self.core.bindings_mut().collect_observations());
+        let binding_count = self.core.release_binding_roots(released);
         let handles = self.custody_cleanup.take_all();
         let count = handles.len();
         if let Some(machine) = self.core.machine_mut() {
@@ -2763,7 +2832,7 @@ where
                 machine.discard_handle(handle);
             }
         }
-        count
+        count + binding_count
     }
 
     /// Classify a projected parked outcome into a [`ResidentOutcome`]:
@@ -2984,6 +3053,19 @@ mod tests {
             heads: Vec::new(),
             inputs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn abandoned_prepared_bindings_use_session_custody_cleanup() {
+        let mut session = bootstrap_trivial_session();
+        let lease = session.lease_bindings(&[tidepool_repr::VarId((0xFE << 56) | 42)]);
+        assert!(session.custody_cleanup.binding_leases.lock().is_empty());
+        // The preparing task can finish after its async caller has gone away.
+        // Dropping its unconsumed result must still hand cleanup to the session.
+        drop(lease);
+        assert_eq!(session.custody_cleanup.binding_leases.lock().len(), 1);
+        assert_eq!(session.settle_dropped_custody(), 0);
+        assert!(session.custody_cleanup.binding_leases.lock().is_empty());
     }
 
     #[test]

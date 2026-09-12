@@ -202,7 +202,7 @@ impl PersistentSession {
         self.release_binding_roots(expired);
     }
 
-    fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
+    pub(super) fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
         let mut released = Vec::new();
         for entry in entries {
             let slot = entry.value.root();
@@ -1037,6 +1037,11 @@ impl PersistentSession {
         self.lib.as_ref().and_then(|l| l.current_module_in(scope))
     }
 
+    #[must_use]
+    pub fn next_lib_module(&self) -> Option<SessionModule> {
+        self.lib.as_ref().map(SessionLib::next_module)
+    }
+
     /// Snapshot the exact source-side environment visible from `scope` so a
     /// caller can release its machine borrow before invoking GHC. Returns
     /// `None` for a dead scope or a session without a declaration/include
@@ -1077,6 +1082,7 @@ impl PersistentSession {
                 injected_values,
                 next_value_generation: self.val_gen.next(),
                 shadowing,
+                staged_hiding: Vec::new(),
             }
             .canonicalize(),
         )
@@ -1155,6 +1161,65 @@ impl PersistentSession {
     ) -> Result<Generation, SessionError> {
         self.commit_declarations_in(scope, decl_texts, external)
             .map(|receipt| receipt.generation)
+    }
+
+    /// Render and validate the exact next declaration module without changing
+    /// the live log, scope tip, recovery manifest, or value plane.
+    pub fn stage_declarations_in(
+        &self,
+        scope: ScopeId,
+        decl_texts: &[&str],
+        external: &SourceImports,
+    ) -> Result<super::StagedDeclaration, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let mut persistent_imports = external.clone();
+        persistent_imports.extend(&self.workbench_imports_in(scope));
+        let sources = decl_texts
+            .iter()
+            .map(|source| persistent_imports.declaration_source(source))
+            .collect::<Vec<_>>();
+        let source_refs = sources.iter().map(String::as_str).collect::<Vec<_>>();
+        #[allow(clippy::expect_used, reason = "decl plane present")]
+        let lib = self.lib.as_ref().expect("decl plane present");
+        let receipt = lib.declaration_receipt(&source_refs)?.ok_or_else(|| {
+            SessionError::Compile(crate::CompileError::ExtractFailed(
+                "cell declaration group unexpectedly contained no declarations".into(),
+            ))
+        })?;
+        let replaced_names = receipt
+            .items
+            .iter()
+            .flat_map(super::ExportItem::all_names)
+            .collect::<Vec<_>>();
+        let mut import_modules = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .filter(|(name, _)| {
+                !replaced_names
+                    .iter()
+                    .any(|replaced| replaced == &name.0.as_str())
+            })
+            .map(|(_, entry)| entry.module.module_name())
+            .collect::<Vec<_>>();
+        import_modules.sort();
+        import_modules.dedup();
+        lib.stage_batch_with_receipt_and_vals_in(
+            scope,
+            &source_refs,
+            decl_texts,
+            &receipt,
+            &import_modules,
+            &self.live_val_modules(),
+        )
+    }
+
+    pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
+        if let Some(lib) = &self.lib {
+            lib.discard_staged(staged);
+        }
     }
 
     /// Retract `name` from the decl plane (its binding migrated to the value

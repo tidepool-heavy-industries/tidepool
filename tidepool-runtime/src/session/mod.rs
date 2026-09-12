@@ -300,7 +300,21 @@ pub struct SessionLib {
     recovery_report: Option<DeclarationRecoveryReport>,
 }
 
+/// Exact declaration module prepared for cell compilation without advancing
+/// the live declaration log or scope tip.
+#[derive(Clone, Debug)]
+pub struct StagedDeclaration {
+    pub generation: Generation,
+    pub module: SessionModule,
+    pub receipt: DeclarationReceipt,
+}
+
 impl SessionLib {
+    #[must_use]
+    pub fn next_module(&self) -> SessionModule {
+        SessionModule::lib(self.log.generation().next())
+    }
+
     /// Open a session rooted at `root` (created if absent). `env` controls the
     /// generated modules' pragma/import surface; pass
     /// [`ModuleEnv::standalone_default`] for the pure Lane-A surface.
@@ -884,6 +898,65 @@ impl SessionLib {
             ));
         }
         Ok(gen)
+    }
+
+    pub(crate) fn stage_batch_with_receipt_and_vals_in(
+        &self,
+        scope: ScopeId,
+        decl_texts: &[&str],
+        workbench_import_sources: &[&str],
+        receipt: &DeclarationReceipt,
+        import_modules: &[String],
+        inject_modules: &[String],
+    ) -> Result<StagedDeclaration, SessionError> {
+        let sources = decl_texts
+            .iter()
+            .filter(|source| !source.trim().is_empty())
+            .map(|source| (*source).to_string())
+            .collect::<Vec<_>>();
+        let mut workbench_imports = SourceImports::new();
+        for source in workbench_import_sources {
+            workbench_imports.extend_declaration_source(source);
+        }
+        let mut log = self.log.clone();
+        let generation = log.push(DeclTurn {
+            sources,
+            workbench_imports,
+            items: receipt.items.clone(),
+            retracts: Vec::new(),
+            parent: (self.scope_tip(scope).0 > 0).then_some(self.scope_tip(scope)),
+        });
+        let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
+        self.write_module(&rendered)?;
+        if let Err(error) = self.validate_candidate(&rendered, inject_modules) {
+            self.discard_module_artifacts(rendered.module);
+            return Err(error);
+        }
+        Ok(StagedDeclaration {
+            generation,
+            module: rendered.module,
+            receipt: receipt.clone(),
+        })
+    }
+
+    pub(crate) fn discard_staged(&self, staged: &StagedDeclaration) {
+        if staged.generation == self.log.generation().next() {
+            self.discard_module_artifacts(staged.module);
+        }
+    }
+
+    /// Remove an unpublished module's source and session-local compiler products.
+    /// Shared compiler caches own their own content-based invalidation.
+    fn discard_module_artifacts(&self, module: SessionModule) {
+        let source = self.root.join(module.relative_hs_path());
+        for extension in ["hs", "hi", "dyn_hi", "o", "dyn_o", "hie"] {
+            let path = source.with_extension(extension);
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(path = %path.display(), %error, "could not remove unpublished declaration artifact");
+                }
+            }
+        }
     }
 
     /// Append `turn` as `scope`'s next turn: chains its `parent` from

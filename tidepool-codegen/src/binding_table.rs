@@ -151,10 +151,10 @@ pub struct BindingTable {
     tips: HashMap<ScopeId, BindingTip>,
     /// Names deliberately hidden by this scope's declaration plane.
     hidden: HashMap<ScopeId, HashSet<BindingName>>,
-    /// Number of live binding tips retaining each value root.
-    tip_leases: HashMap<SessionVarId, usize>,
-    /// Entries whose owning scope retired while a binding tip still leased
-    /// them. They leave `live` only when the final tip releases its lease.
+    /// Binding tips and prepared work retaining each value identity.
+    leases: HashMap<SessionVarId, usize>,
+    /// Entries whose owning scope retired while another owner still leased
+    /// them. They leave `live` when the final lease is released.
     retired_owners: HashSet<SessionVarId>,
     next_tip: u64,
     observations: HashMap<SessionVarId, ObservationBinding>,
@@ -172,7 +172,7 @@ impl Default for BindingTable {
             live: HashMap::new(),
             tips: HashMap::new(),
             hidden: HashMap::new(),
-            tip_leases: HashMap::new(),
+            leases: HashMap::new(),
             retired_owners: HashSet::new(),
             next_tip: 1,
             observations: HashMap::new(),
@@ -275,7 +275,7 @@ impl BindingTable {
             .observations
             .iter()
             .filter(|(id, observation)| {
-                observation.recent || self.tip_leases.get(id).copied().unwrap_or(0) > 0
+                observation.recent || self.leases.get(id).copied().unwrap_or(0) > 0
             })
             .map(|(id, _)| *id)
             .collect();
@@ -405,7 +405,7 @@ impl BindingTable {
     /// Returns the evicted entry (so the caller can read its [`RootSlot`]), or
     /// `None` if `id` was not live.
     pub fn remove_live(&mut self, id: SessionVarId) -> Option<BindingEntry> {
-        if self.tip_leases.get(&id).copied().unwrap_or(0) > 0 {
+        if self.leases.get(&id).copied().unwrap_or(0) > 0 {
             return None;
         }
         let entry = self.live.remove(&id)?;
@@ -441,7 +441,7 @@ impl BindingTable {
         self.current.remove(&scope);
         self.hidden.remove(&scope);
         for id in ids {
-            if self.tip_leases.get(&id).copied().unwrap_or(0) > 0 {
+            if self.leases.get(&id).copied().unwrap_or(0) > 0 {
                 self.retired_owners.insert(id);
             } else if let Some(entry) = self.live.remove(&id) {
                 released.push(entry);
@@ -468,18 +468,7 @@ impl BindingTable {
             .into_iter()
             .map(|(name, entry)| (name.clone(), entry.id))
             .collect();
-        let mut retained = HashSet::new();
-        let mut pending: Vec<_> = visible.values().copied().collect();
-        while let Some(id) = pending.pop() {
-            if retained.insert(id) {
-                if let Some(observation) = self.observations.get(&id) {
-                    pending.extend(observation.dependencies.iter().copied());
-                }
-            }
-        }
-        for id in &retained {
-            *self.tip_leases.entry(*id).or_default() += 1;
-        }
+        let retained = self.acquire_leases(visible.values().copied());
         let id = BindingTipId(self.next_tip);
         self.next_tip += 1;
         self.tips.insert(
@@ -503,14 +492,44 @@ impl BindingTable {
         let Some(tip) = self.tips.remove(&scope) else {
             return Vec::new();
         };
+        self.release_leases(tip.retained)
+    }
+
+    /// Lease exact binding identities, including identities reserved for future
+    /// materialization. Existing observation dependencies share the same lease.
+    pub fn acquire_leases(
+        &mut self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) -> HashSet<SessionVarId> {
+        let mut retained = HashSet::new();
+        let mut pending = ids.into_iter().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            if retained.insert(id) {
+                if let Some(observation) = self.observations.get(&id) {
+                    pending.extend(observation.dependencies.iter().copied());
+                }
+            }
+        }
+        for id in &retained {
+            *self.leases.entry(*id).or_default() += 1;
+        }
+        retained
+    }
+
+    /// Release a previously acquired set; the session owns deregistration of
+    /// the returned roots. Unmaterialized identities need no special cleanup.
+    pub fn release_leases(
+        &mut self,
+        retained: impl IntoIterator<Item = SessionVarId>,
+    ) -> Vec<BindingEntry> {
         let mut released = Vec::new();
-        for id in tip.retained {
-            let Some(count) = self.tip_leases.get_mut(&id) else {
+        for id in retained {
+            let Some(count) = self.leases.get_mut(&id) else {
                 continue;
             };
             *count -= 1;
             if *count == 0 {
-                self.tip_leases.remove(&id);
+                self.leases.remove(&id);
                 if self.retired_owners.remove(&id) {
                     if let Some(entry) = self.live.remove(&id) {
                         released.push(entry);
@@ -746,6 +765,53 @@ mod tests {
             // never-bound fixture entry reads as a flat-session binding.
             scope: ScopeId::ROOT,
         }
+    }
+
+    #[test]
+    fn prepared_dependencies_survive_expiry_and_release_after_cancellation() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut bindings = BindingTable::new();
+        let first = bindings.bind(entry("first", 1, (0xFE << 56) | 1, slot));
+        bindings.save_observation(first, &[], 1);
+        let future = SessionVarId::from_extract((0xFE << 56) | 2);
+        let lease = bindings.acquire_leases([first, future]);
+        assert_eq!(
+            bindings.bind(entry("future", 2, future.raw(), slot)),
+            future
+        );
+        bindings.save_observation(future, &[first.var()], 1);
+        let recent = bindings.bind(entry("recent", 3, (0xFE << 56) | 3, slot));
+        assert!(bindings.save_observation(recent, &[], 1).is_empty());
+        assert!(bindings.resolve("first").is_none());
+        assert!(bindings.resolve("future").is_none());
+        assert!(bindings.get(first).is_some());
+        assert!(bindings.get(future).is_some());
+        assert!(bindings.release_leases(lease).is_empty());
+        assert_eq!(bindings.collect_observations().len(), 2);
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings.leases.is_empty());
+    }
+
+    #[test]
+    fn prepared_and_fork_leases_share_scope_retirement() {
+        let mut pointer = std::ptr::null_mut();
+        let slot = fake_slot(&mut pointer);
+        let mut tree = ScopeTree::new();
+        let owner = tree.mint_child(ScopeId::ROOT).unwrap();
+        let child = tree.mint_child(owner).unwrap();
+        let mut bindings = BindingTable::new();
+        let value = bindings.bind_in(owner, entry("value", 1, (0xFE << 56) | 1, slot));
+        bindings.seed_scope(&tree, owner, child);
+        let prepared = bindings.acquire_leases([value]);
+        assert!(bindings.drain_scope(owner).is_empty());
+        assert!(bindings.drain_scope(child).is_empty());
+        assert!(bindings.get(value).is_some());
+        let released = bindings.release_leases(prepared);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].id, value);
+        assert!(bindings.is_empty());
+        assert!(bindings.leases.is_empty());
     }
 
     #[test]

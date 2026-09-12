@@ -962,7 +962,7 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
            => TidepoolCellPure (Eff effects value)\n\
          class TidepoolCellExpression value where {{ \
            __tidepoolCellExpression :: value -> Eff {effect_stack} () }}\n\
-         instance {{-# OVERLAPPING #-}} TidepoolCellExpression (Eff {effect_stack} value) where {{ \
+         instance {{-# OVERLAPPING #-}} (effects ~ {effect_stack}) => TidepoolCellExpression (Eff effects value) where {{ \
            __tidepoolCellExpression action = action >> pure () }}\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where {{ \
            __tidepoolCellExpression _ = pure () }}\n\

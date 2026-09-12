@@ -28,22 +28,17 @@ Stage 2 execution, field-specific continuations, and orchestration redesign are
 deferred. A first-release feature is complete only when its real hosted consumer
 passes, not when a neighboring unit test or a source-generation assertion passes.
 
-## Verification evidence
+## Architecture review and next repair
 
-## Next cell repair
+[Architecture findings](architecture-review.md) track the review against the real
+hosted consumer. Cell preparation now claims exact identities and leases compiled
+dependencies before execution; these are structural repairs to the recovered code.
 
-The recovered notebook patch is 942 lines, not only the visible prologue edit.
-It attempts to compile all staged statements against temporary declaration/value
-interfaces before executing. Review and adapt it against the combined source:
-`resident_actor.rs` already contains rejection changes, so the patch does not
-apply wholesale. The other runtime/actor hunks apply in a check-only trial.
-
-Do not copy `validate_declared_heads_in` unchanged: it identifies same-cell types
-by occurrence name, so a reference to an older qualified type with the same name
-would be mistaken for a new declaration. Preserve the complete nominal identity.
-The prologue patch alone also does not establish matching flags during staged
-execution: the existing declaration renderer hoists LANGUAGE text but not general
-OPTIONS_GHC. Complete the compiler-owned prologue path across both phases.
+Next: replace the remaining resident line/block parser, carry a single GHC-owned
+source/prologue plan through checking and execution, and preserve source-item
+receipts when checking rejects the cell. Do not adopt the recovered prologue patch
+unchanged: it moves pragma text but does not establish matching compiler flags
+across every phase.
 
 ## Completed checks
 
@@ -69,3 +64,21 @@ Rust checks use `CARGO_TARGET_DIR=/home/inanna/dev/tidepool-overlay-efficiency/t
 and this checkout's explicitly selected Haskell worker. The test wrapper owns
 the per-run compile daemon. Rerun affected cases after repairs rather than broad
 batteries.
+
+Structural cell preparation spot checks:
+
+- Hosted prefix/rejection/shadowing fixture: passed (1 test, 49s).
+- Hosted inferred-Response plus retained-old-type fixtures: passed (2 tests, 77s),
+  including a stored action used in a later cell and qualified Map imports.
+- Hosted terminal reply fixture: passed (68s alongside the earlier response
+  trial; the response trial used an incorrect explicit test row, corrected).
+- Hosted observation-lease suffix fixture: passed (1 test, 49s), after nine
+  preceding displays expire its dependency's public name.
+- Binding-owner lease/observation/retirement selection: 4 passed, 117 skipped.
+- Runtime compile-view and dropped-preparation cleanup selection: 4 passed,
+  157 skipped.
+- Worktree-local Haskell worker rebuilt; Rust formatting and diff check passed.
+
+The full fixture boundary, recipe check, final combined overlay tests, and broader
+notebook release checks remain outstanding. These focused checks do not close the
+release checklist.

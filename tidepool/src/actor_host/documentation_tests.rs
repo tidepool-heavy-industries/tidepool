@@ -146,6 +146,57 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 }
 
 #[tokio::test]
+async fn notebook_cell_preserves_old_types() {
+    let campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(root.as_ref(), include_str!("notebook_identity_original.hs")).await;
+    let shadowed = committed(root.as_ref(), include_str!("notebook_identity_shadowed.hs")).await;
+    let output = shadowed["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap();
+    assert!(
+        output.contains("OldVersion 1") && output.contains("NewVersion True"),
+        "{shadowed:?}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_cell_retains_observations_needed_by_its_suffix() {
+    let campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let initial = committed(root.as_ref(), "(42 :: Int)\n").await;
+    let saved = initial["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    let source = include_str!("notebook_lease_suffix.hs").replace("__SAVED__", saved);
+    let result = committed(root.as_ref(), &source).await;
+    assert_eq!(
+        result["items"].as_array().unwrap().last().unwrap()["output"],
+        "42",
+        "{result:?}"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_cell_infers_response_results() {
+    let campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let response = committed(root.as_ref(), include_str!("notebook_identity_response.hs")).await;
+    let output = response["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap();
+    assert!(output.contains("Pending"), "{response:?}");
+    committed(root.as_ref(), "later\npollResponse pending\n").await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn notebook_cell_reply_marks_its_tail_not_run() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();

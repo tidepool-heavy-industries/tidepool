@@ -18,10 +18,10 @@ use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     check_cell, classify_workbench_item, insert_preamble_imports, render_turn_compile_error,
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, GhciInputKind, InspectionQuery,
-    InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
-    TurnRequest, TurnResult, WorkbenchDiscovery, WorkbenchItem,
+    run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, DeclarationReceipt,
+    GhciInputKind, InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, SourceImports,
+    TurnClassification, TurnKind, TurnRequest, TurnResult, WorkbenchDiscovery, WorkbenchItem,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -68,6 +68,36 @@ fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> Strin
         "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = TidepoolAgentRef.internalAgentRef {} {}\n",
         context.actor.id.0, context.actor.incarnation.0
     )
+}
+
+// This header belongs to the trusted generated template, never authored cell text.
+fn cell_module_preamble(
+    preamble: &str,
+    module: &str,
+) -> Result<String, ResidentActorWorkbenchError> {
+    let mut replaced = false;
+    let rendered = preamble
+        .split_inclusive('\n')
+        .map(|line| {
+            if !replaced
+                && line.trim_start().starts_with("module ")
+                && line.trim_end().ends_with(" where")
+            {
+                replaced = true;
+                let newline = if line.ends_with('\n') { "\n" } else { "" };
+                format!("module {module} where{newline}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<String>();
+    if replaced {
+        Ok(rendered)
+    } else {
+        Err(ResidentActorWorkbenchError::CompileInfrastructure(
+            "resident cell preamble has no module declaration".into(),
+        ))
+    }
 }
 
 /// Trusted source environment supplied by actor deployment. The canonical
@@ -1843,11 +1873,11 @@ where
         )
     }
 
-    pub(crate) async fn check_cell(
+    pub(crate) async fn prepare_cell(
         &self,
         context: crate::ActorSessionContext,
         cell_source: String,
-    ) -> Result<CellCheck, ResidentActorWorkbenchError> {
+    ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
         let response = self.response.clone();
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
@@ -1860,6 +1890,11 @@ where
         .into();
         self.access
             .with_machine(context, move |session, context, _| {
+                let candidate_module = session.next_declaration_module().ok_or_else(|| {
+                    ResidentActorWorkbenchError::CompileInfrastructure(
+                        "resident cell session has no declaration plane".into(),
+                    )
+                })?;
                 source.preamble = match (response.as_ref(), request) {
                     (Some(response), Some(request)) => response.request_preamble(
                         &source.preamble,
@@ -1873,8 +1908,10 @@ where
                 source.preamble = actor_preamble(&source.preamble, context).into();
                 let compile_view = actor_compile_view(session, context, &source, &type_modules)?;
                 let prepared = source.prepare(&compile_view);
+                let check_preamble =
+                    cell_module_preamble(&prepared.preamble, &candidate_module.module_name())?;
                 let template = resident_cell_check_template(
-                    &prepared.preamble,
+                    &check_preamble,
                     &context.haskell_effects_alias,
                     &prepared.imports,
                 );
@@ -1883,14 +1920,35 @@ where
                     .iter()
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>();
-                check_cell(CellCheckRequest {
+                let checked = check_cell(CellCheckRequest {
                     cell_text: &cell_source,
                     template: &template,
                     include: &include,
                     session_root: compile_view.session_root(),
                     inject_modules: &prepared.injected,
                 })
-                .map_err(ResidentActorWorkbenchError::Compile)
+                .map_err(|error| {
+                    if classify_compile(&error).class == FailureClass::UserHaskell {
+                        ResidentActorWorkbenchError::Compile(error)
+                    } else {
+                        ResidentActorWorkbenchError::CompileInfrastructure(
+                            tidepool_runtime::session::render_cell_compile_error(
+                                &error,
+                                &cell_source,
+                            ),
+                        )
+                    }
+                })?;
+                let prepared = prepare_cell_in_session(
+                    session,
+                    context,
+                    &source,
+                    &context.haskell_effects_alias,
+                    &type_modules,
+                    &checked,
+                    compile_view,
+                )?;
+                Ok((checked, prepared))
             })
             .await
     }
@@ -1989,12 +2047,29 @@ where
             .await
     }
 
-    pub(crate) async fn begin_cell_item(
+    pub(crate) async fn begin_prepared_cell_item(
         &self,
         context: crate::ActorSessionContext,
         block: ParsedBlock,
-        pins: Vec<CheckedBinderPin>,
+        prepared: PreparedCellItem,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        let ready = match prepared.ready {
+            PreparedCellStep::Executable(ready) => ready,
+            PreparedCellStep::Declaration {
+                generation,
+                binders,
+            } => {
+                return Ok(ResidentWorkbenchStep::Committed {
+                    output: format!(
+                        "defined {} at generation {}",
+                        binders.join(", "),
+                        generation.0
+                    ),
+                    warnings: Vec::new(),
+                    installed_bindings: binders,
+                });
+            }
+        };
         let response = self.response.clone();
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
@@ -2007,7 +2082,18 @@ where
         .into();
         self.access
             .with_machine(context, move |session, context, _| {
-                begin_fragment(
+                turn_source.preamble = match (response.as_ref(), request) {
+                    (Some(response), Some(request)) => response.request_preamble(
+                        &turn_source.preamble,
+                        request,
+                        &context.haskell_effects_alias,
+                    ),
+                    (None, None) => turn_source.preamble.to_string(),
+                    _ => unreachable!("request workbench scope is constructed atomically"),
+                }
+                .into();
+                turn_source.preamble = actor_preamble(&turn_source.preamble, context).into();
+                begin_ready_block(
                     session,
                     context,
                     &turn_source,
@@ -2017,8 +2103,7 @@ where
                         type_modules: &type_modules,
                     },
                     block,
-                    GhciInputKind::Code,
-                    Some(&pins),
+                    ready,
                 )
             })
             .await
@@ -2189,13 +2274,28 @@ where
             return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
         }
     };
+    begin_ready_block(session, context, &source, scope, block, *compiled)
+}
+
+fn begin_ready_block<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    scope: RequestWorkbenchScope<'_>,
+    block: ParsedBlock,
+    compiled: ReadyBlock,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
     let ReadyBlock {
         result,
         generation,
         declaration_source,
         declaration_imports,
         observation,
-    } = *compiled;
+    } = compiled;
     match result {
         TurnResult::Decl(receipt) => {
             let result = match session.define_scoped_with_imports_in(
@@ -4969,9 +5069,197 @@ struct ReadyBlock {
     observation: Option<String>,
 }
 
+pub(crate) struct PreparedCellItem {
+    ready: PreparedCellStep,
+}
+
+enum PreparedCellStep {
+    Executable(ReadyBlock),
+    Declaration {
+        generation: tidepool_repr::Generation,
+        binders: Vec<String>,
+    },
+}
+
+pub(crate) enum PreparedCell {
+    Ready {
+        items: Vec<PreparedCellItem>,
+        dependencies: tidepool_runtime::session::resident::BindingLease,
+    },
+    Rejected {
+        index: usize,
+        diagnostic: String,
+    },
+}
+
 enum CompiledBlock {
     Ready(Box<ReadyBlock>),
     Rejected(String),
+}
+
+fn prepare_cell_in_session<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    effect_stack: &str,
+    type_modules: &[String],
+    checked: &CellCheck,
+    base_view: crate::ActorCompileView,
+) -> Result<PreparedCell, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let declaration = checked
+        .items
+        .iter()
+        .enumerate()
+        .find(|(_, item)| item.verdict.kind == TurnKind::Decl);
+    let declaration_imports = base_view.workbench_imports();
+    let staged = if let Some((_, item)) = declaration {
+        match session.stage_declarations_in(
+            context.placement.lexical_scope,
+            &[item.source.as_str()],
+            &declaration_imports,
+        ) {
+            Ok(staged) => Some(staged),
+            Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
+                return Ok(PreparedCell::Rejected {
+                    index: 0,
+                    diagnostic: classify_session(&error).message,
+                });
+            }
+            Err(error) => {
+                return Err(ResidentActorWorkbenchError::Resident(
+                    ResidentError::Session(error),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let mut compile_view = match &staged {
+        Some(staged) => base_view.with_staged_library(staged.module, &staged.receipt.items),
+        None => base_view,
+    };
+    let prepared = (|| {
+        let mut result = Vec::with_capacity(checked.items.len());
+        let mut staged_names = Vec::new();
+        for (index, item) in checked.items.iter().enumerate() {
+            if item.verdict.kind == TurnKind::Decl {
+                let staged = staged.as_ref().ok_or_else(|| {
+                    ResidentActorWorkbenchError::CompileInfrastructure(
+                        "cell declaration item has no staged declaration module".into(),
+                    )
+                })?;
+                result.push(PreparedCellItem {
+                    ready: PreparedCellStep::Executable(ReadyBlock {
+                        result: TurnResult::Decl(DeclarationReceipt {
+                            binders: item.verdict.binders.clone(),
+                            items: staged.receipt.items.clone(),
+                        }),
+                        generation: compile_view.next_value_generation(),
+                        declaration_source: item.source.clone(),
+                        declaration_imports: declaration_imports.clone(),
+                        observation: None,
+                    }),
+                });
+                continue;
+            }
+            let pins = (item.verdict.kind == TurnKind::Bind)
+                .then(|| checked.pins_for_item(index))
+                .transpose()
+                .map_err(ResidentActorWorkbenchError::Compile)?;
+            let block = ParsedBlock {
+                ordinal: index + 1,
+                total: checked.items.len(),
+                source: item.source.clone(),
+            };
+            let compiled = compile_block_in_view(
+                session,
+                context,
+                source,
+                effect_stack,
+                type_modules,
+                &block,
+                pins.as_deref(),
+                compile_view.clone(),
+                &staged_names,
+                Some(&item.verdict),
+            )?;
+            let ready = match compiled {
+                CompiledBlock::Ready(ready) => *ready,
+                CompiledBlock::Rejected(diagnostic) => {
+                    return Ok(PreparedCell::Rejected { index, diagnostic });
+                }
+            };
+            if let TurnResult::Bind { bound, .. } = &ready.result {
+                if !bound.is_empty() {
+                    let module =
+                        tidepool_repr::SessionModule::val(compile_view.next_value_generation());
+                    let expected = module.module_name();
+                    if bound.iter().any(|binder| binder.module != expected) {
+                        return Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
+                            "staged cell binder module does not match {expected}"
+                        )));
+                    }
+                    let names = bound
+                        .iter()
+                        .map(|binder| binder.name.clone())
+                        .collect::<Vec<_>>();
+                    staged_names.extend(names.iter().cloned());
+                    compile_view = compile_view.with_staged_values(module, names);
+                }
+            }
+            result.push(PreparedCellItem {
+                ready: PreparedCellStep::Executable(ready),
+            });
+        }
+        let referenced = result
+            .iter()
+            .flat_map(|item| match &item.ready {
+                PreparedCellStep::Executable(ReadyBlock {
+                    result: TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. },
+                    ..
+                }) => tidepool_repr::free_vars::free_vars(&compiled.expr),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let dependencies = session.lease_bindings(&referenced);
+        Ok(PreparedCell::Ready {
+            items: result,
+            dependencies,
+        })
+    })();
+    let prepared = prepared.and_then(|mut prepared| {
+        if let PreparedCell::Ready { items, .. } = &mut prepared {
+            if let (Some((_, declaration)), Some(staged)) = (declaration, staged.as_ref()) {
+                let generation = session
+                    .define_scoped_with_imports_in(
+                        context.placement.lexical_scope,
+                        &[declaration.source.as_str()],
+                        &declaration_imports,
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })?;
+                if generation != staged.generation {
+                    return Err(ResidentActorWorkbenchError::CompileInfrastructure(
+                        "cell declaration generation changed during exclusive preparation".into(),
+                    ));
+                }
+                items[0].ready = PreparedCellStep::Declaration {
+                    generation,
+                    binders: declaration.verdict.binders.clone(),
+                };
+            }
+        }
+        Ok(prepared)
+    });
+    if let Some(staged) = &staged {
+        session.discard_staged_declaration(staged);
+    }
+    prepared
 }
 
 fn actor_compile_view<H, O>(
@@ -4998,7 +5286,7 @@ where
 }
 
 fn compile_block<H, O>(
-    session: &ResidentSession<H, O>,
+    session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     effect_stack: &str,
@@ -5011,18 +5299,61 @@ where
     O: OutputSink + Sync,
 {
     let compile_view = actor_compile_view(session, context, source, type_modules)?;
+    compile_block_in_view(
+        session,
+        context,
+        source,
+        effect_stack,
+        type_modules,
+        block,
+        pins,
+        compile_view,
+        &[],
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_block_in_view<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    effect_stack: &str,
+    _type_modules: &[String],
+    block: &ParsedBlock,
+    pins: Option<&[CheckedBinderPin]>,
+    compile_view: crate::ActorCompileView,
+    staged_names: &[String],
+    checked_verdict: Option<&TurnClassification>,
+) -> Result<CompiledBlock, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let pin_imports = SourceImports::from_specs(
+        pins.into_iter()
+            .flatten()
+            .flat_map(|pin| &pin.heads)
+            .filter(|head| head.module.starts_with("Tidepool.Session."))
+            .map(|head| format!("qualified {}", head.module)),
+    );
+    let compile_view = compile_view.with_workbench_imports(&pin_imports);
     let prepared = source.prepare(&compile_view);
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let mut verdict = match classify_workbench_item(&block.source) {
-        Ok(WorkbenchItem::Declaration(_)) => Some(TurnClassification {
-            kind: TurnKind::Decl,
-            binders: Vec::new(),
-            items: Vec::new(),
-        }),
-        Ok(WorkbenchItem::Haskell(_) | WorkbenchItem::Command(_)) => None,
-        Err(diagnostic) => return Ok(CompiledBlock::Rejected(diagnostic)),
+    let mut verdict = if let Some(checked) = checked_verdict {
+        Some(checked.clone())
+    } else {
+        match classify_workbench_item(&block.source) {
+            Ok(WorkbenchItem::Declaration(_)) => Some(TurnClassification {
+                kind: TurnKind::Decl,
+                binders: Vec::new(),
+                items: Vec::new(),
+            }),
+            Ok(WorkbenchItem::Haskell(_) | WorkbenchItem::Command(_)) => None,
+            Err(diagnostic) => return Ok(CompiledBlock::Rejected(diagnostic)),
+        }
     };
     if verdict.is_none() {
         verdict = tidepool_runtime::session::classify_block(&[&block.source])
@@ -5036,7 +5367,9 @@ where
     {
         let mut name = format!("observation{}", compile_view.next_value_generation().0);
         let visible = session.workbench_bindings_in(context.placement.lexical_scope);
-        while visible.iter().any(|binding| binding.name == name) {
+        while visible.iter().any(|binding| binding.name == name)
+            || staged_names.iter().any(|staged| staged == &name)
+        {
             name.push('_');
         }
         let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
@@ -5085,6 +5418,15 @@ where
         verdict,
         target: None,
     };
+    // A failed worker may already have published a thin value interface.
+    // Its identity is never reused, whether compilation or execution succeeds.
+    if request
+        .verdict
+        .as_ref()
+        .is_none_or(|verdict| verdict.kind != TurnKind::Decl)
+    {
+        session.reserve_value_generations_through(compile_view.next_value_generation());
+    }
     let compiled = match pins {
         Some(pins) => run_turn_pinned(request, pins),
         None => run_turn(request),

@@ -133,6 +133,7 @@ pub struct SessionCompileView {
     pub(super) injected_values: Vec<SessionModule>,
     pub(super) next_value_generation: Generation,
     pub(super) shadowing: Vec<super::ExportItem>,
+    pub(super) staged_hiding: Vec<(SessionModule, Vec<super::ExportItem>)>,
 }
 
 impl SessionCompileView {
@@ -214,6 +215,69 @@ impl SessionCompileView {
         self.next_value_generation
     }
 
+    /// Use a declaration module that has been validated for a cell but is not
+    /// yet committed to the live declaration log.
+    #[must_use]
+    pub fn with_staged_library(
+        mut self,
+        module: SessionModule,
+        declared: &[super::ExportItem],
+    ) -> Self {
+        self.hide_staged_names(declared);
+        self.shadowing.extend_from_slice(declared);
+        self.library = Some(module);
+        self
+    }
+
+    /// Extend a preflight view with the thin value interface emitted by an
+    /// earlier statement in the same cell.
+    #[must_use]
+    pub fn with_staged_values(
+        mut self,
+        module: SessionModule,
+        names: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let names = names
+            .into_iter()
+            .map(|name| super::ExportItem::Value { name })
+            .collect::<Vec<_>>();
+        self.hide_staged_names(&names);
+        self.shadowing.extend(names);
+        self.visible_values.push(module);
+        self.injected_values.push(module);
+        self.next_value_generation = module.gen().next();
+        self.canonicalize()
+    }
+
+    // Shadow names in earlier staged interfaces without dropping other names
+    // exported by those modules or losing their qualified identity.
+    fn hide_staged_names(&mut self, names: &[super::ExportItem]) {
+        for module in self.library.iter().chain(self.visible_values.iter()) {
+            if let Some((_, hidden)) = self.staged_hiding.iter_mut().find(|(key, _)| key == module)
+            {
+                hidden.extend_from_slice(names);
+            } else {
+                self.staged_hiding.push((*module, names.to_vec()));
+            }
+        }
+    }
+
+    fn staged_import(&self, module: SessionModule) -> String {
+        let hidden = self
+            .staged_hiding
+            .iter()
+            .find(|(key, _)| *key == module)
+            .map(|(_, hidden)| hidden.iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let name = module.module_name();
+        let unqualified = super::render::hide_session_heads(&name, &hidden);
+        if hidden.is_empty() {
+            unqualified
+        } else {
+            format!("{unqualified}\nqualified {name}")
+        }
+    }
+
     /// External imports plus this scope's current declaration and value
     /// modules, ready for a turn template.
     #[must_use]
@@ -223,10 +287,10 @@ impl SessionCompileView {
             &self.shadow_preamble(&self.workbench_imports(external).declaration_prefix()),
         );
         if let Some(module) = self.library {
-            specs.extend_text(&module.module_name());
+            specs.extend_text(&self.staged_import(module));
         }
         for module in &self.visible_values {
-            specs.extend_text(&module.module_name());
+            specs.extend_text(&self.staged_import(*module));
         }
         specs.template_text()
     }
@@ -275,6 +339,7 @@ mod tests {
             ],
             next_value_generation: Generation(6),
             shadowing: Vec::new(),
+            staged_hiding: Vec::new(),
         }
         .canonicalize();
         let external = SourceImports::from_specs(["HarnessTypes (Decision (..))"]);
@@ -293,6 +358,36 @@ mod tests {
         let external = SourceImports::from_specs(["Tidepool.Duration (after)"]);
         assert_eq!(view.turn_imports(&external),
             "Tidepool.Duration ()\nData.Set qualified as Set\nTidepool.Session.Lib.G3\nTidepool.Session.Val.G5");
+    }
+
+    #[test]
+    fn staged_values_shadow_names_without_losing_old_module_identity() {
+        let view = SessionCompileView {
+            session: SessionId(4),
+            lexical_scope: ScopeId::ROOT,
+            root: PathBuf::from("/session"),
+            persistent_imports: SourceImports::default(),
+            library: None,
+            visible_values: vec![SessionModule::val(Generation(5))],
+            injected_values: vec![SessionModule::val(Generation(5))],
+            next_value_generation: Generation(6),
+            shadowing: Vec::new(),
+            staged_hiding: Vec::new(),
+        }
+        .with_staged_values(SessionModule::val(Generation(6)), ["answer".into()])
+        .with_staged_values(SessionModule::val(Generation(7)), ["answer".into()]);
+
+        assert_eq!(view.turn_imports(&SourceImports::default()),
+            "Tidepool.Session.Val.G5 hiding (answer)\nqualified Tidepool.Session.Val.G5\nTidepool.Session.Val.G6 hiding (answer)\nqualified Tidepool.Session.Val.G6\nTidepool.Session.Val.G7");
+        assert_eq!(
+            view.injected_module_names(),
+            [
+                "Tidepool.Session.Val.G5",
+                "Tidepool.Session.Val.G6",
+                "Tidepool.Session.Val.G7"
+            ]
+        );
+        assert_eq!(view.next_value_generation(), Generation(8));
     }
 
     #[test]

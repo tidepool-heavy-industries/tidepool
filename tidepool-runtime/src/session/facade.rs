@@ -237,6 +237,7 @@ mod tests {
             injected_values: Vec::new(),
             next_value_generation: Generation(1),
             shadowing: Vec::new(),
+            staged_hiding: Vec::new(),
         }
         .canonicalize();
         let surface = ExactExportSurface::new(
