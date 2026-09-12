@@ -12,13 +12,9 @@ coding actor. It is a syntax example, not a recommended task size. Replace the
 assignment with a bounded obligation against the actual shared scaffold.
 
 ```haskell
-let Right campaign = campaignLabel "api-guide"
-let Right wave = forkGroupLabel "checks"
-let Right checkBranch = branchLabel "hit-targets"
 let task = "Check the hit targets." :: Text
-worker <- unfold (batch campaign wave) (child (withEffort Medium (coding @Text checkBranch projectHead task)))
-let Right readyLabel = watchLabel "hit-targets-ready"
-ready <- watch readyLabel (awaitSettledFork worker)
+worker <- unfold (batch "api-guide" "checks") (child (withEffort Medium (coding @Text "hit-targets" projectHead task)))
+ready <- watch "hit-targets-ready" (awaitSettledFork worker)
 ```
 
 Return from that tool call so the child can start. End the model turn when
@@ -127,7 +123,7 @@ boundHead     :: WorktreeSeed
 snapshotDirty :: WorktreeSeed -> WorktreeSeed
 
 coding          :: BranchLabel -> WorktreeSeed -> input -> Branch CodingEffects input result
-scaffolding     :: BranchLabel -> WorktreeSeed -> input -> Branch ScaffoldEffects input result
+scaffolding     :: BranchLabel -> WorktreeSeed -> input -> Branch CodingEffects input result
 integrating     :: BranchLabel -> WorktreeSeed -> input -> Branch IntegrationEffects input result
 researching     :: BranchLabel -> WorktreeSeed -> input -> Branch ResearchEffects input result
 researchingLeaf :: BranchLabel -> WorktreeSeed -> input -> Branch ResearchLeafEffects input result
@@ -153,8 +149,9 @@ forkedLaunch   :: Forked result -> BranchReceipt
 ```
 
 Labels use nonempty lowercase letters/digits separated by single hyphens, at
-most 48 characters. The example uses validated literals; handle `Left` for
-externally supplied labels. `projectHead` selects the project checkout;
+most 48 characters. String literals validate when consumed and fail the current
+workbench unit when invalid; use the named constructors and handle `Left` for
+externally supplied text. `projectHead` selects the project checkout;
 `boundHead` requires an allocated bound checkout, not merely write access.
 Ordinary `unfold` inherits its working files and index, including untracked and
 ignored project files. Busy or unavailable capture falls back to the selected
@@ -248,16 +245,14 @@ responseWorktree  :: ResponseResult result -> WorktreeEvidence
 `awaitSettledFork`/`awaitSettled` retain dependency failures inside `Settlement`;
 `awaitFork`/`awaitResponse` propagate unavailability to the watch instead.
 `awaitAnyProgress` wakes when any input advances or closes; captured results retain
-input order, with unchanged inputs Pending. Applicative combinations still wait
-for all combined dependencies. Empty input is immediately ready with [].
-A terminal watch can be polled again without consuming it. A notice is not the
-result: poll its retained handle, and do not repeat the original work.
+input order, with unchanged inputs pending. Applicative combinations wait for all
+combined dependencies, and a terminal watch can be polled again.
 
 Lifecycle observations may print only `WatchReady`; the payload still exists.
-Bind the observation, then apply a projection or `inspectFull` to that saved
-value. `inspectFull expression` is standalone workbench display syntax, not an
-`Eff` action to compose with `>>=`. It does not poll again. `:info ResponseFailure` or
-`:info WatchFailure` supplies detailed constructors only when needed.
+Bind the observation, then inspect the saved value or project from it.
+`inspectFull` constructs a pure presentation value, so `inspectFull <$> action`
+is valid and does not repeat the action. Use `:info ResponseFailure` or
+`:info WatchFailure` when their constructors matter.
 
 ## Persistent typed coordination
 
@@ -403,50 +398,21 @@ usageByRequestedModel :: SwarmSnapshot -> [(Maybe Text, UsageTotal)]
 usageDelta :: SwarmSnapshot -> SwarmSnapshot -> UsageDelta
 ```
 
-A route installs one callback, returns promptly, and runs it on its owning actor
-when the typed dependency is ready. It accepts ordinary applicative `Await`
-values, including settlements and `awaitProgressAfter` observations. Known
-forwarding needs no model relay. For settlements handle both `ReplyAvailable`
-and `ReplyUnavailable`; for progress preserve its cursor, cumulative unresolved
-facts, closure and rejection. Rearming from the captured cursor waits for a newer
-observation; it does not turn progress into a lossless event stream.
-Callback effects have the owner's
-permissions; captured handles never confer someone else's authority. Keep callbacks
-short: submit work or install the next route, then return. `pollRoute` reports
-waiting, running, completed, or retained failure. A failed callback is not retried
-automatically because earlier effects may have happened. Callback failure sends
-one exceptional notification to its owner; ordinary successful routing does not
-wake the model. Inspect the failed route before deciding how to continue.
-`listRoutes` recovers this actor's retained handles, including routes created
-inside callbacks. It excludes other actors' routes and forgotten routes. Bind
-the list, then use `traverse pollRoute` to inspect the current states.
+A route runs one callback on its owning actor when an applicative `Await` becomes
+ready. Handle unavailable settlements and closed or rejected progress explicitly.
+Callbacks use the owner's permissions; captured handles grant no authority. Keep
+them short. A failed callback is retained and not retried because earlier effects
+may have happened. Use `listRoutes >>= traverse pollRoute` to recover their state.
 
-A callback can `reply` through a captured `Reply` owned by this same actor to
-finish its active obligation. This is a terminal transfer: later callback code
-does not run. Exact request ownership, cancellation and update fences still
-apply. Use this to deliver a completed chain directly to its original requester.
+A callback may `reply` through this actor's captured `Reply`; settlement is
+terminal, so later callback code does not run.
 
-Snapshots read existing observations without asking models to report. They include
-creation, supervision and context ancestry, actual/requested model, current requests, received
-request and coordination-event counts, compactions when known, and provider usage.
-Received coordination events count watch/cancellation notifications issued by the
-request owner; they do not claim to count all provider/TUI events or presentation.
-`shareObservation recipient scope` grants visibility into that exact actor's
-creation tree, including later workers. The caller must already observe that
-scope. Inspect `ObservationShareResult`: the recipient/scope may be unavailable,
-or sharing may be unauthorized. Sharing is observation-only; it never permits
-stopping workers or mutating their resources. Snapshots, host graph reads and
-`:status`/`:lineage` use the same visibility policy. Use `creationTree` to group
-planner-created work independently of supervision lifetimes.
-Usage totals deduplicate provider threads, choose a compatible cumulative
-observation across resumed actors, and expose unknown actors, inconsistent sources
-and partial coverage. `usageByRequestedModel` groups those totals by requested
-launch model; mixed/unspecified selections share `Nothing`. It is not attribution
-to the model billed for every response. `usageDelta before after` separates
-comparable increases, newly observed thread histories, lost observations and
-discontinuities. Newly visible history may predate the first snapshot.
-Token counts are observations, not a kill budget. Use ordinary TUI
-conversations to steer workers and request high-leverage decisions.
+Snapshots expose recorded ancestry, lifecycle, request, provider, and usage facts
+without asking a model. `shareObservation` extends visibility to one actor's
+creation tree; it does not grant control. Usage functions deduplicate provider
+threads and retain unknown, partial, or discontinuous observations. Requested
+model grouping is not billing attribution, and newly visible history may predate
+the first snapshot.
 
 The original workspace root has the swarm’s one authoritative `.shoal`. Copies
 in managed checkouts are candidate source, not per-worker configuration. Integrate

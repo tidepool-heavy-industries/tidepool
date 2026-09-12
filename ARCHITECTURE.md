@@ -31,13 +31,13 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 
 ## Surfaces
 
-The same compiled effect machine is driven from three different server shapes, each with its own request vocabulary — an effect *declaring* is not the same as a surface *servicing* it:
+The compiled effect machine is used by three live entry points:
 
-- **One-shot eval (`tidepool`)**: every `eval` call compiles and runs a fresh program to completion or a single suspension. Its `SessionEngine` request parser (`tidepool-runtime/src/session/engine.rs`) recognizes exactly two suspension shapes by constructor name: `AskWith` and `RunLLMTurnWith`. A program that suspends on anything else (`RunLLMTurnFreezeWith`, `ForkWith`, `ForkAllWith`) compiles and suspends the machine, then fails at request-extraction time — there is no handler behind those constructors on this surface.
-- **Resident REPL (`tidepool-repl`)**: a GHCi-style session (bindings, declarations, and heap persist across calls) built on the same `PersistentSession`/`SessionEngine` machinery, and it reuses the identical request parser — so it services the same `AskWith`/`RunLLMTurnWith` subset and rejects the same constructors as the one-shot surface.
-- **Resident harness (`tidepool-harness`)**: a session-TREE runtime, not a single session. `NodeTree`/`SessionRegistry` (`tidepool-harness/src/tree.rs`, `registry.rs`) own a set of nodes, each independently checked out, suspended, and resumed; a `pending_holes` map tracks every parked hole across the whole tree, keyed by session+hole. The harness's own turn engine classifies suspensions by constructor name across the FULL interposed vocabulary — `AskWith`, `AskUserWith`, `RunLLMTurnWith`, `RunLLMTurnFreezeWith`, `ForkWith`, `ForkAllWith`, `FinalizeWith` — and services all of them: freezing a context for later branching, forking one or many sub-answerers, finalizing a node. This is the only surface that runs an authored `State`/`render`/`loop` program indefinitely (the `selfharness` driver) rather than to a single completion.
+- **One-shot eval (`tidepool`)** compiles and runs a fresh program.
+- **Resident REPL (`tidepool-repl`)** preserves declarations, bindings, and the heap across calls.
+- **Shoal (`tidepool` actor host)** runs persistent typed actors. Haskell describes requests, watches, actor records, and context unfolds; Rust owns actor identity, scheduling, providers, worktrees, authority, and persistence.
 
-Effect *declaration* (what `standard_decls()` puts in the compiled row) is shared across all three surfaces; effect *servicing* is not — only the harness implements the fuller interposed control vocabulary.
+Each entry point services only the effects installed by its Rust interpreter. Declaring an effect in Haskell does not install runtime authority or a handler.
 
 ## Facade surface
 
@@ -66,8 +66,6 @@ The `tidepool` library crate re-exports the crates a Rust consumer needs to comp
 - **`tidepool-repl`**: GHCi-style resident-session MCP server (declarations and heap persist across calls). See "Surfaces" above for what it actually services.
 - **`tidepool-worktree`**: Managed git worktrees, a durable registry, and typed repository events. It includes one typed merge-and-abort primitive; conflict resolution and other git workflow remain authored policy.
 - **`tidepool-agent`**: Typed headless coding subagents — the containment boundary and the one place a coding backend (Codex today) is named. Spawns a subagent into a managed `tidepool-worktree` worktree.
-- **`tidepool-harness`**: Resident harness runtime — session-tree turn lifecycle, `SessionRegistry` checkout ownership, the selfharness driver that drives an authored `State`/`render`/`loop` program forever. See "Surfaces" above.
-- **`tidepool-web`**: Operator GUI (HTTP+SSE, Datastar/d3) for the self-iterating harness.
 - **`tidepool`**: Facade crate + the `tidepool` MCP server binary. See "Facade surface" above.
 - **`tidepool-testing`**: Internal utilities and property-based generators for testing the compiler and runtime — the primary consumer of `tidepool-optimize`.
 
@@ -77,4 +75,4 @@ The `tidepool` library crate re-exports the crates a Rust consumer needs to comp
 2.  `tidepool-runtime` invokes `tidepool-extract` to get CBOR.
 3.  `tidepool-repr` parses CBOR into `CoreExpr`.
 4.  `tidepool-codegen` emits Cranelift IR directly from that `CoreExpr` (no optimization pass), compiles to machine code, and constructs a `JitEffectMachine`, which owns and manages its own heap (built on `tidepool-heap`'s copying GC).
-5.  `vm.run()` executes the machine, yielding effects to `EffectHandler`s until completion — or, on the harness surface, until the machine parks in the multi-hole `SessionRegistry` for later resumption.
+5.  `vm.run()` executes the machine, yielding effects to `EffectHandler`s until completion or parking a resident continuation for later resumption.

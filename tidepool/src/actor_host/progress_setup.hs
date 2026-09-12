@@ -1,10 +1,10 @@
 data ProgressNote = ProgressNote Int (Int -> Int)
 worker <- startAgent (readonlyAgent "progress-worker")
-let Right progressRequestLabel = requestLabel "progress-request"
+let progressRequestLabel = "progress-request" :: RequestLabel
 (answer, updates) <- requestWithProgress @ProgressNote @Int worker (requestOptions progressRequestLabel (10 :: Int))
-let Right progressWatchLabel = watchLabel "progress-update"
+let progressWatchLabel = "progress-update" :: WatchLabel
 observedUpdate <- watch progressWatchLabel (awaitProgressAfter updates (ProgressCursor 0))
-let Right combinedLabel = watchLabel "progress-and-answer"
+let combinedLabel = "progress-and-answer" :: WatchLabel
 combined <- watch combinedLabel ((,) <$> awaitProgressAfter updates (ProgressCursor 0) <*> awaitValue answer)
-let Right secondLabel = watchLabel "second-cursor"
+let secondLabel = "second-cursor" :: WatchLabel
 secondCursor <- watch secondLabel (awaitProgressAfter updates (ProgressCursor 1))

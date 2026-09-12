@@ -1,5 +1,5 @@
 import qualified Tidepool.Actor as Actor
-let Right requestName = requestLabel "router-notification"
+let requestName = "router-notification" :: RequestLabel
 worker <- startAgent (readonlyAgent "progress-source")
 (response, progress) <- requestWithProgress @WorkProgress @Text worker (requestOptions requestName ("publish a decision" :: Text))
 owner <- actorContext

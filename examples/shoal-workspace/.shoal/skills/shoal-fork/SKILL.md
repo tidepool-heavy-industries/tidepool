@@ -16,7 +16,7 @@ Given your authored `task :: Task` and `source :: WorktreeSeed`, this launches a
 fresh Sol Medium owner returning `Outcome Candidate`, with a progress stream:
 
 ```haskell
-let Right workerLabel = branchLabel "implementation"
+let workerLabel = "implementation" :: BranchLabel
 let branch = withEffort Medium $ withContext (selected taskContext) $ solTaskFrom workerLabel source task
 (worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) branch)
 ```

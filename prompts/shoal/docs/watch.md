@@ -2,7 +2,7 @@ Polling is authoritative and never wakes an idle model by itself. A labeled
 `Watch a` retains one finite applicative observation.
 
 ```haskell
-let Right joinLabel = watchLabel "first-wave-results"
+let joinLabel = "first-wave-results" :: WatchLabel
 :{
 joined <- watch joinLabel $
   (,) <$> awaitSettledFork (fst workers) <*> awaitSettledFork (snd workers)
@@ -78,12 +78,12 @@ For a retained `lead :: AgentRef`, construct options with exported
 setup requests cumulative nonterminal findings (`[Text]`) and a final `Text` reply:
 
 ```haskell
-let Right progressRequestLabel = requestLabel "lead-findings"
+let progressRequestLabel = "lead-findings" :: RequestLabel
 let progressOptions = requestOptions progressRequestLabel ("Publish cumulative findings; then return your final report." :: Text)
 (leadResponse, leadProgress) <- requestWithProgress @[Text] @Text lead progressOptions
-let Right findingsLabel = watchLabel "lead-findings-ready"
+let findingsLabel = "lead-findings-ready" :: WatchLabel
 findingsReady <- watch findingsLabel (awaitProgressAfter leadProgress (ProgressCursor 0))
-let Right reportLabel = watchLabel "lead-report-ready"
+let reportLabel = "lead-report-ready" :: WatchLabel
 reportReady <- watch reportLabel (awaitSettled leadResponse)
 ```
 

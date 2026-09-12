@@ -8,23 +8,17 @@ writing uses this vocabulary; old spellings are migrated on contact and by
 staged sweeps (prose first, identifiers second, serialized fields last,
 with compatibility).
 
-## The three execution units
+## Execution units
 
-The old bare "window"/"turn"/"cycle" muddle collapses into exactly three
-units. Bare **"window" is banned everywhere** — the ONLY surviving use is
-**context window**, meaning the provider's token limit, nothing else.
+Use **context window** only for the provider's token limit.
 
 | Term | Means | Never means |
 |---|---|---|
 | **model round** | ONE provider request + reply | a whole interaction |
-| **agent session** | the possibly-multi-round interaction answering ONE typed request (was: "window", "cognition window", "answerer window", "residency") | the runtime machine state |
-| **loop iteration** | one authored `render`/`loop`/checkpoint pass (was: "cycle", "loop", sometimes "window") | a model round |
-
-Qualified companions: a **child agent session** (was "fork/branch child
-window"); a session is **reusable** (the per-loop answerer) or **one-shot**.
+| **machine session** | the resident JIT machine, heap, and bindings | a provider exchange |
 
 An **actor application** is the persistent supervised identity that may handle
-many agent sessions and model rounds. A root or child actor application becomes
+many typed requests and model rounds. A root or child actor application becomes
 idle when a model round ends; it is not completed by ending that round or by
 settling one reply.
 
@@ -45,13 +39,13 @@ settling one reply.
 | hylo boundary | say what crosses: the Haskell-expand / Rust-collapse split |
 | one-session collapse / pillar A/B/D / lane coordinates | name the mechanism plainly; project coordinates never leave `plans/` |
 | session (bare, for runtime state) | **machine session** (`ResidentSession` — the resident JIT machine + heap + bindings) |
-| context fork / self-fork (Shoal actor surface) | **context unfold** for the applicative expansion; **blocking answerer fork** for `Tidepool.Answerer.Fork` |
+| context fork / self-fork (Shoal actor surface) | **context unfold** for the applicative expansion |
 
 ## Reserved words (industry meaning only)
 
 - **context window** — provider token limit. Nothing else.
 - **turn / round** — one model exchange (prefer **model round**).
-- **session** — always qualified: **agent session** or **machine session**.
+- **session** — qualify the concrete session being discussed; use **machine session** for resident JIT state.
 - **journal** — append-only durable records.
 - **generation** — stale-writer fencing value.
 - **timeout interval** — elapsed-time limits (never "window").

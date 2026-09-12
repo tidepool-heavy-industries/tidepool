@@ -1,5 +1,5 @@
-let Right repairLabel = requestLabel "repair-candidate"
+let repairLabel = "repair-candidate" :: RequestLabel
 next <- repair repairLabel sessionInput (reviewInput sessionInput) ["preserve the product gate"]
 let Right revision = next
-let Right repairedLabel = watchLabel "repaired"
+let repairedLabel = "repaired" :: WatchLabel
 repaired <- watch repairedLabel (awaitSettled revision)

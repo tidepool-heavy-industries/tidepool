@@ -7117,7 +7117,7 @@ mod tests {
         let idle_send = tokio::spawn(async move {
             dispatch_haskell_script(
                 policy.as_ref(),
-                "Right idleReceipt <- notify idle \"idle notice\"",
+                "Right idleReceipt <- sendMessage idle \"idle notice\"",
             )
             .await
         });
@@ -8646,7 +8646,7 @@ mod tests {
 
         let folded = dispatch_haskell_script(
             scaffold_installation.policy.as_ref(),
-            ":{\nevidenceOf :: ResponseResult a -> (WorktreeReceipt, GitOid)\nevidenceOf result = case responseWorktree result of { WorktreeObserved receipt _ submission -> (receipt, case submittedHead submission of { OnBranch _ oid -> oid; Detached oid -> oid }); _ -> error \"expected worktree evidence\" }\nmergeObserved :: WorktreeHandle -> Text -> ResponseResult a -> Eff ScaffoldActorEffects (Either WorktreeError MergeOutcome)\nmergeObserved target message result = let (receipt, source) = evidenceOf result in tryMerge MergeRequest { mergeSourceHead = source, mergeSourceBranch = Just (branch receipt), mergeTargetWorktree = worktreeId target, mergeMessage = message }\n:}\nnestedObserved <- pollWatch nestedReady\nlet nestedResults = case nestedObserved of { WatchReady values -> values; _ -> error \"expected ready nested watch\" }\ntargetResult <- boundWorktree\nlet targetTree = case targetResult of { Right value -> value; Left _ -> error \"expected bound scaffold tree\" }\nmergeImplementation <- mergeObserved targetTree \"merge nested implementation\" (fst nestedResults)\nmergeVerification <- mergeObserved targetTree \"merge nested verification\" (snd nestedResults)\nrespond (ScaffoldReport \"folded\")",
+            ":{\nevidenceOf :: ResponseResult a -> (WorktreeReceipt, GitOid)\nevidenceOf result = case responseWorktree result of { WorktreeObserved receipt _ submission -> (receipt, case submittedHead submission of { OnBranch _ oid -> oid; Detached oid -> oid }); _ -> error \"expected worktree evidence\" }\nmergeObserved :: WorktreeHandle -> Text -> ResponseResult a -> Eff CodingEffects (Either WorktreeError MergeOutcome)\nmergeObserved target message result = let (receipt, source) = evidenceOf result in tryMerge MergeRequest { mergeSourceHead = source, mergeSourceBranch = Just (branch receipt), mergeTargetWorktree = worktreeId target, mergeMessage = message }\n:}\nnestedObserved <- pollWatch nestedReady\nlet nestedResults = case nestedObserved of { WatchReady values -> values; _ -> error \"expected ready nested watch\" }\ntargetResult <- boundWorktree\nlet targetTree = case targetResult of { Right value -> value; Left _ -> error \"expected bound scaffold tree\" }\nmergeImplementation <- mergeObserved targetTree \"merge nested implementation\" (fst nestedResults)\nmergeVerification <- mergeObserved targetTree \"merge nested verification\" (snd nestedResults)\nrespond (ScaffoldReport \"folded\")",
         )
         .await;
         assert_eq!(folded["status"], "replied", "{folded:?}");

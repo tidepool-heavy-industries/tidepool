@@ -117,7 +117,7 @@ reviewCycle failAfterAdmission automaticRepair = do
   void $ turn (checkActor reviewer) "respond (Produced (Repair (reviewInput sessionInput) []))"
   void $ turn owner "(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom workerLabel projectHead task))"
   worker <- activation
-  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nowner <- actorContext\nlet repairPolicy = OwnerRepairs\nlet Right repairLabel = requestLabel \"repair-produced-candidate\""
+  void $ turn owner "let onReview = keepWork :: WorkSink (Outcome ReviewDecision)\nlet onStopped = const Nothing :: Settlement (Outcome Candidate) -> Maybe Text\nowner <- actorContext\nlet repairPolicy = OwnerRepairs\nlet repairLabel = \"repair-produced-candidate\" :: RequestLabel"
   if automaticRepair then void $ turn owner "let repairPolicy = RetainedImplementer (forkedActor worker)" else pure ()
   if failAfterAdmission then do
     source <- readFile owner ".shoal/checks/review-continuation.hs"
@@ -171,7 +171,7 @@ reviewCycle failAfterAdmission automaticRepair = do
     integrated <- readFile owner "feature.txt"
     check "the owner integrates and checks the actual accepted repair" (integrated == "repaired feature\n")
   else pure ()
-  void $ turn owner "let Right blockedLabel = branchLabel \"blocked-implementation\"\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom blockedLabel projectHead task))"
+  void $ turn owner "let blockedLabel = \"blocked-implementation\"\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom blockedLabel projectHead task))"
   blocked <- activation
   script owner "review-continuation"
   void $ turn (checkActor blocked) "respond (Blocked \"needs owner decision\" [\"contract conflict\"] :: Outcome Candidate)"
@@ -179,7 +179,7 @@ reviewCycle failAfterAdmission automaticRepair = do
   check "a blocked candidate retains its receipt without starting review" ("(0," `Text.isInfixOf` stopped && "contract conflict" `Text.isInfixOf` stopped)
   void $ turn owner "R.finish reviewBox"
   if automaticRepair then do
-    void $ turn owner "let Right mismatchLabel = branchLabel \"mismatched-source\"\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom mismatchLabel projectHead task))"
+    void $ turn owner "let mismatchLabel = \"mismatched-source\"\n(worker, progress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @(Outcome Candidate) (solTaskFrom mismatchLabel projectHead task))"
     mismatched <- activation
     script owner "review-continuation"
     actual <- checkpoint (checkActor mismatched) "different.txt" "actual submitted source\n" "source evidence differs from claim"

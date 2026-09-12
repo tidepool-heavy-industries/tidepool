@@ -29,7 +29,7 @@ use the parent's reply authority.
 After submitting the repair above, the reviewer registers its own watch:
 
 ```haskell
-let Right repairReadyLabel = watchLabel "repair-ready"
+let repairReadyLabel = "repair-ready" :: WatchLabel
 repairReady <- watch repairReadyLabel (awaitResponse revision)
 ```
 

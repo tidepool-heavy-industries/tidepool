@@ -4,7 +4,7 @@ time, not bare integers. Given an existing `worker`, declared `Report`, and
 input `task`:
 
 ```haskell
-let Right label = requestLabel "bounded-review"
+let label = "bounded-review" :: RequestLabel
 :{
 options = withRequestDeadline (after (minutes 10))
         $ requestOptions label task

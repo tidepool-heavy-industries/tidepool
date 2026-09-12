@@ -18,7 +18,7 @@ or repairs; old sessionInput is not automatically rewritten. For within-contract
 findings, the existing repair relationship determines the action:
 
 ```haskell
-let Right repairLabel = requestLabel "repair-candidate"
+let repairLabel = "repair-candidate" :: RequestLabel
 next <- repair repairLabel current latest findings
 ```
 
@@ -27,7 +27,7 @@ can reuse you through reviewAgain. Right response means an available separate
 implementer has a repair request. Bind that response and watch it:
 
 ```haskell
-let Right repairedLabel = watchLabel "repair-ready"
+let repairedLabel = "repair-ready" :: WatchLabel
 repaired <- watch repairedLabel (awaitSettled response)
 ```
 

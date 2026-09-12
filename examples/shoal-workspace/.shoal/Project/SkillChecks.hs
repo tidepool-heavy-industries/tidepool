@@ -22,7 +22,7 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner ("let Right campaign = campaignLabel \"skills\"\nlet Right group = forkGroupLabel \"examples\"\nlet task = Task (batch campaign group) \".shoal/skills/shoal-fork/SKILL.md\" " <> literal baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
+  void $ turn owner ("let campaign = \"skills\" :: CampaignLabel\nlet group = \"examples\" :: ForkGroupLabel\nlet task = Task (batch campaign group) \".shoal/skills/shoal-fork/SKILL.md\" " <> literal baseline <> " \"Exercise skill examples\" \"Check actual resident composition\" [] \"Typed result and progress\" []\nlet source = projectHead")
   void $ example owner "shoal-fork" 0
   worker <- activation
   check "skill launches a fresh Sol Medium worker" (checkModel worker == Just "gpt-5.6-sol" && "Exercise skill examples" `Text.isInfixOf` checkContext worker)

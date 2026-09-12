@@ -20,6 +20,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Shoal
 import Tidepool.Effects.Core (AgentInspection, Forks, GitRef (..))
+import Tidepool.Worktree (renderGitOid, renderWorktreeError)
 import Project.Types
 import Shoal.Workspace (workspacePrompt)
 
@@ -29,12 +30,6 @@ projectPrompt :: Text -> Text
 projectPrompt name = case workspacePrompt name of
   Just body -> body
   Nothing -> error ("Missing configured project prompt: " <> Text.unpack name)
-
-named :: Text -> BranchLabel
-named = either (error . show) id . branchLabel
-
-shown :: Show value => value -> Text
-shown = Text.pack . show
 
 taskContext :: Task -> Text
 taskContext task = Text.unlines $
@@ -100,7 +95,7 @@ implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
   => Task -> Eff effects (Forked (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @WorkProgress @(Outcome Candidate) (solTask (named "implement") task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (solTask "implement" task)
 
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
@@ -110,7 +105,7 @@ reviewContext task = Text.unlines
   , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput task))
   , case repairOwner task of
       OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and reuse you. Do not queue work behind its pending delivery."
-      RetainedImplementer actor -> "Repair owner: retained implementer " <> shown (agentIdentity actor)
+      RetainedImplementer actor -> "Repair owner: retained implementer " <> Text.pack (show actor)
         <> ". Use repair for direct follow-up; keep your review pending while its separate request runs."
   ]
 
@@ -120,7 +115,7 @@ reviewCandidate
 reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
   withModel "gpt-5.6-sol" $ withEffort Medium $
-  coding (named "review") (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
+  coding "review" (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
 
 -- This project's automatic review edge selects the committed submission head.
 -- Other authored flows may deliberately select earlier artifacts instead.

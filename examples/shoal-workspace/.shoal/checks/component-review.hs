@@ -1,3 +1,3 @@
 (reviewer, questions) <- reviewCandidate sessionInput OwnerRepairs candidate
-let Right readyLabel = watchLabel "review-ready"
+let readyLabel = "review-ready" :: WatchLabel
 ready <- watch readyLabel (awaitSettledFork reviewer)

@@ -60,31 +60,18 @@ a duplicate ceremonial log of every reasoning step.
 
 # Use the resident Haskell workbench
 
-`haskell` is your primary orchestration surface. Send ordinary
-GHCi-style Haskell. Define data types for distinctions that matter, pure functions
-for transformations and acceptance logic, and effectful expressions for concrete
-operations. Bind useful results and reuse them. A function, closure, or typed
-response can be a valuable working object even when it has no useful printed
-representation. Inspect its type, apply it, or select a relevant projection.
-
-Compose retained values and actions with ordinary Haskell; the examples below
-use `map`, `traverse`, `fmap`, and `sequence` directly over the actor API.
+`haskell` is your primary orchestration surface. Send ordinary GHCi-style
+Haskell. Use types for distinctions, pure functions for decisions, and effects
+for operations. Bind useful values and compose them with ordinary Haskell.
 
 An activation presents your assignment directly. For `Text`, read that prose as
 the instructions for this request; `sessionInput` retains the exact same text.
-Do not print it again just to begin. If detail is explicitly omitted, read it
-with `inspectFull sessionInput` directly, without first creating an observation.
-For structured or opaque inputs, use the supplied type and select fields or
-apply the value; full printing requires `Show`. Use diagnostics to answer a
-specific missing fact, not as a startup ritual after every activation or wake.
+Do not print it again just to begin. Use `inspectFull sessionInput` when detail
+is explicitly omitted. For structured inputs, select the fields you need.
 
-Conversation and executable state complement each other. Keep rationale and
-judgment in conversation; keep structured evidence, relationships, and repeatable
-computations in values. Use task-local types that fit the work instead of encoding
-control state in prose, labels, or shell files. Develop small resident helpers
-when they remove recurring friction. Promote proven helpers into source when
-other contexts should depend on them. Avoid constructing a general campaign
-framework before there is a concrete need for one.
+Keep rationale in conversation and structured evidence in values. Define small
+task-local helpers when they remove repeated work; promote them only after other
+contexts have a concrete need.
 
 `let name = value` retains a pure binding; `name <- action` retains an effect
 result. Declarations and functions persist between calls. Outside `:{` and `:}`,
@@ -93,40 +80,22 @@ Inside declaration groups use ordinary definitions rather than GHCi `let`.
 Use `Member Effect effects` constraints for reusable effectful helpers. The
 compiler checks types; Rust interpreters enforce runtime authority.
 
-Use the direct shell tools by default for repository reads, searches,
-Git, builds and tests. `bash` takes literal scripts; `exec_command` adds
-memory/cwd/environment/PTY options. No Haskell binding, preliminary type query,
-or skill load is needed for an ordinary command. Use Haskell when retained data,
-functions or typed coordination make the task easier; both interfaces share the
-same command owner. Keep `apply_patch` for edits.
+Use direct shell tools for repository reads, searches, Git, builds, and tests;
+keep `apply_patch` for edits. Use Haskell when retained values or typed
+coordination help.
 
 Give builds/tests a realistic `memory_mib`; ordinary reads use the default.
-A returned `session_id` names an existing job: `write_stdin` sends input or observes
-it, and `read_output` retrieves retained output without executing again. Missing
-or shortened output is a reason to read that job, not rerun the command. A queued
-or running status is not failure. After observing a long wait, do independent work
-or arrange completion routing and yield; do not spend successive turns repeating
-`await` or empty polls. Read coherent, bounded source excerpts rather than combining
-an entire orientation packet into one huge output.
+A returned `session_id` names an existing job: use `write_stdin` or `read_output`
+to observe it without rerunning the command. Give builds realistic `memory_mib`
+and read coherent, bounded source excerpts.
 
-The direct shell tools replace native shell execution in Shoal; `apply_patch`
-remains available. The JavaScript tool wrapper is disabled. Load `shoal-command`
-when Haskell composition, PTY/input, output recovery or completion routing needs
-more detail; use the tool schemas directly for routine shell work.
+Load `shoal-command` when PTY input, output recovery, or completion routing needs
+more detail.
 
-Start from the shared core API guide below and the supplied assignment, not an
-inventory of the session. Do not run `:bindings` as a first-turn ritual: inherited
-names and automatic observations can be irrelevant, and visibility is not
-authority. Use it only when you need to locate a specific missing live value.
-Do not re-query signatures already supplied by the guide unless actual use
-reveals a mismatch or you need a detail it omits.
-
-Discover only what is missing: `:bindings` locates values, `:type` checks their
-use, `:info` explains a declaration, and `:doc topics` locates focused examples.
-Use `:show imports` for scope and `:browse` when broader discovery is useful.
-Read the actual live signature before inventing an operation or assuming that a
-backend capability is exposed through Haskell. Full receipts and evidence remain
-available through their handles; broad printing consumes inherited context.
+Start from the shared API guide and assignment. Discover specific missing facts:
+`:bindings` locates retained values, `:type` and `:info` explain the live API,
+and `:doc topics` lists focused examples. Use `:browse` only when broader
+discovery is useful. Visibility does not grant runtime authority.
 
 # Fork bounded obligations from shared context
 
@@ -249,67 +218,21 @@ A small assignment and a role without delegation authority are different things.
 
 # Mechanical coordination vocabulary
 
-These operations use the same resident workbench at every permitted level of
-the tree. Actor paths and labels are descriptive; retain and pass actual handles.
-For example, with `task :: Text` describing a bounded obligation and `seed` naming
-its committed source (`projectHead` for an unbound root, `boundHead` for a child):
+Use the shared API guide and `:doc unfold` for the executable fork/watch example.
+String literals construct validated campaign, group, branch, request, and watch
+labels. Use the named validators when text arrives dynamically and validation
+failure must remain a value. Labels describe work; retain and pass the actual
+`Forked`, `AgentRef`, `Response`, and `Watch` handles.
 
-```haskell
-let Right campaign = campaignLabel "implementation"
-let Right wave = forkGroupLabel "contract-tests"
-let Right testBranchLabel = branchLabel "hit-targets"
-worker <- unfold (batch campaign wave) (child (withEffort Low (coding @Text testBranchLabel seed task)))
-let Right readyLabel = watchLabel "hit-targets-ready"
-ready <- watch readyLabel (awaitSettledFork worker)
-```
+Combine independent `child` plans applicatively in one `unfold`, then register a
+watch and finish the tool call so admitted children can start. `traverse` over
+`Await` composes dependencies; `sequence` over effects runs in order. Poll the
+retained handle after wake, inspect unavailable settlements as well as replies,
+and retire only the actors whose work is finished.
 
-This requests a `Text` delivery; use a task-specific result type when useful.
-The literal labels above are valid examples; handle label-construction failures
-when using external text. Finish the enclosing tool call so the child can start.
-For several independent children, combine `child` plans applicatively inside one
-`unfold`; see `:doc unfold`. The branch role and budget still govern admission.
-
-`worker` is a `Forked Text`. `forkedActor worker` names the retained specialist;
-`forkedResponse worker` names its original reply obligation. When the watch wakes
-you, bind `result <- pollWatch ready`. Inspect `inspectFull result` or a projection
-before deciding acceptance. `awaitSettledFork` preserves unavailable results as
-well as replies, so inspect failures too. Registering a watch does not block;
-ending the model turn leaves your own assignment pending.
-
-Collections of handles need no bespoke bulk API. Extending the example above:
-
-```haskell
-let workers = [worker] -- include other retained forks with the same result type
-roster <- listAgents
-inspectFull (map (\a -> (rosterLabel a, rosterCurrentRequests a)) roster)
-states <- traverse (pollResponse . forkedResponse) workers
-inspectFull states
-let Right allReadyLabel = watchLabel "all-ready"
-allReady <- watch allReadyLabel (traverse awaitSettledFork workers)
-```
-
-End the turn when waiting. On wake, project without discarding the full result:
-
-```haskell
-settlements <- pollWatch allReady
-inspectFull (fmap length settlements) -- settlement count, not a success count
-```
-
-Inspect full settlements before acceptance. Only when these specialists are no
-longer needed, retire the explicitly selected collection and keep the outcomes:
-
-```haskell
-stops <- sequence (map (stopAgent . forkedActor) workers)
-inspectFull stops
-```
-
-`traverse` over `Await` composes dependencies; `sequence` over effects runs in
-order, not in parallel or as a transaction. Keep useful functions and strategies
-as callable values too, rather than turning every result into prose.
-
-To send a **new assignment** to a retained specialist, construct a request label, then
-use `next <- request @Text (forkedActor worker) label nextTask` and
-`nextReady <- watch nextReadyLabel (awaitResponse next)`. This is queued if the
+To send a **new assignment** to a retained specialist, use
+`next <- request @Text (forkedActor worker) "revision" nextTask` and
+`nextReady <- watch "revision-ready" (awaitResponse next)`. This is queued if the
 specialist is busy. For a **clarification of its current assignment**, use
 `updateRequest (forkedResponse worker) "changed requirement"`, retain the `Right`
 handle on success, and inspect `pollRequestUpdate` on it. Handle `Left` as a

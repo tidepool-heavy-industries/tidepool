@@ -61,8 +61,8 @@ providers, scheduling, resources, persistence, and argument parsing.
   generated bridge, and concrete interpreters.
 - `tidepool-model`, `tidepool-model-output`, `tidepool-agent`: provider-neutral
   conversations, model-output parsing, and coding-agent backends.
-- `tidepool-actor`: actor identity, lifecycle, mailbox, and actor sessions.
-- `tidepool-repl`, `tidepool-harness`, `tidepool-web`: user-facing runtimes.
+- `tidepool-actor`: actor identity, lifecycle, mailbox, and resident workbench.
+- `tidepool-repl` and `tidepool`: user-facing REPL and Shoal runtimes.
 - `tidepool-worktree`: managed coding checkouts and repository observation.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use

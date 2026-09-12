@@ -3,7 +3,7 @@ let delivery = LargeDelivery "candidate-9828" "tested-6c6c" (replicate 2000 "ver
 data Costly = Costly Int
 instance Show Costly where { show _ = error "custom Show failed before its first character" }
 worker <- startAgent (readonlyAgent "quiet-observation-worker")
-let Right label = requestLabel "quiet-observation"
+let label = "quiet-observation" :: RequestLabel
 answer <- request @LargeDelivery worker label delivery
-let Right readyLabel = watchLabel "large-delivery-ready"
+let readyLabel = "large-delivery-ready" :: WatchLabel
 ready <- watch readyLabel (awaitResponse answer)

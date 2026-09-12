@@ -1,3 +1,3 @@
 worker <- startAgent (readonlyAgent "notification-recipient")
-let Right requestName = requestLabel "notification-original"
+let requestName = "notification-original" :: RequestLabel
 answer <- request @Text worker requestName ("original assignment" :: Text)

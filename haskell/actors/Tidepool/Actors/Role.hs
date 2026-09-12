@@ -26,11 +26,9 @@ module Tidepool.Actors.Role
   , CoreEffects
   , ResearchEffects
   , ResearchLeafEffects
-  , ResearchCoordinatorEffects
   , CodingEffects
-  , ScaffoldEffects
   , IntegrationEffects
-  , RootEffects
+  , ActorEffects
   ) where
 
 import Tidepool.Agent.Reply (Replies)
@@ -58,8 +56,7 @@ import Tidepool.Effects.Row
 
 type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Commands, Actor]
 type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Commands, Actor]
-type ResearchEffects = ResearchCoordinatorEffects
-type ResearchCoordinatorEffects =
+type ResearchEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree, Notifications, Commands, Actor
    ]
@@ -68,12 +65,13 @@ type CodingEffects =
    , AgentInspection, AgentControl, BoundWorktree
    , WorktreeIntegration, Notifications, Commands, Actor
    ]
-type ScaffoldEffects = CodingEffects
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
    , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Commands, Actor
    ]
-type RootEffects =
+
+-- | Capabilities installed for the interactive root incarnation.
+type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation

@@ -4,10 +4,10 @@ start after the entire enclosing tool block finishes, including statements after
 bindings and the conversation through the actual tool result.
 
 ```haskell
-let Right campaign = campaignLabel "my-project"
-let Right wave = forkGroupLabel "first-wave"
-let Right domainLabel = branchLabel "domain"
-let Right consumerLabel = branchLabel "consumer-tests"
+let campaign = "my-project" :: CampaignLabel
+let wave = "first-wave" :: ForkGroupLabel
+let domainLabel = "domain" :: BranchLabel
+let consumerLabel = "consumer-tests" :: BranchLabel
 :{
 workers <- unfold (batch campaign wave) $
   (,) <$> child (coding @Report domainLabel projectHead domainPlan)

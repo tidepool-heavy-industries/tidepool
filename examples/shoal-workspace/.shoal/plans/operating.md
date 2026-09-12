@@ -92,10 +92,10 @@ decisions already incorporated. Both get that source; their obligations remain
 distinct. These bindings prepare branches and launch nothing:
 
 ```haskell
-let Right wave = forkGroupLabel "wave-2"
+let wave = "wave-2" :: ForkGroupLabel
 let group = subgroup wave
-let Right leftLabel = branchLabel "generator"
-let Right rightLabel = branchLabel "consumer"
+let leftLabel = "generator" :: BranchLabel
+let rightLabel = "consumer" :: BranchLabel
 let left = leftTask { taskGroup = group, taskSource = source }
 let right = rightTask { taskGroup = group, taskSource = source }
 let leftBranch = solTask leftLabel left :: Branch CodingEffects Task (Outcome Candidate)

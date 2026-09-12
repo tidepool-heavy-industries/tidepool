@@ -22,6 +22,7 @@ fn main() {
 
     emit_bundle(
         &stdlib_root,
+        "../haskell/lib/Tidepool",
         "Tidepool/",
         "EMBEDDED_STDLIB",
         "embedded_stdlib.rs",
@@ -37,13 +38,14 @@ fn main() {
         .expect("haskell/actors must exist relative to the tidepool crate");
     emit_bundle(
         &actor_root,
+        "../haskell/actors",
         "",
         "EMBEDDED_SHOAL_HASKELL",
         "embedded_shoal_haskell.rs",
     );
 }
 
-fn emit_bundle(root: &Path, prefix: &str, symbol: &str, output: &str) {
+fn emit_bundle(root: &Path, watch_root: &str, prefix: &str, symbol: &str, output: &str) {
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
     collect(root, root, &mut entries);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -53,7 +55,7 @@ fn emit_bundle(root: &Path, prefix: &str, symbol: &str, output: &str) {
          pub static {symbol}: &[(&str, &str)] = &[\n"
     );
     for (rel, abs) in &entries {
-        println!("cargo:rerun-if-changed={}", abs.display());
+        println!("cargo:rerun-if-changed={watch_root}/{rel}");
         #[allow(clippy::expect_used, reason = "read an embedded Haskell source")]
         let source = std::fs::read_to_string(abs).expect("read embedded source");
         out.push_str(&format!(
@@ -63,7 +65,7 @@ fn emit_bundle(root: &Path, prefix: &str, symbol: &str, output: &str) {
     }
     out.push_str("];\n");
     // Rerun if files are added/removed under the tree.
-    println!("cargo:rerun-if-changed={}", root.display());
+    println!("cargo:rerun-if-changed={watch_root}");
 
     #[allow(
         clippy::unwrap_used,

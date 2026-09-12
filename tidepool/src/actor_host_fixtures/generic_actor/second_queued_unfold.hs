@@ -1,5 +1,5 @@
-let Right reviewLabel = branchLabel "review"
-let Right laterWave = forkGroupLabel "later-wave"
+let reviewLabel = "review" :: BranchLabel
+let laterWave = "later-wave" :: ForkGroupLabel
 :{
 otherWorkers <- unfold (batch campaign laterWave) $
   (,) <$> child (withEffort Low (coding @Report domainLabel projectHead domainPlan))

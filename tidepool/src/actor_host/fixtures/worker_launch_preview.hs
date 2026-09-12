@@ -1,6 +1,6 @@
-let Right previewCampaign = campaignLabel "preview"
-let Right previewGroup = forkGroupLabel "workers"
-let Right previewLabel = branchLabel "selected"
+let previewCampaign = "preview" :: CampaignLabel
+let previewGroup = "workers" :: ForkGroupLabel
+let previewLabel = "selected" :: BranchLabel
 let previewTask = Task (batch previewCampaign previewGroup) "plans/component.md" "HEAD" "Implement one owned change" "Own the consumer boundary." ["feature.txt"] "Owning focused check passes" []
 let proposed = withBranchGuidance "Read the selected plan before editing." (solTask previewLabel previewTask)
 selectedPreview <- previewBranch proposed

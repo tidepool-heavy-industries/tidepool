@@ -17,9 +17,9 @@ These expressions run in the Sol root's resident environment:
 
 ```haskell
 import qualified Tidepool.Actor as Actor
-let Right campaign = campaignLabel "graph-relations"
-let Right leads = forkGroupLabel "leads"
-let Right contractLabel = branchLabel "contract"
+let campaign = "graph-relations" :: CampaignLabel
+let leads = "leads" :: ForkGroupLabel
+let contractLabel = "contract" :: BranchLabel
 let Right contractTask = component campaign RelationContract baseline
 before <- snapshot
 contractWork <- unfold (batch campaign leads) (childWithProgress @WorkProgress @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom contractLabel projectHead contractTask))))
@@ -42,8 +42,8 @@ The contract lead reads its plan and the supplied source. Bind `question ::
 DesignQuestion` with the concrete uncertainty, evidence, alternatives and consumers:
 
 ```haskell
-let Right designCampaign = campaignLabel "graph-contract"
-let Right slot = relationDesign designCampaign
+let designCampaign = "graph-contract" :: CampaignLabel
+let slot = relationDesign designCampaign
 (expert, designReady) <- consultDesign slot question
 ```
 
@@ -78,9 +78,9 @@ let Right projectionBase = component campaign RelationProjection acceptedContrac
 let Right controlsBase = component campaign RelationControls acceptedContract
 let projectionTask = withDecision contractDecision projectionBase
 let controlsTask = withDecision contractDecision controlsBase
-let Right products = forkGroupLabel "product"
-let Right projectionLabel = branchLabel "projection"
-let Right controlsLabel = branchLabel "controls"
+let products = "product" :: ForkGroupLabel
+let projectionLabel = "projection" :: BranchLabel
+let controlsLabel = "controls" :: BranchLabel
 (projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @WorkProgress @Delivery (componentLeadFrom projectionLabel projectHead projectionTask) <*> childWithProgress @WorkProgress @Delivery (componentLeadFrom controlsLabel projectHead controlsTask))
 ```
 
@@ -107,10 +107,10 @@ request and evidence to precise friction/artifact references, all as Text/[Text]
 
 ```haskell
 let packet = RsiInput source question [projectionEvidence, controlsEvidence] before later evidence
-let Right improvements = forkGroupLabel "requested-improvement"
-let Right improvementLabel = branchLabel "workspace-style"
+let improvements = "requested-improvement" :: ForkGroupLabel
+let improvementLabel = "workspace-style" :: BranchLabel
 improvement <- unfold (batch campaign improvements) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef source)) packet)))
-let Right improvementReadyLabel = watchLabel "improvement-ready"
+let improvementReadyLabel = "improvement-ready" :: WatchLabel
 improvementReady <- watch improvementReadyLabel (awaitSettledFork improvement)
 ```
 

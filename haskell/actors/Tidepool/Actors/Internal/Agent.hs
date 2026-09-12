@@ -52,7 +52,6 @@ module Tidepool.Actors.Internal.Agent
   , stopAgent
   , MessageRecipient
   , sendMessage
-  , notify
   , pollNotification
   , NotificationReceipt
   , NotificationError (..)
@@ -141,6 +140,9 @@ data AgentSpec
 data AgentRef = AgentRef
   (Actor.ActorRef AgentProtocol ())
   (Maybe WorktreeHandle)
+
+instance Show AgentRef where
+  show agent = "AgentRef " <> show (agentIdentity agent)
 
 -- | Repeatable lifecycle observation of one exact actor incarnation.
 data AgentState
@@ -690,11 +692,6 @@ sendMessage
   => recipient -> Text -> Eff effs (Either NotificationError NotificationReceipt)
 sendMessage recipient message =
   fmap (fmap NotificationReceipt) (send (NotifyWith (messageAddress recipient) message))
-
-notify
-  :: (MessageRecipient recipient, Member Notifications effs)
-  => recipient -> Text -> Eff effs (Either NotificationError NotificationReceipt)
-notify = sendMessage
 
 pollNotification :: Member Notifications effs => NotificationReceipt -> Eff effs (Either NotificationError NotificationState)
 pollNotification (NotificationReceipt receipt) = send (PollNotificationWith receipt)

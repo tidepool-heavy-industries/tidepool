@@ -38,9 +38,9 @@ runs as the router, not as the capturing model.
 
 ```haskell
 import qualified Tidepool.Actor as Actor
-let Right campaign = campaignLabel "current-goal"
-let Right owners = forkGroupLabel "owners"
-let Right label = branchLabel "component-a"
+let campaign = "current-goal" :: CampaignLabel
+let owners = "owners" :: ForkGroupLabel
+let label = "component-a" :: BranchLabel
 let group = batch campaign owners
 let task = Task group plan source outcome why paths criterion decisions
 work <- unfold group (childWithProgress @WorkProgress @Delivery (withContext (selected taskContext) (componentLeadFrom label projectHead task)))
@@ -75,7 +75,7 @@ repair. Its attempt settles; the lead's delivery stays open. After local repair 
 checks, bind `revised :: Candidate` and reuse the retained reviewer:
 
 ```haskell
-let Right retryLabel = requestLabel "review-repaired"
+let retryLabel = "review-repaired" :: RequestLabel
 (attempt, retryProgress) <- reviewAgain (forkedActor reviewer) retryLabel (ReviewTask task revised OwnerRepairs)
 retryWave <- followWork [("review", attempt, retryProgress)] (notifyWork owner (workMessage reviewSummary))
 ```

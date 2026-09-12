@@ -95,67 +95,107 @@ async fn published_unfold_watch_and_request_examples_execute() {
 }
 
 #[tokio::test]
-async fn base_prompt_coordination_example_executes() {
+async fn invalid_label_literals_fail_before_actor_side_effects() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
+
+    let invalid_watch = dispatch_haskell_script(
+        root.as_ref(),
+        "badWatch <- watch (\"Bad Label\" :: WatchLabel) (pure ())",
+    )
+    .await;
+    assert_eq!(invalid_watch["status"], "rejected", "{invalid_watch}");
+    assert!(
+        invalid_watch
+            .to_string()
+            .contains("InvalidWatchLabel \\\"Bad Label\\\""),
+        "{invalid_watch}"
+    );
+    for (source, expected) in [
+        (
+            "emptyWatch <- watch (\"\" :: WatchLabel) (pure ())",
+            "EmptyWatchLabel",
+        ),
+        (
+            concat!(
+                "longWatch <- watch ",
+                "(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" :: WatchLabel) ",
+                "(pure ())",
+            ),
+            "WatchLabelTooLong",
+        ),
+    ] {
+        let rejected = dispatch_haskell_script(root.as_ref(), source).await;
+        assert_eq!(rejected["status"], "rejected", "{rejected}");
+        assert!(rejected.to_string().contains(expected), "{rejected}");
+    }
+
+    let invalid_unfold = dispatch_haskell_script(
+        root.as_ref(),
+        concat!(
+            "badWorkers <- unfold (batch \"literal-errors\" \"branches\") $ ",
+            "(,) <$> child (researching @Text \"valid\" projectHead ()) ",
+            "<*> child (researching @Text \"Bad Label\" projectHead ())",
+        ),
+    )
+    .await;
+    assert_eq!(invalid_unfold["status"], "rejected", "{invalid_unfold}");
+    assert!(
+        invalid_unfold
+            .to_string()
+            .contains("InvalidKebabName \\\"Bad Label\\\""),
+        "{invalid_unfold}"
+    );
+    while let Ok(event) = campaign.deployments.try_recv() {
+        assert!(
+            !matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
+            "an invalid later branch launched an earlier child"
+        );
+    }
+
     committed(
         root.as_ref(),
-        "let seed = projectHead\nlet task = \"Check the hit targets.\" :: Text",
+        concat!(
+            "worker <- unfold (batch \"literal-errors\" \"request\") ",
+            "(child (researching @Text \"target\" projectHead ()))\n",
+            "before <- listAgents\n",
+            "let requestCount target rows = sum [length (rosterCurrentRequests row) | ",
+            "row <- rows, (rosterActorId row, rosterActorIncarnation row) == target]\n",
+            "let beforeRequests = requestCount (agentIdentity (forkedActor worker)) before",
+        ),
     )
     .await;
-    let mut snippets = examples(include_str!("../../../prompts/shoal/base.md"));
-    committed(root.as_ref(), snippets.next().unwrap()).await;
-    let mut binding = None;
-    let child = tokio::time::timeout(Duration::from_secs(120), async {
-        let mut child = None;
-        loop {
-            match campaign.deployments.recv().await {
-                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
-                    binding = Some(open_test_fork(&campaign, &installation));
-                    child = Some(installation)
-                }
-                Some(LocalResidentDeployment::SessionReady { activation }) => {
-                    assert!(activation.message.contains("Check the hit targets."));
-                    return child.unwrap();
-                }
-                Some(_) => {}
-                None => panic!("deployment stream closed"),
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(child.fork_effort, Some(tidepool_actor::ForkEffort::Low));
-    let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
-    assert_eq!(reply["status"], "replied", "{reply}");
-    assert_eq!(reply["items"][0]["output"], "Reply submitted.", "{reply}");
-    campaign.await_watch_ready().await;
-    committed(root.as_ref(), "result <- pollWatch ready").await;
-    let result = committed(root.as_ref(), "inspectFull result").await;
-    assert!(result["items"][0]["output"]
-        .as_str()
-        .unwrap()
-        .contains("Check the hit targets."));
-    let original = committed(
+    let rendered = committed(root.as_ref(), "inspectFull (forkedActor worker, worker)").await;
+    let rendered = rendered["items"][0]["output"].as_str().unwrap();
+    assert!(rendered.contains("AgentRef ("), "{rendered}");
+    assert!(
+        rendered.contains("Forked { actor = AgentRef ("),
+        "{rendered}"
+    );
+    assert!(rendered.contains("path = ActorPath"), "{rendered}");
+    assert!(rendered.contains("response = Response"), "{rendered}");
+    let invalid_request = dispatch_haskell_script(
         root.as_ref(),
-        "original <- pollResponse (forkedResponse worker)\ninspectFull original",
+        "badResponse <- request @Text (forkedActor worker) (\"Bad Label\" :: RequestLabel) ()",
     )
     .await;
-    assert!(original["items"][1]["output"]
-        .as_str()
-        .unwrap()
-        .starts_with("ResponseReady"));
-    let projected = committed(root.as_ref(), snippets.next().unwrap()).await;
-    assert!(projected["items"][4]["output"]
-        .as_str()
-        .unwrap()
-        .contains("ResponseReady"));
-    campaign.await_watch_ready().await;
-    let counted = committed(root.as_ref(), snippets.next().unwrap()).await;
-    assert_eq!(counted["items"][1]["output"], "WatchReady 1");
-    let stopped = committed(root.as_ref(), snippets.next().unwrap()).await;
-    assert_eq!(stopped["items"][1]["output"], "[StoppedNow]");
-    assert!(snippets.next().is_none(), "untested base-prompt example");
+    assert_eq!(invalid_request["status"], "rejected", "{invalid_request}");
+    assert!(
+        invalid_request
+            .to_string()
+            .contains("InvalidRequestLabel \\\"Bad Label\\\""),
+        "{invalid_request}"
+    );
+    let unchanged = committed(
+        root.as_ref(),
+        concat!(
+            "after <- listAgents\n",
+            "requestCount (agentIdentity (forkedActor worker)) after == beforeRequests",
+        ),
+    )
+    .await;
+    assert_eq!(unchanged["items"][1]["output"], "True", "{unchanged}");
+
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -346,7 +386,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "case sessionInput of BrokenPreview n -> respond (Report n)",
         ),
     ] {
-        committed(root.as_ref(), &format!("let Right previewLabel = requestLabel \"{label}\"\npreviewResponse <- request @Report worker previewLabel {input}")).await;
+        committed(root.as_ref(), &format!("let previewLabel = \"{label}\" :: RequestLabel\npreviewResponse <- request @Report worker previewLabel {input}")).await;
         let activation = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
                 match campaign.deployments.recv().await {
@@ -857,7 +897,7 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         committed(root.as_ref(), example(document)).await;
         committed(
             root.as_ref(),
-            "let Right readyLabel = watchLabel \"followup-result\"\nready <- watch readyLabel (awaitResponse response)",
+            "let readyLabel = \"followup-result\" :: WatchLabel\nready <- watch readyLabel (awaitResponse response)",
         )
         .await;
         let reply =
@@ -1484,7 +1524,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .unwrap();
     assert!(worker.actor.terminal().get().is_none());
     assert!(observer.actor.terminal().get().is_none());
-    committed(observer.policy.as_ref(), "let Right followupLabel = requestLabel \"peer-followup\"\nfollowup <- request @Text retainedPeer followupLabel (\"after planner retirement\" :: Text)").await;
+    committed(observer.policy.as_ref(), "let followupLabel = \"peer-followup\" :: RequestLabel\nfollowup <- request @Text retainedPeer followupLabel (\"after planner retirement\" :: Text)").await;
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if let Some(LocalResidentDeployment::SessionReady { activation }) =

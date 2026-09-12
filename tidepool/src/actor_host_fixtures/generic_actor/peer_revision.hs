@@ -1,4 +1,4 @@
 type RevisionReport = ReplyReport
 let interfaceWorker = fst nested
-let Right revisionLabel = requestLabel "peer-repair"
+let revisionLabel = "peer-repair" :: RequestLabel
 let revisionPlan = 10 :: Int

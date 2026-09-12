@@ -1,3 +1,3 @@
-let nestedGroup = case forkGroupLabel "nested" of { Right value -> value; Left _ -> error "fixture label" }
-let nestedLabel = case branchLabel "leaf" of { Right value -> value; Left _ -> error "fixture label" }
+let nestedGroup = "nested" :: ForkGroupLabel
+let nestedLabel = "leaf" :: BranchLabel
 nested <- unfold (subgroup nestedGroup) (child (researching @Text nestedLabel boundHead ()))

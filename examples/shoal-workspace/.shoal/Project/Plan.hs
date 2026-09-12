@@ -7,8 +7,6 @@ module Project.Plan
   ) where
 
 import Data.Text (Text)
-import qualified Data.Text as Text
-import Data.Bifunctor (first)
 import Tidepool.Actors.Shoal
 import Tidepool.Effects.Core (GitRef (..))
 import Project.Types
@@ -54,10 +52,7 @@ componentLeadFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects
 componentLeadFrom label source task = withEffort Medium $ withInstructions (projectPrompt "lead") $
   solTaskFrom label source task
 
-relationDesign :: CampaignLabel -> Either Text DesignSlot
-relationDesign campaign = do
-  group <- first (Text.pack . show) (forkGroupLabel "relation-design")
-  label <- first (Text.pack . show) (branchLabel "forest-semantics")
-  ready <- first (Text.pack . show) (watchLabel "relation-design-ready")
-  pure $ DesignSlot ".shoal/plans/graph/contract/design.md"
-    (batch campaign group) label ready "gpt-6-astra" Medium
+relationDesign :: CampaignLabel -> DesignSlot
+relationDesign campaign = DesignSlot ".shoal/plans/graph/contract/design.md"
+  (batch campaign "relation-design") "forest-semantics" "relation-design-ready"
+  "gpt-6-astra" Medium

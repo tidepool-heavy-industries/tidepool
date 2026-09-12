@@ -95,7 +95,7 @@ activationFacts :: ActorContextInfo -> (ActivationKind, Int)
 activationFacts context =
   (contextActivationKind context, contextEventWatermark context)
 
-currentTree :: Eff CodingActorEffects (Either WorktreeError WorktreeHandle)
+currentTree :: Eff CodingEffects (Either WorktreeError WorktreeHandle)
 currentTree = boundWorktree
 
 cancel :: Response result -> Eff '[Replies] CancelRequestOutcome
@@ -132,15 +132,8 @@ cleanupBlocked plan =
 
 safeHead
   :: WorktreeHandle
-  -> Eff CodingActorEffects (Either WorktreeError GitOid)
+  -> Eff CodingEffects (Either WorktreeError GitOid)
 safeHead = worktreeHead
-
-recentCampaignTrees :: ObservedAt -> ForkGroupHandle -> Eff ActorEffects (Either WorktreeError [WorktreeSummary])
-recentCampaignTrees timestamp group =
-  queryWorktrees $
-    createdAfter timestamp $
-      withinForkGroup group $
-        withWorktreePresence PresentWorktrees allManagedWorktrees
 
 launchFacts
   :: Forked result
@@ -194,7 +187,7 @@ recoverableUnfold group leaf =
 configuredBranch
   :: RequestDeadline
   -> BranchLabel
-  -> Branch ResearchActorEffects () Text
+  -> Branch ResearchEffects () Text
 configuredBranch deadline leaf =
   withEffort Medium $ withBranchDeadline deadline $
     withBranchGuidance "inspect only" $

@@ -154,9 +154,9 @@ put the requested result type at the dispatch site when the reply crosses
 workbench input units:
 
 ```haskell
-let Right reviewLabel = requestLabel "review-a"
-let Right testLabel = requestLabel "test-b"
-let Right bothLabel = watchLabel "review-and-test"
+let reviewLabel = "review-a" :: RequestLabel
+let testLabel = "test-b" :: RequestLabel
+let bothLabel = "review-and-test" :: WatchLabel
 reviewerA <- startAgent (codingAgent treeA)
 reviewerB <- startAgent (codingAgent treeB)
 
@@ -208,16 +208,14 @@ respond (ReviewReport findings)
 ```
 
 Submitting a type error rejects only that workbench input. Correct it in the
-same persistent agent session. Ending a model response without replying leaves
+same persistent actor application. Ending a model response without replying leaves
 the request pending. After a valid settlement, the same Codex identity handles
 the next request with its accumulated conversation and declarations intact.
 
 The low-level `Tidepool.Actor` API remains available through an intentional
 advanced import. It is not imported or re-exported by the default facade.
-The older blocking sub-answerer combinators now live under
-`Tidepool.Answerer.Fork`; they serve the noninteractive self-harness and are
-not the persistent-actor fork surface. Shoal context forks are described with
-the applicative `Tidepool.Actors.Unfold` API exported by the default facade.
+Shoal context forks use the applicative `Tidepool.Actors.Unfold` API exported
+by the default facade.
 
 ## shoal-repl development launch
 
@@ -239,11 +237,10 @@ bindings, plus its selected `sessionInput`; the parent keeps the original reply
 authority.
 
 ```haskell
-let Right campaign = campaignLabel "normalization"
-let Right wave = forkGroupLabel "implementation"
-let Right domain = branchLabel "domain"
-let Right ui = branchLabel "ui"
-
+let campaign = "normalization" :: CampaignLabel
+let wave = "implementation" :: ForkGroupLabel
+let domain = "domain" :: BranchLabel
+let ui = "ui" :: BranchLabel
 forks <- unfold (batch campaign wave) $
   (,) <$> child (coding @DomainReport domain projectHead domainTask)
       <*> child (coding @UiReport ui projectHead uiTask)
@@ -270,8 +267,8 @@ After launch, each child has its own lifecycle and may receive typed follow-up
 requests. Reattachment cancels forks whose completion was never acknowledged;
 already released children remain independently addressable.
 
-The standard role rows are `ResearchEffects`, `CodingEffects`,
-`ScaffoldEffects`, and `IntegrationEffects`. `narrowed` may select any
+The standard role rows are `ResearchEffects`, `ResearchLeafEffects`,
+`CodingEffects`, and `IntegrationEffects`. `narrowed` may select any
 compile-time subset of the caller's row. The requested row, semantic role,
 native command policy, workspace access, and descendant budget are projected
 into one effective runtime policy; Haskell membership expresses intent while
@@ -324,10 +321,10 @@ for a review without changes, `changeCommit` identifies the reviewed head.
 Admit the review branches:
 
 ```haskell
-let Right reviewCampaign = campaignLabel "review"
-let Right reviewWave = forkGroupLabel "owners"
-let Right domainReview = branchLabel "domain"
-let Right uiReview = branchLabel "ui"
+let reviewCampaign = "review" :: CampaignLabel
+let reviewWave = "owners" :: ForkGroupLabel
+let domainReview = "domain" :: BranchLabel
+let uiReview = "ui" :: BranchLabel
 let domainTask = "Review domain invariants. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
 let uiTask = "Review presentation behavior. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
 :{
@@ -340,8 +337,8 @@ forks <- unfold (batch reviewCampaign reviewWave) $
 Register the independent watches in the same block or a later call:
 
 ```haskell
-let Right domainReadyLabel = watchLabel "domain-ready"
-let Right uiReadyLabel = watchLabel "ui-ready"
+let domainReadyLabel = "domain-ready" :: WatchLabel
+let uiReadyLabel = "ui-ready" :: WatchLabel
 domainReady <- watch domainReadyLabel (awaitSettledFork (fst forks))
 uiReady <- watch uiReadyLabel (awaitSettledFork (snd forks))
 ```
@@ -362,7 +359,7 @@ before integrating. Retain the actor for a focused follow-up via
 depends on both results:
 
 ```haskell
-let Right pairReadyLabel = watchLabel "pair-ready"
+let pairReadyLabel = "pair-ready" :: WatchLabel
 pairReady <- watch pairReadyLabel $
   (,) <$> awaitSettledFork (fst forks) <*> awaitSettledFork (snd forks)
 ```
@@ -493,9 +490,6 @@ honest source-only root recovery. Workbench posture is visible in `:status`
 and typed roster observations. Supervisor lineage is recorded for every
 child; context-parent lineage is additionally recorded only for actual context
 forks.
-The old blocking answerer API remains available under
-`Tidepool.Answerer.Fork`; it is not Shoal actor unfold.
-
 Provider lineage, Haskell snapshot identity, fork group, exact effect row, and
 cached/uncached input counts read from the conversation's durable Codex rollout
 are observable. Each usage sample records its measurement scope, activation,

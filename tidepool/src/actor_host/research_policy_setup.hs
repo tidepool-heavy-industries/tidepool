@@ -1,4 +1,4 @@
-let campaign = case campaignLabel "research-policy" of { Right value -> value; Left _ -> error "fixture label" }
-let group = case forkGroupLabel "coordinator" of { Right value -> value; Left _ -> error "fixture label" }
-let leafLabel = case branchLabel "researcher" of { Right value -> value; Left _ -> error "fixture label" }
+let campaign = "research-policy" :: CampaignLabel
+let group = "coordinator" :: ForkGroupLabel
+let leafLabel = "researcher" :: BranchLabel
 worker <- unfold (batch campaign group) (child (researching @Text leafLabel projectHead ()))

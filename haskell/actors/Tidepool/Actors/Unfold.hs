@@ -13,9 +13,7 @@ module Tidepool.Actors.Unfold
   , ForkGroupLabel
   , BranchLabel
   , ActorPath
-  , renderActorPath
   , GitBranchPrefix
-  , renderGitBranchPrefix
   , actorGitBranchPrefix
   , ForkGroupPath
   , NameError (..)
@@ -46,8 +44,6 @@ module Tidepool.Actors.Unfold
   , RolePolicy
   , inspectionPolicy
   , codingPolicy
-  , scaffoldPolicy
-  , integrationPolicy
   , narrowed
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
@@ -98,6 +94,7 @@ module Tidepool.Actors.Unfold
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Char (isAsciiLower, isDigit)
 import Data.Kind (Type)
+import Data.String (IsString (fromString))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Prelude
@@ -125,7 +122,6 @@ import Tidepool.Actors.Role
   , KnownEffects
   , ResearchEffects
   , ResearchLeafEffects
-  , ScaffoldEffects
   , Subset
   , effectKeys
   , knownEffects
@@ -164,12 +160,6 @@ newtype GitBranchPrefix = GitBranchPrefix Text
 data ForkGroupPath = ForkGroupPath Bool Text
   deriving (Show, Eq)
 
-renderActorPath :: ActorPath -> Text
-renderActorPath (ActorPath path) = path
-
-renderGitBranchPrefix :: GitBranchPrefix -> Text
-renderGitBranchPrefix (GitBranchPrefix prefix) = prefix
-
 actorGitBranchPrefix :: ActorPath -> GitBranchPrefix
 actorGitBranchPrefix (ActorPath path) = GitBranchPrefix ("shoal/" <> path)
 
@@ -178,6 +168,18 @@ data NameError
   | InvalidKebabName Text
   | NameTooLong Text
   deriving (Show, Eq)
+
+instance IsString CampaignLabel where
+  fromString = validatedLiteral campaignLabel
+
+instance IsString ForkGroupLabel where
+  fromString = validatedLiteral forkGroupLabel
+
+instance IsString BranchLabel where
+  fromString = validatedLiteral branchLabel
+
+validatedLiteral :: (Text -> Either NameError label) -> String -> label
+validatedLiteral validate = either (error . show) id . validate . Text.pack
 
 campaignLabel :: Text -> Either NameError CampaignLabel
 campaignLabel = fmap CampaignLabel . validateSegment
@@ -387,12 +389,6 @@ inspectionPolicy = RolePolicy ResearchFork
 codingPolicy :: WorktreeSeed -> RolePolicy childEffects
 codingPolicy = RolePolicy CodingFork
 
-scaffoldPolicy :: WorktreeSeed -> RolePolicy childEffects
-scaffoldPolicy = RolePolicy ScaffoldingFork
-
-integrationPolicy :: WorktreeSeed -> RolePolicy childEffects
-integrationPolicy = RolePolicy IntegrationFork
-
 narrowed
   :: forall child result input
    . Effects child
@@ -433,7 +429,7 @@ scaffolding
    . BranchLabel
   -> WorktreeSeed
   -> input
-  -> Branch ScaffoldEffects input result
+  -> Branch CodingEffects input result
 scaffolding label seed input =
   Branch label ScaffoldingFork seed knownEffects defaultBranchOptions input
 
@@ -474,6 +470,12 @@ data Forked result = Forked
   , forkedResponse :: Response result
   , forkedLaunch :: BranchReceipt
   }
+
+instance Show (Forked result) where
+  show worker =
+    "Forked { actor = " <> show (forkedActor worker)
+      <> ", path = " <> show (allocatedPath (forkedLaunch worker))
+      <> ", response = " <> show (forkedResponse worker) <> " }"
 
 data ForkGroupHandle = ForkGroupHandle Int ActorPath
   deriving (Show, Eq)

@@ -1,6 +1,6 @@
 firstReview <- pollWatch ready
 inspectFull firstReview
-let Right againLabel = requestLabel "review-repaired"
+let againLabel = "review-repaired" :: RequestLabel
 (again, revisedQuestions) <- reviewAgain (forkedActor reviewer) againLabel (ReviewTask sessionInput revised OwnerRepairs)
-let Right againReadyLabel = watchLabel "repaired-review-ready"
+let againReadyLabel = "repaired-review-ready" :: WatchLabel
 againReady <- watch againReadyLabel (awaitSettled again)

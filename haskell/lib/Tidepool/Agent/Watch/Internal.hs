@@ -37,6 +37,7 @@ module Tidepool.Agent.Watch.Internal
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Char (isAsciiLower, isDigit)
+import Data.String (IsString (fromString))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Prelude
@@ -87,6 +88,9 @@ data WatchLabelError
   | InvalidWatchLabel Text
   | WatchLabelTooLong Text
   deriving (Show, Eq)
+
+instance IsString WatchLabel where
+  fromString = either (error . show) id . watchLabel . Text.pack
 
 watchLabel :: Text -> Either WatchLabelError WatchLabel
 watchLabel value

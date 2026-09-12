@@ -48,7 +48,7 @@ collaboration = do
   attention <- turn owner "observedQuestions <- pollProgress reviewQuestions\ninspectFull observedQuestions"
   check "coalesced attention retains both unresolved questions" ("semantics" `Text.isInfixOf` output attention && "product-gate" `Text.isInfixOf` output attention)
   -- A separate component progresses while this review awaits its owning decision.
-  void $ turn owner ("let Right otherLabel = branchLabel \"unrelated\"\nother <- unfold (taskGroup task) (child @Text (solTaskFrom otherLabel projectHead (task { taskSource = " <> literal source <> ", obligation = \"Inspect an independent consumer\" })))")
+  void $ turn owner ("let otherLabel = \"unrelated\"\nother <- unfold (taskGroup task) (child @Text (solTaskFrom otherLabel projectHead (task { taskSource = " <> literal source <> ", obligation = \"Inspect an independent consumer\" })))")
   other <- activation
   void $ turn (checkActor other) "respond (\"independent work finished\" :: Text)"
   independent <- turn owner "independent <- pollResponse (forkedResponse other)\ninspectFull independent"
@@ -88,5 +88,5 @@ collaboration = do
   check "an uncertain update cannot silently settle the waiting obligation" ("ReplyUpdatePending" `Text.isInfixOf` output fenced)
   -- Feed this same repaired, accepted and incorporated work into the next-wave improvement.
   void $ turn owner "let ResponseReady reviewAnswer = accepted\nlet Produced (Accepted reviewed) = responseValue reviewAnswer\nlet delivered = Produced (Delivered reviewed (candidateCommit (reviewedCandidate reviewed)) [\"checked combined feature and plan\"]) :: Delivery\ninspectFull (deliverySummary delivered)"
-  void $ turn owner "later <- snapshot\nlet packet = RsiInput (candidateCommit (reviewedCandidate reviewed)) \"Human requested: improve decision handoffs from this completed preparation.\" [] before later [deliverySummary delivered, \"Retained repair, accepted amendment, fresh consumer and failed/unconfirmed steering were exercised; no live usage measured.\"]\nlet Right improvementWave = forkGroupLabel \"requested-improvement\"\nlet Right improvementLabel = branchLabel \"workspace-style\"\nimprovement <- unfold (batch campaign improvementWave) (child (rsiBranch improvementLabel (atRef (GitRef (rsiSource packet))) packet))"
+  void $ turn owner "later <- snapshot\nlet packet = RsiInput (candidateCommit (reviewedCandidate reviewed)) \"Human requested: improve decision handoffs from this completed preparation.\" [] before later [deliverySummary delivered, \"Retained repair, accepted amendment, fresh consumer and failed/unconfirmed steering were exercised; no live usage measured.\"]\nlet improvementWave = \"requested-improvement\" :: ForkGroupLabel\nlet improvementLabel = \"workspace-style\" :: BranchLabel\nimprovement <- unfold (batch campaign improvementWave) (child (rsiBranch improvementLabel (atRef (GitRef (rsiSource packet))) packet))"
   checkImprovement owner

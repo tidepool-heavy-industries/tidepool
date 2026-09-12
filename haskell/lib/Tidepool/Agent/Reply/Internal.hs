@@ -55,6 +55,7 @@ module Tidepool.Agent.Reply.Internal
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Char (isAsciiLower, isDigit)
 import Data.Kind (Type)
+import Data.String (IsString (fromString))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Void (Void)
@@ -80,6 +81,9 @@ data RequestLabelError
   | InvalidRequestLabel Text
   | RequestLabelTooLong Text
   deriving (Show, Eq)
+
+instance IsString RequestLabel where
+  fromString = either (error . show) id . requestLabel . Text.pack
 
 requestLabel :: Text -> Either RequestLabelError RequestLabel
 requestLabel value

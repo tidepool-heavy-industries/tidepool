@@ -458,8 +458,11 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     let activation = custody_activation(&mut campaign.deployments).await;
     assert_eq!(activation.id.actor(), leaf.actor.identity());
     custody_assert_request(installed[0].policy.as_ref(), "nested", &activation).await;
-    let watch = tests::dispatch_haskell_script(installed[0].policy.as_ref(),
-        "let Right readyLabel = watchLabel \"custody-leaf-ready\"\nleafReady <- watch readyLabel (awaitFork nested)").await;
+    let watch = tests::dispatch_haskell_script(
+        installed[0].policy.as_ref(),
+        "let readyLabel = \"custody-leaf-ready\" :: WatchLabel\nleafReady <- watch readyLabel (awaitFork nested)",
+    )
+    .await;
     assert_eq!(watch["status"], "committed", "{watch:?}");
     let reply =
         tests::dispatch_haskell_script(leaf.policy.as_ref(), "respond (sessionInput :: Text)")
