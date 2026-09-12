@@ -137,10 +137,6 @@ enum OverlayResourceState {
 #[derive(Debug)]
 enum PublicationState {
     Writable,
-    NeedsRecord {
-        bytes: Vec<u8>,
-        snapshot: OverlaySnapshot,
-    },
     Unconfirmed(Box<PendingRotation>),
 }
 
@@ -151,37 +147,6 @@ struct PendingRotation {
     upper: PathBuf,
     work: PathBuf,
     frozen: Vec<OverlayLayer>,
-    bytes: Vec<u8>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-struct ViewRecord {
-    version: u32,
-    layers: Vec<PathBuf>,
-    upper: PathBuf,
-    work: PathBuf,
-    warm: bool,
-}
-
-impl ViewRecord {
-    fn new(layers: &[OverlayLayer], upper: &Path, work: &Path, warm: bool) -> Self {
-        Self {
-            version: 1,
-            layers: layers.iter().map(|layer| layer.path.clone()).collect(),
-            upper: upper.to_owned(),
-            work: work.to_owned(),
-            warm,
-        }
-    }
-}
-
-fn encode_view(
-    layers: &[OverlayLayer],
-    upper: &Path,
-    work: &Path,
-    warm: bool,
-) -> io::Result<Vec<u8>> {
-    serde_json::to_vec(&ViewRecord::new(layers, upper, work, warm)).map_err(io::Error::other)
 }
 
 impl OverlayResourceLease {
@@ -232,11 +197,6 @@ impl OverlayResourceLease {
         let work = storage.path.join("work");
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
-        // Persist dependency paths before any process can acquire these mounts.
-        // This is a new resource-local format; existing unmanifested resources
-        // remain retained and cannot be adopted by exclusive allocation.
-        let bytes = encode_view(&layers, &upper, &work, latest.is_some())?;
-        tidepool_atomic_write::write_durable(&storage.path.join("view.json"), &bytes)?;
         Ok(Self {
             storage,
             layers,
@@ -247,11 +207,6 @@ impl OverlayResourceLease {
             empty_upper: None,
             claimed: false,
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn path(&self) -> &Path {
-        &self.storage.path
     }
 
     pub(super) fn imported_base(&self) -> io::Result<(&Path, OverlaySnapshot)> {
@@ -321,7 +276,6 @@ impl OverlayResourceLease {
     pub(super) fn settle_pending(&mut self) -> io::Result<()> {
         match &self.publication {
             PublicationState::Writable => Ok(()),
-            PublicationState::NeedsRecord { .. } => self.record_publication(),
             PublicationState::Unconfirmed(pending) => {
                 let outcome = pending.recovery.reconcile();
                 if let OverlayRotationOutcome::Unconfirmed(detail) = &outcome {
@@ -405,10 +359,6 @@ impl OverlayResourceLease {
         target: &Path,
         preserved_mounts: &[PathBuf],
     ) -> io::Result<OverlayRotationOutcome> {
-        if matches!(self.publication, PublicationState::NeedsRecord { .. }) {
-            self.record_publication()?;
-            return Ok(OverlayRotationOutcome::Rotated);
-        }
         if let PublicationState::Unconfirmed(pending) = &self.publication {
             let outcome = pending.recovery.reconcile();
             return self.settle_rotation(outcome);
@@ -444,7 +394,6 @@ impl OverlayResourceLease {
         .preserving_mounts(preserved_mounts)?;
         let prepared = namespace.prepare_overlay_rotation(rotation)?;
         // Once prepared, a lost receipt must never cause a second publication.
-        let pending = encode_view(&frozen, &upper, &work, true)?;
         // Preparation failures reclaim their unused directories. Once a mount
         // can exist, only confirmed transition settlement may release storage.
         let next = generation.keep();
@@ -455,7 +404,6 @@ impl OverlayResourceLease {
             upper,
             work,
             frozen,
-            bytes: pending,
         }));
         self.settle_rotation(outcome)
     }
@@ -479,25 +427,19 @@ impl OverlayResourceLease {
             upper,
             work,
             frozen,
-            bytes,
             ..
         } = *pending;
         match &outcome {
             OverlayRotationOutcome::Rotated => {
-                // Mount state is known even if recording it subsequently fails.
-                // Retry the record, never rotate the filesystem a second time.
                 self.upper = upper;
                 self.work = work;
                 self.layers = frozen;
                 self.empty_upper =
                     Some(SourceStamp::from(&std::fs::symlink_metadata(&self.upper)?));
-                self.publication = PublicationState::NeedsRecord {
-                    bytes,
-                    snapshot: OverlaySnapshot {
-                        layers: self.layers.clone().into(),
-                    },
-                };
-                self.record_publication()?;
+                let previous = self.latest.lock().replace(OverlaySnapshot {
+                    layers: self.layers.clone().into(),
+                });
+                drop(previous);
             }
             OverlayRotationOutcome::Busy
             | OverlayRotationOutcome::RecoveredOriginal
@@ -515,19 +457,6 @@ impl OverlayResourceLease {
             }
         }
         Ok(outcome)
-    }
-
-    fn record_publication(&mut self) -> io::Result<()> {
-        let PublicationState::NeedsRecord { bytes, snapshot } = &self.publication else {
-            return Err(io::Error::other(
-                "build publication has no confirmed mount record",
-            ));
-        };
-        tidepool_atomic_write::write_durable(&self.storage.path.join("view.json"), bytes)?;
-        let previous = self.latest.lock().replace(snapshot.clone());
-        drop(previous);
-        self.publication = PublicationState::Writable;
-        Ok(())
     }
 
     #[cfg(test)]
@@ -971,11 +900,6 @@ mod tests {
         assert_eq!(shell(&namespace, "cat file"), b"after");
         assert!(build.latest_snapshot().is_none());
 
-        // A failed manifest write retains the completed mount and nested views.
-        std::fs::remove_file(source.path().join("view.json")).unwrap();
-        std::fs::create_dir(source.path().join("view.json")).unwrap();
-        assert!(source.publish(&namespace, &project, &preserved).is_err());
-        std::fs::remove_dir(source.path().join("view.json")).unwrap();
         assert!(matches!(
             source.publish(&namespace, &project, &preserved).unwrap(),
             OverlayRotationOutcome::Rotated
@@ -1146,14 +1070,7 @@ mod tests {
                 .path,
             warm_layer
         );
-        // A confirmed mount with a failed manifest write only needs its record
-        // retried. The next attempt must not create another writable generation.
         assert_eq!(worker.exchange("close"), "closed");
-        std::fs::remove_file(parent.path().join("view.json")).unwrap();
-        std::fs::create_dir(parent.path().join("view.json")).unwrap();
-        assert!(parent
-            .publish(&namespace, &project.join("target"), &[])
-            .is_err());
         let layer_count = parent.layers.len();
         assert_eq!(
             parent
@@ -1165,17 +1082,17 @@ mod tests {
                 .path,
             warm_layer
         );
-        std::fs::remove_dir(parent.path().join("view.json")).unwrap();
-        let upper = parent.upper.clone();
         assert!(matches!(
             parent
                 .publish(&namespace, &project.join("target"), &[])
                 .unwrap(),
             OverlayRotationOutcome::Rotated
         ));
-        assert_eq!(parent.layers.len(), layer_count);
-        assert_eq!(parent.upper, upper);
-        assert_eq!(parent.latest_snapshot().unwrap().layers.len(), layer_count);
+        assert_eq!(parent.layers.len(), layer_count + 1);
+        assert_eq!(
+            parent.latest_snapshot().unwrap().layers.len(),
+            layer_count + 1
+        );
         let mut child =
             OverlayResourceLease::allocate_path(root.join("storage/child"), Some(snapshot))
                 .unwrap();
