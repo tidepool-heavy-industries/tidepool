@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v6";
-const MAGIC: &[u8; 8] = b"TPREQ006";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v7";
+const MAGIC: &[u8; 8] = b"TPREQ007";
 
 #[derive(Clone, Debug)]
 enum Field {
@@ -33,6 +33,7 @@ enum Field {
     InspectInfo(String),
     InspectBrowse(String),
     InspectBrowseExpanded(String),
+    InspectSearch(String),
     InspectOut(OsString),
 }
 
@@ -112,6 +113,9 @@ impl ExtractRequest {
                         text_value(&mut args, "--inspect-browse-expanded")?.into(),
                     ))
                 }
+                Some("--inspect-search") => request.fields.push(Field::InspectSearch(
+                    text_value(&mut args, "--inspect-search")?.into(),
+                )),
                 Some("--inspect-out") => request.inspect_out(value(&mut args, "--inspect-out")?),
                 Some(option) if option.starts_with('-') => {
                     return Err(CliError::new(format!("unknown option: {option}")));
@@ -180,6 +184,7 @@ impl ExtractRequest {
                 32 => Field::CellTemplate(PathBuf::from(decoder.os_string()?)),
                 33 => Field::CellOut(decoder.os_string()?),
                 34 => Field::TurnPin(decoder.string()?),
+                35 => Field::InspectSearch(decoder.string()?),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -331,6 +336,10 @@ impl ExtractRequest {
         });
     }
 
+    pub(crate) fn inspect_search(&mut self, query: &str) {
+        self.fields.push(Field::InspectSearch(query.to_owned()));
+    }
+
     pub(crate) fn inspect_out(&mut self, value: impl AsRef<OsStr>) {
         self.fields
             .push(Field::InspectOut(value.as_ref().to_owned()));
@@ -381,6 +390,9 @@ impl ExtractRequest {
                 }
                 Field::InspectBrowseExpanded(value) => {
                     flag(&mut flags, "--inspect-browse-expanded", OsStr::new(value))
+                }
+                Field::InspectSearch(value) => {
+                    flag(&mut flags, "--inspect-search", OsStr::new(value))
                 }
                 Field::InspectOut(value) => flag(&mut flags, "--inspect-out", value),
             }
@@ -489,7 +501,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v6 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v7 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -569,6 +581,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::InspectOut(value) => tagged_frame(out, 28, value),
         Field::InspectBrowse(value) => tagged_frame(out, 29, OsStr::new(value)),
         Field::InspectBrowseExpanded(value) => tagged_frame(out, 30, OsStr::new(value)),
+        Field::InspectSearch(value) => tagged_frame(out, 35, OsStr::new(value)),
     }
 }
 
@@ -687,6 +700,8 @@ mod tests {
             "--worker-request-v2",
             "--worker-request-v3",
             "--worker-request-v4",
+            "--worker-request-v5",
+            "--worker-request-v6",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -741,6 +756,8 @@ mod tests {
             "Tidepool.Prelude".into(),
             "--inspect-browse-expanded".into(),
             "Tidepool.Actors.Shoal".into(),
+            "--inspect-search".into(),
+            "Response result -> Await (Settlement result)".into(),
             "--inspect-out".into(),
             "/tmp/inspection.cbor".into(),
         ];

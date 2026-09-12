@@ -2341,6 +2341,7 @@ impl Session {
         let query_source = match &query {
             InspectionQuery::TypeOf(expression) => expression.as_str(),
             InspectionQuery::Info(name) => name.as_str(),
+            InspectionQuery::TypeSearch(query) => query.as_str(),
             InspectionQuery::Browse { module, .. } => module.as_str(),
         };
         let preamble = self.patched_preamble();

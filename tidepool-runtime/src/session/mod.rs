@@ -34,7 +34,8 @@ pub mod workbench;
 pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS};
 
 pub use inspection::{
-    run_inspections, InfoEntry, InspectionQuery, InspectionRequest, InspectionResult,
+    run_inspections, InfoEntry, InspectionQuery, InspectionRequest, InspectionResult, TypeMatch,
+    TypeMatchQuality,
 };
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 

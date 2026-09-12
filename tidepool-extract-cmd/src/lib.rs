@@ -578,6 +578,12 @@ impl ExtractCmd {
         self
     }
 
+    /// Search the exact inspection scope for values compatible with a Haskell type.
+    pub fn inspect_search(&mut self, query: &str) -> &mut Self {
+        self.request.inspect_search(query);
+        self
+    }
+
     /// Inspection-result CBOR sidecar.
     pub fn inspect_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
         self.request.inspect_out(path);

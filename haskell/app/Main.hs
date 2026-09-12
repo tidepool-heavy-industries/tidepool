@@ -32,14 +32,14 @@ import Tidepool.Artifacts
   ( cborFileName, pruneAllClosedArtifacts, writeClosedTargets
   , writeWholeModuleClosed, runMultiTargetClosed, renderAsksJson )
 import Tidepool.GhcPipeline
-  ( runPipelineSession, PipelineResult(..), dumpCore
+  ( runPipelineSessionFor, CompilePurpose(..), PipelineResult(..), dumpCore
   , withResidentPipeline )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
   , diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
-import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
+import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
   ( SessionScope(..), scaffoldTargetName, scaffoldOutputBase )
@@ -55,7 +55,8 @@ import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 
 type Compiler =
-  Maybe SessionScope
+  CompilePurpose
+  -> Maybe SessionScope
   -> FilePath
   -> [FilePath]
   -> Maybe FilePath
@@ -75,7 +76,7 @@ main = do
           (\cwd argv -> setCurrentDirectory cwd >> runWorkerInvocation compiler argv)
     else do
       hSetEncoding stdout utf8
-      runWorkerInvocation runPipelineSession rawWorkerRequest >>= exitWith
+      runWorkerInvocation runPipelineSessionFor rawWorkerRequest >>= exitWith
 
 -- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
 -- the same versioned payload and therefore the same dispatch path.
@@ -135,7 +136,10 @@ runInspectionMode compiler args _path = do
       then fail "inspection request must carry exactly one source per query"
       else pure ()
     results <- fmap concat $ forM (zip (requestFiles args) queries) $ \(path, query) -> do
-      compiled <- try (compiler scope path (requestIncludes args) (requestBuildProductsDir args))
+      let purpose = case query of
+            InspectTypeSearch _ -> LookupTypeCompile
+            _ -> GeneralCompile
+      compiled <- try (compiler purpose scope path (requestIncludes args) (requestBuildProductsDir args))
       case compiled of
         Left exception -> case fromException exception of
           Just (sourceError :: SourceError) ->
@@ -224,7 +228,7 @@ processFile compiler timing args path = do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    result <- compiler scope path (requestIncludes args) (requestBuildProductsDir args)
+    result <- compiler GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -456,7 +460,7 @@ runTurnMode compiler args path = do
             compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
             compileVariants index (tmplFile:rest) = do
               (spliced, _modName, modulePath) <- spliceInto tmplFile
-              attempted <- try (compiler (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args))
+              attempted <- try (compiler GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args))
               case attempted of
                 Right result -> return (index, spliced, result)
                 Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
@@ -535,11 +539,11 @@ runCellMode compiler args cellPath = do
           else Nothing
     createDirectoryIfMissing True outDir
     writeFile modulePath checkedSource
-    compiled <- compiler scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+    compiled <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
     pinnedSource <- either fail pure
       (renderPinnedCellCheckSource template analyzed (prCheckedBinderPins compiled))
     writeFile modulePath pinnedSource
-    pinned <- compiler scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+    pinned <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
     out <- requireArg "--cell-out" (requestCellOut args)
     BS.writeFile out
       (encodeCellOut analyzed (prCheckedBinderPins pinned) pinnedSource)

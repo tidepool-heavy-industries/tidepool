@@ -4,11 +4,6 @@
 //! This module validates the hosted arguments and presents typed inspection
 //! results; it never parses Haskell type syntax.
 
-#![allow(
-    dead_code,
-    reason = "coordinator-owned resident dispatch consumes this checked adapter in the integration join"
-)]
-
 use serde::{Deserialize, Serialize};
 use tidepool_tool::{HostedTool, ToolDeclaration, ToolKind};
 

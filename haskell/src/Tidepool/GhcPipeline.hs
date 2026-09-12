@@ -1,5 +1,6 @@
 module Tidepool.GhcPipeline
-  ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
+  ( runPipeline, runPipelineSession, runPipelineSessionFor
+  , CompilePurpose(..), PipelineResult(..), dumpCore
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
@@ -74,6 +75,7 @@ import Data.Data (Data, cast, gmapQ)
 import Tidepool.Binders (CheckedBinderPin(..))
 import Tidepool.TypePolicy (nominalHeadsOfType)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
+import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , isSessionScopeActive, injectSessionScope, renderSessionModule
@@ -170,7 +172,17 @@ data PipelineVariant = PipelineVariant
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
   , pvPlan :: Bool -> ModuleGraph -> Ghc CompilePlan
     -- ^ @pvPlan timingEnabled downsweepGraph@.
+  , pvTransformParsed :: ModSummary -> ParsedModule -> ParsedModule
   }
+
+data CompilePurpose = GeneralCompile | LookupTypeCompile
+  deriving (Eq, Show)
+
+transformFor :: CompilePurpose -> ModuleName -> ModSummary -> ParsedModule -> ParsedModule
+transformFor GeneralCompile _ _ = id
+transformFor LookupTypeCompile target summary
+  | ms_mod_name summary == target = normalizeLookupWildcards
+  | otherwise = id
 
 -- | The seam values for one run, derived from the downsweep graph.
 data CompilePlan = CompilePlan
@@ -254,10 +266,13 @@ runCompile variant path includes buildProductsDir = do
 -- | Compile with an optional active session scope and an optional persistent
 -- build-products directory. Inert scopes use the normal pipeline.
 runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
-runPipelineSession mscope path includes buildProductsDir
+runPipelineSession = runPipelineSessionFor GeneralCompile
+
+runPipelineSessionFor :: CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
+runPipelineSessionFor purpose mscope path includes buildProductsDir
   | Just scope <- mscope, isSessionScopeActive scope =
-      runCompile (sessionVariant scope path) path includes buildProductsDir
-  | otherwise = runCompile (normalVariant path) path includes buildProductsDir
+      runCompile (sessionVariant purpose scope path) path includes buildProductsDir
+  | otherwise = runCompile (normalVariant purpose path) path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -416,7 +431,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
           let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
           (typechecked, tcMs) <- timeSection $ do
             parsed <- parseModule modSum
-            typecheckModule parsed
+            typecheckModule (pvTransformParsed variant modSum parsed)
           liftIO (modifyIORef' tcMsRef (+ tcMs))
           hscEnv0 <- getSession
           let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
@@ -709,7 +724,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
 -- paths are applied per request without reinitializing the unit state.
 withResidentPipeline
   :: [FilePath]
-  -> ((Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult) -> IO a)
+  -> ((CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult) -> IO a)
   -> IO a
 withResidentPipeline baseIncludes useCompiler = do
   timing <- readTimingEnabled
@@ -723,9 +738,9 @@ withResidentPipeline baseIncludes useCompiler = do
     memoRef <- liftIO (newIORef Map.empty)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      useCompiler $ \mscope path extraIncludes buildProductsDir ->
+      useCompiler $ \purpose mscope path extraIncludes buildProductsDir ->
         reflectGhc
-          (residentCompileOne cache memoRef dflags' baseImportPaths timing mscope path extraIncludes buildProductsDir)
+          (residentCompileOne cache memoRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
           session
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
@@ -739,9 +754,9 @@ withResidentPipeline baseIncludes useCompiler = do
 -- and therefore can affect merged metadata.
 residentCompileOne
   :: ModIfaceCache -> IORef GutsMemo -> DynFlags -> [FilePath]
-  -> Bool -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
+  -> Bool -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
   -> Ghc PipelineResult
-residentCompileOne cache memoRef baseDFlags baseImportPaths timing mscope path extraIncludes buildProductsDir = do
+residentCompileOne cache memoRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   hsc0 <- getSession
   setSession (hscUpdateFlags
@@ -749,8 +764,8 @@ residentCompileOne cache memoRef baseDFlags baseImportPaths timing mscope path e
       (\df -> df { importPaths = nub (baseImportPaths ++ extraIncludes) }))
     hsc0)
   let variant = case mscope of
-        Just scope | isSessionScopeActive scope -> sessionVariant scope path
-        _                                        -> normalVariant path
+        Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
+        _                                        -> normalVariant purpose path
       targetModName' = mkModuleName (capitalize (takeBaseName path))
   result <- runCompileCycle (Just cache) (Just memoRef) timing sessionT0 variant path
   liftIO (sanitizeMemo targetModName' memoRef)
@@ -848,10 +863,11 @@ configureBuildProducts baseline mDir dflags = case mDir of
 
 -- | The normal (non-session) variant: no injection, and E6's Core-reachability
 -- tier. Everything else is 'runCompile'.
-normalVariant :: FilePath -> PipelineVariant
-normalVariant path = PipelineVariant
+normalVariant :: CompilePurpose -> FilePath -> PipelineVariant
+normalVariant purpose path = PipelineVariant
   { pvLabel = "runPipeline"
   , pvDownsweepExcludes = []
+  , pvTransformParsed = transformFor purpose (mkModuleName (capitalize (takeBaseName path)))
   , pvPlan = \_timing modGraphRaw -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpAfterLoad = \_ -> pure ()
@@ -925,10 +941,11 @@ normalVariant path = PipelineVariant
 -- calls from HPT ifaces) is load-bearing — see 'cpAfterModule' below. A
 -- reference turn imports @Tidepool.Prelude@ via the eval preamble; the
 -- @load'@ also keeps those source deps "loaded" (GHC-58427).
-sessionVariant :: SessionScope -> FilePath -> PipelineVariant
-sessionVariant scope path = PipelineVariant
+sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> PipelineVariant
+sessionVariant purpose scope path = PipelineVariant
   { pvLabel = "runSessionPipeline"
   , pvDownsweepExcludes = excludedVal
+  , pvTransformParsed = transformFor purpose (mkModuleName (capitalize (takeBaseName path)))
   , pvPlan = \timing modGraphRaw -> do
       let targetModName' = mkModuleName (capitalize (takeBaseName path))
           directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]

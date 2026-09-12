@@ -44,6 +44,7 @@ data RequestField
   | InspectInfo String
   | InspectBrowse String
   | InspectBrowseExpanded String
+  | InspectSearch String
   | InspectOut FilePath
   deriving (Eq, Show)
 
@@ -111,6 +112,7 @@ data InspectionRequest
   = InspectTypeOf String
   | InspectNameInfo String
   | InspectModule String Bool
+  | InspectTypeSearch String
   deriving (Eq, Show)
 
 requestFromFields :: [RequestField] -> WorkerRequest
@@ -149,10 +151,12 @@ requestFromFields = foldl apply emptyWorkerRequest
         { requestInspections = requestInspections request ++ [InspectModule name False] }
       InspectBrowseExpanded name -> request
         { requestInspections = requestInspections request ++ [InspectModule name True] }
+      InspectSearch query -> request
+        { requestInspections = requestInspections request ++ [InspectTypeSearch query] }
       InspectOut path -> request { requestInspectOut = Just path }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v6"
+workerRequestFlag = "--worker-request-v7"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -171,7 +175,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ006"
+  if magic /= "TPREQ007"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -181,7 +185,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ006" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ007" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -213,6 +217,7 @@ encodeField field = case field of
   CellTemplate value -> taggedText 32 value
   CellOut value -> taggedText 33 value
   TurnPin value -> taggedText 34 value
+  InspectSearch value -> taggedText 35 value
 
 taggedText :: Word8 -> String -> BS.ByteString
 taggedText tag value = BS.singleton tag <> textFrame value
@@ -277,6 +282,7 @@ pField bytes = do
     32 -> mapParser CellTemplate pText rest
     33 -> mapParser CellOut pText rest
     34 -> mapParser TurnPin pText rest
+    35 -> mapParser InspectSearch pText rest
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

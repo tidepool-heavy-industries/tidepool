@@ -15,6 +15,7 @@ use super::assemble_inspection_module;
 pub enum InspectionQuery {
     TypeOf(String),
     Info(String),
+    TypeSearch(String),
     Browse { module: String, expanded: bool },
 }
 
@@ -24,6 +25,20 @@ pub struct InfoEntry {
     pub module: Option<String>,
     pub kind: String,
     pub display: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeMatchQuality {
+    Exact,
+    Usable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeMatch {
+    pub name: String,
+    pub module: Option<String>,
+    pub signature: String,
+    pub quality: TypeMatchQuality,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +68,10 @@ pub enum InspectionResult {
         module: String,
         expanded: bool,
         entries: Vec<InfoEntry>,
+    },
+    TypeMatches {
+        query: String,
+        matches: Vec<TypeMatch>,
     },
 }
 
@@ -97,6 +116,11 @@ impl InspectionResult {
                     format!("-- {module}\n{declarations}")
                 }
             }
+            Self::TypeMatches { matches, .. } => matches
+                .iter()
+                .map(|entry| format!("{} :: {}", entry.name, entry.signature))
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 }
@@ -136,9 +160,16 @@ pub fn run_inspections(
         let source_path = query_dir.join("Expr.hs");
         let expressions = match query {
             InspectionQuery::TypeOf(expression) => std::slice::from_ref(expression),
-            InspectionQuery::Info(_) | InspectionQuery::Browse { .. } => &[],
+            InspectionQuery::Info(_)
+            | InspectionQuery::TypeSearch(_)
+            | InspectionQuery::Browse { .. } => &[],
         };
-        let source = assemble_inspection_module(request.preamble, request.imports, expressions);
+        let mut source = assemble_inspection_module(request.preamble, request.imports, expressions);
+        if let InspectionQuery::TypeSearch(query) = query {
+            source.push_str("\n__tidepool_lookup_query :: ");
+            source.push_str(query);
+            source.push_str("\n__tidepool_lookup_query = __tidepool_lookup_query\n");
+        }
         std::fs::write(&source_path, source)?;
         command.input(&source_path);
         match query {
@@ -147,6 +178,9 @@ pub fn run_inspections(
             }
             InspectionQuery::Info(name) => {
                 command.inspect_info(name);
+            }
+            InspectionQuery::TypeSearch(query) => {
+                command.inspect_search(query);
             }
             InspectionQuery::Browse { module, expanded } => {
                 command.inspect_browse(module, *expanded);
@@ -187,7 +221,7 @@ fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileErro
         return Err(invalid("trailing CBOR data"));
     }
     let root = array_len(&value, 2, "receipt")?;
-    if text(&root[0], "version")? != "TPINSP002" {
+    if text(&root[0], "version")? != "TPINSP003" {
         return Err(invalid("unsupported receipt version"));
     }
     array(&root[1], "results")?
@@ -262,8 +296,38 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
                 entries,
             })
         }
+        "TypeMatches" => {
+            let body = array_len(value, 3, "TypeMatches result")?;
+            let matches = array(&body[2], "TypeMatches matches")?
+                .iter()
+                .map(decode_type_match)
+                .collect::<Result<_, _>>()?;
+            Ok(InspectionResult::TypeMatches {
+                query: text(&body[1], "TypeMatches query")?.into(),
+                matches,
+            })
+        }
         other => Err(invalid(format!("unknown result tag {other:?}"))),
     }
+}
+
+fn decode_type_match(value: &CborValue) -> Result<TypeMatch, CompileError> {
+    let fields = array_len(value, 4, "TypeMatch")?;
+    let module = match &fields[1] {
+        CborValue::Null => None,
+        value => Some(text(value, "TypeMatch module")?.into()),
+    };
+    let quality = match text(&fields[3], "TypeMatch quality")? {
+        "Exact" => TypeMatchQuality::Exact,
+        "Usable" => TypeMatchQuality::Usable,
+        other => return Err(invalid(format!("unknown TypeMatch quality {other:?}"))),
+    };
+    Ok(TypeMatch {
+        name: text(&fields[0], "TypeMatch name")?.into(),
+        module,
+        signature: text(&fields[2], "TypeMatch signature")?.into(),
+        quality,
+    })
 }
 
 fn boolean(value: &CborValue, what: &str) -> Result<bool, CompileError> {
@@ -334,7 +398,7 @@ mod tests {
     #[test]
     fn decodes_every_result_shape() {
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP002".into()),
+            CborValue::Text("TPINSP003".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("Type".into()),
@@ -398,7 +462,7 @@ mod tests {
                 CborValue::Array(vec![]),
             ]),
             CborValue::Array(vec![
-                CborValue::Text("TPINSP002".into()),
+                CborValue::Text("TPINSP003".into()),
                 CborValue::Array(vec![CborValue::Text("Other".into())]),
             ]),
             CborValue::Array(vec![CborValue::Text("TPINSP001".into())]),
@@ -407,7 +471,7 @@ mod tests {
         }
 
         let mut trailing = encoded(CborValue::Array(vec![
-            CborValue::Text("TPINSP002".into()),
+            CborValue::Text("TPINSP003".into()),
             CborValue::Array(vec![CborValue::Array(vec![
                 CborValue::Text("NotFound".into()),
                 CborValue::Text("x".into()),
@@ -436,7 +500,7 @@ mod tests {
         )
         .unwrap();
         let preamble = concat!(
-            "{-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction #-}\n",
+            "{-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction, PartialTypeSignatures #-}\n",
             "module Expr where\n",
             "import BrowseFixture\n",
             "import qualified BrowseFixture as Alias\n",
@@ -461,6 +525,9 @@ mod tests {
         queries.push(InspectionQuery::Info("Alias.Public".into()));
         queries.push(InspectionQuery::Info("Alias.exportedValue".into()));
         queries.push(InspectionQuery::Info("Missing.Public".into()));
+        queries.push(InspectionQuery::TypeSearch("Public".into()));
+        queries.push(InspectionQuery::TypeSearch("Public ->".into()));
+        queries.push(InspectionQuery::TypeSearch("Public -> _".into()));
         let results = run_inspections(InspectionRequest {
             preamble,
             imports: "",
@@ -484,6 +551,17 @@ mod tests {
         assert!(results[6].render().contains("data Public"));
         assert!(results[7].render().contains("exportedValue :: Int"));
         assert!(matches!(results[8], InspectionResult::NotFound { .. }));
+        assert!(
+            matches!(results[9], InspectionResult::TypeMatches { .. }),
+            "{:?}",
+            results[9]
+        );
+        assert!(matches!(results[10], InspectionResult::Rejected { .. }));
+        assert!(
+            matches!(results[11], InspectionResult::TypeMatches { .. }),
+            "{:?}",
+            results[11]
+        );
         let grouped = results[4].render();
         assert!(grouped.starts_with("-- BrowseFixture\n"));
         assert!(grouped.contains("data Public"));

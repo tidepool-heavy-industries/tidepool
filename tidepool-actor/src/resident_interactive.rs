@@ -33,6 +33,7 @@ impl ResidentInteractivePolicy {
     pub fn local_with_tools(actor: crate::LocalActorRef, tools: Vec<HostedTool>) -> Self {
         Self {
             tools: std::iter::once(haskell_tool_declaration())
+                .chain(std::iter::once(crate::lookup_tool::declaration()))
                 .chain(tools)
                 .collect::<Vec<_>>()
                 .into(),
@@ -42,7 +43,11 @@ impl ResidentInteractivePolicy {
 
     fn with_client(client: ResidentToolClient) -> Self {
         Self {
-            tools: vec![haskell_tool_declaration()].into(),
+            tools: vec![
+                haskell_tool_declaration(),
+                crate::lookup_tool::declaration(),
+            ]
+            .into(),
             client,
         }
     }
@@ -52,7 +57,10 @@ pub(crate) fn project_tools(
     declarations: Vec<tidepool_tool::ToolDeclaration>,
 ) -> Result<Vec<HostedTool>, ResidentToolError> {
     use tidepool_tool::ToolKind;
-    let mut names = std::collections::HashSet::from([HASKELL_TOOL.to_string()]);
+    let mut names = std::collections::HashSet::from([
+        HASKELL_TOOL.to_string(),
+        crate::lookup_tool::LOOKUP_TOOL.to_string(),
+    ]);
     declarations
         .into_iter()
         .map(|declaration| {
@@ -176,6 +184,10 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ToolArguments::Raw(text) => serde_json::Value::String(text),
                     ToolArguments::Structured(value) => value,
                 };
+                if invocation.name == crate::lookup_tool::LOOKUP_TOOL {
+                    crate::lookup_tool::prepare(arguments.clone())
+                        .map_err(|error| ResidentToolError::InvalidInvocation(error.to_string()))?;
+                }
                 return client
                     .dispatch_workbench(
                         WorkbenchRequest::for_tool(invocation.name, arguments),
@@ -225,7 +237,7 @@ mod tests {
 
     #[test]
     fn project_tools_checks_names_and_supported_input_before_publication() {
-        for name in ["", "haskell", "bad.name", "λ", &"a".repeat(65)] {
+        for name in ["", "haskell", "lookup", "bad.name", "λ", &"a".repeat(65)] {
             assert!(project_tools(vec![raw(name)]).is_err(), "{name}");
         }
         assert!(project_tools(vec![raw("bash"), raw("bash")]).is_err());
@@ -256,6 +268,7 @@ mod tests {
             haskell_tool_instructions(),
             PromptId::HaskellToolInstructions.body()
         );
+        assert_eq!(crate::lookup_tool::declaration().name(), "lookup");
     }
 }
 

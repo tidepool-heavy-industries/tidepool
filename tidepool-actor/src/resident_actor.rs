@@ -15,9 +15,10 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    CellCheck, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession,
-    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    CellCheck, InspectionQuery, InspectionResult, OutputSink, ParsedBlock, ResidentHole,
+    ResidentOutcome, ResidentSession, RootCustody, TurnKind, TypeMatchQuality,
+    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
     WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     WorkbenchTerminalTransfer,
 };
@@ -4264,7 +4265,14 @@ where
         mut request: WorkbenchRequest,
     ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
         let execution = request.execution_id().cloned();
-        let tool_dispatch = if let Some(call) = request.tool_call() {
+        let lookup_call = request
+            .tool_call()
+            .filter(|call| call.name == crate::lookup_tool::LOOKUP_TOOL)
+            .cloned();
+        let tool_dispatch = if let Some(call) = request
+            .tool_call()
+            .filter(|call| call.name != crate::lookup_tool::LOOKUP_TOOL)
+        {
             let tools = self
                 .compiled_tools
                 .as_ref()
@@ -4321,6 +4329,51 @@ where
                 .as_ref()
                 .map(tidepool_runtime::session::normalize_workbench_input),
         );
+        if let Some(call) = lookup_call {
+            let prepared = crate::lookup_tool::prepare(call.arguments).map_err(|error| {
+                workbench_failure(
+                    &[],
+                    0,
+                    1,
+                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                )
+            })?;
+            let queries = prepared
+                .iter()
+                .filter_map(|query| match &query.kind {
+                    crate::lookup_tool::PreparedLookupKind::Name(name) => {
+                        Some(InspectionQuery::Info(name.clone()))
+                    }
+                    crate::lookup_tool::PreparedLookupKind::Type(query) => {
+                        Some(InspectionQuery::TypeSearch(query.clone()))
+                    }
+                    crate::lookup_tool::PreparedLookupKind::Rejected(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let (inspected, live_modules) = if queries.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                workbench
+                    .lookup_inspections(context.clone(), queries)
+                    .await
+                    .map_err(|error| workbench_failure(&[], 0, 1, error))?
+            };
+            let response = lookup_response(prepared, inspected, &live_modules);
+            return Ok(KernelStep::Continue(workbench_response(
+                WorkbenchRunStatus::Committed,
+                vec![WorkbenchItemReceipt {
+                    index: 0,
+                    status: WorkbenchItemStatus::Committed,
+                    output: response.render_text(),
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: Vec::new(),
+                    terminal_transfer: None,
+                }],
+                1,
+                1,
+            )));
+        }
         let cell_check = if let Some(cell_source) = request.cell_source() {
             let checked = match workbench
                 .check_cell(context.clone(), cell_source.to_owned())
@@ -6788,19 +6841,213 @@ fn workbench_response(
     }
 }
 
+fn lookup_response(
+    prepared: Vec<crate::lookup_tool::PreparedLookup>,
+    inspected: Vec<InspectionResult>,
+    live_modules: &[String],
+) -> crate::lookup_tool::LookupResponse {
+    use crate::lookup_tool::{
+        LookupEntry, LookupEntryKind, LookupOrigin, LookupOutcome, LookupResult, MatchQuality,
+        PreparedLookupKind,
+    };
+
+    const MATCH_LIMIT: usize = 20;
+    let mut inspected = inspected.into_iter();
+    let results = prepared
+        .into_iter()
+        .map(|prepared| match prepared.kind {
+            PreparedLookupKind::Rejected(diagnostic) => LookupResult {
+                query: prepared.query,
+                outcome: LookupOutcome::Rejected { diagnostic },
+            },
+            PreparedLookupKind::Name(_) => match inspected.next() {
+                Some(InspectionResult::Info { entries, .. }) => LookupResult::found(
+                    prepared.query,
+                    entries
+                        .into_iter()
+                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .collect(),
+                    MATCH_LIMIT,
+                ),
+                Some(InspectionResult::Ambiguous { entries, .. }) => LookupResult::ambiguous(
+                    prepared.query,
+                    entries
+                        .into_iter()
+                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .collect(),
+                    MATCH_LIMIT,
+                ),
+                Some(InspectionResult::NotFound { .. }) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::NotFound,
+                },
+                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected { diagnostic },
+                },
+                Some(other) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected {
+                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
+                    },
+                },
+                None => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected {
+                        diagnostic: "lookup worker omitted a result".into(),
+                    },
+                },
+            },
+            PreparedLookupKind::Type(_) => match inspected.next() {
+                Some(InspectionResult::TypeMatches { matches, .. }) if matches.is_empty() => {
+                    LookupResult {
+                        query: prepared.query,
+                        outcome: LookupOutcome::NotFound,
+                    }
+                }
+                Some(InspectionResult::TypeMatches { matches, .. }) => LookupResult::found(
+                    prepared.query,
+                    matches
+                        .into_iter()
+                        .map(|entry| LookupEntry {
+                            name: entry.name.clone(),
+                            defining_module: entry.module.clone(),
+                            kind: LookupEntryKind::Value,
+                            signature_or_declaration: format!(
+                                "{} :: {}",
+                                entry.name, entry.signature
+                            ),
+                            origin: lookup_origin(entry.module.as_deref(), live_modules),
+                            quality: match entry.quality {
+                                TypeMatchQuality::Exact => MatchQuality::Exact,
+                                TypeMatchQuality::Usable => MatchQuality::Usable,
+                            },
+                        })
+                        .collect(),
+                    MATCH_LIMIT,
+                ),
+                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected { diagnostic },
+                },
+                Some(other) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected {
+                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
+                    },
+                },
+                None => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected {
+                        diagnostic: "lookup worker omitted a result".into(),
+                    },
+                },
+            },
+        })
+        .collect();
+    fn info_lookup_entry(
+        entry: tidepool_runtime::session::InfoEntry,
+        live_modules: &[String],
+    ) -> LookupEntry {
+        let kind = match entry.kind.as_str() {
+            "class-method" => LookupEntryKind::ClassMethod,
+            "record-selector" => LookupEntryKind::RecordSelector,
+            "constructor" => LookupEntryKind::Constructor,
+            "type" => LookupEntryKind::Type,
+            "coercion" => LookupEntryKind::Coercion,
+            _ => LookupEntryKind::Value,
+        };
+        LookupEntry {
+            name: entry.name,
+            defining_module: entry.module.clone(),
+            kind,
+            signature_or_declaration: entry.display,
+            origin: lookup_origin(entry.module.as_deref(), live_modules),
+            quality: MatchQuality::Exact,
+        }
+    }
+
+    fn lookup_origin(module: Option<&str>, live_modules: &[String]) -> LookupOrigin {
+        if module.is_some_and(|module| live_modules.iter().any(|live| live == module)) {
+            LookupOrigin::LiveBinding
+        } else {
+            LookupOrigin::ModuleExport
+        }
+    }
+
+    crate::lookup_tool::LookupResponse { results }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        workbench_failure_after_operations, workbench_response, ChildExitObservations,
-        WorkbenchBoundaryRecord, WorkbenchExecutions,
+        lookup_response, workbench_failure_after_operations, workbench_response,
+        ChildExitObservations, WorkbenchBoundaryRecord, WorkbenchExecutions,
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
-        CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, TurnClassification,
-        TurnKind, WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt,
-        WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-        WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+        CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
+        InspectionResult, TurnClassification, TurnKind, TypeMatch, TypeMatchQuality,
+        WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
+        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+        WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     };
+
+    #[test]
+    fn lookup_response_preserves_mixed_batch_and_actual_signature() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": [
+                "awaitSettled",
+                ":: NotInScope -> Int",
+                ":: Response result -> Await (Settlement result)"
+            ]
+        }))
+        .unwrap();
+        let response = lookup_response(
+            prepared,
+            vec![
+                InspectionResult::Info {
+                    query: "awaitSettled".into(),
+                    entries: vec![InfoEntry {
+                        name: "awaitSettled".into(),
+                        module: Some("Tidepool.Agent.Watch.Internal".into()),
+                        kind: "value".into(),
+                        display: "awaitSettled :: Response result -> Await (Settlement result)"
+                            .into(),
+                    }],
+                },
+                InspectionResult::Rejected {
+                    diagnostic: "NotInScope is not in scope".into(),
+                },
+                InspectionResult::TypeMatches {
+                    query: "Response result -> Await (Settlement result)".into(),
+                    matches: vec![TypeMatch {
+                        name: "awaitSettled".into(),
+                        module: Some("Tidepool.Agent.Watch.Internal".into()),
+                        signature: "Response result -> Await (Settlement result)".into(),
+                        quality: TypeMatchQuality::Exact,
+                    }],
+                },
+            ],
+            &[],
+        );
+        assert_eq!(response.results.len(), 3);
+        assert!(matches!(
+            response.results[0].outcome,
+            crate::lookup_tool::LookupOutcome::Found { .. }
+        ));
+        assert!(matches!(
+            response.results[1].outcome,
+            crate::lookup_tool::LookupOutcome::Rejected { .. }
+        ));
+        assert!(matches!(
+            response.results[2].outcome,
+            crate::lookup_tool::LookupOutcome::Found { .. }
+        ));
+        assert!(response
+            .render_text()
+            .contains("awaitSettled :: Response result -> Await (Settlement result)"));
+    }
 
     #[test]
     fn child_exit_observation_tracks_exact_processing_order() {

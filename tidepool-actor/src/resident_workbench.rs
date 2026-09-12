@@ -1895,6 +1895,62 @@ where
             .await
     }
 
+    pub(crate) async fn lookup_inspections(
+        &self,
+        context: crate::ActorSessionContext,
+        queries: Vec<InspectionQuery>,
+    ) -> Result<
+        (
+            Vec<tidepool_runtime::session::InspectionResult>,
+            Vec<String>,
+        ),
+        ResidentActorWorkbenchError,
+    > {
+        let response = self.response.clone();
+        let request = self.request;
+        let type_modules = Arc::clone(&self.type_modules);
+        let mut source = self.access.source.clone();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                source.preamble = match (response.as_ref(), request) {
+                    (Some(response), Some(request)) => response.request_preamble(
+                        &source.preamble,
+                        request,
+                        &context.haskell_effects_alias,
+                    ),
+                    (None, None) => source.preamble.to_string(),
+                    _ => unreachable!("request workbench scope is constructed atomically"),
+                }
+                .into();
+                source.preamble = actor_preamble(&source.preamble, context).into();
+                let compile_view = actor_compile_view(session, context, &source, &type_modules)?;
+                let prepared = source.prepare(&compile_view);
+                let include = prepared
+                    .include
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .collect::<Vec<_>>();
+                let results = run_inspections(InspectionRequest {
+                    preamble: &prepared.preamble,
+                    imports: &prepared.imports,
+                    include: &include,
+                    session_root: compile_view.session_root(),
+                    inject_modules: &prepared.injected,
+                    queries: &queries,
+                })
+                .map_err(ResidentActorWorkbenchError::Compile)?;
+                if results.len() != queries.len() {
+                    return Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
+                        "lookup returned {} results for {} queries",
+                        results.len(),
+                        queries.len()
+                    )));
+                }
+                Ok((results, prepared.injected))
+            })
+            .await
+    }
+
     /// Compile and begin one actor-local workbench item. Declarations commit
     /// immediately; executable items retain their fragment realm so the host
     /// can route any actor effects through the ordinary actor driver.

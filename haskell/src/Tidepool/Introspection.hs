@@ -52,6 +52,7 @@ data InspectionResult
   | InspectionModuleNotFound String
   | InspectionRejected String
   | InspectionBrowse String Bool [InfoEntry]
+  | InspectionTypeMatches String [TypeMatch]
   deriving (Eq, Show)
 
 data TypeMatchQuality
@@ -174,6 +175,29 @@ runInspection hscEnv rdrEnv capturedTypes requests = do
       InspectModule moduleName expanded -> do
         result <- inspectModule moduleName expanded
         pure (typeIndex, results ++ [result])
+      InspectTypeSearch query -> do
+        result <- inspectTypeSearch rdrEnv query
+        pure (typeIndex, results ++ [result])
+
+inspectTypeSearch :: (GhcMonad m) => GlobalRdrEnv -> String -> m InspectionResult
+inspectTypeSearch rdrEnv query = do
+  let binderName = "__tidepool_lookup_query"
+      binders =
+        [ greName gre
+        | gre <- globalRdrEnvElts rdrEnv,
+          any (matchesQuery binderName) (greRdrNames gre)
+        ]
+  case nubBy (==) binders of
+    [binder] -> do
+      found <- lookupName binder
+      case found of
+        Just (AnId identifier) ->
+          InspectionTypeMatches query <$> searchTypeMatches rdrEnv binder (idType identifier)
+        _ -> missing binderName
+    _ -> missing binderName
+  where
+    missing binder =
+      liftIO (ioError (userError ("lookup module did not expose " ++ binder)))
 
 inspectName :: (GhcMonad m) => GlobalRdrEnv -> String -> m InspectionResult
 inspectName rdrEnv query = do
@@ -278,12 +302,12 @@ thingKind thing = case thing of
   ATyCon _ -> "type"
   ACoAxiom _ -> "coercion"
 
--- | Private V2 batch receipt. The outer list is @['TPINSP002', results]@.
+-- | Private V3 batch receipt. The outer list is @['TPINSP003', results]@.
 encodeInspectionResults :: [InspectionResult] -> BS.ByteString
 encodeInspectionResults results =
   toStrictByteString $
     encodeListLen 2
-      <> encodeString "TPINSP002"
+      <> encodeString "TPINSP003"
       <> encodeListLen (fromIntegral (length results))
       <> foldMap encodeResult results
   where
@@ -306,6 +330,11 @@ encodeInspectionResults results =
           <> text moduleName
           <> encodeBool expanded
           <> encodeEntries entries
+      InspectionTypeMatches query matches ->
+        encodeListLen 3
+          <> encodeString "TypeMatches"
+          <> text query
+          <> encodeTypeMatches matches
     encodeEntries entries =
       encodeListLen (fromIntegral (length entries)) <> foldMap encodeEntry entries
     encodeEntry entry =
@@ -314,4 +343,14 @@ encodeInspectionResults results =
         <> maybe encodeNull text (infoModule entry)
         <> text (infoKind entry)
         <> text (infoDisplay entry)
+    encodeTypeMatches matches =
+      encodeListLen (fromIntegral (length matches)) <> foldMap encodeTypeMatch matches
+    encodeTypeMatch match =
+      encodeListLen 4
+        <> text (typeMatchName match)
+        <> maybe encodeNull text (typeMatchModule match)
+        <> text (typeMatchSignature match)
+        <> encodeString (case typeMatchQuality match of
+          TypeMatchExact -> "Exact"
+          TypeMatchUsable -> "Usable")
     text = encodeString . T.pack

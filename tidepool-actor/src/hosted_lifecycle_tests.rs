@@ -239,6 +239,114 @@ fn invocation(source: &str, id: &str) -> tidepool_tool::ToolInvocation {
     }
 }
 
+fn lookup_invocation(queries: &[&str], id: &str) -> tidepool_tool::ToolInvocation {
+    tidepool_tool::ToolInvocation {
+        name: "lookup".into(),
+        arguments: tidepool_tool::ToolArguments::Structured(serde_json::json!({
+            "queries": queries
+        })),
+        context: Some(tidepool_tool::ToolInvocationContext {
+            context_call_id: Some(id.into()),
+            thread_id: "lookup-test".into(),
+            turn_id: id.into(),
+            call_id: id.into(),
+            namespace: Some("lookup".into()),
+        }),
+    }
+}
+
+#[tokio::test]
+async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
+    eval_harness::require_extract();
+    let declarations = [tidepool_mcp::notifications_decl()];
+    let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
+    let mut include = effects.include_paths().to_vec();
+    include.push(eval_harness::prelude_path());
+    let preamble = format!(
+        "{}\ntype ActorEffects = '[Notifications, Replies, Watches]\n",
+        insert_preamble_imports(
+            &tidepool_mcp::build_preamble(&declarations, false),
+            "Tidepool.Effects.Core (Notifications(..))"
+        )
+    );
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Reply (Replies, Response)");
+    let preamble = insert_preamble_imports(
+        &preamble,
+        "Tidepool.Agent.Watch (Await, Settlement, Watches, awaitSettled)",
+    );
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
+    let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
+    let root = tempfile::tempdir().unwrap();
+    let boot = match run_turn(TurnRequest {
+        turn_text: "pure (0 :: Int)",
+        templates: &templates,
+        include: &include_refs,
+        session_root: root.path(),
+        inject_modules: &[],
+        gen: 1,
+        verdict: None,
+        target: None,
+    })
+    .unwrap()
+    {
+        TurnResult::Expr { compiled, .. } => Arc::new(compiled),
+        _ => panic!("expected compiled program"),
+    };
+    let session = tidepool_repr::SessionId((u64::from(std::process::id()) << 32) | 211);
+    let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(include.clone());
+    let machine = ResidentSession::bootstrap(
+        &boot.expr,
+        boot.table.clone(),
+        NoHandlers,
+        TestSink,
+        include.clone(),
+        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+        Some(lib),
+    )
+    .unwrap();
+    let (forest, _events) = ResidentForest::new(
+        ActorWorkbenchSource::new(preamble, include),
+        session,
+        machine,
+        None,
+        Incarnation::FIRST,
+    );
+    let actor = forest
+        .new_workbench("lookup-workbench".into(), EffectiveRole::coding())
+        .await
+        .unwrap();
+    let policy = super::ResidentInteractivePolicy::local(actor);
+
+    let lookup = policy
+        .dispatch_boxed(lookup_invocation(
+            &[
+                "awaitSettled",
+                ":: NotInScope -> Int",
+                ":: Response result -> Await (Settlement result)",
+            ],
+            "mixed",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(lookup["status"], "committed");
+    let output = lookup["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains("awaitSettled"), "{output}");
+    assert!(output.contains("NotInScope"), "{output}");
+    assert!(
+        output.contains("Response result -> Await (Settlement result)"),
+        "{output}"
+    );
+
+    let next = policy
+        .dispatch_boxed(invocation("let picked = awaitSettled\npicked", "next-cell"))
+        .await
+        .unwrap();
+    assert_eq!(next["status"], "committed", "{next}");
+    forest.shutdown().await;
+}
+
 #[tokio::test]
 async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
     eval_harness::require_extract();
