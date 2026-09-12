@@ -361,6 +361,9 @@ impl ProcessMountBoundary {
                     ]);
                 }
                 ViewMount::Overlay(overlay) => {
+                    // Bubblewrap assembles the initial merged view before
+                    // nested mounts are attached. Rotation uses fsopen after
+                    // the namespace and its mountpoints exist.
                     for layer in &overlay.layers {
                         args.extend(["--overlay-src".into(), layer.to_string_lossy().into_owned()]);
                     }

@@ -442,7 +442,12 @@ impl NativeForkAdmission {
         // Sibling forks queue on the same source publication. Contention here
         // says nothing about native writers or the source's availability.
         // A caller cancelled while waiting has not begun an operation.
+        let wait_started = std::time::Instant::now();
         let mut publication = parent.workspace.publication.clone().lock_owned().await;
+        tracing::info!(
+            publication_wait_ms = wait_started.elapsed().as_millis() as u64,
+            "workspace publication gate acquired"
+        );
         let source_still_owned = self.owners.lock().get(&source_owner).is_some_and(|owner| {
             owner.terminal.is_none()
                 && owner
@@ -712,9 +717,10 @@ impl WorkspaceLayout {
             let inherited = self.reusable_import(source_path, &excluded);
             let source = OverlayResourceLease::allocate_path(source_pathname, inherited.clone())?;
             if inherited.is_some() {
-                tracing::debug!(path = %source_path.display(), "reused imported source base");
+                tracing::info!(path = %source_path.display(), "reused imported source base");
                 (Some(source), None)
             } else {
+                let import_started = std::time::Instant::now();
                 let excluded_refs = excluded
                     .iter()
                     .map(std::ffi::OsString::as_os_str)
@@ -732,7 +738,14 @@ impl WorkspaceLayout {
                         }
                     });
                 match imported {
-                    Ok(()) => (Some(source), None),
+                    Ok(()) => {
+                        tracing::info!(
+                            path = %source_path.display(),
+                            import_ms = import_started.elapsed().as_millis() as u64,
+                            "imported source base"
+                        );
+                        (Some(source), None)
+                    }
                     Err(error) => (None, Some(SourceFallback::ImportFailed(error.to_string()))),
                 }
             }
@@ -775,6 +788,7 @@ impl WorkspaceLayout {
         let id = git.receipt().worktree_id.clone();
         let path = git.receipt().cwd.clone();
         if source.is_none() {
+            tracing::info!(?fallback, "using committed source fallback");
             let handle = self
                 .worktrees
                 .finish_committed_source(git)
@@ -823,6 +837,9 @@ impl WorkspaceLayout {
         fallback: Option<SourceFallback>,
         donor: Option<MountNamespace>,
     ) -> io::Result<AdmittedWorkspace> {
+        if fallback.is_some() {
+            tracing::info!(?fallback, "using committed source fallback");
+        }
         let handle = authorized
             .materialize_committed()
             .map_err(|error| io::Error::other(format!("{error:?}")))?;

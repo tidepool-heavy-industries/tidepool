@@ -67,6 +67,8 @@ impl SharedOverlayResource {
         }
         if let Some(mut resource) = slot.take() {
             resource.custody.settled = true;
+            // An uncertain descendant retains its backing through Arc custody;
+            // it vetoes reclamation, not retirement of this owner's view.
             *resource.storage.state.lock() = if resource
                 .storage
                 .uncertain
@@ -458,6 +460,8 @@ impl OverlayResourceLease {
     }
 
     fn compact_snapshot(&mut self) -> io::Result<()> {
+        let started = std::time::Instant::now();
+        let former_depth = self.layers.len();
         let stage = tempfile::Builder::new()
             .prefix("compact-")
             .tempdir_in(&self.storage.path)?;
@@ -525,7 +529,9 @@ impl OverlayResourceLease {
             layers: self.layers.clone().into(),
         });
         tracing::info!(
+            former_depth,
             retained_layers = self.retired_layers.len(),
+            compaction_ms = started.elapsed().as_millis() as u64,
             "overlay layers compacted"
         );
         Ok(())
