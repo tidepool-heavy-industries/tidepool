@@ -14,6 +14,7 @@ use tidepool_node::{
 pub(super) struct OverlayResourceLease {
     storage: Arc<OverlayStorage>,
     layers: Vec<OverlayLayer>,
+    retired_layers: Vec<OverlayLayer>,
     upper: PathBuf,
     work: PathBuf,
     latest: Arc<Mutex<Option<OverlaySnapshot>>>,
@@ -78,10 +79,12 @@ impl SharedOverlayResource {
             let OverlayResourceLease {
                 storage,
                 layers,
+                retired_layers,
                 custody,
                 ..
             } = resource;
             drop(layers);
+            drop(retired_layers);
             drop(custody);
             if let Ok(mut storage) = Arc::try_unwrap(storage) {
                 storage.release()?;
@@ -169,6 +172,8 @@ struct PendingRotation {
 }
 
 impl OverlayResourceLease {
+    const COMPACT_AT_LAYERS: usize = 32;
+
     pub(super) fn allocate_path(
         path: PathBuf,
         inherited: Option<OverlaySnapshot>,
@@ -227,6 +232,7 @@ impl OverlayResourceLease {
         Ok(Self {
             storage,
             layers,
+            retired_layers: Vec::new(),
             upper,
             work,
             latest: Arc::new(Mutex::new(latest)),
@@ -437,7 +443,89 @@ impl OverlayResourceLease {
             work,
             frozen,
         }));
-        self.settle_rotation(outcome)
+        let outcome = self.settle_rotation(outcome)?;
+        if matches!(outcome, OverlayRotationOutcome::Rotated)
+            && self.layers.len() >= Self::COMPACT_AT_LAYERS
+        {
+            if let Err(error) = self.compact_snapshot() {
+                tracing::warn!(%error, layers = self.layers.len(), "overlay compaction skipped");
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn compact_snapshot(&mut self) -> io::Result<()> {
+        let stage = tempfile::Builder::new()
+            .prefix("compact-")
+            .tempdir_in(&self.storage.path)?;
+        let view = stage.path().join("view");
+        let upper = stage.path().join("upper");
+        let work = stage.path().join("work");
+        let base = stage.path().join("base");
+        for path in [&view, &upper, &work, &base] {
+            std::fs::create_dir(path)?;
+        }
+        let boundary = ProcessMountBoundary::new(&view, [view.clone()], [view.clone()])
+            .map_err(io::Error::other)?
+            .with_overlay_view(self.layers(), &upper, &work, &view)
+            .map_err(io::Error::other)?
+            .with_read_only_project();
+        let namespace = boundary.prepare_view(
+            tidepool_node::BUBBLEWRAP_PROGRAM,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )?;
+        let visible = namespace.retained_view_path(&view)?;
+        let original = source_manifest(visible.as_path(), &[])?;
+        let output = namespace
+            .host_command(&view, "cp".as_ref())?
+            .args([
+                "--archive",
+                "--reflink=auto",
+                "--sparse=always",
+                "--preserve=links",
+            ])
+            .arg("--")
+            .arg(view.join("."))
+            .arg(&base)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "overlay compaction copy failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        if original != source_manifest(&base, &[])? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compacted base differs from merged view",
+            ));
+        }
+        verify_sparse_copy(visible.as_path(), &base, &original)?;
+        drop(visible);
+        namespace.detach_retired_tree(&view)?;
+        drop(namespace);
+        sync_compacted_tree(&base)?;
+        let compacted = self
+            .storage
+            .path
+            .join(format!("compacted-{}", uuid::Uuid::new_v4()));
+        std::fs::rename(&base, &compacted)?;
+        tidepool_atomic_write::sync_parent_directory(&compacted)?;
+        self.retired_layers.extend(std::mem::replace(
+            &mut self.layers,
+            vec![OverlayLayer {
+                path: compacted,
+                storage: self.storage.clone(),
+            }],
+        ));
+        *self.latest.lock() = Some(OverlaySnapshot {
+            layers: self.layers.clone().into(),
+        });
+        tracing::info!(
+            retained_layers = self.retired_layers.len(),
+            "overlay layers compacted"
+        );
+        Ok(())
     }
 
     fn settle_rotation(
@@ -504,10 +592,12 @@ impl OverlayResourceLease {
         let Self {
             storage,
             layers,
+            retired_layers,
             custody,
             ..
         } = self;
         drop(layers);
+        drop(retired_layers);
         drop(custody);
         match Arc::try_unwrap(storage) {
             Ok(mut storage) => storage.release(),
@@ -671,6 +761,48 @@ fn source_xattrs(path: &Path) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
     }
     attributes.sort();
     Ok(attributes)
+}
+
+fn verify_sparse_copy(source: &Path, copy: &Path, manifest: &SourceManifest) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    for (relative, entry) in &manifest.0 {
+        if !matches!(entry.data, SourceData::File(_)) {
+            continue;
+        }
+        let original = std::fs::metadata(source.join(relative))?;
+        if original.len() < 4096 || original.blocks().saturating_mul(512) >= original.len() {
+            continue;
+        }
+        let copied = std::fs::metadata(copy.join(relative))?;
+        if copied.blocks().saturating_mul(512) >= copied.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("compaction filled sparse file {}", relative.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sync_compacted_tree(root: &Path) -> io::Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut directories = Vec::new();
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            directories.push(path.clone());
+            for entry in std::fs::read_dir(&path)? {
+                pending.push(entry?.path());
+            }
+        } else if metadata.is_file() {
+            std::fs::File::open(&path)?.sync_all()?;
+        }
+    }
+    for directory in directories.into_iter().rev() {
+        std::fs::File::open(directory)?.sync_all()?;
+    }
+    Ok(())
 }
 
 impl From<&std::fs::Metadata> for SourceStamp {
@@ -1013,7 +1145,58 @@ mod tests {
     }
 
     #[test]
+    fn compaction_matches_the_read_only_merged_view() {
+        use std::io::{Seek, SeekFrom};
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let mut source =
+            OverlayResourceLease::allocate_path(directory.path().join("storage"), None).unwrap();
+        let base = &source.layers[0].path;
+        std::fs::write(base.join("kept"), "original").unwrap();
+        std::fs::hard_link(base.join("kept"), base.join("linked")).unwrap();
+        std::fs::write(base.join("removed"), "old").unwrap();
+        let mut sparse = std::fs::File::create(base.join("sparse")).unwrap();
+        sparse.set_len(8 * 1024 * 1024).unwrap();
+        sparse.seek(SeekFrom::End(-1)).unwrap();
+        sparse.write_all(b"x").unwrap();
+        let (mut worker, namespace) = Worker::start(&mut source, &project);
+        let output = namespace
+            .host_command(&project, "/bin/sh".as_ref())
+            .unwrap()
+            .args(["-ec", "rm target/removed; printf new > target/new"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(worker.exchange("write"), "wrote");
+        assert!(matches!(
+            source
+                .publish(&namespace, &project.join("target"), &[])
+                .unwrap(),
+            OverlayRotationOutcome::Rotated
+        ));
+        source.compact_snapshot().unwrap();
+        assert_eq!(source.layers.len(), 1);
+        assert_eq!(source.latest_snapshot().unwrap().layers.len(), 1);
+        let compacted = &source.layers[0].path;
+        assert!(!compacted.join("removed").exists());
+        assert_eq!(
+            std::fs::read_to_string(compacted.join("new")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::metadata(compacted.join("kept")).unwrap().ino(),
+            std::fs::metadata(compacted.join("linked")).unwrap().ino()
+        );
+        let sparse = std::fs::metadata(compacted.join("sparse")).unwrap();
+        assert!(sparse.blocks() * 512 < sparse.len());
+        assert_eq!(worker.exchange("close"), "closed");
+    }
+
+    #[test]
     fn forty_generations_share_artifacts_and_preserve_whiteouts() {
+        use std::io::{Seek, SeekFrom};
         use std::os::unix::fs::MetadataExt;
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
@@ -1022,13 +1205,21 @@ mod tests {
                 .unwrap();
         let artifact = parent.layers[0].path.join("artifact");
         std::fs::write(&artifact, vec![42u8; 1024 * 1024]).unwrap();
+        std::fs::hard_link(&artifact, parent.layers[0].path.join("linked-artifact")).unwrap();
+        let sparse_path = parent.layers[0].path.join("sparse");
+        let mut sparse = std::fs::File::create(&sparse_path).unwrap();
+        sparse.set_len(8 * 1024 * 1024).unwrap();
+        sparse.seek(SeekFrom::End(-1)).unwrap();
+        sparse.write_all(b"x").unwrap();
+        std::fs::create_dir(parent.layers[0].path.join("overwritten")).unwrap();
+        std::fs::write(parent.layers[0].path.join("overwritten/old"), "old").unwrap();
         std::fs::write(parent.layers[0].path.join("deleted"), "old").unwrap();
         let original = std::fs::metadata(&artifact).unwrap();
         let (mut worker, namespace) = Worker::start(&mut parent, &project);
         let output = namespace
             .host_command(&project, "/bin/sh".as_ref())
             .unwrap()
-            .args(["-ec", "rm target/deleted; printf preserved > target/kept"])
+            .args(["-ec", "rm target/deleted; rm -rf target/overwritten; mkdir target/overwritten; printf new > target/overwritten/new; printf preserved > target/kept"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -1041,7 +1232,8 @@ mod tests {
                 OverlayRotationOutcome::Rotated
             ));
         }
-        assert_eq!(parent.layers.len(), 41);
+        assert!(parent.layers.len() < 32, "deep layers were not compacted");
+        assert!(parent.retired_layers.len() >= 32);
         assert_eq!(std::fs::metadata(&artifact).unwrap().ino(), original.ino());
         assert_eq!(
             std::fs::metadata(&artifact).unwrap().blocks(),
@@ -1055,8 +1247,17 @@ mod tests {
                 .count(),
             1
         );
+        let compacted = &parent.layers[0].path;
+        assert_eq!(
+            std::fs::metadata(compacted.join("artifact")).unwrap().ino(),
+            std::fs::metadata(compacted.join("linked-artifact"))
+                .unwrap()
+                .ino()
+        );
+        let sparse = std::fs::metadata(compacted.join("sparse")).unwrap();
+        assert!(sparse.blocks() * 512 < sparse.len());
         let output = namespace.host_command(&project, "/bin/sh".as_ref()).unwrap()
-            .args(["-ec", "test ! -e target/deleted; test \"$(cat target/kept)\" = preserved; test -s target/artifact"]).output().unwrap();
+            .args(["-ec", "test ! -e target/deleted; test ! -e target/overwritten/old; test \"$(cat target/overwritten/new)\" = new; test \"$(cat target/kept)\" = preserved; test -s target/artifact"]).output().unwrap();
         assert!(output.status.success());
         assert_eq!(worker.exchange("hold"), "held");
         assert!(matches!(

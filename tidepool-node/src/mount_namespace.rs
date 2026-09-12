@@ -6,10 +6,10 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -33,6 +33,20 @@ pub use overlay::{
 pub struct MountNamespace {
     preparation: Option<Arc<Descriptors>>,
     descriptors: Arc<Descriptors>,
+}
+
+/// A host-side read path through a pinned namespace root. Keep this guard
+/// alive while walking it; paths derived from it must not escape the guard.
+#[derive(Debug)]
+pub struct RetainedViewPath {
+    _descriptors: Arc<Descriptors>,
+    path: PathBuf,
+}
+
+impl RetainedViewPath {
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +88,28 @@ impl Descriptors {
 }
 
 impl MountNamespace {
+    pub fn retained_view_path(&self, path: &Path) -> io::Result<RetainedViewPath> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid retained view path",
+            ));
+        }
+        let relative = path.strip_prefix("/").map_err(io::Error::other)?;
+        Ok(RetainedViewPath {
+            _descriptors: self.descriptors.clone(),
+            path: PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                self.descriptors.root.as_raw_fd()
+            ))
+            .join(relative),
+        })
+    }
+
     /// Open one regular-file candidate through the retained view. The caller
     /// supplies an absolute path visible inside that view; kernel resolution
     /// confines symlinks to its root and refuses magic links.
