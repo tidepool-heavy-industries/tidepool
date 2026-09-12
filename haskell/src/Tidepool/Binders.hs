@@ -17,8 +17,14 @@ module Tidepool.Binders
   , parseTurnKind
   , StmtBinders(..)
   , extractStmtBinders
+  , classifyWithFlags
   , classifyBlock
   , renderVerdictsJson
+    -- * Notebook cell splitting
+  , CellSourceSpan(..)
+  , CellSourceItem(..)
+  , CellSplitError(..)
+  , splitCellWithFlags
     -- * Turn-mode template selection (--turn)
   , TemplateSelector(..)
   , templateSelectorForVerdict
@@ -35,7 +41,12 @@ import GHC.Driver.Session (xopt_set)
 import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser (parseStatement, parseDeclaration)
 import qualified GHC.Parser (parseModule)
-import GHC.Parser.Lexer (ParseResult(..), unP, initParserState)
+import GHC.Parser.Lexer
+  ( ParseResult(..)
+  , initParserState
+  , lexTokenStream
+  , unP
+  )
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString)
@@ -45,8 +56,8 @@ import GHC.Types.Name.Occurrence (occNameString)
 import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
-import Data.List (intercalate, nub)
-import Data.Maybe (catMaybes, isJust)
+import Data.List (intercalate, nub, sort)
+import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
@@ -187,6 +198,98 @@ data StmtBinders = StmtBinders
   , sbBinders   :: [String]
   , sbDeclItems :: [ExportItem]
   } deriving (Eq, Show)
+
+-- | Exact cell coordinates reported by GHC's lexer. Lines and columns are
+-- one-based, matching GHC diagnostics.
+data CellSourceSpan = CellSourceSpan
+  { cellStartLine :: Int
+  , cellStartColumn :: Int
+  , cellEndLine :: Int
+  , cellEndColumn :: Int
+  } deriving (Eq, Show)
+
+-- | One source item in a notebook cell. The text is sliced from the original
+-- payload, so quotation bodies and line endings are not reconstructed.
+data CellSourceItem = CellSourceItem
+  { cellSourceSpan :: CellSourceSpan
+  , cellSourceText :: String
+  } deriving (Eq, Show)
+
+data CellSplitError = CellLexFailure
+  deriving (Eq, Show)
+
+-- | Split a notebook cell at real tokens beginning in column one on a later
+-- line. GHC's lexer, not a second Haskell grammar, decides which newlines are
+-- inside strings, quasiquotes, comments, and pragmas.
+--
+-- This function only establishes lexical source items. Declaration grouping
+-- and statement/expression classification remain separate GHC parser steps.
+splitCellWithFlags :: DynFlags -> String -> Either CellSplitError [CellSourceItem]
+splitCellWithFlags dflags0 source =
+  case lexTokenStream popts buffer location of
+    PFailed _ -> Left CellLexFailure
+    POk _ tokens ->
+      let tokenSpans = mapMaybe realTokenSpan tokens
+          boundaryLines = case tokenSpans of
+            [] -> []
+            firstSpan : rest ->
+              srcSpanStartLine firstSpan
+                : [ srcSpanStartLine tokenSpan
+                  | tokenSpan <- rest
+                  , srcSpanStartCol tokenSpan == 1
+                  ]
+          starts = nub (sort boundaryLines)
+       in Right (mapMaybe (sourceItem tokenSpans) (zip starts (drop 1 starts ++ [maxBound])))
+  where
+    dflags = foldl' xopt_set dflags0 stmtExtensions
+    popts = initParserOpts dflags
+    buffer = stringToStringBuffer source
+    location = mkRealSrcLoc (mkFastString "<cell>") 1 1
+
+    realTokenSpan (L (RealSrcSpan realSpan _) _)
+      | srcSpanStartLine realSpan /= srcSpanEndLine realSpan
+          || srcSpanStartCol realSpan /= srcSpanEndCol realSpan =
+          Just realSpan
+    realTokenSpan _ = Nothing
+
+    sourceItem tokenSpans (startLine, nextLine) = do
+      firstSpan <- firstAtOrAfter startLine tokenSpans
+      lastSpan <- lastBefore nextLine tokenSpans
+      let startOffset = lineOffset source startLine
+          endOffset =
+            if nextLine == maxBound
+              then length source
+              else lineOffset source nextLine
+      pure CellSourceItem
+        { cellSourceSpan = CellSourceSpan
+            { cellStartLine = srcSpanStartLine firstSpan
+            , cellStartColumn = srcSpanStartCol firstSpan
+            , cellEndLine = srcSpanEndLine lastSpan
+            , cellEndColumn = srcSpanEndCol lastSpan
+            }
+        , cellSourceText = take (endOffset - startOffset) (drop startOffset source)
+        }
+
+    firstAtOrAfter line =
+      safeHead . filter ((>= line) . srcSpanStartLine)
+
+    lastBefore line =
+      safeLast . filter ((< line) . srcSpanStartLine)
+
+    safeHead [] = Nothing
+    safeHead (value : _) = Just value
+
+    safeLast [] = Nothing
+    safeLast values = Just (last values)
+
+-- Offset of a one-based source line. Callers only supply lines from GHC spans.
+lineOffset :: String -> Int -> Int
+lineOffset source targetLine = go 1 0 source
+  where
+    go line offset _ | line == targetLine = offset
+    go _ offset [] = offset
+    go line offset ('\n' : rest) = go (line + 1) (offset + 1) rest
+    go line offset (_ : rest) = go line (offset + 1) rest
 
 -- | Which wrapper template a verdict selects — a refinement of 'TurnKind': a
 -- 'KBind' verdict maps to one of two distinct template shapes depending on
@@ -382,7 +485,7 @@ stmtExtensions =
   -- Without it, `x <- … [fmt|…|] …` failed classification and fell through
   -- to the expression path ("parse error on input `<-'") — found live in the
   -- kata sweep, 2026-07-02.
-  , QuasiQuotes
+  , QuasiQuotes, MultilineStrings
   ]
 
 -- | The @--classify@ CLI contract: one verdict per positional file, in argv
