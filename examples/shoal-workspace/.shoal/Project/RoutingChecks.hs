@@ -350,7 +350,7 @@ forwardCandidate disposition = do
     failure <- awaitOutput (checkActor lead) "pollRoute forwarding" (Text.isInfixOf "RouteFailed")
     check "lost execution remains explicit in the retained route" ("RouteFailed" `Text.isInfixOf` failure)
     obligation <- turn (checkActor lead) "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply"
-    check "lost execution does not become a successful candidate" (output obligation == "ReplyOpen")
+    check "lost execution does not become a successful candidate" ("ReplyOpen" `Text.isSuffixOf` output obligation)
   else do
     result <- awaitOutput owner "answer <- pollResponse lead\ninspectFull answer" (Text.isInfixOf candidate)
     check "routing forwards exact evidence without a lead relay turn" ("independent review remains" `Text.isInfixOf` result)

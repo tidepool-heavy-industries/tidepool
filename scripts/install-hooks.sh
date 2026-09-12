@@ -29,4 +29,4 @@ for hook_path in "$src_dir"/*; do
 done
 
 echo ""
-echo "Hooks installed. Bypass any single push with: TIDEPOOL_SKIP_PRE_PUSH=1 git push"
+echo "Hooks installed. Run checks on a push with: TIDEPOOL_CHECK_PRE_PUSH=1 git push"

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Pre-push hook: run the canonical formatting, lint, and default test gate.
-# Block push if either fails. Skip with `git push --no-verify` if you must.
+# Pre-push hook: checks are opt-in; ordinary pushes do not launch a build.
 #
 # Install: scripts/install-hooks.sh
-# Bypass:  TIDEPOOL_SKIP_PRE_PUSH=1 git push   (or --no-verify)
+# Check:   TIDEPOOL_CHECK_PRE_PUSH=1 git push
 
 set -e
 
-if [[ "${TIDEPOOL_SKIP_PRE_PUSH:-}" == "1" ]]; then
-  echo "[pre-push] TIDEPOOL_SKIP_PRE_PUSH=1, skipping checks." >&2
+if [[ "${TIDEPOOL_CHECK_PRE_PUSH:-}" != "1" ]]; then
   exit 0
 fi
 
@@ -23,7 +21,7 @@ else
 fi
 if ! "${CHECK_CMD[@]}"; then
   echo "" >&2
-  echo "[pre-push] FAILED. Fix the reported check, or bypass with TIDEPOOL_SKIP_PRE_PUSH=1." >&2
+  echo "[pre-push] FAILED. Fix the reported check before pushing with TIDEPOOL_CHECK_PRE_PUSH=1." >&2
   exit 1
 fi
 

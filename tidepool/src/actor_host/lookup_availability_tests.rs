@@ -10,7 +10,12 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let names = dispatch_lookup(
         policy,
-        &["pollResponse", "sleep", "LookupEffects.readFile", "installTools"],
+        &[
+            "pollResponse",
+            "sleep",
+            "LookupEffects.readFile",
+            "installTools",
+        ],
     )
     .await;
     assert_eq!(names["status"], "committed", "{names:?}");
@@ -35,7 +40,7 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
         policy,
         &[
             ":: Response result -> Eff effects (ResponseState result)",
-            ":: FilePath -> Eff effects _",
+            ":: FilePath -> Eff effects Bool",
         ],
     )
     .await;
@@ -50,7 +55,7 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
     assert!(
         matches
             .lines()
-            .any(|line| line.contains("[unavailable]") && line.contains("readFile ::")),
+            .any(|line| line.contains("[unavailable]") && line.contains("doesFileExist ::")),
         "{matches}"
     );
 
