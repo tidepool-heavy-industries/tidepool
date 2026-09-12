@@ -1893,6 +1893,13 @@ mod tests {
         let pins = checked.pins_for_item(1).unwrap();
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].ty, "Maybe G");
+        assert!(
+            checked
+                .checked_source
+                .contains("__tidepool_cell_pin_1_h :: Maybe G"),
+            "the accepted source must reparse the rendered pin: {}",
+            checked.checked_source
+        );
         assert!(pins[0]
             .heads
             .iter()

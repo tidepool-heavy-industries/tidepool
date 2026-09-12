@@ -29,6 +29,7 @@ module Tidepool.Binders
   , analyzeCellWithFlags
   , analyzeCell
   , renderCellCheckSource
+  , renderPinnedCellCheckSource
   , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
   , TemplateSelector(..)
@@ -309,9 +310,30 @@ analyzeCell source = do
 -- vocabulary. Missing or duplicate placeholders are rejected by the worker
 -- entry point before compilation.
 renderCellCheckSource :: String -> [CellAnalysisItem] -> Either String String
-renderCellCheckSource template items = do
+renderCellCheckSource template items =
+  renderCellCheckSourceWithPins template items Nothing
+
+-- | Re-render a checked cell with every harvested binder type written back as
+-- an explicit local signature. Typechecking this source proves that the
+-- compiler's rendered type is parseable in the cell's declaration scope
+-- before the actor installs a declaration or runs an effect.
+renderPinnedCellCheckSource
+  :: String
+  -> [CellAnalysisItem]
+  -> [CheckedBinderPin]
+  -> Either String String
+renderPinnedCellCheckSource template items pins =
+  renderCellCheckSourceWithPins template items (Just pins)
+
+renderCellCheckSourceWithPins
+  :: String
+  -> [CellAnalysisItem]
+  -> Maybe [CheckedBinderPin]
+  -> Either String String
+renderCellCheckSourceWithPins template items pins = do
   withDecls <- replaceOnce "{{CELL_DECLS}}" declarations template
-  replaceOnce "{{CELL_BODY}}" body withDecls
+  renderedBody <- body
+  replaceOnce "{{CELL_BODY}}" renderedBody withDecls
   where
     declarations = concat
       [ linePragma item ++ cellAnalysisSource item ++ trailingNewline (cellAnalysisSource item)
@@ -324,29 +346,41 @@ renderCellCheckSource template items = do
       , sbKind (cellAnalysisVerdict item) /= KDecl
       ]
     body = case executable of
-      [] -> "pure ()\n"
-      values -> intercalate "\n; " (map renderExecutable values) ++ "\n"
+      [] -> Right "pure ()\n"
+      values -> (++ "\n") . intercalate "\n; " <$> mapM renderExecutable values
 
     renderExecutable (index, item) =
-      linePragma item
-      ++ case cellAnalysisVerdict item of
+      (linePragma item ++) <$> case cellAnalysisVerdict item of
         StmtBinders KBind binders _ ->
-          cellAnalysisSource item
-          ++ trailingNewline (cellAnalysisSource item)
-          ++ if null binders
-            then ""
-            else "; let { "
-              ++ intercalate "; "
-                [ pinKey index binder ++ " = " ++ binder
-                | binder <- binders
-                ]
-              ++ " }\n"
+          if null binders
+            then Right (cellAnalysisSource item ++ trailingNewline (cellAnalysisSource item))
+            else do
+              aliases <- mapM (renderAlias index) binders
+              Right
+                ( cellAnalysisSource item
+                ++ trailingNewline (cellAnalysisSource item)
+                ++ "; let { "
+                ++ intercalate "; " aliases
+                ++ " }\n"
+                )
         StmtBinders KExpr _ _ ->
-          "__tidepoolCellExpression (\n"
-          ++ cellAnalysisSource item
-          ++ trailingNewline (cellAnalysisSource item)
-          ++ ")\n"
-        StmtBinders KDecl _ _ -> ""
+          Right
+            ( "__tidepoolCellExpression (\n"
+            ++ cellAnalysisSource item
+            ++ trailingNewline (cellAnalysisSource item)
+            ++ ")\n"
+            )
+        StmtBinders KDecl _ _ -> Right ""
+
+    renderAlias index binder =
+      let key = pinKey index binder
+       in case pins of
+            Nothing -> Right (key ++ " = " ++ binder)
+            Just available ->
+              case [checkedPinType pin | pin <- available, checkedPinKey pin == key] of
+                [ty] -> Right (key ++ " :: " ++ ty ++ "; " ++ key ++ " = " ++ binder)
+                [] -> Left ("whole-cell check returned no rendered type for " ++ key)
+                _ -> Left ("whole-cell check returned duplicate rendered types for " ++ key)
 
     linePragma item =
       "{-# LINE " ++ show (cellStartLine (cellAnalysisSpan item)) ++ " \"<cell>\" #-}\n"

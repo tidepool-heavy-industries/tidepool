@@ -24,7 +24,7 @@ import qualified Data.Text as T
 import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
-  , analyzeCell, renderCellCheckSource
+  , analyzeCell, renderCellCheckSource, renderPinnedCellCheckSource
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderVerdictsJson )
@@ -536,9 +536,13 @@ runCellMode compiler args cellPath = do
     createDirectoryIfMissing True outDir
     writeFile modulePath checkedSource
     compiled <- compiler scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+    pinnedSource <- either fail pure
+      (renderPinnedCellCheckSource template analyzed (prCheckedBinderPins compiled))
+    writeFile modulePath pinnedSource
+    pinned <- compiler scope modulePath (requestIncludes args) (requestBuildProductsDir args)
     out <- requireArg "--cell-out" (requestCellOut args)
     BS.writeFile out
-      (encodeCellOut analyzed (prCheckedBinderPins compiled) checkedSource)
+      (encodeCellOut analyzed (prCheckedBinderPins pinned) pinnedSource)
   reportDiags res
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
