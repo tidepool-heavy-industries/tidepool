@@ -328,6 +328,7 @@ async fn submit(
         Ok(Err(KernelInvocationFailure::Workbench(failure))) => {
             let mut response = map_result(WorkbenchResponse {
                 status: WorkbenchRunStatus::Rejected,
+                summary: None,
                 items: failure.receipts,
                 next_index: failure.failed_index,
                 total: failure.total,

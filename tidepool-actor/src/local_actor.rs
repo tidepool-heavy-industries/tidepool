@@ -1748,6 +1748,7 @@ mod tests {
             Box::pin(async {
                 Ok(KernelStep::Continue(WorkbenchResponse {
                     status: WorkbenchRunStatus::Committed,
+                    summary: None,
                     items: Vec::new(),
                     next_index: 0,
                     total: 0,

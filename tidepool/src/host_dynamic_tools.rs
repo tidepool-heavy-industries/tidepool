@@ -1242,6 +1242,7 @@ pub(crate) mod tests {
                         execution,
                         reply: Ok(WorkbenchResponse {
                             status: WorkbenchRunStatus::RequestCancelled,
+                            summary: None,
                             items: vec![],
                             next_index: 0,
                             total: 2,
@@ -1276,6 +1277,7 @@ pub(crate) mod tests {
                     "call-a" => WorkbenchBoundaryReconciliation::Recovered {
                         reply: Ok(WorkbenchResponse {
                             status: WorkbenchRunStatus::Committed,
+                            summary: None,
                             items: vec![],
                             next_index: 1,
                             total: 1,
@@ -1824,6 +1826,8 @@ pub(crate) mod tests {
             detail: "large diagnostic λ\n".repeat(20_000),
             receipts: vec![WorkbenchItemReceipt {
                 index: 1,
+                kind: None,
+                span: None,
                 status: WorkbenchItemStatus::Rejected,
                 output: output.clone(),
                 warnings: vec![],

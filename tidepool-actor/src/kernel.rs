@@ -642,6 +642,8 @@ mod tests {
             actor: ActorRef::first(crate::ActorId(7)),
             receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
                 index: 0,
+                kind: None,
+                span: None,
                 status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
                 output: "defined spotTaskText at generation 2".into(),
                 warnings: Vec::new(),

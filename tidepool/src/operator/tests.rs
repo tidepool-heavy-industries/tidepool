@@ -342,6 +342,7 @@ async fn wire_terminal_mapping_and_response_bounds() {
     ] {
         let result = map_result(WorkbenchResponse {
             status,
+            summary: None,
             items: vec![],
             next_index: 0,
             total: 0,

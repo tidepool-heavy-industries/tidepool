@@ -15,10 +15,11 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
-    WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
-    WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    CellCheck, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession,
+    RootCustody, TurnKind, WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 use tidepool_runtime::{classify_compile, FailureClass};
 use tokio::sync::mpsc;
@@ -349,6 +350,8 @@ fn workbench_failure_after_operations(
     if !operations.is_empty() {
         receipts.push(WorkbenchItemReceipt {
             index: failed_index,
+            kind: None,
+            span: None,
             status: WorkbenchItemStatus::Rejected,
             // The failure owns its diagnostic separately; this field retains
             // output committed before the failing continuation.
@@ -4330,6 +4333,8 @@ where
                         WorkbenchRunStatus::Rejected,
                         vec![WorkbenchItemReceipt {
                             index: 0,
+                            kind: None,
+                            span: None,
                             status: WorkbenchItemStatus::Rejected,
                             output: tidepool_runtime::session::render_cell_compile_error(
                                 &error,
@@ -4342,6 +4347,7 @@ where
                         }],
                         0,
                         1,
+                        None,
                     )));
                 }
                 Err(source) => return Err(workbench_failure(&[], 0, 1, source)),
@@ -4371,6 +4377,8 @@ where
             if let Some(status_view) = status_view {
                 receipts.push(WorkbenchItemReceipt {
                     index,
+                    kind: None,
+                    span: None,
                     status: WorkbenchItemStatus::Committed,
                     output: self.status_text(kernel, context.actor, status_view),
                     warnings: Vec::new(),
@@ -4387,6 +4395,8 @@ where
                 if request.item_is_observational(index) {
                     receipts.push(WorkbenchItemReceipt {
                         index,
+                        kind: None,
+                        span: None,
                         status: WorkbenchItemStatus::Diagnostic,
                         output: output.clone(),
                         warnings: Vec::new(),
@@ -4421,6 +4431,8 @@ where
                     match output {
                         Ok(output) => receipts.push(WorkbenchItemReceipt {
                             index: receipt_index,
+                            kind: None,
+                            span: None,
                             status: WorkbenchItemStatus::Committed,
                             output,
                             warnings: Vec::new(),
@@ -4431,6 +4443,8 @@ where
                         Err(output) => {
                             receipts.push(WorkbenchItemReceipt {
                                 index: receipt_index,
+                                kind: None,
+                                span: None,
                                 status: WorkbenchItemStatus::Diagnostic,
                                 output,
                                 warnings: Vec::new(),
@@ -4628,6 +4642,8 @@ where
                         );
                         receipts.push(WorkbenchItemReceipt {
                             index,
+                            kind: None,
+                            span: None,
                             status: WorkbenchItemStatus::Rejected,
                             output: "unfold admission ended without committing every fork group"
                                 .into(),
@@ -4641,10 +4657,13 @@ where
                             receipts,
                             index,
                             request.items.len(),
+                            cell_check.as_ref(),
                         )));
                     }
                     receipts.push(WorkbenchItemReceipt {
                         index,
+                        kind: None,
+                        span: None,
                         status: WorkbenchItemStatus::Committed,
                         output,
                         warnings,
@@ -4671,6 +4690,8 @@ where
                     if request.item_is_observational(index) {
                         receipts.push(WorkbenchItemReceipt {
                             index,
+                            kind: None,
+                            span: None,
                             status: WorkbenchItemStatus::Diagnostic,
                             output,
                             warnings: Vec::new(),
@@ -4689,6 +4710,8 @@ where
                     .await;
                     receipts.push(WorkbenchItemReceipt {
                         index,
+                        kind: None,
+                        span: None,
                         status: WorkbenchItemStatus::Rejected,
                         output,
                         warnings: Vec::new(),
@@ -4701,6 +4724,7 @@ where
                         receipts,
                         index,
                         request.items.len(),
+                        cell_check.as_ref(),
                     )));
                 }
                 ResidentWorkbenchStep::CommandBackgrounded {
@@ -4754,6 +4778,8 @@ where
                     }
                     receipts.push(WorkbenchItemReceipt {
                         index,
+                        kind: None,
+                        span: None,
                         status: WorkbenchItemStatus::Stopped,
                         output,
                         warnings: Vec::new(),
@@ -4766,6 +4792,7 @@ where
                         receipts,
                         index,
                         request.items.len(),
+                        cell_check.as_ref(),
                     )));
                 }
                 ResidentWorkbenchStep::Replied {
@@ -4785,6 +4812,8 @@ where
                         })?;
                     receipts.push(WorkbenchItemReceipt {
                         index,
+                        kind: None,
+                        span: None,
                         status: WorkbenchItemStatus::Committed,
                         output: "Reply submitted.".to_owned(),
                         warnings: Vec::new(),
@@ -4797,6 +4826,7 @@ where
                         receipts,
                         index + 1,
                         request.items.len(),
+                        cell_check.as_ref(),
                     )));
                 }
                 ResidentWorkbenchStep::CancellationAcknowledged {
@@ -4924,6 +4954,8 @@ where
                     self.pending_cancellation = Some(request_id);
                     receipts.push(WorkbenchItemReceipt {
                         index,
+                        kind: None,
+                        span: None,
                         status: WorkbenchItemStatus::Committed,
                         output: String::new(),
                         warnings: Vec::new(),
@@ -4938,6 +4970,7 @@ where
                         receipts,
                         index + 1,
                         request.items.len(),
+                        cell_check.as_ref(),
                     )));
                 }
                 ResidentWorkbenchStep::Running { .. } => {
@@ -4951,6 +4984,7 @@ where
             receipts,
             request.items.len(),
             request.items.len(),
+            cell_check.as_ref(),
         )))
     }
 
@@ -6622,7 +6656,20 @@ fn workbench_response(
     mut items: Vec<WorkbenchItemReceipt>,
     next_index: usize,
     total: usize,
+    cell_check: Option<&CellCheck>,
 ) -> WorkbenchResponse {
+    if let Some(checked) = cell_check {
+        for receipt in &mut items {
+            if let Some(item) = checked.items.get(receipt.index) {
+                receipt.kind = Some(match item.verdict.kind {
+                    TurnKind::Decl => WorkbenchCellItemKind::Declaration,
+                    TurnKind::Bind => WorkbenchCellItemKind::Statement,
+                    TurnKind::Expr => WorkbenchCellItemKind::Expression,
+                });
+                receipt.span = Some(item.span);
+            }
+        }
+    }
     let essential = items.iter().rposition(|item| {
         matches!(
             item.status,
@@ -6656,6 +6703,17 @@ fn workbench_response(
     };
     items.extend((first_not_run..total).map(|index| WorkbenchItemReceipt {
         index,
+        kind: cell_check.and_then(|checked| {
+            checked
+                .items
+                .get(index)
+                .map(|item| match item.verdict.kind {
+                    TurnKind::Decl => WorkbenchCellItemKind::Declaration,
+                    TurnKind::Bind => WorkbenchCellItemKind::Statement,
+                    TurnKind::Expr => WorkbenchCellItemKind::Expression,
+                })
+        }),
+        span: cell_check.and_then(|checked| checked.items.get(index).map(|item| item.span)),
         status: WorkbenchItemStatus::NotRun,
         output: String::new(),
         warnings: Vec::new(),
@@ -6665,6 +6723,31 @@ fn workbench_response(
     }));
     WorkbenchResponse {
         status,
+        summary: cell_check.map(|checked| {
+            let mut declarations = 0;
+            let mut statements = 0;
+            let mut displays = 0;
+            for item in &checked.items {
+                match item.verdict.kind {
+                    TurnKind::Decl => declarations += 1,
+                    TurnKind::Bind => statements += 1,
+                    TurnKind::Expr => displays += 1,
+                }
+            }
+            let label = |count, singular| {
+                if count == 1 {
+                    format!("1 {singular}")
+                } else {
+                    format!("{count} {singular}s")
+                }
+            };
+            format!(
+                "{}, {}, {}",
+                label(declarations, "declaration"),
+                label(statements, "statement"),
+                label(displays, "display")
+            )
+        }),
         items,
         next_index,
         total,
@@ -6679,7 +6762,8 @@ mod tests {
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
-        WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
+        CellAnalysisItem, CellCheck, CellSourceSpan, TurnClassification, TurnKind,
+        WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
         WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
         WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     };
@@ -6713,8 +6797,34 @@ mod tests {
 
     #[test]
     fn rejected_workbench_response_marks_the_unexecuted_suffix() {
+        let item = |kind, line| CellAnalysisItem {
+            span: CellSourceSpan {
+                start_line: line,
+                start_column: 1,
+                end_line: line,
+                end_column: 8,
+            },
+            source: String::new(),
+            verdict: TurnClassification {
+                kind,
+                binders: Vec::new(),
+                items: Vec::new(),
+            },
+        };
+        let checked = CellCheck {
+            items: vec![
+                item(TurnKind::Decl, 1),
+                item(TurnKind::Bind, 2),
+                item(TurnKind::Bind, 3),
+                item(TurnKind::Expr, 4),
+            ],
+            pins: Vec::new(),
+            checked_source: String::new(),
+        };
         let committed = WorkbenchItemReceipt {
             index: 0,
+            kind: None,
+            span: None,
             status: WorkbenchItemStatus::Committed,
             output: "[bound prior]".into(),
             warnings: Vec::new(),
@@ -6728,6 +6838,8 @@ mod tests {
                 committed.clone(),
                 WorkbenchItemReceipt {
                     index: 1,
+                    kind: None,
+                    span: None,
                     status: WorkbenchItemStatus::Rejected,
                     output: "<input unit 2>: runtime error: pattern match failure: Just x".into(),
                     warnings: Vec::new(),
@@ -6738,13 +6850,30 @@ mod tests {
             ],
             1,
             4,
+            Some(&checked),
+        );
+        assert_eq!(
+            response.summary.as_deref(),
+            Some("1 declaration, 2 statements, 1 display")
         );
         assert_eq!(response.items.len(), 4);
-        assert_eq!(response.items[0], committed);
+        assert_eq!(
+            response.items[0].kind,
+            Some(WorkbenchCellItemKind::Declaration)
+        );
+        assert_eq!(response.items[0].span.unwrap().start_line, 1);
         assert_eq!(response.items[1].status, WorkbenchItemStatus::Rejected);
+        assert_eq!(
+            response.items[1].kind,
+            Some(WorkbenchCellItemKind::Statement)
+        );
         assert!(response.items[1].installed_bindings.is_empty());
         assert_eq!(response.items[2].status, WorkbenchItemStatus::NotRun);
         assert_eq!(response.items[3].status, WorkbenchItemStatus::NotRun);
+        assert_eq!(
+            response.items[3].kind,
+            Some(WorkbenchCellItemKind::Expression)
+        );
         assert!(response.items[2..]
             .iter()
             .all(|item| item.installed_bindings.is_empty()));
@@ -6791,6 +6920,7 @@ mod tests {
             .with_execution_id(execution.clone());
         let reply = Ok(WorkbenchResponse {
             status: WorkbenchRunStatus::Committed,
+            summary: None,
             items: Vec::new(),
             next_index: 1,
             total: 1,
@@ -6845,6 +6975,7 @@ mod tests {
             .with_execution_id(execution.clone());
         let reply = Ok(WorkbenchResponse {
             status: WorkbenchRunStatus::Committed,
+            summary: None,
             items: Vec::new(),
             next_index: 1,
             total: 1,

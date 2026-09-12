@@ -13,6 +13,7 @@ use pest_derive::Parser;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::turn::CellSourceSpan;
 use super::{
     assemble_bind_module, assemble_display_expression_module, assemble_opaque_expression_module,
     insert_preamble_imports, ExpressionLift, TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
@@ -556,10 +557,22 @@ pub enum WorkbenchItemStatus {
     NotRun,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchCellItemKind {
+    Declaration,
+    Statement,
+    Expression,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchItemReceipt {
     pub index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<WorkbenchCellItemKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<CellSourceSpan>,
     pub status: WorkbenchItemStatus,
     pub output: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -593,6 +606,8 @@ pub enum WorkbenchRunStatus {
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchResponse {
     pub status: WorkbenchRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub items: Vec<WorkbenchItemReceipt>,
     pub next_index: usize,
     pub total: usize,
@@ -940,6 +955,7 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where {{ \
            __tidepoolCellExpression _ = pure () }}\n\
          {{{{CELL_DECLS}}}}\n\
+         __tidepool_cell_check :: Eff {effect_stack} ()\n\
          __tidepool_cell_check = do {{\n\
          {{{{CELL_BODY}}}}\n\
          ; pure () }}\n"
@@ -1549,8 +1565,11 @@ mod tests {
         let execution = WorkbenchExecutionId::from_digest([3; 16]);
         let response = WorkbenchResponse {
             status: WorkbenchRunStatus::Replied,
+            summary: None,
             items: vec![WorkbenchItemReceipt {
                 index: 0,
+                kind: None,
+                span: None,
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
                 warnings: Vec::new(),

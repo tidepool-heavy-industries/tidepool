@@ -751,6 +751,7 @@ mod tests {
     fn terminal_reply() -> crate::KernelWorkbenchReply {
         Ok(WorkbenchResponse {
             status: WorkbenchRunStatus::Rejected,
+            summary: None,
             items: Vec::new(),
             next_index: 0,
             total: 1,

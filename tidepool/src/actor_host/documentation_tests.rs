@@ -30,15 +30,29 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     let campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
 
-    let committed = committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")).await;
-    let items = committed["items"].as_array().unwrap();
-    assert_eq!(items.len(), 4, "{committed:?}");
-    assert_eq!(items[3]["status"], "committed", "{committed:?}");
+    let setup = committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")).await;
+    assert_eq!(
+        setup["summary"], "1 declaration, 2 statements, 1 display",
+        "{setup:?}"
+    );
+    let items = setup["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "{setup:?}");
+    for (item, kind, start_line) in [
+        (&items[0], "declaration", 1),
+        (&items[1], "statement", 4),
+        (&items[2], "statement", 6),
+        (&items[3], "expression", 8),
+    ] {
+        assert_eq!(item["kind"], kind, "{setup:?}");
+        assert_eq!(item["span"]["startLine"], start_line, "{setup:?}");
+        assert_eq!(item["span"]["startColumn"], 1, "{setup:?}");
+    }
+    assert_eq!(items[3]["status"], "committed", "{setup:?}");
     assert!(
         items[3]["output"]
             .as_str()
             .is_some_and(|output| output.contains("Nothing")),
-        "{committed:?}"
+        "{setup:?}"
     );
 
     let rejected =
@@ -72,6 +86,94 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
             && missing_binding.to_string().contains("not in scope"),
         "{missing_binding:?}"
     );
+
+    let prefix_failure =
+        dispatch_haskell_script(root.as_ref(), include_str!("notebook_prefix_failure.hs")).await;
+    assert_eq!(prefix_failure["status"], "rejected", "{prefix_failure:?}");
+    assert_eq!(
+        prefix_failure["summary"], "0 declarations, 4 statements, 0 displays",
+        "{prefix_failure:?}"
+    );
+    let items = prefix_failure["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "{prefix_failure:?}");
+    assert_eq!(items[0]["status"], "committed", "{prefix_failure:?}");
+    assert_eq!(items[1]["status"], "committed", "{prefix_failure:?}");
+    assert_eq!(items[2]["status"], "rejected", "{prefix_failure:?}");
+    assert_eq!(items[3]["status"], "notRun", "{prefix_failure:?}");
+    assert!(items.iter().all(|item| item["kind"] == "statement"));
+
+    let recovered = committed(root.as_ref(), "prefixValue\n").await;
+    assert_eq!(recovered["items"][0]["output"], "41", "{recovered:?}");
+    let missing_tail = dispatch_haskell_script(root.as_ref(), "tailValue\n").await;
+    assert_eq!(missing_tail["status"], "rejected", "{missing_tail:?}");
+    assert!(
+        missing_tail.to_string().contains("tailValue")
+            && missing_tail.to_string().contains("not in scope"),
+        "{missing_tail:?}"
+    );
+
+    committed(root.as_ref(), "shadowed <- pure (1 :: Int)\n").await;
+    let shadowed = committed(root.as_ref(), "shadowed <- pure (2 :: Int)\nshadowed\n").await;
+    assert_eq!(shadowed["items"][1]["output"], "2", "{shadowed:?}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_cell_reply_marks_its_tail_not_run() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        "worker <- startAgent (readonlyAgent \"notebook-reply-worker\")\n",
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        "response <- request @Text worker (assignment \"notebook-reply\" (\"ready\" :: Text))\n",
+    )
+    .await;
+    let child = tokio::time::timeout(Duration::from_secs(120), async {
+        let mut child = None;
+        loop {
+            match campaign.deployments.recv().await {
+                Some(LocalResidentDeployment::PolicyInstalled(installation)) => {
+                    child = Some(installation)
+                }
+                Some(LocalResidentDeployment::SessionReady { activation })
+                    if activation.message.contains("notebook-reply") =>
+                {
+                    return child.expect("policy installed before request activation");
+                }
+                Some(_) => {}
+                None => panic!("deployment channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("notebook reply request activation");
+
+    let reply = dispatch_haskell_script(
+        child.policy.as_ref(),
+        include_str!("notebook_reply_tail.hs"),
+    )
+    .await;
+    assert_eq!(reply["status"], "replied", "{reply:?}");
+    assert_eq!(
+        reply["summary"], "0 declarations, 1 statement, 1 display",
+        "{reply:?}"
+    );
+    let items = reply["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{reply:?}");
+    assert_eq!(items[0]["status"], "committed", "{reply:?}");
+    assert_eq!(items[0]["kind"], "expression", "{reply:?}");
+    assert_eq!(items[0]["terminalTransfer"], "replyAccepted", "{reply:?}");
+    assert_eq!(items[1]["status"], "notRun", "{reply:?}");
+    assert_eq!(items[1]["kind"], "statement", "{reply:?}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 fn open_test_fork(

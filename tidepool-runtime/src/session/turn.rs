@@ -95,7 +95,8 @@ pub struct TurnClassification {
 }
 
 /// One-based source coordinates reported by GHC for a notebook-cell item.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct CellSourceSpan {
     pub start_line: usize,
     pub start_column: usize,
