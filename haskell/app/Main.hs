@@ -162,6 +162,7 @@ runInspectionMode compiler args _path = do
           Nothing -> throwIO exception
         Right successful -> runInspection
           (prHscEnv successful)
+          (prTargetTcGblEnv successful)
           (prTargetRdrEnv successful)
           (prCapturedTypes successful)
           [query]

@@ -2355,6 +2355,7 @@ impl Session {
             session_root: self.session_root(),
             inject_modules: &inject_modules,
             queries: std::slice::from_ref(&query),
+            effects: None,
         }) {
             Ok(mut results) => TurnOutcome::Inspection(results.pop().map_or_else(
                 || "inspection returned no result".into(),

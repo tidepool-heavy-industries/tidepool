@@ -16,9 +16,10 @@ a new swarm or validating a package change.
 `boundHead`. `implement` uses `solTask`. They suit recursive implementation from
 an allocated checkout. Component leads, solTask/implement and reviews explicitly select Medium;
 keep Sol effort stable across inherited forks. Original-root callers use `solTaskFrom label projectHead`
-or `componentLeadFrom label projectHead`. A Task's source hash records provenance;
-it does not override that live checkout selection. Commit coherent work for Git
-integration and restart recovery, even though ordinary unfold inherits working files.
+or `componentLeadFrom label projectHead`. A Task's source hash records its accepted
+baseline; it does not override live checkout selection. Shoal checkpoints eligible
+source changes on the current branch before a live-source fork. Commit authored
+units with meaningful messages for Git integration and restart recovery.
 
 Use `withContext (selected taskContext)` for an independent component or fresh
 inspection; use `atRef (GitRef (renderGitOid source))` with the source variant for an exact
@@ -42,7 +43,16 @@ let campaign = "current-goal" :: CampaignLabel
 let owners = "owners" :: ForkGroupLabel
 let label = "component-a" :: Label
 let group = batch campaign owners
-let task = Task group plan source outcome why paths criterion decisions
+let task = Task
+      { taskGroup = group
+      , planPath = plan
+      , taskSource = source
+      , obligation = outcome
+      , rationale = why
+      , ownedPaths = paths
+      , acceptance = criterion
+      , acceptedDecisions = decisions
+      }
 work <- unfold group (childWithProgress @WorkProgress @Delivery (withContext (selected taskContext) (componentLeadFrom label projectHead task)))
 let (lead, progress) = work
 wave <- followWork [("component-a", lead, progress)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))

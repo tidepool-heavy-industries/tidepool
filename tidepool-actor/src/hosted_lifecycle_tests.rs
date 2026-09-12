@@ -239,6 +239,33 @@ fn invocation(source: &str, id: &str) -> tidepool_tool::ToolInvocation {
     }
 }
 
+async fn cancel_sleeping_cell(
+    policy: &Arc<super::ResidentInteractivePolicy>,
+    source: &str,
+    id: &str,
+) -> (tidepool_actor::KernelWorkbenchFailure, tidepool_tool::ToolInvocationContext) {
+    let invocation = invocation(source, id);
+    let context = invocation.context.clone().unwrap();
+    let mut running = {
+        let policy = Arc::clone(policy);
+        tokio::spawn(async move { policy.dispatch_boxed(invocation).await })
+    };
+    tokio::time::timeout(Duration::from_secs(30), policy.client.wait_until_sleeping(&context))
+        .await
+        .expect("notebook cell did not reach its cancellable suspension boundary");
+    running.abort();
+    let _ = (&mut running).await;
+    let cancellation = policy.cancel_workbench_boxed(context.clone()).await.unwrap();
+    let WorkbenchCancellationOutcome::Cancelled {
+        reply: Err(tidepool_actor::KernelInvocationFailure::Workbench(failure)),
+        ..
+    } = cancellation
+    else {
+        panic!("cancellation did not retain its workbench failure: {cancellation:?}");
+    };
+    (failure, context)
+}
+
 fn lookup_invocation(queries: &[&str], id: &str) -> tidepool_tool::ToolInvocation {
     tidepool_tool::ToolInvocation {
         name: "lookup".into(),
@@ -469,13 +496,15 @@ async fn hosted_lookup_and_status_use_actor_owned_views() {
 #[tokio::test]
 async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
     eval_harness::require_extract();
-    let declarations = [tidepool_mcp::sleep_decl()];
+    let declarations = tidepool_mcp::all_decls();
     let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
+    let role = EffectiveRole::coding();
     let preamble = format!(
-        "{}\ntype ActorEffects = '[Sleep, Replies, Watches]\n",
-        tidepool_mcp::build_preamble(&declarations, false)
+        "{}\ntype ActorEffects = {}\n",
+        tidepool_mcp::build_preamble(&declarations, false),
+        role.haskell_effects_type(),
     );
     let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Reply (Replies)");
     let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
@@ -523,11 +552,11 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         Incarnation::FIRST,
     );
     let sleeper = forest
-        .new_workbench("sleeper".into(), EffectiveRole::coding())
+        .new_workbench("sleeper".into(), role.clone())
         .await
         .unwrap();
     let sibling = forest
-        .new_workbench("sibling".into(), EffectiveRole::coding())
+        .new_workbench("sibling".into(), role)
         .await
         .unwrap();
     let sleeper_policy = Arc::new(super::ResidentInteractivePolicy::local(sleeper.clone()));
@@ -535,15 +564,18 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
 
     tokio::time::pause();
     let completed_invocation = invocation(
-        "sleep (minutes 15)\npure (7 :: Int)",
+        "sleep (minutes 15)\n(7 :: Int)",
         "fifteen-minute-sleep",
     );
     let completed_context = completed_invocation.context.clone().unwrap();
     let sleeping = tokio::spawn(sleeper_policy.dispatch_boxed(completed_invocation));
-    tokio::task::yield_now().await;
+    sleeper_policy
+        .client
+        .wait_until_sleeping(&completed_context)
+        .await;
 
     let sibling_result = sibling_policy
-        .dispatch_boxed(invocation("pure (3 :: Int)", "sibling-progress"))
+        .dispatch_boxed(invocation("(3 :: Int)", "sibling-progress"))
         .await
         .unwrap();
     assert_eq!(
@@ -570,41 +602,27 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         WorkbenchCancellationOutcome::Expired { .. }
     ));
 
-    let cancel_invocation = invocation(
-        "sleep (minutes 15)\nafterCancelled <- pure (99 :: Int)",
-        "cancelled-sleep",
-    );
-    let cancel_context = cancel_invocation.context.clone().unwrap();
-    let mut cancelled = {
-        let sleeper_policy = Arc::clone(&sleeper_policy);
-        tokio::spawn(async move { sleeper_policy.dispatch_boxed(cancel_invocation).await })
-    };
-    sleeper_policy
-        .client
-        .wait_until_sleeping(&cancel_context)
-        .await;
-    cancelled.abort();
-    let _ = (&mut cancelled).await;
+    tokio::time::resume();
+    let (before_prefix, cancel_context) = cancel_sleeping_cell(
+        &sleeper_policy,
+        include_str!("../tests/resident_local_actor/notebook_cancellation_before_prefix.hs"),
+        "cancelled-before-prefix",
+    )
+    .await;
+    assert_eq!(before_prefix.failed_index, 0, "{before_prefix:?}");
+    assert!(before_prefix.receipts.is_empty(), "{before_prefix:?}");
     let mut foreign_context = cancel_context.clone();
     foreign_context.context_call_id = Some("foreign-outer-call".into());
     let foreign_cancellation = {
         let sleeper_policy = Arc::clone(&sleeper_policy);
         tokio::spawn(async move { sleeper_policy.cancel_workbench_boxed(foreign_context).await })
     };
-    let cancellation = sleeper_policy
-        .cancel_workbench_boxed(cancel_context.clone())
-        .await
-        .unwrap();
     assert!(
         matches!(
             foreign_cancellation.await.unwrap().unwrap(),
             WorkbenchCancellationOutcome::UnknownEvaluation { .. }
         ),
         "a different enclosing call must not target the active evaluation"
-    );
-    assert!(
-        matches!(cancellation, WorkbenchCancellationOutcome::Cancelled { .. }),
-        "cancellation outcome: {cancellation:?}"
     );
     assert!(
         matches!(
@@ -616,22 +634,98 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         ),
         "an exact retry must return the retained terminal cancellation"
     );
+    sleeper_policy
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "seal-test".into(),
+            call_id: "cancelled-before-prefix".into(),
+        })
+        .await
+        .unwrap();
 
     let next = sleeper_policy
-        .dispatch_boxed(invocation("pure (11 :: Int)", "after-cancellation"))
+        .dispatch_boxed(invocation("(11 :: Int)", "after-cancellation"))
         .await
         .unwrap();
     assert_eq!(next["status"], "committed");
-    let suffix = sleeper_policy
-        .dispatch_boxed(invocation("afterCancelled", "cancelled-suffix"))
+    let no_prefix = sleeper_policy
+        .dispatch_boxed(invocation("cancelledNoPrefix", "cancelled-no-prefix"))
         .await;
-    match suffix {
+    match no_prefix {
         Ok(response) => assert_eq!(
             response["status"], "rejected",
-            "the interrupted suffix must not install bindings: {response}"
+            "the interrupted first cell must not install bindings: {response}"
         ),
         Err(_) => {}
     }
+
+    let initial = sleeper_policy
+        .dispatch_boxed(invocation("(41 :: Int)", "prepared-dependency"))
+        .await
+        .unwrap();
+    let dependency = initial["items"][0]["installedBindings"][0]
+        .as_str()
+        .expect("expression installs its retained observation");
+    let source = include_str!("../tests/resident_local_actor/notebook_cancellation_prefix.hs")
+        .replace("__DEPENDENCY__", dependency);
+    let (after_prefix, prefix_context) =
+        cancel_sleeping_cell(&sleeper_policy, &source, "cancelled-after-prefix").await;
+    assert_eq!(after_prefix.failed_index, 3, "{after_prefix:?}");
+    assert_eq!(after_prefix.receipts.len(), 3, "{after_prefix:?}");
+    assert!(after_prefix.receipts.iter().all(|receipt| {
+        receipt.status == tidepool_runtime::session::WorkbenchItemStatus::Committed
+    }));
+    assert!(matches!(
+        sleeper_policy
+            .cancel_workbench_boxed(prefix_context.clone())
+            .await
+            .unwrap(),
+        WorkbenchCancellationOutcome::Cancelled { .. }
+    ));
+    sleeper_policy
+        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
+            thread_id: "seal-test".into(),
+            call_id: "cancelled-after-prefix".into(),
+        })
+        .await
+        .unwrap();
+
+    let prefix = sleeper_policy
+        .dispatch_boxed(invocation(
+            "(cancelledDeclaration, cancelledBinding)",
+            "cancelled-prefix",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(prefix["status"], "committed", "{prefix}");
+    assert_eq!(prefix["items"][0]["output"], "(7,8)", "{prefix}");
+    let tail = sleeper_policy
+        .dispatch_boxed(invocation("cancelledTail", "cancelled-tail"))
+        .await;
+    match tail {
+        Ok(response) => assert_eq!(response["status"], "rejected", "{response}"),
+        Err(_) => {}
+    }
+
+    for value in 1..=9 {
+        let result = sleeper_policy
+            .dispatch_boxed(invocation(&format!("({value} :: Int)"), "release-dependency"))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "committed", "{result}");
+    }
+    let released = sleeper_policy
+        .dispatch_boxed(invocation(dependency, "released-dependency"))
+        .await;
+    match released {
+        Ok(response) => assert_eq!(response["status"], "rejected", "{response}"),
+        Err(_) => {}
+    }
+    let available = sleeper_policy
+        .dispatch_boxed(invocation("40 + 2 :: Int", "available-after-cancellation"))
+        .await
+        .unwrap();
+    assert_eq!(available["status"], "committed", "{available}");
+    assert_eq!(available["items"][0]["output"], "42", "{available}");
 
     let unknown = invocation("pure ()", "never-admitted").context.unwrap();
     assert!(matches!(

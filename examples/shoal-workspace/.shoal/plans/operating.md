@@ -46,7 +46,14 @@ is the current cumulative Attention, initially `[] :: Attention` only when none
 are open:
 
 ```haskell
-let details = DesignQuestion (planPath task) source summary evidence alternatives consumers
+let details = DesignQuestion
+      { questionPlan = planPath task
+      , questionSource = source
+      , questionFinding = summary
+      , questionEvidence = evidence
+      , questionAlternatives = alternatives
+      , questionUnblocks = consumers
+      }
 let question = Question "execution-plan" details
 let waiting = raiseQuestion question openQuestions
 reportProgress (WorkProgress [Candidate source evidence []] waiting)
@@ -85,6 +92,14 @@ A reservation without a worker or parent implementing it is not a dependency
 being delivered. Root-owned UI/API wiring is a deliverable with a recipient and timing;
 provide it early enough for dependent lanes to exercise the actual consumer.
 A branch awaiting its second scaffold need not stop a sibling's third wave.
+
+The live-source admission checkpoints eligible source edits on the checkout's
+current branch before the child is captured. It includes tracked changes and
+eligible nonignored new files under the source-import exclusions, but skips
+runtime `.shoal/`, configured exclusions, and caches even if staged. It runs no
+hooks or checks. Give important authored units their own meaningful commits,
+including red tests and incomplete plans. The automatic checkpoint only aligns
+the child's source with Git; acceptance is a separate judgment.
 
 For example, inside a lead, bind `source :: GitOid` to its actual checked integration
 hash and `leftTask`/`rightTask` to two current independent assignments, with accepted
@@ -134,9 +149,8 @@ inherited context.
 
 Retain useful specialists after replies and send later exact tasks/decisions.
 New requests to a busy actor queue. Existing context does not automatically learn
-new parent commits. Saving an arbitrary earlier fork point as checkpointContext
-is proposed future work; it is not an operation in this package. Transcript reuse
-also does not establish provider cache reuse; report the observed coverage.
+new parent commits. Report cache reuse only from observed provider requests and
+usage with its coverage.
 
 ## Source, evidence and handoffs
 

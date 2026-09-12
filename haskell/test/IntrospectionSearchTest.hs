@@ -4,7 +4,7 @@ module Main (main) where
 
 import Control.Monad (unless)
 import GHC
-import GHC.Tc.Types (tcg_rdr_env)
+import GHC.Tc.Types (TcGblEnv, tcg_rdr_env)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Reader (GlobalRdrEnv, globalRdrEnvElts, greName)
@@ -40,15 +40,16 @@ main = do
       typed <- typecheckModule parsed
       let (tcEnv, _) = tm_internals_ typed
           rdrEnv = tcg_rdr_env tcEnv
-      repeatMatches <- matchesFor rdrEnv "queryRepeat"
-      wildMatches <- matchesFor rdrEnv "queryWild"
-      anyMatches <- matchesFor rdrEnv "queryAny"
-      collisionMatches <- matchesFor rdrEnv "queryCollision"
-      numMatches <- matchesFor rdrEnv "queryNum"
-      plainMatches <- matchesFor rdrEnv "queryPlain"
-      rankMatches <- matchesFor rdrEnv "queryRank"
-      qualifiedMatches <- matchesFor rdrEnv "queryQualified"
-      ambiguousMatches <- matchesFor rdrEnv "queryAmbiguous"
+      hscEnv <- getSession
+      repeatMatches <- matchesFor hscEnv tcEnv rdrEnv "queryRepeat"
+      wildMatches <- matchesFor hscEnv tcEnv rdrEnv "queryWild"
+      anyMatches <- matchesFor hscEnv tcEnv rdrEnv "queryAny"
+      collisionMatches <- matchesFor hscEnv tcEnv rdrEnv "queryCollision"
+      numMatches <- matchesFor hscEnv tcEnv rdrEnv "queryNum"
+      plainMatches <- matchesFor hscEnv tcEnv rdrEnv "queryPlain"
+      rankMatches <- matchesFor hscEnv tcEnv rdrEnv "queryRank"
+      qualifiedMatches <- matchesFor hscEnv tcEnv rdrEnv "queryQualified"
+      ambiguousMatches <- matchesFor hscEnv tcEnv rdrEnv "queryAmbiguous"
       pure
         ( repeatMatches,
           wildMatches,
@@ -84,10 +85,10 @@ main = do
     fail "matches were not deterministic by quality/name/module/signature"
   unless (isExact "candidateNum" numMatches) $
     fail ("alpha-equivalent constrained signature was not exact: " ++ show numMatches)
-  unless ("candidatePlain" `notElem` map typeMatchName numMatches) $
-    fail ("constrained query matched unconstrained candidate: " ++ show numMatches)
-  unless ("candidateNum" `notElem` map typeMatchName plainMatches) $
-    fail ("unconstrained query matched constrained candidate: " ++ show plainMatches)
+  unless (hasAvailability "candidatePlain" Available numMatches) $
+    fail ("constrained query lost usable plain candidate: " ++ show numMatches)
+  unless (hasAvailability "candidateNum" Unknown plainMatches) $
+    fail ("plain query lost unresolved constrained candidate: " ++ show plainMatches)
   unless ("candidateMismatch" `notElem` map typeMatchName plainMatches) $
     fail ("repeated query variable accepted Int -> Bool: " ++ show plainMatches)
   unless (isExact "candidateRank" rankMatches) $
@@ -114,7 +115,8 @@ main = do
   where
     trim = reverse . dropWhile (`elem` ['\n', '\r']) . reverse
     matchKey result =
-      ( typeMatchQuality result,
+      ( typeMatchAvailability result,
+        typeMatchQuality result,
         typeMatchName result,
         typeMatchModule result,
         typeMatchSignature result
@@ -122,11 +124,14 @@ main = do
     isExact wanted =
       any
         (\result -> typeMatchName result == wanted && typeMatchQuality result == TypeMatchExact)
+    hasAvailability wanted availability =
+      any
+        (\result -> typeMatchName result == wanted && typeMatchAvailability result == availability)
 
-matchesFor :: (GhcMonad m) => GlobalRdrEnv -> String -> m [TypeMatch]
-matchesFor rdrEnv wanted = do
+matchesFor :: (GhcMonad m) => HscEnv -> TcGblEnv -> GlobalRdrEnv -> String -> m [TypeMatch]
+matchesFor hscEnv tcEnv rdrEnv wanted = do
   (binder, query) <- findId rdrEnv wanted
-  searchTypeMatches rdrEnv binder query
+  searchTypeMatches hscEnv tcEnv rdrEnv binder query
 
 findId :: (GhcMonad m) => GlobalRdrEnv -> String -> m (Name, Type)
 findId rdrEnv wanted = do

@@ -10,7 +10,7 @@ let domainLabel = "domain" :: Label
 let consumerLabel = "consumer-tests" :: Label
 workers <- unfold (batch campaign wave) $
   (,) <$> child (coding @Report projectHead (assignment domainLabel domainPlan))
-      <*> child (withEffort Low (coding @Report projectHead (assignment consumerLabel consumerPlan)))
+      <*> child (withEffort Medium (coding @Report projectHead (assignment consumerLabel consumerPlan)))
 let sharedAfterUnfold = ("ready" :: Text)
 ```
 
@@ -36,9 +36,9 @@ cancelled with an explicit failure; already started children are unaffected.
 
 `withEffort Low`, `Medium`, or `High` requests the child's initial reasoning
 effort. Omission uses the launch selector's inherited default. Inspect provider
-observations when checking the effective selection or cache reuse. The consumer branch above inherits the same committed context
-while explicitly selecting Low for a bounded obligation against an agreed interface.
-Keep more effort for shared design choices and uncertain integration work.
+observations when checking the effective selection or cache reuse. The consumer
+branch above inherits the same committed context while explicitly selecting
+Medium, as the example workspace requires for Sol execution forks.
 `withEffort` applies at context-fork construction; it is not an API for steering
 an already active Shoal assignment. The Codex backend's configuration-update
 mechanism is a separate control layer, not a missing model capability.
@@ -50,10 +50,13 @@ names owned paths, the contract revision, acceptance, and allowed holes. Return
 exact candidates, check evidence, discoveries, and unresolved decisions. Keep
 shared wiring with the coordinator. Review an implementation candidate after it
 exists; the parallel consumer branch tests the contract from the common scaffold.
-Ordinary `unfold` inherits the selected checkout's working files and private
-index. If capture is busy or unavailable, it uses that checkout's committed HEAD
-and reports that working files were omitted. A committed shared interface remains
-useful for integration and crash recovery. Build caches follow the creator; a
+Before live-source capture, Shoal checkpoints eligible source changes on the
+source checkout's current branch. The child inherits that commit. Runtime
+`.shoal/`, configured source exclusions and recognized caches stay out even when
+staged. The checkpoint runs no hooks, builds or tests. If Git cannot commit, the
+fork fails with its source files preserved; it does not silently use an older
+`HEAD`. An unchanged source needs no commit. An explicit committed-ref launch
+still selects its specified revision. Build caches follow the creator; a
 completed warm build helps descendants without stopping active builds.
 
 `coding` children can repeat the scaffold/fork/fold rhythm within their inherited

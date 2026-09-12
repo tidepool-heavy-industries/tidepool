@@ -21,7 +21,12 @@ with `checks :: [Text]` naming the actual checks and `scope :: Text` describing 
 those checks establish:
 
 ```haskell
-let reviewed = ReviewedCandidate (reviewAssignment sessionInput) (reviewInput sessionInput) checks scope
+let reviewed = ReviewedCandidate
+      { acceptedAssignment = reviewAssignment sessionInput
+      , reviewedCandidate = reviewInput sessionInput
+      , reviewChecks = checks
+      , reviewRationale = scope
+      }
 respond (Produced (Accepted reviewed))
 ```
 

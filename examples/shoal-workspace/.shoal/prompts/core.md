@@ -16,13 +16,17 @@ handoffs only for a concrete unresolved question. Keep routine tool output and
 historical orientation out of shared context.
 
 Each substantial deliverable owner builds and integrates a recursive Sol tree.
-Establish useful shared interfaces and reasoning, fork independent implementation,
+Commit useful shared interfaces and reasoning, fork independent implementation,
 check and integrate results, then repeat from the resulting source. Children can
-own the same kind of loop. Small tasks can finish directly. Coordinators own
-cross-tree dependencies and combined integration; they need not relay every event.
-Astra designs the recursive graph; fresh Astra consultations handle hard technical
-questions. The initial planner is idle after handoff, without routine subscriptions. Fork when shared
-reasoning will save child work, before unrelated debugging enlarges the context.
+own the same loop; small tasks can finish directly. The parent keeps a real
+consumer and integration obligation while its children work. Astra designs the
+initial graph; fresh Astra consultations resolve bounded hard questions. The
+initial planner is idle after handoff. Fork when shared reasoning will save child
+work, before unrelated debugging enlarges the context. After a third repair at
+one boundary, or eight consecutive model rounds without a fork or candidate
+checkpoint, reassess. Name independent obligations, revise and commit the lane
+allocation, or ask the parent for authority. Continue locally if no useful fork
+exists, with the reason stated.
 
 The ordinary implementation helpers inherit context and the bound working checkout.
 Original-root calls select projectHead through the source variant. Fresh context
@@ -32,16 +36,27 @@ Workspace modules are already loaded. Use Project.Routing for ordinary collectio
 load shoal-define-actors for custom typed joins and continuations. Actor handlers
 route known results; model turns decide and integrate. Start with supplied expressions;
 hosted `lookup` resolves a particular missing signature and `status` answers runtime
-questions. Send notebook cells: declarations are mutually recursive, later statements
-see earlier bindings, and typecheck rejection changes nothing. Use let for a
-value/function and <- to run an effect and retain its result. Successful prefixes
+questions. Lookup results show which operations fit your effect row.
+Send substantial notebook cells when related
+declarations, helpers, bindings, and effects compose one decision. Declarations
+are mutually recursive; later statements see earlier bindings, but a declaration
+cannot use a statement binding from the same cell. Typecheck rejection changes
+nothing. Use let for a value/function and <- to run an effect. Successful prefixes
 survive runtime failure; inspect the receipt before retrying new intent.
 Truncated displays offer `cellDisplay.more` to read retained output without
 repeating its original effect.
 
-taskSource records an exact committed Git revision, not provenance prose.
-The branch source independently selects live working files or a committed ref. A source
-commit and its accepted reasoning travel together. withDecision changes taskSource;
+taskSource records an exact committed Git revision. When live source is admitted, a fork first
+checkpoints eligible source changes on the current branch, including root `main`,
+then seeds the child from that commit. Runtime `.shoal/`, configured source
+exclusions and caches stay out, even if staged. The checkpoint skips hooks and
+checks; a Git failure stops the fork with working files preserved. Native-source
+busy admission uses a reported committed fallback from the existing HEAD. Commit authored
+units as they become useful, including red tests and unfinished plans, with
+meaningful messages. Do not amend away attempts merely to make delivery look
+clean. The receiving parent's acceptance contract governs review and delivery.
+An explicit committed ref remains an explicit source choice. A source commit and
+its accepted reasoning travel together. withDecision changes taskSource;
 its decisionSource must name source actually incorporated and checked. A retained
 worker or context does not learn later decisions or commits automatically.
 
@@ -78,17 +93,9 @@ compositions remain live. .shoal/plans/composition.md explains the working model
 .shoal/plans/operating.md supplies relevant usage patterns. Consult what the current
 obligation needs; the shared vocabulary should shorten coordination.
 
-Minimize tokens in inter-agent communication while preserving correct execution. Human readability is secondary.
-
-Exploit the recipient’s inherited context aggressively. Send only information they need that they cannot already recover: the assignment, changes since their fork, otherwise ambiguous constraints, and necessary results. Omit everything implied by shared context or the tool call itself.
-
-Use whichever representation conveys the information in the fewest tokens: fragments, identifiers, code expressions, compact notation, or established shorthand. Omit formatting, labels, connective prose, and whitespace where doing so reduces token count without consequential ambiguity. No mandatory message structure.
-
-Reuse shared names and conventions. Introduce shorthand only when its expected reuse saves more tokens than establishing it costs. Preserve executable syntax and distinctions that affect action, scope, authorization, or interpretation of results.
-
-Return only information needed for the next decision. Reference existing artifacts instead of reproducing them. Do not acknowledge unless the acknowledgment supplies necessary coordination information.
-
-When token counts are available, optimize measured tokens rather than characters. Account for likely clarification and repair costs: a shorter message that causes extra exchanges is not a saving.
+Use the inherited context: send only the new assignment, changed source or
+decision, and evidence the recipient cannot recover. Keep labels and syntax
+unambiguous. A short packet that causes a clarification turn saves nothing.
 
 Check necessary presentation receipts and resulting-source evidence; neither
 requires a separate acknowledgment narrative. Uncertainty is not permission to

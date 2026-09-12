@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use ciborium::value::Value as CborValue;
+use serde::Serialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 
@@ -25,6 +26,28 @@ pub struct InfoEntry {
     pub module: Option<String>,
     pub kind: String,
     pub display: String,
+    pub availability: InspectionAvailability,
+}
+
+/// Whether a callable's required effects fit the inspecting actor's row.
+/// Runtime resource grants remain a separate authority check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionAvailability {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+impl InspectionAvailability {
+    fn decode(value: &CborValue, what: &str) -> Result<Self, CompileError> {
+        match text(value, what)? {
+            "Available" => Ok(Self::Available),
+            "Unavailable" => Ok(Self::Unavailable),
+            "Unknown" => Ok(Self::Unknown),
+            other => Err(invalid(format!("unknown {what} {other:?}"))),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +62,7 @@ pub struct TypeMatch {
     pub module: Option<String>,
     pub signature: String,
     pub quality: TypeMatchQuality,
+    pub availability: InspectionAvailability,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +70,7 @@ pub enum InspectionResult {
     Type {
         expression: String,
         display: String,
+        availability: InspectionAvailability,
     },
     Info {
         query: String,
@@ -82,6 +107,7 @@ impl InspectionResult {
             Self::Type {
                 expression,
                 display,
+                ..
             } => format!("{expression} :: {display}"),
             Self::Info { entries, .. } => entries
                 .iter()
@@ -132,6 +158,8 @@ pub struct InspectionRequest<'a> {
     pub session_root: &'a Path,
     pub inject_modules: &'a [String],
     pub queries: &'a [InspectionQuery],
+    /// The actor's GHC effects type alias. Standalone inspections leave it absent.
+    pub effects: Option<&'a str>,
 }
 
 /// Inspect an ordered batch without evaluating it or mutating the resident
@@ -154,6 +182,10 @@ pub fn run_inspections(
         .includes(request.include)
         .session_root(request.session_root)
         .inject_vals(request.inject_modules);
+    let imports = match request.effects {
+        Some(_) => format!("{}\nqualified Data.Proxy\n", request.imports),
+        None => request.imports.to_owned(),
+    };
     for (index, query) in request.queries.iter().enumerate() {
         let query_dir = temp.path().join(format!("query-{index}"));
         std::fs::create_dir(&query_dir)?;
@@ -164,7 +196,12 @@ pub fn run_inspections(
             | InspectionQuery::TypeSearch(_)
             | InspectionQuery::Browse { .. } => &[],
         };
-        let mut source = assemble_inspection_module(request.preamble, request.imports, expressions);
+        let mut source = assemble_inspection_module(request.preamble, &imports, expressions);
+        if let Some(effects) = request.effects {
+            source.push_str("\n__tidepool_lookup_row :: Data.Proxy.Proxy (");
+            source.push_str(effects);
+            source.push_str(")\n__tidepool_lookup_row = Data.Proxy.Proxy\n");
+        }
         if let InspectionQuery::TypeSearch(query) = query {
             source.push_str("\n__tidepool_lookup_query :: ");
             source.push_str(query);
@@ -221,7 +258,7 @@ fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileErro
         return Err(invalid("trailing CBOR data"));
     }
     let root = array_len(&value, 2, "receipt")?;
-    if text(&root[0], "version")? != "TPINSP003" {
+    if text(&root[0], "version")? != "TPINSP004" {
         return Err(invalid("unsupported receipt version"));
     }
     array(&root[1], "results")?
@@ -238,10 +275,11 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
         .and_then(|value| text(value, "result tag"))?;
     match tag {
         "Type" => {
-            let body = array_len(value, 3, "Type result")?;
+            let body = array_len(value, 4, "Type result")?;
             Ok(InspectionResult::Type {
                 expression: text(&body[1], "Type expression")?.into(),
                 display: text(&body[2], "Type display")?.into(),
+                availability: InspectionAvailability::decode(&body[3], "Type availability")?,
             })
         }
         "Info" => {
@@ -312,7 +350,7 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
 }
 
 fn decode_type_match(value: &CborValue) -> Result<TypeMatch, CompileError> {
-    let fields = array_len(value, 4, "TypeMatch")?;
+    let fields = array_len(value, 5, "TypeMatch")?;
     let module = match &fields[1] {
         CborValue::Null => None,
         value => Some(text(value, "TypeMatch module")?.into()),
@@ -327,6 +365,7 @@ fn decode_type_match(value: &CborValue) -> Result<TypeMatch, CompileError> {
         module,
         signature: text(&fields[2], "TypeMatch signature")?.into(),
         quality,
+        availability: InspectionAvailability::decode(&fields[4], "TypeMatch availability")?,
     })
 }
 
@@ -338,7 +377,7 @@ fn boolean(value: &CborValue, what: &str) -> Result<bool, CompileError> {
 }
 
 fn decode_info_entry(value: &CborValue) -> Result<InfoEntry, CompileError> {
-    let fields = array_len(value, 4, "Info entry")?;
+    let fields = array_len(value, 5, "Info entry")?;
     let module = match &fields[1] {
         CborValue::Null => None,
         value => Some(text(value, "Info module")?.into()),
@@ -348,6 +387,7 @@ fn decode_info_entry(value: &CborValue) -> Result<InfoEntry, CompileError> {
         module,
         kind: text(&fields[2], "Info kind")?.into(),
         display: text(&fields[3], "Info display")?.into(),
+        availability: InspectionAvailability::decode(&fields[4], "Info availability")?,
     })
 }
 
@@ -398,12 +438,13 @@ mod tests {
     #[test]
     fn decodes_every_result_shape() {
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP003".into()),
+            CborValue::Text("TPINSP004".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("Type".into()),
                     CborValue::Text("fmap".into()),
                     CborValue::Text("Functor f => (a -> b) -> f a -> f b".into()),
+                    CborValue::Text("Unknown".into()),
                 ]),
                 CborValue::Array(vec![
                     CborValue::Text("Info".into()),
@@ -413,6 +454,7 @@ mod tests {
                         CborValue::Text("GHC.Internal.Maybe".into()),
                         CborValue::Text("type".into()),
                         CborValue::Text("data Maybe a = Nothing | Just a".into()),
+                        CborValue::Text("Unknown".into()),
                     ])]),
                 ]),
                 CborValue::Array(vec![
@@ -433,8 +475,16 @@ mod tests {
             ]),
         ]);
         let decoded = decode_inspections(&encoded(receipt)).unwrap();
-        assert!(matches!(decoded[0], InspectionResult::Type { .. }));
-        assert!(matches!(decoded[1], InspectionResult::Info { .. }));
+        assert!(matches!(
+            decoded[0],
+            InspectionResult::Type {
+                availability: InspectionAvailability::Unknown,
+                ..
+            }
+        ));
+        assert!(
+            matches!(decoded[1], InspectionResult::Info { ref entries, .. } if entries[0].availability == InspectionAvailability::Unknown)
+        );
         assert_eq!(
             decoded[2],
             InspectionResult::Ambiguous {
@@ -462,7 +512,7 @@ mod tests {
                 CborValue::Array(vec![]),
             ]),
             CborValue::Array(vec![
-                CborValue::Text("TPINSP003".into()),
+                CborValue::Text("TPINSP004".into()),
                 CborValue::Array(vec![CborValue::Text("Other".into())]),
             ]),
             CborValue::Array(vec![CborValue::Text("TPINSP001".into())]),
@@ -471,7 +521,7 @@ mod tests {
         }
 
         let mut trailing = encoded(CborValue::Array(vec![
-            CborValue::Text("TPINSP003".into()),
+            CborValue::Text("TPINSP004".into()),
             CborValue::Array(vec![CborValue::Array(vec![
                 CborValue::Text("NotFound".into()),
                 CborValue::Text("x".into()),
@@ -479,6 +529,38 @@ mod tests {
         ]));
         trailing.push(0);
         assert!(decode_inspections(&trailing).is_err());
+    }
+
+    #[test]
+    fn decodes_row_availability_and_rejects_unknown_values() {
+        let receipt = |availability: &str| {
+            CborValue::Array(vec![
+                CborValue::Text("TPINSP004".into()),
+                CborValue::Array(vec![CborValue::Array(vec![
+                    CborValue::Text("TypeMatches".into()),
+                    CborValue::Text("Eff effects ()".into()),
+                    CborValue::Array(vec![CborValue::Array(vec![
+                        CborValue::Text("run".into()),
+                        CborValue::Null,
+                        CborValue::Text("Eff effects ()".into()),
+                        CborValue::Text("Usable".into()),
+                        CborValue::Text(availability.into()),
+                    ])]),
+                ])]),
+            ])
+        };
+        for (encoded_name, expected) in [
+            ("Available", InspectionAvailability::Available),
+            ("Unavailable", InspectionAvailability::Unavailable),
+            ("Unknown", InspectionAvailability::Unknown),
+        ] {
+            let decoded = decode_inspections(&encoded(receipt(encoded_name))).unwrap();
+            assert!(
+                matches!(&decoded[0], InspectionResult::TypeMatches { matches, .. }
+                if matches[0].availability == expected)
+            );
+        }
+        assert!(decode_inspections(&encoded(receipt("Guess"))).is_err());
     }
 
     #[test]
@@ -535,6 +617,7 @@ mod tests {
             session_root: session.path(),
             inject_modules: &[],
             queries: &queries,
+            effects: None,
         })
         .unwrap();
 

@@ -16,6 +16,7 @@ import qualified Fidelity.ClosureTier as ClosureTier
 import qualified Fidelity.TopoRecovery as TopoRecovery
 import qualified Fidelity.ExtractRequest as ExtractRequest
 import qualified Fidelity.MissingFields as MissingFields
+import qualified Fidelity.Introspection as Introspection
 
 import Control.Monad (forM_)
 import System.Exit (exitFailure, exitSuccess)
@@ -30,6 +31,7 @@ groups =
   , ("GHC diagnostic-recovery topological order (Known Limits cascade)", TopoRecovery.checks)
   , ("Rust-to-Haskell extractor request protocol", ExtractRequest.checks)
   , ("missing record-field diagnostics", MissingFields.checks)
+  , ("GHC lookup constraint and row availability", Introspection.checks)
   ]
 
 main :: IO ()

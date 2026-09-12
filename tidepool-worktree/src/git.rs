@@ -11,12 +11,13 @@
 //! libgit2 models incompletely. Reconciled inspection through the same tool the
 //! writers use is the honest observer.
 
-use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{GitFailureReceipt, InProgressKind, WorktreeError};
+use crate::id::GitOid;
 
 /// A successful git invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +151,21 @@ impl GitCli {
         result.map_err(|error| crate::storage::storage_failure(path, error))
     }
 
+    fn try_exists_in_repo(&self, repo: &Path, path: &Path) -> Result<bool, WorktreeError> {
+        #[cfg(target_os = "linux")]
+        if let Some(view) = self
+            .views
+            .resolve(repo)
+            .map_err(|error| crate::storage::storage_failure(repo, error))?
+        {
+            return view
+                .namespace
+                .try_exists(path)
+                .map_err(|error| crate::storage::storage_failure(path, error));
+        }
+        self.try_exists(path)
+    }
+
     /// Copy private Git state out of the same filesystem view used for commands.
     /// The destination belongs to the host; it need not be writable in that view.
     pub(crate) fn copy_file_to_host(
@@ -181,11 +197,11 @@ impl GitCli {
 
     /// Run git in `cwd`. `Err` only for a nonzero exit or a spawn failure; a
     /// command that succeeds with output on stderr is still `Ok`.
-    pub fn run<S: AsRef<OsStr>>(
+    fn run_output<S: AsRef<OsStr>>(
         &self,
         cwd: &Path,
         args: &[S],
-    ) -> Result<GitOutput, GitFailureReceipt> {
+    ) -> Result<std::process::Output, GitFailureReceipt> {
         let _admission = self.admission.lock();
         let arg_strings: Vec<String> = args
             .iter()
@@ -235,14 +251,37 @@ impl GitCli {
             .output()
             .map_err(|e| receipt(None, String::new(), format!("spawn failed: {e}")))?;
 
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-
-        if out.status.success() {
-            Ok(GitOutput { stdout, stderr })
+        if !out.status.success() {
+            Err(receipt(
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            ))
         } else {
-            Err(receipt(out.status.code(), stdout, stderr))
+            Ok(out)
         }
+    }
+
+    pub fn run<S: AsRef<OsStr>>(
+        &self,
+        cwd: &Path,
+        args: &[S],
+    ) -> Result<GitOutput, GitFailureReceipt> {
+        let out = self.run_output(cwd, args)?;
+        Ok(GitOutput {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    fn stdout_bytes<S: AsRef<OsStr>>(
+        &self,
+        cwd: &Path,
+        args: &[S],
+    ) -> Result<Vec<u8>, WorktreeError> {
+        self.run_output(cwd, args)
+            .map(|output| output.stdout)
+            .map_err(WorktreeError::GitFailure)
     }
 
     /// [`Self::run`], with the failure already lifted into [`WorktreeError`].
@@ -252,6 +291,175 @@ impl GitCli {
         args: &[S],
     ) -> Result<GitOutput, WorktreeError> {
         self.run(cwd, args).map_err(WorktreeError::GitFailure)
+    }
+
+    /// Add a repository-local exclusion for Shoal's runtime directory. This
+    /// leaves project ignore files and existing `info/exclude` bytes intact.
+    pub fn ensure_shoal_local_exclude(&self, repo: &Path) -> Result<(), WorktreeError> {
+        let _admission = self.admission.lock();
+        let path = inspect::git_common_dir(self, repo)?.join("info/exclude");
+        let parent = path.parent().ok_or_else(|| WorktreeError::StorageFailure {
+            path: path.clone(),
+            detail: "Git exclude path has no parent".to_owned(),
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| crate::storage::storage_failure(parent, error))?;
+        let mut contents = match std::fs::read(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(crate::storage::storage_failure(&path, error)),
+        };
+        if contents
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == b"/.shoal/")
+        {
+            return Ok(());
+        }
+        if !contents.is_empty() && !contents.ends_with(b"\n") {
+            contents.push(b'\n');
+        }
+        contents.extend_from_slice(b"/.shoal/\n");
+        tidepool_atomic_write::write_best_effort(&path, &contents)
+            .map_err(|error| crate::storage::storage_failure(&error.path, error.source))
+    }
+
+    /// Commit all eligible source working-tree changes before a fork. The
+    /// temporary index starts at HEAD, so a pre-staged excluded path cannot
+    /// enter the commit or be unstaged by the post-commit real-index update.
+    /// The caller holds the source capture gate against native writers.
+    pub fn checkpoint_source(
+        &self,
+        repo: &Path,
+        excluded: &[OsString],
+    ) -> Result<GitOid, WorktreeError> {
+        let _admission = self.admission.lock();
+        inspect::work_tree(self, repo)?;
+        if let Some(kind) = inspect::in_progress(self, repo)? {
+            return Err(WorktreeError::SourceOperationInProgress(kind));
+        }
+        self.try_run(repo, &["symbolic-ref", "HEAD"])?;
+        let head = GitOid::from_raw(
+            self.try_run(repo, &["rev-parse", "--verify", "HEAD^{commit}"])?
+                .trimmed()
+                .to_owned(),
+        );
+
+        // These are root entry names from the source-import policy, not path
+        // fragments. Literal pathspecs prevent Git metacharacters in a name
+        // from changing the exclusion's meaning.
+        let mut paths = vec![OsString::from(":(top)")];
+        for name in excluded {
+            let mut path = OsString::from(":(top,exclude,literal)");
+            path.push(name);
+            paths.push(path);
+        }
+        let common = inspect::git_common_dir(&self.on_host(), repo)?;
+        let temporary = tempfile::Builder::new()
+            .prefix("tidepool-checkpoint-")
+            .tempdir_in(&common)
+            .map_err(|error| crate::storage::storage_failure(&common, error))?;
+        let index = temporary.path().join("index");
+        let index =
+            camino::Utf8Path::from_path(&index).ok_or_else(|| WorktreeError::StorageFailure {
+                path: index.clone(),
+                detail: "temporary index path is not valid UTF-8".to_owned(),
+            })?;
+        let temp_git = self.with_env("GIT_INDEX_FILE", index.as_str());
+        temp_git.try_run(repo, &["read-tree", "HEAD"])?;
+
+        // Enumerate eligible files before asking Git to create any blobs.
+        // The HEAD-backed temporary index covers tracked deletions and ordinary
+        // untracked files; the real index adds explicitly staged ignored files.
+        let mut list = vec![
+            OsString::from("ls-files"),
+            OsString::from("--full-name"),
+            OsString::from("-z"),
+            OsString::from("--cached"),
+            OsString::from("--others"),
+            OsString::from("--exclude-standard"),
+            OsString::from("--deduplicate"),
+            OsString::from("--"),
+        ];
+        list.extend(paths.iter().cloned());
+        let split = |output: Vec<u8>| -> BTreeSet<Vec<u8>> {
+            output
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect()
+        };
+        let mut eligible = split(temp_git.stdout_bytes(repo, &list)?);
+        let staged = split(self.stdout_bytes(repo, &list)?);
+        let mut deleted_args = vec![
+            OsString::from("ls-files"),
+            OsString::from("--full-name"),
+            OsString::from("-z"),
+            OsString::from("--deleted"),
+            OsString::from("--"),
+        ];
+        deleted_args.extend(paths.iter().cloned());
+        let deleted = split(self.stdout_bytes(repo, &deleted_args)?);
+        eligible.extend(staged.into_iter().filter(|path| !deleted.contains(path)));
+        if eligible.is_empty() {
+            return Ok(head);
+        }
+
+        let pathspec_file = temporary.path().join("paths");
+        let mut pathspecs = Vec::new();
+        for path in eligible {
+            pathspecs.extend_from_slice(b":(top,literal)");
+            pathspecs.extend_from_slice(&path);
+            pathspecs.push(0);
+        }
+        std::fs::write(&pathspec_file, pathspecs)
+            .map_err(|error| crate::storage::storage_failure(&pathspec_file, error))?;
+        let mut add = vec![
+            OsString::from("add"),
+            OsString::from("-A"),
+            OsString::from("-f"),
+            OsString::from("--pathspec-file-nul"),
+        ];
+        let mut file_arg = OsString::from("--pathspec-from-file=");
+        file_arg.push(&pathspec_file);
+        add.push(file_arg);
+        temp_git.try_run(repo, &add)?;
+
+        let changed = match temp_git.run(repo, &["diff", "--cached", "--quiet", "--exit-code"]) {
+            Ok(_) => false,
+            Err(failure) if failure.exit_code == Some(1) => true,
+            Err(failure) => return Err(WorktreeError::GitFailure(failure)),
+        };
+        if !changed {
+            return Ok(head);
+        }
+        temp_git.try_run(
+            repo,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "-m",
+                "chore: checkpoint source before Shoal fork\n\nAutogenerated source checkpoint. Make meaningful commits when ready. No checks ran.",
+            ],
+        )?;
+        let committed = GitOid::from_raw(
+            self.try_run(repo, &["rev-parse", "--verify", "HEAD^{commit}"])?
+                .trimmed()
+                .to_owned(),
+        );
+        let mut reset = vec![
+            OsString::from("reset"),
+            OsString::from("--quiet"),
+            OsString::from("HEAD"),
+            OsString::from("--"),
+        ];
+        reset.extend(paths);
+        self.try_run(repo, &reset)?;
+        Ok(committed)
     }
 }
 
@@ -424,7 +632,7 @@ pub mod inspect {
     /// status output format changes.
     pub fn in_progress(git: &GitCli, cwd: &Path) -> Result<Option<InProgressKind>, WorktreeError> {
         let dir = git_dir(git, cwd)?;
-        let has = |name: &str| git.try_exists(&dir.join(name));
+        let has = |name: &str| git.try_exists_in_repo(cwd, &dir.join(name));
         Ok(if has("MERGE_HEAD")? {
             Some(InProgressKind::Merge)
         } else if has("rebase-merge")? || has("rebase-apply")? || has("REBASE_HEAD")? {

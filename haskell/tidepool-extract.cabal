@@ -326,6 +326,7 @@ test-suite extract-fidelity-test
     Fidelity.TopoRecovery
     Fidelity.ExtractRequest
     Fidelity.MissingFields
+    Fidelity.Introspection
   build-depends:
     tidepool-extract-internal,
     base         >= 4.20 && < 5,

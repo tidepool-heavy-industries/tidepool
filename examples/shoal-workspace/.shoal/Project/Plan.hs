@@ -23,25 +23,28 @@ componentName RelationControls = "controls"
 component :: CampaignLabel -> GraphComponent -> GitOid -> Either NameError Task
 component campaign part source = do
   group <- forkGroupLabel (componentName part)
-  pure $ Task (batch campaign group)
-    (".shoal/plans/graph/" <> componentName part <> "/README.md") source
-    (case part of
+  pure $ Task
+    { taskGroup = batch campaign group
+    , planPath = ".shoal/plans/graph/" <> componentName part <> "/README.md"
+    , taskSource = source
+    , obligation = case part of
       RelationContract -> "Land the shared graph relation contract and incorporate the tagged design decision."
       RelationProjection -> "Implement faithful, deterministic forests for the selected relation over exact actor identities."
-      RelationControls -> "Expose relation selection and all three raw relationships without changing composer or authority behavior.")
-    (case part of
+      RelationControls -> "Expose relation selection and all three raw relationships without changing composer or authority behavior."
+    , rationale = case part of
       RelationContract -> "Creation, supervision and context are different evidence. Resolve their common contract before parallel consumers rely on it."
       RelationProjection -> "Display edges must not fabricate authority or lose actors. One deterministic projection should serve all relation views."
-      RelationControls -> "The operator needs to understand relationships while retaining the existing editor, selection and submission guarantees.")
-    (case part of
+      RelationControls -> "The operator needs to understand relationships while retaining the existing editor, selection and submission guarantees."
+    , ownedPaths = case part of
       RelationContract -> ["src/graph_wire.rs", "src/agents.rs: shared types and parent selection", "fixture constructors", ".shoal/plans/graph/contract"]
       RelationProjection -> ["src/agents.rs: graph projection and traversal", "focused pure graph tests"]
-      RelationControls -> ["src/ui/agents.rs", "view state, inspector and canvas consumers", "UI and interaction tests", "README controls"])
-    (case part of
+      RelationControls -> ["src/ui/agents.rs", "view state, inspector and canvas consumers", "UI and interaction tests", "README controls"]
+    , acceptance = case part of
       RelationContract -> "Buildable shared API; omitted creator remains unknown; pure parent selection; compile consumers; document accepted signatures before consumer forks."
       RelationProjection -> "Every supplied actor appears once; stable under reorder; cycles, missing parents and distinct incarnations preserve evidence; focused graph tests pass."
-      RelationControls -> "Keyboard/mouse and narrow layouts work; selection/focus remain coherent; graph interaction never POSTs Haskell or changes the composer; terminal proof and focused UI tests.")
-    []
+      RelationControls -> "Keyboard/mouse and narrow layouts work; selection/focus remain coherent; graph interaction never POSTs Haskell or changes the composer; terminal proof and focused UI tests."
+    , acceptedDecisions = []
+    }
 
 -- The lead implements useful work itself and commissions independent review.
 -- withLifetime remains an ordinary caller choice when admitting this branch.
@@ -53,6 +56,11 @@ componentLeadFrom label source task = withEffort Medium $ withInstructions (proj
   solTaskFrom label source task
 
 relationDesign :: CampaignLabel -> DesignSlot
-relationDesign campaign = DesignSlot ".shoal/plans/graph/contract/design.md"
-  (batch campaign "relation-design") "forest-semantics" "relation-design-ready"
-  "planner" Medium
+relationDesign campaign = DesignSlot
+  { specialistPlan = ".shoal/plans/graph/contract/design.md"
+  , specialistGroup = batch campaign "relation-design"
+  , specialistLabel = "forest-semantics"
+  , specialistWatch = "relation-design-ready"
+  , specialistModel = "planner"
+  , specialistEffort = Medium
+  }

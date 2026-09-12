@@ -53,7 +53,9 @@ Curate the Haskell surface as a prompting artifact: meaningful types, sensible
 constructors, short invocations and exact examples. Stable shared understanding
 should precede context forks; retain reasoning that children need and omit routine
 history. Context ancestry, source baseline and supervision are separate choices.
-Use the actual current fork boundary; checkpointContext remains proposed work.
+Use the actual current fork boundary. Admitted live source checkpoints eligible
+source changes in Git before capture; it does not preserve a selectable earlier
+reasoning context.
 
 Use normal Markdown, TOML-selected prompt resources and existing Haskell effects.
 Follow this engagement's scope before editing shared definitions. In a hosted

@@ -24,7 +24,7 @@ Respect the assigned authoring location, requested scope and concurrent owners.
 Improve canonical source; installed copies are not a second curation location.
 For prompt-only RSI, edit guidance,
 examples and prompt-resource selection; leave runtime and Haskell implementation
-changes as precise follow-ups. checkpointContext remains a proposal until implemented.
+changes as precise follow-ups.
 Work directly without creating an RSI management tree.
 
 Check candidate source with shoal check and its relevant model-free recipes. Prose

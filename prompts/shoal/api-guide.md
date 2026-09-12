@@ -22,7 +22,12 @@ repeating the original effect.
 
 An `unfold` is applicative. It constructs every child before submitting any
 assignment, and children start after the cell commits. Combine independent
-children with `<$>` and `<*>`; use a later cell for dependent work.
+children with `<$>` and `<*>`; use a later cell for dependent work. Define a
+shared plan once and use an ordinary local Haskell selector to derive short
+child assignments. Commit an authored scaffold when useful; admitted live source
+mechanically checkpoints eligible changes on its current branch and
+seeds children from that commit. It skips hooks and checks. Intermediate red
+or incomplete commits are legitimate; the parent's contract governs delivery.
 
 `child` returns a `Response result`. `responseActor` addresses its target.
 `responseLaunch` is `Just` only on the request created with that launch; later
@@ -36,9 +41,11 @@ Use `report = Silent` for a record actor settlement source.
 
 `request @Report (responseActor worker) (assignment "revision" revisedTask)`
 assigns more work to the retained actor. `withModel "executor"` selects a
-frozen workspace alias. Use
+frozen workspace alias; pair it with an explicit `withEffort Medium` when that
+is the execution policy. Use
 `withModel (Literal "provider-model")` for an explicit provider name. Omitted
-model and effort inherit the parent's effective selection. `withInstructions`,
+model and the native effort selector's effective default are used. Verify the
+selected launch before assuming effort inheritance. `withInstructions`,
 `withContext`, `withLifetime`, and `withForkBudget` configure launch behavior;
 they do not apply to requests sent to an existing actor.
 
@@ -51,8 +58,11 @@ state <- pollWatch ready
 inspectFull (fmap settledValue state)
 ```
 
-`lookup` provides name information and type search (`::type`); `doc` lists its
-topics and `doc <topic>` returns one guide. `status` defaults to `summary` and
+`lookup` searches names and types (`::type`) and ranks callable results by their
+availability in your effect row. `unknown` needs more type information; full
+signatures retain their constraints. `doc` lists topics and `doc <topic>` returns
+one guide. Resource grants are checked when an operation executes.
+`status` defaults to `summary` and
 also provides `detailed`, `recovery`, `lineage`, `trace`, and `bindings` views.
 
 `pollResponse` distinguishes pending, cancellation pending, ready, and

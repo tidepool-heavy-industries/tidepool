@@ -17,13 +17,22 @@ they claim to establish; a compile-only demonstration does not prove execution.
 When a bounded source amendment is useful, commit it and return:
 
 ```haskell
-let amendment = PlanAmendment base head paths reason obligations checks
+let amendment = PlanAmendment
+      { amendmentBase = base
+      , amendmentCommit = head
+      , amendmentPaths = paths
+      , amendmentReason = reason
+      , amendmentObligations = obligations
+      , amendmentEvidence = checks
+      }
 respond (AmendPlan amendment)
 ```
 
 The owner accepts, incorporates and checks the proposal before dependent work.
-NeedEvidence identifies the missing observation and why it matters; it ends this
-attempt honestly so the owner can obtain evidence and reuse you. Preserve the
+`NeedEvidence` identifies the missing observation, why it matters, and what would
+resolve it. Submit it with `respond (NeedEvidence missing)` as the final item of
+the cell: the consultation ends, and the owner can obtain evidence before a new
+assignment. Preserve the
 human's agreed feature rather than quietly substituting a weaker one. Finish the
 useful obligation and remain available for precise follow-ups; avoid routine
 status relay or an unplanned expert tree.

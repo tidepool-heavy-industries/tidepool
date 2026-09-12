@@ -9,8 +9,10 @@
 - Keep `InteractiveGoalPolicy::Disabled` uniform at the shared Shoal launch
   entry point, including root and resumed nodes. Shoal owns continuation;
   role-dependent goal tools would change the first cached provider input item.
-- `launch_effort` defaults omitted fork effort to Low, not the root's effort.
-  Preserve explicit fork overrides and configured fresh/resumed root effort.
+- Worker launch resolution fills omitted effort from the host configuration;
+  the lower-level `launch_effort` helper's Low fallback is not that production
+  default. Preserve explicit overrides. Project recipes select executor/Medium.
+  Immediate-parent effort inheritance remains a separate follow-up.
 - `src/actor_host/prompt_catalog.rs` freezes one shared superset base composed
   from the run-selected core prose (default `prompts/shoal/base.md`) and
   the shipped `api-guide.md`. TOML workspace overrides freeze at startup;

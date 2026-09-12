@@ -240,22 +240,22 @@ fn source_exclusions_keep_tracked_files_and_untagged_directories() {
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
     };
-    let excluded = layout.source_exclusions(repo.path()).unwrap();
+    let excluded = layout.source_exclusions(repo.path(), repo.path()).unwrap();
     assert!(excluded.contains(&"node_modules".into()));
     assert!(!excluded.contains(&"tracked".into()));
     assert!(!excluded.contains(&"ordinary".into()));
     layout.source_exclude.push("ordinary".into());
     assert!(layout
-        .source_exclusions(repo.path())
+        .source_exclusions(repo.path(), repo.path())
         .unwrap()
         .contains(&"ordinary".into()));
     layout.source_exclude.push("tracked".into());
-    assert!(layout.source_exclusions(repo.path()).is_err());
+    assert!(layout.source_exclusions(repo.path(), repo.path()).is_err());
     repo.git()
         .try_run(repo.path(), &["rm", "--cached", "--", "tracked/source"])
         .unwrap();
     assert!(
-        layout.source_exclusions(repo.path()).is_err(),
+        layout.source_exclusions(repo.path(), repo.path()).is_err(),
         "HEAD must still protect a staged deletion"
     );
     let mut config = crate::shoal::LaunchConfig::default();
@@ -283,7 +283,7 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
     };
-    let excluded = layout.source_exclusions(repo.path()).unwrap();
+    let excluded = layout.source_exclusions(repo.path(), repo.path()).unwrap();
     let source =
         OverlayResourceLease::allocate_path(layout.resource_root("first").join("source"), None)
             .unwrap();
@@ -314,7 +314,7 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
     );
     assert!(layout.reusable_import(repo.path(), &excluded).is_none());
     layout.source_exclude.push("scratch".into());
-    let changed_exclusions = layout.source_exclusions(repo.path()).unwrap();
+    let changed_exclusions = layout.source_exclusions(repo.path(), repo.path()).unwrap();
     assert!(layout
         .reusable_import(repo.path(), &changed_exclusions)
         .is_none());
@@ -422,7 +422,6 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap()
         .modified()
         .unwrap();
-    let index = std::fs::read(repo.path().join(".git/index")).unwrap();
     let head = std::fs::read(repo.path().join(".git/HEAD")).unwrap();
     let runtime = tempfile::tempdir().unwrap();
     let (manager, bindings) = actor_worktree_resources_at(runtime.path(), repo.path()).unwrap();
@@ -578,7 +577,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             child,
             "cat file; git show :file; cat untracked ignored .shoal/config"
         ),
-        "workingstageduntrackedignoredcanonical"
+        "workingworkinguntrackedignoredcanonical"
     );
     assert_eq!(
         shell(child, "stat -c '%y' file"),
@@ -591,10 +590,12 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             .unwrap(),
         source_modified
     );
+    assert_eq!(shell(&workspace, "git status --porcelain"), "");
     assert_eq!(
-        std::fs::read(repo.path().join(".git/index")).unwrap(),
-        index
+        shell(child, "git rev-parse HEAD"),
+        shell(&workspace, "git rev-parse HEAD")
     );
+    assert_eq!(shell(child, "git show HEAD:file"), "working");
     assert_eq!(std::fs::read(repo.path().join(".git/HEAD")).unwrap(), head);
     std::fs::write(repo.path().join("file"), "later").unwrap();
     assert_eq!(shell(child, "cat file"), "working");
@@ -603,6 +604,15 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         std::fs::read_to_string(repo.path().join("file")).unwrap(),
         "later"
     );
+    repo.git()
+        .try_run(repo.path(), &["rm", "--cached", "target/source"])
+        .unwrap();
+    repo.git()
+        .try_run(
+            repo.path(),
+            &["commit", "-qm", "remove source from cache directory"],
+        )
+        .unwrap();
     std::fs::write(
         repo.path().join("target/CACHEDIR.TAG"),
         "Signature: 8a477f597d28d172789f06886806bc55\n",
@@ -620,6 +630,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert!(tagged.inheritance_notice.is_none());
     shell(tagged.workspace.as_ref().unwrap(), "test ! -e target");
     let calls_before_siblings = backend.calls.lock().len();
+    let sibling_head = shell(&workspace, "git rev-parse HEAD");
     let (entered, ready) = tokio::sync::oneshot::channel();
     let (release, resumed) = tokio::sync::oneshot::channel();
     *backend.begin_pause.lock() = Some((entered, resumed));
@@ -680,6 +691,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             "siblings must inherit the same dirty source before either starts"
         );
         let workspace = child.workspace.as_ref().unwrap();
+        assert_eq!(shell(workspace, "git rev-parse HEAD"), sibling_head);
         assert!(
             !layout
                 .resource_root(workspace.worktree.as_ref().unwrap().as_str())
@@ -696,6 +708,8 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         2,
         "the cancelled waiter must not begin publication"
     );
+    assert_eq!(shell(&workspace, "git rev-parse HEAD"), sibling_head);
+    std::fs::write(repo.path().join("file"), "unpublished-busy").unwrap();
     *backend.busy.lock() = true;
     let fallback = admission
         .admit(root, "root/busy".into(), seed(), CODING)
@@ -714,9 +728,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(
         shell(
             fallback.workspace.as_ref().unwrap(),
-            "cat file; test ! -e untracked; test ! -e ignored"
+            "cat file untracked; test ! -e ignored"
         ),
-        "committed"
+        "lateruntracked"
     );
     assert_eq!(
         shell(
@@ -738,6 +752,48 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         "committed fallback should reuse its inherited build artifacts"
     );
     *backend.busy.lock() = false;
+
+    // A ready native source with a busy host Git lane cannot skip its source
+    // checkpoint and silently fork the previous HEAD.
+    std::fs::write(repo.path().join("file"), "git-busy-dirty").unwrap();
+    let before_git_busy = shell(&workspace, "git rev-parse HEAD");
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release_begin, resumed) = tokio::sync::oneshot::channel();
+    *backend.begin_pause.lock() = Some((entered, resumed));
+    let blocked_admission = admission.clone();
+    let blocked = tokio::spawn(async move {
+        blocked_admission
+            .admit(root, "root/git-busy".into(), seed(), CODING)
+            .await
+    });
+    ready.await.unwrap();
+    let git = admission.manager.git().clone();
+    let (held_sender, held_receiver) = std::sync::mpsc::channel();
+    let (release_git_sender, release_git_receiver) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _gate = git.try_capture().expect("test Git lane must be free");
+        held_sender.send(()).unwrap();
+        release_git_receiver.recv().unwrap();
+    });
+    held_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    release_begin.send(()).unwrap();
+    let failed = tokio::time::timeout(Duration::from_secs(30), blocked).await;
+    release_git_sender.send(()).unwrap();
+    holder.join().unwrap();
+    let failed = failed.unwrap().unwrap();
+    assert!(
+        failed
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("not checkpointed")),
+        "Git-busy live fork must fail visibly"
+    );
+    assert!(!workspace.publication.lock().await.is_pending());
+    assert_eq!(shell(&workspace, "git rev-parse HEAD"), before_git_busy);
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("file")).unwrap(),
+        "git-busy-dirty"
+    );
+
     *backend.lose_finish.lock() = true;
     let mut publication = workspace.publication.lock().await;
     assert!(matches!(
@@ -802,7 +858,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
             grandchild,
             "cat file; git show :file; cat .shoal/build/cargo/artifact .shoal/config"
         ),
-        "dirty-childstaged-childwarmcanonical"
+        "dirty-childdirty-childwarmcanonical"
     );
     shell(
         child,
@@ -812,8 +868,11 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         shell(grandchild, "cat file .shoal/build/cargo/artifact"),
         "dirty-childwarm"
     );
-    shell(grandchild, "git commit -qm grandchild");
-    assert_eq!(shell(child, "git show HEAD:file"), "committed");
+    shell(
+        grandchild,
+        "printf grandchild > file; git add file; git commit -qm grandchild",
+    );
+    assert_eq!(shell(child, "git show HEAD:file"), "dirty-child");
 
     let inspection = admission
         .admit(
@@ -845,29 +904,17 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         child,
         "git rev-parse HEAD > \"$(git rev-parse --git-path MERGE_HEAD)\"",
     );
-    let fallback = admission
+    let failed = admission
         .admit(
             child_actor,
             "root/child/in-progress".into(),
             ForkWorkspaceSeed::BoundHead(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
             CODING,
         )
-        .await
-        .unwrap()
-        .install(ActorRef::first(tidepool_actor::ActorId(6)))
-        .unwrap();
-    let fallback = (fallback.as_ref() as &dyn std::any::Any)
-        .downcast_ref::<ActorWorkspaceCustody>()
-        .unwrap();
-    assert!(fallback
-        .inheritance_notice
-        .as_ref()
-        .unwrap()
-        .contains("Git operation in progress"));
-    assert_eq!(
-        shell(fallback.workspace.as_ref().unwrap(), "cat file"),
-        "committed"
-    );
+        .await;
+    assert!(failed.is_err(), "a failed checkpoint must stop this fork");
+    assert!(!child.publication.lock().await.is_pending());
+    assert_eq!(shell(child, "cat file"), "later-child");
     shell(child, "rm -- \"$(git rev-parse --git-path MERGE_HEAD)\"");
     *backend.lose_begin.lock() = true;
     let failed = admission
@@ -943,11 +990,8 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap();
     assert!(explicit.inheritance_notice.is_none());
     assert_eq!(
-        shell(
-            explicit.workspace.as_ref().unwrap(),
-            "cat file; test ! -e untracked"
-        ),
-        "committed"
+        shell(explicit.workspace.as_ref().unwrap(), "cat file untracked"),
+        "lateruntracked"
     );
     *backend.unavailable.lock() = true;
     let unavailable = admission
@@ -971,7 +1015,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .contains("test native unavailable"));
     assert_eq!(
         shell(unavailable.workspace.as_ref().unwrap(), "cat file"),
-        "committed"
+        "later-child"
     );
     *backend.unavailable.lock() = false;
     let (entered, ready) = tokio::sync::oneshot::channel();

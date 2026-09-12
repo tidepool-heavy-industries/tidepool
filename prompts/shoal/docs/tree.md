@@ -8,10 +8,14 @@ Commit a useful interface, example, test, or partial implementation in your
 owned worktree. Name each obligation's scope, acceptance condition, and allowed
 holes. Use `boundHead` for an allocated child checkout and `projectHead` for the source
 project. The hosted root writes the project checkout directly and has no bound
-worktree handle: seed its children with `projectHead`. Ordinary unfolding also
-inherits working files and the index. If capture is busy or unavailable, the
-child starts from committed HEAD with an omission notice. Commit useful shared
-work for integration and recovery; no special dirty-snapshot option is needed.
+worktree handle: seed its children with `projectHead`. Before a live-source fork,
+Shoal checkpoints eligible edits on the source's current branch. The child starts
+from that committed source. If the optional overlay capture is busy or unavailable,
+the child starts from the checkpointed HEAD with an omission notice. If native
+source admission is busy, the committed fallback instead uses the existing HEAD
+and reports omitted working files. A Git checkpoint failure stops the fork.
+Commit authored units with meaningful
+messages for integration and recovery.
 
 One shared interface can support four branches: a pure test implementation,
 integration tests exercising the real implementation, the real implementation,

@@ -5,6 +5,7 @@
 //! results; it never parses Haskell type syntax.
 
 use serde::{Deserialize, Serialize};
+use tidepool_runtime::session::InspectionAvailability;
 use tidepool_tool::{HostedTool, ToolDeclaration, ToolKind};
 
 pub(crate) const LOOKUP_TOOL: &str = "lookup";
@@ -12,6 +13,8 @@ pub(crate) const LOOKUP_TOOL: &str = "lookup";
 const LOOKUP_DESCRIPTION: &str = "Look up names, Haskell types, or Shoal documentation. \
 Batch example: {\"queries\":[\"awaitSettled\",\":: Int -> Int\",\"doc workbench\"]}. \
 Prefix a type query with `::`; use `doc` for topics or `doc <topic>` for a topic. \
+Callable results show current-row availability; `unknown` needs more type \
+information. Resource grants are checked when an operation executes. \
 A bare string is also accepted as one query. \
 Each query reports independently in deterministic text, so one bad query does \
 not hide other results.";
@@ -167,6 +170,23 @@ pub(crate) struct LookupEntry {
     pub(crate) signature_or_declaration: String,
     pub(crate) origin: LookupOrigin,
     pub(crate) quality: MatchQuality,
+    pub(crate) availability: InspectionAvailability,
+}
+
+fn availability_rank(availability: InspectionAvailability) -> u8 {
+    match availability {
+        InspectionAvailability::Available => 0,
+        InspectionAvailability::Unknown => 1,
+        InspectionAvailability::Unavailable => 2,
+    }
+}
+
+fn availability_label(availability: InspectionAvailability) -> &'static str {
+    match availability {
+        InspectionAvailability::Available => "available",
+        InspectionAvailability::Unknown => "unknown",
+        InspectionAvailability::Unavailable => "unavailable",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -225,12 +245,14 @@ fn bounded_matches(
 ) -> LookupOutcome {
     matches.sort_by(|left, right| {
         (
+            availability_rank(left.availability),
             left.quality.rank(),
             &left.name,
             &left.defining_module,
             &left.signature_or_declaration,
         )
             .cmp(&(
+                availability_rank(right.availability),
                 right.quality.rank(),
                 &right.name,
                 &right.defining_module,
@@ -254,7 +276,18 @@ impl LookupResponse {
                     | LookupOutcome::Ambiguous { matches, truncated } => {
                         let mut lines = matches
                             .iter()
-                            .map(|entry| format!("  {}", entry.signature_or_declaration.trim()))
+                            .map(|entry| {
+                                let signature = entry.signature_or_declaration.trim();
+                                match entry.kind {
+                                    LookupEntryKind::Value
+                                    | LookupEntryKind::ClassMethod
+                                    | LookupEntryKind::RecordSelector => format!(
+                                        "  [{}] {signature}",
+                                        availability_label(entry.availability)
+                                    ),
+                                    _ => format!("  {signature}"),
+                                }
+                            })
                             .collect::<Vec<_>>();
                         if *truncated {
                             lines.push("  … more matches omitted".into());
@@ -286,6 +319,7 @@ mod tests {
             signature_or_declaration: format!("{name} :: Int"),
             origin: LookupOrigin::ModuleExport,
             quality,
+            availability: InspectionAvailability::Available,
         }
     }
 
@@ -414,6 +448,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["alpha", "beta"]
         );
+    }
+
+    #[test]
+    fn row_availability_precedes_match_quality_and_survives_json() {
+        let mut unavailable = entry("exact-unavailable", MatchQuality::Exact);
+        unavailable.availability = InspectionAvailability::Unavailable;
+        let mut unknown = entry("exact-unknown", MatchQuality::Exact);
+        unknown.availability = InspectionAvailability::Unknown;
+        let available = entry("usable-available", MatchQuality::Usable);
+        let result = LookupResult::found(":: Row".into(), vec![unavailable, unknown, available], 2);
+        let LookupOutcome::Found { matches, truncated } = &result.outcome else {
+            panic!("expected found");
+        };
+        assert!(*truncated);
+        assert_eq!(
+            matches
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["usable-available", "exact-unknown"]
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["outcome"]["matches"][0]["availability"], "available");
+        assert_eq!(json["outcome"]["matches"][1]["availability"], "unknown");
+        let text = LookupResponse {
+            results: vec![result],
+        }
+        .render_text();
+        assert!(text.contains("[available] usable-available :: Int"));
+        assert!(text.contains("[unknown] exact-unknown :: Int"));
     }
 
     #[test]

@@ -32,7 +32,7 @@ acceptance, known limits, and the reasons behind the consequential choices.
 
 | Boundary | Source side | Reasoning side |
 |---|---|---|
-| Prepare | Check and commit the shared scaffold, or reuse an adequate existing one. | Resolve coupled choices and retain their reasons and limits. |
+| Prepare | Commit useful shared source, or reuse an adequate existing baseline. | Resolve coupled choices and retain their reasons and limits. |
 | Fork | Seed each child's worktree from the chosen source. | Inherit a useful completed boundary or select a focused context; add its own obligation. |
 | Work | Children implement and check their artifacts, recursively where useful. | Children investigate independent questions and own their local decisions. |
 | Integrate | Incorporate coherent candidates and check the resulting revision. | Reconcile findings; retain changed decisions, evidence and remaining gates. |
@@ -43,16 +43,22 @@ real types, minimum usable semantics and early consumer wiring. Resolve what mus
 agree across the branches. Leave independent choices to their owners. Fork after
 that common ground is useful and before unrelated debugging fills its context.
 There is no need to create an empty scaffold commit when the source already fits.
+For a live-source fork, Shoal first checkpoints eligible source changes on that
+checkout's current branch, including root `main`. It stages the same source set
+the child will inherit: tracked edits/deletions and eligible nonignored new files,
+excluding runtime `.shoal/`, configured source exclusions and recognized caches
+even when staged. The checkpoint skips hooks, builds and tests; a Git failure
+stops the fork with working files intact. An unchanged sibling reuses `HEAD`.
+Use authored commits with meaningful messages for useful plans, failing tests and
+partial implementation. Delivery checks are separate from the right to commit.
 
 The two sides are paired semantically, not kept synchronized by magic. A commit
 does not convey all its rationale; inherited reasoning does not change a worktree.
 An accepted correction needs both its source and its decision delta. In particular,
 a retained worker does not learn later parent work automatically.
 
-This is also the useful interpretation of a future checkpointContext: save a
-valuable completed reasoning fork point and select it later with compatible source
-and intervening decisions. It is not implemented now. Retaining a transcript prefix
-would not by itself establish provider cache residency.
+The Git checkpoint records source, not a selectable earlier reasoning fork point.
+An accepted correction needs both the later source and its decision delta.
 
 ## Join the results without collecting every transcript
 

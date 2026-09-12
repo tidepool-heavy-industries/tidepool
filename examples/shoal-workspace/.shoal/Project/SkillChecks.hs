@@ -50,3 +50,24 @@ skills = do
   void $ example owner "shoal-define-actors" 2
   cleanup <- example owner "shoal-coordinate" 2
   check "the coordinate skill retains its scoped cleanup receipt" ("CleanupReceipt" `Text.isInfixOf` lastOutput cleanup)
+
+  -- The shipped decomposition example is a real multi-item cell. It uses an
+  -- ordinary local selector, one inherited prefix and a selective collector.
+  void $ turn owner ("let baseline = " <> gitOidLiteral baseline)
+  void $ example owner "shoal-coordinate" 3
+  interface <- activation
+  consumer <- activation
+  let labels = map checkLabel [interface, consumer]
+  check "one plan yields two distinct inherited Sol Medium assignments"
+    (checkModel interface == Just "gpt-5.6-sol"
+      && checkModel consumer == Just "gpt-5.6-sol"
+      && "interface" `elem` labels && "consumer" `elem` labels
+      && all (Text.isInfixOf "Deliver the feature through its real consumer" . checkContext) [interface, consumer])
+  void $ example owner "shoal-coordinate" 4
+  void $ turn (checkActor interface) ("let found = Candidate " <> gitOidLiteral baseline <> " [\"interface evidence\"] []\nreportProgress (WorkProgress [found] [])")
+  void $ turn (checkActor consumer) ("let found = Candidate " <> gitOidLiteral baseline <> " [\"consumer evidence\"] []\nreportProgress (WorkProgress [found] [])")
+  observed <- awaitOutput owner "state <- readWork router\ninspectFull (map (workEvidence . sourceProgress) (collectedWork state))" (Text.isInfixOf "consumer evidence")
+  check "collector retains both candidates without a routine wake" ("interface evidence" `Text.isInfixOf` observed && "consumer evidence" `Text.isInfixOf` observed)
+  void $ turn (checkActor interface) "respond (Produced found)"
+  void $ turn (checkActor consumer) "respond (Produced found)"
+  void $ turn owner "drained <- finishWork router\nlet Just group = forkGroupHandle interface\nreleased <- releaseGroup group\ninspectFull released"

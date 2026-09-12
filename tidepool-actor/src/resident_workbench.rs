@@ -2028,6 +2028,7 @@ where
                     session_root: compile_view.session_root(),
                     inject_modules: &prepared.injected,
                     queries: &queries,
+                    effects: Some(&context.haskell_effects_alias),
                 })
                 .map_err(ResidentActorWorkbenchError::Compile)?;
                 if results.len() != queries.len() {
@@ -5647,13 +5648,19 @@ where
     O: OutputSink + Sync,
 {
     let compile_view = actor_compile_view(session, context, source, type_modules)?;
-    inspect_compile_view(&compile_view, source, queries)
+    inspect_compile_view(
+        &compile_view,
+        source,
+        queries,
+        Some(&context.haskell_effects_alias),
+    )
 }
 
 fn inspect_compile_view(
     compile_view: &crate::ActorCompileView,
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
+    effects: Option<&str>,
 ) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError> {
     let prepared = source.prepare(compile_view);
     let include_refs = prepared
@@ -5668,6 +5675,7 @@ fn inspect_compile_view(
         session_root: compile_view.session_root(),
         inject_modules: &prepared.injected,
         queries,
+        effects,
     }) {
         Ok(results) if results.len() == queries.len() => Ok(results
             .into_iter()

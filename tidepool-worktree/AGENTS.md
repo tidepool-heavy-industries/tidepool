@@ -6,8 +6,10 @@ inspection, coalesced events, snapshots, and the narrow typed merge primitive.
 worktrees: working files, index, and HEAD are per actor; objects, refs, config,
 and administrative metadata share the source repository's namespace.
 
-- Never dirty the source working tree. Registry state, managed repositories,
-  journals, and temporary indexes live outside it.
+- Do not write runtime state into the source working tree. An explicitly
+  authorized source checkpoint may stage and commit source changes through
+  `GitCli`; registry state, managed repositories, journals, and temporary
+  indexes live outside it.
 - Shared Git metadata is intentional collaboration infrastructure, not an
   isolation boundary. Do not add publication/import machinery between actors.
 - Retain first: no deletion, GC, or silent recreation of a missing managed

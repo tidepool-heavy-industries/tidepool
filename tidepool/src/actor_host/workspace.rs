@@ -35,11 +35,6 @@ impl SourceFallback {
     }
 }
 
-enum SourceCapture {
-    Ready(CapturedSource),
-    Fallback(SourceFallback),
-}
-
 struct CapturedSource {
     git: PreparedSourceWorktree,
     source: Option<OverlayResourceLease>,
@@ -232,7 +227,11 @@ impl WorkspaceLayout {
         Ok(())
     }
 
-    fn source_exclusions(&self, source: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    fn source_exclusions(
+        &self,
+        source: &Path,
+        files: &Path,
+    ) -> io::Result<Vec<std::ffi::OsString>> {
         let mut excluded = vec![".git".into(), ".shoal".into()];
         let git = self.worktrees.git();
         for name in &self.source_exclude {
@@ -243,7 +242,7 @@ impl WorkspaceLayout {
             }
             excluded.push(name.into());
         }
-        for entry in std::fs::read_dir(source)? {
+        for entry in std::fs::read_dir(files)? {
             let entry = entry?;
             let name = entry.file_name();
             if excluded.iter().any(|excluded| excluded == &name) || !entry.file_type()?.is_dir() {
@@ -286,6 +285,10 @@ impl WorkspaceLayout {
         inherited_build: Option<OverlaySnapshot>,
     ) -> io::Result<Arc<PreparedWorkspace>> {
         let visible = PathBuf::from(ACTOR_PROJECT_ROOT);
+        self.worktrees
+            .git()
+            .ensure_shoal_local_exclude(&host_path)
+            .map_err(io::Error::other)?;
         let common =
             tidepool_worktree::git::inspect::git_common_dir(self.worktrees.git(), &host_path)
                 .map_err(io::Error::other)?;
@@ -545,28 +548,31 @@ impl NativeForkAdmission {
             let host_path = parent.workspace.host_path.clone();
             let preserved = parent.workspace.source_preserved_mounts.clone();
             let captured = tokio::task::spawn_blocking(move || {
-                let captured = capture_layout
+                let _admission = capture_layout
                     .worktrees
                     .git()
                     .try_capture()
-                    .map(|_admission| {
-                        capture_layout.capture(
-                            &authorized,
-                            &namespace,
-                            &host_path,
-                            &preserved,
-                            source,
-                            cache,
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "source Git operation is busy; live fork was not checkpointed",
                         )
-                    });
-                (authorized, captured)
+                    })?;
+                capture_layout.capture(
+                    &authorized,
+                    &namespace,
+                    &host_path,
+                    &preserved,
+                    source,
+                    cache,
+                )
             })
             .await
             .map_err(io::Error::other);
             parent
                 .settle_publication(&mut publication, backend.as_ref())
                 .await?;
-            let (authorized, captured) = captured?;
+            let captured = captured??;
             let build = if source_owner == creator
                 && policy.native_tools != tidepool_actor::NativeToolClass::InspectionOnly
             {
@@ -582,26 +588,8 @@ impl NativeForkAdmission {
             // Keep siblings queued until the worktree created by this
             // publication is finalized. Otherwise the next sibling can race
             // its Git capture against that finalization and fall back cold.
-            let admitted = tokio::task::spawn_blocking(move || match captured {
-                Some(captured) => match captured? {
-                    SourceCapture::Ready(captured) => {
-                        layout.prepare_captured(captured, policy, build, Some(donor_view))
-                    }
-                    SourceCapture::Fallback(reason) => layout.prepare_committed(
-                        authorized,
-                        policy,
-                        build,
-                        Some(reason),
-                        Some(donor_view),
-                    ),
-                },
-                None => layout.prepare_committed(
-                    authorized,
-                    policy,
-                    build,
-                    Some(SourceFallback::Busy),
-                    Some(donor_view),
-                ),
+            let admitted = tokio::task::spawn_blocking(move || {
+                layout.prepare_captured(captured, policy, build, Some(donor_view))
             })
             .await
             .map_err(io::Error::other)?;
@@ -666,16 +654,18 @@ impl WorkspaceLayout {
         preserved: &[PathBuf],
         mut parent_source: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
         mut parent_build: Option<tokio::sync::OwnedMutexGuard<Option<OverlayResourceLease>>>,
-    ) -> io::Result<SourceCapture> {
-        let git = match authorized.prepare_source() {
-            Ok(git) => git,
-            Err(tidepool_handlers::WorktreeError::SourceOperationInProgress(kind)) => {
-                return Ok(SourceCapture::Fallback(SourceFallback::Unavailable(
-                    format!("Git operation in progress: {kind:?}"),
-                )));
-            }
-            Err(error) => return Err(io::Error::other(format!("{error:?}"))),
-        };
+    ) -> io::Result<CapturedSource> {
+        let files = namespace.retained_view_path(Path::new(ACTOR_PROJECT_ROOT))?;
+        let excluded = self.source_exclusions(source_path, files.as_path())?;
+        // Native writers and host Git operations are excluded by the caller.
+        // Resolve the child's Git baseline only after this source checkpoint.
+        self.worktrees
+            .git()
+            .checkpoint_source(source_path, &excluded)
+            .map_err(io::Error::other)?;
+        let git = authorized
+            .prepare_source()
+            .map_err(|error| io::Error::other(format!("{error:?}")))?;
         let source_pathname = self
             .resource_root(git.receipt().worktree_id.as_str())
             .join("source");
@@ -713,7 +703,6 @@ impl WorkspaceLayout {
                 Err(fallback) => (None, Some(fallback)),
             }
         } else {
-            let excluded = self.source_exclusions(source_path)?;
             let inherited = self.reusable_import(source_path, &excluded);
             let source = OverlayResourceLease::allocate_path(source_pathname, inherited.clone())?;
             if inherited.is_some() {
@@ -728,7 +717,7 @@ impl WorkspaceLayout {
                 let imported = source
                     .import_source(source_path, &excluded_refs)
                     .and_then(|()| {
-                        if excluded == self.source_exclusions(source_path)? {
+                        if excluded == self.source_exclusions(source_path, files.as_path())? {
                             self.remember_import(source_path, &excluded, &source)
                         } else {
                             Err(io::Error::new(
@@ -766,11 +755,11 @@ impl WorkspaceLayout {
                 }
             }
         }
-        Ok(SourceCapture::Ready(CapturedSource {
+        Ok(CapturedSource {
             git,
             source,
             fallback,
-        }))
+        })
     }
 
     fn prepare_captured(

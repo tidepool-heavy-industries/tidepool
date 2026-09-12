@@ -1,6 +1,6 @@
 ---
 name: shoal-coordinate
-description: Route and inspect Shoal child progress and final replies with Project.Routing actors, without manual watch rearming or repeated full-state reports.
+description: Split a shared Shoal Task into inherited children, then route and inspect progress and replies with Project.Routing actors.
 ---
 
 For a worker launched with `childWithProgress @WorkProgress`, its current request
@@ -63,3 +63,66 @@ Do not turn it into a stop/retry loop.
 For custom typed joins or automatic request continuations, load
 `shoal-define-actors`. Routine routing stays in Haskell; wake the owning Sol only
 for engineering decisions, actionable failures or integration work.
+
+## Split one shared Task
+
+Start from the accepted `Task` and a checked shared source. Bind the shared plan
+once. An ordinary local selector can make short, disjoint assignments without
+a new workspace lane registry. This cell assumes `baseline :: GitOid` is bound
+to the source being split. Both branches deliberately inherit the current
+reasoning and use the live root source; `solTaskFrom` selects the executor alias
+and Medium effort. The current branch is checkpointed before capture.
+
+```haskell
+data Lane = InterfaceLane | ConsumerLane deriving (Show, Eq)
+
+laneName :: Lane -> Text
+laneName InterfaceLane = "interface"
+laneName ConsumerLane = "consumer"
+
+lanePaths :: Lane -> [Text]
+lanePaths InterfaceLane = ["src/interface.rs", "tests/interface.rs"]
+lanePaths ConsumerLane = ["src/consumer.rs", "tests/consumer.rs"]
+
+let group = batch "corpus" "fanout"
+let shared = Task
+      { taskGroup = group
+      , planPath = "plans/feature.md"
+      , taskSource = baseline
+      , obligation = "Deliver the feature through its real consumer"
+      , rationale = "The interface and consumer share one accepted contract"
+      , ownedPaths = []
+      , acceptance = "Integrated behavior and focused checks"
+      , acceptedDecisions = []
+      }
+let laneTask lane = shared
+      { obligation = laneName lane <> ": implement and check the assigned slice"
+      , ownedPaths = lanePaths lane
+      }
+let laneBranch lane = solTaskFrom (case lane of { InterfaceLane -> "interface"; ConsumerLane -> "consumer" }) projectHead (laneTask lane)
+((interface, interfaceProgress), (consumer, consumerProgress)) <- unfold group $
+  (,) <$> childWithProgress @WorkProgress @(Outcome Candidate) (laneBranch InterfaceLane)
+      <*> childWithProgress @WorkProgress @(Outcome Candidate) (laneBranch ConsumerLane)
+```
+
+Admission creates two pending obligations; it does not join their results. End
+that cell promptly. In the next cell, attach one persistent selective collector:
+
+```haskell
+router <- followWork
+  [ ("interface", interface, interfaceProgress)
+  , ("consumer", consumer, consumerProgress)
+  ] (notifyWork me (withCheckpoints (workMessage candidateSummary)))
+state <- readWork router
+inspectFull (workSnapshotSummary candidateSummary state)
+```
+
+`solTaskFrom` sets `report = Silent` because the record actor owns settlement
+delivery. Routine progress stays in `state`; a question, unavailable result,
+terminal result, or candidate checkpoint wakes the owner. On wake, inspect the
+relevant candidate and source receipt before incorporating it. Mark handled
+evidence with `incorporatedWork`, drain the router after the wave, and release
+finished children. A third repair at one boundary, or eight model rounds without
+a fork or candidate checkpoint, triggers a work-split reassessment. Commit a
+changed allocation or ask the parent for authority; continue locally if the
+remaining work is truly bounded.

@@ -20,6 +20,12 @@ as its text. A mock or golden string establishes only its own boundary. Read you
 final diff for unused surface,
 misleading success, and accidental scope changes.
 
+Commit useful authored units during the work, including failing tests and partial
+code. Use messages that explain the change; preserve attempts. The automatic
+pre-fork checkpoint runs no checks or hooks, so it proves only which source the
+child inherited. Candidate review and delivery follow the parent's acceptance
+contract, not a rule that every intermediate commit is green.
+
 Bind head to the exact checked commit, checks to actual commands/evidence there,
 and gates to remaining product limits. For implement's Outcome Candidate:
 

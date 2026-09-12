@@ -6917,6 +6917,7 @@ fn lookup_response(
                         signature_or_declaration: body.into(),
                         origin: LookupOrigin::Documentation,
                         quality: MatchQuality::Exact,
+                        availability: tidepool_runtime::session::InspectionAvailability::Unknown,
                     }],
                     MATCH_LIMIT,
                 ),
@@ -6987,6 +6988,7 @@ fn lookup_response(
                                 TypeMatchQuality::Exact => MatchQuality::Exact,
                                 TypeMatchQuality::Usable => MatchQuality::Usable,
                             },
+                            availability: entry.availability,
                         })
                         .collect(),
                     MATCH_LIMIT,
@@ -7029,6 +7031,7 @@ fn lookup_response(
             signature_or_declaration: entry.display,
             origin: lookup_origin(entry.module.as_deref(), live_modules),
             quality: MatchQuality::Exact,
+            availability: entry.availability,
         }
     }
 
@@ -7052,10 +7055,10 @@ mod tests {
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
-        InspectionResult, TurnClassification, TurnKind, TypeMatch, TypeMatchQuality,
-        WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
-        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-        WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+        InspectionAvailability, InspectionResult, TurnClassification, TurnKind, TypeMatch,
+        TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt,
+        WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+        WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     };
 
     #[test]
@@ -7079,6 +7082,7 @@ mod tests {
                         kind: "value".into(),
                         display: "awaitSettled :: Response result -> Await (Settlement result)"
                             .into(),
+                        availability: InspectionAvailability::Available,
                     }],
                 },
                 InspectionResult::Rejected {
@@ -7091,6 +7095,7 @@ mod tests {
                         module: Some("Tidepool.Agent.Watch.Internal".into()),
                         signature: "Response result -> Await (Settlement result)".into(),
                         quality: TypeMatchQuality::Exact,
+                        availability: InspectionAvailability::Available,
                     }],
                 },
             ],
@@ -7112,6 +7117,15 @@ mod tests {
         assert!(response
             .render_text()
             .contains("awaitSettled :: Response result -> Await (Settlement result)"));
+        let structured = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            structured["results"][0]["outcome"]["matches"][0]["availability"],
+            "available"
+        );
+        assert_eq!(
+            structured["results"][2]["outcome"]["matches"][0]["availability"],
+            "available"
+        );
     }
 
     #[test]

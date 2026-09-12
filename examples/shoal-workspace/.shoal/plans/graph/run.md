@@ -107,7 +107,14 @@ the human's improvement request, and `evidence :: [Text]` to precise
 friction/artifact references.
 
 ```haskell
-let packet = RsiInput source question [projectionEvidence, controlsEvidence] before later evidence
+let packet = RsiInput
+      { rsiSource = source
+      , rsiQuestion = question
+      , rsiWork = [projectionEvidence, controlsEvidence]
+      , rsiBefore = before
+      , rsiAfter = later
+      , rsiEvidence = evidence
+      }
 let improvements = "requested-improvement" :: ForkGroupLabel
 let improvementLabel = "workspace-style" :: Label
 improvement <- unfold (batch campaign improvements) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef (renderGitOid source))) packet)))

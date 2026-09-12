@@ -16,6 +16,8 @@ mod host_incarnation;
 mod hosted_retirement;
 #[cfg(test)]
 mod hosted_tools_tests;
+#[cfg(test)]
+mod lookup_availability_tests;
 mod overlay_resource;
 #[cfg(test)]
 #[path = "host_dynamic_tools/tui_resource_tests.rs"]

@@ -46,19 +46,41 @@ when inspecting rather than expanding every field. Keep original values for chec
 The Sol owner resolves ordinary interfaces and ownership. A reservation without
 an executing owner is work to allocate. The planner has no execution subscription
 after the initial understanding check. For a hard question, the Sol owner calls
-`consultDesign` directly, using a fresh selected Astra and the returned watch:
+`consultDesign` directly. Give the fresh context enough exact source evidence,
+alternatives and a decision to make without a transcript:
 
 ```haskell
-let question = (designQuestion task candidate "Which live roots own these wrappers?")
-      { questionAlternatives = ["trace wrapper roots", "retain until retirement"] }
+let slot = DesignSlot
+      { specialistPlan = planPath task
+      , specialistGroup = batch "design" "wrapper-lifetime"
+      , specialistLabel = "wrapper-lifetime"
+      , specialistWatch = "wrapper-answer"
+      , specialistModel = "planner"
+      , specialistEffort = Medium
+      }
+let question = DesignQuestion
+      { questionPlan = planPath task
+      , questionSource = candidateCommit candidate
+      , questionFinding = "The wrapper outlives its request; choose the owner of final release."
+      , questionEvidence = ["src/wrapper.rs: release is reachable only from actor retirement", "lifetime check: wrapper remains after reply"]
+      , questionAlternatives = ["request owns release: add reply cleanup", "actor owns release: keep until retirement"]
+      , questionUnblocks = ["choose cleanup ownership before the consumer uses this wrapper"]
+      }
 (expert, answerReady) <- consultDesign slot question
 ```
 
-`slot :: DesignSlot` selects the plan section, unique group/labels, Astra model
-and effort. The packet derives exact source and checks from the bound candidate.
-Add only evidence and alternatives needed to decide. Inspect the actual answer;
-incorporate any proposal before treating it as a checked decision. Keep useful
-experts available for follow-up; do not kill in-flight work to meet a token target.
+Use actual paths and check results in a real packet. This watch settles one
+consultation. If evidence is inadequate, the expert returns a terminal
+`NeedEvidence` naming what observation would settle it:
+
+```haskell
+let missing = ["Run the lifetime check through actor retirement; reply-time observation alone cannot distinguish the owners."]
+respond (NeedEvidence missing)
+```
+
+The owner obtains that evidence and sends a new assignment if needed. Inspect
+the answer and incorporate any source proposal before recording a checked
+decision. Retain experts for named follow-up work.
 
 ## Compact steering
 
