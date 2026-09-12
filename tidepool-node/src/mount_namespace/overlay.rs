@@ -10,7 +10,7 @@ use std::process::Stdio;
 use rustix::io::Errno;
 use rustix::mount::MountFlags;
 
-use super::{MountNamespace, OwnerRequirement};
+use super::{MountNamespace, OwnerRequirement, MOUNT_HELPER_COMMAND};
 
 mod observation;
 #[cfg(test)]
@@ -474,7 +474,7 @@ impl MountNamespace {
         let mut command = unsafe {
             self.command_with_setup(
                 Path::new("/"),
-                "/bin/sh".as_ref(),
+                "/proc/self/exe".as_ref(),
                 OwnerRequirement::LiveProcess,
                 move || {
                     if observation::mount_id(target.as_c_str())? != original_id {
@@ -485,7 +485,7 @@ impl MountNamespace {
                 },
             )?
         };
-        let _ = command.args(["-c", ":"]).status();
+        let _ = command.arg(MOUNT_HELPER_COMMAND).status();
         let restored = self.observe_overlay(&rotation.target)?;
         if restored.id == before.id && !restored.readonly {
             Ok(OverlayRotationOutcome::RecoveredOriginal)
@@ -500,7 +500,7 @@ impl MountNamespace {
     ) -> io::Result<OverlayRotationOutcome> {
         let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
         // Command owns/reaps the short helper. All mount work happens in its
-        // pre-exec syscall phase; the shell only exits after capabilities drop.
+        // pre-exec syscall phase; the re-executed binary only exits afterward.
         let descriptors = self.descriptors.clone();
         let backing = self
             .preparation
@@ -515,7 +515,7 @@ impl MountNamespace {
         let mut command = unsafe {
             self.command_with_setup(
                 Path::new("/"),
-                "/bin/sh".as_ref(),
+                "/proc/self/exe".as_ref(),
                 OwnerRequirement::LiveProcess,
                 move || {
                     let result = rotation
@@ -539,7 +539,7 @@ impl MountNamespace {
             )?
         };
         let status = command
-            .args(["-c", ":"])
+            .arg(MOUNT_HELPER_COMMAND)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -25,6 +25,10 @@ pub use overlay::{
     PreparedOverlayRotation,
 };
 
+/// Re-exec target after a mount transition's syscall-only pre-exec phase.
+/// Test harnesses accept this as an unmatched filter and exit successfully.
+pub const MOUNT_HELPER_COMMAND: &str = "__tidepool_mount_helper";
+
 /// A retained filesystem view captured from an owned live process.
 ///
 /// This is access to a filesystem, not proof that any process has stopped or
@@ -146,7 +150,7 @@ impl MountNamespace {
             let mut command = unsafe {
                 view.command_with_setup(
                     Path::new("/"),
-                    "/bin/sh".as_ref(),
+                    "/proc/self/exe".as_ref(),
                     OwnerRequirement::RetainedView,
                     move || loop {
                         match rustix::mount::unmount(
@@ -162,7 +166,7 @@ impl MountNamespace {
                     },
                 )?
             };
-            if !command.args(["-c", ":"]).status()?.success() {
+            if !command.arg(MOUNT_HELPER_COMMAND).status()?.success() {
                 return Err(io::Error::other("namespace retirement did not complete"));
             }
         }

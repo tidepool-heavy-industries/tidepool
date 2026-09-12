@@ -64,17 +64,18 @@ impl SharedOverlayResource {
             if !matches!(resource.publication, PublicationState::Writable) {
                 return Err(io::Error::other("workspace publication remains unsettled"));
             }
-            if resource
+        }
+        if let Some(mut resource) = slot.take() {
+            resource.custody.settled = true;
+            *resource.storage.state.lock() = if resource
                 .storage
                 .uncertain
                 .load(std::sync::atomic::Ordering::Acquire)
             {
-                return Err(io::Error::other("inherited mount custody is unconfirmed"));
-            }
-        }
-        if let Some(mut resource) = slot.take() {
-            resource.custody.settled = true;
-            *resource.storage.state.lock() = OverlayResourceState::Reclaimable;
+                OverlayResourceState::RetainedUnconfirmed
+            } else {
+                OverlayResourceState::Reclaimable
+            };
             resource.latest.lock().take();
             let OverlayResourceLease {
                 storage,
@@ -87,7 +88,9 @@ impl SharedOverlayResource {
             drop(retired_layers);
             drop(custody);
             if let Ok(mut storage) = Arc::try_unwrap(storage) {
-                storage.release()?;
+                if !storage.uncertain.load(std::sync::atomic::Ordering::Acquire) {
+                    storage.release()?;
+                }
             }
         }
         Ok(())

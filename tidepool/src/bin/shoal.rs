@@ -12,6 +12,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Complete a mount transition after its pre-exec syscall phase.
+    #[command(name = "__tidepool_mount_helper", hide = true)]
+    MountHelper,
     /// Verify containment before executing an internal launch payload.
     #[command(hide = true)]
     InSlice {
@@ -159,6 +162,9 @@ impl From<Effort> for ShoalEffort {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = Cli::parse().command;
+    if let Command::MountHelper = command {
+        return Ok(());
+    }
     if let Command::InSlice { slice, command } = command {
         use std::os::unix::process::CommandExt;
         let slice = tidepool_node::systemd_slice::SystemdSlice::try_from(slice)?;
@@ -189,6 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::MountHelper => unreachable!("handled before runtime construction"),
         Command::InSlice { .. } => unreachable!("handled before runtime construction"),
         Command::CommandResources { socket, policy } => {
             tidepool::shoal::resources::serve(socket, policy).await
