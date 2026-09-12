@@ -29,6 +29,28 @@ are `haskell/src/Tidepool/ExtractRequest.hs`, `tidepool-extract-cmd`, and the
 runtime decoder. Any new search query changes all those consumers and its
 versioned receipt deliberately.
 
+## Checked feasibility
+
+`probes/TypeQuery.hs`, integrated from the bounded feasibility child, ran on
+the repository's GHC 9.12.2. Against one parsed/typechecked `Expr` module it
+enumerated 268 in-scope reader entries, resolved
+`forall a. a -> Maybe a` once, and matched the visible polymorphic `useful`
+with `tcMatchTy` without compiling candidate modules.
+
+The same run demonstrated that raw partial-signature holes are not suitable
+match variables: `_ -> Maybe _` zonked to two `ZonkAny` types and did not match
+`useful`. Production must normalize the GHC-parsed query AST: preserve repeated
+named variables, replace each anonymous wildcard node with a distinct fresh
+variable, and explicitly quantify query variables before checking. String
+substitution is excluded.
+
+The probe's `IIModule Expr` context failed because this compiled target is not
+interpreted; reproducing imports as `IIDecl`s worked but would duplicate scope
+assembly. Production should instead synthesize the normalized query signatures
+inside the one inspection module, harvest their checked types, and match the
+module's reader environment in memory. This also changes the present N source
+files/N compiles into one source/compile for the lookup batch.
+
 ## First shared interface
 
 The lane proposes one new domain query:
@@ -113,21 +135,14 @@ Focused checks then cover:
 
 ## Open technical questions
 
-1. Can GHC 9.12's interactive context resolve the query type directly against
-   the already-compiled inspection module, or should the query be represented
-   by a compiler-only signature whose post-zonk `Type` is harvested? This is
-   the current feasibility probe.
-2. Which GHC matcher gives Hoogle-natural directionality for argument/result
+1. Which GHC matcher gives Hoogle-natural directionality for argument/result
    polymorphism while preserving repeated variables and constraints?
-3. Does `_` survive query resolution as useful match structure? If not, rewrite
-   wildcard nodes in the parsed Haskell type AST to fresh quantified variables;
-   never textual substitution.
-4. What authoritative marker distinguishes a current injected live binding from
+2. What authoritative marker distinguishes a current injected live binding from
    an imported value? Module generation metadata may need to travel into the
    inspection request rather than infer provenance from rendered module names.
-5. What default limit fits the hosted output budget, and how is truncation
+3. What default limit fits the hosted output budget, and how is truncation
    continued without coupling this release to notebook `last.more`?
 
-Questions 1–3 are one declared fresh-Astra slot if the feasibility worker cannot
-settle them with a checked GHC boundary. Questions 4–5 are retained integration
-engineering for the lookup lead.
+Question 1 is a declared fresh-Astra slot if the initial matching corpus does not
+settle it. Questions 2–3 are retained integration engineering for the lookup
+lead.
