@@ -17,6 +17,7 @@ pub mod finalize;
 pub mod fork;
 pub mod forks;
 pub mod green;
+pub mod introspection;
 pub mod journal;
 pub mod notifications;
 pub mod read_state;
@@ -46,6 +47,7 @@ pub use finalize::*;
 pub use fork::*;
 pub use forks::*;
 pub use green::*;
+pub use introspection::*;
 pub use journal::*;
 pub use notifications::*;
 pub use read_state::*;
@@ -74,6 +76,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         green_decl(),
         actor_decl(),
         actor_context_decl(),
+        introspection_decl(),
         actor_kernel_decl(),
         actor_local_decl(),
         sleep_decl(),

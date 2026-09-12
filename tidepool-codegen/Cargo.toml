@@ -71,3 +71,15 @@ path = "tests/suites/resident.rs"
 [[test]]
 name = "codegen"
 path = "tests/suites/codegen.rs"
+
+[[test]]
+name = "prepared_calls"
+path = "tests/prepared_calls.rs"
+
+[[test]]
+name = "prepared_control"
+path = "tests/prepared_control.rs"
+
+[[test]]
+name = "prepared_native"
+path = "tests/prepared_native.rs"

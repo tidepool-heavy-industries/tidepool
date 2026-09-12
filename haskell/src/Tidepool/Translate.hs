@@ -46,8 +46,6 @@ import GHC.Types.Name (nameOccName, isSystemName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Data.FastString (unpackFS)
 import GHC.Core.TyCon
-import GHC.Types.TyThing.Ppr (pprTyThingInContext)
-import GHC.Iface.Type (ShowForAllFlag(..), ShowHowMuch(..), ShowSub(..))
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..))
@@ -57,11 +55,10 @@ import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, mkUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe, renderWithContext, defaultSDocContext, ppr)
-import GHC.Utils.Fingerprint (Fingerprint(..), fingerprintString)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Data.Char (ord)
 import Data.List (isPrefixOf, isInfixOf)
-import Data.Bits ((.&.), (.|.), shiftL, shiftR, xor)
+import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Word
 import Data.Text (Text)
 import qualified Data.Set as Set
@@ -84,17 +81,16 @@ import Tidepool.Metadata (DCMeta(..))
 import Tidepool.PrimOps
   ( floatMathToDouble, mapPrimOp, primOpArity, splitMultiReturnPrimOp
   , splitTripleReturnPrimOp, splitUnaryMultiReturnPrimOp, splitWord2DivPrimOp )
+import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb)
 import Tidepool.EffectSchema
   ( SiteAnswerSource (..)
-  , SiteType (..)
   , VerbSpec (..)
   , YieldSite (..)
   , sitedVerbs
   )
 import Tidepool.Session (isSessionValModule)
 import Tidepool.TypePolicy
-  ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType, nominalHeadsOfType
-  , stabilizeEffectRows )
+  ( isGhcCompilerName, isGhcCompilerTyCon, stabilizeEffectRows )
 import System.IO.Unsafe (unsafePerformIO)
 import qualified System.Environment
 import qualified Data.List
@@ -214,17 +210,6 @@ freshSiteOrdinal = do
       ordinal = Map.findWithDefault 0 origin (tsSiteCounters s)
   put s { tsSiteCounters = Map.insert origin (ordinal + 1) (tsSiteCounters s) }
   return (origin, ordinal)
-
--- | Stable positive identity for one typed suspension boundary. The actual
--- GHC-derived answer/input contract participates in the hash: two independent
--- @Expr.__user@ snippets may share a binder spelling and ordinal, but a type
--- change is a different boundary. Unrelated declarations remain irrelevant.
-siteIdFor :: VerbSpec -> Text -> Word64 -> SiteType -> [SiteType] -> Word64
-siteIdFor spec origin ordinal answer inputs =
-  let Fingerprint high low = fingerprintString
-        (T.unpack origin ++ "#" ++ show ordinal ++ "#" ++ vsName spec
-          ++ "#" ++ show answer ++ "#" ++ show inputs)
-  in max 1 ((high `xor` low) .&. 0x7FFFFFFFFFFFFFFF)
 
 -- | The identity slot for one poisoned unresolved external, assigned on first
 -- reference and reused for every later reference to the same original id.
@@ -1947,19 +1932,12 @@ translate expr =
             -- actually resumes the parent; the harness derives the element
             -- type back by stripping the outer `[]`. 'vsListAnswer' is which
             -- verbs those are.
-            let renderedTy = Tidepool.GhcPipeline.renderType stableTy
-                typeStr | vsListAnswer spec = "[" ++ renderedTy ++ "]"
-                        | otherwise         = renderedTy
-                answerSiteType = SiteType
-                  (T.pack typeStr)
-                  (modulesOfType stableTy)
-                  (nominalHeadsOfType stableTy)
-                inputSiteTypes = map siteTypeOf stableInputs
-                siteId = siteIdFor spec siteOrigin siteOrdinal answerSiteType inputSiteTypes
+            let site = buildYieldSite spec siteOrigin siteOrdinal stableTy stableInputs
+                siteId = ysSite site
             -- Modules are resolved from the per-child element type `ty`
             -- itself (never the `[]`-wrapped 'typeStr') — a fanout site's
             -- shim needs T's own defining module(s), not '[]''s.
-            recordYieldSite (YieldSite siteId siteOrigin siteOrdinal answerSiteType inputSiteTypes (replyDeclaration stableTy))
+            recordYieldSite site
             sitedRef <- emitNode $ NVar sitedVarId
             -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
             -- their original order, before the injected site-id literal —
@@ -2781,7 +2759,7 @@ isParseISO8601Var = isIntrinsicVerb "parseISO8601"
 -- own same-named function never matches. 'Nothing' for everything else,
 -- including the @*Sited@ siblings themselves.
 lookupSitedVerb :: Id -> Maybe VerbSpec
-lookupSitedVerb v = Data.List.find (\spec -> isIntrinsicVerb (vsName spec) v) sitedVerbs
+lookupSitedVerb = lookupPreparedVerb
 
 -- | The first @n@ arguments of an (already 'isValueArg'-filtered) spine as
 -- 'Type's — 'Nothing' when there are fewer than @n@, or when any of them is
@@ -2826,18 +2804,6 @@ checkSiteInputType spec tys index =
       pure (stabilizeEffectRows ty)
     [] -> error $ "sited verb " ++ vsName spec
       ++ " declares missing input type argument " ++ show index
-
-replyDeclaration :: Type -> Maybe T.Text
-replyDeclaration ty = case splitTyConApp_maybe ty of
-  Nothing -> Nothing
-  Just (tc, _) -> Just $ T.pack $ renderWithContext defaultSDocContext
-    (pprTyThingInContext (ShowSub ShowIface ShowForAllWhen) (ATyCon tc))
-
-siteTypeOf :: Type -> SiteType
-siteTypeOf ty = SiteType
-  (T.pack (Tidepool.GhcPipeline.renderType ty))
-  (modulesOfType ty)
-  (nominalHeadsOfType ty)
 
 -- | Suspension sites carry concrete type metadata, so their answer type must
 -- be monomorphic at extraction time.

@@ -229,6 +229,40 @@ fn emit_alloc_con2(
 }
 
 #[test]
+fn failed_allocation_returns_before_object_initialization() {
+    let (pipeline, func) = build_test_fn(
+        "failed_alloc_does_not_initialize",
+        |builder, vmctx, gc_sig, oom_func| {
+            let ptr = emit_alloc_fast_path(builder, vmctx, 24, gc_sig, oom_func);
+            let marker = builder.ins().iconst(types::I64, 0x7f);
+            builder.ins().istore8(MemFlags::trusted(), marker, ptr, 0);
+            builder.ins().return_(&[ptr]);
+        },
+    );
+    let guard = install_test_machine();
+    guard._ms.set_stack_map_registry(&pipeline.stack_maps);
+    let mut nursery = [0u64; 1];
+    let start = nursery.as_mut_ptr() as *mut u8;
+    let mut vmctx = VMContext::new(start, start, host_fns::gc_trigger);
+    vmctx.machine_state = &*guard._ms as *const _ as *mut _;
+    let poison = host_fns::error_poison_ptr();
+    let before = unsafe { *poison };
+
+    let result = unsafe { func(&mut vmctx) };
+
+    assert_eq!(result, poison, "failure returns the logical poison value");
+    assert_eq!(
+        unsafe { *poison },
+        before,
+        "initializer must be unreachable"
+    );
+    assert!(matches!(
+        host_fns::take_runtime_error(),
+        Some(RuntimeError::HeapOverflow)
+    ));
+}
+
+#[test]
 fn test_yield_done_val() {
     let (_pipeline, func) = build_test_fn("test_val", |builder, vmctx, gc_sig, oom_func| {
         let lit_ptr = emit_alloc_lit_int(builder, vmctx, gc_sig, oom_func, 42);

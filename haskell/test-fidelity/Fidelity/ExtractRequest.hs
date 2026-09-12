@@ -2,13 +2,16 @@ module Fidelity.ExtractRequest (checks) where
 
 import Fidelity.Harness (Check, check)
 import Tidepool.ExtractRequest
-  ( InspectionRequest(..), RequestField(..), WorkerRequest(..)
+  ( InspectionProvenance(..), InspectionRequest(..), RequestField(..)
+  , StructuredInspection(..), StructuredNameNamespace(..)
+  , StructuredNameScope(..), WorkerRequest(..)
   , workerArgv, workerRequestFromArgv )
 
 checks :: IO [Check]
 checks = pure
   [ check "typed request decodes fields and a binary generation" typedRequestDecodes
   , check "typed inspection request retains query and output" typedInspectionDecodes
+  , check "structured inspection retains scope namespace and provenance" structuredInspectionDecodes
   , check "unknown request versions are rejected" wrongVersionRejected
   , check "retired request flags are rejected" retiredFlagsRejected
   , check "unknown field tags are rejected" unknownTagRejected
@@ -35,6 +38,24 @@ typedInspectionDecodes = case workerRequestFromArgv
       ]
       && requestInspectOut request == Just "inspection.cbor"
   _ -> False
+
+structuredInspectionDecodes :: Bool
+structuredInspectionDecodes = case workerRequestFromArgv
+  (workerArgv
+    [ Input "Expr.hs"
+    , InspectStructuredInfo current
+    , InspectStructuredType public
+    , InspectOut "inspection.cbor"
+    ]) of
+  Right (Just request) -> requestInspections request ==
+    [InspectStructuredInfoOf current, InspectStructuredTypeOf public]
+  _ -> False
+  where
+    provenance = InspectionProvenance 17 "scope-fingerprint"
+    current = StructuredInspection
+      StructuredCurrentScope StructuredAnyName "WorkProgress" provenance
+    public = StructuredInspection
+      (StructuredPublicModule "Project.Work") StructuredTypeName "Task" provenance
 
 typedRequestDecodes :: Bool
 typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v7", payload] of

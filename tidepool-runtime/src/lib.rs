@@ -1,7 +1,8 @@
 //! High-level runtime for compiling and executing Haskell source via Tidepool.
 //!
-//! Provides `compile_haskell` (source to Core) and `compile_and_run` (source to
-//! evaluated result), with filesystem caching of compiled CBOR artifacts.
+//! Provides `compile_haskell` (source to checked prepared execution plus the
+//! transitional Core path) and `compile_and_run` (source to evaluated result),
+//! with filesystem caching of compiled artifacts.
 //!
 //! Toolchain location, validation, fingerprinting, and the compile-output
 //! cache live in `tidepool-toolchain` (a crate this one depends on and sits
@@ -28,6 +29,7 @@ use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::{CoreExpr, DataConTable};
 
 pub(crate) use tidepool_toolchain::extract_spawn_error;
+pub use tidepool_toolchain::prepared_artifact::PreparedArtifact;
 pub use tidepool_toolchain::CompileError;
 pub use tidepool_toolchain::{artifacts, cache, diag, paths, timing, toolchain};
 
@@ -41,6 +43,7 @@ pub mod failclass;
 pub mod generated;
 mod render;
 pub mod session;
+pub use session::prepared as prepared_execution;
 
 pub use artifacts::{
     compile_targets, compile_targets_with_session_inject, compile_targets_with_stable_inject,
@@ -64,7 +67,8 @@ pub fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Result of successful Haskell compilation: a Core expression, DataCon metadata, and warnings.
+/// Result of successful Haskell compilation, including both the checked
+/// prepared program and the transitional legacy execution inputs.
 #[derive(Debug)]
 pub struct CompileResult {
     /// The compiled Core expression (the JIT/eval input).
@@ -73,6 +77,8 @@ pub struct CompileResult {
     pub table: DataConTable,
     /// Compile warnings (e.g. `has_io`, captured type).
     pub warnings: MetaWarnings,
+    /// Checked versioned execution program for the native cutover path.
+    pub prepared: PreparedArtifact,
 }
 
 /// Unified error type for the compile-and-run pipeline.
@@ -139,7 +145,7 @@ pub fn compile_haskell_salted(
         clippy::expect_used,
         reason = "compile_invocation compiled exactly this target"
     )]
-    let TargetArtifact { expr, .. } = bundle
+    let TargetArtifact { expr, prepared, .. } = bundle
         .targets
         .remove(target)
         .expect("compile_invocation compiled exactly this target");
@@ -154,6 +160,7 @@ pub fn compile_haskell_salted(
         expr,
         table,
         warnings,
+        prepared,
     })
 }
 
@@ -223,6 +230,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
         expr,
         mut table,
         warnings,
+        ..
     } = compile_haskell(source, target, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
@@ -300,6 +308,7 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
         expr,
         mut table,
         warnings,
+        ..
     } = compile_haskell(source, target, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
@@ -395,6 +404,7 @@ pub fn compile_and_run_pure_salted(
         expr,
         mut table,
         warnings,
+        ..
     } = compile_haskell_salted(source, target, include, cache_salt)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
@@ -445,11 +455,13 @@ mod tests {
     fn test_compile_identity() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module Test where\nidentity x = x";
-        let CompileResult { expr, .. } =
+        let CompileResult { expr, prepared, .. } =
             compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
 
         // identity = \x -> x — node count varies with GHC optimization level
         assert!(expr.nodes.len() >= 2);
+        assert!(!prepared.bytes().is_empty());
+        assert!(!prepared.prepared().bindings().is_empty());
     }
 
     /// The extractor captures the GHC-inferred type of the eval's top

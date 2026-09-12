@@ -4,6 +4,10 @@
 module Tidepool.ExtractRequest
   ( RequestField(..)
   , InspectionRequest(..)
+  , StructuredInspection(..)
+  , StructuredNameScope(..)
+  , StructuredNameNamespace(..)
+  , InspectionProvenance(..)
   , WorkerRequest(..)
   , workerRequestFromArgv
   , workerArgv
@@ -291,6 +295,25 @@ mapParser :: (a -> b) -> Parser a -> Parser b
 mapParser f parser bytes = do
   (value, rest) <- parser bytes
   Right (f value, rest)
+
+pStructuredInspection :: Parser StructuredInspection
+pStructuredInspection bytes = do
+  (scopeTag, rest) <- pWord8 bytes
+  (scope, rest') <- case scopeTag of
+    0 -> Right (StructuredCurrentScope, rest)
+    1 -> mapParser StructuredPublicModule pText rest
+    _ -> Left ("worker request: unknown structured inspection scope " ++ show scopeTag)
+  (namespaceTag, rest'') <- pWord8 rest'
+  namespace <- case namespaceTag of
+    0 -> Right StructuredAnyName
+    1 -> Right StructuredValueName
+    2 -> Right StructuredTypeName
+    3 -> Right StructuredConstructorName
+    _ -> Left ("worker request: unknown structured inspection namespace " ++ show namespaceTag)
+  (name, rest''') <- pText rest''
+  (generation, rest'''') <- pWord64 rest'''
+  (fingerprint, trailing) <- pText rest''''
+  Right (StructuredInspection scope namespace name (InspectionProvenance generation fingerprint), trailing)
 
 pN :: Int -> Parser a -> Parser [a]
 pN 0 _ bytes = Right ([], bytes)

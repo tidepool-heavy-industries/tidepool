@@ -31,7 +31,9 @@ mod process;
 mod request;
 pub use endpoint::{CompilerEndpoint, CompilerIdentity};
 use exec_check::is_readable_executable_file;
-pub use request::{ExtractRequest, ProtocolError};
+pub use request::{
+    ExtractRequest, InspectionNamespace, InspectionScope, ProtocolError, StructuredInspection,
+};
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
 ///
@@ -584,6 +586,18 @@ impl ExtractCmd {
         self
     }
 
+    /// Ask for a structured declaration of one resolved identifier.
+    pub fn inspect_structured_info(&mut self, query: StructuredInspection) -> &mut Self {
+        self.request.inspect_structured_info(query);
+        self
+    }
+
+    /// Ask for a structured canonical type of one resolved identifier.
+    pub fn inspect_structured_type(&mut self, query: StructuredInspection) -> &mut Self {
+        self.request.inspect_structured_type(query);
+        self
+    }
+
     /// Inspection-result CBOR sidecar.
     pub fn inspect_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
         self.request.inspect_out(path);
@@ -741,6 +755,26 @@ mod tests {
         );
         let decoded = ExtractRequest::decode(&cmd.request_bytes()).unwrap();
         assert_eq!(decoded.cli_argv(), cmd.argv());
+    }
+
+    #[test]
+    fn structured_inspection_request_round_trips_scope_namespace_and_provenance() {
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        cmd.input("Expr.hs")
+            .inspect_structured_info(StructuredInspection {
+                scope: InspectionScope::PublicModule("Project.Work".into()),
+                namespace: InspectionNamespace::Type,
+                name: "WorkProgress".into(),
+                generation: 7,
+                fingerprint: "scope-abc".into(),
+            })
+            .inspect_out("inspection.cbor");
+
+        let decoded = ExtractRequest::decode(&cmd.request_bytes()).unwrap();
+        assert_eq!(decoded.cli_argv(), cmd.argv());
+        assert!(strs(&decoded.cli_argv()).iter().any(|arg| {
+            arg == "scope=module:Project.Work;namespace=Type;name=WorkProgress;generation=7;fingerprint=scope-abc"
+        }));
     }
 
     /// One test owns `$TIDEPOOL_EXTRACT` for this binary (all cases in

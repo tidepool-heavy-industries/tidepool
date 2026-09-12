@@ -10,6 +10,7 @@ pub mod actor_path;
 pub mod builder;
 pub mod datacon;
 pub mod datacon_table;
+pub mod execution_schema;
 pub mod frame;
 pub mod free_vars;
 pub mod freer_names;

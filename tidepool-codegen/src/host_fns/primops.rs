@@ -3,7 +3,7 @@
 //! measurement helpers, and the pure JSON-decode (`eitherDecodeValue`) primop.
 
 use crate::context::VMContext;
-use crate::machine_state::machine_state;
+use crate::machine_state::{current_machine, machine_state, ExternalStorageKind};
 
 use super::errors::{
     check_ptr_invalid, error_poison_ptr, overwrite_runtime_error, runtime_error_with_msg,
@@ -35,6 +35,47 @@ use super::gc::write_barrier;
 /// (proptest_host_arrays BUG-2)
 const BYTE_ARRAY_BASE_OFFSET: usize = 8;
 
+fn external_allocation_failure(kind: ExternalStorageKind, bytes: usize) -> i64 {
+    overwrite_runtime_error(RuntimeError::ExternalAllocationFailed { kind, bytes });
+    error_poison_ptr() as i64
+}
+
+/// Allocate and register a GC-external buffer before the caller initializes
+/// or publishes any part of it. Host functions in this module lack `vmctx`,
+/// so production reaches the owning machine through the run-scoped
+/// `CURRENT_MACHINE`; the registry guard installs/restores that pointer around
+/// exactly one machine's JIT entry. Direct low-level tests without an installed
+/// machine retain their historical untracked allocation behavior.
+fn allocate_external(
+    total: usize,
+    published_offset: usize,
+    kind: ExternalStorageKind,
+    logical_len: usize,
+    zeroed: bool,
+) -> Result<*mut u8, i64> {
+    let layout = std::alloc::Layout::from_size_align(total, 8)
+        .map_err(|_| external_allocation_failure(kind, total))?;
+    // SAFETY: `layout` is valid. A null result is handled before any caller
+    // initialization can run.
+    let base = unsafe {
+        if zeroed {
+            std::alloc::alloc_zeroed(layout)
+        } else {
+            std::alloc::alloc(layout)
+        }
+    };
+    if base.is_null() {
+        return Err(external_allocation_failure(kind, total));
+    }
+    // SAFETY: published_offset is supplied only as 0 (boxed arrays) or 8 for
+    // the byte layout, both within their nonempty allocations.
+    let published = unsafe { base.add(published_offset) };
+    if let Some(ms) = unsafe { current_machine() } {
+        ms.register_external_storage(published, base, layout, kind, logical_len);
+    }
+    Ok(published)
+}
+
 pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
     if size < 0 {
         overwrite_runtime_error(RuntimeError::UserErrorMsg(
@@ -42,19 +83,24 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
         ));
         return error_poison_ptr() as i64;
     }
-    let total = (2 * BYTE_ARRAY_BASE_OFFSET).saturating_add(size as usize);
-    let layout =
-        std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
-    // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
-    let base = unsafe { std::alloc::alloc_zeroed(layout) };
-    if base.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
+    let Some(total) = (2 * BYTE_ARRAY_BASE_OFFSET).checked_add(size as usize) else {
+        return external_allocation_failure(ExternalStorageKind::Bytes, usize::MAX);
+    };
+    let ba = match allocate_external(
+        total,
+        BYTE_ARRAY_BASE_OFFSET,
+        ExternalStorageKind::Bytes,
+        size as usize,
+        true,
+    ) {
+        Ok(ptr) => ptr,
+        Err(poison) => return poison,
+    };
     // SAFETY: base is a valid fresh allocation; capacity word at offset 0,
     // logical length prefix at offset 8 (= the returned ba's offset 0).
     unsafe {
+        let base = ba.sub(BYTE_ARRAY_BASE_OFFSET);
         *(base as *mut u64) = total as u64;
-        let ba = base.add(BYTE_ARRAY_BASE_OFFSET);
         *(ba as *mut u64) = size as u64;
         ba as i64
     }
@@ -120,6 +166,9 @@ pub extern "C" fn runtime_shrink_byte_array(ba: i64, new_size: i64) {
     unsafe {
         *(ba as *mut u64) = new_size as u64;
     }
+    if let Some(ms) = unsafe { current_machine() } {
+        ms.set_external_logical_len(ba as *mut u8, new_size as usize);
+    }
 }
 
 /// Resize a mutable byte array. Allocates a new buffer, copies existing data,
@@ -146,15 +195,20 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
     let old_total = unsafe { *(old_base as *const u64) } as usize;
     let new_size = new_size as usize;
 
-    let new_total = (2 * BYTE_ARRAY_BASE_OFFSET).saturating_add(new_size);
-    let new_layout =
-        std::alloc::Layout::from_size_align(new_total, 8).unwrap_or_else(|_| std::process::abort());
-    // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
-    let new_base = unsafe { std::alloc::alloc_zeroed(new_layout) };
-    if new_base.is_null() {
-        std::alloc::handle_alloc_error(new_layout);
-    }
-    let new_ptr = unsafe { new_base.add(BYTE_ARRAY_BASE_OFFSET) };
+    let Some(new_total) = (2 * BYTE_ARRAY_BASE_OFFSET).checked_add(new_size) else {
+        return external_allocation_failure(ExternalStorageKind::Bytes, usize::MAX);
+    };
+    let new_ptr = match allocate_external(
+        new_total,
+        BYTE_ARRAY_BASE_OFFSET,
+        ExternalStorageKind::Bytes,
+        new_size,
+        true,
+    ) {
+        Ok(ptr) => ptr,
+        Err(poison) => return poison,
+    };
+    let new_base = unsafe { new_ptr.sub(BYTE_ARRAY_BASE_OFFSET) };
 
     // Copy existing data (up to min of old/new logical size)
     let copy_len = old_size.min(new_size);
@@ -172,12 +226,22 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
     }
 
     // Free old buffer with its RECORDED allocation layout.
-    let old_layout =
-        std::alloc::Layout::from_size_align(old_total, 8).unwrap_or_else(|_| std::process::abort());
-    // SAFETY: old_base/old_total are exactly the pointer and layout produced by
-    // the runtime_new/resize call that allocated this array.
-    unsafe {
-        std::alloc::dealloc(old_base, old_layout);
+    if let Some(ms) = unsafe { current_machine() } {
+        if !ms.release_external_storage(old_ptr) {
+            let old_layout = match std::alloc::Layout::from_size_align(old_total, 8) {
+                Ok(layout) => layout,
+                Err(_) => {
+                    return external_allocation_failure(ExternalStorageKind::Bytes, old_total)
+                }
+            };
+            unsafe { std::alloc::dealloc(old_base, old_layout) };
+        }
+    } else {
+        let old_layout = match std::alloc::Layout::from_size_align(old_total, 8) {
+            Ok(layout) => layout,
+            Err(_) => return external_allocation_failure(ExternalStorageKind::Bytes, old_total),
+        };
+        unsafe { std::alloc::dealloc(old_base, old_layout) };
     }
 
     new_ptr as i64
@@ -291,13 +355,10 @@ pub extern "C" fn runtime_new_boxed_array(len: i64, init: i64) -> i64 {
             return error_poison_ptr() as i64;
         }
     };
-    let layout =
-        std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
-    // SAFETY: alloc returns a valid allocation of the requested size.
-    let ptr = unsafe { std::alloc::alloc(layout) };
-    if ptr.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
+    let ptr = match allocate_external(total, 0, ExternalStorageKind::BoxedArray, n, false) {
+        Ok(ptr) => ptr,
+        Err(poison) => return poison,
+    };
     // SAFETY: ptr is a fresh allocation of (8 + 8*n) bytes. Initializing all
     // pointer slots to `init` and then writing the length prefix.
     unsafe {
@@ -349,20 +410,18 @@ pub extern "C" fn runtime_clone_boxed_array(src: i64, off: i64, len: i64) -> i64
         return error_poison_ptr() as i64; // silently return
     }
 
-    let layout =
-        std::alloc::Layout::from_size_align(total, 8).unwrap_or_else(|_| std::process::abort());
-    // SAFETY: alloc returns a valid allocation of the requested size.
-    let ptr = unsafe { std::alloc::alloc(layout) };
-    if ptr.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
+    let ptr = match allocate_external(total, 0, ExternalStorageKind::BoxedArray, n, false) {
+        Ok(ptr) => ptr,
+        Err(poison) => return poison,
+    };
     // SAFETY: ptr is a fresh allocation. src is a valid boxed array from JIT code.
     // Copying len pointer slots from src[off..off+len] to the new array.
     unsafe {
-        *(ptr as *mut u64) = n as u64;
         let src_slots = (src as *const u8).add(8 + 8 * off as usize);
         let dst_slots = ptr.add(8);
         std::ptr::copy_nonoverlapping(src_slots, dst_slots, 8 * n);
+        // Publish the readable length only after every reference slot exists.
+        *(ptr as *mut u64) = n as u64;
     }
     ptr as i64
 }
@@ -423,6 +482,9 @@ pub extern "C" fn runtime_shrink_boxed_array(arr: i64, new_len: i64) {
     // prefix at offset 0 with a smaller value (logical shrink).
     unsafe {
         *(arr as *mut u64) = new_len as u64;
+    }
+    if let Some(ms) = unsafe { current_machine() } {
+        ms.set_external_logical_len(arr as *mut u8, new_len as usize);
     }
 }
 
@@ -888,6 +950,87 @@ mod tests {
     // the test via runtime_new_byte_array or stack-allocated buffers with known
     // sizes and layouts. Pointers and offsets are controlled by the test code.
     use super::*;
+    use crate::machine_state::{install_current_machine, restore_current_machine, MachineState};
+
+    struct CurrentMachineGuard(*mut MachineState);
+
+    impl CurrentMachineGuard {
+        fn install(machine: &MachineState) -> Self {
+            Self(install_current_machine(
+                machine as *const MachineState as *mut MachineState,
+            ))
+        }
+    }
+
+    impl Drop for CurrentMachineGuard {
+        fn drop(&mut self) {
+            restore_current_machine(self.0);
+        }
+    }
+
+    #[test]
+    fn external_allocations_are_owned_and_accounted() {
+        let machine = MachineState::new();
+        let _current = CurrentMachineGuard::install(&machine);
+
+        let bytes = runtime_new_byte_array(13);
+        let boxed = runtime_new_boxed_array(3, 0);
+        assert_ne!(bytes as *mut u8, error_poison_ptr());
+        assert_ne!(boxed as *mut u8, error_poison_ptr());
+
+        let stats = machine.external_storage_stats();
+        assert_eq!(stats.allocated_objects, 2);
+        assert_eq!(stats.live_objects, 2);
+        assert_eq!(stats.freed_objects, 0);
+        assert_eq!(stats.allocated_bytes, 29 + 32);
+        assert_eq!(stats.live_bytes, stats.allocated_bytes);
+    }
+
+    #[test]
+    fn impossible_external_layout_returns_poison_and_typed_failure() {
+        let machine = MachineState::new();
+        let _current = CurrentMachineGuard::install(&machine);
+
+        let result = runtime_new_byte_array(i64::MAX);
+        assert_eq!(result as *mut u8, error_poison_ptr());
+        assert_eq!(machine.external_storage_stats(), Default::default());
+        assert!(matches!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::ExternalAllocationFailed {
+                kind: ExternalStorageKind::Bytes,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn concurrent_machine_external_ledgers_are_isolated() {
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = [7_i64, 41_i64]
+            .into_iter()
+            .map(|size| {
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    let machine = MachineState::new();
+                    let _current = CurrentMachineGuard::install(&machine);
+                    gate.wait();
+                    let ptr = runtime_new_byte_array(size);
+                    assert_ne!(ptr as *mut u8, error_poison_ptr());
+                    gate.wait();
+                    machine.external_storage_stats()
+                })
+            })
+            .collect();
+        let mut stats: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        stats.sort_by_key(|stats| stats.live_bytes);
+        assert_eq!(stats[0].live_objects, 1);
+        assert_eq!(stats[0].live_bytes, 23);
+        assert_eq!(stats[1].live_objects, 1);
+        assert_eq!(stats[1].live_bytes, 57);
+    }
 
     #[test]
     fn test_runtime_strlen() {

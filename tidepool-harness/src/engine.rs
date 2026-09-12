@@ -59,7 +59,7 @@ use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, p
 pub use tidepool_runtime::YieldSites;
 use tidepool_runtime::{
     compile_targets, compile_targets_with_stable_inject, CompileError, CompiledArtifacts,
-    StableValInject,
+    PreparedArtifact, StableValInject,
 };
 
 use crate::provider::{
@@ -78,6 +78,7 @@ pub struct CompiledTurn {
     pub expr: CoreExpr,
     pub table: DataConTable,
     pub asks: YieldSites,
+    pub prepared: PreparedArtifact,
 }
 
 /// Compile `source` with entry binder `target`, searching `include` for
@@ -134,6 +135,7 @@ pub fn compile_turns(
                     expr: a.expr,
                     table: table.clone(),
                     asks: a.asks,
+                    prepared: a.prepared,
                 },
             )
         })
@@ -179,6 +181,7 @@ pub fn compile_turns_with_stable_inject(
                     expr: a.expr,
                     table: table.clone(),
                     asks: a.asks,
+                    prepared: a.prepared,
                 },
             )
         })

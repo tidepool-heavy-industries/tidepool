@@ -1830,6 +1830,17 @@ where
                     .resume_agent_observation(context.clone(), inspection.continuation, observation)
                     .await
             }),
+            ResidentActorBoundary::Introspection {
+                continuation,
+                query,
+                kind,
+            } => Box::pin(async move {
+                self.environment
+                    .runner
+                    .application_workbench()
+                    .resume_structured_introspection(context.clone(), continuation, query, kind)
+                    .await
+            }),
             ResidentActorBoundary::AgentList(continuation) => Box::pin(async move {
                 let records = self.environment.actors.lock().clone();
                 let mut roster = records

@@ -196,6 +196,24 @@ fn unreferenced_bindings_survive_a_real_gc_after_narrowed_seeding() {
                  never seeded across"
             );
 
+            // Drop the binding-table owner and retire y's ordinary persistent
+            // root. The already-compiled read_y fragment embeds the stable
+            // slot address and registered it as a code root, so the automatic
+            // major collection must rewrite that slot and keep both the value
+            // and its defining code dependency callable.
+            drop(bindings);
+            machine.retire_scope_root(slot_y);
+            assert_eq!(machine.persistent_roots_count(), 1);
+            assert_eq!(
+                expect_int(
+                    &machine
+                        .run_fragment_pure(frag_read_y)
+                        .expect("read y after source-root retirement")
+                ),
+                42,
+                "reachable generated code must retain and reload its global slot across major collection"
+            );
+
             tidepool_codegen::host_fns::set_gc_poison(false);
             tidepool_codegen::host_fns::set_heap_verify(false);
             drop(machine);

@@ -565,7 +565,7 @@ unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, Br
                     // We allocate via the stable runtime allocator to avoid nursery movement.
                     let data_ptr =
                         crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
-                    if data_ptr.is_null() {
+                    if data_ptr.is_null() || data_ptr == crate::host_fns::error_poison_ptr() {
                         return Err(BridgeError::NurseryExhausted);
                     }
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
@@ -581,7 +581,7 @@ unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, Br
                     // belt-and-suspenders path for any direct Lit conversion.)
                     let data_ptr =
                         crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
-                    if data_ptr.is_null() {
+                    if data_ptr.is_null() || data_ptr == crate::host_fns::error_poison_ptr() {
                         return Err(BridgeError::NurseryExhausted);
                     }
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());
@@ -602,7 +602,7 @@ unsafe fn leaf_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u8, Br
                 .lock()
                 .map_err(|e| BridgeError::InternalError(format!("mutex poisoned: {e}")))?;
             let data_ptr = crate::host_fns::runtime_new_byte_array(bytes.len() as i64) as *mut u8;
-            if data_ptr.is_null() {
+            if data_ptr.is_null() || data_ptr == crate::host_fns::error_poison_ptr() {
                 return Err(BridgeError::NurseryExhausted);
             }
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr.add(8), bytes.len());

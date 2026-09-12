@@ -2343,6 +2343,8 @@ impl Session {
             InspectionQuery::Info(name) => name.as_str(),
             InspectionQuery::TypeSearch(query) => query.as_str(),
             InspectionQuery::Browse { module, .. } => module.as_str(),
+            InspectionQuery::StructuredInfo { query, .. }
+            | InspectionQuery::StructuredType { query, .. } => query.name.as_str(),
         };
         let preamble = self.patched_preamble();
         let imports = self.turn_imports(query_source);

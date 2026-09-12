@@ -34,3 +34,35 @@ passString x = x
 
 nulString :: Int
 nulString = sum (map ord (passString "a\0b"))
+
+data LazyPair = LazyPair Int Int
+
+lazyConstructor :: Int
+lazyConstructor = case LazyPair 42 (bad 0) of
+  LazyPair first _ -> first
+
+data FunctionBox = FunctionBox (Int -> Int)
+
+{-# OPAQUE makeAdderBox #-}
+makeAdderBox :: Int -> FunctionBox
+makeAdderBox x = FunctionBox (x +)
+
+returnedFunction :: Int
+returnedFunction = case makeAdderBox 1 of
+  FunctionBox function -> function 41
+
+{-# OPAQUE countDown #-}
+countDown :: Int -> Int -> Int -> Int
+countDown 0 step total = total + step
+countDown n step total = countDown (n - 1) step (total + 1)
+
+multiParameterRecursion :: Int
+multiParameterRecursion = countDown 100 1 0
+
+multibyteChars :: Int
+multibyteChars = sum (map ord (passString "λ🙂"))
+
+data StrictBox = StrictBox !Int
+
+strictFieldFailure :: Int
+strictFieldFailure = StrictBox (bad 0) `seq` 42

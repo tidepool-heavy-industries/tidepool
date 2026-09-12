@@ -298,6 +298,7 @@ pub fn classify_jit(e: &JitError) -> JitErrorClass {
         | JitError::UnknownValueHandle(_)
         | JitError::EmptyProjection => JitErrorClass::Other,
         JitError::VarIdCollision(_) => JitErrorClass::Other,
+        JitError::MachineUnavailable { .. } => JitErrorClass::Other,
     }
 }
 
@@ -334,11 +335,14 @@ fn classify_runtime(e: &RuntimeError) -> JitErrorClass {
         RuntimeError::UnresolvedVar(..) => JitErrorClass::UnresolvedVar,
         RuntimeError::NullFunPtr => JitErrorClass::NullFunPtr,
         RuntimeError::BadFunPtrTag(_) => JitErrorClass::BadFunPtrTag,
-        RuntimeError::HeapOverflow => JitErrorClass::HeapOverflow,
+        RuntimeError::HeapOverflow | RuntimeError::ExternalAllocationFailed { .. } => {
+            JitErrorClass::HeapOverflow
+        }
         RuntimeError::StackOverflow => JitErrorClass::StackOverflow,
         RuntimeError::BlackHole => JitErrorClass::BlackHole,
         RuntimeError::BadThunkState(_) => JitErrorClass::BadThunkState,
         RuntimeError::Cancelled => JitErrorClass::Cancelled,
+        RuntimeError::IncompleteRootSnapshot(_) => JitErrorClass::Other,
     }
 }
 

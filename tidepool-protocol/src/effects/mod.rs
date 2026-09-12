@@ -35,6 +35,7 @@ pub mod finalize;
 pub mod fork;
 pub mod forks;
 pub mod green;
+pub mod introspection;
 pub mod journal;
 pub mod notifications;
 pub mod read_state;
@@ -76,6 +77,7 @@ pub fn all() -> Vec<Effect> {
         green::green(),
         actor::actor(),
         actor_context::actor_context(),
+        introspection::introspection(),
         actor_kernel::actor_kernel(),
         actor_local::actor_local(),
         sleep::sleep(),

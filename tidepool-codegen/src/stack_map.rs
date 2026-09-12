@@ -23,12 +23,14 @@ pub struct RawStackMap {
     pub entries: Vec<RawStackMapEntry>,
 }
 
-/// Maps absolute return addresses to stack map info.
+/// Maps exact absolute call return addresses to stack map info.
 ///
 /// Key = function_base_ptr + code_offset
 /// (i.e., the return address, which is what the frame walker sees as caller_pc).
-/// Cranelift's `code_offset` for user stack maps already points to the
-/// instruction AFTER the call (the return point).
+/// Cranelift's call-site `ret_addr` and user-stack-map `code_offset` both point
+/// to the instruction after the call. Calls with no live managed values still
+/// have an entry with an empty `offsets` list: absence means the PC is not an
+/// exact compiled safepoint, not merely that the safepoint has zero roots.
 #[derive(Debug, Default)]
 pub struct StackMapRegistry {
     entries: BTreeMap<usize, StackMapInfo>,
@@ -52,12 +54,12 @@ impl StackMapRegistry {
         Self::default()
     }
 
-    /// Register stack map entries from a compiled function.
+    /// Register exact call-site entries from a compiled function.
     ///
     /// `base_ptr` is the start address of the compiled function in memory.
     /// `size` is the total size of the function in bytes.
-    /// `raw_entries` come from `CompiledCode.buffer.user_stack_maps()`:
-    ///   each tuple is (code_offset, frame_size, UserStackMap).
+    /// `raw_entries` join `CompiledCode.buffer.call_sites()` with
+    /// `user_stack_maps()` by exact return offset. An entry may have no roots.
     pub fn register(&mut self, base_ptr: usize, size: u32, raw_entries: &[RawStackMap]) {
         Self::insert_disjoint_range(&mut self.ranges, base_ptr, base_ptr + size as usize);
 
@@ -265,5 +267,25 @@ mod tests {
             !registry.contains_address(0x1100),
             "exclusive end of the union"
         );
+    }
+
+    #[test]
+    fn exact_zero_root_call_site_is_registered() {
+        let mut registry = StackMapRegistry::new();
+        registry.register(
+            0x1000,
+            0x100,
+            &[RawStackMap {
+                code_offset: 0x36,
+                frame_size: 0x20,
+                entries: Vec::new(),
+            }],
+        );
+
+        let info = registry.lookup(0x1036).expect("exact call-site entry");
+        assert_eq!(info.frame_size, 0x20);
+        assert!(info.offsets.is_empty());
+        assert!(registry.lookup(0x1035).is_none());
+        assert!(registry.lookup(0x1037).is_none());
     }
 }

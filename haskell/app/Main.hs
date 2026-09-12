@@ -1,3 +1,5 @@
+{-# LANGUAGE RankNTypes #-}
+
 module Main where
 
 import System.Environment (getArgs)
@@ -9,12 +11,14 @@ import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, throwIO, SomeException, Exception, fromException, toException)
 import Data.List (isPrefixOf, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
-import Control.Monad (foldM, forM, void)
+import Control.Monad (foldM, forM, forM_, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
+import qualified System.Info as SystemInfo
 
 import GHC.Types.SourceError (SourceError)
-import GHC (moduleName, moduleNameString)
+import GHC (moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..))
 import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Id (idName)
@@ -62,7 +66,7 @@ type Compiler =
   -> FilePath
   -> [FilePath]
   -> Maybe FilePath
-  -> IO PipelineResult
+  -> IO result
 
 data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
   deriving Show
@@ -86,7 +90,7 @@ main = do
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
-      withResidentPipeline [] $ \compiler ->
+      withResidentPipelineSelected [] $ \compiler ->
         WorkerServer.runWorkerLoop
           (\cwd argv -> setCurrentDirectory cwd >> runWorkerInvocation compiler argv)
     else do
@@ -395,7 +399,37 @@ processFile compiler timing args path = do
         writeFile asksFile (renderAsksJson [])
         hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (0 sites)"
 
+    let preparedTargets = case requestTargets args of
+          targets@(_ : _) -> targets
+          [] -> maybe [] pure mTarget
+    writePreparedArtifacts outDir path (pprModules prepared) preparedTargets
+
   reportDiags res
+
+writePreparedArtifacts :: FilePath -> FilePath -> [PreparedModule] -> [String] -> IO ()
+writePreparedArtifacts outDir input modules targets = do
+  source <- readFile input
+  let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
+      matching = [prepared | prepared <- modules,
+        moduleNameString (moduleName (pmModule prepared)) == targetModule]
+  preparedModule <- case matching of
+    [value] -> pure value
+    values -> ioError (userError ("prepared target module selection was not unique: " ++ show (length values)))
+  (architecture, abi) <- case SystemInfo.arch of
+    "x86_64" -> pure (X86_64, "sysv64")
+    "aarch64" -> pure (Aarch64, "aapcs64")
+    other -> ioError (userError ("prepared execution is not configured for " ++ other))
+  forM_ targets $ \target -> do
+    let entry = SymbolIdentity
+          (T.pack (unitString (moduleUnit (pmModule preparedModule))))
+          (T.pack targetModule) "value" (T.pack target)
+        context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+          (TargetDescriptor architecture LittleEndian 64 64 abi []) Map.empty entry
+    program <- either (ioError . userError . ("prepared projection failed: " <>) . show) pure
+      (projectPreparedTarget context modules)
+    let output = outDir </> target ++ ".prepared.cbor"
+    BS.writeFile output (encodeWireProgram program)
+    hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
 
 -- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the

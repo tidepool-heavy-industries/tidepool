@@ -3,8 +3,10 @@
 //! guards (`debug_app_check`, `runtime_shape_trap`).
 
 use crate::context::VMContext;
+use crate::gc::frame_walker::FrameWalkError;
 use crate::layout;
 use crate::machine_state::{current_machine, machine_state};
+use crate::machine_state::{ExternalStorageKind, MachineDisposition};
 use std::cell::{Cell, RefCell};
 use tidepool_heap::layout as heap_layout;
 
@@ -50,6 +52,11 @@ pub enum RuntimeError {
     BadFunPtrTag(u8),
     #[error("heap overflow (nursery exhausted after GC)")]
     HeapOverflow,
+    #[error("external {kind:?} allocation failed ({bytes} bytes)")]
+    ExternalAllocationFailed {
+        kind: ExternalStorageKind,
+        bytes: usize,
+    },
     #[error("stack overflow — likely unbounded or very deep non-tail recursion (~20k live nested calls); a long list processed via a strict, TAIL-recursive fold is not bounded by this (only concurrently-live call nesting counts, not total calls made)")]
     StackOverflow,
     #[error("blackhole detected (infinite loop: thunk forced itself)")]
@@ -62,6 +69,39 @@ pub enum RuntimeError {
     /// Observed at the next GC safepoint (heap check).
     #[error("execution cancelled by external request")]
     Cancelled,
+    #[error("incomplete GC root snapshot: {0}")]
+    IncompleteRootSnapshot(FrameWalkError),
+}
+
+impl RuntimeError {
+    /// Classify whether this failure leaves the owning machine safe to reuse.
+    /// Language failures, bounded resource failures, and cancellation unwind
+    /// through normal run cleanup. Shape, pointer, and compiler-contract
+    /// failures mean the live machine can no longer prove heap integrity.
+    pub fn machine_disposition(&self) -> MachineDisposition {
+        match self {
+            Self::CaseTrap
+            | Self::BadPointer
+            | Self::TypeMetadata
+            | Self::UnresolvedExternal(_)
+            | Self::UnresolvedVar(_, _)
+            | Self::NullFunPtr
+            | Self::BadFunPtrTag(_)
+            | Self::BadThunkState(_)
+            | Self::IncompleteRootSnapshot(_) => MachineDisposition::Unavailable,
+            Self::DivisionByZero
+            | Self::Overflow
+            | Self::UserError
+            | Self::PatternMatchFailure(_)
+            | Self::Undefined
+            | Self::HeapOverflow
+            | Self::ExternalAllocationFailed { .. }
+            | Self::StackOverflow
+            | Self::BlackHole
+            | Self::UserErrorMsg(_)
+            | Self::Cancelled => MachineDisposition::Reusable,
+        }
+    }
 }
 
 /// The `kind` discriminant JIT code passes to [`runtime_error`] /
@@ -180,14 +220,14 @@ thread_local! {
     pub(crate) static SIGNAL_SAFE_CTX_LEN: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Unconditionally overwrite this thread's current-machine pending cause —
-/// no-op if no machine is installed. Mirrors writers (e.g.
-/// `unresolved_var_trap`, the case/app traps) that replace any earlier cause
-/// rather than preserving it; see `MachineState::set_runtime_error_overwrite`
-/// and contrast with the first-write-wins [`set_first_cause`].
+/// Record an error raised by an older host-function call site.
+///
+/// The historical name is retained for those internal callers, but the
+/// machine contract is first-write-wins: downstream shape/poison symptoms
+/// must never replace the cause closest to the fault.
 pub(crate) fn overwrite_runtime_error(cause: RuntimeError) {
     if let Some(ms) = unsafe { current_machine() } {
-        ms.set_runtime_error_overwrite(cause);
+        ms.set_first_cause(cause);
     }
 }
 
@@ -433,85 +473,29 @@ pub extern "C" fn runtime_bad_thunk_state_trap(_vmctx: *mut VMContext, state: u8
     error_poison_ptr()
 }
 
-/// Size of the poison buffer.
-///
-/// The JIT's `emit_alloc_fast_path` slow-fail edge calls `runtime_oom`, takes
-/// the returned pointer as if it were a freshly-allocated heap object, and
-/// then unconditionally writes the full header + payload into it (tag byte,
-/// size halfword, Con/Closure/Thunk fields, capture slots, …). If the poison
-/// is smaller than the attempted allocation, those post-OOM stores spill past
-/// the poison into adjacent heap, corrupting it (glibc "corrupted size vs.
-/// prev_size" aborts are a direct symptom).
-///
-/// The JIT never clamps allocation size at emit time. For a Con, the
-/// effective upper bound is `CON_FIELDS_OFFSET + MAX_FIELDS * 8` (the
-/// largest Con the read-side `heap_bridge` is willing to decode; see
-/// `MAX_FIELDS = 1024` there). Closures and thunks have NO equivalent
-/// emit-time or read-side cap — `num_captured` is a bare `u16` field, so the
-/// true worst case is `u16::MAX` captures. Sized here to that structural
-/// maximum rather than any "typical" capture count, so no otherwise-valid
-/// program can ever exceed it — a static, one-time (`OnceLock`) allocation,
-/// so the larger size costs nothing per OOM event (see PR #272 for the
-/// original heap-corruption class this buffer closes).
-pub(crate) const POISON_BUF_SIZE: usize =
-    layout::CLOSURE_CAPTURED_OFFSET as usize + u16::MAX as usize * 8;
-
-/// Compile-time guard: the poison buffer must be large enough to absorb a
-/// post-OOM write of a worst-case Con at the read-side decoder's
-/// `MAX_FIELDS` ceiling, AND a worst-case Closure/Thunk capture write
-/// (`u16::MAX` captures — nothing else bounds it). If either ceiling is
-/// bumped without updating `POISON_BUF_SIZE`, this assertion fails to
-/// compile rather than regressing into the heap-corruption symptom PR #272
-/// diagnosed (glibc "corrupted size vs. prev_size" aborts on OOM paths
-/// writing past an undersized poison). Matching runtime regression tests:
-/// `poison_buf_absorbs_max_con_write`, `poison_buf_absorbs_max_capture_write`.
-const _: () = {
-    let worst_case_con = layout::CON_FIELDS_OFFSET as usize + crate::heap_bridge::MAX_FIELDS * 8;
-    assert!(
-        POISON_BUF_SIZE >= worst_case_con,
-        "POISON_BUF_SIZE must absorb worst-case Con write \
-         (CON_FIELDS_OFFSET + MAX_FIELDS * 8); bump POISON_BUF_SIZE \
-         when MAX_FIELDS grows",
-    );
-    let worst_case_captures = layout::CLOSURE_CAPTURED_OFFSET as usize + u16::MAX as usize * 8;
-    assert!(
-        POISON_BUF_SIZE >= worst_case_captures,
-        "POISON_BUF_SIZE must absorb a worst-case Closure/Thunk capture \
-         write (CLOSURE_CAPTURED_OFFSET + u16::MAX * 8) — num_captured has \
-         no cap other than its u16 width (L4)",
-    );
-};
-
 /// Return a pointer to a pre-allocated "poison" Closure heap object.
 /// When JIT code tries to call this as a function, it returns itself,
 /// preventing cascading crashes. The runtime error flag is already set,
 /// so the effect machine will catch it before the poison reaches user code.
 ///
-/// The backing allocation is oversized (`POISON_BUF_SIZE`) so that OOM
-/// paths which treat the poison as freshly-allocated scratch (via
-/// `runtime_oom`) can complete their field writes without corrupting
-/// adjacent heap. See `POISON_BUF_SIZE` for rationale.
+/// Allocation failure never returns this pointer to an initialization path;
+/// it is only the immutable logical error value used for propagation.
 pub fn error_poison_ptr() -> *mut u8 {
     use std::sync::OnceLock;
     // Layout: Closure with code_ptr pointing to `poison_trampoline`,
     // num_captured = 0. When called, returns the poison closure itself.
     static POISON: OnceLock<usize> = OnceLock::new();
     let addr = *POISON.get_or_init(|| {
-        // Backing buffer is oversized to absorb post-OOM scratch writes
-        // from the JIT (see POISON_BUF_SIZE docs). The Closure header
-        // describes only the logical 24-byte Closure layout — the tail
-        // bytes are zero-initialized padding that the JIT may clobber
-        // after a `runtime_oom` return.
         let logical_size = 24u32;
-        let layout = std::alloc::Layout::from_size_align(POISON_BUF_SIZE, 8)
+        let layout = std::alloc::Layout::from_size_align(logical_size as usize, 8)
             .unwrap_or_else(|_| std::process::abort());
         // SAFETY: alloc_zeroed returns a valid, zeroed allocation of the requested size.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
-        // SAFETY: ptr is a fresh allocation of POISON_BUF_SIZE bytes
-        // (>= 24). Writing the closure header, code pointer, and capture
+        // SAFETY: ptr is a fresh allocation of `logical_size` bytes.
+        // Writing the closure header, code pointer, and capture
         // count at known offsets within the first 24 bytes.
         unsafe {
             tidepool_heap::layout::write_header(
@@ -1235,132 +1219,14 @@ mod tests {
         });
     }
 
-    /// Regression test for the poison-buffer undersize bug.
-    ///
-    /// Prior to the fix, `runtime_oom` returned a 24-byte poison buffer that
-    /// the JIT's slow-fail alloc path then treated as freshly-allocated
-    /// scratch. For any Con with `>= 1` field (size `>= 32`) the post-OOM
-    /// field write spilled past the 24-byte allocation into adjacent heap,
-    /// manifesting as glibc "corrupted size vs. prev_size" aborts.
-    ///
-    /// The fix enlarges the poison buffer to absorb the maximum Con/Closure
-    /// footprint the JIT can emit. This test simulates the JIT's write
-    /// sequence directly: allocate a worst-case Con (24 + 1024*8 = 8216
-    /// bytes) into the poison and verify no OOB writes occur.
-    ///
-    /// Under Miri / ASan this would fail before the fix; under glibc the
-    /// corruption is non-deterministic, but the write itself is unsound
-    /// and the buffer-size assertion below guards against regression.
     #[test]
-    fn poison_buf_absorbs_max_con_write() {
+    fn legacy_error_writers_preserve_the_first_cause() {
         crate::machine_state::test_support::with_test_machine(|| {
-            // The read-side decoder cap; the compile-time assertion above
-            // guarantees POISON_BUF_SIZE absorbs this. The runtime check here
-            // additionally exercises the full write sequence to surface any
-            // overflow under Miri / ASan, not just the size relationship.
-            use crate::heap_bridge::MAX_FIELDS;
-            let worst_case_con = layout::CON_FIELDS_OFFSET as usize + MAX_FIELDS * 8;
-            assert!(
-                POISON_BUF_SIZE >= worst_case_con,
-                "poison buffer ({} B) must cover worst-case Con footprint ({} B)",
-                POISON_BUF_SIZE,
-                worst_case_con,
-            );
-
-            // Simulate the JIT's post-OOM write sequence exactly as
-            // `emit_alloc_fast_path` + the Con emitter do: tag at 0, size
-            // word at 1, CON_TAG at 8, num_fields at 16, fields from 24.
-            let ptr = runtime_oom();
-            assert!(!ptr.is_null());
-
-            // SAFETY: `ptr` is the poison buffer (POISON_BUF_SIZE >= worst_case_con).
-            // Writing a TAG_CON header and MAX_FIELDS u64 field slots into it
-            // stays entirely within the allocation after the fix.
-            // JIT stores use `MemFlags::trusted()` which permits unaligned
-            // access; mirror that with `write_unaligned` so the test also works
-            // on targets where a naked deref would trap on misalignment (the
-            // size word lands at offset 1).
-            unsafe {
-                ptr.write(layout::TAG_CON);
-                (ptr.add(1) as *mut u32).write_unaligned(worst_case_con as u32);
-                (ptr.add(layout::CON_TAG_OFFSET as usize) as *mut u64).write_unaligned(7);
-                (ptr.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16)
-                    .write_unaligned(MAX_FIELDS as u16);
-                for i in 0..MAX_FIELDS {
-                    let off = layout::CON_FIELDS_OFFSET as usize + 8 * i;
-                    (ptr.add(off) as *mut u64).write_unaligned(0xDEAD_BEEF_0000_0000 | (i as u64));
-                }
-                // Read back a sentinel to ensure the writes landed (and weren't
-                // silently dropped) — also defeats the optimizer.
-                let last_off = layout::CON_FIELDS_OFFSET as usize + 8 * (MAX_FIELDS - 1);
-                assert_eq!(
-                    (ptr.add(last_off) as *const u64).read_unaligned(),
-                    0xDEAD_BEEF_0000_0000 | (MAX_FIELDS as u64 - 1),
-                );
-            }
-
-            // `runtime_oom` sets `RuntimeError::HeapOverflow` — clear it so
-            // we don't leak state to other tests sharing this thread.
-            let err = take_runtime_error().expect("runtime_oom must flag an error");
-            assert!(matches!(err, RuntimeError::HeapOverflow));
+            set_first_cause(RuntimeError::Cancelled);
+            overwrite_runtime_error(RuntimeError::BadPointer);
+            assert_eq!(take_runtime_error(), Some(RuntimeError::Cancelled));
         });
     }
-
-    /// Unlike Con (`MAX_FIELDS = 1024`, read-side-decoder-bounded), a
-    /// Closure/Thunk's `num_captured` has NO cap other than its `u16`
-    /// width — past 2045 captures a `POISON_BUF_SIZE` tuned only for
-    /// `MAX_FIELDS` would already be smaller than the write, reopening the
-    /// PR #272 heap-corruption class for large closures. Simulates the
-    /// JIT's post-OOM write sequence for a worst-case (`u16::MAX`-capture)
-    /// Closure into the poison buffer and verifies no OOB writes occur.
-    #[test]
-    fn poison_buf_absorbs_max_capture_write() {
-        crate::machine_state::test_support::with_test_machine(|| {
-            let worst_case_captures =
-                layout::CLOSURE_CAPTURED_OFFSET as usize + u16::MAX as usize * 8;
-            assert!(
-                POISON_BUF_SIZE >= worst_case_captures,
-                "poison buffer ({} B) must cover worst-case Closure/Thunk capture footprint ({} B)",
-                POISON_BUF_SIZE,
-                worst_case_captures,
-            );
-
-            // Simulate the JIT's post-OOM write sequence exactly as
-            // `emit_alloc_fast_path` + the Closure emitter do: tag at 0,
-            // size word at 1, code_ptr at 8, num_captured at 16, captures
-            // from 24.
-            let ptr = runtime_oom();
-            assert!(!ptr.is_null());
-
-            // SAFETY: `ptr` is the poison buffer (POISON_BUF_SIZE >=
-            // worst_case_captures). Writing a TAG_CLOSURE header and
-            // u16::MAX u64 capture slots stays entirely within the
-            // allocation after the fix. `write_unaligned` mirrors the JIT's
-            // `MemFlags::trusted()` unaligned stores.
-            unsafe {
-                ptr.write(layout::TAG_CLOSURE);
-                (ptr.add(1) as *mut u32).write_unaligned(worst_case_captures as u32);
-                (ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *mut usize)
-                    .write_unaligned(0xDEAD_BEEF);
-                (ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *mut u16)
-                    .write_unaligned(u16::MAX);
-                for i in 0..(u16::MAX as usize) {
-                    let off = layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * i;
-                    (ptr.add(off) as *mut u64).write_unaligned(0xCAFE_0000_0000_0000 | (i as u64));
-                }
-                let last_off =
-                    layout::CLOSURE_CAPTURED_OFFSET as usize + 8 * (u16::MAX as usize - 1);
-                assert_eq!(
-                    (ptr.add(last_off) as *const u64).read_unaligned(),
-                    0xCAFE_0000_0000_0000 | (u16::MAX as u64 - 1),
-                );
-            }
-
-            let err = take_runtime_error().expect("runtime_oom must flag an error");
-            assert!(matches!(err, RuntimeError::HeapOverflow));
-        });
-    }
-
     extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
 
     /// `materialize_message`'s Text branch (`nf == 3`) reads the offset/len

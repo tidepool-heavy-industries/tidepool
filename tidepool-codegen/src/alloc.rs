@@ -2,6 +2,26 @@ use cranelift_codegen::ir::{self, types, BlockArg, InstBuilder, MemFlags, Value}
 use cranelift_frontend::FunctionBuilder;
 
 use crate::layout::*;
+use tidepool_heap::execution_descriptor::ObjectDescriptor;
+
+/// Allocate storage using the one heap-owned execution descriptor. New
+/// LinkedProgram emitters use this entry instead of recomputing extent or
+/// alignment in codegen.
+pub fn emit_descriptor_alloc_fast_path(
+    builder: &mut FunctionBuilder,
+    vmctx_val: Value,
+    descriptor: &ObjectDescriptor,
+    gc_trigger_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
+) -> Value {
+    emit_alloc_fast_path(
+        builder,
+        vmctx_val,
+        u64::from(descriptor.allocation_extent()),
+        gc_trigger_sig,
+        oom_func,
+    )
+}
 
 /// Emit the alloc fast-path as inline Cranelift IR.
 ///
@@ -87,7 +107,7 @@ pub fn emit_alloc_fast_path(
         .ins()
         .call_indirect(gc_trigger_sig, gc_trigger_ptr, &[vmctx_val]);
 
-    // After GC: reload alloc_ptr and alloc_limit, bump, check, then store or trap.
+    // After GC: reload alloc_ptr and alloc_limit, bump, check, then store or fail.
     let post_gc_ptr = builder
         .ins()
         .load(types::I64, flags, vmctx_val, VMCTX_ALLOC_PTR_OFFSET);
@@ -122,14 +142,15 @@ pub fn emit_alloc_fast_path(
         .ins()
         .jump(continue_block, &[BlockArg::Value(post_gc_ptr)]);
 
-    // Slow path failure: call runtime_oom instead of trapping
+    // Slow path failure: record the first cause and return directly from the
+    // compiled function. This block must not join `continue_block`: callers
+    // initialize the returned allocation after this helper, so returning a
+    // poison/scratch pointer there would permit writes after allocation failed.
     builder.switch_to_block(slow_fail_block);
     builder.seal_block(slow_fail_block);
     let oom_result = builder.ins().call(oom_func, &[]);
     let poison_ptr = builder.inst_results(oom_result)[0];
-    builder
-        .ins()
-        .jump(continue_block, &[BlockArg::Value(poison_ptr)]);
+    builder.ins().return_(&[poison_ptr]);
 
     // --- Continue: result is the old alloc_ptr from whichever path ---
     builder.switch_to_block(continue_block);

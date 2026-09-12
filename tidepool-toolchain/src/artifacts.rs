@@ -16,7 +16,8 @@
 //! policy delta between the lanes. The eval lane
 //! (`tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`) keys
 //! through [`crate::cache::eval_cache_key`] / [`crate::cache::cache_load`] /
-//! [`crate::cache::cache_store`] (a single `(expr, meta)` pair, optionally
+//! [`crate::cache::cache_store`] (a single target's legacy, prepared, metadata,
+//! and typed-site artifacts, optionally
 //! salted per session/generation); the turn lane ([`compile_targets`]) keys
 //! through [`crate::cache::invocation_key`] / [`crate::cache::artifacts_load`]
 //! / [`crate::cache::artifacts_store`] (a named artifact SET, which is what
@@ -33,9 +34,11 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin};
+use tidepool_repr::execution_schema::DecodeLimits;
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
 
+use crate::prepared_artifact::{prepared_artifact_name, PreparedArtifact};
 use crate::{cache, diag, extract_module_name, extract_spawn_error, timing, CompileError};
 
 // ---------------------------------------------------------------------------
@@ -265,13 +268,15 @@ pub struct SessionInject<'a> {
 // The artifact bundle
 // ---------------------------------------------------------------------------
 
-/// One target's compiled output: the Core expression and its typed-yield
-/// sidecar. The constructor table and warnings are SHARED across every
+/// One target's compiled output: the transitional Core expression, checked
+/// prepared program, and typed-yield sidecar. The constructor table and warnings are SHARED across every
 /// target in the same [`CompiledArtifacts`] (one GHC session, one merged
 /// `meta.cbor`).
 pub struct TargetArtifact {
     pub expr: CoreExpr,
     pub asks: YieldSites,
+    /// Versioned execution program decoded under the exact host contract.
+    pub prepared: PreparedArtifact,
 }
 
 /// The full output of one `tidepool-extract` invocation: a shared constructor
@@ -283,7 +288,7 @@ pub struct CompiledArtifacts {
     /// Compile warnings (e.g. `has_io`, captured type) — shared by every
     /// target, same reason.
     pub warnings: MetaWarnings,
-    /// Per-target Core + asks sidecar, keyed by target name.
+    /// Per-target legacy Core + prepared program + asks sidecar, keyed by target name.
     pub targets: BTreeMap<String, TargetArtifact>,
 }
 
@@ -468,11 +473,14 @@ pub fn compile_invocation(
                         endpoint.identity().as_bytes(),
                     );
                     if let Some(key) = &key {
-                        if let Some((expr_bytes, meta_bytes, asks_bytes)) = cache::cache_load(key) {
+                        if let Some((expr_bytes, meta_bytes, asks_bytes, prepared_bytes)) =
+                            cache::cache_load(key)
+                        {
                             let raw = vec![RawTargetOutput {
                                 target: inv.targets[0].to_string(),
                                 expr_bytes,
                                 asks_bytes,
+                                prepared_bytes,
                             }];
                             if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
                                 return Ok(Ok(CompileAttempt::Cached(Box::new(artifacts))));
@@ -569,7 +577,13 @@ pub fn compile_invocation(
     // memo costs a recompile, it never fails a compile.
     let artifacts = assemble(&meta_bytes, &raw, &mut on_stage)?;
     if let Some(key) = &eval_key {
-        cache::cache_store(key, &raw[0].expr_bytes, &meta_bytes, &raw[0].asks_bytes);
+        cache::cache_store(
+            key,
+            &raw[0].expr_bytes,
+            &meta_bytes,
+            &raw[0].asks_bytes,
+            &raw[0].prepared_bytes,
+        );
     }
     if let Some(key) = &inv_key {
         store_memo(key, &name_refs, &meta_bytes, &raw);
@@ -689,6 +703,7 @@ pub(crate) struct RawTargetOutput {
     pub(crate) target: String,
     pub(crate) expr_bytes: Vec<u8>,
     asks_bytes: Vec<u8>,
+    prepared_bytes: Vec<u8>,
 }
 
 /// Spawn `cmd` (already fully configured — input, output-dir, target(s),
@@ -757,6 +772,11 @@ pub(crate) fn extract_and_read(
             return Err(CompileError::MissingOutput(expr_path));
         }
         let expr_bytes = std::fs::read(&expr_path)?;
+        let prepared_path = temp_dir.join(prepared_artifact_name(target));
+        if !prepared_path.exists() {
+            return Err(CompileError::MissingOutput(prepared_path));
+        }
+        let prepared_bytes = std::fs::read(&prepared_path)?;
         let asks_path = if multi {
             temp_dir.join(format!("{target}.asks.json"))
         } else {
@@ -767,6 +787,7 @@ pub(crate) fn extract_and_read(
             target: (*target).to_string(),
             expr_bytes,
             asks_bytes,
+            prepared_bytes,
         });
     }
     on_stage(
@@ -792,6 +813,10 @@ pub(crate) fn assemble(
         .iter()
         .map(|r| read_cbor(&r.expr_bytes).map_err(CompileError::from))
         .collect::<Result<Vec<_>, CompileError>>()?;
+    let prepared: Vec<PreparedArtifact> = raw
+        .iter()
+        .map(|r| PreparedArtifact::parse(r.prepared_bytes.clone(), DecodeLimits::default()))
+        .collect::<Result<_, _>>()?;
     on_stage(
         timing::STAGE_CBOR_DESERIALIZE,
         deserialize_start.elapsed(),
@@ -806,9 +831,16 @@ pub(crate) fn assemble(
 
     let asks_start = Instant::now();
     let mut targets = BTreeMap::new();
-    for (r, expr) in raw.iter().zip(exprs.into_iter()) {
+    for ((r, expr), prepared) in raw.iter().zip(exprs.into_iter()).zip(prepared) {
         let asks = parse_asks(&r.asks_bytes)?;
-        targets.insert(r.target.clone(), TargetArtifact { expr, asks });
+        targets.insert(
+            r.target.clone(),
+            TargetArtifact {
+                expr,
+                asks,
+                prepared,
+            },
+        );
     }
     on_stage(timing::STAGE_ASKS_PARSE, asks_start.elapsed(), 0);
 
@@ -852,15 +884,16 @@ pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
 
 /// The logical artifact names of one invocation's output set — exactly the
 /// filenames [`compile_targets`] reads out of the extract's output dir, in a
-/// fixed order: the shared `meta.cbor`, then per target its `<target>.cbor`
-/// and its asks sidecar. `multi` picks the sidecar SHAPE on the same
+/// fixed order: shared `meta.cbor`, then per target `<target>.cbor`,
+/// `<target>.prepared.cbor`, and its asks sidecar. `multi` picks the sidecar SHAPE on the same
 /// `targets.len() > 1` test the Haskell side uses to decide which shape to
 /// write, so the memo's names track the extract's own contract.
 fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
-    let mut names = Vec::with_capacity(1 + targets.len() * 2);
+    let mut names = Vec::with_capacity(1 + targets.len() * 3);
     names.push("meta.cbor".to_string());
     for target in targets {
         names.push(format!("{target}.cbor"));
+        names.push(prepared_artifact_name(target));
         names.push(if multi {
             format!("{target}.asks.json")
         } else {
@@ -877,7 +910,7 @@ fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput]) -> u64 {
     let total = meta_bytes.len()
         + raw
             .iter()
-            .map(|r| r.expr_bytes.len() + r.asks_bytes.len())
+            .map(|r| r.expr_bytes.len() + r.prepared_bytes.len() + r.asks_bytes.len())
             .sum::<usize>();
     total as u64
 }
@@ -898,11 +931,13 @@ fn load_memo(
     let mut raw = Vec::with_capacity(targets.len());
     for target in targets {
         let expr_bytes = it.next()??;
+        let prepared_bytes = it.next()??;
         let asks_bytes = it.next()??;
         raw.push(RawTargetOutput {
             target: (*target).to_string(),
             expr_bytes,
             asks_bytes,
+            prepared_bytes,
         });
     }
     Some((meta_bytes, raw))
@@ -922,10 +957,13 @@ fn store_memo(
         artifacts.push((name, Some(meta_bytes)));
     }
     for r in raw {
-        let (Some(expr_name), Some(asks_name)) = (names.next(), names.next()) else {
+        let (Some(expr_name), Some(prepared_name), Some(asks_name)) =
+            (names.next(), names.next(), names.next())
+        else {
             return;
         };
         artifacts.push((expr_name, Some(r.expr_bytes.as_slice())));
+        artifacts.push((prepared_name, Some(r.prepared_bytes.as_slice())));
         artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
     }
     cache::artifacts_store(key, &artifacts);

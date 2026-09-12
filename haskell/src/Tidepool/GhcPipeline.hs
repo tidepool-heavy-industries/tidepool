@@ -1,3 +1,6 @@
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
+
 module Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, runPipelineSessionFor
   , CompilePurpose(..), PipelineResult(..), dumpCore
@@ -7,7 +10,7 @@ module Tidepool.GhcPipeline
   , CellDisplayPass(..), cellDisplayDeclarations
   , checkCellInstances
     -- * Resident session
-  , withResidentPipeline
+  , withResidentPipeline, withResidentPipelineSelected
   ) where
 
 import GHC hiding (typeKind)
@@ -106,6 +109,23 @@ import Tidepool.Session
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming )
+import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
+import Tidepool.PreparedSites (elaboratePreparedSites, resolvePreparedSiblings)
+
+-- | Selects the compiler representation produced at the internal GHC API
+-- boundary. Existing extraction entry points always select 'LegacyCore'.
+data PipelineSelection result where
+  LegacyCore :: PipelineSelection PipelineResult
+  PreparedStg :: PipelineSelection PreparedPipelineResult
+
+data PreparationKind = KeepCore | PrepareStg
+
+-- | Prepared mode keeps the ordinary typed pipeline observations alongside
+-- the unflattened per-module STG handoff.
+data PreparedPipelineResult = PreparedPipelineResult
+  { pprPipelineResult :: PipelineResult
+  , pprModules :: [PreparedModule]
+  }
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -279,7 +299,11 @@ cellDisplayDeclarations pass result plan = do
 -- @runPipelineSession Nothing@, so no session
 -- machinery (iface injection, source-less home modules) ever touches this path.
 runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
-runPipeline path includes = runPipelineSession Nothing path includes Nothing
+runPipeline = runPipelineSelected LegacyCore
+
+runPipelineSelected :: PipelineSelection result -> FilePath -> [FilePath] -> IO result
+runPipelineSelected selection path includes =
+  runPipelineSessionSelected selection Nothing path includes Nothing
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
@@ -382,8 +406,8 @@ data ModuleFront = ModuleFront
   , mfResultType :: Maybe Type
   }
 
-runCompile :: PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
-runCompile variant path includes buildProductsDir = do
+runCompile :: PreparationKind -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO CompileResult
+runCompile preparation variant path includes buildProductsDir = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -414,7 +438,7 @@ runCompile variant path includes buildProductsDir = do
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle Nothing Nothing timing sessionT0 variant path
+    runCompileCycle preparation Nothing Nothing timing sessionT0 variant path
 
 -- | Compile with an optional active session scope and an optional persistent
 -- build-products directory. Inert scopes use the normal pipeline.
@@ -474,9 +498,9 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 --   * 'summaryT0' — the caller's compile start. Direct callers capture it
 --     before session bootstrap; resident callers capture it per request.
 runCompileCycle
-  :: Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
-  -> Bool -> Double -> PipelineVariant -> FilePath -> Ghc PipelineResult
-runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
+  :: PreparationKind -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
+  -> Bool -> Double -> PipelineVariant -> FilePath -> Ghc CompileResult
+runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Install target-diagnostic capture before load/typecheck. Warnings become
@@ -484,6 +508,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
     -- only a 'Failed' flag rather than throwing a 'SourceError'.
     warnRef <- liftIO (newIORef [])
     errorRef <- liftIO (newIORef [])
+    preparedSiblingsRef <- liftIO (newIORef Map.empty)
     pushLogHookM (diagnosticCollectorHook path warnRef errorRef)
     -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
     -- 'depanal' runs downsweep, whose @enableCodeGenForTH@ downgrades the
@@ -666,7 +691,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
                   if ms_hs_hash (mfSummary (gmeFront entry)) == ms_hs_hash modSum
                     then Just entry
                     else Nothing
-    (fronts, results, mReachable) <- case cpTier plan of
+    (fronts, results, preparedModules, mReachable) <- case cpTier plan of
       OptimizeEveryModule -> do
         pairs <- forM summaries $ \modSum -> do
           cpBeforeModule plan modSum
@@ -683,17 +708,31 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
             -- into the HPT that 'load'' just wiped.
             Just entry -> do
               recordValidity modSum True
+              mapM_ rememberPreparedSiblings (gmePrepared entry)
               cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
-              pure (gmeFront entry, gmeResult entry)
+              prepared <- case (preparation, gmePrepared entry) of
+                (KeepCore, _) -> pure Nothing
+                (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
+                (PrepareStg, Nothing) -> do
+                  freshPrepared <- prepareSelected (gmeFront entry) (gmeSimplified entry)
+                  case mMemoRef of
+                    Just ref -> liftIO (modifyIORef' ref
+                      (Map.adjust (\e -> e { gmePrepared = freshPrepared }) mn))
+                    Nothing -> pure ()
+                  pure freshPrepared
+              pure (gmeFront entry, gmeResult entry, prepared)
             Nothing -> do
               recordValidity modSum False
               mf <- compileFront modSum
               (simplified, r) <- compileBack mf
+              prepared <- prepareSelected mf simplified
               case mMemoRef of
-                Just ref -> liftIO (modifyIORef' ref (Map.insert mn (GutsMemoEntry mf simplified r)))
+                Just ref -> liftIO (modifyIORef' ref
+                  (Map.insert mn (GutsMemoEntry mf simplified r prepared)))
                 Nothing  -> pure ()
-              pure (mf, r)
-        pure (map fst pairs, map snd pairs, Nothing)
+              pure (mf, r, prepared)
+        pure ([f | (f, _, _) <- pairs], [r | (_, r, _) <- pairs],
+              [p | (_, _, Just p) <- pairs], Nothing)
       OptimizeCoreReachable -> do
         -- A resident-session memo hit reuses a module's cached front (needed for the
         -- reachability walk below, since it carries 'mfDesugared') without
@@ -714,7 +753,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
           case cached of
             Just entry -> do
               recordValidity modSum True
-              pure (gmeFront entry, Just (gmeResult entry))
+              pure (gmeFront entry, Just entry)
             Nothing    -> do
               recordValidity modSum False
               mf <- compileFront modSum
@@ -764,20 +803,35 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
               -- core2core'd by whatever cycle inserted it) is exactly what
               -- a fresh 'compileBack' would recompute — reuse it, skipping
               -- the optimizer pass entirely.
-              Just r -> pure [r]
+              Just entry -> do
+                mapM_ rememberPreparedSiblings (gmePrepared entry)
+                prepared <- case (preparation, gmePrepared entry) of
+                  (KeepCore, _) -> pure Nothing
+                  (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
+                  (PrepareStg, Nothing) -> do
+                    freshPrepared <- prepareSelected f (gmeSimplified entry)
+                    case mMemoRef of
+                      Just ref -> liftIO (modifyIORef' ref
+                        (Map.adjust (\e -> e { gmePrepared = freshPrepared })
+                          (ms_mod_name (mfSummary f))))
+                      Nothing -> pure ()
+                    pure freshPrepared
+                pure [(gmeResult entry, prepared)]
               Nothing -> do
                 (simplified, r) <- compileBack f
+                prepared <- prepareSelected f simplified
                 case mMemoRef of
                   Just ref -> liftIO (modifyIORef' ref
-                    (Map.insert (ms_mod_name (mfSummary f)) (GutsMemoEntry f simplified r)))
+                    (Map.insert (ms_mod_name (mfSummary f))
+                      (GutsMemoEntry f simplified r prepared)))
                   Nothing  -> pure ()
-                pure [r]
+                pure [(r, prepared)]
             -- Not reachable: never core2core'd this cycle (matches every
             -- pre-existing caller byte for byte) and never inserted into
             -- the memo — a module a LATER cycle finds reachable must still
             -- get a real 'compileBack', never a validation-only stand-in.
             else pure []
-        pure (fs, rs, Just reachableMods)
+        pure (fs, map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
     totalTcMs   <- liftIO (readIORef tcMsRef)
     totalCoreMs <- liftIO (readIORef coreMsRef)
     liftIO (emitPhase timing "typecheck" totalTcMs)
@@ -881,6 +935,18 @@ withResidentPipeline
   -> ((CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult) -> IO a)
   -> IO a
 withResidentPipeline baseIncludes useCompiler = do
+  withResidentPipelineSelected baseIncludes $ \compile ->
+    useCompiler (compile LegacyCore)
+
+-- | Resident compiler with an explicit representation selection per request.
+-- Prepared outputs share the same validity checks and request-scope cleanup as
+-- the optimized guts from which they were produced.
+withResidentPipelineSelected
+  :: [FilePath]
+  -> ((forall result. PipelineSelection result -> Maybe SessionScope
+       -> FilePath -> [FilePath] -> Maybe FilePath -> IO result) -> IO a)
+  -> IO a
+withResidentPipelineSelected baseIncludes useCompiler = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -900,7 +966,8 @@ withResidentPipeline baseIncludes useCompiler = do
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
 -- 'withResidentPipeline' booted. Patches @importPaths@ for THIS cycle only
 -- (see 'withResidentPipeline'), compiles with the shared 'ModIfaceCache' +
--- 'GutsMemo', then sanitizes the memo before returning (see 'sanitizeMemo').
+-- 'GutsMemo'. The IO boundary in 'withResidentPipelineSelected' sanitizes the
+-- memo after both successful and exceptional cycles (see 'sanitizeMemo').
 -- Captures a fresh start time so every request gets its own compile summary.
 --
 -- The resident and direct paths select the same pipeline variant. This is an

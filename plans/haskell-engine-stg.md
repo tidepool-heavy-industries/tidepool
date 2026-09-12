@@ -2,6 +2,10 @@
 
 Status: implementation is underway on retained branches. This design defines
 acceptance, not current completion; use the current lane checkpoint for evidence.
+
+Vocabulary: implementation identifiers use `prepared_*`; “STG” names the GHC
+pass consumed by the M1 handoff.
+
 [Recursive execution allocation](parallel-dogfood/next-wave/engine.md) organizes
 worker ownership without weakening the mechanism contracts below.
 Written 2026-09-07 against GHC 9.12.2. The original engine review used commit

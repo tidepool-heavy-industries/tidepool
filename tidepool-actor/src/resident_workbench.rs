@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tidepool_bridge::{BridgeError, FromCore, ToCore};
+use tidepool_bridge_derive::FromCore as DeriveFromCore;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_eval::Value;
@@ -903,6 +904,11 @@ pub(crate) enum ResidentActorBoundary {
     ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
     AgentAttachment(ResidentAgentAttachment),
+    Introspection {
+        continuation: ResidentHole,
+        query: tidepool_runtime::session::NameQuery,
+        kind: StructuredInspectionKind,
+    },
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
     AgentShareObservation {
@@ -1043,6 +1049,10 @@ impl ResidentActorBoundary {
             Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
             Self::AgentAttachment(_) => "agent attachment",
+            Self::Introspection { kind, .. } => match kind {
+                StructuredInspectionKind::Info => "structured info",
+                StructuredInspectionKind::Type => "structured type",
+            },
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
             Self::AgentShareObservation { .. } => "shareObservation",
@@ -1081,6 +1091,53 @@ enum BoundaryCapture {
     Replacement,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum StructuredInspectionKind {
+    Info,
+    Type,
+}
+
+#[derive(DeriveFromCore)]
+#[core(name = "NameQuery")]
+struct IntrospectionNameQuery {
+    scope: IntrospectionNameScope,
+    namespace: IntrospectionNameNamespace,
+    name: String,
+}
+
+#[derive(DeriveFromCore)]
+enum IntrospectionNameScope {
+    CurrentScope,
+    PublicModule(String),
+}
+
+#[derive(DeriveFromCore)]
+enum IntrospectionNameNamespace {
+    AnyName,
+    ValueName,
+    TypeName,
+    ConstructorName,
+}
+
+impl From<IntrospectionNameQuery> for tidepool_runtime::session::NameQuery {
+    fn from(query: IntrospectionNameQuery) -> Self {
+        use tidepool_runtime::session::{NameNamespace, NameScope};
+        Self {
+            scope: match query.scope {
+                IntrospectionNameScope::CurrentScope => NameScope::Current,
+                IntrospectionNameScope::PublicModule(module) => NameScope::PublicModule(module),
+            },
+            namespace: match query.namespace {
+                IntrospectionNameNamespace::AnyName => NameNamespace::Any,
+                IntrospectionNameNamespace::ValueName => NameNamespace::Value,
+                IntrospectionNameNamespace::TypeName => NameNamespace::Type,
+                IntrospectionNameNamespace::ConstructorName => NameNamespace::Constructor,
+            },
+            name: query.name,
+        }
+    }
+}
+
 /// The one nominal roster for requests interpreted at actor execution
 /// boundaries. Generated request enums own constructor recognition and field
 /// shape; this sum owns orchestration routing.
@@ -1093,6 +1150,7 @@ enum ResidentRequest {
     ActorContext(crate::generated::actor_context::ActorContextReq),
     AgentControl(crate::generated::agent_control::AgentControlReq),
     AgentInspection(crate::generated::agent_inspection::AgentInspectionReq),
+    Introspection(crate::generated::introspection::IntrospectionReq),
     AgentLaunch(crate::generated::agent_launch::AgentLaunchReq),
     Forks(crate::generated::forks::ForksReq),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
@@ -1139,6 +1197,10 @@ impl ResidentRequest {
         try_member!(
             Self::AgentInspection,
             crate::generated::agent_inspection::AgentInspectionReq
+        );
+        try_member!(
+            Self::Introspection,
+            crate::generated::introspection::IntrospectionReq
         );
         try_member!(
             Self::AgentLaunch,
@@ -1214,6 +1276,12 @@ impl ResidentRequest {
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(..),
             ) => "forgetAgent",
+            Self::Introspection(
+                crate::generated::introspection::IntrospectionReq::IntrospectionInfoWith(..),
+            ) => "structured info",
+            Self::Introspection(
+                crate::generated::introspection::IntrospectionReq::IntrospectionTypeOfWith(..),
+            ) => "structured type",
             Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
                 ..,
             )) => "startAgent",
@@ -2162,6 +2230,86 @@ where
         }).await
     }
 
+    /// Service structured inspection without holding the resident machine
+    /// while the compiler worker runs. The suspended continuation remains the
+    /// actor's exclusive turn, and the immutable compile-view fingerprint is
+    /// checked again before resumption.
+    pub(crate) async fn resume_structured_introspection(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        query: tidepool_runtime::session::NameQuery,
+        kind: StructuredInspectionKind,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let source = self.access.source.clone();
+        let snapshot_source = source.clone();
+        let query_scope = query.scope.clone();
+        let snapshot = self
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &snapshot_source, &[])?;
+                let provenance = structured_provenance(&view, &snapshot_source, query_scope);
+                Ok((view, provenance))
+            })
+            .await?;
+        let (compile_view, provenance) = snapshot;
+        let request_query = match kind {
+            StructuredInspectionKind::Info => InspectionQuery::StructuredInfo {
+                query: query.clone(),
+                provenance: provenance.clone(),
+            },
+            StructuredInspectionKind::Type => InspectionQuery::StructuredType {
+                query: query.clone(),
+                provenance: provenance.clone(),
+            },
+        };
+        let compiler_source = source.clone();
+        let effects = context.haskell_effects_alias.clone();
+        let inspected = tokio::task::spawn_blocking(move || {
+            let prepared = compiler_source.prepare(&compile_view);
+            let include = prepared
+                .include
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            run_inspections(InspectionRequest {
+                preamble: &prepared.preamble,
+                imports: &prepared.imports,
+                include: &include,
+                session_root: compile_view.session_root(),
+                inject_modules: &prepared.injected,
+                queries: &[request_query],
+                effects: Some(&effects),
+            })
+            .map_err(|error| error.to_string())
+            .and_then(|mut results| {
+                if results.len() == 1 {
+                    Ok(results.remove(0))
+                } else {
+                    Err(format!(
+                        "inspection returned {} results for one query",
+                        results.len()
+                    ))
+                }
+            })
+        })
+        .await
+        .map_err(ResidentActorWorkbenchError::Join)?;
+
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let current_view = actor_compile_view(session, context, &source, &[])?;
+                let current = structured_provenance(&current_view, &source, query.scope.clone());
+                let table = session.data_con_table();
+                let answer =
+                    structured_introspection_answer(table, kind, inspected, &provenance, &current)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     /// Settle a resumed fragment outcome. Nominal suspensions retain
     /// the same realm and return to the host for nominal actor dispatch.
     pub(crate) async fn settle_item(
@@ -3001,6 +3149,32 @@ where
                             continuation: hole,
                         },
                     )),
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::IntrospectionInfoWith(
+                            query,
+                        ),
+                    ) => Ok(ResidentActorBoundary::Introspection {
+                        continuation: hole,
+                        query: IntrospectionNameQuery::from_value(
+                            &query,
+                            session.data_con_table(),
+                        )?
+                        .into(),
+                        kind: StructuredInspectionKind::Info,
+                    }),
+                    ResidentRequest::Introspection(
+                        crate::generated::introspection::IntrospectionReq::IntrospectionTypeOfWith(
+                            query,
+                        ),
+                    ) => Ok(ResidentActorBoundary::Introspection {
+                        continuation: hole,
+                        query: IntrospectionNameQuery::from_value(
+                            &query,
+                            session.data_con_table(),
+                        )?
+                        .into(),
+                        kind: StructuredInspectionKind::Type,
+                    }),
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),
@@ -5035,6 +5209,352 @@ fn qualified_constructor(
     Ok(Value::Con(constructor, fields))
 }
 
+fn introspection_constructor(
+    table: &DataConTable,
+    name: &str,
+    fields: Vec<Value>,
+) -> Result<Value, tidepool_bridge::BridgeError> {
+    actor_context_constructor(table, name, fields)
+}
+
+fn either_constructor(
+    table: &DataConTable,
+    right: bool,
+    field: Value,
+) -> Result<Value, tidepool_bridge::BridgeError> {
+    let name = if right { "Right" } else { "Left" };
+    let constructor = tidepool_bridge::get_resilient(table, name, 1)
+        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(name.into()))?;
+    Ok(Value::Con(constructor, vec![field]))
+}
+
+fn introspection_scope_value(
+    table: &DataConTable,
+    scope: &tidepool_runtime::session::NameScope,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    use tidepool_runtime::session::NameScope;
+    Ok(match scope {
+        NameScope::Current => introspection_constructor(table, "CurrentScope", vec![])?,
+        NameScope::PublicModule(module) => {
+            introspection_constructor(table, "PublicModule", vec![module.clone().to_value(table)?])?
+        }
+    })
+}
+
+fn introspection_query_value(
+    table: &DataConTable,
+    query: &tidepool_runtime::session::NameQuery,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    use tidepool_runtime::session::NameNamespace;
+    let namespace = introspection_constructor(
+        table,
+        match query.namespace {
+            NameNamespace::Any => "AnyName",
+            NameNamespace::Value => "ValueName",
+            NameNamespace::Type => "TypeName",
+            NameNamespace::Constructor => "ConstructorName",
+        },
+        vec![],
+    )?;
+    Ok(introspection_constructor(
+        table,
+        "NameQuery",
+        vec![
+            introspection_scope_value(table, &query.scope)?,
+            namespace,
+            query.name.clone().to_value(table)?,
+        ],
+    )?)
+}
+
+fn introspection_identifier_value(
+    table: &DataConTable,
+    identifier: &tidepool_runtime::session::IdentifierRef,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    use tidepool_runtime::session::IdentifierNamespace;
+    let namespace = introspection_constructor(
+        table,
+        match identifier.namespace {
+            IdentifierNamespace::Value => "ValueIdentifier",
+            IdentifierNamespace::Type => "TypeIdentifier",
+            IdentifierNamespace::Constructor => "ConstructorIdentifier",
+            IdentifierNamespace::Field => "FieldIdentifier",
+        },
+        vec![],
+    )?;
+    Ok(introspection_constructor(
+        table,
+        "IdentifierRef",
+        vec![
+            identifier.module.clone().to_value(table)?,
+            identifier.name.clone().to_value(table)?,
+            namespace,
+        ],
+    )?)
+}
+
+fn introspection_type_expression_value(
+    table: &DataConTable,
+    ty: &tidepool_runtime::session::TypeExpression,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    Ok(introspection_constructor(
+        table,
+        "TypeExpression",
+        vec![
+            ty.canonical.clone().to_value(table)?,
+            ty.variables.clone().to_value(table)?,
+            ty.constraints.clone().to_value(table)?,
+        ],
+    )?)
+}
+
+fn introspection_provenance_value(
+    table: &DataConTable,
+    provenance: &tidepool_runtime::session::ScopeProvenance,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    Ok(introspection_constructor(
+        table,
+        "ScopeProvenance",
+        vec![
+            introspection_scope_value(table, &provenance.scope)?,
+            actor_int(provenance.generation)?.to_value(table)?,
+            provenance.fingerprint.clone().to_value(table)?,
+        ],
+    )?)
+}
+
+fn introspection_field_value(
+    table: &DataConTable,
+    field: &tidepool_runtime::session::FieldInfo,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    Ok(introspection_constructor(
+        table,
+        "FieldInfo",
+        vec![
+            field.name.clone().to_value(table)?,
+            introspection_type_expression_value(table, &field.ty)?,
+        ],
+    )?)
+}
+
+fn introspection_constructor_value(
+    table: &DataConTable,
+    constructor: &tidepool_runtime::session::ConstructorInfo,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    let arguments = constructor
+        .arguments
+        .iter()
+        .map(|ty| introspection_type_expression_value(table, ty))
+        .collect::<Result<Vec<_>, _>>()?;
+    let fields = constructor
+        .fields
+        .iter()
+        .map(|field| introspection_field_value(table, field))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(introspection_constructor(
+        table,
+        "ConstructorInfo",
+        vec![
+            introspection_identifier_value(table, &constructor.identifier)?,
+            introspection_type_expression_value(table, &constructor.ty)?,
+            core_list(table, arguments)?,
+            core_list(table, fields)?,
+        ],
+    )?)
+}
+
+fn introspection_declaration_value(
+    table: &DataConTable,
+    declaration: &tidepool_runtime::session::DeclarationInfo,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    use tidepool_runtime::session::DeclarationInfo;
+    let (name, fields) = match declaration {
+        DeclarationInfo::Value(ty) => (
+            "ValueDeclaration",
+            vec![introspection_type_expression_value(table, ty)?],
+        ),
+        DeclarationInfo::Data {
+            parameters,
+            constructors,
+        } => (
+            "DataDeclaration",
+            vec![
+                parameters.clone().to_value(table)?,
+                core_list(
+                    table,
+                    constructors
+                        .iter()
+                        .map(|constructor| introspection_constructor_value(table, constructor))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )?,
+            ],
+        ),
+        DeclarationInfo::Newtype {
+            parameters,
+            constructor,
+        } => (
+            "NewtypeDeclaration",
+            vec![
+                parameters.clone().to_value(table)?,
+                introspection_constructor_value(table, constructor)?,
+            ],
+        ),
+        DeclarationInfo::TypeSynonym { parameters, body } => (
+            "TypeSynonymDeclaration",
+            vec![
+                parameters.clone().to_value(table)?,
+                introspection_type_expression_value(table, body)?,
+            ],
+        ),
+        DeclarationInfo::Class {
+            parameters,
+            superclasses,
+            methods,
+        } => {
+            let superclasses = superclasses
+                .iter()
+                .map(|ty| introspection_type_expression_value(table, ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            let methods = methods
+                .iter()
+                .map(|method| {
+                    Ok::<_, ResidentActorWorkbenchError>(introspection_constructor(
+                        table,
+                        "ClassMethodInfo",
+                        vec![
+                            introspection_identifier_value(table, &method.identifier)?,
+                            introspection_type_expression_value(table, &method.ty)?,
+                        ],
+                    )?)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (
+                "ClassDeclaration",
+                vec![
+                    parameters.clone().to_value(table)?,
+                    core_list(table, superclasses)?,
+                    core_list(table, methods)?,
+                ],
+            )
+        }
+        DeclarationInfo::Constructor {
+            parent,
+            constructor,
+        } => (
+            "ConstructorDeclaration",
+            vec![
+                introspection_identifier_value(table, parent)?,
+                introspection_constructor_value(table, constructor)?,
+            ],
+        ),
+        DeclarationInfo::RecordSelector { parent, ty } => (
+            "RecordSelectorDeclaration",
+            vec![
+                introspection_identifier_value(table, parent)?,
+                introspection_type_expression_value(table, ty)?,
+            ],
+        ),
+    };
+    Ok(introspection_constructor(table, name, fields)?)
+}
+
+fn introspection_info_value(
+    table: &DataConTable,
+    info: &tidepool_runtime::session::IdentifierInfo,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    let parent = info
+        .parent
+        .as_ref()
+        .map(|parent| introspection_identifier_value(table, parent))
+        .transpose()?
+        .to_value(table)?;
+    Ok(introspection_constructor(
+        table,
+        "IdentifierInfo",
+        vec![
+            introspection_identifier_value(table, &info.identifier)?,
+            introspection_declaration_value(table, &info.declaration)?,
+            parent,
+            introspection_provenance_value(table, &info.provenance)?,
+        ],
+    )?)
+}
+
+fn introspection_type_value(
+    table: &DataConTable,
+    info: &tidepool_runtime::session::TypeInfo,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    Ok(introspection_constructor(
+        table,
+        "TypeInfo",
+        vec![
+            introspection_identifier_value(table, &info.identifier)?,
+            introspection_type_expression_value(table, &info.expression)?,
+            introspection_provenance_value(table, &info.provenance)?,
+        ],
+    )?)
+}
+
+fn introspection_query_error_value(
+    table: &DataConTable,
+    error: &tidepool_runtime::session::QueryError,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    use tidepool_runtime::session::QueryError;
+    let (name, fields) = match error {
+        QueryError::Unknown(query) => (
+            "UnknownIdentifier",
+            vec![introspection_query_value(table, query)?],
+        ),
+        QueryError::Ambiguous(query, candidates) => (
+            "AmbiguousIdentifier",
+            vec![
+                introspection_query_value(table, query)?,
+                core_list(
+                    table,
+                    candidates
+                        .iter()
+                        .map(|candidate| introspection_identifier_value(table, candidate))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )?,
+            ],
+        ),
+        QueryError::UnknownModule(module) => {
+            ("UnknownModule", vec![module.clone().to_value(table)?])
+        }
+        QueryError::Unsupported(detail) => (
+            "UnsupportedDeclaration",
+            vec![detail.clone().to_value(table)?],
+        ),
+    };
+    Ok(introspection_constructor(table, name, fields)?)
+}
+
+fn introspection_compiler_error_value(
+    table: &DataConTable,
+    detail: impl Into<String>,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    Ok(introspection_constructor(
+        table,
+        "CompilerUnavailable",
+        vec![detail.into().to_value(table)?],
+    )?)
+}
+
+fn introspection_scope_changed_value(
+    table: &DataConTable,
+    before: &tidepool_runtime::session::ScopeProvenance,
+    after: &tidepool_runtime::session::ScopeProvenance,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    Ok(introspection_constructor(
+        table,
+        "ScopeChanged",
+        vec![
+            introspection_provenance_value(table, before)?,
+            introspection_provenance_value(table, after)?,
+        ],
+    )?)
+}
+
 fn core_list(
     table: &DataConTable,
     values: Vec<Value>,
@@ -5700,6 +6220,82 @@ fn inspect_compile_view(
     }
 }
 
+fn structured_introspection_answer(
+    table: &DataConTable,
+    kind: StructuredInspectionKind,
+    inspected: Result<tidepool_runtime::session::InspectionResult, String>,
+    provenance: &tidepool_runtime::session::ScopeProvenance,
+    current: &tidepool_runtime::session::ScopeProvenance,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    if current != provenance {
+        let error = introspection_scope_changed_value(table, provenance, current)?;
+        return Ok(either_constructor(table, false, error)?);
+    }
+    Ok(match (kind, inspected) {
+        (
+            StructuredInspectionKind::Info,
+            Ok(tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info))),
+        ) => either_constructor(table, true, introspection_info_value(table, &info)?)?,
+        (
+            StructuredInspectionKind::Type,
+            Ok(tidepool_runtime::session::InspectionResult::StructuredType(Ok(info))),
+        ) => either_constructor(table, true, introspection_type_value(table, &info)?)?,
+        (
+            _,
+            Ok(
+                tidepool_runtime::session::InspectionResult::StructuredInfo(Err(error))
+                | tidepool_runtime::session::InspectionResult::StructuredType(Err(error)),
+            ),
+        ) => either_constructor(
+            table,
+            false,
+            introspection_query_error_value(table, &error)?,
+        )?,
+        (_, Ok(result)) => either_constructor(
+            table,
+            false,
+            introspection_compiler_error_value(
+                table,
+                format!(
+                    "unexpected structured inspection result: {}",
+                    result.render()
+                ),
+            )?,
+        )?,
+        (_, Err(detail)) => either_constructor(
+            table,
+            false,
+            introspection_compiler_error_value(table, detail)?,
+        )?,
+    })
+}
+
+fn structured_provenance(
+    compile_view: &crate::ActorCompileView,
+    source: &ActorWorkbenchSource,
+    scope: tidepool_runtime::session::NameScope,
+) -> tidepool_runtime::session::ScopeProvenance {
+    let prepared = source.prepare(compile_view);
+    let generation = compile_view.next_value_generation().0;
+    let mut fingerprint = blake3::Hasher::new();
+    fingerprint.update(prepared.preamble.as_bytes());
+    fingerprint.update(prepared.imports.as_bytes());
+    fingerprint.update(&generation.to_le_bytes());
+    for path in &prepared.include {
+        fingerprint.update(path.as_os_str().as_encoded_bytes());
+        fingerprint.update(&[0]);
+    }
+    for module in &prepared.injected {
+        fingerprint.update(module.as_bytes());
+        fingerprint.update(&[0]);
+    }
+    tidepool_runtime::session::ScopeProvenance {
+        scope,
+        generation,
+        fingerprint: fingerprint.finalize().to_hex().to_string(),
+    }
+}
+
 fn projected_binding_receipt(
     bound_name: Option<&str>,
     output: &[String],
@@ -5720,6 +6316,81 @@ fn projected_binding_receipt(
 #[cfg(test)]
 mod request_tests {
     use super::*;
+
+    fn introspection_error_table() -> DataConTable {
+        use tidepool_repr::{DataCon, DataConId};
+        let mut table = tidepool_testing::gen::datacon_table::standard_datacon_table();
+        for (id, name, arity) in [
+            (100, "Left", 1),
+            (101, "CurrentScope", 0),
+            (102, "ScopeProvenance", 3),
+            (103, "CompilerUnavailable", 1),
+            (104, "ScopeChanged", 2),
+        ] {
+            table.insert(DataCon {
+                id: DataConId(id),
+                name: name.into(),
+                tag: 1,
+                rep_arity: arity,
+                field_bangs: Vec::new(),
+                qualified_name: (name != "Left").then(|| format!("Tidepool.Effects.Core.{name}")),
+                type_name: String::new(),
+            });
+        }
+        table
+    }
+
+    fn current_provenance(
+        generation: u64,
+        fingerprint: &str,
+    ) -> tidepool_runtime::session::ScopeProvenance {
+        tidepool_runtime::session::ScopeProvenance {
+            scope: tidepool_runtime::session::NameScope::Current,
+            generation,
+            fingerprint: fingerprint.into(),
+        }
+    }
+
+    #[test]
+    fn structured_introspection_compiler_failure_is_a_typed_left() {
+        use tidepool_repr::DataConId;
+        let table = introspection_error_table();
+        let provenance = current_provenance(7, "same");
+        let answer = structured_introspection_answer(
+            &table,
+            StructuredInspectionKind::Info,
+            Err("ghc unavailable".into()),
+            &provenance,
+            &provenance,
+        )
+        .unwrap();
+        assert!(matches!(
+            answer,
+            Value::Con(DataConId(100), ref fields)
+                if matches!(fields.as_slice(), [Value::Con(DataConId(103), detail)] if detail.len() == 1)
+        ));
+    }
+
+    #[test]
+    fn structured_introspection_generation_change_is_a_typed_left() {
+        use tidepool_repr::DataConId;
+        let table = introspection_error_table();
+        let before = current_provenance(7, "before");
+        let after = current_provenance(8, "after");
+        let answer = structured_introspection_answer(
+            &table,
+            StructuredInspectionKind::Type,
+            Err("compiler result must be discarded".into()),
+            &before,
+            &after,
+        )
+        .unwrap();
+        assert!(matches!(
+            answer,
+            Value::Con(DataConId(100), ref fields)
+                if matches!(fields.as_slice(), [Value::Con(DataConId(104), changed)] if changed.len() == 2)
+        ));
+    }
 
     #[tokio::test]
     async fn incomplete_compilation_retires_only_its_registered_machine() {

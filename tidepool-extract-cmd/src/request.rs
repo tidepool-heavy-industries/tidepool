@@ -4,6 +4,29 @@ use std::path::{Path, PathBuf};
 pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v7";
 const MAGIC: &[u8; 8] = b"TPREQ007";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InspectionScope {
+    Current,
+    PublicModule(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectionNamespace {
+    Any,
+    Value,
+    Type,
+    Constructor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructuredInspection {
+    pub scope: InspectionScope,
+    pub namespace: InspectionNamespace,
+    pub name: String,
+    pub generation: u64,
+    pub fingerprint: String,
+}
+
 #[derive(Clone, Debug)]
 enum Field {
     Input(OsString),
@@ -34,6 +57,8 @@ enum Field {
     InspectBrowse(String),
     InspectBrowseExpanded(String),
     InspectSearch(String),
+    InspectStructuredInfo(StructuredInspection),
+    InspectStructuredType(StructuredInspection),
     InspectOut(OsString),
 }
 
@@ -185,6 +210,8 @@ impl ExtractRequest {
                 33 => Field::CellOut(decoder.os_string()?),
                 34 => Field::TurnPin(decoder.string()?),
                 35 => Field::InspectSearch(decoder.string()?),
+                36 => Field::InspectStructuredInfo(decoder.structured_inspection()?),
+                37 => Field::InspectStructuredType(decoder.structured_inspection()?),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -340,6 +367,14 @@ impl ExtractRequest {
         self.fields.push(Field::InspectSearch(query.to_owned()));
     }
 
+    pub(crate) fn inspect_structured_info(&mut self, query: StructuredInspection) {
+        self.fields.push(Field::InspectStructuredInfo(query));
+    }
+
+    pub(crate) fn inspect_structured_type(&mut self, query: StructuredInspection) {
+        self.fields.push(Field::InspectStructuredType(query));
+    }
+
     pub(crate) fn inspect_out(&mut self, value: impl AsRef<OsStr>) {
         self.fields
             .push(Field::InspectOut(value.as_ref().to_owned()));
@@ -393,6 +428,12 @@ impl ExtractRequest {
                 }
                 Field::InspectSearch(value) => {
                     flag(&mut flags, "--inspect-search", OsStr::new(value))
+                }
+                Field::InspectStructuredInfo(query) => {
+                    structured_flag(&mut flags, "--inspect-structured-info", query)
+                }
+                Field::InspectStructuredType(query) => {
+                    structured_flag(&mut flags, "--inspect-structured-type", query)
                 }
                 Field::InspectOut(value) => flag(&mut flags, "--inspect-out", value),
             }
@@ -473,6 +514,28 @@ impl<'a> Decoder<'a> {
         Ok(self.string()?.into())
     }
 
+    fn structured_inspection(&mut self) -> Result<StructuredInspection, ProtocolError> {
+        let scope = match self.byte()? {
+            0 => InspectionScope::Current,
+            1 => InspectionScope::PublicModule(self.string()?),
+            tag => return Err(ProtocolError::UnknownInspectionScope(tag)),
+        };
+        let namespace = match self.byte()? {
+            0 => InspectionNamespace::Any,
+            1 => InspectionNamespace::Value,
+            2 => InspectionNamespace::Type,
+            3 => InspectionNamespace::Constructor,
+            tag => return Err(ProtocolError::UnknownInspectionNamespace(tag)),
+        };
+        Ok(StructuredInspection {
+            scope,
+            namespace,
+            name: self.string()?,
+            generation: self.u64()?,
+            fingerprint: self.string()?,
+        })
+    }
+
     fn finish(self) -> Result<(), ProtocolError> {
         if self.cursor == self.bytes.len() {
             Ok(())
@@ -495,6 +558,8 @@ pub enum ProtocolError {
     NonHexData,
     RetiredFieldTag(u8),
     UnknownFieldTag(u8),
+    UnknownInspectionScope(u8),
+    UnknownInspectionNamespace(u8),
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -512,6 +577,12 @@ impl std::fmt::Display for ProtocolError {
             Self::NonHexData => f.write_str("worker request payload contains non-hexadecimal data"),
             Self::RetiredFieldTag(tag) => write!(f, "retired field tag {tag}"),
             Self::UnknownFieldTag(tag) => write!(f, "unknown field tag {tag}"),
+            Self::UnknownInspectionScope(tag) => {
+                write!(f, "unknown structured inspection scope tag {tag}")
+            }
+            Self::UnknownInspectionNamespace(tag) => {
+                write!(f, "unknown structured inspection namespace tag {tag}")
+            }
         }
     }
 }
@@ -582,7 +653,44 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::InspectBrowse(value) => tagged_frame(out, 29, OsStr::new(value)),
         Field::InspectBrowseExpanded(value) => tagged_frame(out, 30, OsStr::new(value)),
         Field::InspectSearch(value) => tagged_frame(out, 35, OsStr::new(value)),
+        Field::InspectStructuredInfo(query) => encode_structured(out, 36, query),
+        Field::InspectStructuredType(query) => encode_structured(out, 37, query),
     }
+}
+
+fn encode_structured(out: &mut Vec<u8>, tag: u8, query: &StructuredInspection) {
+    out.push(tag);
+    match &query.scope {
+        InspectionScope::Current => out.push(0),
+        InspectionScope::PublicModule(module) => {
+            out.push(1);
+            push_frame(out, OsStr::new(module));
+        }
+    }
+    out.push(match query.namespace {
+        InspectionNamespace::Any => 0,
+        InspectionNamespace::Value => 1,
+        InspectionNamespace::Type => 2,
+        InspectionNamespace::Constructor => 3,
+    });
+    push_frame(out, OsStr::new(&query.name));
+    out.extend_from_slice(&query.generation.to_le_bytes());
+    push_frame(out, OsStr::new(&query.fingerprint));
+}
+
+fn structured_flag(flags: &mut Vec<OsString>, name: &str, query: &StructuredInspection) {
+    let scope = match &query.scope {
+        InspectionScope::Current => "current".to_owned(),
+        InspectionScope::PublicModule(module) => format!("module:{module}"),
+    };
+    flag(
+        flags,
+        name,
+        OsStr::new(&format!(
+            "scope={scope};namespace={:?};name={};generation={};fingerprint={}",
+            query.namespace, query.name, query.generation, query.fingerprint
+        )),
+    );
 }
 
 fn tagged_frame(out: &mut Vec<u8>, tag: u8, value: &OsStr) {

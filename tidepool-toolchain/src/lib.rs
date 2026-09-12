@@ -21,6 +21,7 @@ pub mod cache;
 pub mod diag;
 pub mod failclass;
 pub mod paths;
+pub mod prepared_artifact;
 pub mod timing;
 pub mod toolchain;
 
@@ -64,6 +65,9 @@ pub enum CompileError {
     /// Failed to deserialize the CBOR output from `tidepool-extract`.
     #[error("CBOR deserialization error: {0}")]
     ReadError(#[from] ReadError),
+    /// Prepared execution bytes violated the exact schema/profile/target contract.
+    #[error("prepared execution artifact rejected: {0}")]
+    Prepared(#[from] tidepool_repr::execution_schema::ParseError),
     /// A required output file (.cbor or meta.cbor) was not produced by the extractor.
     #[error("Missing output file from extractor: {}", .0.display())]
     MissingOutput(PathBuf),

@@ -22,6 +22,7 @@ pub mod facade;
 pub mod inspection;
 pub mod kernel;
 pub mod persistent;
+pub mod prepared;
 mod recovery;
 pub mod registry;
 pub mod render;
@@ -34,14 +35,21 @@ pub mod workbench;
 pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS};
 
 pub use inspection::{
-    run_inspections, InfoEntry, InspectionAvailability, InspectionQuery, InspectionRequest,
-    InspectionResult, TypeMatch, TypeMatchQuality,
+    run_inspections, ClassMethodInfo, ConstructorInfo, DeclarationInfo, FieldInfo, IdentifierInfo,
+    IdentifierNamespace, IdentifierRef, InfoEntry, InspectionAvailability, InspectionQuery,
+    InspectionRequest, InspectionResult, NameNamespace, NameQuery, NameScope, QueryError,
+    ScopeProvenance, TypeExpression, TypeInfo, TypeMatch, TypeMatchQuality,
 };
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
     DeclarationPlaneCommit, MachineLease, MaterializationSetCommit, PersistentSession,
     ScopeRetirement, ValuePlaneCommit,
+};
+
+pub use prepared::{
+    run_prepared_once, PreparedCancelHandle, PreparedFailureKind, PreparedRunResult,
+    PreparedRuntime, PreparedRuntimeError,
 };
 
 pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};

@@ -1,3 +1,5 @@
+#[path = "../support/engine_observation.rs"]
+mod engine_observation;
 #[path = "../support/session_scaffold.rs"]
 mod session_scaffold;
 #[path = "../support/session_scaffold_expect.rs"]
@@ -76,6 +78,8 @@ mod letrec_field_freevar_deps;
 mod letrec_lazy_guard;
 #[path = "../normalize_differential.rs"]
 mod normalize_differential;
+#[path = "../prepared_thunks.rs"]
+mod prepared_thunks;
 #[path = "../primop_bitcount_differential.rs"]
 mod primop_bitcount_differential;
 #[path = "../raise_con_field_trivial_differential.rs"]

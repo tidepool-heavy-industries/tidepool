@@ -48,10 +48,11 @@ use std::path::{Path, PathBuf};
 
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::DataConTable;
+pub use tidepool_runtime::CompileError;
 use tidepool_runtime::{
     compile_and_run, compile_and_run_pure, compile_and_run_with_nursery_size, compile_haskell,
-    compile_targets, CompileError, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
-    RuntimeError, Value, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
+    compile_targets, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult, RuntimeError,
+    Value, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
 };
 
 /// Repo root, derived from this crate's manifest dir (`<root>/tidepool-testing`).

@@ -104,3 +104,7 @@ path = "tests/repro/main.rs"
 [[test]]
 name = "verbs"
 path = "tests/verbs/main.rs"
+
+[[test]]
+name = "prepared_execution"
+path = "tests/prepared_execution.rs"

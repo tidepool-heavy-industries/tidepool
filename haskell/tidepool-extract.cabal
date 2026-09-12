@@ -24,10 +24,17 @@ library tidepool-extract-internal
     Tidepool.FatIface
     Tidepool.GhcPipeline
     Tidepool.Identity
-    Tidepool.Introspection
+    Tidepool.Compiler.Introspection
     Tidepool.IR
     Tidepool.Metadata
     Tidepool.PrimOps
+    Tidepool.PreparedStg
+    Tidepool.PreparedFacts
+    Tidepool.PreparedSites
+    Tidepool.ExecutionIR
+    Tidepool.ExecutionSchema
+    Tidepool.ExecutionProjection
+    Tidepool.ExecutionEncode
     Tidepool.Json
     Tidepool.Resolve
     Tidepool.Session
@@ -128,6 +135,46 @@ executable tidepool-extract-bin
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
+test-suite execution-inventory
+  type:             exitcode-stdio-1.0
+  main-is:          ExecutionInventoryTest.hs
+  hs-source-dirs:   test-execution-inventory
+  build-depends:
+    base >= 4.20 && < 5,
+    containers,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+
+test-suite execution-schema-encode
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test-execution-schema-encode
+  build-depends:
+    base >= 4.20 && < 5,
+    bytestring,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+
+test-suite execution-schema-projection
+  type:             exitcode-stdio-1.0
+  main-is:          ExecutionProjectionProbe.hs
+  hs-source-dirs:   test-prepared-stg
+  other-modules:    ExecutionProjectionTest
+  build-depends:
+    base >= 4.20 && < 5,
+    bytestring,
+    containers,
+    directory,
+    filepath,
+    ghc >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+
 -- Not built by default: `cabal build` only builds tidepool-extract-bin.
 -- Run: cabal test spike-extract  (needs the nix with-packages GHC on PATH;
 -- `cabal build --enable-tests` builds it without running).
@@ -194,6 +241,20 @@ test-suite varid-mechanism-test
     process,
     text,
     mtl
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+
+-- Internal GHC API boundary for prepared-STG selection and resident memo use.
+test-suite prepared-stg-pipeline-test
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test-prepared-stg
+  build-depends:
+    base         >= 4.20 && < 5,
+    ghc          >= 9.12 && < 9.13,
+    tidepool-extract-internal,
+    directory,
+    filepath
   default-language: GHC2024
   default-extensions: OverloadedStrings
 

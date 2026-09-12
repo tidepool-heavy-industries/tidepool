@@ -17,7 +17,141 @@ pub enum InspectionQuery {
     TypeOf(String),
     Info(String),
     TypeSearch(String),
-    Browse { module: String, expanded: bool },
+    Browse {
+        module: String,
+        expanded: bool,
+    },
+    StructuredInfo {
+        query: NameQuery,
+        provenance: ScopeProvenance,
+    },
+    StructuredType {
+        query: NameQuery,
+        provenance: ScopeProvenance,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NameScope {
+    Current,
+    PublicModule(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameNamespace {
+    Any,
+    Value,
+    Type,
+    Constructor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameQuery {
+    pub scope: NameScope,
+    pub namespace: NameNamespace,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeProvenance {
+    pub scope: NameScope,
+    pub generation: u64,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentifierNamespace {
+    Value,
+    Type,
+    Constructor,
+    Field,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentifierRef {
+    pub module: String,
+    pub name: String,
+    pub namespace: IdentifierNamespace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeExpression {
+    pub canonical: String,
+    pub variables: Vec<String>,
+    pub constraints: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeInfo {
+    pub identifier: IdentifierRef,
+    pub expression: TypeExpression,
+    pub provenance: ScopeProvenance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldInfo {
+    pub name: String,
+    pub ty: TypeExpression,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConstructorInfo {
+    pub identifier: IdentifierRef,
+    pub ty: TypeExpression,
+    pub arguments: Vec<TypeExpression>,
+    pub fields: Vec<FieldInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassMethodInfo {
+    pub identifier: IdentifierRef,
+    pub ty: TypeExpression,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeclarationInfo {
+    Value(TypeExpression),
+    Data {
+        parameters: Vec<String>,
+        constructors: Vec<ConstructorInfo>,
+    },
+    Newtype {
+        parameters: Vec<String>,
+        constructor: ConstructorInfo,
+    },
+    TypeSynonym {
+        parameters: Vec<String>,
+        body: TypeExpression,
+    },
+    Class {
+        parameters: Vec<String>,
+        superclasses: Vec<TypeExpression>,
+        methods: Vec<ClassMethodInfo>,
+    },
+    Constructor {
+        parent: IdentifierRef,
+        constructor: ConstructorInfo,
+    },
+    RecordSelector {
+        parent: IdentifierRef,
+        ty: TypeExpression,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentifierInfo {
+    pub identifier: IdentifierRef,
+    pub declaration: DeclarationInfo,
+    pub parent: Option<IdentifierRef>,
+    pub provenance: ScopeProvenance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueryError {
+    Unknown(NameQuery),
+    Ambiguous(NameQuery, Vec<IdentifierRef>),
+    UnknownModule(String),
+    Unsupported(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +232,8 @@ pub enum InspectionResult {
         query: String,
         matches: Vec<TypeMatch>,
     },
+    StructuredInfo(Result<IdentifierInfo, QueryError>),
+    StructuredType(Result<TypeInfo, QueryError>),
 }
 
 impl InspectionResult {
@@ -142,12 +278,58 @@ impl InspectionResult {
                     format!("-- {module}\n{declarations}")
                 }
             }
+            Self::StructuredInfo(Ok(info)) => format!(
+                "{} -- {}.{}",
+                render_declaration(&info.declaration),
+                info.identifier.module,
+                info.identifier.name
+            ),
+            Self::StructuredType(Ok(info)) => format!(
+                "{}.{} :: {}",
+                info.identifier.module, info.identifier.name, info.expression.canonical
+            ),
+            Self::StructuredInfo(Err(error)) | Self::StructuredType(Err(error)) => {
+                render_query_error(error)
+            }
             Self::TypeMatches { matches, .. } => matches
                 .iter()
                 .map(|entry| format!("{} :: {}", entry.name, entry.signature))
                 .collect::<Vec<_>>()
                 .join("\n"),
         }
+    }
+}
+
+fn render_declaration(declaration: &DeclarationInfo) -> String {
+    match declaration {
+        DeclarationInfo::Value(ty) => ty.canonical.clone(),
+        DeclarationInfo::Data { constructors, .. } => {
+            format!("data ({} constructors)", constructors.len())
+        }
+        DeclarationInfo::Newtype { constructor, .. } => {
+            format!("newtype ({})", constructor.identifier.name)
+        }
+        DeclarationInfo::TypeSynonym { body, .. } => format!("type = {}", body.canonical),
+        DeclarationInfo::Class { methods, .. } => format!("class ({} methods)", methods.len()),
+        DeclarationInfo::Constructor { constructor, .. } => constructor.ty.canonical.clone(),
+        DeclarationInfo::RecordSelector { ty, .. } => ty.canonical.clone(),
+    }
+}
+
+fn render_query_error(error: &QueryError) -> String {
+    match error {
+        QueryError::Unknown(query) => format!("unknown name `{}`", query.name),
+        QueryError::Ambiguous(query, candidates) => format!(
+            "ambiguous name `{}`; candidates: {}",
+            query.name,
+            candidates
+                .iter()
+                .map(|candidate| format!("{}.{}", candidate.module, candidate.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        QueryError::UnknownModule(module) => format!("unknown module `{module}`"),
+        QueryError::Unsupported(detail) => detail.clone(),
     }
 }
 
@@ -194,7 +376,9 @@ pub fn run_inspections(
             InspectionQuery::TypeOf(expression) => std::slice::from_ref(expression),
             InspectionQuery::Info(_)
             | InspectionQuery::TypeSearch(_)
-            | InspectionQuery::Browse { .. } => &[],
+            | InspectionQuery::Browse { .. }
+            | InspectionQuery::StructuredInfo { .. }
+            | InspectionQuery::StructuredType { .. } => &[],
         };
         let mut source = assemble_inspection_module(request.preamble, &imports, expressions);
         if let Some(effects) = request.effects {
@@ -222,6 +406,12 @@ pub fn run_inspections(
             InspectionQuery::Browse { module, expanded } => {
                 command.inspect_browse(module, *expanded);
             }
+            InspectionQuery::StructuredInfo { query, provenance } => {
+                command.inspect_structured_info(structured_request(query, provenance));
+            }
+            InspectionQuery::StructuredType { query, provenance } => {
+                command.inspect_structured_type(structured_request(query, provenance));
+            }
         }
     }
 
@@ -243,7 +433,49 @@ pub fn run_inspections(
             CompileError::Io(error)
         }
     })?;
-    decode_inspections(&bytes)
+    let results = decode_inspections(&bytes)?;
+    if results.len() != request.queries.len() {
+        return Err(invalid(format!(
+            "worker returned {} results for {} queries",
+            results.len(),
+            request.queries.len()
+        )));
+    }
+    Ok(request
+        .queries
+        .iter()
+        .zip(results)
+        .map(|(query, result)| match (query, result) {
+            (
+                InspectionQuery::StructuredType { .. },
+                InspectionResult::StructuredInfo(Err(error)),
+            ) => InspectionResult::StructuredType(Err(error)),
+            (_, result) => result,
+        })
+        .collect())
+}
+
+fn structured_request(
+    query: &NameQuery,
+    provenance: &ScopeProvenance,
+) -> tidepool_extract_cmd::StructuredInspection {
+    tidepool_extract_cmd::StructuredInspection {
+        scope: match &query.scope {
+            NameScope::Current => tidepool_extract_cmd::InspectionScope::Current,
+            NameScope::PublicModule(module) => {
+                tidepool_extract_cmd::InspectionScope::PublicModule(module.clone())
+            }
+        },
+        namespace: match query.namespace {
+            NameNamespace::Any => tidepool_extract_cmd::InspectionNamespace::Any,
+            NameNamespace::Value => tidepool_extract_cmd::InspectionNamespace::Value,
+            NameNamespace::Type => tidepool_extract_cmd::InspectionNamespace::Type,
+            NameNamespace::Constructor => tidepool_extract_cmd::InspectionNamespace::Constructor,
+        },
+        name: query.name.clone(),
+        generation: provenance.generation,
+        fingerprint: provenance.fingerprint.clone(),
+    }
 }
 
 fn map_spawn(error: SpawnError) -> CompileError {
@@ -505,6 +737,64 @@ mod tests {
     }
 
     #[test]
+    fn decodes_structured_type_and_typed_query_error() {
+        let scope = CborValue::Array(vec![
+            CborValue::Text("PublicModule".into()),
+            CborValue::Text("Project.Work".into()),
+        ]);
+        let query = CborValue::Array(vec![
+            scope.clone(),
+            CborValue::Text("Value".into()),
+            CborValue::Text("work".into()),
+        ]);
+        let identifier = CborValue::Array(vec![
+            CborValue::Text("Project.Work".into()),
+            CborValue::Text("work".into()),
+            CborValue::Text("Value".into()),
+        ]);
+        let expression = CborValue::Array(vec![
+            CborValue::Text("Eq a => a -> Bool".into()),
+            CborValue::Array(vec![CborValue::Text("a".into())]),
+            CborValue::Array(vec![CborValue::Text("Eq a".into())]),
+        ]);
+        let provenance = CborValue::Array(vec![
+            scope,
+            CborValue::Integer(7.into()),
+            CborValue::Text("scope-abc".into()),
+        ]);
+        let receipt = CborValue::Array(vec![
+            CborValue::Text("TPINSP003".into()),
+            CborValue::Array(vec![
+                CborValue::Array(vec![
+                    CborValue::Text("StructuredTypeOk".into()),
+                    CborValue::Array(vec![identifier, expression, provenance]),
+                ]),
+                CborValue::Array(vec![
+                    CborValue::Text("StructuredError".into()),
+                    CborValue::Array(vec![CborValue::Text("Unknown".into()), query]),
+                ]),
+            ]),
+        ]);
+
+        let decoded = decode_inspections(&encoded(receipt)).unwrap();
+        let InspectionResult::StructuredType(Ok(info)) = &decoded[0] else {
+            panic!("expected structured type: {:?}", decoded[0]);
+        };
+        assert_eq!(info.identifier.module, "Project.Work");
+        assert_eq!(info.expression.variables, ["a"]);
+        assert_eq!(info.expression.constraints, ["Eq a"]);
+        assert_eq!(info.provenance.generation, 7);
+        assert!(matches!(
+            &decoded[1],
+            InspectionResult::StructuredInfo(Err(QueryError::Unknown(NameQuery {
+                scope: NameScope::PublicModule(module),
+                namespace: NameNamespace::Value,
+                name,
+            }))) if module == "Project.Work" && name == "work"
+        ));
+    }
+
+    #[test]
     fn rejects_version_shape_and_unknown_tag() {
         for value in [
             CborValue::Array(vec![
@@ -571,11 +861,20 @@ mod tests {
         std::fs::write(
             include.path().join("BrowseFixture.hs"),
             concat!(
-                "module BrowseFixture (Public(..), Service(..), exportedValue, Maybe(..)) where\n",
+                "{-# LANGUAGE TypeFamilies #-}\n",
+                "module BrowseFixture (Public(..), Record(..), Abstract, Opaque, Solo(..), Alias, Family, Service(..), constrained, exportedValue, Maybe(..)) where\n",
                 "import Prelude\n",
                 "import Data.Maybe (Maybe(..))\n",
                 "data Public = First | Second\n",
+                "data Record = Record { recordField :: Int }\n",
+                "data Abstract = Hidden\n",
+                "newtype Opaque = Opaque Int\n",
+                "data Solo = Solo\n",
+                "type Alias a = Maybe a\n",
+                "type family Family a\n",
                 "class Service a where service :: a -> Int\n",
+                "constrained :: Eq a => a -> Bool\n",
+                "constrained x = x == x\n",
                 "exportedValue :: Int\n",
                 "exportedValue = 42\n",
             ),
@@ -587,6 +886,26 @@ mod tests {
             "import BrowseFixture\n",
             "import qualified BrowseFixture as Alias\n",
         );
+        let current = ScopeProvenance {
+            scope: NameScope::Current,
+            generation: 11,
+            fingerprint: "current-scope".into(),
+        };
+        let public = ScopeProvenance {
+            scope: NameScope::PublicModule("BrowseFixture".into()),
+            generation: 11,
+            fingerprint: "public-module".into(),
+        };
+        let current_query = |namespace, name: &str| NameQuery {
+            scope: NameScope::Current,
+            namespace,
+            name: name.into(),
+        };
+        let public_query = |namespace, name: &str| NameQuery {
+            scope: NameScope::PublicModule("BrowseFixture".into()),
+            namespace,
+            name: name.into(),
+        };
         let mut queries = vec![
             InspectionQuery::TypeOf("exportedValue".into()),
             InspectionQuery::Info("Public".into()),
@@ -602,6 +921,54 @@ mod tests {
             InspectionQuery::Browse {
                 module: "BrowseFixture".into(),
                 expanded: true,
+            },
+            InspectionQuery::StructuredType {
+                query: current_query(NameNamespace::Value, "constrained"),
+                provenance: current.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: public_query(NameNamespace::Type, "Record"),
+                provenance: public.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: public_query(NameNamespace::Type, "Abstract"),
+                provenance: public.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: public_query(NameNamespace::Type, "Alias"),
+                provenance: public.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: current_query(NameNamespace::Any, "Solo"),
+                provenance: current.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: current_query(NameNamespace::Constructor, "Solo"),
+                provenance: current.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: current_query(NameNamespace::Value, "missingName"),
+                provenance: current.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: NameQuery {
+                    scope: NameScope::PublicModule("No.Such.Module".into()),
+                    namespace: NameNamespace::Type,
+                    name: "Missing".into(),
+                },
+                provenance: ScopeProvenance {
+                    scope: NameScope::PublicModule("No.Such.Module".into()),
+                    generation: 11,
+                    fingerprint: "missing-module".into(),
+                },
+            },
+            InspectionQuery::StructuredInfo {
+                query: public_query(NameNamespace::Type, "Family"),
+                provenance: public.clone(),
+            },
+            InspectionQuery::StructuredInfo {
+                query: public_query(NameNamespace::Type, "Opaque"),
+                provenance: public,
             },
         ];
         queries.push(InspectionQuery::Info("Alias.Public".into()));
@@ -655,5 +1022,84 @@ mod tests {
         assert!(expanded.contains("First :: Public"), "{expanded}");
         assert!(expanded.contains("service ::"), "{expanded}");
         assert!(expanded.contains("data Maybe"), "{expanded}");
+
+        let InspectionResult::StructuredType(Ok(constrained)) = &results[6] else {
+            panic!("expected constrained function type: {:?}", results[6]);
+        };
+        assert_eq!(constrained.identifier.name, "constrained");
+        assert!(
+            constrained
+                .expression
+                .constraints
+                .iter()
+                .any(|constraint| constraint.contains("Eq")),
+            "{:?}",
+            constrained.expression
+        );
+        assert_eq!(constrained.provenance.fingerprint, "current-scope");
+
+        let InspectionResult::StructuredInfo(Ok(record)) = &results[7] else {
+            panic!("expected record declaration: {:?}", results[7]);
+        };
+        let DeclarationInfo::Data { constructors, .. } = &record.declaration else {
+            panic!("expected data declaration: {:?}", record.declaration);
+        };
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(constructors[0].fields[0].name, "recordField");
+
+        let InspectionResult::StructuredInfo(Ok(abstract_type)) = &results[8] else {
+            panic!("expected abstract type declaration: {:?}", results[8]);
+        };
+        assert!(matches!(
+            &abstract_type.declaration,
+            DeclarationInfo::Data { constructors, .. } if constructors.is_empty()
+        ));
+
+        let InspectionResult::StructuredInfo(Ok(alias)) = &results[9] else {
+            panic!("expected type synonym: {:?}", results[9]);
+        };
+        assert!(
+            matches!(
+                &alias.declaration,
+                DeclarationInfo::TypeSynonym { parameters, body }
+                    if parameters.len() == 1 && body.canonical.contains("Maybe")
+            ),
+            "{:?}",
+            alias.declaration
+        );
+        assert!(matches!(
+            &results[10],
+            InspectionResult::StructuredInfo(Err(QueryError::Ambiguous(query, candidates)))
+                if query.name == "Solo" && candidates.len() == 2
+        ));
+
+        let InspectionResult::StructuredInfo(Ok(constructor)) = &results[11] else {
+            panic!("expected constructor declaration: {:?}", results[11]);
+        };
+        assert!(matches!(
+            (&constructor.declaration, &constructor.parent),
+            (DeclarationInfo::Constructor { parent, .. }, Some(recorded_parent))
+                if parent.name == "Solo" && recorded_parent == parent
+        ));
+        assert!(matches!(
+            &results[12],
+            InspectionResult::StructuredInfo(Err(QueryError::Unknown(query)))
+                if query.name == "missingName"
+        ));
+        assert!(matches!(
+            &results[13],
+            InspectionResult::StructuredInfo(Err(QueryError::UnknownModule(module)))
+                if module == "No.Such.Module"
+        ));
+        assert!(matches!(
+            &results[14],
+            InspectionResult::StructuredInfo(Err(QueryError::Unsupported(detail)))
+                if detail.contains("unsupported")
+        ));
+        assert!(matches!(
+            &results[15],
+            InspectionResult::StructuredInfo(Err(QueryError::Unsupported(detail)))
+                if detail.contains("abstract newtype constructor")
+        ));
     }
 }

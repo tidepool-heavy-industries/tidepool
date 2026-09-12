@@ -1,4 +1,6 @@
 // Each module remains a separate source file; nextest isolates each test process.
+#[path = "../introspection_public_api.rs"]
+mod introspection_public_api;
 #[path = "../run_llm_turn_sidecar.rs"]
 mod run_llm_turn_sidecar;
 #[path = "../session_decl_accum.rs"]

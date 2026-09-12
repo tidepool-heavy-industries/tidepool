@@ -142,3 +142,46 @@ fn realm_root_growth_persistent_roots_and_heap() {
         .join()
         .unwrap();
 }
+
+#[test]
+#[serial]
+fn retirement_major_collection_rewrites_survivor_and_reclaims_old_space() {
+    use tidepool_heap::layout::{CON_FIELDS_OFFSET, LIT_VALUE_OFFSET};
+
+    let table = table_with_c1();
+    let dummy = build_value_fragment(0);
+    let mut machine =
+        JitEffectMachine::compile_session(&dummy, &table, 2048).expect("compile_session");
+    let mut roots = Vec::new();
+    for round in 1..=3 {
+        let frag = machine
+            .add_function(
+                &format!("retire_{round}"),
+                &build_value_fragment(round),
+                &table,
+                &ExternalEnv::new(),
+            )
+            .expect("add_function");
+        roots.push(machine.run_pure_and_bind(frag).expect("bind"));
+    }
+    let before = machine.old_space_bytes_used();
+    assert!(before > 0);
+
+    machine.retire_scope_root(roots[0]);
+    machine.retire_scope_root(roots[1]);
+    let survivor_bytes = machine.old_space_bytes_used();
+    assert!(survivor_bytes > 0 && survivor_bytes < before);
+    assert_eq!(machine.persistent_roots_count(), 1);
+
+    // The surviving RootSlot address is stable while its value is rewritten
+    // to the compacted arena. Read the fixture's C1 (LitInt 3) shape directly.
+    unsafe {
+        let con = roots[2].current();
+        let lit = *(con.add(CON_FIELDS_OFFSET) as *const *mut u8);
+        assert_eq!(*(lit.add(LIT_VALUE_OFFSET) as *const i64), 3);
+    }
+
+    machine.retire_scope_root(roots[2]);
+    assert_eq!(machine.persistent_roots_count(), 0);
+    assert_eq!(machine.old_space_bytes_used(), 0);
+}

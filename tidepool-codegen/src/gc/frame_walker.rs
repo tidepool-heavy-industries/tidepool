@@ -9,6 +9,35 @@ pub struct StackRoot {
     pub heap_ptr: *mut u8,
 }
 
+/// Why a frame walk could not prove a complete root snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FrameWalkError {
+    #[error("no stack-map registry is installed for collection")]
+    RegistryUnavailable,
+    #[error("frame address computation overflowed at {address:#x} ({operation})")]
+    AddressOverflow {
+        address: usize,
+        operation: &'static str,
+    },
+    #[error(
+        "{kind} address {address:#x} is outside stack bounds {low:#x}..{high:#x} or misaligned"
+    )]
+    InvalidAddress {
+        kind: &'static str,
+        address: usize,
+        low: usize,
+        high: usize,
+    },
+    #[error("caller frame {caller_fp:#x} is smaller than frame size {frame_size}")]
+    FrameSizeUnderflow { caller_fp: usize, frame_size: u32 },
+    #[error("safepoint stack pointer {sp:#x} is outside stack bounds {low:#x}..{high:#x}")]
+    InvalidSafepointSp { sp: usize, low: usize, high: usize },
+    #[error("JIT return address {return_addr:#x} has no stack-map entry")]
+    MissingStackMap { return_addr: usize },
+    #[error("invalid frame link {fp:#x} -> {saved_fp:#x}")]
+    InvalidFrameLink { fp: usize, saved_fp: usize },
+}
+
 /// Conservative fallback span (bytes) for [`StackBounds::capture`]'s HIGH
 /// bound when the platform thread-stack query is unavailable or fails.
 /// Chosen larger than any `stack_size` this repo's test harnesses hand to a
@@ -113,10 +142,8 @@ fn query_stack_top() -> Option<usize> {
 ///   (typically gc_trigger's FP, read via inline asm), OR any value at all —
 ///   an invalid `start_fp` is a controlled failure, not UB, PROVIDED `bounds`
 ///   correctly excludes it.
-/// - `stack_maps` must contain entries for all JIT functions in the call chain
-///   the caller wants fully walked; a stack map missing for a live JIT return
-///   address silently drops that frame's roots (not this function's contract
-///   to detect — see "What this does NOT guarantee" below).
+/// - `stack_maps` must contain entries for every live JIT safepoint. A return
+///   address inside registered JIT code without an exact entry fails the walk.
 /// - `bounds` must be a `StackBounds` the caller can justify contains every
 ///   frame it expects to walk (see [`StackBounds::capture`]).
 ///
@@ -130,32 +157,31 @@ fn query_stack_top() -> Option<usize> {
 /// saved FP, a `frame_size` that walks `sp_at_safepoint` outside `bounds`, or
 /// a stack-map offset landing outside `bounds` — cannot produce a wild read
 /// or write: it is caught before the dereference, an always-on `[BUG]`
-/// breadcrumb is printed naming the violated condition, and the walk stops,
-/// returning whatever roots were collected before the bad frame. Under
+/// breadcrumb is printed naming the violated condition, and the whole walk
+/// fails. Partial roots are never returned as a collection-ready snapshot. Under
 /// diagnostic mode (`diagnostic_mode = true`, wired to `TIDEPOOL_HEAP_VERIFY`
 /// at the call site) the same condition panics instead, so a test can assert
 /// on it deterministically.
 ///
-/// # What this does NOT guarantee
-/// Stopping early is itself a GC bug either way: any roots that lived past
-/// the bad frame are lost, and the objects they point to may be collected
-/// out from under a still-live reference. Bounds-checking makes a bad frame
-/// chain fail safe, not correct.
+/// A zero saved frame pointer is the explicit clean activation boundary.
+/// Nonzero self/backward links and JIT PCs without exact safepoint metadata
+/// are integrity failures, not alternate termination forms.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub unsafe fn walk_frames(
     start_fp: usize,
     stack_maps: &StackMapRegistry,
     bounds: StackBounds,
     diagnostic_mode: bool,
-) -> Vec<StackRoot> {
+) -> Result<Vec<StackRoot>, FrameWalkError> {
     let mut roots = Vec::new();
     let mut fp = start_fp;
 
-    let fail = |what: &str| {
-        eprintln!("[BUG] walk_frames: {what}");
+    let fail = |error: FrameWalkError| {
+        eprintln!("[BUG] walk_frames: {error}");
         if diagnostic_mode {
-            panic!("[BUG] walk_frames: {what}");
+            panic!("[BUG] walk_frames: {error}");
         }
+        error
     };
 
     loop {
@@ -164,100 +190,97 @@ pub unsafe fn walk_frames(
         }
 
         let Some(return_addr_slot) = fp.checked_add(8) else {
-            fail(&format!("fp {fp:#x} + 8 overflowed"));
-            break;
+            return Err(fail(FrameWalkError::AddressOverflow {
+                address: fp,
+                operation: "fp + return-address offset",
+            }));
         };
 
         if !bounds.contains(fp, 8) || !fp.is_multiple_of(8) {
-            fail(&format!(
-                "fp {fp:#x} outside stack bounds {:#x}..{:#x} or misaligned",
-                bounds.low, bounds.high
-            ));
-            break;
+            return Err(fail(FrameWalkError::InvalidAddress {
+                kind: "frame pointer",
+                address: fp,
+                low: bounds.low,
+                high: bounds.high,
+            }));
         }
         if !bounds.contains(return_addr_slot, 8) || !return_addr_slot.is_multiple_of(8) {
-            fail(&format!(
-                "fp+8 {return_addr_slot:#x} outside stack bounds {:#x}..{:#x} or misaligned",
-                bounds.low, bounds.high
-            ));
-            break;
+            return Err(fail(FrameWalkError::InvalidAddress {
+                kind: "return-address slot",
+                address: return_addr_slot,
+                low: bounds.low,
+                high: bounds.high,
+            }));
         }
 
-        // SAFETY: both `fp` and `return_addr_slot` were just proven in-bounds
-        // (per `bounds`, which the caller justifies as covering the real
-        // stack) and 8-aligned.
+        // SAFETY: both slots were proven in-bounds and aligned above.
         let return_addr = unsafe { *(return_addr_slot as *const usize) };
-        // SAFETY: as above.
         let saved_fp = unsafe { *(fp as *const usize) };
 
         if !stack_maps.contains_address(return_addr) {
-            // Not a JIT frame — skip it and keep walking.
-            // This handles both pre-JIT frames (gc_trigger → perform_gc)
-            // and JIT→Host→JIT sandwiches (heap_force, trampoline_resolve).
-            if saved_fp == 0 || saved_fp == fp || saved_fp <= fp {
+            // Native frames in a JIT -> host -> JIT sandwich carry no map.
+            // A zero saved FP is the explicit clean activation boundary.
+            if saved_fp == 0 {
                 break;
+            }
+            if saved_fp <= fp {
+                return Err(fail(FrameWalkError::InvalidFrameLink { fp, saved_fp }));
             }
             fp = saved_fp;
             continue;
         }
 
-        // Found a JIT return address. The stack map at this address describes
-        // the caller's GC roots at the point it made the call.
-        if let Some(info) = stack_maps.lookup(return_addr) {
-            // The caller's FP is saved at [current_FP + 0] (already read above).
-            let caller_fp = saved_fp;
-            let Some(sp_at_safepoint) = caller_fp.checked_sub(info.frame_size as usize) else {
-                fail(&format!(
-                    "caller_fp {caller_fp:#x} - frame_size {} underflowed",
-                    info.frame_size
-                ));
-                break;
-            };
-            if !bounds.contains(sp_at_safepoint, 0) {
-                fail(&format!(
-                    "sp_at_safepoint {sp_at_safepoint:#x} (caller_fp {caller_fp:#x} - frame_size {}) \
-                     outside stack bounds {:#x}..{:#x} — frame_size disagrees with the real frame",
-                    info.frame_size, bounds.low, bounds.high
-                ));
-                break;
-            }
-
-            let mut frame_ok = true;
-            for &offset in &info.offsets {
-                let Some(root_addr) = sp_at_safepoint.checked_add(offset as usize) else {
-                    fail(&format!(
-                        "sp_at_safepoint {sp_at_safepoint:#x} + offset {offset} overflowed"
-                    ));
-                    frame_ok = false;
-                    break;
-                };
-                if !bounds.contains(root_addr, 8) || !root_addr.is_multiple_of(8) {
-                    fail(&format!(
-                        "stack-map root slot {root_addr:#x} (offset {offset} from sp {sp_at_safepoint:#x}) \
-                         outside stack bounds {:#x}..{:#x} or misaligned",
-                        bounds.low, bounds.high
-                    ));
-                    frame_ok = false;
-                    break;
-                }
-                // SAFETY: root_addr was just proven in-bounds and 8-aligned.
-                let heap_ptr = unsafe { *(root_addr as *const u64) as *mut u8 };
-                roots.push(StackRoot {
-                    stack_slot_addr: root_addr as *mut u64,
-                    heap_ptr,
-                });
-            }
-            if !frame_ok {
-                break;
-            }
+        // A PC inside registered JIT code must be an exact safepoint. Merely
+        // belonging to the function range is not enough to trace its roots.
+        let Some(info) = stack_maps.lookup(return_addr) else {
+            return Err(fail(FrameWalkError::MissingStackMap { return_addr }));
+        };
+        let caller_fp = saved_fp;
+        let Some(sp_at_safepoint) = caller_fp.checked_sub(info.frame_size as usize) else {
+            return Err(fail(FrameWalkError::FrameSizeUnderflow {
+                caller_fp,
+                frame_size: info.frame_size,
+            }));
+        };
+        if !bounds.contains(sp_at_safepoint, 0) {
+            return Err(fail(FrameWalkError::InvalidSafepointSp {
+                sp: sp_at_safepoint,
+                low: bounds.low,
+                high: bounds.high,
+            }));
         }
 
-        // Sanity checks to prevent infinite loops.
-        if saved_fp == 0 || saved_fp == fp || saved_fp <= fp {
+        for &offset in &info.offsets {
+            let Some(root_addr) = sp_at_safepoint.checked_add(offset as usize) else {
+                return Err(fail(FrameWalkError::AddressOverflow {
+                    address: sp_at_safepoint,
+                    operation: "safepoint SP + stack-map offset",
+                }));
+            };
+            if !bounds.contains(root_addr, 8) || !root_addr.is_multiple_of(8) {
+                return Err(fail(FrameWalkError::InvalidAddress {
+                    kind: "stack-map root slot",
+                    address: root_addr,
+                    low: bounds.low,
+                    high: bounds.high,
+                }));
+            }
+            // SAFETY: root_addr was proven in-bounds and aligned above.
+            let heap_ptr = unsafe { *(root_addr as *const u64) as *mut u8 };
+            roots.push(StackRoot {
+                stack_slot_addr: root_addr as *mut u64,
+                heap_ptr,
+            });
+        }
+
+        if saved_fp == 0 {
             break;
+        }
+        if saved_fp <= fp {
+            return Err(fail(FrameWalkError::InvalidFrameLink { fp, saved_fp }));
         }
         fp = saved_fp;
     }
 
-    roots
+    Ok(roots)
 }

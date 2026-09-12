@@ -1,0 +1,26 @@
+# Stable M1 facts required from the production worker's prepared probe.
+# One fixed-string fragment per line; process-corpus.sh checks every line.
+module main:PreparedStgProbe:<module>
+RecursiveDependency
+GlobalDependency(main:Tidepool.Effects.Core:runLLMTurnSited)
+LibraryDependency(text-
+LibraryDependency(ghc-bignum
+# Exact imported home values used as a retained-value-shaped baseline.
+GlobalDependency(main:RetainedValueShape:importedRetainedValue)
+GlobalDependency(main:RetainedValueShape:retainedApply)
+GlobalDependency(main:RetainedValueShape:retainedEnvironment)
+ClosureCaptures
+ConstructorLayout (ExactName {exactUnit = "main", exactModule = "PreparedStgProbe", exactOccurrence = "StrictAndUnpacked"}) ["IntRep","BoxedRep (Just Lifted)"]
+OperationSignature "+#" ["IntRep","IntRep"] ["IntRep"]
+OperationSignature "foreign:
+"RuntimePolymorphic"
+TagInferenceCount
+CharacterLiteral '\1114111'
+StringLiteral [108,101,102,116,192,128,114,105,103,104,116] True
+VoidArgument
+UnboxedTuple
+UnboxedSum
+JoinBinding
+MultiValueAlternative 3
+SupportStatus CharacterLiteralsSupported
+SupportStatus EmbeddedNulStringsRetainedAsModifiedUtf8

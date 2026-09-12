@@ -5,6 +5,7 @@
 //! of them.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+pub mod execution_descriptor;
 pub mod gc;
 pub mod layout;
 

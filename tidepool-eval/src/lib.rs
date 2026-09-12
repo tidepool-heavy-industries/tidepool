@@ -8,6 +8,7 @@
 pub mod env;
 pub mod error;
 pub mod eval;
+pub mod execution;
 pub mod heap;
 pub mod json;
 pub mod shapes;
@@ -17,5 +18,6 @@ pub mod value;
 pub use env::*;
 pub use error::*;
 pub use eval::*;
+pub use execution::*;
 pub use heap::*;
 pub use value::*;

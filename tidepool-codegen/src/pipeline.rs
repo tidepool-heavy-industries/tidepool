@@ -4,7 +4,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
@@ -278,6 +278,23 @@ impl CodegenPipeline {
             .map_err(|e| PipelineError::Declaration(format!("failed to declare `{}`: {}", name, e)))
     }
 
+    /// Declare a function with a caller-supplied checked signature.
+    ///
+    /// Prepared-program emitters use this path so definitions, calls and C
+    /// adapters all consume the same [`crate::entry_abi::EntryAbi`] lowering;
+    /// the legacy unary Core ABI remains confined to `declare_function`.
+    pub fn declare_function_with_signature(
+        &mut self,
+        name: &str,
+        linkage: Linkage,
+        signature: &ir::Signature,
+    ) -> Result<FuncId, PipelineError> {
+        self.ensure_usable()?;
+        self.module
+            .declare_function(name, linkage, signature)
+            .map_err(|e| PipelineError::Declaration(format!("failed to declare `{name}`: {e}")))
+    }
+
     /// Compile and define a function in the JIT module.
     ///
     /// `define_function` internally calls `ctx.compile()`, then stack maps
@@ -324,12 +341,21 @@ impl CodegenPipeline {
             .define_function(func_id, ctx)
             .map_err(|e| PipelineError::Definition(format!("{:?}", e)))?;
 
-        // Extract stack maps from the same compilation
+        // Cranelift's call-site table is the authoritative inventory of exact
+        // return PCs. `user_stack_maps()` contains only calls with at least one
+        // live declared GC value, so using it alone mistakes a valid zero-root
+        // safepoint for missing metadata. Join the two tables by exact return
+        // offset and retain an empty root list for zero-root calls.
         let compiled = ctx.compiled_code().ok_or_else(|| {
             PipelineError::Compilation("compiled_code missing after define_function".into())
         })?;
         let func_size = compiled.code_buffer().len() as u32;
-        let raw_maps: Vec<RawStackMap> = compiled
+        let frame_size = compiled
+            .buffer
+            .frame_layout()
+            .ok_or_else(|| PipelineError::Compilation("Cranelift omitted frame layout".into()))?
+            .frame_to_fp_offset;
+        let mut rooted_maps: BTreeMap<u32, (u32, Vec<RawStackMapEntry>)> = compiled
             .buffer
             .user_stack_maps()
             .iter()
@@ -338,13 +364,34 @@ impl CodegenPipeline {
                     .entries()
                     .map(|(ty, offset)| RawStackMapEntry { ty, offset })
                     .collect();
-                RawStackMap {
-                    code_offset: *offset,
-                    frame_size: *span,
-                    entries,
-                }
+                (*offset, (*span, entries))
             })
             .collect();
+        let mut raw_maps = Vec::new();
+        for call_site in compiled.buffer.call_sites() {
+            let entries = match rooted_maps.remove(&call_site.ret_addr) {
+                Some((stack_map_frame_size, entries)) => {
+                    if stack_map_frame_size != frame_size {
+                        return Err(PipelineError::Compilation(format!(
+                            "Cranelift call site at {:#x} disagrees on frame size: call-site {frame_size}, stack-map {stack_map_frame_size}",
+                            call_site.ret_addr
+                        )));
+                    }
+                    entries
+                }
+                None => Vec::new(),
+            };
+            raw_maps.push(RawStackMap {
+                code_offset: call_site.ret_addr,
+                frame_size,
+                entries,
+            });
+        }
+        if let Some((&code_offset, _)) = rooted_maps.first_key_value() {
+            return Err(PipelineError::Compilation(format!(
+                "Cranelift stack map at {code_offset:#x} has no matching call site"
+            )));
+        }
 
         self.pending_stack_maps.push((func_id, func_size, raw_maps));
         self.functions_defined += 1;

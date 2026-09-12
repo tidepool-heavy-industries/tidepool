@@ -226,6 +226,14 @@ impl ExternalEnv {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Stable root-slot addresses embedded by code compiled from this
+    /// environment. The owning machine registers these only after successful
+    /// finalization, keeping their pointees live for the callable code's
+    /// lifetime.
+    pub(crate) fn root_slots(&self) -> impl Iterator<Item = *mut *mut u8> + '_ {
+        self.0.values().copied()
+    }
 }
 
 pub struct ScopedEnv {

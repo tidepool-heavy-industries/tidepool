@@ -499,7 +499,9 @@ fn eval_err_class(e: &EffectError) -> (u8, i64) {
 fn runtime_err_class(e: &RuntimeError) -> (u8, i64) {
     match e {
         RuntimeError::CaseTrap => (errclass::CASE_TRAP, -1),
-        RuntimeError::HeapOverflow => (errclass::HEAP_OVERFLOW, -1),
+        RuntimeError::HeapOverflow | RuntimeError::ExternalAllocationFailed { .. } => {
+            (errclass::HEAP_OVERFLOW, -1)
+        }
         RuntimeError::DivisionByZero
         | RuntimeError::Overflow
         | RuntimeError::UserError
@@ -515,7 +517,8 @@ fn runtime_err_class(e: &RuntimeError) -> (u8, i64) {
         | RuntimeError::StackOverflow
         | RuntimeError::BlackHole
         | RuntimeError::BadThunkState(_)
-        | RuntimeError::Cancelled => (errclass::OTHER, -1),
+        | RuntimeError::Cancelled
+        | RuntimeError::IncompleteRootSnapshot(_) => (errclass::OTHER, -1),
     }
 }
 
@@ -550,6 +553,7 @@ fn jit_err_class(e: &JitError) -> (u8, i64) {
         | JitError::UnknownValueHandle(_)
         | JitError::EmptyProjection => (errclass::OTHER, -1),
         JitError::VarIdCollision(_) => (errclass::OTHER, -1),
+        JitError::MachineUnavailable { .. } => (errclass::OTHER, -1),
     }
 }
 

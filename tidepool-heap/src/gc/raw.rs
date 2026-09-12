@@ -1,12 +1,59 @@
 //! Cheney's semi-space copying GC for raw HeapObjects.
 
+use crate::execution_descriptor::{DescriptorTraceError, ObjectDescriptor};
 use crate::layout::*;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Result of a Cheney copying collection, containing statistics about the collection.
 pub struct CopyResult {
     pub bytes_copied: usize,
+}
+
+/// Stable descriptor ownership for objects whose physical layout cannot be
+/// recovered from the legacy heap tag. This is deliberately not a root set:
+/// entries describe object bytes, while the runtime's frame/global registry
+/// remains the sole owner of reachability.
+#[derive(Default)]
+pub struct DescriptorRegistry {
+    objects: HashMap<usize, Arc<ObjectDescriptor>>,
+}
+
+impl DescriptorRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish a descriptor after every payload slot has been initialized.
+    ///
+    /// # Safety
+    ///
+    /// `object` must remain a valid initialized object for `available` bytes
+    /// until it is unregistered or relocated by `cheney_copy_registered`.
+    pub unsafe fn register(
+        &mut self,
+        object: *mut u8,
+        available: usize,
+        descriptor: Arc<ObjectDescriptor>,
+    ) -> Result<(), DescriptorTraceError> {
+        if available < descriptor.allocation_extent() as usize {
+            return Err(DescriptorTraceError::Truncated {
+                declared: descriptor.allocation_extent(),
+                available,
+            });
+        }
+        self.objects.insert(object as usize, descriptor);
+        Ok(())
+    }
+
+    pub fn descriptor(&self, object: *const u8) -> Option<&ObjectDescriptor> {
+        self.objects.get(&(object as usize)).map(Arc::as_ref)
+    }
+
+    pub fn unregister(&mut self, object: *const u8) -> Option<Arc<ObjectDescriptor>> {
+        self.objects.remove(&(object as usize))
+    }
 }
 
 fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
@@ -555,64 +602,132 @@ pub unsafe fn cheney_copy(
     from_end: *const u8,
     tospace: &mut [u8],
 ) -> CopyResult {
+    let mut descriptors = DescriptorRegistry::new();
+    match cheney_copy_impl(
+        root_ptrs,
+        from_start,
+        from_end,
+        tospace,
+        &mut descriptors,
+        false,
+    ) {
+        Ok(result) => result,
+        Err(_) => unreachable!("empty descriptor registry cannot fail validation"),
+    }
+}
+
+/// Perform a copying collection while using registered descriptors for new
+/// execution-schema objects and the existing tag scanner for legacy objects.
+/// Descriptor identities move with evacuated objects; dead from-space entries
+/// are retired after the scan.
+///
+/// # Safety
+///
+/// The safety requirements of [`cheney_copy`] apply. Every registry entry in
+/// from-space must describe the object at that exact address.
+pub unsafe fn cheney_copy_registered(
+    root_ptrs: &[*mut *mut u8],
+    from_start: *const u8,
+    from_end: *const u8,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorRegistry,
+) -> Result<CopyResult, DescriptorTraceError> {
+    cheney_copy_impl(root_ptrs, from_start, from_end, tospace, descriptors, true)
+}
+
+unsafe fn cheney_copy_impl(
+    root_ptrs: &[*mut *mut u8],
+    from_start: *const u8,
+    from_end: *const u8,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorRegistry,
+    descriptor_scanning: bool,
+) -> Result<CopyResult, DescriptorTraceError> {
     let to_base = tospace.as_mut_ptr();
     let to_len = tospace.len();
-    let mut free: usize = 0;
-    // Evacuate roots
+    let mut free = 0usize;
+
+    // Validate every described from-space extent before installing a single
+    // forwarding pointer. A bad registration therefore cannot leave a
+    // half-relocated heap or registry behind.
+    if descriptor_scanning {
+        for (&address, descriptor) in &descriptors.objects {
+            let object = address as *mut u8;
+            if is_in_range(object, from_start, from_end) {
+                let available = from_end as usize - address;
+                descriptor.for_each_trace_slot(object, available, |_| {})?;
+            }
+        }
+    }
+
     for &root_slot in root_ptrs {
-        // SAFETY: root_slot is a valid mutable pointer slot per caller's contract.
         let old_ptr = *root_slot;
-        if !old_ptr.is_null() && is_in_range(old_ptr as *const u8, from_start, from_end) {
-            // Real bytes readable from old_ptr: the from-space range check
-            // above establishes old_ptr < from_end, so this never underflows.
-            let avail = from_end as usize - old_ptr as usize;
-            // SAFETY: old_ptr points to a valid heap object in from-space; tospace has sufficient capacity.
-            let new_ptr = evacuate(old_ptr, to_base, &mut free, avail);
+        if !old_ptr.is_null() && is_in_range(old_ptr, from_start, from_end) {
+            let available = from_end as usize - old_ptr as usize;
+            let descriptor = descriptor_scanning
+                .then(|| descriptors.objects.get(&(old_ptr as usize)).cloned())
+                .flatten();
+            let new_ptr = evacuate(old_ptr, to_base, &mut free, available);
+            if let Some(descriptor) = descriptor {
+                descriptors.objects.insert(new_ptr as usize, descriptor);
+            }
             *root_slot = new_ptr;
         }
     }
-    // Cheney scan: walk already-copied objects in tospace, evacuating their pointer fields.
-    let mut scan: usize = 0;
+
+    let mut scan = 0usize;
     while scan < free {
-        // SAFETY: scan offset is within [0, free) which is the initialized portion of tospace.
-        let obj = to_base.add(scan);
-        // Real bytes readable from obj: bounded by tospace's own extent.
-        let obj_avail = to_len - scan;
-        // SAFETY: obj is a valid, fully-copied heap object in tospace.
-        let obj_tag = read_tag(obj);
-        let obj_size = read_size(obj) as usize;
-        // Same degenerate-size guard as `evacuate`: a size below the header
-        // minimum would otherwise leave `aligned` at 0, so `scan` never
-        // advances and this loop spins forever on the same bogus object.
-        // Clamping to HEADER_SIZE guarantees forward progress every
-        // iteration.
-        let obj_size = if obj_size < HEADER_SIZE {
+        let object = to_base.add(scan);
+        let available = to_len - scan;
+        let object_tag = read_tag(object);
+        let object_size = read_size(object) as usize;
+        let object_size = if object_size < HEADER_SIZE {
             report_violation(
-                obj,
-                obj_tag,
-                obj_size,
-                obj_avail,
+                object,
+                object_tag,
+                object_size,
+                available,
                 "size below header minimum during Cheney scan",
             );
             HEADER_SIZE
         } else {
-            obj_size
+            object_size
         };
-        let aligned = obj_size.checked_add(7).unwrap_or(obj_size) & !7;
-        // SAFETY: obj is a valid heap object; for_each_pointer_field reads its layout.
-        // The closure evacuates any from-space pointer fields into tospace.
-        for_each_pointer_field(obj, obj_avail, |field_slot| {
-            let field_val = *field_slot;
-            if !field_val.is_null() && is_in_range(field_val as *const u8, from_start, from_end) {
-                // Real bytes readable from field_val, same reasoning as the root case above.
-                let avail = from_end as usize - field_val as usize;
-                let new_ptr = evacuate(field_val, to_base, &mut free, avail);
+        let aligned = object_size.checked_add(7).unwrap_or(object_size) & !7;
+
+        let descriptor = descriptor_scanning
+            .then(|| descriptors.objects.get(&(object as usize)).cloned())
+            .flatten();
+        let mut visit = |field_slot: *mut *mut u8| {
+            let field_value = *field_slot;
+            if !field_value.is_null() && is_in_range(field_value, from_start, from_end) {
+                let field_available = from_end as usize - field_value as usize;
+                let field_descriptor = descriptor_scanning
+                    .then(|| descriptors.objects.get(&(field_value as usize)).cloned())
+                    .flatten();
+                let new_ptr = evacuate(field_value, to_base, &mut free, field_available);
+                if let Some(field_descriptor) = field_descriptor {
+                    descriptors
+                        .objects
+                        .insert(new_ptr as usize, field_descriptor);
+                }
                 *field_slot = new_ptr;
             }
-        });
+        };
+        if let Some(descriptor) = descriptor {
+            descriptor.for_each_trace_slot(object, available, &mut visit)?;
+        } else {
+            for_each_pointer_field(object, available, &mut visit);
+        }
         scan += aligned;
     }
-    CopyResult { bytes_copied: free }
+
+    if descriptor_scanning {
+        descriptors
+            .objects
+            .retain(|address, _| !is_in_range(*address as *const u8, from_start, from_end));
+    }
+    Ok(CopyResult { bytes_copied: free })
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@
 //! frame retains that policy, so resume cannot change how completion is
 //! materialized.
 
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -28,7 +29,9 @@ use tidepool_repr::{CoreExpr, DataConTable, PrincipalId};
 use crate::context::VMContext;
 use crate::effect_machine::{CompiledEffectMachine, ConTags};
 use crate::heap_bridge;
-use crate::machine_state::{machine_state, MachineState};
+pub use crate::machine_state::ExternalStorageStats;
+pub use crate::machine_state::MachineDisposition;
+use crate::machine_state::{machine_state, MachineFailure, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
 pub use crate::resource_ledger::ResourceCounts;
@@ -75,6 +78,8 @@ pub enum JitError {
         "VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression."
     )]
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
+    #[error("machine is unavailable after an integrity failure: {failure:?}")]
+    MachineUnavailable { failure: Option<MachineFailure> },
 }
 
 /// A pending first-cause `RuntimeError` surfaces as a yield error — the shape
@@ -858,6 +863,7 @@ impl JitEffectMachine {
         exec_start: &str,
         resume_suffix: &str,
     ) -> Result<MaterializeResult, JitError> {
+        self.ensure_reusable()?;
         self.pipeline.ensure_usable()?;
         let _ = l7_msg;
         let tags = match &mode {
@@ -1333,6 +1339,7 @@ impl JitEffectMachine {
         materialization: ResultMaterialization,
         park: ParkTarget,
     ) -> Result<ParkedRaw, JitError> {
+        self.ensure_reusable()?;
         self.pipeline.ensure_usable()?;
         assert!(
             self.session.is_some(),
@@ -1375,7 +1382,7 @@ impl JitEffectMachine {
                 materialization,
                 park,
                 table,
-                park_cancel_flag,
+                park_cancel_flag.clone(),
             ),
             Err(e) => Err(e),
         };
@@ -1482,6 +1489,7 @@ impl JitEffectMachine {
                     _guard
                         .arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
                 }
+                cancel_flag.store(false, Ordering::Relaxed);
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "ask aborted by caller: {reason}"
                 ))));
@@ -1511,7 +1519,7 @@ impl JitEffectMachine {
                         materialization,
                         park,
                         table,
-                        cancel_flag,
+                        cancel_flag.clone(),
                     ),
                     Err(e) => Err(e),
                 },
@@ -1813,6 +1821,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         external_env: &crate::emit::ExternalEnv,
     ) -> Result<FuncId, JitError> {
+        self.ensure_reusable()?;
         self.fragments_added += 1;
         // Mirror compile_inner's tree shaping so the fragment is emitted exactly
         // like the original entry; only the JITModule destination differs (it is
@@ -1911,6 +1920,12 @@ impl JitEffectMachine {
         // drains only THIS round's pending stack maps and appends them to the
         // registry (round-1 maps were drained on the first finalize).
         self.pipeline.finalize()?;
+
+        // Finalized code loads through every ExternalEnv slot it referenced.
+        // Keep those pointees strong for the code's lifetime even if the
+        // binding table later retires its own root registration.
+        self.machine_state
+            .register_code_roots(external_env.root_slots());
 
         Ok(func_id)
     }
@@ -2165,6 +2180,12 @@ impl JitEffectMachine {
         self.machine_state.remembered_slots_count()
     }
 
+    /// Cumulative and currently-live accounting for byte and boxed-array
+    /// payloads owned outside this machine's moving heap.
+    pub fn external_storage_stats(&self) -> ExternalStorageStats {
+        self.machine_state.external_storage_stats()
+    }
+
     /// Session-lifetime count of Cranelift functions successfully compiled
     /// into this machine's `JITModule` (test/diagnostic accessor).
     pub fn functions_defined(&self) -> u64 {
@@ -2190,6 +2211,28 @@ impl JitEffectMachine {
     /// Its owning resident session must retire it rather than admit another turn.
     pub fn compilation_failed(&self) -> bool {
         self.pipeline.compilation_failed()
+    }
+
+    /// The machine's monotonic reuse decision after its most recent failures.
+    pub fn disposition(&self) -> MachineDisposition {
+        self.machine_state.disposition()
+    }
+
+    /// Reject entry after an integrity failure. This decision is monotonic;
+    /// only retiring the machine is valid after this returns an error.
+    pub fn ensure_reusable(&self) -> Result<(), JitError> {
+        if self.disposition() == MachineDisposition::Unavailable {
+            Err(JitError::MachineUnavailable {
+                failure: self.last_failure(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The most recently recorded first cause and its typed reuse decision.
+    pub fn last_failure(&self) -> Option<MachineFailure> {
+        self.machine_state.last_failure()
     }
 
     /// Read-only heap/GC snapshot (observatory heap pane) — EXISTING counters
@@ -2238,6 +2281,10 @@ impl JitEffectMachine {
             self.session.is_some(),
             "force_gc_for_test requires a session machine (compile_session)"
         );
+        self.collect_quiescent_nursery();
+    }
+
+    fn collect_quiescent_nursery(&mut self) {
         let mut guard = self.install_registries();
         let mut vmctx = self.make_session_vmctx();
         // SAFETY: machine_state outlives this call (owned by self), matching
@@ -2255,6 +2302,139 @@ impl JitEffectMachine {
         unsafe {
             guard.arm_reclaim(&mut self.session as *mut _, vmctx_ptr as *const _);
         }
+    }
+
+    /// Reclaim unreachable old-space and external payloads after an owning
+    /// resource root retires. Existing retirement entries are the policy
+    /// boundary; collection failure only makes this machine unavailable.
+    fn collect_retired_storage(&mut self) {
+        if self.session.is_none() || self.disposition() == MachineDisposition::Unavailable {
+            return;
+        }
+        if let Err(detail) = self.collect_major_quiescent() {
+            self.machine_state
+                .set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+            self.machine_state
+                .push_diagnostic(format!("major collection failed: {detail}"));
+            return;
+        }
+        self.collect_quiescent_nursery();
+    }
+
+    /// Trace live nursery wrappers, old objects, code/persistent/stowed roots,
+    /// and reference-bearing payloads to a fixed point before committing
+    /// either the old-space replacement or external sweep.
+    fn collect_major_quiescent(&mut self) -> Result<(), String> {
+        let session = self.session.as_ref().expect("checked session");
+        let (nursery_start, nursery_used) = match session.heap.as_ref() {
+            Some(heap) => (heap.as_ptr() as *mut u8, session.cursor),
+            None => (self.nursery.start() as *mut u8, session.cursor),
+        };
+        let nursery_end = unsafe { nursery_start.add(nursery_used) } as *const u8;
+        // SAFETY: this is a quiescent entry: generated stack and tail roots
+        // are empty, while the sole constructor still joins every registry.
+        let mut graph_roots = unsafe {
+            self.machine_state.complete_root_snapshot(
+                &[],
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }
+        .into_major_slots();
+
+        let mut external: HashMap<*mut u8, crate::machine_state::ExternalStorageKind> =
+            HashMap::new();
+        let mut expanded = HashSet::new();
+        let mut expanded_old_slots = HashSet::new();
+        let (compaction, rewrite_slots) = loop {
+            let nursery = unsafe {
+                crate::old_space::trace_heap_region(nursery_start, nursery_used, &graph_roots)?
+            };
+            for (pointer, kind) in nursery.external_storage {
+                if let Some(previous) = external.insert(pointer, kind) {
+                    if previous != kind {
+                        return Err(format!(
+                            "external payload {pointer:p} has conflicting wrapper kinds"
+                        ));
+                    }
+                }
+            }
+            let mut rewrite_slots = graph_roots.clone();
+            rewrite_slots.extend(nursery.pointer_slots);
+            let old_space = &self.session.as_ref().expect("session").old_space;
+            let plan = unsafe { old_space.stage_compaction(&rewrite_slots)? };
+            let mut added_slots = false;
+            for slot in plan.source_pointer_slots() {
+                if expanded_old_slots.insert(slot as usize) {
+                    graph_roots.push(slot);
+                    added_slots = true;
+                }
+            }
+            for (pointer, kind) in plan.reachable_external_storage() {
+                if let Some(previous) = external.insert(pointer, kind) {
+                    if previous != kind {
+                        return Err(format!(
+                            "external payload {pointer:p} has conflicting wrapper kinds"
+                        ));
+                    }
+                }
+            }
+            let pending: Vec<_> = external
+                .iter()
+                .filter_map(|(&pointer, &kind)| {
+                    (!expanded.contains(&pointer)).then_some((pointer, kind))
+                })
+                .collect();
+            for (pointer, kind) in pending {
+                let view = self
+                    .machine_state
+                    .external_payload_view(pointer, kind)
+                    .map_err(|error| format!("invalid external payload {pointer:p}: {error:?}"))?;
+                added_slots |= !view.pointer_slots.is_empty();
+                graph_roots.extend(view.pointer_slots);
+                expanded.insert(pointer);
+            }
+            if !added_slots {
+                break (plan, rewrite_slots);
+            }
+        };
+
+        let marked: HashSet<_> = external.keys().copied().collect();
+        let sweep = self
+            .machine_state
+            .plan_external_sweep(&marked)
+            .map_err(|error| format!("external sweep validation failed: {error:?}"))?;
+        unsafe {
+            self.session
+                .as_mut()
+                .expect("session")
+                .old_space
+                .commit_compaction(
+                    &self.machine_state,
+                    compaction,
+                    &rewrite_slots,
+                    (nursery_start as *const u8, nursery_end),
+                )?;
+        }
+        self.machine_state
+            .commit_external_sweep(sweep)
+            .map_err(|error| format!("external sweep commit failed: {error:?}"))?;
+
+        // Old-space commit rebuilt its half after clearing the old remembered
+        // set. Rebuild live external old-to-young slots from the traced graph.
+        for pointer in marked {
+            let view = self
+                .machine_state
+                .external_payload_view(pointer, external[&pointer])
+                .map_err(|error| format!("live external payload changed: {error:?}"))?;
+            for slot in view.pointer_slots {
+                let value = unsafe { *slot } as usize;
+                if value >= nursery_start as usize && value < nursery_end as usize {
+                    self.machine_state.register_remembered_slot(slot);
+                }
+            }
+        }
+        Ok(())
     }
 
     // ----------------------------------------------------------------------
@@ -2380,6 +2560,7 @@ impl JitEffectMachine {
         user: &U,
         input: ResumeInput,
     ) -> Result<ParkedOutcome, JitError> {
+        self.ensure_reusable()?;
         self.pipeline.ensure_usable()?;
         // Inspect without removing: validation failures must leave the frame
         // parked and rooted so the caller can retry.
@@ -2583,6 +2764,7 @@ impl JitEffectMachine {
         };
         self.machine_state
             .deregister_persistent_root(entry.slot.addr());
+        self.collect_retired_storage();
         true
     }
 
@@ -2690,6 +2872,9 @@ impl JitEffectMachine {
                 .deregister_persistent_root(entry.slot.addr());
         }
         self.assert_rooting_receipt();
+        if frames_dropped != 0 || handles_released != 0 {
+            self.collect_retired_storage();
+        }
         (frames_dropped, handles_released)
     }
 
@@ -2717,16 +2902,18 @@ impl JitEffectMachine {
     /// Removal is memory-safe here for the same reasons it is in
     /// [`Self::close_realm`]: `perform_gc` rebuilds its root vector per
     /// collection (`extend_persistent_roots`), so nothing holds an index
-    /// across collections. It does **not** touch `OldSpace::slots` — the `Box`
-    /// cell stays allocated for the machine's life, so an already-compiled
-    /// fragment that `iconst`ed that address still `load`s. What is released
-    /// is the root's place in the GC trace list, not its bytes.
+    /// across collections. The root-slot `Box` stays allocated for the
+    /// machine's life, so an already-compiled fragment that `iconst`ed that
+    /// address still `load`s. After deregistration, the quiescent retirement
+    /// collector may compact old-space objects and sweep external payloads no
+    /// longer reachable from the remaining roots.
     ///
     /// Idempotent (the underlying deregistration is a `Vec::remove` by
     /// position, a no-op if absent), but a caller relying on that is a caller
     /// violating the exactly-once clause above.
     pub fn retire_scope_root(&mut self, slot: crate::old_space::RootSlot) {
         self.machine_state.deregister_persistent_root(slot.addr());
+        self.collect_retired_storage();
     }
 
     /// Abandon a persistent root produced for a materialization that failed
@@ -2740,15 +2927,16 @@ impl JitEffectMachine {
     /// - no `BindingEntry` contains it, and no [`ValueHandle`] holds it;
     /// - this is its exactly-once abandonment.
     ///
-    /// The caller witnesses the ledger decrement. This method leaves old-space
-    /// bytes allocated, exactly like scope retirement; it only removes the
-    /// slot from the GC trace list.
+    /// The caller witnesses the ledger decrement. As with scope retirement,
+    /// the slot cell remains stable while the quiescent retirement collector
+    /// may reclaim unreachable old-space and external storage.
     pub fn abandon_uncommitted_root(&mut self, slot: crate::old_space::RootSlot) {
         debug_assert!(
             !self.handle_holds_root(slot),
             "an uncommitted root must not still be owned by a ValueHandle"
         );
         self.machine_state.deregister_persistent_root(slot.addr());
+        self.collect_retired_storage();
     }
 
     /// Whether any LIVE [`ValueHandle`] still holds `slot` — the
@@ -3488,6 +3676,26 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_machine_rejects_reentry() {
+        use tidepool_repr::types::Literal;
+        use tidepool_repr::{CoreFrame, TreeBuilder};
+
+        let mut builder = TreeBuilder::new();
+        builder.push(CoreFrame::Lit(Literal::LitInt(1)));
+        let mut machine =
+            JitEffectMachine::compile_session(&builder.build(), &DataConTable::new(), 4096)
+                .unwrap();
+        machine
+            .machine_state
+            .set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+
+        assert!(matches!(
+            machine.run_pure(),
+            Err(JitError::MachineUnavailable { .. })
+        ));
+    }
+
+    #[test]
     fn test_varid_check_rejects_duplicate_toplevel_binder() {
         use tidepool_repr::tree::RecursiveTree;
         use tidepool_repr::types::Literal;
@@ -3777,6 +3985,252 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// A nursery collection keeps external payloads for the machine lifetime.
+    /// It cannot reclaim them from a nursery-root snapshot because an
+    /// old-space Lit wrapper may remain consumable through generated return
+    /// state that this minor collector does not retire.
+    fn external_storage_after_collections(major_after_retirement: bool) -> ExternalStorageStats {
+        use tidepool_heap::layout::{self as heap_layout, LitTag, LIT_SIZE};
+
+        let (expr, table) = make_gc_forcing_setup(1);
+        let mut machine = JitEffectMachine::compile_session(&expr, &table, 2048)
+            .expect("compile session machine");
+
+        let (live_bytes, dead_bytes, live_boxed, dead_boxed) = {
+            let _guard = machine.install_registries();
+            (
+                crate::host_fns::runtime_new_byte_array(3) as *mut u8,
+                crate::host_fns::runtime_new_byte_array(5) as *mut u8,
+                crate::host_fns::runtime_new_boxed_array(2, 0) as *mut u8,
+                crate::host_fns::runtime_new_boxed_array(2, 0) as *mut u8,
+            )
+        };
+        for payload in [live_bytes, dead_bytes, live_boxed, dead_boxed] {
+            assert_ne!(payload, crate::host_fns::error_poison_ptr());
+        }
+
+        let heap = machine.nursery.start() as *mut u8;
+        let live_bytes_wrapper = heap;
+        let dead_bytes_wrapper = unsafe { heap.add(LIT_SIZE) };
+        let live_boxed_wrapper = unsafe { heap.add(2 * LIT_SIZE) };
+        let dead_boxed_wrapper = unsafe { heap.add(3 * LIT_SIZE) };
+        unsafe {
+            for (wrapper, tag, payload) in [
+                (live_bytes_wrapper, LitTag::ByteArray, live_bytes),
+                (dead_bytes_wrapper, LitTag::ByteArray, dead_bytes),
+                (live_boxed_wrapper, LitTag::SmallArray, live_boxed),
+                (dead_boxed_wrapper, LitTag::Array, dead_boxed),
+            ] {
+                heap_layout::write_header(wrapper, heap_layout::TAG_LIT, LIT_SIZE as u32);
+                *wrapper.add(heap_layout::LIT_TAG_OFFSET) = tag as u8;
+                *(wrapper.add(heap_layout::LIT_VALUE_OFFSET) as *mut *mut u8) = payload;
+            }
+            // A live boxed payload reaches the byte wrapper after its direct
+            // root retires, and reaches its own wrapper cyclically. The minor
+            // pass must rewrite both external slots; the major fixed point
+            // must retain both payloads until the boxed wrapper retires.
+            *(live_boxed.add(8) as *mut *mut u8) = live_bytes_wrapper;
+            *(live_boxed.add(16) as *mut *mut u8) = live_boxed_wrapper;
+        }
+        machine.session.as_mut().expect("session state").cursor = 4 * LIT_SIZE;
+
+        let mut live_bytes_root = live_bytes_wrapper;
+        let mut live_boxed_root = live_boxed_wrapper;
+        unsafe {
+            machine.register_persistent_root(&mut live_bytes_root);
+            machine.register_persistent_root(&mut live_boxed_root);
+        }
+        assert_eq!(machine.external_storage_stats().live_objects, 4);
+
+        machine.force_gc_for_test();
+
+        let after_first = machine.external_storage_stats();
+        assert_eq!(after_first.allocated_objects, 4);
+        assert_eq!(after_first.live_objects, 4);
+        assert_eq!(after_first.freed_objects, 0);
+        assert_eq!(after_first.live_bytes, after_first.allocated_bytes);
+        assert_eq!(after_first.freed_bytes, 0);
+        unsafe {
+            assert_eq!(
+                *(live_bytes_root.add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8),
+                live_bytes
+            );
+            assert_eq!(
+                *(live_boxed_root.add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8),
+                live_boxed
+            );
+            assert_eq!(*(live_bytes as *const u64), 3);
+            assert_eq!(*(live_boxed as *const u64), 2);
+        }
+
+        if major_after_retirement {
+            let live_bytes_slot =
+                unsafe { crate::old_space::RootSlot::new(&mut live_bytes_root as *mut *mut u8) };
+            machine.retire_scope_root(live_bytes_slot);
+            let between = machine.external_storage_stats();
+            assert_eq!(between.live_objects, 2);
+            assert_eq!(between.freed_objects, 2);
+            assert!(between.live_bytes < between.allocated_bytes);
+            unsafe {
+                assert_eq!(
+                    *(live_boxed_root.add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8),
+                    live_boxed
+                );
+                assert_eq!(*(live_boxed as *const u64), 2);
+                let boxed_byte_wrapper = *(live_boxed.add(8) as *const *mut u8);
+                assert_eq!(
+                    *(boxed_byte_wrapper.add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8),
+                    live_bytes,
+                    "boxed payload edge must retain the byte wrapper and its payload"
+                );
+                assert_eq!(
+                    *(live_boxed.add(16) as *const *mut u8),
+                    live_boxed_root,
+                    "boxed payload cycle must follow its wrapper's minor-GC rewrite"
+                );
+            }
+            let live_boxed_slot =
+                unsafe { crate::old_space::RootSlot::new(&mut live_boxed_root as *mut *mut u8) };
+            machine.retire_scope_root(live_boxed_slot);
+        } else {
+            machine
+                .machine_state
+                .deregister_persistent_root(&mut live_bytes_root);
+            machine
+                .machine_state
+                .deregister_persistent_root(&mut live_boxed_root);
+            machine.force_gc_for_test();
+        }
+
+        machine.external_storage_stats()
+    }
+
+    #[test]
+    #[serial]
+    fn external_storage_survives_minor_collection_with_consumable_wrappers() {
+        let after_second = external_storage_after_collections(false);
+        assert_eq!(after_second.live_objects, 4);
+        assert_eq!(after_second.live_bytes, after_second.allocated_bytes);
+        assert_eq!(after_second.freed_objects, 0);
+        assert_eq!(after_second.freed_bytes, 0);
+    }
+
+    /// M2's remaining full-collection gate. A wrapper-complete collector must
+    /// retire unreachable wrappers and their payloads together; a nursery
+    /// root snapshot is not sufficient evidence for this reclamation.
+    #[test]
+    #[serial]
+    fn external_storage_follows_wrapper_complete_collection_reachability() {
+        let after_collection = external_storage_after_collections(true);
+        assert_eq!(after_collection.live_objects, 0);
+        assert_eq!(after_collection.live_bytes, 0);
+        assert_eq!(
+            after_collection.freed_objects,
+            after_collection.allocated_objects
+        );
+        assert_eq!(
+            after_collection.freed_bytes,
+            after_collection.allocated_bytes
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn major_collection_follows_only_live_old_owners_into_nursery() {
+        use crate::emit::ExternalEnv;
+        use tidepool_heap::layout::{self as heap_layout, LitTag, CON_FIELDS_OFFSET, LIT_SIZE};
+
+        let (expr, table) = make_gc_forcing_setup(1);
+        let mut machine =
+            JitEffectMachine::compile_session(&expr, &table, 4096).expect("compile session");
+        let owner_entry = machine
+            .add_function("live_old_owner", &expr, &table, &ExternalEnv::new())
+            .expect("compile live owner");
+        let dead_entry = machine
+            .add_function("dead_old_owner", &expr, &table, &ExternalEnv::new())
+            .expect("compile dead owner");
+        let live_owner = machine
+            .run_pure_and_bind(owner_entry)
+            .expect("tenure live owner");
+        let dead_owner = machine
+            .run_pure_and_bind(dead_entry)
+            .expect("tenure dead owner");
+
+        let (live_payload, dead_payload) = {
+            let _guard = machine.install_registries();
+            (
+                crate::host_fns::runtime_new_byte_array(7) as *mut u8,
+                crate::host_fns::runtime_new_byte_array(11) as *mut u8,
+            )
+        };
+        assert_ne!(live_payload, crate::host_fns::error_poison_ptr());
+        assert_ne!(dead_payload, crate::host_fns::error_poison_ptr());
+
+        let nursery_start = machine
+            .session
+            .as_mut()
+            .expect("session")
+            .heap
+            .as_mut()
+            .map_or(machine.nursery.start() as *mut u8, |heap| {
+                heap.as_mut_ptr() as *mut u8
+            });
+        let cursor = machine.session.as_ref().expect("session").cursor;
+        let live_wrapper = unsafe { nursery_start.add(cursor) };
+        let dead_wrapper = unsafe { live_wrapper.add(LIT_SIZE) };
+        unsafe {
+            for (wrapper, payload) in [(live_wrapper, live_payload), (dead_wrapper, dead_payload)] {
+                heap_layout::write_header(wrapper, heap_layout::TAG_LIT, LIT_SIZE as u32);
+                *wrapper.add(heap_layout::LIT_TAG_OFFSET) = LitTag::ByteArray as u8;
+                *(wrapper.add(heap_layout::LIT_VALUE_OFFSET) as *mut *mut u8) = payload;
+            }
+        }
+        machine.session.as_mut().expect("session").cursor = cursor + 2 * LIT_SIZE;
+
+        let live_field = unsafe { live_owner.current().add(CON_FIELDS_OFFSET) as *mut *mut u8 };
+        let dead_field = unsafe { dead_owner.current().add(CON_FIELDS_OFFSET) as *mut *mut u8 };
+        unsafe {
+            *live_field = live_wrapper;
+            *dead_field = dead_wrapper;
+        }
+        machine.machine_state.register_remembered_slot(live_field);
+        machine.machine_state.register_remembered_slot(dead_field);
+
+        machine.retire_scope_root(dead_owner);
+        let after_major = machine.external_storage_stats();
+        assert_eq!(
+            after_major.live_objects, 1,
+            "live old owner retains its payload"
+        );
+        assert_eq!(
+            after_major.freed_objects, 1,
+            "dead owner edge is not a strong root"
+        );
+        unsafe {
+            let live_field = live_owner.current().add(CON_FIELDS_OFFSET) as *mut *mut u8;
+            let wrapper = *live_field;
+            assert_eq!(
+                *(wrapper.add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8),
+                live_payload
+            );
+            assert_eq!(*(live_payload as *const u64), 7);
+        }
+
+        machine.force_gc_for_test();
+        unsafe {
+            let live_field = live_owner.current().add(CON_FIELDS_OFFSET) as *mut *mut u8;
+            let wrapper = *live_field;
+            assert_eq!(
+                *(wrapper.add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8),
+                live_payload
+            );
+            assert_eq!(*(live_payload as *const u64), 7);
+        }
+
+        machine.retire_scope_root(live_owner);
+        assert_eq!(machine.external_storage_stats().live_objects, 0);
     }
 
     #[test]

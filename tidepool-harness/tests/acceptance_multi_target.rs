@@ -53,6 +53,30 @@ fn two_target_source() -> (EngineConfig, String) {
     (cfg, source)
 }
 
+#[test]
+fn multi_target_retains_checked_prepared_artifacts() {
+    tidepool_testing::eval_harness::require_extract();
+    let cfg = EngineConfig::from_decls(Vec::new(), prelude_dir(), None).expect("engine config");
+    let target = cfg.turn_target(None).expect("turn target");
+    let source = "module Expr where\ntargetA :: Int\ntargetA = 41\ntargetB :: Int\ntargetB = 42\n";
+
+    let turns = engine::compile_turns(
+        &cfg.extract_bin,
+        source,
+        &["targetA", "targetB"],
+        &target.include,
+        tidepool_harness::timing::NO_NODE,
+        tidepool_harness::timing::NO_ROUND,
+    )
+    .expect("both prepared targets must compile and pass the exact reader contract");
+
+    for name in ["targetA", "targetB"] {
+        let prepared = &turns.get(name).expect("requested target present").prepared;
+        assert!(!prepared.bytes().is_empty());
+        assert!(!prepared.prepared().bindings().is_empty());
+    }
+}
+
 /// **fail-on-any-bad-target.** `compile_turns` over `["targetA", "nonexistentTarget"]`
 /// must return `Err` — the extract's `--targets` mode fails the WHOLE spawn
 /// (`runMultiTargetClosed` calls `translateTargetClosed` directly, with no

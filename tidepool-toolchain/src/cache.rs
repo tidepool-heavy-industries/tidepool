@@ -223,18 +223,18 @@ fn has_untracked_cpp_inputs(source: &str, include: &[PathBuf]) -> bool {
 }
 
 /// Sentinel payload: blake3(expr_bytes) || blake3(meta_bytes) ||
-/// blake3(asks_bytes), 96 raw bytes.
+/// blake3(asks_bytes) || blake3(prepared_bytes), 128 raw bytes.
 /// Anything else (missing, empty, wrong length — an old-format entry from
 /// before this checksum existed) is treated as absent, forcing a MISS.
-const SENTINEL_LEN: usize = 96;
+const SENTINEL_LEN: usize = 128;
 
 /// Attempts to load the Core expression and metadata from the cache.
-/// Returns `Some((expr_bytes, meta_bytes, asks_bytes))` on success.
-/// Beyond mere sentinel existence (completeness), the sentinel's three blake3
+/// Returns `Some((expr_bytes, meta_bytes, asks_bytes, prepared_bytes))` on success.
+/// Beyond mere sentinel existence (completeness), the sentinel's four blake3
 /// digests are recomputed over the loaded bytes and compared: a bit-flip that
 /// still decodes as valid CBOR would otherwise be served as a different
 /// program, so a checksum mismatch falls through to a MISS/recompile instead.
-pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
     let dir = cache_dir()?;
     let sentinel_path = dir.join(format!("{}.ok", key));
     let sentinel = fs::read(&sentinel_path).ok()?;
@@ -245,27 +245,37 @@ pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> 
     let expr_path = dir.join(format!("{}.cbor", key));
     let meta_path = dir.join(format!("{}.meta.cbor", key));
     let asks_path = dir.join(format!("{}.asks.json", key));
+    let prepared_path = dir.join(format!("{}.prepared.cbor", key));
 
     let expr = fs::read(&expr_path).ok()?;
     let meta = fs::read(&meta_path).ok()?;
     let asks = fs::read(&asks_path).ok()?;
+    let prepared = fs::read(&prepared_path).ok()?;
 
     if blake3::hash(&expr).as_bytes() != &sentinel[0..32]
         || blake3::hash(&meta).as_bytes() != &sentinel[32..64]
         || blake3::hash(&asks).as_bytes() != &sentinel[64..96]
+        || blake3::hash(&prepared).as_bytes() != &sentinel[96..128]
     {
         return None;
     }
 
-    Some((expr, meta, asks))
+    Some((expr, meta, asks, prepared))
 }
 
 /// Stores the compilation results in the cache. Each file is replaced atomically
 /// via rename. A sentinel file `{key}.ok` is written last to mark the entry as
 /// complete — `cache_load` checks for this before reading. The sentinel body is
-/// blake3(expr_bytes) || blake3(meta_bytes) || blake3(asks_bytes), letting
+/// blake3(expr_bytes) || blake3(meta_bytes) || blake3(asks_bytes) ||
+/// blake3(prepared_bytes), letting
 /// `cache_load` detect a bit-flip that still decodes as plausible data.
-pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8], asks_bytes: &[u8]) {
+pub(crate) fn cache_store(
+    key: &CacheKey,
+    expr_bytes: &[u8],
+    meta_bytes: &[u8],
+    asks_bytes: &[u8],
+    prepared_bytes: &[u8],
+) {
     let Some(dir) = cache_dir() else { return };
     if fs::create_dir_all(&dir).is_err() {
         return;
@@ -282,6 +292,9 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8], 
     let Ok(mut tmp_asks) = tempfile::NamedTempFile::new_in(&dir) else {
         return;
     };
+    let Ok(mut tmp_prepared) = tempfile::NamedTempFile::new_in(&dir) else {
+        return;
+    };
 
     if tmp_expr.write_all(expr_bytes).is_err() {
         return;
@@ -292,10 +305,14 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8], 
     if tmp_asks.write_all(asks_bytes).is_err() {
         return;
     }
+    if tmp_prepared.write_all(prepared_bytes).is_err() {
+        return;
+    }
 
     let final_expr = dir.join(format!("{}.cbor", key));
     let final_meta = dir.join(format!("{}.meta.cbor", key));
     let final_asks = dir.join(format!("{}.asks.json", key));
+    let final_prepared = dir.join(format!("{}.prepared.cbor", key));
     let sentinel = dir.join(format!("{}.ok", key));
 
     // Remove sentinel first — marks the entry as incomplete during update.
@@ -310,6 +327,9 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8], 
     if tmp_asks.persist(&final_asks).is_err() {
         return;
     }
+    if tmp_prepared.persist(&final_prepared).is_err() {
+        return;
+    }
 
     // Sentinel written last — entry is only valid when this exists. Its body
     // binds the checksums, not just completeness.
@@ -317,6 +337,7 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8], 
     checksum[0..32].copy_from_slice(blake3::hash(expr_bytes).as_bytes());
     checksum[32..64].copy_from_slice(blake3::hash(meta_bytes).as_bytes());
     checksum[64..96].copy_from_slice(blake3::hash(asks_bytes).as_bytes());
+    checksum[96..128].copy_from_slice(blake3::hash(prepared_bytes).as_bytes());
     let _ = fs::write(&sentinel, checksum);
 }
 
@@ -692,11 +713,12 @@ mod tests {
         let expr = b"expr-data";
         let meta = b"meta-data";
         let asks = b"[]";
+        let prepared = b"prepared-data";
 
         // Before store, load should miss.
         assert!(cache_load(&key).is_none());
 
-        cache_store(&key, expr, meta, asks);
+        cache_store(&key, expr, meta, asks, prepared);
 
         // Sentinel must exist after store.
         let sentinel = temp_dir.path().join("tidepool").join(format!("{}.ok", key));
@@ -706,6 +728,7 @@ mod tests {
         assert_eq!(loaded.0, expr);
         assert_eq!(loaded.1, meta);
         assert_eq!(loaded.2, asks);
+        assert_eq!(loaded.3, prepared);
     }
 
     #[test]
@@ -726,6 +749,19 @@ mod tests {
             cache_load(&key).is_none(),
             "cache_load should return None without sentinel"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_cache_sentinel_misses_after_prepared_cutover() {
+        let temp_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::new("XDG_CACHE_HOME", temp_dir.path());
+        let key = CacheKey("legacy-sentinel".to_string());
+        let dir = temp_dir.path().join("tidepool");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{}.ok", key)), [0; 96]).unwrap();
+
+        assert!(cache_load(&key).is_none());
     }
 
     #[test]

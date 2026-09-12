@@ -6,8 +6,8 @@
 //! `JitEffectMachine`: the external-cancellation flag, the JSON decode
 //! constructor ids, the stack-map registry pointer, and the call-depth
 //! counter (leaf 1); the first-cause runtime error and diagnostics (leaf 2);
-//! and the GC state + GC root registries
-//! (leaf 3: `GC_STATE`, `RUST_ROOTS`, `PERSISTENT_ROOTS`).
+//! the GC state + GC root registries (leaf 3: `GC_STATE`, `RUST_ROOTS`,
+//! `PERSISTENT_ROOTS`); and the external payload ledger (leaf 4).
 //! `install_registries` points the run's `VMContext.machine_state` at it and
 //! installs it as this thread's [`CURRENT_MACHINE`].
 //!
@@ -29,6 +29,16 @@
 //! see the null-vmctx invariant on `RootScope`/`heap_to_value` in
 //! `heap_bridge.rs` for why that no-op is temporally safe.
 //!
+//! External allocation is the narrow exception to the vmctx-only GC reach:
+//! the existing byte/boxed allocation ABIs have no vmctx argument, so they
+//! register through `CURRENT_MACHINE` before initializing or returning the
+//! payload. `RegistryGuard` installs that pointer from the same
+//! `JitEffectMachine::machine_state` placed in vmctx, and restores it before
+//! another machine can run on the thread. Collection reaches the ledger back
+//! through vmctx; `MachineState::drop` reaches it directly. Thus allocation,
+//! tracing/sweep, and teardown converge on the same owner without a process
+//! registry or shared scratch allocation.
+//!
 //! GC-cluster **isolation invariant**: `MAX_CONCURRENT_EVALS` machines can be
 //! live at once, one parked at `ask` on one thread, another running on
 //! another. Per-machine (not process-global) GC state is what keeps two
@@ -45,14 +55,153 @@
 //! and/or installs it as `CURRENT_MACHINE`, exercising the same reach paths
 //! as production instead of a test-only backdoor.
 
+use std::alloc::Layout;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::context::VMContext;
 use crate::host_fns::{GcState, RuntimeError};
 use crate::stack_map::StackMapRegistry;
+
+/// Whether another entry may safely reuse this machine after a failed run.
+///
+/// `Unavailable` is monotonic for the lifetime of a machine: once execution
+/// observes an integrity failure, later cleanup cannot prove that compiled
+/// state, heap roots, and external storage are mutually consistent again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineDisposition {
+    Reusable,
+    Unavailable,
+}
+
+/// The retained first cause and the reuse decision it imposed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineFailure {
+    pub cause: RuntimeError,
+    pub disposition: MachineDisposition,
+}
+
+/// The two GC-external payload shapes owned by a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalStorageKind {
+    Bytes,
+    BoxedArray,
+}
+
+/// Lifetime accounting for a machine's GC-external payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExternalStorageStats {
+    pub allocated_bytes: usize,
+    pub allocated_objects: usize,
+    pub live_bytes: usize,
+    pub live_objects: usize,
+    pub freed_bytes: usize,
+    pub freed_objects: usize,
+}
+
+/// One complete, point-in-time set of slots that collection must trace and
+/// rewrite. Remembered edges stay separately classified: minor collection
+/// consumes them as roots, while major collection reaches them through their
+/// live old/external owners rather than letting a dead owner root itself.
+///
+/// The constructor is private to [`MachineState::complete_root_snapshot`], so
+/// collectors cannot accidentally select only one registry. Stack roots are
+/// supplied by the checked frame walk; every ambient machine registry and the
+/// two VM tail-call slots are joined here in one owning entry point.
+pub(crate) struct GcRootSnapshot {
+    slots: Vec<*mut *mut u8>,
+    remembered_slots: Vec<*mut *mut u8>,
+}
+
+impl GcRootSnapshot {
+    pub(crate) fn into_slots(mut self) -> Vec<*mut *mut u8> {
+        self.slots.append(&mut self.remembered_slots);
+        self.slots
+    }
+
+    /// Strong roots for a full graph trace. Remembered slots describe edges
+    /// from old/external owners; they are not independent roots when deciding
+    /// whether those owners themselves are live.
+    pub(crate) fn into_major_slots(self) -> Vec<*mut *mut u8> {
+        self.slots
+    }
+}
+
+struct ExternalStorage {
+    base: *mut u8,
+    layout: Layout,
+    #[allow(
+        dead_code,
+        reason = "consumed by the independently integrated major collector"
+    )]
+    kind: ExternalStorageKind,
+    logical_len: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "consumed by the independently integrated major collector"
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExternalStorageValidationError {
+    Untracked(*mut u8),
+    InvalidBase,
+    LayoutAlignment {
+        actual: usize,
+    },
+    PointerAlignment {
+        kind: ExternalStorageKind,
+    },
+    KindMismatch {
+        expected: ExternalStorageKind,
+        actual: ExternalStorageKind,
+    },
+    PublishedPointerMismatch {
+        kind: ExternalStorageKind,
+    },
+    SpanOverflow {
+        kind: ExternalStorageKind,
+        logical_len: usize,
+    },
+    SpanExceedsAllocation {
+        kind: ExternalStorageKind,
+        required: usize,
+        allocated: usize,
+    },
+    CapacityPrefixMismatch {
+        recorded: usize,
+        stored: usize,
+    },
+    LogicalLengthMismatch {
+        kind: ExternalStorageKind,
+        recorded: usize,
+        stored: usize,
+    },
+    LedgerChanged,
+}
+
+/// Validated pointer-bearing slots in one tracked external payload.
+#[allow(
+    dead_code,
+    reason = "consumed by the independently integrated major collector"
+)]
+pub(crate) struct ExternalPayloadView {
+    pub(crate) pointer_slots: Vec<*mut *mut u8>,
+}
+
+/// Allocation-bearing sweep plan produced before a major collector commits.
+/// Fields remain private so callers cannot fabricate a partial dead set.
+#[allow(
+    dead_code,
+    reason = "consumed by the independently integrated major collector"
+)]
+pub(crate) struct ExternalSweepPlan {
+    allocated_objects: usize,
+    live_objects: usize,
+    dead: Vec<*mut u8>,
+}
 
 /// Per-machine ambient state. Each cell's wrapper type (`RefCell`/`Cell`) is
 /// chosen to match the try_borrow/borrow-panic/take semantics its callers
@@ -65,6 +214,8 @@ pub struct MachineState {
     stack_map_registry: RefCell<Option<*const StackMapRegistry>>,
     call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
+    disposition: Cell<MachineDisposition>,
+    last_failure: RefCell<Option<MachineFailure>>,
     diagnostics: RefCell<Vec<String>>,
     /// Bumped once per actual collection (`perform_gc`). `deep_force` reads
     /// this to invalidate its address-keyed visited set whenever a GC could have
@@ -96,6 +247,10 @@ pub struct MachineState {
     /// (`free_session_heap`). NOT touched by `clear_run_scratch` — a child
     /// turn's per-run teardown must not strand the parent's continuation.
     stowed_roots: RefCell<Vec<*mut *mut u8>>,
+    /// Stable slots embedded as loads in finalized session fragments. A
+    /// binding may leave the session table while older callable code still
+    /// names its slot, so these remain strong for the machine/code lifetime.
+    code_roots: RefCell<HashSet<*mut *mut u8>>,
     /// Write-barrier armed flag: false until `OldSpace::tenure` first runs.
     /// Before the first tenure there is no old-space, so no old-to-young
     /// store is possible — see `old_space.rs`'s module doc for the invariant.
@@ -118,6 +273,14 @@ pub struct MachineState {
     /// each arena's range here as it is allocated gives a diagnostic pass
     /// old-space bounds without threading `OldSpace` itself through vmctx.
     old_space_arenas: RefCell<Vec<(*const u8, *const u8)>>,
+    /// Payloads allocated outside the moving heap. The map key is the pointer
+    /// published in a Lit's value word; `base` may differ for byte arrays,
+    /// whose ABI pointer follows a hidden allocation-size word.
+    external_storage: RefCell<HashMap<*mut u8, ExternalStorage>>,
+    external_allocated_bytes: Cell<usize>,
+    external_allocated_objects: Cell<usize>,
+    external_freed_bytes: Cell<usize>,
+    external_freed_objects: Cell<usize>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -135,15 +298,23 @@ impl MachineState {
             stack_map_registry: RefCell::new(None),
             call_depth: Cell::new(0),
             runtime_error: RefCell::new(None),
+            disposition: Cell::new(MachineDisposition::Reusable),
+            last_failure: RefCell::new(None),
             diagnostics: RefCell::new(Vec::new()),
             gc_generation: Cell::new(0),
             gc_state: RefCell::new(None),
             rust_roots: RefCell::new(Vec::new()),
             persistent_roots: RefCell::new(Vec::new()),
             stowed_roots: RefCell::new(Vec::new()),
+            code_roots: RefCell::new(HashSet::new()),
             write_barrier_armed: Cell::new(false),
             remembered_slots: RefCell::new(HashSet::new()),
             old_space_arenas: RefCell::new(Vec::new()),
+            external_storage: RefCell::new(HashMap::new()),
+            external_allocated_bytes: Cell::new(0),
+            external_allocated_objects: Cell::new(0),
+            external_freed_bytes: Cell::new(0),
+            external_freed_objects: Cell::new(0),
         }
     }
 
@@ -242,22 +413,39 @@ impl MachineState {
     /// cause; silently dropping it (rather than panicking) is the same
     /// tradeoff `take_runtime_error` already makes.
     pub(crate) fn set_first_cause(&self, cause: RuntimeError) {
+        let disposition = cause.machine_disposition();
+        if disposition == MachineDisposition::Unavailable {
+            self.disposition.set(MachineDisposition::Unavailable);
+        }
         if let Ok(mut slot) = self.runtime_error.try_borrow_mut() {
             if slot.is_none() {
-                *slot = Some(cause);
+                *slot = Some(cause.clone());
+                if let Ok(mut failure) = self.last_failure.try_borrow_mut() {
+                    *failure = Some(MachineFailure {
+                        cause,
+                        disposition: self.disposition.get(),
+                    });
+                }
+            }
+        }
+        // A later integrity observation cannot replace the first cause, but
+        // it still makes reuse unsafe. Keep the retained cause and upgrade
+        // its disposition to match the machine's monotonic decision.
+        if disposition == MachineDisposition::Unavailable {
+            if let Ok(mut failure) = self.last_failure.try_borrow_mut() {
+                if let Some(failure) = failure.as_mut() {
+                    failure.disposition = MachineDisposition::Unavailable;
+                }
             }
         }
     }
 
-    /// Unconditionally overwrite the pending cause, rather than preserving
-    /// an earlier one (unlike [`Self::set_first_cause`]'s first-write-wins).
-    ///
-    /// Same `try_borrow_mut` defense as [`Self::set_first_cause`] — this
-    /// writer has the identical stuck-RefCell hazard as its sibling.
-    pub(crate) fn set_runtime_error_overwrite(&self, cause: RuntimeError) {
-        if let Ok(mut slot) = self.runtime_error.try_borrow_mut() {
-            *slot = Some(cause);
-        }
+    pub(crate) fn disposition(&self) -> MachineDisposition {
+        self.disposition.get()
+    }
+
+    pub(crate) fn last_failure(&self) -> Option<MachineFailure> {
+        self.last_failure.try_borrow().ok().and_then(|f| f.clone())
     }
 
     /// Take the pending cause, if any. Uses `try_borrow_mut` defensively: this
@@ -512,6 +700,14 @@ impl MachineState {
         out.extend(self.stowed_roots.borrow().iter().copied());
     }
 
+    pub(crate) fn register_code_roots(&self, roots: impl IntoIterator<Item = *mut *mut u8>) {
+        self.code_roots.borrow_mut().extend(roots);
+    }
+
+    pub(crate) fn extend_code_roots(&self, out: &mut Vec<*mut *mut u8>) {
+        out.extend(self.code_roots.borrow().iter().copied());
+    }
+
     // --- write barrier / remembered set (generational write barrier) ------
 
     /// Arm the barrier. Idempotent; `OldSpace::tenure` calls this unconditionally
@@ -546,6 +742,56 @@ impl MachineState {
     /// sibling of `extend_stowed_roots`, used by `perform_gc`.
     pub(crate) fn extend_remembered_slots(&self, out: &mut Vec<*mut *mut u8>) {
         out.extend(self.remembered_slots.borrow().iter().copied());
+    }
+
+    /// Join a successful generated-frame walk with every ambient root registry.
+    ///
+    /// `tail_callee_slot` and `tail_arg_slot` are stable fields in the live
+    /// `VMContext`. They are omitted only when their current value is null,
+    /// preserving the existing collector behavior. Other categories retain
+    /// null-valued slots: the slot itself is stable and a later collection may
+    /// need to rewrite it after its owner fills the value.
+    ///
+    /// This method does not make an unsuccessful frame walk complete. Its caller
+    /// must construct the stack-root slice only after `walk_frames` succeeds;
+    /// the opaque return type then prevents downstream collectors from rebuilding
+    /// a partial registry list.
+    pub(crate) unsafe fn complete_root_snapshot(
+        &self,
+        stack_roots: &[*mut *mut u8],
+        tail_callee_slot: *mut *mut u8,
+        tail_arg_slot: *mut *mut u8,
+    ) -> GcRootSnapshot {
+        let mut slots = Vec::with_capacity(
+            stack_roots.len()
+                + self.rust_roots.borrow().len()
+                + self.persistent_roots.borrow().len()
+                + self.stowed_roots.borrow().len()
+                + self.code_roots.borrow().len()
+                + self.remembered_slots.borrow().len()
+                + 2,
+        );
+        slots.extend_from_slice(stack_roots);
+        self.extend_rust_roots(&mut slots);
+        self.extend_persistent_roots(&mut slots);
+        self.extend_stowed_roots(&mut slots);
+        self.extend_code_roots(&mut slots);
+        let mut remembered_slots = Vec::with_capacity(self.remembered_slots.borrow().len());
+        self.extend_remembered_slots(&mut remembered_slots);
+
+        // SAFETY: the caller supplies valid VMContext field addresses.
+        if !tail_callee_slot.is_null() && !unsafe { *tail_callee_slot }.is_null() {
+            slots.push(tail_callee_slot);
+        }
+        // SAFETY: the caller supplies valid VMContext field addresses.
+        if !tail_arg_slot.is_null() && !unsafe { *tail_arg_slot }.is_null() {
+            slots.push(tail_arg_slot);
+        }
+
+        GcRootSnapshot {
+            slots,
+            remembered_slots,
+        }
     }
 
     /// Snapshot of every currently-remembered slot. Read-only; does not
@@ -588,6 +834,299 @@ impl MachineState {
     /// reach `MachineState` (via vmctx), not `OldSpace` itself.
     pub(crate) fn old_space_arena_ranges(&self) -> Vec<(*const u8, *const u8)> {
         self.old_space_arenas.borrow().iter().copied().collect()
+    }
+
+    // --- GC-external byte/reference storage -------------------------------
+
+    /// Take ownership of a fresh allocation before its pointer is initialized
+    /// or published to JIT code.
+    pub(crate) fn register_external_storage(
+        &self,
+        published: *mut u8,
+        base: *mut u8,
+        layout: Layout,
+        kind: ExternalStorageKind,
+        logical_len: usize,
+    ) {
+        let old = self.external_storage.borrow_mut().insert(
+            published,
+            ExternalStorage {
+                base,
+                layout,
+                kind,
+                logical_len,
+            },
+        );
+        debug_assert!(
+            old.is_none(),
+            "external allocation pointer registered twice"
+        );
+        self.external_allocated_bytes.set(
+            self.external_allocated_bytes
+                .get()
+                .saturating_add(layout.size()),
+        );
+        self.external_allocated_objects
+            .set(self.external_allocated_objects.get().saturating_add(1));
+    }
+
+    pub(crate) fn set_external_logical_len(&self, ptr: *mut u8, logical_len: usize) {
+        if let Some(record) = self.external_storage.borrow_mut().get_mut(&ptr) {
+            record.logical_len = logical_len;
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "consumed by the independently integrated major collector"
+    )]
+    fn validate_external_record(
+        published: *mut u8,
+        record: &ExternalStorage,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let prefix_alignment = std::mem::align_of::<u64>();
+        if record.base.is_null() {
+            return Err(ExternalStorageValidationError::InvalidBase);
+        }
+        if record.layout.align() < prefix_alignment {
+            return Err(ExternalStorageValidationError::LayoutAlignment {
+                actual: record.layout.align(),
+            });
+        }
+        if (record.base as usize) % prefix_alignment != 0
+            || (published as usize) % prefix_alignment != 0
+        {
+            return Err(ExternalStorageValidationError::PointerAlignment { kind: record.kind });
+        }
+        let stored_len = match record.kind {
+            ExternalStorageKind::Bytes => {
+                // Byte arrays publish eight bytes after their allocation base:
+                // [capacity][logical length][bytes...].
+                let expected_published = (record.base as usize).checked_add(8).ok_or(
+                    ExternalStorageValidationError::SpanOverflow {
+                        kind: record.kind,
+                        logical_len: record.logical_len,
+                    },
+                )?;
+                if published as usize != expected_published {
+                    return Err(ExternalStorageValidationError::PublishedPointerMismatch {
+                        kind: record.kind,
+                    });
+                }
+                let required = 16usize.checked_add(record.logical_len).ok_or(
+                    ExternalStorageValidationError::SpanOverflow {
+                        kind: record.kind,
+                        logical_len: record.logical_len,
+                    },
+                )?;
+                if required > record.layout.size() {
+                    return Err(ExternalStorageValidationError::SpanExceedsAllocation {
+                        kind: record.kind,
+                        required,
+                        allocated: record.layout.size(),
+                    });
+                }
+                // SAFETY: pointer relationship and required allocation span
+                // were checked above before either prefix is read.
+                let stored_capacity = unsafe { *(record.base as *const u64) } as usize;
+                if stored_capacity != record.layout.size() {
+                    return Err(ExternalStorageValidationError::CapacityPrefixMismatch {
+                        recorded: record.layout.size(),
+                        stored: stored_capacity,
+                    });
+                }
+                // SAFETY: required >= 16, so the published length prefix is
+                // within the registered allocation.
+                (unsafe { *(published as *const u64) }) as usize
+            }
+            ExternalStorageKind::BoxedArray => {
+                if published != record.base {
+                    return Err(ExternalStorageValidationError::PublishedPointerMismatch {
+                        kind: record.kind,
+                    });
+                }
+                let required = record
+                    .logical_len
+                    .checked_mul(std::mem::size_of::<*mut u8>())
+                    .and_then(|bytes| 8usize.checked_add(bytes))
+                    .ok_or(ExternalStorageValidationError::SpanOverflow {
+                        kind: record.kind,
+                        logical_len: record.logical_len,
+                    })?;
+                if required > record.layout.size() {
+                    return Err(ExternalStorageValidationError::SpanExceedsAllocation {
+                        kind: record.kind,
+                        required,
+                        allocated: record.layout.size(),
+                    });
+                }
+                // SAFETY: required >= 8, so the length prefix is contained.
+                (unsafe { *(published as *const u64) }) as usize
+            }
+        };
+        if stored_len != record.logical_len {
+            return Err(ExternalStorageValidationError::LogicalLengthMismatch {
+                kind: record.kind,
+                recorded: record.logical_len,
+                stored: stored_len,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a wrapper's published payload identity before exposing boxed
+    /// reference slots to graph traversal. Byte payloads yield no heap edges.
+    #[allow(
+        dead_code,
+        reason = "consumed by the independently integrated major collector"
+    )]
+    pub(crate) fn external_payload_view(
+        &self,
+        published: *mut u8,
+        expected: ExternalStorageKind,
+    ) -> Result<ExternalPayloadView, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let record = storage
+            .get(&published)
+            .ok_or(ExternalStorageValidationError::Untracked(published))?;
+        if record.kind != expected {
+            return Err(ExternalStorageValidationError::KindMismatch {
+                expected,
+                actual: record.kind,
+            });
+        }
+        Self::validate_external_record(published, record)?;
+        let pointer_slots = if record.kind == ExternalStorageKind::BoxedArray {
+            (0..record.logical_len)
+                // SAFETY: validation proved the complete slot span is inside
+                // the registered allocation.
+                .map(|index| unsafe { published.add(8 + index * 8) as *mut *mut u8 })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(ExternalPayloadView { pointer_slots })
+    }
+
+    /// Validate wrapper-declared payloads and remember every boxed element
+    /// slot. This is called when wrappers first move into old-space, before
+    /// the tenure fixup minor collection, so initialization performed while
+    /// the barrier was disarmed cannot strand a nursery child.
+    pub(crate) fn remember_external_payload_edges(
+        &self,
+        payloads: impl IntoIterator<Item = (*mut u8, ExternalStorageKind)>,
+    ) -> Result<(), ExternalStorageValidationError> {
+        for (published, kind) in payloads {
+            for slot in self.external_payload_view(published, kind)?.pointer_slots {
+                self.register_remembered_slot(slot);
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the complete ledger and stage the exact unmarked allocation
+    /// identities. Staging allocates; commit below does not.
+    #[allow(
+        dead_code,
+        reason = "consumed by the independently integrated major collector"
+    )]
+    pub(crate) fn plan_external_sweep(
+        &self,
+        marked: &HashSet<*mut u8>,
+    ) -> Result<ExternalSweepPlan, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        for &published in marked {
+            if !storage.contains_key(&published) {
+                return Err(ExternalStorageValidationError::Untracked(published));
+            }
+        }
+        for (&published, record) in storage.iter() {
+            Self::validate_external_record(published, record)?;
+        }
+        let dead = storage
+            .keys()
+            .copied()
+            .filter(|pointer| !marked.contains(pointer))
+            .collect();
+        Ok(ExternalSweepPlan {
+            allocated_objects: self.external_allocated_objects.get(),
+            live_objects: storage.len(),
+            dead,
+        })
+    }
+
+    /// Commit a previously validated sweep without allocating. The major
+    /// collector holds exclusive machine access between plan and commit; the
+    /// counters still fence accidental stale-plan reuse before any mutation.
+    #[allow(
+        dead_code,
+        reason = "consumed by the independently integrated major collector"
+    )]
+    pub(crate) fn commit_external_sweep(
+        &self,
+        plan: ExternalSweepPlan,
+    ) -> Result<ExternalStorageStats, ExternalStorageValidationError> {
+        if self.external_allocated_objects.get() != plan.allocated_objects
+            || self.external_storage.borrow().len() != plan.live_objects
+            || !plan
+                .dead
+                .iter()
+                .all(|pointer| self.external_storage.borrow().contains_key(pointer))
+        {
+            return Err(ExternalStorageValidationError::LedgerChanged);
+        }
+        for pointer in plan.dead {
+            let removed = self.release_external_storage(pointer);
+            debug_assert!(removed, "validated external sweep entry disappeared");
+        }
+        Ok(self.external_storage_stats())
+    }
+
+    /// Release one allocation, first retiring remembered slots located in it.
+    pub(crate) fn release_external_storage(&self, ptr: *mut u8) -> bool {
+        let Some(record) = self.external_storage.borrow_mut().remove(&ptr) else {
+            return false;
+        };
+        let start = record.base as *const u8;
+        // SAFETY: `layout` is the exact allocation layout registered with
+        // `base`, so this address computation stays within/one-past it.
+        let end = unsafe { record.base.add(record.layout.size()) as *const u8 };
+        self.forget_remembered_range(start, end);
+        // SAFETY: ownership was removed above, making this the sole dealloc.
+        unsafe { std::alloc::dealloc(record.base, record.layout) };
+        self.external_freed_bytes.set(
+            self.external_freed_bytes
+                .get()
+                .saturating_add(record.layout.size()),
+        );
+        self.external_freed_objects
+            .set(self.external_freed_objects.get().saturating_add(1));
+        true
+    }
+
+    fn release_all_external_storage(&self) {
+        let pointers: Vec<_> = self.external_storage.borrow().keys().copied().collect();
+        for ptr in pointers {
+            self.release_external_storage(ptr);
+        }
+    }
+
+    pub fn external_storage_stats(&self) -> ExternalStorageStats {
+        let live = self.external_storage.borrow();
+        ExternalStorageStats {
+            allocated_bytes: self.external_allocated_bytes.get(),
+            allocated_objects: self.external_allocated_objects.get(),
+            live_bytes: live.values().map(|record| record.layout.size()).sum(),
+            live_objects: live.len(),
+            freed_bytes: self.external_freed_bytes.get(),
+            freed_objects: self.external_freed_objects.get(),
+        }
+    }
+}
+
+impl Drop for MachineState {
+    fn drop(&mut self) {
+        self.release_all_external_storage();
     }
 }
 
@@ -736,11 +1275,229 @@ mod tests {
 
         // has_runtime_error: conservative `true` fallback, not a panic.
         assert!(ms.has_runtime_error());
-        // set_first_cause / set_runtime_error_overwrite: silently no-op, not a panic.
+        // set_first_cause: silently cannot write the cause, but does not panic.
         ms.set_first_cause(RuntimeError::Cancelled);
-        ms.set_runtime_error_overwrite(RuntimeError::Cancelled);
         // take_runtime_error: None, not a panic.
         assert_eq!(ms.take_runtime_error(), None);
+    }
+
+    #[test]
+    fn first_cause_wins_while_integrity_disposition_is_monotonic() {
+        let ms = MachineState::new();
+        ms.set_first_cause(RuntimeError::Cancelled);
+        ms.set_first_cause(RuntimeError::BadPointer);
+
+        assert_eq!(ms.take_runtime_error(), Some(RuntimeError::Cancelled));
+        assert_eq!(ms.disposition(), MachineDisposition::Unavailable);
+        assert_eq!(
+            ms.last_failure(),
+            Some(MachineFailure {
+                cause: RuntimeError::Cancelled,
+                disposition: MachineDisposition::Unavailable,
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_language_failure_remains_reusable() {
+        let ms = MachineState::new();
+        ms.set_first_cause(RuntimeError::UserErrorMsg("boom".into()));
+
+        assert_eq!(ms.disposition(), MachineDisposition::Reusable);
+        assert_eq!(
+            ms.take_runtime_error(),
+            Some(RuntimeError::UserErrorMsg("boom".into()))
+        );
+    }
+
+    #[test]
+    fn complete_root_snapshot_joins_every_registry_and_live_tail_slot() {
+        let ms = MachineState::new();
+        let mut stack_value = 1usize as *mut u8;
+        let mut rust_value = 2usize as *mut u8;
+        let mut persistent_value = 3usize as *mut u8;
+        let mut stowed_value = 4usize as *mut u8;
+        let mut remembered_value = 5usize as *mut u8;
+        let mut code_value = 6usize as *mut u8;
+        let mut tail_callee = 7usize as *mut u8;
+        let mut tail_arg = std::ptr::null_mut();
+
+        ms.register_rust_root(&mut rust_value);
+        ms.register_persistent_root(&mut persistent_value);
+        ms.register_stowed_root(&mut stowed_value);
+        ms.register_code_roots([&mut code_value as *mut *mut u8]);
+        ms.register_remembered_slot(&mut remembered_value);
+
+        // SAFETY: every argument is the stable address of a live local pointer
+        // slot for the duration of this assertion.
+        let slots = unsafe {
+            ms.complete_root_snapshot(&[&mut stack_value], &mut tail_callee, &mut tail_arg)
+        }
+        .into_slots();
+
+        assert_eq!(slots.len(), 7);
+        for expected in [
+            &mut stack_value as *mut *mut u8,
+            &mut rust_value,
+            &mut persistent_value,
+            &mut stowed_value,
+            &mut code_value,
+            &mut remembered_value,
+            &mut tail_callee,
+        ] {
+            assert!(slots.contains(&expected));
+        }
+        assert!(!slots.contains(&(&mut tail_arg as *mut *mut u8)));
+    }
+
+    #[test]
+    fn major_snapshot_keeps_remembered_edges_distinct_from_strong_roots() {
+        let ms = MachineState::new();
+        let mut persistent = 1usize as *mut u8;
+        let mut remembered = 2usize as *mut u8;
+        ms.register_persistent_root(&mut persistent);
+        ms.register_remembered_slot(&mut remembered);
+
+        let slots =
+            unsafe { ms.complete_root_snapshot(&[], std::ptr::null_mut(), std::ptr::null_mut()) }
+                .into_major_slots();
+        assert_eq!(slots, vec![&mut persistent as *mut *mut u8]);
+        assert!(!slots.contains(&(&mut remembered as *mut *mut u8)));
+    }
+
+    unsafe fn register_test_external(
+        ms: &MachineState,
+        kind: ExternalStorageKind,
+        logical_len: usize,
+    ) -> *mut u8 {
+        let (total, published_offset) = match kind {
+            ExternalStorageKind::Bytes => (16 + logical_len, 8),
+            ExternalStorageKind::BoxedArray => (8 + logical_len * 8, 0),
+        };
+        let layout = Layout::from_size_align(total, 8).unwrap();
+        // SAFETY: test layout is valid and nonempty.
+        let base = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!base.is_null());
+        // SAFETY: published_offset is within the allocation.
+        let published = unsafe { base.add(published_offset) };
+        match kind {
+            ExternalStorageKind::Bytes => {
+                // SAFETY: the allocation contains both prefixes.
+                unsafe {
+                    *(base as *mut u64) = total as u64;
+                    *(published as *mut u64) = logical_len as u64;
+                }
+            }
+            ExternalStorageKind::BoxedArray => {
+                // SAFETY: the allocation contains its length prefix.
+                unsafe { *(published as *mut u64) = logical_len as u64 };
+            }
+        }
+        ms.register_external_storage(published, base, layout, kind, logical_len);
+        published
+    }
+
+    #[test]
+    fn external_sweep_retains_marked_and_releases_unmarked_once() {
+        let ms = MachineState::new();
+        // SAFETY: helper registers allocations directly with this machine.
+        let live = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 3) };
+        // SAFETY: helper registers allocations directly with this machine.
+        let dead = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        let dead_slot = unsafe { dead.add(8) as *mut *mut u8 };
+        ms.register_remembered_slot(dead_slot);
+
+        let mut marked = HashSet::new();
+        assert!(marked.insert(live));
+        assert!(
+            !marked.insert(live),
+            "aliased payload identity is deduplicated"
+        );
+        let first = ms
+            .commit_external_sweep(ms.plan_external_sweep(&marked).unwrap())
+            .unwrap();
+        assert_eq!(first.live_objects, 1);
+        assert_eq!(first.freed_objects, 1);
+        assert_eq!(ms.remembered_slots_count(), 0);
+
+        let second = ms
+            .commit_external_sweep(ms.plan_external_sweep(&marked).unwrap())
+            .unwrap();
+        assert_eq!(second.live_objects, 1);
+        assert_eq!(second.freed_objects, 1);
+
+        let final_stats = ms
+            .commit_external_sweep(ms.plan_external_sweep(&HashSet::new()).unwrap())
+            .unwrap();
+        assert_eq!(final_stats.live_objects, 0);
+        assert_eq!(final_stats.freed_objects, 2);
+        assert_eq!(final_stats.freed_bytes, final_stats.allocated_bytes);
+    }
+
+    #[test]
+    fn external_payload_view_validates_kind_length_and_slot_span() {
+        let ms = MachineState::new();
+        // SAFETY: helper registers the exact boxed-array layout.
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        let view = ms
+            .external_payload_view(boxed, ExternalStorageKind::BoxedArray)
+            .unwrap();
+        assert_eq!(view.pointer_slots.len(), 2);
+        assert_eq!(view.pointer_slots[0], unsafe {
+            boxed.add(8) as *mut *mut u8
+        });
+        assert_eq!(view.pointer_slots[1], unsafe {
+            boxed.add(16) as *mut *mut u8
+        });
+        assert!(matches!(
+            ms.external_payload_view(boxed, ExternalStorageKind::Bytes),
+            Err(ExternalStorageValidationError::KindMismatch { .. })
+        ));
+        assert!(matches!(
+            ms.plan_external_sweep(&HashSet::from([boxed.wrapping_add(1)])),
+            Err(ExternalStorageValidationError::Untracked(_))
+        ));
+
+        // SAFETY: the registered allocation contains its prefix; corrupt only
+        // the logical value to prove validation occurs before slot traversal.
+        unsafe { *(boxed as *mut u64) = 3 };
+        let before = ms.external_storage_stats();
+        assert!(matches!(
+            ms.plan_external_sweep(&HashSet::new()),
+            Err(ExternalStorageValidationError::LogicalLengthMismatch { .. })
+        ));
+        assert_eq!(ms.external_storage_stats(), before);
+
+        // Align the ledger with the corrupted prefix so the registered
+        // allocation is too short for its claimed pointer slots.
+        unsafe { *(boxed as *mut u64) = 3 };
+        ms.external_storage
+            .borrow_mut()
+            .get_mut(&boxed)
+            .unwrap()
+            .logical_len = 3;
+        assert!(matches!(
+            ms.plan_external_sweep(&HashSet::new()),
+            Err(ExternalStorageValidationError::SpanExceedsAllocation { .. })
+        ));
+        assert_eq!(ms.external_storage_stats(), before);
+    }
+
+    #[test]
+    fn external_sweep_rejects_stale_plan_before_mutation() {
+        let ms = MachineState::new();
+        // SAFETY: helper registers allocations directly with this machine.
+        let first = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 1) };
+        let plan = ms.plan_external_sweep(&HashSet::new()).unwrap();
+        // SAFETY: a second valid allocation changes the fenced ledger epoch.
+        let _second = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 2) };
+        let before = ms.external_storage_stats();
+        assert!(matches!(
+            ms.commit_external_sweep(plan),
+            Err(ExternalStorageValidationError::LedgerChanged)
+        ));
+        assert_eq!(ms.external_storage_stats(), before);
+        assert!(ms.external_storage.borrow().contains_key(&first));
     }
 
     #[test]

@@ -105,7 +105,8 @@ fn well_formed_chain_collects_expected_roots() {
     let bounds = stack.bounds();
     let start_fp = stack.addr(0);
 
-    let roots = unsafe { walk_frames(start_fp, &registry, bounds, false) };
+    let roots = unsafe { walk_frames(start_fp, &registry, bounds, false) }
+        .expect("well-formed walk must be complete");
 
     let expected = vec![
         StackRoot {
@@ -135,10 +136,10 @@ fn oversized_frame_size_is_controlled_failure() {
     let bounds = stack.bounds();
     let start_fp = stack.addr(0);
 
-    let roots = unsafe { walk_frames(start_fp, &registry, bounds, false) };
+    let result = unsafe { walk_frames(start_fp, &registry, bounds, false) };
     assert!(
-        roots.is_empty(),
-        "oversized frame_size must not yield any roots, got {roots:?}"
+        result.is_err(),
+        "oversized frame_size must reject the snapshot"
     );
 }
 
@@ -166,7 +167,7 @@ fn oversized_frame_size_panics_in_diagnostic_mode() {
 
 /// (c) A stack-map offset that lands outside bounds even though
 /// `sp_at_safepoint` itself is valid: controlled failure, and roots
-/// collected before the bad offset (within the same frame) are kept.
+/// no partial root prefix is returned.
 #[test]
 fn out_of_bounds_stack_map_offset_is_controlled_failure() {
     let mut stack = SyntheticStack::new(4);
@@ -180,15 +181,8 @@ fn out_of_bounds_stack_map_offset_is_controlled_failure() {
     let bounds = stack.bounds();
     let start_fp = stack.addr(0);
 
-    let roots = unsafe { walk_frames(start_fp, &registry, bounds, false) };
-    assert_eq!(
-        roots,
-        vec![StackRoot {
-            stack_slot_addr: stack.addr(2) as *mut u64,
-            heap_ptr: 0x3333_3333_3333_3333u64 as *mut u8,
-        }],
-        "only the root collected before the bad offset should survive"
-    );
+    let result = unsafe { walk_frames(start_fp, &registry, bounds, false) };
+    assert!(result.is_err(), "a partial root prefix must never escape");
 }
 
 /// Same corruption as above under diagnostic mode: panics.
@@ -224,8 +218,8 @@ fn fp_outside_bounds_stops_immediately() {
     let start_fp = bounds.high + 0x1000_0000;
 
     let registry = jit_registry(0, &[]);
-    let roots = unsafe { walk_frames(start_fp, &registry, bounds, false) };
-    assert!(roots.is_empty());
+    let result = unsafe { walk_frames(start_fp, &registry, bounds, false) };
+    assert!(result.is_err());
 }
 
 /// Same corruption as above under diagnostic mode: panics.
@@ -258,12 +252,44 @@ fn terminating_non_jit_frame_stops_cleanly() {
     let start_fp = stack.addr(0);
     let registry = jit_registry(0, &[]); // no safepoint at NON_JIT_RETURN_ADDR
 
-    let roots = unsafe { walk_frames(start_fp, &registry, bounds, false) };
+    let roots = unsafe { walk_frames(start_fp, &registry, bounds, false) }.unwrap();
     assert!(roots.is_empty());
 
-    let roots_diagnostic = unsafe { walk_frames(start_fp, &registry, bounds, true) };
+    let roots_diagnostic = unsafe { walk_frames(start_fp, &registry, bounds, true) }.unwrap();
     assert!(
         roots_diagnostic.is_empty(),
         "a clean terminating non-JIT frame must not panic even in diagnostic mode"
     );
+}
+
+#[test]
+fn jit_pc_without_exact_stack_map_rejects_snapshot() {
+    let mut stack = SyntheticStack::new(4);
+    stack.set(0, 0);
+    stack.set(1, (JIT_RETURN_ADDR + 1) as u64);
+    let registry = jit_registry(0, &[]);
+
+    let result = unsafe { walk_frames(stack.addr(0), &registry, stack.bounds(), false) };
+    assert!(result.is_err());
+}
+
+#[test]
+fn nonzero_self_and_backward_links_reject_snapshot() {
+    let registry = jit_registry(0, &[]);
+    for link in [0usize, 1] {
+        let mut stack = SyntheticStack::new(4);
+        let fp = stack.addr(1);
+        let saved_fp = if link == 0 { fp } else { stack.addr(0) };
+        stack.set(1, saved_fp as u64);
+        stack.set(2, NON_JIT_RETURN_ADDR as u64);
+        let result = unsafe { walk_frames(fp, &registry, stack.bounds(), false) };
+        assert!(result.is_err(), "link {fp:#x} -> {saved_fp:#x} must fail");
+    }
+}
+
+#[test]
+fn zero_start_is_complete_empty_snapshot() {
+    let registry = jit_registry(0, &[]);
+    let roots = unsafe { walk_frames(0, &registry, StackBounds::new(0, 0), false) }.unwrap();
+    assert!(roots.is_empty());
 }

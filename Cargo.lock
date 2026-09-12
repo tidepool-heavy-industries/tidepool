@@ -4272,6 +4272,10 @@ dependencies = [
 [[package]]
 name = "tidepool-heap"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tidepool-repr",
+]
 
 [[package]]
 name = "tidepool-macro"
