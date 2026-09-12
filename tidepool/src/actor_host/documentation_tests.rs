@@ -25,6 +25,55 @@ async fn committed(
     result
 }
 
+#[tokio::test]
+async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation() {
+    let campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+
+    let committed = committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")).await;
+    let items = committed["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "{committed:?}");
+    assert_eq!(items[3]["status"], "committed", "{committed:?}");
+    assert!(
+        items[3]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Nothing")),
+        "{committed:?}"
+    );
+
+    let rejected =
+        dispatch_haskell_script(root.as_ref(), include_str!("notebook_nominal_rejected.hs")).await;
+    assert_eq!(rejected["status"], "rejected", "{rejected:?}");
+    assert_eq!(
+        rejected["items"].as_array().unwrap().len(),
+        1,
+        "{rejected:?}"
+    );
+
+    let missing_declaration = dispatch_haskell_script(
+        root.as_ref(),
+        include_str!("notebook_nominal_scope_probe.hs"),
+    )
+    .await;
+    assert_eq!(
+        missing_declaration["status"], "rejected",
+        "{missing_declaration:?}"
+    );
+    assert!(
+        missing_declaration.to_string().contains("MustNotCommit")
+            && missing_declaration.to_string().contains("Not in scope"),
+        "{missing_declaration:?}"
+    );
+
+    let missing_binding = dispatch_haskell_script(root.as_ref(), "willNotRun").await;
+    assert_eq!(missing_binding["status"], "rejected", "{missing_binding:?}");
+    assert!(
+        missing_binding.to_string().contains("willNotRun")
+            && missing_binding.to_string().contains("Not in scope"),
+        "{missing_binding:?}"
+    );
+}
+
 fn open_test_fork(
     campaign: &TestCampaign,
     child: &tidepool_actor::LocalResidentInstallation,
