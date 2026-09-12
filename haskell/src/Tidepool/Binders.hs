@@ -24,13 +24,21 @@ module Tidepool.Binders
   , CellSourceSpan(..)
   , CellSourceItem(..)
   , CellSplitError(..)
+  , renderCellSplitError
+  , PragmaKind(..)
+  , LocatedPragma(..)
+  , LocatedImport(..)
+  , SourcePrologue(..)
+  , DeclarationSource(..)
+  , CellSourcePlan(..)
+  , declarationSourceWithTemplate
+  , renderDeclarationForTemplate
   , splitCellWithFlags
   , CellAnalysisItem(..)
   , CellAnalysisSourceItem(..)
   , analyzeCellWithFlags
   , analyzeCell
   , renderCellCheckSource
-  , renderPinnedCellCheckSource
   , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
   , TemplateSelector(..)
@@ -44,12 +52,16 @@ module Tidepool.Binders
   ) where
 
 import GHC
-import GHC.Driver.Session (xopt_set)
+import GHC.Driver.Session (xopt, xopt_set, parseDynamicFilePragma)
+import GHC.Utils.Outputable (showSDocOneLine, defaultSDocContext, ppr)
 import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser (parseStatement, parseDeclaration)
 import qualified GHC.Parser (parseModule)
+import qualified GHC.Parser as Parser (parseImport)
+import GHC.Parser.Header (getOptions)
 import GHC.Parser.Lexer
   ( ParseResult(..)
+  , Token(..)
   , initParserState
   , lexTokenStream
   , unP
@@ -60,10 +72,12 @@ import GHC.Data.FastString (mkFastString)
 import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Error (errorsFound)
 import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
+import Data.Char (isSpace)
 import Data.Foldable (toList)
-import Data.List (intercalate, isInfixOf, isPrefixOf, nub, partition, sort)
+import Data.List (intercalate, isInfixOf, isPrefixOf, nub, partition, sort, stripPrefix)
 import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -72,6 +86,7 @@ import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
+import Tidepool.TurnSource (spliceTemplate)
 
 -- | A binder a declaration introduces.
 --
@@ -222,8 +237,158 @@ data CellSourceItem = CellSourceItem
   , cellSourceText :: String
   } deriving (Eq, Show)
 
-data CellSplitError = CellLexFailure
+data CellSplitError
+  = CellLexFailure
+  | CellPrologueFailure CellSourceSpan String
+  | CellHeaderFailure String
   deriving (Eq, Show)
+
+renderCellSplitError :: CellSplitError -> String
+renderCellSplitError CellLexFailure = "<cell>:1:1: GHC could not lex the notebook cell"
+renderCellSplitError (CellPrologueFailure sourceSpan message) =
+  "<cell>:" ++ show (cellStartLine sourceSpan) ++ ":" ++ show (cellStartColumn sourceSpan)
+    ++ ": " ++ message
+renderCellSplitError (CellHeaderFailure message) =
+  "cell check template header: " ++ message
+
+data PragmaKind = LanguagePragma | OptionsGhcPragma
+  deriving (Eq, Show)
+
+data LocatedPragma = LocatedPragma
+  { locatedPragmaKind :: PragmaKind
+  , locatedPragmaSpan :: CellSourceSpan
+  , locatedPragmaSource :: String
+  } deriving (Eq, Show)
+
+data LocatedImport = LocatedImport
+  { locatedImportSpan :: CellSourceSpan
+  , locatedImportSource :: String
+  } deriving (Eq, Show)
+
+data SourcePrologue = SourcePrologue
+  { prologuePragmas :: [LocatedPragma]
+  , prologueImports :: [LocatedImport]
+  } deriving (Eq, Show)
+
+data DeclarationSource = DeclarationSource
+  { declarationPrologue :: SourcePrologue
+  , declarationBody :: String
+  } deriving (Eq, Show)
+
+data CellSourcePlan = CellSourcePlan
+  { cellPlanPrologue :: SourcePrologue
+  , cellPlanItems :: [CellAnalysisItem]
+  } deriving (Eq, Show)
+
+emptyPrologue :: SourcePrologue
+emptyPrologue = SourcePrologue [] []
+
+spanToCellSpan :: SrcSpan -> CellSourceSpan
+spanToCellSpan (RealSrcSpan sourceSpan _) = CellSourceSpan
+  (srcSpanStartLine sourceSpan) (srcSpanStartCol sourceSpan)
+  (srcSpanEndLine sourceSpan) (srcSpanEndCol sourceSpan)
+spanToCellSpan _ = CellSourceSpan 1 1 1 1
+
+cellEffectiveFlags :: DynFlags -> String -> String -> IO (Either CellSplitError DynFlags)
+cellEffectiveFlags initial template source = do
+  let defaults = foldl' xopt_set initial stmtExtensions
+      (templateMessages, templateOptions) =
+        getOptions (initParserOpts defaults) (stringToStringBuffer template) "<cell-template>"
+  if errorsFound templateMessages
+    then pure (Left (CellHeaderFailure "GHC could not read template options"))
+    else do
+      (templateFlags, templateLeftovers, templateFlagMessages) <-
+        parseDynamicFilePragma defaults templateOptions
+      if errorsFound templateFlagMessages || not (null templateLeftovers)
+        then pure (Left (CellHeaderFailure "GHC rejected template options"))
+        else do
+          let (sourceMessages, sourceOptions) =
+                getOptions (initParserOpts templateFlags) (stringToStringBuffer source) "<cell>"
+              optionSpan = case sourceOptions of
+                L sourceSpan _ : _ -> spanToCellSpan sourceSpan
+                [] -> CellSourceSpan 1 1 1 1
+          if errorsFound sourceMessages
+            then pure (Left (CellPrologueFailure optionSpan "GHC could not read cell options"))
+            else do
+              (effective, leftovers, sourceFlagMessages) <-
+                parseDynamicFilePragma templateFlags sourceOptions
+              if errorsFound sourceFlagMessages || not (null leftovers)
+                then pure (Left (CellPrologueFailure optionSpan "GHC rejected cell options"))
+                else if xopt Cpp effective || gopt Opt_Pp effective
+                  || any (isPrefixOf "-pgmF" . unLoc) (templateOptions ++ sourceOptions)
+                  then pure (Left (CellPrologueFailure optionSpan
+                    "CPP and custom preprocessors are unsupported in notebook cells"))
+                  else pure (Right effective)
+
+collectPrologue
+  :: DynFlags
+  -> [CellSourceItem]
+  -> Either CellSplitError (SourcePrologue, [CellAnalysisSourceItem], [CellSourceItem])
+collectPrologue flags = go emptyPrologue [] False
+  where
+    go prologue headers _ [] = Right (prologue, reverse headers, [])
+    go prologue headers seenImport items@(item : rest) =
+      case firstToken item of
+        Just (L sourceSpan (ITblockComment raw _))
+          | not seenImport, Just kind <- pragmaKind raw ->
+              let pragma = LocatedPragma kind (spanToCellSpan sourceSpan) raw
+               in go prologue { prologuePragmas = prologuePragmas prologue ++ [pragma] }
+                    (headerItem item (length headers) : headers) seenImport rest
+          | otherwise -> finish prologue headers items
+        Just (L _ ITimport) ->
+          case unP Parser.parseImport
+            (initParserState (initParserOpts flags)
+              (stringToStringBuffer (cellSourceText item))
+              (mkRealSrcLoc (mkFastString "<cell>")
+                (cellStartLine (cellSourceSpan item)) 1)) of
+            PFailed _ -> Left (CellPrologueFailure (cellSourceSpan item)
+              "GHC could not parse this import declaration")
+            POk _ parsed ->
+              let imported = LocatedImport
+                    (spanToCellSpan (getLocA parsed))
+                    (showSDocOneLine defaultSDocContext (ppr (unLoc parsed)))
+               in go prologue { prologueImports = prologueImports prologue ++ [imported] }
+                    (headerItem item (length headers) : headers) True rest
+        _ -> finish prologue headers items
+
+    finish prologue headers items =
+      case mapMaybe latePrologueItem items of
+        late : _ -> Left (CellPrologueFailure (cellSourceSpan late)
+          "cell pragmas and imports must precede declarations and statements")
+        [] -> Right (prologue, reverse headers, items)
+
+    latePrologueItem item = case firstToken item of
+      Just (L _ ITimport) -> Just item
+      Just (L _ (ITblockComment raw _)) | isJust (pragmaKind raw) -> Just item
+      _ -> Nothing
+
+    firstToken item =
+      case lexTokenStream (initParserOpts flags)
+        (stringToStringBuffer (cellSourceText item))
+        (mkRealSrcLoc (mkFastString "<cell>")
+          (cellStartLine (cellSourceSpan item)) 1) of
+        PFailed _ -> Nothing
+        POk _ (token : _) -> Just token
+        POk _ [] -> Nothing
+
+    headerItem item ordinal = CellAnalysisSourceItem
+      { cellAnalysisSourceOrdinal = ordinal
+      , cellAnalysisSourceSpan = cellSourceSpan item
+      , cellAnalysisSourceKind = KDecl
+      }
+
+    pragmaKind raw = do
+      rest <- stripPrefix "{-#" raw
+      case takeWhile (not . isSpace) (dropWhile isSpace rest) of
+        "LANGUAGE" -> Just LanguagePragma
+        "OPTIONS_GHC" -> Just OptionsGhcPragma
+        _ -> Nothing
+
+blankBeforeLine :: Int -> String -> String
+blankBeforeLine firstBodyLine source =
+  let offset = lineOffset source firstBodyLine
+      blank char = if char == '\n' then '\n' else ' '
+   in map blank (take offset source) ++ drop offset source
 
 -- | One GHC-classified item of a notebook cell. The source and span always
 -- refer to the submitted cell; generated checking scaffolds never become the
@@ -260,12 +425,28 @@ data CheckedBinderPin = CheckedBinderPin
 analyzeCellWithFlags
   :: DynFlags
   -> String
-  -> Either CellSplitError [CellAnalysisItem]
-analyzeCellWithFlags dflags source =
-  fmap groupDeclarations (zipWith classify [0..] <$> splitCellWithFlags dflags source)
+  -> String
+  -> IO (Either CellSplitError CellSourcePlan)
+analyzeCellWithFlags dflags template source = do
+  flags <- cellEffectiveFlags dflags template source
+  pure $ do
+    effective <- flags
+    lexical <- splitCellWithFlags effective source
+    (prologue, headerItems, bodyItems) <- collectPrologue effective lexical
+    let firstBodyLine = case bodyItems of
+          item : _ -> cellStartLine (cellSourceSpan item)
+          [] -> maxBound
+        bodySource = blankBeforeLine firstBodyLine source
+    body <- splitCellWithFlags effective bodySource
+    let classified = zipWith (classify effective) [length headerItems..] body
+        grouped = groupDeclarations headerItems classified
+    pure CellSourcePlan
+      { cellPlanPrologue = prologue
+      , cellPlanItems = grouped
+      }
   where
-    classify ordinal item =
-      let verdict = classifyWithFlags dflags (cellSourceText item)
+    classify effective ordinal item =
+      let verdict = classifyWithFlagsExact effective (cellSourceText item)
        in CellAnalysisItem
       { cellAnalysisSpan = cellSourceSpan item
       , cellAnalysisSource = cellSourceText item
@@ -278,20 +459,22 @@ analyzeCellWithFlags dflags source =
               }
           ]
       }
-    groupDeclarations classified =
+    groupDeclarations headerItems classified =
       case partition isDeclaration classified of
-        ([], executable) -> executable
-        (declarations, executable) -> declarationGroup declarations : executable
+        ([], executable) | null headerItems -> executable
+        (declarations, executable) -> declarationGroup headerItems declarations : executable
     isDeclaration =
       (== KDecl) . sbKind . cellAnalysisVerdict
-    declarationGroup declarations@(firstDeclaration : _) =
-      let firstSpan = cellAnalysisSpan firstDeclaration
-          lastSpan' = foldl
-            (\_ declaration -> cellAnalysisSpan declaration)
-            firstSpan
-            declarations
-          verdicts = map cellAnalysisVerdict declarations
-       in CellAnalysisItem
+    declarationGroup headerItems declarations =
+      case headerItems ++ concatMap cellAnalysisSourceItems declarations of
+        [] -> error "declarationGroup requires a source item"
+        sourceItems@(firstSource : _) ->
+          let firstSpan = cellAnalysisSourceSpan firstSource
+              lastSpan' = foldl
+                (\_ sourceItem -> cellAnalysisSourceSpan sourceItem)
+                firstSpan sourceItems
+              verdicts = map cellAnalysisVerdict declarations
+           in CellAnalysisItem
             { cellAnalysisSpan = CellSourceSpan
                 { cellStartLine = cellStartLine firstSpan
                 , cellStartColumn = cellStartColumn firstSpan
@@ -303,11 +486,8 @@ analyzeCellWithFlags dflags source =
                 KDecl
                 (nub (concatMap sbBinders verdicts))
                 (concatMap sbDeclItems verdicts)
-            , cellAnalysisSourceItems =
-                concatMap cellAnalysisSourceItems declarations
+            , cellAnalysisSourceItems = sourceItems
             }
-    declarationGroup [] =
-      error "declarationGroup: empty declaration group"
     locatedDeclaration item =
       "{-# LINE " ++ show (cellStartLine (cellAnalysisSpan item))
       ++ " \"<cell>\" #-}\n"
@@ -317,12 +497,47 @@ analyzeCellWithFlags dflags source =
         then ""
         else "\n"
 
-analyzeCell :: String -> IO (Either CellSplitError [CellAnalysisItem])
-analyzeCell source = do
+analyzeCell :: String -> String -> IO (Either CellSplitError CellSourcePlan)
+analyzeCell template source = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    liftIO (evaluate (analyzeCellWithFlags dflags source))
+    liftIO (analyzeCellWithFlags dflags template source)
+
+-- | Extract the same located header for a declaration turn without
+-- reclassifying the already-checked declaration body.
+declarationSourceWithTemplate
+  :: String -> String -> IO (Either CellSplitError DeclarationSource)
+declarationSourceWithTemplate template source = do
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    liftIO $ do
+      flags <- cellEffectiveFlags dflags template source
+      pure $ do
+        effective <- flags
+        lexical <- splitCellWithFlags effective source
+        (prologue, _, bodyItems) <- collectPrologue effective lexical
+        let firstBodyLine = case bodyItems of
+              item : _ -> cellStartLine (cellSourceSpan item)
+              [] -> maxBound
+        pure (DeclarationSource prologue (blankBeforeLine firstBodyLine source))
+
+renderDeclarationForTemplate :: String -> DeclarationSource -> Either String String
+renderDeclarationForTemplate template source = do
+  let (beforeModule, afterModule) = break moduleHeader (lines template)
+  case afterModule of
+    [] -> Left "declaration template has no module header"
+    _ ->
+      let pragmas = concatMap ((++ "\n") . locatedPragmaSource)
+            (prologuePragmas (declarationPrologue source))
+          imports = concatMap ((++ "\n") . locatedImportSource)
+            (prologueImports (declarationPrologue source))
+          withPragmas = unlines beforeModule ++ pragmas ++ unlines afterModule
+       in Right (spliceTemplate withPragmas
+            (imports ++ declarationBody source) "")
+  where
+    moduleHeader line = "module " `isPrefixOf` dropWhile isSpace line
 
 -- | Fill the runtime-authored whole-cell checking template. The template owns
 -- imports, the exact effect row, and expression admissibility; this function
@@ -331,32 +546,18 @@ analyzeCell source = do
 -- The two literal placeholders are intentionally the entire template
 -- vocabulary. Missing or duplicate placeholders are rejected by the worker
 -- entry point before compilation.
-renderCellCheckSource :: String -> [CellAnalysisItem] -> Either String String
-renderCellCheckSource template items =
-  renderCellCheckSourceWithPins template items Nothing
-
--- | Re-render a checked cell with every harvested binder type written back as
--- an explicit local signature. Typechecking this source proves that the
--- compiler's rendered type is parseable in the cell's declaration scope
--- before the actor installs a declaration or runs an effect.
-renderPinnedCellCheckSource
-  :: String
-  -> [CellAnalysisItem]
-  -> [CheckedBinderPin]
-  -> Either String String
-renderPinnedCellCheckSource template items pins =
-  renderCellCheckSourceWithPins template items (Just pins)
-
-renderCellCheckSourceWithPins
-  :: String
-  -> [CellAnalysisItem]
-  -> Maybe [CheckedBinderPin]
-  -> Either String String
-renderCellCheckSourceWithPins template items pins = do
-  withDecls <- replaceOnce "{{CELL_DECLS}}" declarations template
+renderCellCheckSource :: String -> CellSourcePlan -> Either String String
+renderCellCheckSource template plan = do
+  withPragmas <- replaceOnce "{{CELL_PRAGMAS}}" pragmas template
+  withImports <- replaceOnce "{{CELL_IMPORTS}}" imports withPragmas
+  withDecls <- replaceOnce "{{CELL_DECLS}}" declarations withImports
   renderedBody <- body
   replaceOnce "{{CELL_BODY}}" renderedBody withDecls
   where
+    items = cellPlanItems plan
+    prologue = cellPlanPrologue plan
+    pragmas = concatMap ((++ "\n") . locatedPragmaSource) (prologuePragmas prologue)
+    imports = concatMap ((++ "\n") . locatedImportSource) (prologueImports prologue)
     declarations = concat
       [ linePragma item ++ cellAnalysisSource item ++ trailingNewline (cellAnalysisSource item)
       | item <- items
@@ -372,12 +573,13 @@ renderCellCheckSourceWithPins template items pins = do
       values -> (++ "\n") . intercalate "\n; " <$> mapM renderExecutable values
 
     renderExecutable (index, item) =
-      (linePragma item ++) <$> case cellAnalysisVerdict item of
+      let prefix = if sbKind (cellAnalysisVerdict item) == KExpr then "" else linePragma item
+      in (prefix ++) <$> case cellAnalysisVerdict item of
         StmtBinders KBind binders _ ->
           if null binders
             then Right (cellAnalysisSource item ++ trailingNewline (cellAnalysisSource item))
             else do
-              aliases <- mapM (renderAlias index) binders
+              let aliases = map (renderAlias index) binders
               Right
                 ( cellAnalysisSource item
                 ++ trailingNewline (cellAnalysisSource item)
@@ -388,6 +590,7 @@ renderCellCheckSourceWithPins template items pins = do
         StmtBinders KExpr _ _ ->
           Right
             ( "__tidepoolCellExpression (\n"
+            ++ linePragma item
             ++ cellAnalysisSource item
             ++ trailingNewline (cellAnalysisSource item)
             ++ ")\n"
@@ -395,14 +598,7 @@ renderCellCheckSourceWithPins template items pins = do
         StmtBinders KDecl _ _ -> Right ""
 
     renderAlias index binder =
-      let key = pinKey index binder
-       in case pins of
-            Nothing -> Right (key ++ " = " ++ binder)
-            Just available ->
-              case [checkedPinType pin | pin <- available, checkedPinKey pin == key] of
-                [ty] -> Right (key ++ " :: " ++ ty ++ "; " ++ key ++ " = " ++ binder)
-                [] -> Left ("whole-cell check returned no rendered type for " ++ key)
-                _ -> Left ("whole-cell check returned duplicate rendered types for " ++ key)
+      pinKey index binder ++ " = " ++ binder
 
     linePragma item =
       "{-# LINE " ++ show (cellStartLine (cellAnalysisSpan item)) ++ " \"<cell>\" #-}\n"
@@ -436,28 +632,37 @@ splitCellWithFlags dflags0 source =
   case lexTokenStream popts buffer location of
     PFailed _ -> Left CellLexFailure
     POk _ tokens ->
-      let tokenSpans = mapMaybe realTokenSpan tokens
-          boundaryLines = case tokenSpans of
-            [] -> []
-            firstSpan : rest ->
-              srcSpanStartLine firstSpan
-                : [ srcSpanStartLine tokenSpan
-                  | tokenSpan <- rest
-                  , srcSpanStartCol tokenSpan == 1
-                  ]
+      let locatedTokens = mapMaybe realTokenSpan tokens
+          tokenSpans = map fst locatedTokens
+          boundaryLines = reverse (snd (foldl boundary (0 :: Int, []) locatedTokens))
           starts = nub (sort boundaryLines)
        in Right (mapMaybe (sourceItem tokenSpans) (zip starts (drop 1 starts ++ [maxBound])))
   where
-    dflags = foldl' xopt_set dflags0 stmtExtensions
-    popts = initParserOpts dflags
+    popts = initParserOpts dflags0
     buffer = stringToStringBuffer source
     location = mkRealSrcLoc (mkFastString "<cell>") 1 1
 
-    realTokenSpan (L (RealSrcSpan realSpan _) _)
+    realTokenSpan (L (RealSrcSpan realSpan _) token)
       | srcSpanStartLine realSpan /= srcSpanEndLine realSpan
-          || srcSpanStartCol realSpan /= srcSpanEndCol realSpan =
-          Just realSpan
+          || srcSpanStartCol realSpan /= srcSpanEndCol realSpan
+      , not (ordinaryComment token) =
+          Just (realSpan, token)
     realTokenSpan _ = Nothing
+
+    boundary (depth, starts) (tokenSpan, token) =
+      let starts' = if null starts || (depth == 0 && srcSpanStartCol tokenSpan == 1)
+            then srcSpanStartLine tokenSpan : starts
+            else starts
+          depth' = case token of
+            IToparen -> depth + 1
+            ITcparen -> max 0 (depth - 1)
+            _ -> depth
+       in (depth', starts')
+
+    ordinaryComment (ITlineComment _ _) = True
+    ordinaryComment (ITblockComment raw _) =
+      not ("{-#" `isPrefixOf` raw)
+    ordinaryComment _ = False
 
     sourceItem tokenSpans (startLine, nextLine) = do
       firstSpan <- firstAtOrAfter startLine tokenSpans
@@ -544,9 +749,12 @@ templateSelectorWireName SExpr        = "expr"
 --   * else (both fail) → @"expr"@ (the runtime recompiles through the
 --     bare-expression path, where GHC re-parses and reports the real error).
 classifyWithFlags :: DynFlags -> String -> StmtBinders
-classifyWithFlags dflags0 src = classifyTurn declRes stmtRes modRes
+classifyWithFlags dflags0 src =
+  classifyWithFlagsExact (foldl' xopt_set dflags0 stmtExtensions) src
+
+classifyWithFlagsExact :: DynFlags -> String -> StmtBinders
+classifyWithFlagsExact dflags src = classifyTurn declRes stmtRes modRes
   where
-    dflags = foldl' xopt_set dflags0 stmtExtensions
     popts  = initParserOpts dflags
     loc    = mkRealSrcLoc (mkFastString "<turn>") 1 1
     buf    = stringToStringBuffer src
@@ -763,6 +971,7 @@ data TurnOut
   = TDecl
       { toBinders   :: [Text]
       , toDeclItems :: [ExportItem]
+      , toDeclarationSource :: DeclarationSource
       }
   | TBind
       { toBinders       :: [Text]

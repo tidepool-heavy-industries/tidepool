@@ -256,7 +256,7 @@ fn lookup_invocation(queries: &[&str], id: &str) -> tidepool_tool::ToolInvocatio
 }
 
 #[tokio::test]
-async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
+async fn hosted_lookup_and_status_use_actor_owned_views() {
     eval_harness::require_extract();
     let declarations = [tidepool_mcp::notifications_decl()];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
@@ -350,6 +350,86 @@ async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
         output.contains("Response result -> Await (Settlement result)"),
         "{output}"
     );
+    let bare = policy
+        .dispatch_boxed(tidepool_tool::ToolInvocation {
+            arguments: tidepool_tool::ToolArguments::Structured(serde_json::json!("awaitSettled")),
+            ..lookup_invocation(&["unused"], "bare")
+        })
+        .await
+        .unwrap();
+    assert_eq!(bare["status"], "committed");
+    assert!(
+        bare["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("awaitSettled"),
+        "{bare}"
+    );
+    let docs = policy
+        .dispatch_boxed(lookup_invocation(
+            &["doc", "doc workbench", "doc missing", "awaitSettled"],
+            "docs-mixed",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(docs["status"], "committed", "{docs}");
+    let doc_output = docs["items"][0]["output"].as_str().unwrap();
+    assert!(doc_output.contains("Shoal topics:"), "{doc_output}");
+    assert!(
+        doc_output.contains("Send raw Haskell to the tool"),
+        "{doc_output}"
+    );
+    assert!(
+        doc_output.contains("unknown Shoal documentation topic `missing`"),
+        "{doc_output}"
+    );
+    assert!(
+        doc_output.contains("awaitSettled :: Response result -> Await (Settlement result)"),
+        "{doc_output}"
+    );
+    assert!(
+        doc_output.find("doc\n").unwrap() < doc_output.find("doc workbench\n").unwrap()
+            && doc_output.find("doc workbench\n").unwrap()
+                < doc_output.find("doc missing\n").unwrap()
+            && doc_output.find("doc missing\n").unwrap()
+                < doc_output.find("awaitSettled\n").unwrap(),
+        "{doc_output}"
+    );
+    for (view, expected) in [
+        (None, "actor"),
+        (Some("summary"), "actor"),
+        (Some("detailed"), "lineage:"),
+        (Some("recovery"), "declaration recovery"),
+        (Some("lineage"), "lineage"),
+        (Some("trace"), "provider_usage_history="),
+    ] {
+        let arguments = view.map_or_else(
+            || serde_json::json!({}),
+            |view| serde_json::json!({"view": view}),
+        );
+        let status = policy
+            .dispatch_boxed(tidepool_tool::ToolInvocation {
+                name: "status".into(),
+                arguments: tidepool_tool::ToolArguments::Structured(arguments),
+                ..lookup_invocation(&["unused"], view.unwrap_or("default"))
+            })
+            .await
+            .unwrap();
+        let output = status["items"][0]["output"].as_str().unwrap();
+        assert!(output.contains(expected), "view={view:?}: {output}");
+    }
+    let bindings = policy
+        .dispatch_boxed(tidepool_tool::ToolInvocation {
+            name: "status".into(),
+            arguments: tidepool_tool::ToolArguments::Structured(serde_json::json!({
+                "view": "bindings"
+            })),
+            ..lookup_invocation(&["unused"], "bindings")
+        })
+        .await
+        .unwrap();
+    assert_eq!(bindings["status"], "committed");
+    assert!(!bindings["items"][0]["output"].as_str().unwrap().is_empty());
     let returned = output
         .split("\n\n")
         .find(|section| {
@@ -369,6 +449,20 @@ async fn hosted_lookup_isolates_type_failure_and_returns_next_cell_name() {
         .await
         .unwrap();
     assert_eq!(next["status"], "committed", "{next}");
+    let invalid = policy
+        .dispatch_boxed(tidepool_tool::ToolInvocation {
+            name: "status".into(),
+            arguments: tidepool_tool::ToolArguments::Structured(serde_json::json!({
+                "view": "unknown"
+            })),
+            ..lookup_invocation(&["unused"], "invalid-status")
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        invalid.to_string().contains("status arguments"),
+        "{invalid}"
+    );
     forest.shutdown().await;
 }
 

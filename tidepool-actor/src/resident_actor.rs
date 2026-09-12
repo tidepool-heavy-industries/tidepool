@@ -15,14 +15,12 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    CellCheck, InspectionQuery, InspectionResult, OutputSink, ParsedBlock, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, TurnKind, TypeMatchQuality,
-    WorkbenchCellItemKind, WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
-    WorkbenchTerminalTransfer,
+    InspectionQuery, InspectionResult, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome,
+    ResidentSession, RootCustody, TurnKind, TypeMatchQuality, WorkbenchCellItemKind,
+    WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
-use tidepool_runtime::{classify_compile, FailureClass};
 use tokio::sync::mpsc;
 
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
@@ -4269,10 +4267,14 @@ where
             .tool_call()
             .filter(|call| call.name == crate::lookup_tool::LOOKUP_TOOL)
             .cloned();
-        let tool_dispatch = if let Some(call) = request
+        let status_call = request
             .tool_call()
-            .filter(|call| call.name != crate::lookup_tool::LOOKUP_TOOL)
-        {
+            .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
+            .cloned();
+        let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
+            call.name != crate::lookup_tool::LOOKUP_TOOL
+                && call.name != crate::status_tool::STATUS_TOOL
+        }) {
             let tools = self
                 .compiled_tools
                 .as_ref()
@@ -4329,6 +4331,62 @@ where
                 .as_ref()
                 .map(tidepool_runtime::session::normalize_workbench_input),
         );
+        if let Some(call) = status_call {
+            let view = crate::status_tool::parse(call.arguments).map_err(|error| {
+                workbench_failure(
+                    &[],
+                    0,
+                    1,
+                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                )
+            })?;
+            let output = match view {
+                crate::status_tool::StatusView::Summary => {
+                    self.status_text(kernel, context.actor, StatusView::Concise)
+                }
+                crate::status_tool::StatusView::Detailed => {
+                    self.status_text(kernel, context.actor, StatusView::Expanded)
+                }
+                crate::status_tool::StatusView::Lineage => {
+                    self.status_text(kernel, context.actor, StatusView::Lineage)
+                }
+                crate::status_tool::StatusView::Trace => {
+                    self.status_text(kernel, context.actor, StatusView::Trace)
+                }
+                crate::status_tool::StatusView::Recovery => workbench
+                    .status_discovery(
+                        context.clone(),
+                        crate::status_tool::StatusDiscovery::Recovery,
+                    )
+                    .await
+                    .map_err(|error| workbench_failure(&[], 0, 1, error))?,
+                crate::status_tool::StatusView::Bindings => workbench
+                    .status_discovery(
+                        context.clone(),
+                        crate::status_tool::StatusDiscovery::Bindings,
+                    )
+                    .await
+                    .map_err(|error| workbench_failure(&[], 0, 1, error))?,
+            };
+            return Ok(KernelStep::Continue(workbench_response(
+                WorkbenchRunStatus::Committed,
+                vec![WorkbenchItemReceipt {
+                    index: 0,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Committed,
+                    output,
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: Vec::new(),
+                    terminal_transfer: None,
+                }],
+                1,
+                1,
+                None,
+            )));
+        }
         if let Some(call) = lookup_call {
             let prepared = crate::lookup_tool::prepare(call.arguments).map_err(|error| {
                 workbench_failure(
@@ -4347,6 +4405,7 @@ where
                     crate::lookup_tool::PreparedLookupKind::Type(query) => {
                         Some(InspectionQuery::TypeSearch(query.clone()))
                     }
+                    crate::lookup_tool::PreparedLookupKind::Doc(_) => None,
                     crate::lookup_tool::PreparedLookupKind::Rejected(_) => None,
                 })
                 .collect::<Vec<_>>();
@@ -4386,29 +4445,10 @@ where
                 .await
             {
                 Ok(checked) => checked,
-                Err(ResidentActorWorkbenchError::Compile(error))
-                    if classify_compile(&error).class == FailureClass::UserHaskell =>
-                {
-                    return Ok(KernelStep::Continue(workbench_response(
-                        WorkbenchRunStatus::Rejected,
-                        vec![WorkbenchItemReceipt {
-                            index: 0,
-                            kind: None,
-                            span: None,
-                            source_items: Vec::new(),
-                            status: WorkbenchItemStatus::Rejected,
-                            output: tidepool_runtime::session::render_cell_compile_error(
-                                &error,
-                                cell_source,
-                            ),
-                            warnings: Vec::new(),
-                            installed_bindings: Vec::new(),
-                            operations: Vec::new(),
-                            terminal_transfer: None,
-                        }],
-                        0,
-                        1,
-                        None,
+                Err(ResidentActorWorkbenchError::CellCheck(failure)) => {
+                    return Ok(KernelStep::Continue(cell_check_rejection(
+                        failure,
+                        cell_source,
                     )));
                 }
                 Err(source) => return Err(workbench_failure(&[], 0, 1, source)),
@@ -4456,7 +4496,7 @@ where
                         items,
                         index,
                         request.items.len(),
-                        Some(&checked),
+                        Some(&checked.items),
                     )));
                 }
             }
@@ -4757,7 +4797,7 @@ where
                             receipts,
                             index,
                             request.items.len(),
-                            cell_check.as_ref(),
+                            cell_check.as_ref().map(|checked| checked.items.as_slice()),
                         )));
                     }
                     receipts.push(WorkbenchItemReceipt {
@@ -4827,7 +4867,7 @@ where
                         receipts,
                         index,
                         request.items.len(),
-                        cell_check.as_ref(),
+                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
                     )));
                 }
                 ResidentWorkbenchStep::CommandBackgrounded {
@@ -4896,7 +4936,7 @@ where
                         receipts,
                         index,
                         request.items.len(),
-                        cell_check.as_ref(),
+                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
                     )));
                 }
                 ResidentWorkbenchStep::Replied {
@@ -4931,7 +4971,7 @@ where
                         receipts,
                         index + 1,
                         request.items.len(),
-                        cell_check.as_ref(),
+                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
                     )));
                 }
                 ResidentWorkbenchStep::CancellationAcknowledged {
@@ -5076,7 +5116,7 @@ where
                         receipts,
                         index + 1,
                         request.items.len(),
-                        cell_check.as_ref(),
+                        cell_check.as_ref().map(|checked| checked.items.as_slice()),
                     )));
                 }
                 ResidentWorkbenchStep::Running { .. } => {
@@ -5090,7 +5130,7 @@ where
             receipts,
             request.items.len(),
             request.items.len(),
-            cell_check.as_ref(),
+            cell_check.as_ref().map(|checked| checked.items.as_slice()),
         )))
     }
 
@@ -6757,12 +6797,75 @@ fn completed_terminal() -> ActorTerminal {
     }
 }
 
+fn cell_check_rejection(
+    failure: tidepool_runtime::session::CellCheckFailure,
+    source: &str,
+) -> WorkbenchResponse {
+    let checked = failure.items.as_deref();
+    let total = checked.map_or(1, |analysis| analysis.len().max(1));
+    let mut items = (0..total)
+        .map(|index| WorkbenchItemReceipt {
+            index,
+            kind: None,
+            span: None,
+            source_items: Vec::new(),
+            status: WorkbenchItemStatus::NotRun,
+            output: String::new(),
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations: Vec::new(),
+            terminal_transfer: None,
+        })
+        .collect::<Vec<_>>();
+    match &failure.error {
+        tidepool_runtime::CompileError::Diagnostics(diagnostics) => {
+            for diagnostic in diagnostics {
+                let index = diagnostic
+                    .span
+                    .as_ref()
+                    .filter(|span| span.file == "<cell>")
+                    .and_then(|span| {
+                        checked.and_then(|analysis| {
+                            analysis.iter().position(|item| {
+                                item.source_items.iter().any(|item| {
+                                    let start = (item.span.start_line, item.span.start_column);
+                                    let end = (item.span.end_line, item.span.end_column);
+                                    let point = (span.start_line as usize, span.start_col as usize);
+                                    start <= point && point <= end
+                                })
+                            })
+                        })
+                    })
+                    .unwrap_or(0);
+                let rendered = tidepool_runtime::session::render_cell_compile_error(
+                    &tidepool_runtime::CompileError::Diagnostics(vec![diagnostic.clone()]),
+                    source,
+                );
+                if diagnostic.severity == tidepool_runtime::diag::DiagnosticSeverity::Warning {
+                    items[index].warnings.push(rendered);
+                } else {
+                    items[index].status = WorkbenchItemStatus::Rejected;
+                    if !items[index].output.is_empty() {
+                        items[index].output.push_str("\n\n");
+                    }
+                    items[index].output.push_str(&rendered);
+                }
+            }
+        }
+        error => {
+            items[0].status = WorkbenchItemStatus::Rejected;
+            items[0].output = tidepool_runtime::session::render_cell_compile_error(error, source);
+        }
+    }
+    workbench_response(WorkbenchRunStatus::Rejected, items, 0, total, checked)
+}
+
 fn workbench_response(
     status: WorkbenchRunStatus,
     mut items: Vec<WorkbenchItemReceipt>,
     next_index: usize,
     total: usize,
-    cell_check: Option<&CellCheck>,
+    cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
 ) -> WorkbenchResponse {
     let receipt_kind = |kind| match kind {
         TurnKind::Decl => WorkbenchCellItemKind::Declaration,
@@ -6771,7 +6874,7 @@ fn workbench_response(
     };
     if let Some(checked) = cell_check {
         for receipt in &mut items {
-            if let Some(item) = checked.items.get(receipt.index) {
+            if let Some(item) = checked.get(receipt.index) {
                 receipt.kind = Some(receipt_kind(item.verdict.kind));
                 receipt.span = Some(item.span);
                 receipt.source_items = item
@@ -6817,18 +6920,18 @@ fn workbench_response(
         | WorkbenchRunStatus::Completed => next_index,
         WorkbenchRunStatus::Committed => total,
     };
-    items.extend((first_not_run..total).map(|index| {
+    let recorded_through = items.last().map_or(0, |item| item.index + 1);
+    items.extend((first_not_run.max(recorded_through)..total).map(|index| {
         WorkbenchItemReceipt {
             index,
             kind: cell_check.and_then(|checked| {
                 checked
-                    .items
                     .get(index)
                     .map(|item| receipt_kind(item.verdict.kind))
             }),
-            span: cell_check.and_then(|checked| checked.items.get(index).map(|item| item.span)),
+            span: cell_check.and_then(|checked| checked.get(index).map(|item| item.span)),
             source_items: cell_check
-                .and_then(|checked| checked.items.get(index))
+                .and_then(|checked| checked.get(index))
                 .map(|item| {
                     item.source_items
                         .iter()
@@ -6853,12 +6956,12 @@ fn workbench_response(
         summary: cell_check.map(|checked| {
             let mut declarations = 0;
             let mut statements = 0;
-            let mut displays = 0;
-            for item in checked.items.iter().flat_map(|item| &item.source_items) {
+            let mut expressions = 0;
+            for item in checked.iter().flat_map(|item| &item.source_items) {
                 match item.kind {
                     TurnKind::Decl => declarations += 1,
                     TurnKind::Bind => statements += 1,
-                    TurnKind::Expr => displays += 1,
+                    TurnKind::Expr => expressions += 1,
                 }
             }
             let label = |count, singular| {
@@ -6872,7 +6975,7 @@ fn workbench_response(
                 "{}, {}, {}",
                 label(declarations, "declaration"),
                 label(statements, "statement"),
-                label(displays, "display")
+                label(expressions, "expression")
             )
         }),
         items,
@@ -6899,6 +7002,24 @@ fn lookup_response(
             PreparedLookupKind::Rejected(diagnostic) => LookupResult {
                 query: prepared.query,
                 outcome: LookupOutcome::Rejected { diagnostic },
+            },
+            PreparedLookupKind::Doc(topic) => match crate::prompt_catalog::workbench_doc(&topic) {
+                Ok(body) => LookupResult::found(
+                    prepared.query,
+                    vec![LookupEntry {
+                        name: topic,
+                        defining_module: None,
+                        kind: LookupEntryKind::Documentation,
+                        signature_or_declaration: body.into(),
+                        origin: LookupOrigin::Documentation,
+                        quality: MatchQuality::Exact,
+                    }],
+                    MATCH_LIMIT,
+                ),
+                Err(diagnostic) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected { diagnostic },
+                },
             },
             PreparedLookupKind::Name(_) => match inspected.next() {
                 Some(InspectionResult::Info { entries, .. }) => LookupResult::found(
@@ -7141,6 +7262,7 @@ mod tests {
             }
         };
         let checked = CellCheck {
+            prologue: Default::default(),
             items: vec![
                 item(TurnKind::Decl, 1),
                 item(TurnKind::Bind, 2),
@@ -7181,11 +7303,11 @@ mod tests {
             ],
             1,
             4,
-            Some(&checked),
+            Some(&checked.items),
         );
         assert_eq!(
             response.summary.as_deref(),
-            Some("1 declaration, 2 statements, 1 display")
+            Some("1 declaration, 2 statements, 1 expression")
         );
         assert_eq!(response.items.len(), 4);
         assert_eq!(

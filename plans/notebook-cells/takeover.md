@@ -14,14 +14,17 @@ These patches are unverified inputs, not accepted implementations.
 - [x] Preserve modified tracked actor sources and combine committed baselines.
 - [ ] Compiler-owned cell splitting, imports/prologue, and obsolete parser removal.
 - [ ] Exact staged type transport, whole-cell rejection, and nominal recovery.
-- [ ] Source-item receipts on rejection and accurate display/terminal accounting.
-- [ ] Lookup usable names, real returned-name invocation, truthful hosted output.
+- [x] Source-item receipts on rejection and accurate expression/terminal accounting.
+- [x] Lookup usable names, real returned-name invocation, truthful hosted output.
 - [ ] Status views and documentation lookup; no colon commands in cells.
 - [ ] Automatic Generic and bounded structural rendering with opaque fields.
 - [ ] Typed retained `last.more`, command paging, and per-cell display budget.
 - [ ] Complete multi-step teaching corpus and runnable recipe migration.
 - [ ] Focused acceptance, fixture boundary, recipe check, overlay admission and
       40-generation oracle on the combined revision; formatting and diff review.
+- [ ] Once implementation is ready, fresh Sol reviews of prompting and projected
+      worker UX, plus the integration owner's own read-through. Review the actual
+      shipped context and runnable examples; repair findings before landing.
 - [ ] Commit, push, and land clean main while preserving unrelated live runs.
 
 Stage 2 execution, field-specific continuations, and orchestration redesign are
@@ -82,3 +85,24 @@ Structural cell preparation spot checks:
 The full fixture boundary, recipe check, final combined overlay tests, and broader
 notebook release checks remain outstanding. These focused checks do not close the
 release checklist.
+
+Source-plan rejection: the hosted multiple-errors fixture passed (1 test, 23s).
+Its receipt retains every source item, maps both errors to their original cell
+lines, and confirms no statement binding was installed.
+
+Hosted tool transport: raw-string and batched lookup checks passed. Status parser
+and registration checks passed (4 tests), the hosted lookup/status case exercised
+all six views, default selection, and invalid input (1 test), and downstream host
+registration passed (1 test). Colon entry points still await removal.
+
+Compiler-owned prologue integration: the splitter suite passed, including
+multiline imports, comments, option negation, and located late-pragma rejection;
+the worker rebuilt without warnings. Runtime and actor libraries compiled. All
+27 declaration-renderer tests passed. Hosted prologue, multiple-errors rejection,
+and retained-old-nominal-type checks passed together (3 tests, 67s). The legacy
+harness's import-view spot check passed (1 test); its caller now consumes the same
+declaration receipt rather than prefixing authored source with import text.
+
+Documentation lookup: the parser spot check and hosted mixed documentation/name
+batch passed (1 test each). `doc` lists existing catalog topics and `doc <topic>`
+returns one topic; a missing topic does not hide subsequent batch results.

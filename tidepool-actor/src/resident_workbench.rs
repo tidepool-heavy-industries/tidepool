@@ -1437,6 +1437,8 @@ pub enum ResidentActorWorkbenchError {
     Checkout(CheckoutError<String>),
     #[error("resident workbench compiler failed: {0}")]
     Compile(CompileError),
+    #[error("resident cell check failed: {0}")]
+    CellCheck(tidepool_runtime::session::CellCheckFailure),
     #[error("resident workbench compiler infrastructure failed:\n{0}")]
     CompileInfrastructure(String),
     #[error("resident workbench execution failed: {0}")]
@@ -1927,13 +1929,13 @@ where
                     session_root: compile_view.session_root(),
                     inject_modules: &prepared.injected,
                 })
-                .map_err(|error| {
-                    if classify_compile(&error).class == FailureClass::UserHaskell {
-                        ResidentActorWorkbenchError::Compile(error)
+                .map_err(|failure| {
+                    if classify_compile(&failure.error).class == FailureClass::UserHaskell {
+                        ResidentActorWorkbenchError::CellCheck(failure)
                     } else {
                         ResidentActorWorkbenchError::CompileInfrastructure(
                             tidepool_runtime::session::render_cell_compile_error(
-                                &error,
+                                &failure.error,
                                 &cell_source,
                             ),
                         )
@@ -1949,6 +1951,38 @@ where
                     compile_view,
                 )?;
                 Ok((checked, prepared))
+            })
+            .await
+    }
+
+    pub(crate) async fn status_discovery(
+        &self,
+        context: crate::ActorSessionContext,
+        discovery: crate::status_tool::StatusDiscovery,
+    ) -> Result<String, ResidentActorWorkbenchError> {
+        let response = self.response.clone();
+        let request = self.request;
+        let type_modules = Arc::clone(&self.type_modules);
+        let mut source = self.access.source.clone();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                source.preamble = match (response.as_ref(), request) {
+                    (Some(response), Some(request)) => response.request_preamble(
+                        &source.preamble,
+                        request,
+                        &context.haskell_effects_alias,
+                    ),
+                    (None, None) => source.preamble.to_string(),
+                    _ => unreachable!("request workbench scope is constructed atomically"),
+                }
+                .into();
+                source.preamble = actor_preamble(&source.preamble, context).into();
+                let command = match discovery {
+                    crate::status_tool::StatusDiscovery::Recovery => WorkbenchDiscovery::Recovery,
+                    crate::status_tool::StatusDiscovery::Bindings => WorkbenchDiscovery::Bindings,
+                };
+                run_discovery_command(session, context, &source, &type_modules, command)?
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
             })
             .await
     }
@@ -5117,9 +5151,17 @@ where
         .find(|(_, item)| item.verdict.kind == TurnKind::Decl);
     let declaration_imports = base_view.workbench_imports();
     let staged = if let Some((_, item)) = declaration {
+        let receipt = DeclarationReceipt {
+            binders: item.verdict.binders.clone(),
+            items: item.verdict.items.clone(),
+            source: tidepool_runtime::session::DeclarationSource {
+                prologue: checked.prologue.clone(),
+                body: item.source.clone(),
+            },
+        };
         match session.stage_declarations_in(
             context.placement.lexical_scope,
-            &[item.source.as_str()],
+            &receipt,
             &declaration_imports,
         ) {
             Ok(staged) => Some(staged),
@@ -5154,10 +5196,7 @@ where
                 })?;
                 result.push(PreparedCellItem {
                     ready: PreparedCellStep::Executable(ReadyBlock {
-                        result: TurnResult::Decl(DeclarationReceipt {
-                            binders: item.verdict.binders.clone(),
-                            items: staged.receipt.items.clone(),
-                        }),
+                        result: TurnResult::Decl(staged.receipt.clone()),
                         generation: compile_view.next_value_generation(),
                         declaration_source: item.source.clone(),
                         declaration_imports: declaration_imports.clone(),
@@ -5186,6 +5225,7 @@ where
                 compile_view.clone(),
                 &staged_names,
                 Some(&item.verdict),
+                Some(&checked.prologue),
             )?;
             let ready = match compiled {
                 CompiledBlock::Ready(ready) => *ready,
@@ -5235,14 +5275,15 @@ where
         if let PreparedCell::Ready { items, .. } = &mut prepared {
             if let (Some((_, declaration)), Some(staged)) = (declaration, staged.as_ref()) {
                 let generation = session
-                    .define_scoped_with_imports_in(
+                    .commit_declaration_receipt_in(
                         context.placement.lexical_scope,
-                        &[declaration.source.as_str()],
+                        &staged.receipt,
                         &declaration_imports,
                     )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })?;
+                    })?
+                    .generation;
                 if generation != staged.generation {
                     return Err(ResidentActorWorkbenchError::CompileInfrastructure(
                         "cell declaration generation changed during exclusive preparation".into(),
@@ -5310,6 +5351,7 @@ where
         compile_view,
         &[],
         None,
+        None,
     )
 }
 
@@ -5325,6 +5367,7 @@ fn compile_block_in_view<H, O>(
     compile_view: crate::ActorCompileView,
     staged_names: &[String],
     checked_verdict: Option<&TurnClassification>,
+    prologue: Option<&tidepool_runtime::session::SourcePrologue>,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -5338,7 +5381,18 @@ where
             .map(|head| format!("qualified {}", head.module)),
     );
     let compile_view = compile_view.with_workbench_imports(&pin_imports);
-    let prepared = source.prepare(&compile_view);
+    let mut prepared = source.prepare(&compile_view);
+    if let Some(prologue) = prologue {
+        prepared.preamble = prepared.preamble.replacen(
+            "\nmodule ",
+            &format!("\n{}module ", prologue.pragma_text()),
+            1,
+        );
+        prepared.preamble = insert_preamble_imports(
+            &prepared.preamble,
+            &prologue.workbench_imports().template_text(),
+        );
+    }
     let mut templates =
         resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
     let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
@@ -5479,6 +5533,20 @@ where
         }
         Err(diagnostic) => return Ok(Err(diagnostic)),
     };
+    run_discovery_command(session, context, source, type_modules, command)
+}
+
+fn run_discovery_command<H, O>(
+    session: &ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    command: WorkbenchDiscovery,
+) -> Result<Result<String, String>, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
     match command {
         WorkbenchDiscovery::ShowImports => {
             let imports = actor_compile_view(session, context, source, &[])?

@@ -953,6 +953,9 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
         &insert_preamble_imports(preamble, imports),
         "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
     );
+    let preamble = insert_preamble_imports(&preamble, "{{CELL_IMPORTS}}")
+        .replace("import {{CELL_IMPORTS}}", "{{CELL_IMPORTS}}")
+        .replacen("\nmodule ", "\n{{CELL_PRAGMAS}}\nmodule ", 1);
     format!(
         "{preamble}\n\
          class TidepoolCellPure value\n\

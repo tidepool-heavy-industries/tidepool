@@ -34,6 +34,7 @@ impl ResidentInteractivePolicy {
         Self {
             tools: std::iter::once(haskell_tool_declaration())
                 .chain(std::iter::once(crate::lookup_tool::declaration()))
+                .chain(std::iter::once(crate::status_tool::declaration()))
                 .chain(tools)
                 .collect::<Vec<_>>()
                 .into(),
@@ -46,6 +47,7 @@ impl ResidentInteractivePolicy {
             tools: vec![
                 haskell_tool_declaration(),
                 crate::lookup_tool::declaration(),
+                crate::status_tool::declaration(),
             ]
             .into(),
             client,
@@ -60,6 +62,7 @@ pub(crate) fn project_tools(
     let mut names = std::collections::HashSet::from([
         HASKELL_TOOL.to_string(),
         crate::lookup_tool::LOOKUP_TOOL.to_string(),
+        crate::status_tool::STATUS_TOOL.to_string(),
     ]);
     declarations
         .into_iter()
@@ -173,7 +176,9 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                         invocation.name
                     ))
                 })?;
-            if !declaration.accepts(&invocation.arguments) {
+            let lookup_structured = invocation.name == crate::lookup_tool::LOOKUP_TOOL
+                && matches!(&invocation.arguments, ToolArguments::Structured(_));
+            if !declaration.accepts(&invocation.arguments) && !lookup_structured {
                 return Err(ResidentToolError::InvalidInvocation(format!(
                     "invalid argument kind for {:?}",
                     invocation.name
@@ -184,10 +189,6 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     ToolArguments::Raw(text) => serde_json::Value::String(text),
                     ToolArguments::Structured(value) => value,
                 };
-                if invocation.name == crate::lookup_tool::LOOKUP_TOOL {
-                    crate::lookup_tool::prepare(arguments.clone())
-                        .map_err(|error| ResidentToolError::InvalidInvocation(error.to_string()))?;
-                }
                 return client
                     .dispatch_workbench(
                         WorkbenchRequest::for_tool(invocation.name, arguments),
@@ -237,7 +238,15 @@ mod tests {
 
     #[test]
     fn project_tools_checks_names_and_supported_input_before_publication() {
-        for name in ["", "haskell", "lookup", "bad.name", "λ", &"a".repeat(65)] {
+        for name in [
+            "",
+            "haskell",
+            "lookup",
+            "status",
+            "bad.name",
+            "λ",
+            &"a".repeat(65),
+        ] {
             assert!(project_tools(vec![raw(name)]).is_err(), "{name}");
         }
         assert!(project_tools(vec![raw("bash"), raw("bash")]).is_err());
@@ -269,6 +278,7 @@ mod tests {
             PromptId::HaskellToolInstructions.body()
         );
         assert_eq!(crate::lookup_tool::declaration().name(), "lookup");
+        assert_eq!(crate::status_tool::declaration().name(), "status");
     }
 }
 

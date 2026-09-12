@@ -9,8 +9,10 @@ use tidepool_tool::{HostedTool, ToolDeclaration, ToolKind};
 
 pub(crate) const LOOKUP_TOOL: &str = "lookup";
 
-const LOOKUP_DESCRIPTION: &str = "Look up names or Haskell types in the current \
-actor scope. Pass several queries together; prefix a type query with `::`. \
+const LOOKUP_DESCRIPTION: &str = "Look up names, Haskell types, or Shoal documentation. \
+Batch example: {\"queries\":[\"awaitSettled\",\":: Int -> Int\",\"doc workbench\"]}. \
+Prefix a type query with `::`; use `doc` for topics or `doc <topic>` for a topic. \
+A bare string is also accepted as one query. \
 Each query reports independently in deterministic text, so one bad query does \
 not hide other results.";
 
@@ -30,12 +32,15 @@ pub(crate) struct PreparedLookup {
 pub(crate) enum PreparedLookupKind {
     Name(String),
     Type(String),
+    Doc(String),
     Rejected(String),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum LookupInputError {
-    #[error("lookup arguments must be an object containing only `queries: [string]`: {0}")]
+    #[error(
+        "lookup arguments must be a string or an object containing only `queries: [string]`: {0}"
+    )]
     InvalidArguments(String),
     #[error("lookup requires at least one query")]
     EmptyBatch,
@@ -64,15 +69,21 @@ pub(crate) fn declaration() -> HostedTool {
     })
 }
 
-/// Validate the canonical object once, then classify each query independently.
+/// Accept a bare string as one query or validate the canonical batch object,
+/// then classify each query independently.
 ///
 /// Empty strings are retained as per-query rejections rather than rejecting
 /// the whole batch. Haskell after `::` remains opaque for GHC.
 pub(crate) fn prepare(
     arguments: serde_json::Value,
 ) -> Result<Vec<PreparedLookup>, LookupInputError> {
-    let arguments: LookupArguments = serde_json::from_value(arguments)
-        .map_err(|error| LookupInputError::InvalidArguments(error.to_string()))?;
+    let arguments = match arguments {
+        serde_json::Value::String(query) => LookupArguments {
+            queries: vec![query],
+        },
+        value => serde_json::from_value(value)
+            .map_err(|error| LookupInputError::InvalidArguments(error.to_string()))?,
+    };
     if arguments.queries.is_empty() {
         return Err(LookupInputError::EmptyBatch);
     }
@@ -89,6 +100,20 @@ pub(crate) fn prepare(
                     PreparedLookupKind::Rejected("type query after `::` is empty".into())
                 } else {
                     PreparedLookupKind::Type(body.into())
+                }
+            } else if trimmed == "doc" {
+                PreparedLookupKind::Doc("topics".into())
+            } else if let Some(body) = trimmed
+                .strip_prefix("doc")
+                .filter(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
+            {
+                let mut words = body.split_whitespace();
+                match (words.next(), words.next()) {
+                    (Some(topic), None) => PreparedLookupKind::Doc(topic.into()),
+                    (None, _) => PreparedLookupKind::Doc("topics".into()),
+                    _ => {
+                        PreparedLookupKind::Rejected("documentation query accepts one topic".into())
+                    }
                 }
             } else {
                 PreparedLookupKind::Name(trimmed.into())
@@ -107,6 +132,7 @@ pub(crate) enum LookupEntryKind {
     Constructor,
     Type,
     Coercion,
+    Documentation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -114,6 +140,7 @@ pub(crate) enum LookupEntryKind {
 pub(crate) enum LookupOrigin {
     ModuleExport,
     LiveBinding,
+    Documentation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -315,6 +342,37 @@ mod tests {
     }
 
     #[test]
+    fn bare_string_is_one_query_with_the_same_classification() {
+        assert_eq!(
+            prepare(serde_json::json!(" :: Int -> Int ")).unwrap(),
+            vec![PreparedLookup {
+                query: " :: Int -> Int ".into(),
+                kind: PreparedLookupKind::Type("Int -> Int".into()),
+            }]
+        );
+        assert!(matches!(
+            prepare(serde_json::json!("  ")).unwrap()[0].kind,
+            PreparedLookupKind::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn documentation_queries_are_local_and_keep_names_distinct() {
+        let prepared = prepare(serde_json::json!({
+            "queries": ["doc", "doc workbench", "doc unknown", "doc workbench extra", "doctor"]
+        }))
+        .unwrap();
+        assert_eq!(prepared[0].kind, PreparedLookupKind::Doc("topics".into()));
+        assert_eq!(
+            prepared[1].kind,
+            PreparedLookupKind::Doc("workbench".into())
+        );
+        assert_eq!(prepared[2].kind, PreparedLookupKind::Doc("unknown".into()));
+        assert!(matches!(prepared[3].kind, PreparedLookupKind::Rejected(_)));
+        assert_eq!(prepared[4].kind, PreparedLookupKind::Name("doctor".into()));
+    }
+
+    #[test]
     fn outer_shape_errors_do_not_become_query_results() {
         assert!(matches!(
             prepare(serde_json::json!({"queries": []})),
@@ -326,6 +384,10 @@ mod tests {
         ));
         assert!(matches!(
             prepare(serde_json::json!({"queries": [1]})),
+            Err(LookupInputError::InvalidArguments(_))
+        ));
+        assert!(matches!(
+            prepare(serde_json::json!(["awaitSettled"])),
             Err(LookupInputError::InvalidArguments(_))
         ));
     }

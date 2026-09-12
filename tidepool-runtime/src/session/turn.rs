@@ -134,9 +134,83 @@ pub struct CheckedBinderPin {
     pub heads: Vec<NominalHead>,
 }
 
+/// Compiler-parsed header syntax, preserved in authored order. It applies to
+/// this source only; later cells start from their configured defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourcePrologue {
+    pub pragmas: Vec<LocatedPragma>,
+    pub imports: Vec<LocatedImport>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PragmaKind {
+    Language,
+    OptionsGhc,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedPragma {
+    pub kind: PragmaKind,
+    pub span: CellSourceSpan,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedImport {
+    pub span: CellSourceSpan,
+    /// GHC-rendered complete, single-line import declaration.
+    pub source: String,
+}
+
+/// The declaration owner renders this compiler-normalized source. Authored
+/// text is retained separately when needed for receipts and recovery.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeclarationSource {
+    pub prologue: SourcePrologue,
+    pub body: String,
+}
+
+impl SourcePrologue {
+    pub fn pragma_text(&self) -> String {
+        self.pragmas
+            .iter()
+            .map(|pragma| format!("{}\n", pragma.source))
+            .collect()
+    }
+
+    pub fn workbench_imports(&self) -> super::SourceImports {
+        super::SourceImports::from_specs(self.imports.iter().map(|import| {
+            // The worker returns normalized import declarations, never raw cell lines.
+            &import.source["import ".len()..]
+        }))
+    }
+
+    pub fn import_text(&self) -> String {
+        self.imports
+            .iter()
+            .map(|import| format!("{}\n", import.source))
+            .collect()
+    }
+}
+
+impl DeclarationSource {
+    /// Reconstruct replay source from compiler-owned fragments. No syntax is
+    /// inferred from authored lines, and compiler option ordering is retained.
+    pub fn replay_source(&self, external: &super::SourceImports) -> String {
+        format!(
+            "{}{}{}{}",
+            self.prologue.pragma_text(),
+            self.prologue.import_text(),
+            external.declaration_prefix(),
+            self.body
+        )
+    }
+}
+
 /// Successful whole-cell preflight result.
 #[derive(Clone, Debug)]
 pub struct CellCheck {
+    pub prologue: SourcePrologue,
     pub items: Vec<CellAnalysisItem>,
     pub pins: Vec<CheckedBinderPin>,
     /// Exact generated module GHC checked.
@@ -175,6 +249,27 @@ impl CellCheck {
                 Ok(pin)
             })
             .collect()
+    }
+}
+
+/// Checking failure with the GHC source plan, when lexing/classification succeeded.
+/// A failed check never makes the plan executable: it carries no trusted pins.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct CellCheckFailure {
+    pub error: CompileError,
+    pub items: Option<Vec<CellAnalysisItem>>,
+}
+
+impl From<CompileError> for CellCheckFailure {
+    fn from(error: CompileError) -> Self {
+        Self { error, items: None }
+    }
+}
+
+impl From<std::io::Error> for CellCheckFailure {
+    fn from(error: std::io::Error) -> Self {
+        CompileError::from(error).into()
     }
 }
 
@@ -520,6 +615,7 @@ pub enum TurnResult {
 /// GHC's complete parse-only receipt for one declaration turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclarationReceipt {
+    pub source: DeclarationSource,
     /// Declared names from the verdict/whole-module parse.
     pub binders: Vec<String>,
     /// Exported values, types, and classes, including constructor/method facts.
@@ -947,7 +1043,7 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// effect is installed. The runtime supplies the exact next-cell scope as a
 /// source template; the worker owns Haskell parsing and post-zonk binder
 /// harvesting.
-pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CompileError> {
+pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
     let temp = TempDir::new()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
@@ -971,10 +1067,15 @@ pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CompileError> 
     if let Err(error) =
         crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
     {
-        return Err(error);
+        let items = match std::fs::read(&out_path) {
+            Ok(bytes) => Some(decode_cell_out(&bytes)?.items),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        return Err(CellCheckFailure { error, items });
     }
     let bytes = std::fs::read(&out_path)?;
-    decode_cell_out(&bytes)
+    decode_cell_out(&bytes).map_err(Into::into)
 }
 
 /// The one entry point for a session-eval turn. Writes the turn text and
@@ -1140,9 +1241,15 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
     let turn_out = decode_turn_out(&turn_out_bytes)?;
 
     match turn_out {
-        DecodedTurnOut::Decl { binders, items } => {
-            Ok(TurnResult::Decl(DeclarationReceipt { binders, items }))
-        }
+        DecodedTurnOut::Decl {
+            binders,
+            items,
+            source,
+        } => Ok(TurnResult::Decl(DeclarationReceipt {
+            binders,
+            items,
+            source,
+        })),
         DecodedTurnOut::Bind {
             binders,
             variant,
@@ -1229,6 +1336,7 @@ enum DecodedTurnOut {
     Decl {
         binders: Vec<String>,
         items: Vec<ExportItem>,
+        source: DeclarationSource,
     },
     Bind {
         binders: Vec<String>,
@@ -1423,11 +1531,60 @@ fn decode_asks(v: &CborValue) -> Result<Vec<YieldSite>, CompileError> {
         .collect()
 }
 
+fn decode_source_prologue(value: &CborValue) -> Result<SourcePrologue, CompileError> {
+    let fields = cbor_expect_array_len(value, 2, "source prologue")?;
+    let pragmas = cbor_expect_array(&fields[0], "source pragmas")?
+        .iter()
+        .map(|value| {
+            let fields = cbor_expect_array_len(value, 3, "source pragma")?;
+            let kind = match cbor_expect_text(&fields[0], "pragma kind")? {
+                "language" => PragmaKind::Language,
+                "options_ghc" => PragmaKind::OptionsGhc,
+                other => {
+                    return Err(CompileError::ExtractFailed(format!(
+                        "unknown source pragma kind {other:?}"
+                    )))
+                }
+            };
+            Ok(LocatedPragma {
+                kind,
+                span: decode_cell_span(&fields[1])?,
+                source: cbor_expect_text(&fields[2], "pragma source")?.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let imports = cbor_expect_array(&fields[1], "source imports")?
+        .iter()
+        .map(|value| {
+            let fields = cbor_expect_array_len(value, 2, "source import")?;
+            let source = cbor_expect_text(&fields[1], "import source")?;
+            if !source.starts_with("import ") || source.contains(['\n', '\r']) {
+                return Err(CompileError::ExtractFailed(
+                    "worker import is not a normalized single-line declaration".into(),
+                ));
+            }
+            Ok(LocatedImport {
+                span: decode_cell_span(&fields[0])?,
+                source: source.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    Ok(SourcePrologue { pragmas, imports })
+}
+
+fn decode_declaration_source(value: &CborValue) -> Result<DeclarationSource, CompileError> {
+    let fields = cbor_expect_array_len(value, 2, "declaration source")?;
+    Ok(DeclarationSource {
+        prologue: decode_source_prologue(&fields[0])?,
+        body: cbor_expect_text(&fields[1], "declaration body")?.to_owned(),
+    })
+}
+
 fn decode_cell_out(bytes: &[u8]) -> Result<CellCheck, CompileError> {
     let value: CborValue = ciborium::de::from_reader(bytes).map_err(|error| {
         CompileError::ExtractFailed(format!("CellOut CBOR: malformed: {error}"))
     })?;
-    let root = cbor_expect_array_len(&value, 3, "CellOut")?;
+    let root = cbor_expect_array_len(&value, 4, "CellOut")?;
     let items = cbor_expect_array(&root[0], "cell items")?
         .iter()
         .map(decode_cell_item)
@@ -1442,6 +1599,7 @@ fn decode_cell_out(bytes: &[u8]) -> Result<CellCheck, CompileError> {
         items,
         pins,
         checked_source,
+        prologue: decode_source_prologue(&root[3])?,
     })
 }
 
@@ -1473,15 +1631,19 @@ fn validate_cell_source_items(items: &[CellAnalysisItem]) -> Result<(), CompileE
     Ok(())
 }
 
+fn decode_cell_span(value: &CborValue) -> Result<CellSourceSpan, CompileError> {
+    let span = cbor_expect_array_len(value, 4, "source span")?;
+    Ok(CellSourceSpan {
+        start_line: cbor_as_usize(&span[0], "span start line")?,
+        start_column: cbor_as_usize(&span[1], "span start column")?,
+        end_line: cbor_as_usize(&span[2], "span end line")?,
+        end_column: cbor_as_usize(&span[3], "span end column")?,
+    })
+}
+
 fn decode_cell_item(value: &CborValue) -> Result<CellAnalysisItem, CompileError> {
     let fields = cbor_expect_array_len(value, 5, "cell item")?;
-    let span = cbor_expect_array_len(&fields[0], 4, "cell item span")?;
-    let span = CellSourceSpan {
-        start_line: cbor_as_usize(&span[0], "cell span start line")?,
-        start_column: cbor_as_usize(&span[1], "cell span start column")?,
-        end_line: cbor_as_usize(&span[2], "cell span end line")?,
-        end_column: cbor_as_usize(&span[3], "cell span end column")?,
-    };
+    let span = decode_cell_span(&fields[0])?;
     let kind = match cbor_expect_text(&fields[1], "cell item kind")? {
         "decl" => TurnKind::Decl,
         "bind" => TurnKind::Bind,
@@ -1511,7 +1673,6 @@ fn decode_cell_item(value: &CborValue) -> Result<CellAnalysisItem, CompileError>
 
 fn decode_cell_source_item(value: &CborValue) -> Result<CellAnalysisSourceItem, CompileError> {
     let fields = cbor_expect_array_len(value, 3, "cell source item")?;
-    let span = cbor_expect_array_len(&fields[1], 4, "cell source item span")?;
     let kind = match cbor_expect_text(&fields[2], "cell source item kind")? {
         "decl" => TurnKind::Decl,
         "bind" => TurnKind::Bind,
@@ -1524,12 +1685,7 @@ fn decode_cell_source_item(value: &CborValue) -> Result<CellAnalysisSourceItem, 
     };
     Ok(CellAnalysisSourceItem {
         ordinal: cbor_as_usize(&fields[0], "cell source item ordinal")?,
-        span: CellSourceSpan {
-            start_line: cbor_as_usize(&span[0], "cell source span start line")?,
-            start_column: cbor_as_usize(&span[1], "cell source span start column")?,
-            end_line: cbor_as_usize(&span[2], "cell source span end line")?,
-            end_column: cbor_as_usize(&span[3], "cell source span end column")?,
-        },
+        span: decode_cell_span(&fields[1])?,
         kind,
     })
 }
@@ -1554,10 +1710,14 @@ fn decode_turn_out(bytes: &[u8]) -> Result<DecodedTurnOut, CompileError> {
     let tag = cbor_expect_text(&root[0], "TurnOut tag")?;
     match tag {
         "Decl" => {
-            let payload = cbor_expect_array_len(&root[1], 2, "Decl payload")?;
+            let payload = cbor_expect_array_len(&root[1], 3, "Decl payload")?;
             let binders = decode_string_array(&payload[0], "Decl binders")?;
             let items = decode_export_items(&payload[1])?;
-            Ok(DecodedTurnOut::Decl { binders, items })
+            Ok(DecodedTurnOut::Decl {
+                binders,
+                items,
+                source: decode_declaration_source(&payload[2])?,
+            })
         }
         "Bind" => {
             let payload = cbor_expect_array_len(&root[1], 5, "Bind payload")?;
@@ -1860,8 +2020,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let template = concat!(
             "{-# LANGUAGE NoImplicitPrelude #-}\n",
+            "{{CELL_PRAGMAS}}\n",
             "module CellCheck where\n",
             "import Prelude\n",
+            "{{CELL_IMPORTS}}\n",
             "__tidepoolCellExpression :: value -> IO ()\n",
             "__tidepoolCellExpression _ = pure ()\n",
             "{{CELL_DECLS}}\n",
@@ -1958,8 +2120,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let template = concat!(
             "{-# LANGUAGE NoImplicitPrelude #-}\n",
+            "{{CELL_PRAGMAS}}\n",
             "module CellCheck where\n",
             "import Prelude\n",
+            "{{CELL_IMPORTS}}\n",
             "__tidepoolCellExpression :: value -> IO ()\n",
             "__tidepoolCellExpression _ = pure ()\n",
             "{{CELL_DECLS}}\n",
@@ -1987,8 +2151,8 @@ mod tests {
         assert!(
             checked
                 .checked_source
-                .contains("__tidepool_cell_pin_1_h :: Maybe G"),
-            "the accepted source must reparse the rendered pin: {}",
+                .contains("__tidepool_cell_pin_1_h = h"),
+            "the checked source must capture the inferred binder: {}",
             checked.checked_source
         );
         assert!(pins[0]
@@ -2492,13 +2656,23 @@ mod tests {
                     CborValue::Text("EValue".into()),
                     CborValue::Text("sq".into()),
                 ])]),
+                CborValue::Array(vec![
+                    CborValue::Array(vec![CborValue::Array(vec![]), CborValue::Array(vec![])]),
+                    CborValue::Text("sq x = x * x".into()),
+                ]),
             ]),
         ]);
         match decode_turn_out(&build_cbor(&v)).unwrap() {
-            DecodedTurnOut::Decl { binders, items } => {
+            DecodedTurnOut::Decl {
+                binders,
+                items,
+                source,
+            } => {
                 assert_eq!(binders, vec!["sq".to_string()]);
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0].head_name(), "sq");
+                assert_eq!(source.body, "sq x = x * x");
+                assert!(source.prologue.imports.is_empty());
             }
             other => panic!("expected Decl, got {other:?}"),
         }

@@ -6,7 +6,7 @@ import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
-import Control.Exception (evaluate, try, throwIO, SomeException, fromException, toException)
+import Control.Exception (evaluate, try, throwIO, SomeException, Exception, fromException, toException)
 import Data.List (isPrefixOf, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Control.Monad (foldM, forM, void)
@@ -24,7 +24,8 @@ import qualified Data.Text as T
 import Tidepool.Binders
   ( extractBindersNamed
   , extractStmtBinders, classifyBlock, exportItemName
-  , analyzeCell, renderCellCheckSource, renderPinnedCellCheckSource
+  , analyzeCell, renderCellCheckSource, CellSplitError(..), CellSourceSpan(..)
+  , declarationSourceWithTemplate, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderVerdictsJson )
@@ -61,6 +62,19 @@ type Compiler =
   -> [FilePath]
   -> Maybe FilePath
   -> IO PipelineResult
+
+data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
+  deriving Show
+instance Exception LocatedCellRejection
+
+throwCellSplitError :: CellSplitError -> IO a
+throwCellSplitError errorValue = case errorValue of
+  CellPrologueFailure sourceSpan message ->
+    throwIO (LocatedCellRejection sourceSpan message)
+  CellLexFailure ->
+    throwIO (LocatedCellRejection (CellSourceSpan 1 1 1 1)
+      "GHC could not lex the notebook cell")
+  CellHeaderFailure message -> fail ("cell check template header: " ++ message)
 
 -- | Serve one typed request. Stdout contains exactly one diagnostics document;
 -- stderr is the human-readable channel.
@@ -196,7 +210,11 @@ reportDiags (Left e) = do
         Nothing -> case fromException e of
           Just (SourceRejection message) ->
             (ReportSourceFailure, [Diag Nothing DiagError message])
-          Nothing -> (ReportWorkerFailure, [diagFromException e])
+          Nothing -> case fromException e of
+            Just (LocatedCellRejection (CellSourceSpan sl sc el ec) message) ->
+              (ReportSourceFailure,
+                [Diag (Just ("<cell>", sl, sc, el, ec)) DiagError message])
+            Nothing -> (ReportWorkerFailure, [diagFromException e])
   putStrLn (renderDiagsJson outcome diags)
   -- Debug copy for humans only; stdout (above) is the authoritative machine
   -- contract.
@@ -427,8 +445,9 @@ runTurnMode compiler args path = do
         spliceInto :: FilePath -> IO (String, String, FilePath)
         spliceInto tmplFile = do
           tmplSrc <- readFile tmplFile
-          let spliced = spliceTemplate tmplSrc turnSrc bindersStr
-              modName = fromMaybe "Input" (extractModuleName spliced)
+          writeSpliced (spliceTemplate tmplSrc turnSrc bindersStr)
+        writeSpliced spliced = do
+          let modName = fromMaybe "Input" (extractModuleName spliced)
           createDirectoryIfMissing True outDir
           let modulePath = outDir </> modName ++ ".hs"
           writeFile modulePath spliced
@@ -442,12 +461,16 @@ runTurnMode compiler args path = do
         tmplFile <- case lookup (templateSelectorWireName SDecl) templates of
           Just f  -> return f
           Nothing -> error "--turn: no --turn-template for kind decl"
-        (_spliced, modName, modulePath) <- spliceInto tmplFile
+        tmplSrc <- readFile tmplFile
+        declarationSource <- declarationSourceWithTemplate tmplSrc turnSrc
+          >>= either throwCellSplitError pure
+        spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
+        (_spliced, modName, modulePath) <- writeSpliced spliced
         items <- extractBindersNamed modulePath (requestIncludes args) modName
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
-        return (TDecl binders items)
+        return (TDecl binders items declarationSource)
       kind -> do
         -- Four-shape selection (protocol note, "the verdict space has four
         -- shapes, not three"): a bind that binds no name selects its own
@@ -525,9 +548,7 @@ runCellMode compiler args cellPath = do
     cellSource <- readFile cellPath
     templatePath <- requireArg "--cell-template" (requestCellTemplate args)
     template <- readFile templatePath
-    analyzed <- analyzeCell cellSource >>= either
-      (const (fail "GHC could not lex the notebook cell"))
-      pure
+    analyzed <- analyzeCell template cellSource >>= either throwCellSplitError pure
     checkedSource <- either fail pure (renderCellCheckSource template analyzed)
     let outDir = fromMaybe
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
@@ -539,14 +560,14 @@ runCellMode compiler args cellPath = do
           else Nothing
     createDirectoryIfMissing True outDir
     writeFile modulePath checkedSource
-    compiled <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
-    pinnedSource <- either fail pure
-      (renderPinnedCellCheckSource template analyzed (prCheckedBinderPins compiled))
-    writeFile modulePath pinnedSource
-    pinned <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
     out <- requireArg "--cell-out" (requestCellOut args)
+    -- Preserve GHC's source plan even when checking reports diagnostics.
+    BS.writeFile out (encodeCellOut analyzed [] checkedSource)
+    compiled <- compiler GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+    -- Statement preparation checks these rendered pins in their actual value
+    -- modules before any declaration commits or effect runs.
     BS.writeFile out
-      (encodeCellOut analyzed (prCheckedBinderPins pinned) pinnedSource)
+      (encodeCellOut analyzed (prCheckedBinderPins compiled) checkedSource)
   reportDiags res
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same

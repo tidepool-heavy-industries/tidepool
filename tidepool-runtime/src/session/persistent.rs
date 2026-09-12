@@ -1168,7 +1168,7 @@ impl PersistentSession {
     pub fn stage_declarations_in(
         &self,
         scope: ScopeId,
-        decl_texts: &[&str],
+        receipt: &super::DeclarationReceipt,
         external: &SourceImports,
     ) -> Result<super::StagedDeclaration, SessionError> {
         if !self.scopes.is_live(scope) {
@@ -1176,18 +1176,8 @@ impl PersistentSession {
         }
         let mut persistent_imports = external.clone();
         persistent_imports.extend(&self.workbench_imports_in(scope));
-        let sources = decl_texts
-            .iter()
-            .map(|source| persistent_imports.declaration_source(source))
-            .collect::<Vec<_>>();
-        let source_refs = sources.iter().map(String::as_str).collect::<Vec<_>>();
         #[allow(clippy::expect_used, reason = "decl plane present")]
         let lib = self.lib.as_ref().expect("decl plane present");
-        let receipt = lib.declaration_receipt(&source_refs)?.ok_or_else(|| {
-            SessionError::Compile(crate::CompileError::ExtractFailed(
-                "cell declaration group unexpectedly contained no declarations".into(),
-            ))
-        })?;
         let replaced_names = receipt
             .items
             .iter()
@@ -1208,9 +1198,8 @@ impl PersistentSession {
         import_modules.dedup();
         lib.stage_batch_with_receipt_and_vals_in(
             scope,
-            &source_refs,
-            decl_texts,
-            &receipt,
+            &persistent_imports,
+            receipt,
             &import_modules,
             &self.live_val_modules(),
         )
@@ -1438,16 +1427,9 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        let mut persistent_imports = external.clone();
-        persistent_imports.extend(&self.workbench_imports_in(scope));
-        let sources = decl_texts
-            .iter()
-            .map(|source| persistent_imports.declaration_source(source))
-            .collect::<Vec<_>>();
-        let source_refs = sources.iter().map(String::as_str).collect::<Vec<_>>();
         #[allow(clippy::expect_used, reason = "decl plane present")]
         let lib = self.lib.as_ref().expect("decl plane present");
-        let Some(receipt) = lib.declaration_receipt(&source_refs)? else {
+        let Some(receipt) = lib.declaration_receipt(decl_texts)? else {
             let generation = lib.scope_tip(scope);
             return Ok(DeclarationPlaneCommit {
                 generation,
@@ -1456,6 +1438,22 @@ impl PersistentSession {
                 evicted_values: Vec::new(),
             });
         };
+        self.commit_declaration_receipt_in(scope, &receipt, external)
+    }
+
+    /// Consume compiler-owned source facts through the same capture and
+    /// value-replacement boundary as ordinary definitions.
+    pub fn commit_declaration_receipt_in(
+        &mut self,
+        scope: ScopeId,
+        receipt: &super::DeclarationReceipt,
+        external: &SourceImports,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let mut persistent_imports = external.clone();
+        persistent_imports.extend(&self.workbench_imports_in(scope));
         let mut replaced_names: Vec<String> = receipt
             .items
             .iter()
@@ -1493,9 +1491,8 @@ impl PersistentSession {
             .expect("decl plane present")
             .define_batch_with_receipt_and_vals_in(
                 scope,
-                &source_refs,
-                decl_texts,
-                &receipt,
+                &persistent_imports,
+                receipt,
                 &import_modules,
                 &inject_modules,
             )?;
@@ -1509,7 +1506,7 @@ impl PersistentSession {
         Ok(DeclarationPlaneCommit {
             generation,
             module: SessionModule::lib(generation),
-            items: receipt.items,
+            items: receipt.items.clone(),
             evicted_values,
         })
     }

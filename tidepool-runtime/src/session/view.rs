@@ -14,10 +14,9 @@ use tidepool_repr::{Generation, SessionId, SessionModule};
 /// Ordered external import specifications for model-authored source.
 ///
 /// Entries omit the leading `import`, matching Tidepool's template builders.
-/// Extraction from authored declarations deliberately recognizes only the
-/// established single-line import grammar. Actor program images use a
-/// structured exact-export facade; this remains the final rendered source view
-/// shared by existing harness and REPL compilation.
+/// Authored imports arrive normalized by GHC. Actor program images use a
+/// structured exact-export facade; this is the rendered source view shared
+/// by session frontends.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceImports {
     specs: Vec<String>,
@@ -56,13 +55,9 @@ impl SourceImports {
         }
     }
 
-    /// Record the ordinary single-line imports present in declaration source.
-    ///
-    /// Declaration rendering and workbench persistence support the same
-    /// practical import grammar: one complete `import ...` specification per
-    /// line. The stored form omits the keyword so it can be fed back through
-    /// turn templates without another representation change.
-    pub fn extend_declaration_source(&mut self, source: &str) {
+    /// Read imports from a generated preamble, whose renderer already owns
+    /// the one-import-per-line format. Authored source must pass through GHC.
+    pub fn extend_generated_imports(&mut self, source: &str) {
         for line in source.lines().map(str::trim) {
             let Some(rest) = line.strip_prefix("import") else {
                 continue;
@@ -100,18 +95,6 @@ impl SourceImports {
             .iter()
             .map(|spec| format!("import {spec}\n"))
             .collect()
-    }
-
-    /// Attach the exact same external import view to source that will be
-    /// persisted in the declaration plane.
-    #[must_use]
-    pub fn declaration_source(&self, body: &str) -> String {
-        let prefix = self.declaration_prefix();
-        if prefix.is_empty() {
-            body.to_string()
-        } else {
-            format!("{prefix}\n{body}")
-        }
     }
 }
 
@@ -283,7 +266,7 @@ impl SessionCompileView {
     #[must_use]
     pub fn turn_imports(&self, external: &SourceImports) -> String {
         let mut specs = SourceImports::new();
-        specs.extend_declaration_source(
+        specs.extend_generated_imports(
             &self.shadow_preamble(&self.workbench_imports(external).declaration_prefix()),
         );
         if let Some(module) = self.library {
@@ -393,7 +376,7 @@ mod tests {
     #[test]
     fn source_imports_extract_and_render_deterministically() {
         let mut imports = SourceImports::from_specs(["Tidepool.Actors.Shoal"]);
-        imports.extend_declaration_source(
+        imports.extend_generated_imports(
             "import qualified Data.Set as Set\nimport Tidepool.Actors.Shoal\nvalue = Set.empty",
         );
 

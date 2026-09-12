@@ -18,7 +18,9 @@ import Tidepool.IR (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..))
 import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Binders
   ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..)
-  , CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..), CheckedBinderPin(..)
+  , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
+  , CellSourceSpan(..), CheckedBinderPin(..), SourcePrologue(..)
+  , LocatedPragma(..), LocatedImport(..), PragmaKind(..), DeclarationSource(..)
   , StmtBinders(..), turnKindWireName )
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
@@ -199,9 +201,10 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
 
 encodeTurnOut :: TurnOut -> ByteString
 encodeTurnOut turnOut = toStrictByteString $ case turnOut of
-  TDecl bs items ->
+  TDecl bs items source ->
     encodeListLen 2 <> encodeString "Decl"
-    <> (encodeListLen 2 <> encodeTextList bs <> encodeExportItems items)
+    <> (encodeListLen 3 <> encodeTextList bs <> encodeExportItems items
+        <> encodeDeclarationSource source)
   TBind bs var bbs aks wrapped ->
     encodeListLen 2 <> encodeString "Bind"
     <> (encodeListLen 5
@@ -219,20 +222,55 @@ encodeTurnOut turnOut = toStrictByteString $ case turnOut of
 
 -- | Whole-cell analysis wire. Independent from the frozen Core format and
 -- deliberately positional like 'TurnOut':
--- @[items, pins, checked_source]@. The checked source is retained as exact
+-- @[items, pins, checked_source, prologue]@. The checked source is retained as exact
 -- evidence for diagnostic remapping and staged-wrapper review.
 encodeCellOut
-  :: [CellAnalysisItem]
+  :: CellSourcePlan
   -> [CheckedBinderPin]
   -> String
   -> ByteString
-encodeCellOut items pins checkedSource = toStrictByteString $
-  encodeListLen 3
+encodeCellOut plan pins checkedSource = toStrictByteString $
+  let items = cellPlanItems plan in
+  encodeListLen 4
   <> encodeListLen (fromIntegral (length items))
   <> foldMap encodeCellItem items
   <> encodeListLen (fromIntegral (length pins))
   <> foldMap encodeCheckedBinderPin pins
   <> encodeString (T.pack checkedSource)
+  <> encodeSourcePrologue (cellPlanPrologue plan)
+
+encodeDeclarationSource :: DeclarationSource -> Encoding
+encodeDeclarationSource (DeclarationSource prologue body) =
+  encodeListLen 2 <> encodeSourcePrologue prologue <> encodeString (T.pack body)
+
+encodeSourcePrologue :: SourcePrologue -> Encoding
+encodeSourcePrologue (SourcePrologue pragmas imports) =
+  encodeListLen 2
+  <> encodeListLen (fromIntegral (length pragmas))
+  <> foldMap encodeLocatedPragma pragmas
+  <> encodeListLen (fromIntegral (length imports))
+  <> foldMap encodeLocatedImport imports
+
+encodeLocatedPragma :: LocatedPragma -> Encoding
+encodeLocatedPragma (LocatedPragma kind sourceSpan source) =
+  encodeListLen 3
+  <> encodeString (case kind of
+       LanguagePragma -> "language"
+       OptionsGhcPragma -> "options_ghc")
+  <> encodeCellSpan sourceSpan
+  <> encodeString (T.pack source)
+
+encodeLocatedImport :: LocatedImport -> Encoding
+encodeLocatedImport (LocatedImport sourceSpan source) =
+  encodeListLen 2 <> encodeCellSpan sourceSpan <> encodeString (T.pack source)
+
+encodeCellSpan :: CellSourceSpan -> Encoding
+encodeCellSpan (CellSourceSpan startLine startColumn endLine endColumn) =
+  encodeListLen 4
+  <> encodeInt startLine
+  <> encodeInt startColumn
+  <> encodeInt endLine
+  <> encodeInt endColumn
 
 encodeCellItem :: CellAnalysisItem -> Encoding
 encodeCellItem CellAnalysisItem

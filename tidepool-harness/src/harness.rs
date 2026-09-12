@@ -1680,11 +1680,6 @@ impl Harness {
         let inject_modules = ctx.inject_modules.clone();
         let gen = ctx.gen;
 
-        // Declarations are compiled once more into the resident declaration
-        // plane. Preserve the exact external compile view used above; session
-        // ancestry is supplied by `define_scoped_in` and must not be re-glued
-        // here.
-        let decl_source = compile_imports.declaration_source(block);
         let block_owned = block.to_string();
         let req_block = block_owned.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1713,7 +1708,7 @@ impl Harness {
         })?;
 
         match outcome {
-            TurnResult::Decl(_) => {
+            TurnResult::Decl(receipt) => {
                 let checkout = self.checkout_run_waiting(node).await?;
                 // Into the node's OWN scope: the definition joins that scope's
                 // decl tip (which already re-exports its ancestors'), so it is
@@ -1724,7 +1719,9 @@ impl Harness {
                 let scope = self.node_scope(node);
                 let res = self
                     .run_checked_out(node, checkout, move |mut session| {
-                        let r = session.define_scoped_in(scope, &[&decl_source]);
+                        let r = session
+                            .commit_declaration_receipt_in(scope, &receipt, &compile_imports)
+                            .map(|commit| commit.generation);
                         (session, r)
                     })
                     .await?;
@@ -3662,11 +3659,10 @@ mod tests {
             "HarnessTypes (Decision (..))\nData.Text (Text)\nqualified Data.Map.Strict as Map"
         );
         assert_eq!(
-            imports.declaration_source("data Wrapped = Wrapped Decision"),
+            imports.declaration_prefix(),
             "import HarnessTypes (Decision (..))\n\
              import Data.Text (Text)\n\
-             import qualified Data.Map.Strict as Map\n\n\
-             data Wrapped = Wrapped Decision"
+             import qualified Data.Map.Strict as Map\n"
         );
     }
 

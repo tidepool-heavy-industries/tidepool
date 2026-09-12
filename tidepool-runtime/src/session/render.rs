@@ -2,7 +2,7 @@
 //! modules.
 //!
 //! The whole module source is a **pure function of the decl log**: given the
-//! ordered turns (each carrying the raw declaration source text, the
+//! ordered turns (each carrying GHC-normalized declaration source, the
 //! GHC-sourced [`ExportItem`]s it introduces, and the generation it chains
 //! from — [`DeclTurn::parent`]), [`render_module`] produces the source of any
 //! one generation's module. Each generation imports its **parent** generation
@@ -127,9 +127,12 @@ impl ExportItem {
 /// export items GHC says they introduce.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclTurn {
-    /// Declaration source committed to the generated module. This preserves
-    /// authored text verbatim and may prefix trusted workbench imports needed
-    /// to validate that text. May contain several top-level declarations.
+    /// GHC-parsed source and imports used for compilation. Rendering never
+    /// scans the authored source for Haskell header syntax.
+    pub normalized: super::DeclarationSource,
+    pub external_imports: SourceImports,
+    /// Replay source reconstructed from the normalized header and body,
+    /// including trusted imports required to compile it outside this frontend.
     pub sources: Vec<String>,
     /// Imports authored in this turn, separate from trusted imports prefixed
     /// onto `sources` for declaration validation.
@@ -373,80 +376,6 @@ pub struct RenderedModule {
     pub hoisted_lines: bool,
 }
 
-/// Parse `{-# LANGUAGE Ext1, Ext2 #-}` (single pragma block, one or more lines)
-/// into the list of extension names. Returns an empty vec for absent or malformed input.
-fn parse_pragma_extensions(pragma_block: &str) -> Vec<String> {
-    let mut exts = Vec::new();
-    for line in pragma_block.lines() {
-        let line = line.trim();
-        if line.starts_with("{-# LANGUAGE") && line.contains("#-}") {
-            if let Some(inner) = line
-                .strip_prefix("{-# LANGUAGE")
-                .and_then(|s| s.rfind("#-}").map(|i| s[..i].trim()))
-            {
-                for e in inner.split(',') {
-                    let e = e.trim().to_string();
-                    if !e.is_empty() {
-                        exts.push(e);
-                    }
-                }
-            }
-        }
-    }
-    exts
-}
-
-/// Scan `src` line by line for `{-# LANGUAGE … #-}` pragmas (line-anchored),
-/// collect their extension names, strip those lines, and return
-/// `(stripped_source, extensions)`.
-fn extract_language_pragmas(src: &str) -> (String, Vec<String>) {
-    let mut exts = Vec::new();
-    let mut kept: Vec<&str> = Vec::new();
-    for line in src.lines() {
-        let t = line.trim();
-        if t.starts_with("{-# LANGUAGE") && t.contains("#-}") {
-            if let Some(inner) = t
-                .strip_prefix("{-# LANGUAGE")
-                .and_then(|s| s.rfind("#-}").map(|i| s[..i].trim()))
-            {
-                for e in inner.split(',') {
-                    let e = e.trim().to_string();
-                    if !e.is_empty() {
-                        exts.push(e);
-                    }
-                }
-            }
-        } else {
-            kept.push(line);
-        }
-    }
-    (kept.join("\n"), exts)
-}
-
-/// Scan `src` line by line for top-level `import …` lines (line-anchored),
-/// collect them verbatim, strip those lines, and return
-/// `(stripped_source, import_lines)`.
-///
-/// Handles the common single-line case: `import [qualified] Mod [as X]
-/// [(list)] [hiding (list)]`. Multi-line import lists (a line ending with `(`
-/// and no closing `)` on the same line) are not currently hoisted — they stay
-/// in the body where they are a parse error if before declarations. Multi-line
-/// imports in session_def bodies are rare enough that single-line coverage
-/// handles the practical cases.
-fn extract_user_imports(src: &str) -> (String, Vec<String>) {
-    let mut imports = Vec::new();
-    let mut kept: Vec<&str> = Vec::new();
-    for line in src.lines() {
-        let t = line.trim();
-        if t.starts_with("import ") || t.starts_with("import\t") {
-            imports.push(t.to_string());
-        } else {
-            kept.push(line);
-        }
-    }
-    (kept.join("\n"), imports)
-}
-
 /// Rewrite one `env.imports` line so no name in `all_session_heads` reaches
 /// scope through it. Three shapes, because GHC allows at most one of an
 /// explicit import list and a `hiding` clause per import:
@@ -646,35 +575,20 @@ pub fn render_module_with_vals(
     let this = &log.turns[g - 1];
     let prior = cumulative_exports_before(log, g);
 
-    // Hoist LANGUAGE pragmas and import lines from user source: strip them so
-    // they don't reappear after the module header / in the declaration body.
-    let mut hoisted_exts: Vec<String> = Vec::new();
-    let mut hoisted_imports: Vec<String> = Vec::new();
-    let stripped_sources: Vec<String> = this
-        .sources
-        .iter()
-        .map(|src| {
-            let (stripped, exts) = extract_language_pragmas(src);
-            hoisted_exts.extend(exts);
-            let (stripped, imps) = extract_user_imports(&stripped);
-            hoisted_imports.extend(imps);
-            stripped
-        })
-        .collect();
-
-    // Build merged pragma block: env extensions first, then any new user
-    // extensions not already present (dedupe, order-preserving).
-    let mut merged_exts = parse_pragma_extensions(&env.pragmas);
-    for ext in &hoisted_exts {
-        if !merged_exts.contains(ext) {
-            merged_exts.push(ext.clone());
-        }
-    }
-    let merged_pragmas = if merged_exts.is_empty() {
-        env.pragmas.clone()
-    } else {
-        format!("{{-# LANGUAGE {} #-}}", merged_exts.join(", "))
-    };
+    let mut hoisted_imports = this.external_imports.source_lines();
+    hoisted_imports.extend(
+        this.normalized
+            .prologue
+            .imports
+            .iter()
+            .map(|import| import.source.clone()),
+    );
+    let merged_pragmas = format!(
+        "{}\n{}",
+        env.pragmas,
+        this.normalized.prologue.pragma_text()
+    );
+    let stripped_sources = [&this.normalized.body];
 
     // Heads this turn (re)defines — drives the `hiding` clause on the prior-gen
     // import (head-name match only; see `cumulative_exports_before`).
@@ -765,17 +679,15 @@ pub fn render_module_with_vals(
     }
     out.push('\n');
 
-    // Lines emitted before the user's declaration text — the coordinate-remap
-    // offset. Hoisting that DELETED lines from the user source breaks the
-    // 1:1 line mapping; flag it so the remap is skipped rather than wrong.
+    // Normalized sources carry GHC LINE mappings. Legacy offset-based
+    // diagnostics may only remap when source normalization preserved lines.
     let body_line = out.matches('\n').count();
     let hoisted_lines = stripped_sources
         .iter()
         .zip(&this.sources)
         .any(|(stripped, original)| stripped.lines().count() != original.lines().count());
 
-    // The accumulated declaration source for this turn, with LANGUAGE pragmas
-    // already hoisted into the merged pragma block above.
+    // Header syntax has already been separated by GHC.
     for src in &stripped_sources {
         let body = src.trim_end();
         if !body.is_empty() {
@@ -809,6 +721,11 @@ mod tests {
     /// here would need the log this turn hasn't been pushed to yet.
     fn turn(src: &str, items: Vec<ExportItem>) -> DeclTurn {
         DeclTurn {
+            normalized: super::super::DeclarationSource {
+                prologue: Default::default(),
+                body: src.into(),
+            },
+            external_imports: SourceImports::new(),
             sources: vec![src.into()],
             workbench_imports: SourceImports::new(),
             items,
@@ -816,9 +733,43 @@ mod tests {
             parent: None,
         }
     }
+    fn header_turn(
+        body: &str,
+        items: Vec<ExportItem>,
+        pragmas: &[&str],
+        imports: &[&str],
+    ) -> DeclTurn {
+        use super::super::{CellSourceSpan, LocatedImport, LocatedPragma, PragmaKind};
+        let mut turn = turn(body, items);
+        let span = CellSourceSpan {
+            start_line: 1,
+            start_column: 1,
+            end_line: 1,
+            end_column: 2,
+        };
+        turn.normalized.prologue.pragmas = pragmas
+            .iter()
+            .map(|source| LocatedPragma {
+                kind: PragmaKind::Language,
+                span,
+                source: (*source).into(),
+            })
+            .collect();
+        turn.normalized.prologue.imports = imports
+            .iter()
+            .map(|source| LocatedImport {
+                span,
+                source: (*source).into(),
+            })
+            .collect();
+        turn
+    }
+
     /// A pure-retraction turn: removes `names` from the decl plane, no source.
     fn retract_turn(names: &[&str]) -> DeclTurn {
         DeclTurn {
+            normalized: Default::default(),
+            external_imports: SourceImports::new(),
             sources: Vec::new(),
             workbench_imports: SourceImports::new(),
             items: Vec::new(),
@@ -1124,9 +1075,11 @@ mod tests {
         let mut log = DeclLog::new();
         push_chained(
             &mut log,
-            turn(
-                "{-# LANGUAGE DeriveAnyClass #-}\ndata Foo = Foo deriving (Eq, Show)",
+            header_turn(
+                "data Foo = Foo deriving (Eq, Show)",
                 vec![ty("Foo", &["Foo"])],
+                &["{-# LANGUAGE DeriveAnyClass #-}"],
+                &[],
             ),
         );
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
@@ -1155,23 +1108,28 @@ mod tests {
     }
 
     #[test]
-    fn multiple_user_language_pragmas_deduplicated() {
+    fn compiler_option_order_preserves_explicit_negation() {
         let mut log = DeclLog::new();
-        // OverloadedStrings already in standalone_default — must not appear twice.
-        push_chained(&mut log, turn(
-            "{-# LANGUAGE DeriveGeneric #-}\n{-# LANGUAGE OverloadedStrings #-}\ndata Bar = Bar",
-            vec![ty("Bar", &["Bar"])],
-        ));
+        push_chained(
+            &mut log,
+            header_turn(
+                "data Bar = Bar",
+                vec![ty("Bar", &["Bar"])],
+                &[
+                    "{-# LANGUAGE NoOverloadedStrings #-}",
+                    "{-# LANGUAGE OverloadedStrings #-}",
+                ],
+                &[],
+            ),
+        );
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
-        let module_pos = r
-            .source
-            .find("module Tidepool.Session.Lib.G1")
-            .expect("module header present");
+        let module_pos = r.source.find("module Tidepool.Session.Lib.G1").unwrap();
         let preamble = &r.source[..module_pos];
-        // DeriveGeneric added; OverloadedStrings already present → no duplicate.
-        assert!(preamble.contains("DeriveGeneric"));
-        let count = preamble.matches("OverloadedStrings").count();
-        assert_eq!(count, 1, "OverloadedStrings must appear exactly once");
+        let disabled = preamble
+            .find("{-# LANGUAGE NoOverloadedStrings #-}")
+            .unwrap();
+        let enabled = preamble.find("{-# LANGUAGE OverloadedStrings #-}").unwrap();
+        assert!(disabled < enabled);
     }
 
     #[test]
@@ -1182,9 +1140,11 @@ mod tests {
         let mut log = DeclLog::new();
         push_chained(
             &mut log,
-            turn(
-                "import Data.Char (toUpper)\ntoUpper' c = toUpper c",
+            header_turn(
+                "toUpper' c = toUpper c",
                 vec![val("toUpper'")],
+                &[],
+                &["import Data.Char (toUpper)"],
             ),
         );
         let r = render_module(&log, Generation(1), &ModuleEnv::standalone_default());
@@ -1330,6 +1290,11 @@ mod tests {
                                                                // A turn at position 3, chained from gen 1 (NOT gen 2) — a child
                                                                // scope that forked off before `b` was defined.
         log.push(DeclTurn {
+            normalized: super::super::DeclarationSource {
+                prologue: Default::default(),
+                body: "a = 99".into(),
+            },
+            external_imports: SourceImports::new(),
             sources: vec!["a = 99".into()],
             workbench_imports: SourceImports::new(),
             items: vec![val("a")],
@@ -1363,6 +1328,11 @@ mod tests {
         let mut log = DeclLog::new();
         push_chained(&mut log, turn("helper x = x", vec![val("helper")])); // gen 1
         log.push(DeclTurn {
+            normalized: super::super::DeclarationSource {
+                prologue: Default::default(),
+                body: "helper x = x + 1".into(),
+            },
+            external_imports: SourceImports::new(),
             sources: vec!["helper x = x + 1".into()],
             workbench_imports: SourceImports::new(),
             items: vec![val("helper")],
@@ -1370,6 +1340,11 @@ mod tests {
             parent: Some(Generation(1)),
         }); // gen 2 (left sibling)
         log.push(DeclTurn {
+            normalized: super::super::DeclarationSource {
+                prologue: Default::default(),
+                body: "helper x = x * 2".into(),
+            },
+            external_imports: SourceImports::new(),
             sources: vec!["helper x = x * 2".into()],
             workbench_imports: SourceImports::new(),
             items: vec![val("helper")],

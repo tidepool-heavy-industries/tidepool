@@ -38,12 +38,20 @@ its meaning from a later session view.
    and imposes equality with the actor's row as a constraint. Bare `pollResponse`
    works without an authored row annotation; wrong rows remain rejected.
 
-5. **Classification and diagnostics have inconsistent owners.** Prepared items
-   now reuse GHC's returned classification. The remaining resident line/block
-   parser, prologue handling across check and execution, and metadata lost on
-   whole-cell rejection still require consolidation. A single GHC-authored item
-   plan must survive both success and failure. Rust should sequence and present
-   that plan, not reclassify source or infer outcomes from error text.
+5. **Classification and diagnostics had inconsistent owners.** Prepared items
+   reuse GHC's returned classification. Rejected cells now retain the complete
+   source-item plan, with individual diagnostics attached by original spans.
+   Prologue consolidation is in progress: GHC separates flags, imports, and
+   declaration bodies; Rust renders those typed fragments. Compiler options are
+   cell-local, but retained with compiled declarations for recovery. Imports
+   commit with the declaration group. The old resident line/block parser still
+   needs removal.
+
+6. **The whole-cell check compiled twice.** The second pass only checked the
+   rendered binder signatures. Each statement already checks those signatures
+   in its actual value module before commit, so the duplicate whole-cell compile
+   has been removed. Declaration preparation also reuses the checked receipt
+   rather than asking GHC to classify the same declaration again.
 
 ## Remaining review gates
 

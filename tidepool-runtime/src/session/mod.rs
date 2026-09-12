@@ -86,8 +86,9 @@ pub use turn::{
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
     render_cell_compile_error, render_template, render_turn_compile_error, run_turn,
     run_turn_pinned, turn_user_code_line_range, turn_user_code_offset, BoundBinder,
-    CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckRequest, CellSourceSpan,
-    CheckedBinderPin, CompiledTurn, DeclarationReceipt, ExpressionLift, TemplateSelector,
+    CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
+    CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, DeclarationSource,
+    ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, SourcePrologue, TemplateSelector,
     TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
     DECL_TEMPLATE_SOURCE,
 };
@@ -771,8 +772,7 @@ impl SessionLib {
         };
         self.define_batch_with_receipt_and_vals_in(
             scope,
-            decl_texts,
-            decl_texts,
+            &SourceImports::new(),
             &receipt,
             import_modules,
             inject_modules,
@@ -802,7 +802,10 @@ impl SessionLib {
 
         let decl_template = TurnTemplate {
             kind: TemplateSelector::Decl,
-            source: turn::DECL_TEMPLATE_SOURCE.to_string(),
+            source: format!(
+                "{}\nmodule SessionDecls where\n{{{{TURN}}}}\n",
+                self.env.pragmas
+            ),
         };
         let turn_result = run_turn(TurnRequest {
             turn_text: &combined,
@@ -830,36 +833,27 @@ impl SessionLib {
         Ok(Some(receipt))
     }
 
-    /// Commit `decl_texts` using the exact GHC receipt previously returned by
+    /// Commit normalized source using the exact GHC receipt returned by
     /// [`Self::declaration_receipt`]. Keeping receipt acquisition separate from
     /// mutation lets [`PersistentSession`] derive value-plane eviction and
     /// validation imports from the same facts before this atomic commit.
     pub(crate) fn define_batch_with_receipt_and_vals_in(
         &mut self,
         scope: ScopeId,
-        decl_texts: &[&str],
-        workbench_import_sources: &[&str],
+        external: &SourceImports,
         receipt: &DeclarationReceipt,
         import_modules: &[String],
         inject_modules: &[String],
     ) -> Result<Generation, SessionError> {
-        let sources: Vec<String> = decl_texts
-            .iter()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| (*s).to_string())
-            .collect();
-        if sources.is_empty() {
-            return Ok(self.scope_tip(scope));
-        }
-        let mut workbench_imports = SourceImports::new();
-        for source in workbench_import_sources {
-            workbench_imports.extend_declaration_source(source);
-        }
+        let sources = vec![receipt.source.replay_source(external)];
+        let workbench_imports = receipt.source.prologue.workbench_imports();
 
         let tip_before = self.tips.get(&scope).copied();
         let gen = self.push_turn_in(
             scope,
             DeclTurn {
+                normalized: receipt.source.clone(),
+                external_imports: external.clone(),
                 sources: sources.clone(),
                 workbench_imports,
                 items: receipt.items.clone(),
@@ -903,23 +897,17 @@ impl SessionLib {
     pub(crate) fn stage_batch_with_receipt_and_vals_in(
         &self,
         scope: ScopeId,
-        decl_texts: &[&str],
-        workbench_import_sources: &[&str],
+        external: &SourceImports,
         receipt: &DeclarationReceipt,
         import_modules: &[String],
         inject_modules: &[String],
     ) -> Result<StagedDeclaration, SessionError> {
-        let sources = decl_texts
-            .iter()
-            .filter(|source| !source.trim().is_empty())
-            .map(|source| (*source).to_string())
-            .collect::<Vec<_>>();
-        let mut workbench_imports = SourceImports::new();
-        for source in workbench_import_sources {
-            workbench_imports.extend_declaration_source(source);
-        }
+        let sources = vec![receipt.source.replay_source(external)];
+        let workbench_imports = receipt.source.prologue.workbench_imports();
         let mut log = self.log.clone();
         let generation = log.push(DeclTurn {
+            normalized: receipt.source.clone(),
+            external_imports: external.clone(),
             sources,
             workbench_imports,
             items: receipt.items.clone(),
@@ -1036,6 +1024,8 @@ impl SessionLib {
         let gen = self.push_turn_in(
             scope,
             DeclTurn {
+                normalized: Default::default(),
+                external_imports: SourceImports::new(),
                 sources: Vec::new(),
                 workbench_imports: SourceImports::new(),
                 items: Vec::new(),
@@ -1255,6 +1245,8 @@ mod tests {
         let root = lib.push_turn_in(
             ScopeId::ROOT,
             DeclTurn {
+                normalized: Default::default(),
+                external_imports: SourceImports::new(),
                 sources: vec!["import qualified Data.Set as Set".into()],
                 workbench_imports: SourceImports::from_specs(["qualified Data.Set as Set"]),
                 items: Vec::new(),
@@ -1267,6 +1259,8 @@ mod tests {
         lib.push_turn_in(
             child,
             DeclTurn {
+                normalized: Default::default(),
+                external_imports: SourceImports::new(),
                 sources: vec!["import Data.Proxy (Proxy (..))".into()],
                 workbench_imports: SourceImports::from_specs(["Data.Proxy (Proxy (..))"]),
                 items: Vec::new(),
@@ -1277,6 +1271,8 @@ mod tests {
         lib.push_turn_in(
             ScopeId::ROOT,
             DeclTurn {
+                normalized: Default::default(),
+                external_imports: SourceImports::new(),
                 sources: vec!["import qualified Data.Map.Strict as Map".into()],
                 workbench_imports: SourceImports::from_specs(["qualified Data.Map.Strict as Map"]),
                 items: Vec::new(),

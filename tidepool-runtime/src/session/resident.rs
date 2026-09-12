@@ -729,11 +729,20 @@ where
     pub fn stage_declarations_in(
         &self,
         scope: ScopeId,
-        declarations: &[&str],
+        receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
     ) -> Result<super::StagedDeclaration, SessionError> {
+        self.core.stage_declarations_in(scope, receipt, imports)
+    }
+
+    pub fn commit_declaration_receipt_in(
+        &mut self,
+        scope: ScopeId,
+        receipt: &super::DeclarationReceipt,
+        imports: &SourceImports,
+    ) -> Result<super::DeclarationPlaneCommit, SessionError> {
         self.core
-            .stage_declarations_in(scope, declarations, imports)
+            .commit_declaration_receipt_in(scope, receipt, imports)
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
@@ -1529,16 +1538,13 @@ where
                         .turns
                         .get(generation.saturating_sub(1) as usize)
                         .is_some_and(|turn| {
-                            let [stored] = turn.sources.as_slice() else {
-                                return false;
-                            };
-                            let mut imports = super::SourceImports::new();
-                            imports.extend_declaration_source(stored);
+                            let mut imports = turn.external_imports.clone();
+                            imports.extend(&turn.normalized.prologue.workbench_imports());
                             required_imports
                                 .specs()
                                 .iter()
                                 .all(|required| imports.specs().contains(required))
-                                && imports.declaration_source(source) == *stored
+                                && turn.normalized.body.trim() == source.trim()
                         })
             })
     }

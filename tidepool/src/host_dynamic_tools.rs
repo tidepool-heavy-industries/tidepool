@@ -1037,18 +1037,12 @@ async fn call(
     let actual_argument_kind = json_kind(&request.arguments);
     let arguments = match (kind, request.arguments) {
         (ToolKind::Custom, serde_json::Value::String(source)) => ToolArguments::Raw(source),
-        (ToolKind::Function, value @ serde_json::Value::Object(_)) => {
-            ToolArguments::Structured(value)
-        }
-        _ => {
-            let expected = match kind {
-                ToolKind::Custom => "string",
-                ToolKind::Function => "object",
-            };
+        (ToolKind::Function, value) => ToolArguments::Structured(value),
+        (ToolKind::Custom, _) => {
             return Json(CallResponse::failure(
                 &HostToolFailure::ArgumentKindMismatch {
                     tool: request.tool,
-                    expected,
+                    expected: "string",
                     actual: actual_argument_kind,
                 },
             ));
@@ -1753,6 +1747,7 @@ pub(crate) mod tests {
 
     struct WorkbenchFunctionEndpoint {
         tools: Vec<HostedTool>,
+        expected_arguments: serde_json::Value,
     }
 
     impl ResidentToolEndpoint for WorkbenchFunctionEndpoint {
@@ -1769,7 +1764,10 @@ pub(crate) mod tests {
         }
 
         fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
-            assert!(matches!(invocation.arguments, ToolArguments::Structured(_)));
+            assert_eq!(
+                invocation.arguments,
+                ToolArguments::Structured(self.expected_arguments.clone())
+            );
             Box::pin(async {
                 Ok(serde_json::json!({
                     "status": "committed",
@@ -1788,6 +1786,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn workbench_function_result_uses_endpoint_owned_text_boundary() {
         let endpoint = Arc::new(WorkbenchFunctionEndpoint {
+            expected_arguments: serde_json::json!({"queries": [":: Int -> Int"]}),
             tools: vec![HostedTool::Function(ToolDeclaration {
                 name: "lookup".into(),
                 description: "Search current Haskell scope; returns deterministic text.".into(),
@@ -1807,6 +1806,33 @@ pub(crate) mod tests {
         assert!(response.success);
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(text, ":: Int -> Int\n  id :: a -> a");
+    }
+
+    #[tokio::test]
+    async fn function_arguments_retain_non_object_json_for_endpoint_validation() {
+        for arguments in [
+            serde_json::json!("awaitSettled"),
+            serde_json::json!(["awaitSettled"]),
+            serde_json::Value::Null,
+        ] {
+            let endpoint = Arc::new(WorkbenchFunctionEndpoint {
+                expected_arguments: arguments.clone(),
+                tools: vec![HostedTool::Function(ToolDeclaration {
+                    name: "inspect".into(),
+                    description: "Inspect a value".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    output_schema: None,
+                    kind: tidepool_tool::ToolKind::Call,
+                })],
+            });
+            let state = attached_state(endpoint).await;
+            let mut request = call_request(arguments);
+            request.tool = "inspect".into();
+            let response = call(State(state), Json(request)).await.0;
+            assert!(response.success);
+            let CallContent::InputText { text } = &response.content_items[0];
+            assert_eq!(text, ":: Int -> Int\n  id :: a -> a");
+        }
     }
 
     #[test]
@@ -2050,7 +2076,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn kind_mismatch_and_handler_panics_fail_closed() {
+    async fn endpoint_rejection_and_handler_panics_fail_closed() {
         let function = Arc::new(EchoEndpoint {
             tools: vec![HostedTool::Function(ToolDeclaration {
                 name: "haskell".into(),
@@ -2069,7 +2095,7 @@ pub(crate) mod tests {
         let CallContent::InputText { text } = &mismatch.content_items[0];
         assert_eq!(
             text,
-            "tool `haskell` expected object arguments, received string"
+            "invalid resident tool invocation: unexpected structured call"
         );
 
         let dispatch_error = call_haskell(

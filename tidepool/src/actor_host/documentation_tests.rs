@@ -32,7 +32,7 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 
     let setup = committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")).await;
     assert_eq!(
-        setup["summary"], "3 declarations, 2 statements, 1 display",
+        setup["summary"], "3 declarations, 2 statements, 1 expression",
         "{setup:?}"
     );
     let items = setup["items"].as_array().unwrap();
@@ -85,9 +85,13 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     assert_eq!(rejected["status"], "rejected", "{rejected:?}");
     assert_eq!(
         rejected["items"].as_array().unwrap().len(),
-        1,
+        3,
         "{rejected:?}"
     );
+    assert_eq!(rejected["items"][0]["status"], "notRun", "{rejected:?}");
+    assert_eq!(rejected["items"][1]["status"], "notRun", "{rejected:?}");
+    assert_eq!(rejected["items"][2]["status"], "rejected", "{rejected:?}");
+    assert_eq!(rejected["items"][2]["span"]["startLine"], 6, "{rejected:?}");
 
     let missing_declaration = dispatch_haskell_script(
         root.as_ref(),
@@ -116,7 +120,7 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
         dispatch_haskell_script(root.as_ref(), include_str!("notebook_prefix_failure.hs")).await;
     assert_eq!(prefix_failure["status"], "rejected", "{prefix_failure:?}");
     assert_eq!(
-        prefix_failure["summary"], "0 declarations, 4 statements, 0 displays",
+        prefix_failure["summary"], "0 declarations, 4 statements, 0 expressions",
         "{prefix_failure:?}"
     );
     let items = prefix_failure["items"].as_array().unwrap();
@@ -141,6 +145,84 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     let shadowed = committed(root.as_ref(), "shadowed <- pure (2 :: Int)\nshadowed\n").await;
     assert_eq!(shadowed["items"][1]["output"], "2", "{shadowed:?}");
 
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_cell_prologue_applies_to_check_stage_and_execution() {
+    let campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let result = committed(root.as_ref(), include_str!("notebook_prologue.hs")).await;
+    assert!(
+        result["items"].as_array().unwrap().last().unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .contains("True"),
+        "{result}"
+    );
+    let later = committed(
+        root.as_ref(),
+        "later <- pure (Imported.reverse [answer, 10])\nlater == [10, 7]\n",
+    )
+    .await;
+    assert!(later.to_string().contains("True"), "{later}");
+    let disabled = dispatch_haskell_script(
+        root.as_ref(),
+        "notInstalled <- pure (let ?offset = 5 in implicitTotal 2)\nnotInstalled\n",
+    )
+    .await;
+    assert_eq!(
+        disabled["status"], "rejected",
+        "cell flags must not leak: {disabled}"
+    );
+    let imported = committed(
+        root.as_ref(),
+        "import qualified Data.Maybe as ImportedMaybe\n",
+    )
+    .await;
+    assert_eq!(imported["items"][0]["kind"], "declaration", "{imported}");
+    committed(
+        root.as_ref(),
+        "optional <- pure (ImportedMaybe.fromMaybe answer Nothing)\noptional\n",
+    )
+    .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn notebook_cell_rejection_retains_its_source_plan() {
+    let campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let rejected =
+        dispatch_haskell_script(root.as_ref(), include_str!("notebook_multiple_errors.hs")).await;
+    assert_eq!(rejected["status"], "rejected", "{rejected:?}");
+    let items = rejected["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "{rejected:?}");
+    assert_eq!(items[0]["status"], "rejected", "{rejected:?}");
+    assert!(
+        items[0]["output"].as_str().unwrap().contains("<cell>:2:"),
+        "{rejected:?}"
+    );
+    assert_eq!(items[1]["status"], "notRun", "{rejected:?}");
+    assert_eq!(items[2]["status"], "rejected", "{rejected:?}");
+    assert!(
+        items[2]["output"].as_str().unwrap().contains("<cell>:4:"),
+        "{rejected:?}"
+    );
+    assert_eq!(items[3]["status"], "notRun", "{rejected:?}");
+    assert!(
+        items.iter().all(|item| item["kind"].is_string()
+            && item["span"].is_object()
+            && item["installedBindings"]
+                .as_array()
+                .is_none_or(Vec::is_empty)),
+        "{rejected:?}"
+    );
+    let missing = dispatch_haskell_script(root.as_ref(), "willNotRun").await;
+    assert_eq!(missing["status"], "rejected", "{missing:?}");
+    assert!(missing.to_string().contains("not in scope"), "{missing:?}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -237,7 +319,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     .await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
     assert_eq!(
-        reply["summary"], "0 declarations, 1 statement, 1 display",
+        reply["summary"], "0 declarations, 1 statement, 1 expression",
         "{reply:?}"
     );
     let items = reply["items"].as_array().unwrap();
