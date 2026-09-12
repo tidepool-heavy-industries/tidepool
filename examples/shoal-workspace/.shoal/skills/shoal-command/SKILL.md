@@ -46,7 +46,8 @@ value for `watch`; see the routing example linked below.
 Starting with no output is ordinary progress. Readable-but-empty output has byte
 positions; an unavailable-output error is different and keeps the same job.
 
-Defaults: 256 MiB and a 30-second observation. Expiry leaves the command alive.
+Execution defaults: 256 MiB and a 30-second observation. Expiry leaves the
+command alive.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
 use at most 32 KiB; oversized foreground displays use an 8 KiB preview. Shortened
 output is recoverable only to the extent the job still retains it; follow the

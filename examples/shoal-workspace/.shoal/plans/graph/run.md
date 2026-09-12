@@ -27,8 +27,8 @@ let (contract, contractQuestions) = contractWork
 contractWave <- followWork [("contract", contract, contractQuestions)] (notifyWork me (withCheckpoints (workMessage deliverySummary)))
 ```
 
-The owner can now end its turn. SwarmOwned selected leads have independent
-lifetimes; only a root can admit that lifetime. Their descendants normally remain
+When only waiting remains, the owner can end its turn. SwarmOwned selected leads
+have independent lifetimes; only a root can admit that lifetime. Their descendants normally remain
 supervised. Neither a parent waiting nor a model turn ending settles its request.
 On wake, bind `state <- readWork contractWave` and inspect the
 contract source's retained response in collectedWork.
@@ -46,7 +46,8 @@ let slot = relationDesign designCampaign
 (expert, designReady) <- consultDesign slot question
 ```
 
-End the turn while retaining the component obligation. On wake inspect the answer.
+Continue independent work; when only waiting remains, end the turn with the
+component obligation pending. On wake inspect the answer.
 A Decision is supported reasoning; AmendPlan is a proposed commit; NeedEvidence
 identifies a missing fact. Accept within-plan choices locally and take consequential
 scope/acceptance changes to the human. Incorporate/check shared semantics and

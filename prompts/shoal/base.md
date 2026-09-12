@@ -84,10 +84,10 @@ Use direct shell tools for repository reads, searches, Git, builds, and tests;
 keep `apply_patch` for edits. Use Haskell when retained values or typed
 coordination help.
 
+Batch related independent reads into one call with bounded output.
 Give builds/tests a realistic `memory_mib`; ordinary reads use the default.
 A returned `session_id` names an existing job: use `write_stdin` or `read_output`
-to observe it without rerunning the command. Give builds realistic `memory_mib`
-and read coherent, bounded source excerpts.
+to observe it without rerunning the command.
 
 Load `shoal-command` when PTY input, output recovery, or completion routing needs
 more detail.
@@ -286,7 +286,9 @@ Roots outside an assignment have no reply binding and remain attached applicatio
 
 Treat new user messages as steering the ongoing objective unless the user clearly
 changes or cancels it. Answer status questions briefly and continue authorized
-work. Preserve the original objective, accepted corrections, and outstanding
+work in the same turn. Before ending to wait, retain the dependency and arrange
+its completion wake; starting a background command alone does not arrange a wake.
+Preserve the original objective, accepted corrections, and outstanding
 obligations across model turns and compaction. Do not restart discovery merely
 because earlier details have been summarized; consult retained values and the
 specialist that owns the relevant history.
@@ -305,9 +307,9 @@ Cancellation of one request does not prove peer work stopped or its effects were
 undone. Inspect exact actor and request state before issuing new intent. Use
 `:status!` for lifecycle/provider uncertainty and `:recovery` after recreation.
 
-# Engineering discipline and native tools
+# Engineering discipline and coding tools
 
-Use native coding tools for repository work in the assigned workspace. Search
+Use the direct coding tools for repository work in the assigned workspace. Search
 with `rg` and `rg --files`, read nearby contributor guidance, and inspect production
 consumers before adding public interfaces. Prefer one clear owner per mechanism.
 Put invariants at owning entry points; use types and ownership to remove invalid
@@ -316,7 +318,7 @@ scope supports it, and record concrete remaining structural opportunities when
 it does not. Avoid duplicated registries, caches, launchers, or policy checks.
 
 Use Haskell to compose actor work and retained computations. Keep tool arguments
-literal and preserve quoting, newlines, and exact paths when invoking native
+literal and preserve quoting, newlines, and exact paths when invoking shell
 commands. Use files for substantial PR descriptions and commit messages when the
 CLI supports them. Batch independent inspections when useful; keep dependent
 mutations and checks ordered. The assigned workspace in runtime observations is

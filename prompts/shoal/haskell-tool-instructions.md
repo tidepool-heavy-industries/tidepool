@@ -12,6 +12,6 @@ Use :status! for lifecycle uncertainty and :recovery after recreation.
 unfold starts children after the tool block returns. request queues new work;
 updateRequest clarifies an owned active response. respond value settles the
 request; ending the model response only ends the turn. Roots have no reply.
-Register a labeled watch, end the turn, and poll its retained handle on wake.
+When only waiting remains, register a watch and end the turn; poll on wake.
 Expand saved observations with their displayed expression.
 Use shell tools for repository work.

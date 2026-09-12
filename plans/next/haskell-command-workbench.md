@@ -24,11 +24,14 @@ is literal, without implicit Haskell interpolation. `Cmd.withArguments` supplies
 actual positional arguments, including spaces and shell metacharacters.
 `Cmd.inDirectory` and `Cmd.withEnvironment` select per-command overrides.
 
-`Cmd.start` returns an owned job immediately. `Cmd.run` waits up to one second,
-including admission, returning `Finished` with result/bounded output or `Pending`
-with the continuing job. `Cmd.await` explicitly waits for completion. Jobs survive
-tool return and observer disconnection; queues have no implicit lifetime timeout.
-There is no automatic execution retry.
+`Cmd.start` returns an owned job immediately. `Cmd.run` starts a job and observes
+it for up to 30 seconds; `Cmd.await` observes an existing job for the same period.
+On overrun, the interactive workbench stops the computation and names a retained
+job binding; later observation does not resume that computation. `Cmd.observe`
+returns status normally after a bounded wait. Jobs survive tool return and
+observer disconnection; there is no automatic execution retry. See the shipped
+[command skill](../../examples/shoal-workspace/.shoal/skills/shoal-command/SKILL.md)
+for output recovery and completion routing.
 
 The default hard limit is 256 MiB and the same value is the admission weight.
 An explicit memory override is the only model-facing resource setting. One

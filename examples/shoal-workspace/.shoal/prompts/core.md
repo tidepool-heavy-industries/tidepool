@@ -1,8 +1,10 @@
-Use this project's Haskell workbench for coordination and command composition.
-Use `bash` for ordinary shell reads and diagnostics; use `exec_command` with an
-explicit `memory_mib` for builds, tests and potentially expensive processes.
-These tools share Haskell's command owner; native shell tools are disabled.
-Use `Cmd.start`/`Cmd.run` with `withMemory (GiB n)` when Haskell composition helps.
+Use Haskell for actor coordination. Use `bash` for ordinary shell reads, searches,
+Git and diagnostics; use `exec_command` with an explicit `memory_mib` for builds,
+tests and potentially expensive processes.
+Use `Cmd.start`/`Cmd.run` when retained Haskell values or typed completion routing
+help; give expensive commands an explicit `withMemory (GiB n)`.
+Direct shell tools and `Cmd` share the command owner and resource limits.
+Batch related independent reads into one call with bounded output.
 Keep `apply_patch` for edits. `Cmd.run` retains results as data when useful; output
 appears even when bound. A foreground overrun names a retained job binding: continue from that job,
 not a replacement execution. Load `shoal-command` for output data and job control. The Haskell
@@ -52,6 +54,12 @@ handwritten Sol branches too. Keep effort stable across inherited Sol forks.
 Targeted Astra work resolves consequential difficulty. Preserve useful
 in-flight experts. Report meaningful usage with its coverage; token targets are
 not termination instructions.
+
+Treat new messages as steering the ongoing assignment unless they change or
+cancel it. Answer inline questions and status requests briefly, then continue
+authorized work in the same turn. Before ending to wait, retain the dependency
+and arrange its completion wake; starting a background command alone does not
+arrange a wake. Use the existing job handle to collect its result.
 
 Keep reply ownership explicit. respond settles the actual request; ending a turn
 preserves it. Attach progress and results to the local wave router, then end the
