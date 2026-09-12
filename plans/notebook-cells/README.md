@@ -27,14 +27,17 @@ GADT/existential declarations can derive it.
 
 ## Ownership and execution
 
-Coordinator owns combined delivery and the executing edits in cross-lane files:
+Coordinator owns combined delivery and serializes cross-lane changes in
 `haskell/app/Main.hs`, `haskell/src/Tidepool/ExtractRequest.hs`, shared
 request/CBOR dispatch in `tidepool-extract-cmd`, shared `GhcPipeline.hs` seams,
-and the common actor-workbench/hosted registration join. Lane leads deliver
-domain interfaces and focused implementations for incorporation; they do not
-fork competing edits in these files. Coordinator also owns small status migration,
-common documentation_tests fixture wiring, resulting-source review, corpus
-consistency and release evidence. Initial source inspected:
+and the common actor-workbench/hosted registration join. After two fresh shared
+worker admissions failed before startup, the retained notebook lead became the
+single executing owner for the cell-side additions in those files; it may not
+delegate competing edits. Lookup children return patch obligations, and the
+coordinator applies lookup-side additions only after incorporating the cell
+join. Coordinator also owns small status migration, common documentation_tests
+fixture wiring, resulting-source review, corpus consistency and release evidence.
+Initial source inspected:
 2deae09053fc7ca0fd18e2fd1ef472d91ed65b83; taskSource names the actual committed
 planning baseline. Read current owners and nearest AGENTS before changes.
 
