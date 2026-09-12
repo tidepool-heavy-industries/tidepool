@@ -20,7 +20,7 @@ main = do
   let source = root </> "LookupFixture.hs"
   writeFile source fixture
   libdir <- trim <$> readProcess "ghc" ["--print-libdir"] ""
-  (repeatMatches, wildMatches, numMatches, plainMatches, rankMatches) <-
+  (repeatMatches, wildMatches, anyMatches, collisionMatches, numMatches, plainMatches, rankMatches) <-
     runGhc (Just libdir) $ do
       flags <- getSessionDynFlags
       _ <- setSessionDynFlags
@@ -39,10 +39,20 @@ main = do
           rdrEnv = tcg_rdr_env tcEnv
       repeatMatches <- matchesFor rdrEnv "queryRepeat"
       wildMatches <- matchesFor rdrEnv "queryWild"
+      anyMatches <- matchesFor rdrEnv "queryAny"
+      collisionMatches <- matchesFor rdrEnv "queryCollision"
       numMatches <- matchesFor rdrEnv "queryNum"
       plainMatches <- matchesFor rdrEnv "queryPlain"
       rankMatches <- matchesFor rdrEnv "queryRank"
-      pure (repeatMatches, wildMatches, numMatches, plainMatches, rankMatches)
+      pure
+        ( repeatMatches,
+          wildMatches,
+          anyMatches,
+          collisionMatches,
+          numMatches,
+          plainMatches,
+          rankMatches
+        )
   let repeatNames = map typeMatchName repeatMatches
       wildNames = map typeMatchName wildMatches
   unless ("queryRepeat" `notElem` repeatNames && "queryWild" `notElem` wildNames) $
@@ -59,6 +69,10 @@ main = do
     fail ("repeated variable query accepted fixed mismatch: " ++ show repeatMatches)
   unless ("wildUseful" `elem` wildNames) $
     fail ("independent wildcards missed wildUseful: " ++ show wildMatches)
+  unless ("candidateMismatch" `elem` map typeMatchName anyMatches) $
+    fail ("_ -> _ missed Int -> Bool: " ++ show anyMatches)
+  unless ("candidateCollision" `elem` map typeMatchName collisionMatches) $
+    fail ("fresh wildcard collided with explicit spelling: " ++ show collisionMatches)
   unless (isSorted (map matchKey repeatMatches) && isSorted (map matchKey wildMatches)) $
     fail "matches were not deterministic by quality/name/module/signature"
   unless (isExact "candidateNum" numMatches) $
@@ -67,6 +81,8 @@ main = do
     fail ("constrained query matched unconstrained candidate: " ++ show numMatches)
   unless ("candidateNum" `notElem` map typeMatchName plainMatches) $
     fail ("unconstrained query matched constrained candidate: " ++ show plainMatches)
+  unless ("candidateMismatch" `notElem` map typeMatchName plainMatches) $
+    fail ("repeated query variable accepted Int -> Bool: " ++ show plainMatches)
   unless (isExact "candidateRank" rankMatches) $
     fail ("alpha-equivalent nested forall was not exact: " ++ show rankMatches)
   unless ("candidateMonoRank" `notElem` map typeMatchName rankMatches) $
@@ -119,6 +135,12 @@ fixture =
       "queryWild = undefined",
       "wildUseful :: Int -> Maybe String",
       "wildUseful = undefined",
+      "queryAny :: _ -> _",
+      "queryAny = undefined",
+      "queryCollision :: forall __lookup_w0. __lookup_w0 -> _",
+      "queryCollision = undefined",
+      "candidateCollision :: Int -> Bool",
+      "candidateCollision = undefined",
       "queryNum :: Num a => a -> a",
       "queryNum = id",
       "candidateNum :: Num b => b -> b",
@@ -127,6 +149,8 @@ fixture =
       "candidatePlain = id",
       "queryPlain :: a -> a",
       "queryPlain = id",
+      "candidateMismatch :: Int -> Bool",
+      "candidateMismatch = undefined",
       "queryRank :: (forall a. a -> a) -> Int",
       "queryRank _ = 0",
       "candidateRank :: (forall b. b -> b) -> Int",

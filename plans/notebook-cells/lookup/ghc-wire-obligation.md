@@ -5,7 +5,8 @@ Lookup-owned source supplies:
 - `normalizeLookupWildcards :: ParsedModule -> ParsedModule`;
 - `searchTypeMatches :: GlobalRdrEnv -> Name -> Type -> m [TypeMatch]`
   (the `Name` excludes the reserved query binder from its own results);
-- closed exact/usable quality and deterministic result ordering;
+- closed exact/usable quality and deterministic result ordering (`usable`
+  means the bounded compatibility rule below, not GHC subsumption);
 - `introspection-search-test`, covering repeated variables, independent
   anonymous wildcards, exact/usable matching and order.
 
@@ -40,8 +41,9 @@ null queryPredicates
 ```
 
 Full-sigma `tcMatchTy`/`tcUnifyTy` matched only alpha-equivalent polymorphic
-types in the tested specialization cases. Body matching admitted useful
-specialization in one direction and a more-general candidate in the other.
+types in the tested compatibility cases. Body matching admitted a concrete
+compatible type in one direction and a more-general candidate in the other.
 Predicates are therefore retained as a gate: only full-type alpha equality is
-accepted when either side is constrained. Nested foralls stay in the body and
-must match there; a rank-2 query does not match a monomorphic argument.
+accepted when either side is constrained. The matrix observes that one nested
+forall shape rejects one monomorphic argument; it does not claim general
+higher-rank subsumption.

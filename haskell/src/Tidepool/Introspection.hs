@@ -16,10 +16,11 @@ import Control.Monad (foldM, forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (State, evalState, get, put)
 import Data.ByteString qualified as BS
-import Data.Generics (everywhereM, mkM)
+import Data.Generics (everything, everywhereM, mkM, mkQ)
 import Data.List (nubBy, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust)
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC
 import GHC.Core.TyCo.Compare (eqType)
@@ -27,7 +28,7 @@ import GHC.Core.Unify (tcMatchTy)
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkTyVarOcc, occNameString)
-import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual)
+import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual, rdrNameOcc)
 import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
@@ -72,21 +73,34 @@ data TypeMatch = TypeMatch
 -- variables; rendered source never drives this transformation.
 normalizeLookupWildcards :: ParsedModule -> ParsedModule
 normalizeLookupWildcards parsed =
-  parsed
-    { pm_parsed_source =
-        evalState (everywhereM (mkM replaceWildcard) (pm_parsed_source parsed)) 0
-    }
+  let source = pm_parsed_source parsed
+      occupied =
+        Set.fromList $
+          everything (++) (mkQ [] (\name -> [occNameString (rdrNameOcc name)])) source
+   in parsed
+        { pm_parsed_source =
+            evalState (everywhereM (mkM replaceWildcard) source) (0, occupied)
+        }
   where
-    replaceWildcard :: HsType GhcPs -> State Int (HsType GhcPs)
+    replaceWildcard ::
+      HsType GhcPs ->
+      State (Int, Set.Set String) (HsType GhcPs)
     replaceWildcard (HsWildCardTy _) = do
-      index <- get
-      put (index + 1)
+      (index, occupied) <- get
+      let (nextIndex, name) = freshName occupied index
+      put (nextIndex, Set.insert name occupied)
       pure $
         HsTyVar
           noAnn
           NotPromoted
-          (noLocA (mkRdrUnqual (mkTyVarOcc ("__lookup_w" ++ show index))))
+          (noLocA (mkRdrUnqual (mkTyVarOcc name)))
     replaceWildcard other = pure other
+
+    freshName occupied index =
+      let candidate = "__lookup_w" ++ show index
+       in if Set.member candidate occupied
+            then freshName occupied (index + 1)
+            else (index + 1, candidate)
 
 -- | Match a checked lookup type against every value in the exact reader
 -- environment of the inspection module. Matching is entirely in memory:
