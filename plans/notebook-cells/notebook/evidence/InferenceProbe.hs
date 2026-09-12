@@ -15,29 +15,28 @@ ids value =
 
 main :: IO ()
 main = do
-  [lib, path] <- getArgs
+  [lib, path, moduleName, binder, includePath, effectsPath] <- getArgs
   runGhc (Just lib) $ do
     flags <- getSessionDynFlags
-    _ <- setSessionDynFlags flags
+    _ <-
+      setSessionDynFlags
+        flags {importPaths = includePath : effectsPath : importPaths flags}
     target <- guessTarget path Nothing Nothing
     setTargets [target]
-    graph <- depanal [] False
-    mapM_
-      ( \summary -> do
-          parsed <- parseModule summary
-          checked <- typecheckModule parsed
-          liftIO $
-            mapM_
-              ( \identifier ->
-                  putStrLn
-                    ( renderWithContext
-                        defaultSDocContext
-                        (ppr identifier <+> text "::" <+> ppr (idType identifier))
-                    )
+    _ <- load LoadAllTargets
+    summary <- getModSummary (mkModuleName moduleName)
+    parsed <- parseModule summary
+    checked <- typecheckModule parsed
+    liftIO $
+      mapM_
+        ( \identifier ->
+            putStrLn
+              ( renderWithContext
+                  defaultSDocContext
+                  (ppr identifier <+> text "::" <+> ppr (idType identifier))
               )
-              [ identifier
-              | identifier <- ids (tm_typechecked_source checked),
-                getOccString identifier == "x"
-              ]
       )
-      (mgModSummaries graph)
+        [ identifier
+        | identifier <- ids (tm_typechecked_source checked),
+          getOccString identifier == binder
+        ]

@@ -23,7 +23,8 @@ bash scripts/dev-shell.sh bash -c '
     plans/notebook-cells/notebook/evidence/InferenceProbe.hs \
     -o /tmp/inference-probe
   /tmp/inference-probe "$(ghc --print-libdir)" \
-    plans/notebook-cells/notebook/evidence/CellProbe.hs
+    plans/notebook-cells/notebook/evidence/CellProbe.hs CellProbe x \
+    haskell/lib .
 '
 ```
 
