@@ -1566,7 +1566,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        &format!("let sourceHead = \"{}\" :: Text", source.as_str()),
+        &format!("let sourceHead = GitOid \"{}\"", source.as_str()),
     )
     .await;
     committed(
@@ -1596,7 +1596,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let replied = dispatch_haskell_script(
         implementer.policy.as_ref(),
         &format!(
-            "respond (Produced (Candidate \"{}\" [\"focused candidate check\"] [\"open product gate\"]))",
+            "respond (Produced (Candidate (GitOid \"{}\") [\"focused candidate check\"] [\"open product gate\"]))",
             candidate.as_str()
         ),
     )
@@ -1635,7 +1635,11 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "{evidence}"
     );
     assert_eq!(
-        evidence["items"][2]["output"],
+        evidence["items"][2]["output"]
+            .as_str()
+            .unwrap()
+            .split_whitespace()
+            .collect::<String>(),
         format!(
             "({},{})",
             implementer.actor.identity().id.0,
@@ -1652,7 +1656,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
     )
     .await;
-    assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
+    assert_eq!(pending["items"][1]["output"], "ReplyOpen", "{pending}");
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if let Some(LocalResidentDeployment::SessionReady { activation }) =
@@ -1697,7 +1701,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let replied = dispatch_haskell_script(
         implementer.policy.as_ref(),
         &format!(
-            "respond (Produced (Candidate \"{}\" [\"focused repair check\"] [\"open product gate\"]))",
+            "respond (Produced (Candidate (GitOid \"{}\") [\"focused repair check\"] [\"open product gate\"]))",
             revised.as_str()
         ),
     )
@@ -1711,7 +1715,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     let (expert, _expert_binding) = next_project_worker(&mut campaign).await;
-    assert_eq!(expert.model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(expert.model.as_deref(), Some("planner"));
     assert_eq!(expert.fork_effort, Some(tidepool_actor::ForkEffort::Medium));
     assert_eq!(expert.supervisor_parent, Some(reviewer.actor.identity()));
     assert_eq!(expert.context_parent, None);
@@ -1745,7 +1749,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         .unwrap();
     let answered = dispatch_haskell_script(
         expert.policy.as_ref(),
-        &format!("respond (AmendPlan (PlanAmendment \"{}\" \"{}\" [\"plans/feature.md\"] \"retain the preparation gate\" [\"feature review\"] [\"boundary evidence\"]))", revised.as_str(), amendment.as_str()),
+        &format!("respond (AmendPlan (PlanAmendment (GitOid \"{}\") (GitOid \"{}\") [\"plans/feature.md\"] \"retain the preparation gate\" [\"feature review\"] [\"boundary evidence\"]))", revised.as_str(), amendment.as_str()),
     ).await;
     assert_eq!(answered["status"], "replied", "{answered}");
     let decision = committed(reviewer.policy.as_ref(), "design <- pollWatch designReady\ninspectFull (fmap settledValue design)\npollReply sessionReply").await;
@@ -1795,7 +1799,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         "Preparation retains the open product gate.\n"
     );
     let incorporated = dispatch_haskell_script(implementer.policy.as_ref(),
-        &format!("respond (Incorporated (incorporationAmendment sessionInput) \"{}\" [\"read exact plan at resulting head\"])", incorporated_head.trimmed())).await;
+        &format!("respond (Incorporated (incorporationAmendment sessionInput) (GitOid \"{}\") [\"read exact plan at resulting head\"])", incorporated_head.trimmed())).await;
     assert_eq!(incorporated["status"], "replied", "{incorporated}");
     let checked = committed(reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\ninspectFull (fmap settledValue incorporation)\npollReply sessionReply").await;
     for expected in [
@@ -1825,7 +1829,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     committed(
         root.as_ref(),
         &format!(
-            "let incorporatedHead = \"{}\" :: Text",
+            "let incorporatedHead = GitOid \"{}\"",
             incorporated_head.trimmed()
         ),
     )
@@ -1984,7 +1988,7 @@ async fn route_reply_preserves_request_cancellation() {
 async fn route_reply_case(cancel: bool) {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".shoal").unwrap();
-    campaign
+    let source = campaign
         ._repository
         .writer()
         .commit_empty("workspace program")
@@ -1993,6 +1997,11 @@ async fn route_reply_case(cancel: bool) {
     committed(
         root.as_ref(),
         "let routeCampaign = \"route-reply\" :: CampaignLabel",
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        &format!("let sourceHead = GitOid \"{}\"", source.as_str()),
     )
     .await;
     committed(
@@ -2016,7 +2025,7 @@ async fn route_reply_case(cancel: bool) {
     }
     let replied = dispatch_haskell_script(
         worker.policy.as_ref(),
-        "respond (Candidate \"exact-candidate\" [\"checked\"] [\"open gate\"])",
+        "respond (Candidate (GitOid \"exact-candidate\") [\"checked\"] [\"open gate\"])",
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
@@ -2090,7 +2099,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
-    assert_eq!(lead.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(lead.model.as_deref(), Some("executor"));
     assert!(lead.supervisor_parent.is_none());
     let lead_tree = campaign
         .worktrees
@@ -2105,7 +2114,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
         .commit_file("feature.txt", "candidate feature\n", "implement feature")
         .unwrap();
     committed(lead.policy.as_ref(), &format!(
-        "let candidate = Candidate \"{}\" [\"implementation content check\"] [\"open product gate\"]", candidate.as_str()
+        "let candidate = Candidate (GitOid \"{}\") [\"implementation content check\"] [\"open product gate\"]", candidate.as_str()
     )).await;
     committed(
         lead.policy.as_ref(),
@@ -2139,7 +2148,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
         "import Tidepool.Agent.Reply (pollReply)\npollReply sessionReply",
     )
     .await;
-    assert_eq!(pending["items"][0]["output"], "ReplyOpen", "{pending}");
+    assert_eq!(pending["items"][1]["output"], "ReplyOpen", "{pending}");
     // Repair is performed by this already-active lead, not queued behind it.
     let revised = campaign
         ._repository
@@ -2149,7 +2158,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     committed(
         lead.policy.as_ref(),
         &format!(
-            "let revised = Candidate \"{}\" [\"repair content check\"] [\"open product gate\"]",
+            "let revised = Candidate (GitOid \"{}\") [\"repair content check\"] [\"open product gate\"]",
             revised.as_str()
         ),
     )
@@ -2240,7 +2249,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
     )
     .await;
     let (rsi, _rsi_binding) = next_project_worker(&mut campaign).await;
-    assert_eq!(rsi.model.as_deref(), Some("gpt-6-astra"));
+    assert_eq!(rsi.model.as_deref(), Some("planner"));
     assert_eq!(rsi.context_parent, None);
     let packet = committed(rsi.policy.as_ref(), "inspectFull (rsiContext sessionInput)").await;
     for expected in [
@@ -2278,7 +2287,7 @@ async fn workspace_lead_repairs_locally_reuses_review_and_prepares_next_rsi_sele
         )
         .unwrap();
     let result = dispatch_haskell_script(rsi.policy.as_ref(), &format!(
-        "respond (Produced (Candidate \"{}\" [\"reviewed authored task guidance\"] [\"activate at next swarm boundary\"]))", improvement_commit.as_str())).await;
+        "respond (Produced (Candidate (GitOid \"{}\") [\"reviewed authored task guidance\"] [\"activate at next swarm boundary\"]))", improvement_commit.as_str())).await;
     assert_eq!(result["status"], "replied", "{result}");
     let receipt = committed(
         root.as_ref(),
@@ -2470,7 +2479,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     let publisher = source.policy.clone();
     let publication = tokio::spawn(async move {
         committed(publisher.as_ref(),
-            "reportProgress (WorkProgress [] [Question \"decision\" (DesignQuestion \"plans/test.md\" \"candidate\" \"choose the boundary\" [] [] [])])"
+            "reportProgress (WorkProgress [] [Question \"decision\" (DesignQuestion \"plans/test.md\" (GitOid \"candidate\") \"choose the boundary\" [] [] [])])"
         ).await
     });
     let message = match tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())

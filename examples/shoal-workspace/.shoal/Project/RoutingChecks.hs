@@ -76,9 +76,9 @@ twoLaneHandoff = do
   rightSource <- readFile (checkActor right) "right.txt"
   check "both final candidates have source evidence" (leftSource == "left final\n" && rightSource == "right final\n")
   let deliver actor commit = void $ turn actor
-        ("respond (Produced (Delivered (ReviewedCandidate sessionInput (Candidate " <> literal commit
+        ("respond (Produced (Delivered (ReviewedCandidate sessionInput (Candidate " <> gitOidLiteral commit
           <> " [\"read final source\"] [\"product acceptance remains\"]) [\"recipe source assertion\"] \"model-free handoff fixture\") "
-          <> literal commit <> " [\"read final source\"]))")
+          <> gitOidLiteral commit <> " [\"read final source\"]))")
   deliver (checkActor left) leftFinal
   deliver (checkActor right) rightFinal
   final <- turn owner "view <- readWork handoff\ninspectFull (collectedWork view)"
@@ -256,7 +256,7 @@ notificationRetention = do
   check "a failed real send retains the new question and typed failure" ("question-a" `Text.isInfixOf` output retained && "NotificationUnavailable" `Text.isInfixOf` output retained)
   compact <- turn (checkActor producer) "inspectFull (workMessage (id :: Text -> Text) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [] [first,second])))"
   check "question messages contain only the new question" ("question-b" `Text.isInfixOf` output compact && not ("question-a" `Text.isInfixOf` output compact))
-  combined <- turn (checkActor producer) "inspectFull (withCheckpoints (workMessage (id :: Text -> Text)) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [Candidate \"partial-head\" [] [\"review pending\"]] [first,second])))"
+  combined <- turn (checkActor producer) "inspectFull (withCheckpoints (workMessage (id :: Text -> Text)) (workChange \"producer\" (ProgressCursor 1) (WorkProgress [] [first]) (WorkProgress [Candidate (GitOid \"partial-head\") [] [\"review pending\"]] [first,second])))"
   check "a useful checkpoint and a new question both reach the owner" ("partial-head" `Text.isInfixOf` output combined && "question-b" `Text.isInfixOf` output combined && not ("question-a" `Text.isInfixOf` output combined))
   void $ turn (checkActor producer) "reportProgress (WorkProgress [] [first,first])"
   once <- turn owner "inspectFull . length . workNotices <$> readWork collection"
@@ -322,7 +322,7 @@ forwardCandidate disposition = do
         Forward -> "route-forward"
         CancelDestination -> "route-cancel"
         LoseProducer -> "route-unavailable"
-  void $ turn owner ("let routeCampaign = " <> literal campaign <> " :: Text")
+  void $ turn owner ("let routeCampaign = " <> literal campaign <> " :: CampaignLabel")
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline)
   script owner "route-reply-setup"

@@ -42,7 +42,7 @@ collaboration = do
   void $ git (checkActor implementer) ["merge", "--ff-only", amendment]
   plan <- readFile (checkActor implementer) "plans/feature.md"
   check "the accepted plan really reached the implementer's checkout" (plan == "Preparation retains the open product gate.\n")
-  void $ turn (checkActor implementer) ("respond (Incorporated (incorporationAmendment sessionInput) " <> literal amendment <> " [\"read exact plan at resulting head\"])")
+  void $ turn (checkActor implementer) ("respond (Incorporated (incorporationAmendment sessionInput) " <> gitOidLiteral amendment <> " [\"read exact plan at resulting head\"])")
   void $ turn (checkActor reviewer) "incorporation <- pollWatch planReady"
   script (checkActor reviewer) "project_review_questions"
   attention <- turn owner "observedQuestions <- pollProgress reviewQuestions\ninspectFull observedQuestions"

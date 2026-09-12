@@ -92,7 +92,7 @@ literal = Text.pack . show
 
 -- | Render trusted `git rev-parse` output as a typed expression for a fixture cell.
 gitOidLiteral :: Text -> Text
-gitOidLiteral value = "GitOid " <> literal value
+gitOidLiteral value = "(GitOid " <> literal value <> ")"
 
 checkpoint :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Text -> Eff effects Text
 checkpoint actor path contents message = do

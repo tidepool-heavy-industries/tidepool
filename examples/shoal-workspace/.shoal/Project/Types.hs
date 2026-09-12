@@ -106,7 +106,7 @@ data IncorporationTask = IncorporationTask
   } deriving (Show, Eq)
 
 data Incorporation
-  = Incorporated PlanAmendment Text [Text]
+  = Incorporated PlanAmendment GitOid [Text]
   | IncorporationBlocked PlanAmendment Text [Text]
   deriving (Show, Eq)
 
