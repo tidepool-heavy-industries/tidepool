@@ -177,6 +177,8 @@ struct PendingRotation {
 }
 
 impl OverlayResourceLease {
+    // Compaction copies one merged tree per 32 published layers. Older layers
+    // remain leased while descendants use them, so peak storage can rise.
     const COMPACT_AT_LAYERS: usize = 32;
 
     pub(super) fn allocate_path(

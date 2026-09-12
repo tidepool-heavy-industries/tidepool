@@ -203,6 +203,11 @@ impl WorktreeManager {
         let tracked = self
             .git
             .try_run(handle.cwd(), &["ls-files", "--cached", "-z"])?;
+        let checkout =
+            fs::File::open(handle.cwd()).map_err(|error| WorktreeError::StorageFailure {
+                path: handle.cwd().to_owned(),
+                detail: error.to_string(),
+            })?;
         let mut restored = 0;
         for name in tracked.nul_fields() {
             let relative = Path::new(name);
@@ -215,9 +220,18 @@ impl WorktreeManager {
             let Ok(source) = donor.open_view_file(&visible_root.join(relative)) else {
                 continue;
             };
-            let Ok(target) = fs::File::open(handle.cwd().join(relative)) else {
+            let Ok(target) = rustix::fs::openat2(
+                &checkout,
+                relative,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::CLOEXEC
+                    | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+                rustix::fs::ResolveFlags::BENEATH | rustix::fs::ResolveFlags::NO_SYMLINKS,
+            ) else {
                 continue;
             };
+            let target = fs::File::from(target);
             let (Ok(before), Ok(destination)) = (source.metadata(), target.metadata()) else {
                 continue;
             };

@@ -4558,6 +4558,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "parking_lot",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
