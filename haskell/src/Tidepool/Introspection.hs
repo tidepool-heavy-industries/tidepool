@@ -1,6 +1,10 @@
 module Tidepool.Introspection
   ( InspectionResult (..),
     InfoEntry (..),
+    TypeMatch (..),
+    TypeMatchQuality (..),
+    normalizeLookupWildcards,
+    searchTypeMatches,
     runInspection,
     encodeInspectionResults,
   )
@@ -10,19 +14,24 @@ import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad (foldM, forM)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.State.Strict (State, evalState, get, put)
 import Data.ByteString qualified as BS
+import Data.Generics (everywhereM, mkM)
 import Data.List (nubBy, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, isJust)
 import Data.Text qualified as T
 import GHC
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.Unify (tcMatchTy)
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames)
+import GHC.Types.Name.Occurrence (mkTyVarOcc, occNameString)
+import GHC.Types.Name.Reader (GlobalRdrEnv, RdrName (..), globalRdrEnvElts, greName, greRdrNames, mkRdrUnqual)
 import GHC.Types.TyThing (tyThingParent_maybe)
 import GHC.Types.TyThing.Ppr (pprTyThing, pprTyThingInContext)
-import GHC.Utils.Outputable (defaultSDocContext, renderWithContext)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
+import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
 import Tidepool.ExtractRequest (InspectionRequest (..))
 import Tidepool.ExtractUtil (getLibdir)
 
@@ -43,6 +52,86 @@ data InspectionResult
   | InspectionRejected String
   | InspectionBrowse String Bool [InfoEntry]
   deriving (Eq, Show)
+
+data TypeMatchQuality
+  = TypeMatchExact
+  | TypeMatchUsable
+  deriving (Eq, Ord, Show)
+
+data TypeMatch = TypeMatch
+  { typeMatchName :: String,
+    typeMatchModule :: Maybe String,
+    typeMatchSignature :: String,
+    typeMatchQuality :: TypeMatchQuality
+  }
+  deriving (Eq, Show)
+
+-- | Replace each parsed anonymous type wildcard with a distinct implicit type
+-- variable. GHC then kind-checks and quantifies those variables normally.
+-- Rewriting the parsed tree preserves qualification and repeated named
+-- variables; rendered source never drives this transformation.
+normalizeLookupWildcards :: ParsedModule -> ParsedModule
+normalizeLookupWildcards parsed =
+  parsed
+    { pm_parsed_source =
+        evalState (everywhereM (mkM replaceWildcard) (pm_parsed_source parsed)) 0
+    }
+  where
+    replaceWildcard :: HsType GhcPs -> State Int (HsType GhcPs)
+    replaceWildcard (HsWildCardTy _) = do
+      index <- get
+      put (index + 1)
+      pure $
+        HsTyVar
+          noAnn
+          NotPromoted
+          (noLocA (mkRdrUnqual (mkTyVarOcc ("__lookup_w" ++ show index))))
+    replaceWildcard other = pure other
+
+-- | Match a checked lookup type against every value in the exact reader
+-- environment of the inspection module. Matching is entirely in memory:
+-- callers compile the query once, never once per candidate.
+searchTypeMatches :: (GhcMonad m) => GlobalRdrEnv -> Name -> Type -> m [TypeMatch]
+searchTypeMatches rdrEnv queryBinder query = do
+  let names =
+        filter (/= queryBinder) $
+          nubBy (==) (map greName (globalRdrEnvElts rdrEnv))
+  things <- fmap catMaybes $ forM names $ \name -> do
+    found <- lookupName name
+    pure $ case found of
+      Just (AnId identifier) -> Just (name, idType identifier)
+      _ -> Nothing
+  pure . sortOn matchKey . catMaybes $
+    [ toMatch name candidate <$> matchQuality query candidate
+    | (name, candidate) <- things
+    ]
+  where
+    matchQuality expected candidate
+      | eqType expected candidate = Just TypeMatchExact
+      | matchesEitherDirection expected candidate = Just TypeMatchUsable
+      | otherwise = Nothing
+
+    matchesEitherDirection left right =
+      let (_, _, leftBody) = tcSplitSigmaTy left
+          (_, _, rightBody) = tcSplitSigmaTy right
+       in isJust (tcMatchTy leftBody rightBody)
+            || isJust (tcMatchTy rightBody leftBody)
+
+    toMatch name candidate quality =
+      TypeMatch
+        { typeMatchName = occNameString (nameOccName name),
+          typeMatchModule = moduleNameString . moduleName <$> nameModule_maybe name,
+          typeMatchSignature =
+            renderWithContext defaultSDocContext (ppr candidate),
+          typeMatchQuality = quality
+        }
+
+    matchKey result =
+      ( typeMatchQuality result,
+        typeMatchName result,
+        typeMatchModule result,
+        typeMatchSignature result
+      )
 
 runInspection ::
   HscEnv ->

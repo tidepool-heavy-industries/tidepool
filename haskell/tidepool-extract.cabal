@@ -49,6 +49,7 @@ library tidepool-extract-internal
     text,
     cborg,
     mtl,
+    syb,
     lens,
     errors,
     witherable,
@@ -76,6 +77,20 @@ test-suite cell-splitter-test
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
     tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+
+test-suite introspection-search-test
+  type:             exitcode-stdio-1.0
+  main-is:          IntrospectionSearchTest.hs
+  hs-source-dirs:   test
+  build-depends:
+    base >= 4.20 && < 5,
+    ghc >= 9.12 && < 9.13,
+    tidepool-extract-internal,
+    directory,
+    filepath,
+    process
   default-language: GHC2024
   ghc-options:      -Wall
 
