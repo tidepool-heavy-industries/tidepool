@@ -48,6 +48,11 @@ oldScore oldG
 data TransportG = NewG Text deriving Show
 newScore (NewG value) = T.length value
 
+newResponse <- request @TransportG retainedActor ...
+-- retained actor settled with NewG "shadow"
+newScore newG
+-- 6
+
 oldScore oldG
 -- 17
 
@@ -60,8 +65,16 @@ The receipt identifies the old and new heads as
 `Tidepool.Session.Lib.G9.TransportG` and
 `Tidepool.Session.Lib.G10.TransportG`. This proves the existing consumer
 preserves exact installed identity through response settlement and shadowing,
-and rejects the mismatched consumer. An explicitly pinned new-generation child
-is the corresponding new-head execution check.
+and rejects the mismatched consumer. The reverse mismatch,
+`oldScore newG`, was also rejected with the same two exact heads. The
+new-generation reply was delivered by a typed request to the retained Astra
+actor after two unrelated new-actor admissions timed out; it returned
+`NewG "shadow"` and `newScore newG` returned `6`.
+
+Cleanup of the old throwaway child was later reported degraded: its native
+process/socket/worktree custody remain retained because exact termination was
+not established. This does not alter its already-settled typed result, but it is
+reported separately and is not described as successful cleanup.
 
 ## Result and coordinator obligation
 
