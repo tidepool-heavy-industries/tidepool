@@ -13,8 +13,8 @@ acceptance evidence.
   accepted in one `do`. Automatic transport remains unproved: the check module's
   nominal user type is not the later installed `Lib.G<n>` type. The open question
   `inference-transport@9c2b2c0f...` correctly blocks freezing a string-only wire.
-- Lookup: `plans/notebook-cells/lookup/execution-readback.md` and
-  `lookup/type-query-readback.md`. One GHC 9.12.2 module resolved a query once,
+- Lookup: authoritative
+  `plans/notebook-cells/lookup/execution-readback.md`. One GHC 9.12.2 module resolved a query once,
   enumerated 268 in-scope entries and matched a visible polymorphic value with
   `tcMatchTy`, without candidate compilation. Raw `_` zonks to `ZonkAny` and
   needs parsed-AST normalization to explicit quantified variables. The compiled
