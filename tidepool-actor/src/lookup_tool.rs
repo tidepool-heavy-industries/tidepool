@@ -298,7 +298,13 @@ mod tests {
     #[test]
     fn preparation_preserves_order_duplicates_and_per_query_rejections() {
         let prepared = prepare(serde_json::json!({
-            "queries": [" awaitSettled ", ":: Response r -> Await r", "", ":: ", "awaitSettled"]
+            "queries": [
+                " awaitSettled ",
+                ":: Response result -> Await (Settlement result)",
+                "",
+                ":: ",
+                "awaitSettled"
+            ]
         }))
         .unwrap();
         assert_eq!(prepared.len(), 5);
@@ -308,7 +314,9 @@ mod tests {
         );
         assert_eq!(
             prepared[1].kind,
-            PreparedLookupKind::Type("Response r -> Await r".into())
+            PreparedLookupKind::Type(
+                "Response result -> Await (Settlement result)".into()
+            )
         );
         assert!(matches!(prepared[2].kind, PreparedLookupKind::Rejected(_)));
         assert!(matches!(prepared[3].kind, PreparedLookupKind::Rejected(_)));
