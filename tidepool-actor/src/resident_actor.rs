@@ -477,6 +477,16 @@ pub struct ResidentKernelBehavior<H, O> {
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
     active_workbench_control: Option<Arc<crate::resident_tools::WorkbenchExecutionControl>>,
+    settled_fork_boundaries: Vec<tidepool_runtime::session::WorkbenchForkBoundary>,
+    pending_fork_publications: Vec<PendingForkPublication>,
+}
+
+struct PendingForkPublication {
+    boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    groups: Vec<crate::ForkGroupId>,
+    releases: Vec<(ActorRef, tidepool_codegen::scope::ScopeId)>,
+    unused_scopes: Vec<tidepool_codegen::scope::ScopeId>,
+    published: bool,
 }
 
 #[derive(Clone)]
@@ -519,6 +529,11 @@ struct WorkbenchExecutions(std::collections::HashMap<WorkbenchReplayKey, Workben
 enum WorkbenchReplayFailure {
     DifferentInput,
     Unconfirmed,
+}
+
+enum WorkbenchBoundaryRecord {
+    Unconfirmed,
+    Terminal(crate::KernelWorkbenchReply),
 }
 
 impl WorkbenchExecutions {
@@ -603,6 +618,26 @@ impl WorkbenchExecutions {
             },
         }
     }
+
+    fn at_boundary(
+        &self,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Option<WorkbenchBoundaryRecord> {
+        self.0.iter().find_map(|(key, record)| {
+            let WorkbenchReplayKey::Hosted(invocation) = key else {
+                return None;
+            };
+            if !invocation.matches_boundary(boundary) {
+                return None;
+            }
+            Some(match &record.state {
+                WorkbenchExecutionState::Unconfirmed => WorkbenchBoundaryRecord::Unconfirmed,
+                WorkbenchExecutionState::Terminal { reply, .. } => {
+                    WorkbenchBoundaryRecord::Terminal(reply.clone())
+                }
+            })
+        })
+    }
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -682,6 +717,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             active_route: None,
             active_fork_boundary: None,
             active_workbench_control: None,
+            settled_fork_boundaries: Vec::new(),
+            pending_fork_publications: Vec::new(),
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
@@ -4846,6 +4883,59 @@ where
             }
         }
     }
+    async fn finish_pending_fork_publication(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<bool, KernelBehaviorError> {
+        let Some(index) = self
+            .pending_fork_publications
+            .iter()
+            .position(|pending| &pending.boundary == boundary)
+        else {
+            return Ok(false);
+        };
+        let mut pending = self.pending_fork_publications.remove(index);
+        if !pending.published {
+            if let Err(error) = self
+                .environment
+                .fork_groups
+                .publish_groups(&pending.groups, context.actor)
+            {
+                self.pending_fork_publications.push(pending);
+                return Err(KernelBehaviorError {
+                    detail: error.to_string(),
+                });
+            }
+            pending.published = true;
+        }
+        for (child, scope) in pending.releases.drain(..) {
+            let sent = kernel.resolve(child).is_some_and(|child| {
+                child.terminal().get().is_none()
+                    && child
+                        .address()
+                        .send_message(crate::KernelMessage::ReleaseFork { scope })
+                        .is_ok()
+            });
+            if !sent {
+                pending.unused_scopes.push(scope);
+            }
+        }
+        if !pending.unused_scopes.is_empty() {
+            if let Err(error) = self
+                .environment
+                .runner
+                .retire_fork_scopes(context.clone(), pending.unused_scopes.clone())
+                .await
+            {
+                self.pending_fork_publications.push(pending);
+                return Err(Self::failure(error));
+            }
+        }
+        Ok(true)
+    }
+
     async fn abort_incomplete_groups(
         &self,
         kernel: &KernelContext,
@@ -5115,18 +5205,55 @@ where
         })
     }
 
-    fn abort_pending_forks<'a>(
+    fn reconcile_workbench_boundary<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>,
+    > {
         Box::pin(async move {
-            self.abort_unpublished_groups(
-                kernel,
-                kernel.identity(),
-                "host reattached without acknowledging tool completion; queued fork cancelled",
-            )
-            .await;
-            Ok(())
+            if self.settled_fork_boundaries.contains(&boundary) {
+                return Ok(crate::WorkbenchBoundaryReconciliation::Settled);
+            }
+            let retained = self.workbench_executions.lock().at_boundary(&boundary);
+            let reply = match retained {
+                Some(WorkbenchBoundaryRecord::Terminal(reply)) => Some(reply),
+                Some(WorkbenchBoundaryRecord::Unconfirmed) => {
+                    return Ok(crate::WorkbenchBoundaryReconciliation::Pending)
+                }
+                None => None,
+            };
+            let context = self.context(kernel.identity());
+            for child in self
+                .environment
+                .fork_groups
+                .abort_incomplete_at_boundary(context.actor, &boundary)
+            {
+                if let Some(child) = kernel.resolve(child) {
+                    let _ = child
+                        .shutdown(ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "fork admission stopped before interrupted tool settlement"
+                                .into(),
+                        })
+                        .await;
+                }
+            }
+            if let Some(reply) = reply {
+                return Ok(crate::WorkbenchBoundaryReconciliation::Recovered { reply });
+            }
+            if !self
+                .environment
+                .fork_groups
+                .ready_groups_at_boundary(context.actor, &boundary)
+                .is_empty()
+            {
+                return Ok(crate::WorkbenchBoundaryReconciliation::Pending);
+            }
+            self.settled_fork_boundaries.push(boundary);
+            Ok(crate::WorkbenchBoundaryReconciliation::Settled)
         })
     }
 
@@ -5137,6 +5264,15 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            if self
+                .finish_pending_fork_publication(kernel, &context, &boundary)
+                .await?
+            {
+                if !self.settled_fork_boundaries.contains(&boundary) {
+                    self.settled_fork_boundaries.push(boundary);
+                }
+                return Ok(());
+            }
             for child in self
                 .environment
                 .fork_groups
@@ -5167,6 +5303,9 @@ where
                 })
                 .collect();
             if groups.is_empty() {
+                if !self.settled_fork_boundaries.contains(&boundary) {
+                    self.settled_fork_boundaries.push(boundary);
+                }
                 return Ok(());
             }
             let children: Vec<_> = {
@@ -5206,33 +5345,17 @@ where
                 .finalize_fork_scopes(context.clone(), previous)
                 .await
                 .map_err(Self::failure)?;
-            for (group, _) in groups {
-                self.environment
-                    .fork_groups
-                    .publish_group(group, context.actor)
-                    .map_err(|error| KernelBehaviorError {
-                        detail: error.to_string(),
-                    })?;
-            }
-            let mut unused_scopes = Vec::new();
-            for (child, scope) in children.into_iter().zip(scopes) {
-                let sent = kernel.resolve(child).is_some_and(|child| {
-                    child.terminal().get().is_none()
-                        && child
-                            .address()
-                            .send_message(crate::KernelMessage::ReleaseFork { scope })
-                            .is_ok()
-                });
-                if !sent {
-                    unused_scopes.push(scope);
-                }
-            }
-            if !unused_scopes.is_empty() {
-                self.environment
-                    .runner
-                    .retire_fork_scopes(context, unused_scopes)
-                    .await
-                    .map_err(Self::failure)?;
+            self.pending_fork_publications.push(PendingForkPublication {
+                boundary: boundary.clone(),
+                groups: groups.into_iter().map(|(group, _)| group).collect(),
+                releases: children.into_iter().zip(scopes).collect(),
+                unused_scopes: Vec::new(),
+                published: false,
+            });
+            self.finish_pending_fork_publication(kernel, &context, &boundary)
+                .await?;
+            if !self.settled_fork_boundaries.contains(&boundary) {
+                self.settled_fork_boundaries.push(boundary);
             }
             Ok(())
         })
@@ -6464,7 +6587,7 @@ fn workbench_response(
 mod tests {
     use super::{
         workbench_failure_after_operations, workbench_response, ChildExitObservations,
-        WorkbenchExecutions,
+        WorkbenchBoundaryRecord, WorkbenchExecutions,
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
@@ -6616,6 +6739,59 @@ mod tests {
             completed.lookup(&WorkbenchExecutionId::from_digest([8; 16]), &request, None),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn interrupted_recovery_reads_only_the_exact_terminal_execution() {
+        let invocation =
+            crate::resident_tools::WorkbenchCallKey::from(tidepool_tool::ToolInvocationContext {
+                context_call_id: Some("outer".into()),
+                thread_id: "thread".into(),
+                turn_id: "turn".into(),
+                call_id: "call".into(),
+                namespace: None,
+            });
+        let execution = WorkbenchExecutionId::from_digest([3; 16]);
+        let request = WorkbenchRequest::from_ghci_input("unfold work")
+            .unwrap()
+            .with_execution_id(execution.clone());
+        let reply = Ok(WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        });
+        let mut journal = WorkbenchExecutions::default();
+        journal.begin(&execution, request.clone(), Some(&invocation));
+        assert!(matches!(
+            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "outer".into(),
+            }),
+            Some(WorkbenchBoundaryRecord::Unconfirmed)
+        ));
+        journal.record(
+            execution.clone(),
+            request,
+            reply.clone(),
+            crate::WorkbenchCancellationOutcome::NotSleeping {
+                execution: execution.clone(),
+            },
+            Some(&invocation),
+        );
+        assert!(matches!(
+            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "outer".into(),
+            }),
+            Some(WorkbenchBoundaryRecord::Terminal(found)) if found == reply
+        ));
+        assert!(journal
+            .at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary {
+                thread_id: "thread".into(),
+                call_id: "other".into(),
+            })
+            .is_none());
     }
 
     #[test]

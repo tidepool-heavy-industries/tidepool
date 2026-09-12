@@ -137,7 +137,6 @@ async fn authored_seal_survives_lost_waiter_and_rejects_late_work() {
         .unwrap();
     assert_eq!(proof.actor(), actor.identity());
     assert!(late.await.unwrap().is_err());
-    assert!(policy.reattach_boxed().await.is_err());
     assert_eq!(policy.seal_hosted_work_boxed().await.unwrap(), proof);
     policy
         .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {

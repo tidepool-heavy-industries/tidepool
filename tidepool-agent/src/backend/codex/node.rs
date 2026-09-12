@@ -76,7 +76,7 @@ prefix_rule(
     justification = "Inspection-only actors may inspect Git but must delegate repository mutation to a coding actor.",
 )
 "#;
-pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 3;
+pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 4;
 
 /// Resolve and behaviorally verify the interactive Codex executable.
 ///
@@ -1028,9 +1028,10 @@ mod tests {
         let error = accept_session_binding(&path, 1, BackendThreadId(THREAD.to_string()), None)
             .await
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported host dynamic-tools protocol version 1; expected 3"));
+        assert!(error.to_string().contains(&format!(
+            "unsupported host dynamic-tools protocol version 1; expected {}",
+            HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION
+        )));
         assert!(!path.exists());
     }
 

@@ -194,11 +194,12 @@ pub enum KernelMessage {
         execution: tidepool_runtime::session::WorkbenchExecutionId,
         reply: RpcReplyPort<crate::WorkbenchCancellationOutcome>,
     },
+    ReconcileWorkbenchBoundary {
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        reply: RpcReplyPort<crate::WorkbenchBoundaryReconciliation>,
+    },
     ToolCompleted {
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,
-        reply: RpcReplyPort<KernelInvocationReply>,
-    },
-    AbortPendingForks {
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     ReleaseFork {
@@ -263,11 +264,14 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_tuple("ReconcileWorkbenchCancellation")
                 .field(execution)
                 .finish(),
+            Self::ReconcileWorkbenchBoundary { boundary, .. } => formatter
+                .debug_tuple("ReconcileWorkbenchBoundary")
+                .field(boundary)
+                .finish(),
             Self::ToolCompleted { boundary, .. } => formatter
                 .debug_tuple("ToolCompleted")
                 .field(boundary)
                 .finish(),
-            Self::AbortPendingForks { .. } => formatter.write_str("AbortPendingForks"),
             Self::ReleaseFork { scope } => {
                 formatter.debug_tuple("ReleaseFork").field(scope).finish()
             }

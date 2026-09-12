@@ -91,7 +91,7 @@ fn open_test_fork(
 
 #[tokio::test]
 async fn published_unfold_watch_and_request_examples_execute() {
-    execute_examples(false, None, CompletionAction::Acknowledge).await;
+    execute_examples(false, None, 1).await;
 }
 
 #[tokio::test]
@@ -437,7 +437,7 @@ async fn rich_response_survives_resident_computation() {
     let before = tidepool_codegen::host_fns::heap_verify_run_count();
     tidepool_codegen::host_fns::set_heap_verify(true);
     let _verification = VerifyHeap;
-    execute_examples(true, None, CompletionAction::Acknowledge).await;
+    execute_examples(true, None, 1).await;
     assert!(tidepool_codegen::host_fns::heap_verify_run_count() > before);
 }
 
@@ -557,34 +557,86 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
 
 #[tokio::test]
 async fn queued_unfold_survives_later_rejection() {
-    execute_examples(
-        false,
-        Some("missingBindingAfterSuccessfulUnfold"),
-        CompletionAction::Acknowledge,
-    )
-    .await;
+    execute_examples(false, Some("missingBindingAfterSuccessfulUnfold"), 1).await;
 }
 
 #[tokio::test]
-async fn reattachment_cancels_unacknowledged_forks() {
-    execute_examples(false, None, CompletionAction::Reattach { groups: 1 }).await;
+async fn reattachment_preserves_completed_unacknowledged_forks() {
+    let mut campaign = TestCampaign::start().await;
+    let root = Arc::clone(&campaign.root_installation.policy);
+    committed(
+        root.as_ref(),
+        include_str!("../actor_host_fixtures/generic_actor/documentation_setup.hs"),
+    )
+    .await;
+    let boundary = tidepool_runtime::session::WorkbenchForkBoundary {
+        thread_id: "actor-host-recovery".into(),
+        call_id: "minimal-unfold".into(),
+    };
+    let result = root
+        .dispatch_boxed(ToolInvocation {
+            context: Some(ToolInvocationContext {
+                context_call_id: Some(boundary.call_id.clone()),
+                thread_id: boundary.thread_id.clone(),
+                turn_id: "minimal-turn".into(),
+                call_id: "minimal-inner-call".into(),
+                namespace: Some("haskell".into()),
+            }),
+            name: tidepool_actor::HASKELL_TOOL.into(),
+            arguments: ToolArguments::Raw(
+                example(include_str!("../../../prompts/shoal/docs/unfold.md")).into(),
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "committed", "{result:?}");
+    while let Ok(event) = campaign.deployments.try_recv() {
+        assert!(!matches!(
+            event,
+            LocalResidentDeployment::PolicyInstalled(_)
+        ));
+    }
+    root.reattach_boxed().await.unwrap();
+    assert!(matches!(
+        root.reconcile_workbench_boxed(boundary.clone())
+            .await
+            .unwrap(),
+        tidepool_actor::WorkbenchBoundaryReconciliation::Recovered { .. }
+    ));
+    root.complete_boxed(boundary.clone()).await.unwrap();
+    root.complete_boxed(boundary.clone()).await.unwrap();
+
+    let mut children = Vec::new();
+    while children.len() < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+            .await
+            .expect("recovered fork startup timed out")
+            .expect("deployment channel closed");
+        if let LocalResidentDeployment::PolicyInstalled(child) = event {
+            assert_eq!(child.fork_boundary.as_ref(), Some(&boundary));
+            children.push(child);
+        }
+    }
+    for child in &children {
+        let inherited = committed(child.policy.as_ref(), "sessionInput").await;
+        assert!(inherited["items"][0]["output"].as_str().is_some());
+    }
+    while let Ok(event) = campaign.deployments.try_recv() {
+        assert!(
+            !matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
+            "exactly two children belong to the recovered unfold"
+        );
+    }
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
 async fn multiple_unfolds_are_admitted_before_completion() {
-    execute_examples(false, None, CompletionAction::Reattach { groups: 2 }).await;
+    execute_examples(false, None, 2).await;
 }
 
-enum CompletionAction {
-    Acknowledge,
-    Reattach { groups: usize },
-}
-
-async fn execute_examples(
-    rich_response: bool,
-    suffix: Option<&str>,
-    completion_action: CompletionAction,
-) {
+async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usize) {
     let mut campaign = TestCampaign::start().await;
     let root = Arc::clone(&campaign.root_installation.policy);
     for block in include_str!("../../../prompts/shoal/docs/workbench.md")
@@ -603,7 +655,7 @@ async fn execute_examples(
     )
     .await;
     committed(root.as_ref(), ":type (undefined :: Review)").await;
-    let extra_group = if matches!(completion_action, CompletionAction::Reattach { groups: 2 }) {
+    let extra_group = if groups == 2 {
         include_str!("../actor_host_fixtures/generic_actor/second_queued_unfold.hs")
     } else {
         ""
@@ -651,47 +703,14 @@ async fn execute_examples(
         thread_id: "actor-host-vertical".into(),
         call_id,
     };
-    if let CompletionAction::Reattach { groups } = completion_action {
-        root.reattach_boxed().await.unwrap();
-        root.complete_boxed(completion).await.unwrap();
-        let mut retired = 0;
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while retired < groups * 2 {
-                match campaign.deployments.recv().await.unwrap() {
-                    LocalResidentDeployment::Retired { terminal, .. } => {
-                        assert_eq!(terminal.kind, ActorExitKind::Cancelled);
-                        assert!(terminal
-                            .summary
-                            .contains("without acknowledging tool completion"));
-                        retired += 1;
-                    }
-                    LocalResidentDeployment::PolicyInstalled(_) => {
-                        panic!("cancelled child started")
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .expect("queued children must settle on reattachment");
-        campaign
-            .actor
-            .shutdown(ActorTerminal {
-                kind: ActorExitKind::Cancelled,
-                summary: "reattachment test complete".into(),
-            })
-            .await
-            .unwrap();
-        campaign.hosted.await.unwrap();
-        return;
-    }
+    let expected_children = groups * 2;
     root.complete_boxed(completion.clone()).await.unwrap();
     root.complete_boxed(completion).await.unwrap();
     let mut children = Vec::new();
     let mut bindings = Vec::new();
     let mut fork_boundary = None;
     let mut activation_messages = Vec::new();
-    while children.len() < 2 {
+    while children.len() < expected_children {
         let event = tokio::time::timeout(Duration::from_secs(120), async {
             campaign
                 .deployments

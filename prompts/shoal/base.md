@@ -407,8 +407,12 @@ inspect existing evidence and delegate artifact-producing validation appropriate
 # Honest failures, retained evidence, and retirement
 
 Successful workbench prefixes and completed external effects can survive a later
-rejection. A failed unit does not imply rollback. Inspect its receipt before
-retrying; the same source submitted as a new call represents new intent. Existing
+rejection or interruption. Completed unfolds and their recoverable handles survive;
+an unfinished admission may require cleanup. A failed unit does not imply rollback.
+Hosted-call settlement recovers automatically. If recovery blocks a call with
+`not submitted`, it will not execute later; wait for the recovery notice before resubmitting it.
+Do not poll recovery or replay earlier submitted calls. Inspect their retained
+receipts instead; the same source submitted as a new call represents new intent. Existing
 closures keep their captured definitions when you rebind a name. Shared values
 remain governed by their machine and scope custody. Do not assume that textual
 replay or a recreated host restores arbitrary lost live values.

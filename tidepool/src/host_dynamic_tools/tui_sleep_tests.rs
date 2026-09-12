@@ -230,6 +230,22 @@ impl ResidentToolEndpoint for ObservedEndpoint {
         self.inner.reattach_boxed()
     }
 
+    fn reconcile_workbench_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        tidepool_actor::WorkbenchBoundaryReconciliation,
+                        ResidentToolError,
+                    >,
+                > + Send,
+        >,
+    > {
+        self.inner.reconcile_workbench_boxed(boundary)
+    }
+
     fn complete_boxed(
         &self,
         boundary: tidepool_runtime::session::WorkbenchForkBoundary,

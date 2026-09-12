@@ -5769,7 +5769,10 @@ mod tests {
             .unwrap();
         let response = client
             .post("http://localhost/v1/dynamic-tools/session")
-            .json(&serde_json::json!({"protocolVersion": 3, "threadId":thread.0}))
+            .json(&serde_json::json!({
+                "protocolVersion": tidepool_agent::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+                "threadId": thread.0
+            }))
             .send()
             .await
             .unwrap();

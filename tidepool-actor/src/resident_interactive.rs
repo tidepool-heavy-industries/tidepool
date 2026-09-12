@@ -129,9 +129,22 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         Some(haskell_tool_instructions())
     }
 
-    fn reattach_boxed(&self) -> ResidentToolFuture {
+    fn reconcile_workbench_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::WorkbenchBoundaryReconciliation,
+                        crate::ResidentToolError,
+                    >,
+                > + Send
+                + 'static,
+        >,
+    > {
         let client = self.client.clone();
-        Box::pin(async move { client.reattach().await })
+        Box::pin(async move { client.reconcile_workbench(boundary).await })
     }
 
     fn complete_boxed(

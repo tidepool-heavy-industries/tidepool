@@ -2,7 +2,7 @@
 //!
 //! The socket directory is the authority membrane: it is owner-only, created
 //! for one actor incarnation, and mounted into only that actor's interactive
-//! process. Registration is immutable, and the v3 `/session` callback certifies
+//! process. Registration is immutable, and the v4 `/session` callback certifies
 //! that exactly one Codex thread is durably queue-ready before any invocation
 //! can be dispatched.
 
@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tidepool_actor::{ResidentToolEndpoint, ResidentToolError, WorkbenchCancellationOutcome};
+use tidepool_actor::{
+    ResidentToolEndpoint, ResidentToolError, WorkbenchBoundaryReconciliation,
+    WorkbenchCancellationOutcome,
+};
 use tidepool_agent::backend::codex::dynamic_tools::DynamicToolFunctionSpec;
 use tidepool_agent::{
     accept_interactive_session_binding, BackendThreadId, InteractiveSessionBinding,
@@ -48,6 +51,15 @@ enum HostToolPhase {
 enum AdmissionKind {
     NewWork,
     CompletionOrRead,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostBoundaryState {
+    Active,
+    Reconciling,
+    Pending,
+    Recoverable,
+    Settled,
 }
 
 /// One service's HTTP admission control, never resident-effect custody.
@@ -166,6 +178,7 @@ struct HostState {
     endpoint: Arc<dyn ResidentToolEndpoint>,
     binding_path: PathBuf,
     expected_thread: Option<BackendThreadId>,
+    boundaries: Arc<Mutex<HashMap<(String, String), HostBoundaryState>>>,
 }
 
 /// Immutable actor-specific service inputs.
@@ -233,6 +246,7 @@ impl HostDynamicToolService {
                 endpoint,
                 binding_path,
                 expected_thread,
+                boundaries: Arc::default(),
             },
         })
     }
@@ -281,6 +295,7 @@ impl HostDynamicToolService {
             .route("/v1/dynamic-tools/session", post(attach_session))
             .route("/v1/dynamic-tools/call", post(call))
             .route("/v1/dynamic-tools/cancel", post(cancel_workbench))
+            .route("/v1/dynamic-tools/interrupted", post(interrupted))
             .route("/v1/dynamic-tools/completed", post(completed))
             .layer(DefaultBodyLimit::max(REQUEST_LIMIT))
             .with_state(self.state);
@@ -406,6 +421,26 @@ impl WorkbenchCancellationResponse {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum WorkbenchInterruptionResponse {
+    Pending,
+    Recovered { reply: CallResponse },
+    Settled,
+}
+
+impl WorkbenchInterruptionResponse {
+    fn from_reconciliation(reconciliation: WorkbenchBoundaryReconciliation) -> Self {
+        match reconciliation {
+            WorkbenchBoundaryReconciliation::Pending => Self::Pending,
+            WorkbenchBoundaryReconciliation::Recovered { reply } => Self::Recovered {
+                reply: workbench_reply(reply),
+            },
+            WorkbenchBoundaryReconciliation::Settled => Self::Settled,
+        }
+    }
+}
+
 fn workbench_reply(reply: tidepool_actor::KernelWorkbenchReply) -> CallResponse {
     match reply {
         Ok(response) => CallResponse::domain(
@@ -428,6 +463,86 @@ async fn cancel_workbench(
             "tool host is draining".into(),
         ));
     }
+    let invocation = validate_exact_workbench_request(&state, request).await?;
+    state
+        .endpoint
+        .cancel_workbench_boxed(invocation)
+        .await
+        .map(WorkbenchCancellationResponse::from_outcome)
+        .map(Json)
+        .map_err(|error| {
+            let status = match error {
+                ResidentToolError::CancellationUnsupported => StatusCode::NOT_IMPLEMENTED,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.to_string())
+        })
+}
+
+async fn interrupted(
+    State(state): State<HostState>,
+    Json(request): Json<CompletionRequest>,
+) -> Result<Json<WorkbenchInterruptionResponse>, (StatusCode, String)> {
+    if !state.control.admits(AdmissionKind::CompletionOrRead) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tool host is draining".into(),
+        ));
+    }
+    let boundary = validate_completion_boundary(&state, request).await?;
+    let key = (boundary.thread_id.clone(), boundary.call_id.clone());
+    let previous = {
+        let mut boundaries = state.boundaries.lock().await;
+        match boundaries.get(&key).copied() {
+            Some(HostBoundaryState::Reconciling) => {
+                return Ok(Json(WorkbenchInterruptionResponse::Pending));
+            }
+            Some(HostBoundaryState::Settled) => {
+                return Ok(Json(WorkbenchInterruptionResponse::Settled));
+            }
+            previous @ (None
+            | Some(
+                HostBoundaryState::Active
+                | HostBoundaryState::Pending
+                | HostBoundaryState::Recoverable,
+            )) => {
+                boundaries.insert(key.clone(), HostBoundaryState::Reconciling);
+                previous
+            }
+        }
+    };
+    let response = match state.endpoint.reconcile_workbench_boxed(boundary).await {
+        Ok(response) => WorkbenchInterruptionResponse::from_reconciliation(response),
+        Err(error) => {
+            let mut boundaries = state.boundaries.lock().await;
+            match previous {
+                Some(previous) => {
+                    boundaries.insert(key, previous);
+                }
+                None => {
+                    boundaries.remove(&key);
+                }
+            }
+            let status = match error {
+                ResidentToolError::CancellationUnsupported => StatusCode::NOT_IMPLEMENTED,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return Err((status, error.to_string()));
+        }
+    };
+    let state_after = match &response {
+        WorkbenchInterruptionResponse::Pending => HostBoundaryState::Pending,
+        WorkbenchInterruptionResponse::Recovered { .. } => HostBoundaryState::Recoverable,
+        WorkbenchInterruptionResponse::Settled => HostBoundaryState::Settled,
+    };
+    state.boundaries.lock().await.insert(key, state_after);
+    Ok(Json(response))
+}
+
+async fn validate_exact_workbench_request(
+    state: &HostState,
+    request: WorkbenchCancellationRequest,
+) -> Result<ToolInvocationContext, (StatusCode, String)> {
     if request.protocol_version != PROTOCOL_VERSION {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -480,26 +595,13 @@ async fn cancel_workbench(
         ));
     }
 
-    let invocation = ToolInvocationContext {
+    Ok(ToolInvocationContext {
         context_call_id: request.context_call_id,
         thread_id: request.thread_id,
         turn_id: request.turn_id,
         call_id: request.call_id,
         namespace: request.namespace,
-    };
-    state
-        .endpoint
-        .cancel_workbench_boxed(invocation)
-        .await
-        .map(WorkbenchCancellationResponse::from_outcome)
-        .map(Json)
-        .map_err(|error| {
-            let status = match error {
-                ResidentToolError::CancellationUnsupported => StatusCode::NOT_IMPLEMENTED,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, error.to_string())
-        })
+    })
 }
 
 async fn completed(
@@ -512,6 +614,51 @@ async fn completed(
             "tool host is draining".into(),
         ));
     }
+    let boundary = validate_completion_boundary(&state, request).await?;
+    let key = (boundary.thread_id.clone(), boundary.call_id.clone());
+    let previous = {
+        let mut boundaries = state.boundaries.lock().await;
+        match boundaries.get(&key).copied() {
+            Some(
+                HostBoundaryState::Active
+                | HostBoundaryState::Reconciling
+                | HostBoundaryState::Pending,
+            ) => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "tool completion boundary is still active".into(),
+                ));
+            }
+            previous => {
+                boundaries.insert(key.clone(), HostBoundaryState::Reconciling);
+                previous
+            }
+        }
+    };
+    if let Err(error) = state.endpoint.complete_boxed(boundary).await {
+        let mut boundaries = state.boundaries.lock().await;
+        match previous {
+            Some(previous) => {
+                boundaries.insert(key, previous);
+            }
+            None => {
+                boundaries.remove(&key);
+            }
+        }
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()));
+    }
+    state
+        .boundaries
+        .lock()
+        .await
+        .insert(key, HostBoundaryState::Settled);
+    Ok(Json(serde_json::Value::Null))
+}
+
+async fn validate_completion_boundary(
+    state: &HostState,
+    request: CompletionRequest,
+) -> Result<tidepool_runtime::session::WorkbenchForkBoundary, (StatusCode, String)> {
     if request.protocol_version != PROTOCOL_VERSION
         || request.context_call_id.is_empty()
         || request.context_call_id.len() > 256
@@ -528,15 +675,10 @@ async fn completed(
             "invalid tool completion identity".into(),
         ));
     }
-    state
-        .endpoint
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary {
-            thread_id: request.thread_id,
-            call_id: request.context_call_id,
-        })
-        .await
-        .map(Json)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+    Ok(tidepool_runtime::session::WorkbenchForkBoundary {
+        thread_id: request.thread_id,
+        call_id: request.context_call_id,
+    })
 }
 
 async fn registration(State(state): State<HostState>) -> Result<Json<Registration>, StatusCode> {
@@ -648,15 +790,6 @@ async fn attach_session(
             )
         }
     })?;
-    if bound.is_some() {
-        state.endpoint.reattach_boxed().await.map_err(|error| {
-            tracing::error!(%error, "could not settle queued forks on reattachment");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not settle queued forks",
-            )
-        })?;
-    }
     if let Some(binding) = challenged_binding {
         *state.control.challenged_binding.lock().await = Some(binding);
     }
@@ -781,6 +914,10 @@ fn workbench_failure_transcript(failure: &tidepool_actor::KernelWorkbenchFailure
 enum HostToolFailure {
     #[error("tool host is quiescing")]
     Quiescing,
+    #[error("tool completion boundary was already settled")]
+    SettledBoundary,
+    #[error("tool completion boundary already has an active call")]
+    ActiveBoundary,
     #[error("unsupported dynamic-tool protocol version {actual}; expected {expected}")]
     UnsupportedProtocol { expected: u32, actual: u32 },
     #[error("dynamic-tool namespace mismatch: received {actual:?}; expected {expected:?}")]
@@ -917,6 +1054,29 @@ async fn call(
             ));
         }
     };
+    let boundary_key = request
+        .context_call_id
+        .as_ref()
+        .map(|call_id| (request.thread_id.clone(), call_id.clone()));
+    if let Some(key) = &boundary_key {
+        let mut boundaries = state.boundaries.lock().await;
+        match boundaries.get(key) {
+            Some(HostBoundaryState::Settled) => {
+                return Json(CallResponse::failure(&HostToolFailure::SettledBoundary));
+            }
+            Some(
+                HostBoundaryState::Active
+                | HostBoundaryState::Reconciling
+                | HostBoundaryState::Pending
+                | HostBoundaryState::Recoverable,
+            ) => {
+                return Json(CallResponse::failure(&HostToolFailure::ActiveBoundary));
+            }
+            None => {
+                boundaries.insert(key.clone(), HostBoundaryState::Active);
+            }
+        }
+    }
     let invocation = ToolInvocation {
         context: Some(ToolInvocationContext {
             context_call_id: request.context_call_id.clone(),
@@ -943,10 +1103,13 @@ async fn call(
                 error = %failure,
                 "resident tool dispatch panicked before returning its future"
             );
+            if let Some(key) = &boundary_key {
+                state.boundaries.lock().await.remove(key);
+            }
             return Json(CallResponse::failure(&failure));
         }
     };
-    match result {
+    let response = match result {
         Ok(Ok(value)) => Json(match state.endpoint.output_format() {
             tidepool_actor::ResidentToolOutput::Value => CallResponse::domain(kind, value),
             tidepool_actor::ResidentToolOutput::Workbench => CallResponse::workbench(value),
@@ -972,7 +1135,14 @@ async fn call(
             );
             Json(CallResponse::failure(&failure))
         }
+    };
+    if let Some(key) = &boundary_key {
+        let mut boundaries = state.boundaries.lock().await;
+        if boundaries.get(key) == Some(&HostBoundaryState::Active) {
+            boundaries.remove(key);
+        }
     }
+    response
 }
 
 #[cfg(test)]
@@ -1080,6 +1250,40 @@ pub(crate) mod tests {
                 } else {
                     Ok(WorkbenchCancellationOutcome::UnknownEvaluation { execution })
                 }
+            })
+        }
+
+        fn reconcile_workbench_boxed(
+            &self,
+            boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<WorkbenchBoundaryReconciliation, ResidentToolError>,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            self.calls.lock().unwrap().push(ToolInvocationContext {
+                context_call_id: Some(boundary.call_id.clone()),
+                thread_id: boundary.thread_id,
+                turn_id: String::new(),
+                call_id: boundary.call_id.clone(),
+                namespace: None,
+            });
+            Box::pin(async move {
+                Ok(match boundary.call_id.as_str() {
+                    "call-a" => WorkbenchBoundaryReconciliation::Recovered {
+                        reply: Ok(WorkbenchResponse {
+                            status: WorkbenchRunStatus::Committed,
+                            items: vec![],
+                            next_index: 1,
+                            total: 1,
+                        }),
+                    },
+                    "call-b" => WorkbenchBoundaryReconciliation::Pending,
+                    _ => WorkbenchBoundaryReconciliation::Settled,
+                })
             })
         }
     }
@@ -1194,6 +1398,152 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn interrupted_call_returns_exact_retry_safe_receipt_while_quiescing() {
+        let (endpoint, calls) = cancellation_endpoint();
+        let state = challenged_cancellation_state(endpoint).await;
+        state.control.quiesce();
+
+        for (call_id, status) in [
+            ("call-a", "recovered"),
+            ("call-b", "pending"),
+            ("call-c", "settled"),
+            ("call-a", "recovered"),
+            ("call-c", "settled"),
+        ] {
+            let response = interrupted(
+                State(state.clone()),
+                Json(CompletionRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+                    context_call_id: call_id.into(),
+                }),
+            )
+            .await
+            .unwrap();
+            let response = serde_json::to_value(response.0).unwrap();
+            assert_eq!(response["status"], status);
+            if status == "recovered" {
+                assert_eq!(response["reply"]["success"], true);
+                let reply: serde_json::Value = serde_json::from_str(
+                    response["reply"]["contentItems"][0]["text"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(reply["status"], "committed");
+                assert_eq!(reply["nextIndex"], 1);
+            }
+        }
+
+        {
+            let observed = calls.lock().unwrap();
+            assert_eq!(
+                observed.len(),
+                4,
+                "settled receipt is served from the host tombstone"
+            );
+        }
+
+        state.control.phase.send_replace(HostToolPhase::Serving);
+        let mut delayed = call_request(serde_json::Value::String("pure ()".into()));
+        delayed.context_call_id = Some("call-c".into());
+        delayed.call_id = "late-inner-call".into();
+        let response = call(State(state), Json(delayed)).await.0;
+        assert!(!response.success);
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert!(text.contains("completion boundary was already settled"));
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            4,
+            "a delayed call must be rejected before endpoint dispatch"
+        );
+    }
+
+    struct BlockingReconciliationEndpoint {
+        tools: Vec<HostedTool>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        dispatches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ResidentToolEndpoint for BlockingReconciliationEndpoint {
+        fn tools(&self) -> &[HostedTool] {
+            &self.tools
+        }
+
+        fn instructions(&self) -> Option<&str> {
+            None
+        }
+
+        fn dispatch_boxed(&self, _invocation: ToolInvocation) -> ResidentToolFuture {
+            self.dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+
+        fn reconcile_workbench_boxed(
+            &self,
+            _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<WorkbenchBoundaryReconciliation, ResidentToolError>,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(WorkbenchBoundaryReconciliation::Settled)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reconciliation_claim_rejects_a_delayed_call_before_settlement() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let endpoint = Arc::new(BlockingReconciliationEndpoint {
+            tools: vec![HostedTool::Custom(CustomToolDeclaration {
+                name: "haskell".into(),
+                description: "Run Haskell".into(),
+            })],
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            dispatches: Arc::clone(&dispatches),
+        });
+        let state = HostDynamicToolService::new(endpoint, "/tmp/reconcile-binding".into(), None)
+            .unwrap()
+            .state;
+        let thread = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
+        *state.control.bound_thread.lock().await = Some(BackendThreadId(thread.into()));
+        let entered_wait = entered.notified();
+        let reconcile = tokio::spawn(interrupted(
+            State(state.clone()),
+            Json(CompletionRequest {
+                protocol_version: PROTOCOL_VERSION,
+                thread_id: thread.into(),
+                context_call_id: "boundary".into(),
+            }),
+        ));
+        entered_wait.await;
+
+        let mut delayed = call_request(serde_json::Value::String("pure ()".into()));
+        delayed.context_call_id = Some("boundary".into());
+        let response = call(State(state), Json(delayed)).await.0;
+        assert!(!response.success);
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        release.notify_one();
+        let response = reconcile.await.unwrap().unwrap().0;
+        assert!(matches!(response, WorkbenchInterruptionResponse::Settled));
     }
 
     #[tokio::test]
@@ -1649,7 +1999,10 @@ pub(crate) mod tests {
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
-            "unsupported dynamic-tool protocol version 9; expected 3"
+            &format!(
+                "unsupported dynamic-tool protocol version 9; expected {}",
+                HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION
+            )
         );
 
         let mut request = call_request(serde_json::Value::String("pure ()".into()));

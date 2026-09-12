@@ -673,23 +673,29 @@ impl ForkGroupRegistry {
         groups
     }
 
-    pub(crate) fn publish_group(
+    pub(crate) fn publish_groups(
         &self,
-        id: ForkGroupId,
+        ids: &[ForkGroupId],
         owner: ActorRef,
     ) -> Result<(), ForkGroupError> {
         let state = self.state.lock();
-        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
-        if group.owner != owner {
-            return Err(ForkGroupError::WrongOwner {
-                group: id.0,
-                actual: owner,
-            });
+        for id in ids {
+            let group = state.groups.get(id).ok_or(ForkGroupError::Unknown(id.0))?;
+            if group.owner != owner {
+                return Err(ForkGroupError::WrongOwner {
+                    group: id.0,
+                    actual: owner,
+                });
+            }
+            if *group.phase.borrow() != ForkGroupPhase::Ready {
+                return Err(ForkGroupError::NotReady(id.0));
+            }
         }
-        if *group.phase.borrow() != ForkGroupPhase::Ready {
-            return Err(ForkGroupError::NotReady(id.0));
+        for id in ids {
+            state.groups[id]
+                .phase
+                .send_replace(ForkGroupPhase::Committed);
         }
-        group.phase.send_replace(ForkGroupPhase::Committed);
         Ok(())
     }
 
@@ -1160,7 +1166,7 @@ mod tests {
         groups.attach_child(group, owner, child).unwrap();
         let phase = groups.request_commit(group, owner).unwrap();
         groups.mark_ready(group, child).unwrap();
-        groups.publish_group(group, owner).unwrap();
+        groups.publish_groups(&[group], owner).unwrap();
         groups.mark_ready(group, child).unwrap();
         groups.mark_failed(group, child).unwrap();
         assert_eq!(*phase.borrow(), ForkGroupPhase::Committed);
@@ -1189,7 +1195,7 @@ mod tests {
             groups.request_commit(group, owner).unwrap();
             if name == "published" {
                 groups.mark_ready(group, child).unwrap();
-                groups.publish_group(group, owner).unwrap();
+                groups.publish_groups(&[group], owner).unwrap();
             }
             ids.push(group);
         }
@@ -1264,7 +1270,16 @@ mod tests {
             groups.ready_groups_at_boundary(owner, &second_boundary),
             vec![(second, vec![second_child])]
         );
-        groups.publish_group(second, owner).unwrap();
+        assert!(matches!(
+            groups.publish_groups(&[second, _first], owner),
+            Err(ForkGroupError::Unknown(_))
+        ));
+        assert_eq!(
+            groups.ready_groups_at_boundary(owner, &second_boundary),
+            vec![(second, vec![second_child])],
+            "batch publication failure must not partially commit ready groups"
+        );
+        groups.publish_groups(&[second], owner).unwrap();
         assert!(groups
             .ready_groups_at_boundary(owner, &second_boundary)
             .is_empty());

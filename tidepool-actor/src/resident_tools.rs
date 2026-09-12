@@ -43,6 +43,14 @@ pub enum WorkbenchCancellationOutcome {
     },
 }
 
+/// Authoritative state of one exact hosted workbench call after transport loss.
+#[derive(Debug, Clone)]
+pub enum WorkbenchBoundaryReconciliation {
+    Pending,
+    Recovered { reply: crate::KernelWorkbenchReply },
+    Settled,
+}
+
 pub struct WorkbenchExecutionControl {
     pub(crate) invocation: Option<WorkbenchCallKey>,
     phase: std::sync::atomic::AtomicU8,
@@ -291,7 +299,20 @@ pub trait ResidentToolEndpoint: Send + Sync {
     > {
         Box::pin(async { Err(ResidentToolError::CancellationUnsupported) })
     }
-    /// Settle unacknowledged forks when a hosted connection reattaches.
+    fn reconcile_workbench_boxed(
+        &self,
+        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<WorkbenchBoundaryReconciliation, ResidentToolError>>
+                + Send
+                + 'static,
+        >,
+    > {
+        Box::pin(async { Err(ResidentToolError::CancellationUnsupported) })
+    }
+    /// Session attachment is deliberately side-effect free. Exact lost-call
+    /// recovery is performed through `reconcile_workbench_boxed`.
     fn reattach_boxed(&self) -> ResidentToolFuture {
         Box::pin(async { Ok(serde_json::Value::Null) })
     }
@@ -330,6 +351,16 @@ impl From<ToolInvocationContext> for WorkbenchCallKey {
             call_id: context.call_id,
             namespace: context.namespace,
         }
+    }
+}
+
+impl WorkbenchCallKey {
+    pub(crate) fn matches_boundary(
+        &self,
+        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> bool {
+        self.thread_id == boundary.thread_id
+            && self.context_call_id.as_deref() == Some(boundary.call_id.as_str())
     }
 }
 
@@ -483,20 +514,35 @@ impl ResidentToolClient {
             .map_err(ResidentToolError::Invocation)
     }
 
-    pub(crate) async fn reattach(&self) -> Result<serde_json::Value, ResidentToolError> {
+    pub(crate) async fn reconcile_workbench(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> Result<WorkbenchBoundaryReconciliation, ResidentToolError> {
+        if self
+            .active_workbench
+            .lock()
+            .as_ref()
+            .is_some_and(|(_, control)| {
+                control.invocation.as_ref().is_some_and(|invocation| {
+                    invocation.matches_boundary(&boundary) && control.terminal_reply().is_none()
+                })
+            })
+        {
+            return Ok(WorkbenchBoundaryReconciliation::Pending);
+        }
         let (reply, receive) = oneshot::channel();
         self.actor
             .address()
-            .send_message(crate::KernelMessage::AbortPendingForks {
+            .send_message(crate::KernelMessage::ReconcileWorkbenchBoundary {
+                boundary,
                 reply: reply.into(),
             })
             .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
-        receive
-            .await
-            .map_err(|_| {
-                ResidentToolError::Unavailable("actor stopped during reattachment".into())
-            })?
-            .map_err(ResidentToolError::Invocation)
+        receive.await.map_err(|_| {
+            ResidentToolError::Unavailable(
+                "actor stopped during exact workbench reconciliation".into(),
+            )
+        })
     }
 
     pub(crate) async fn complete(

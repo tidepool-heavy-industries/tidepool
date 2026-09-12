@@ -551,17 +551,17 @@ pub trait KernelBehavior: Send + 'static {
         crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution }
     }
 
+    fn reconcile_workbench_boundary<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> BoxFuture<'a, Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>> {
+        Box::pin(async move { Ok(crate::WorkbenchBoundaryReconciliation::Pending) })
+    }
+
     /// Continue work deliberately yielded after its initiating caller was
     /// settled. Behaviors which never return 'ContinueLater' own no pending
     /// continuation and keep this rejecting default.
-    /// Release effects waiting for a durably recorded enclosing tool result.
-    fn abort_pending_forks<'a>(
-        &'a mut self,
-        _context: &'a KernelContext,
-    ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
-        Box::pin(async { Ok(()) })
-    }
-
     fn tool_completed<'a>(
         &'a mut self,
         _context: &'a KernelContext,
@@ -1066,25 +1066,13 @@ where
                     }
                 }
             }
-            KernelMessage::AbortPendingForks { reply } => {
-                if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
-                        actor: state.context.identity,
-                        detail: "hosted work admission is sealed".into(),
-                    }));
-                    return Ok(());
-                }
-
-                let result = state
+            KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
+                let outcome = state
                     .behavior
-                    .abort_pending_forks(&state.context)
+                    .reconcile_workbench_boundary(&state.context, boundary)
                     .await
-                    .map(|()| serde_json::Value::Null)
-                    .map_err(|error| KernelInvocationFailure::Rejected {
-                        actor: state.context.identity,
-                        detail: error.to_string(),
-                    });
-                let _ = reply.send(result);
+                    .unwrap_or(crate::WorkbenchBoundaryReconciliation::Pending);
+                let _ = reply.send(outcome);
             }
             KernelMessage::ToolCompleted { boundary, reply } => {
                 if matches!(state.hosted_admission, HostedAdmission::Closing) {

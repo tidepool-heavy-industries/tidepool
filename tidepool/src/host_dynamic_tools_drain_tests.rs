@@ -499,6 +499,22 @@ mod actual_seal {
         fn reattach_boxed(&self) -> ResidentToolFuture {
             self.real.reattach_boxed()
         }
+
+        fn reconcile_workbench_boxed(
+            &self,
+            boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            tidepool_actor::WorkbenchBoundaryReconciliation,
+                            ResidentToolError,
+                        >,
+                    > + Send,
+            >,
+        > {
+            self.real.reconcile_workbench_boxed(boundary)
+        }
         fn seal_hosted_work_boxed(
             &self,
         ) -> std::pin::Pin<

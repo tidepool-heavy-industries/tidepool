@@ -56,8 +56,11 @@ for actual work rather than elapsed time.
 A delivered human message, steering update, or notification interrupts sleep before
 the next inference. Earlier effects stay committed; the interrupted block's suffix
 does not run. Collector/mailbox data alone does not interrupt it. Transport loss
-is not cancellation or permission to replay. If cancellation is unconfirmed,
-retain the existing evaluation rather than start conflicting work.
+is not cancellation or permission to replay. Automatic settlement preserves the
+committed prefix and completed forks; it never reruns the block. If cancellation
+is unconfirmed, retain the existing evaluation rather than start conflicting work.
+New hosted calls may briefly wait for recovery, then return `not submitted`.
+Those calls cannot execute later. Yield for the recovery notice instead of polling.
 
 ## Commands
 
