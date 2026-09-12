@@ -20,8 +20,8 @@ tokio = { workspace = true, features = ["process", "sync", "time", "macros", "rt
 rustix = { version = "1", features = ["process", "event", "fs", "pipe", "thread", "mount", "stdio", "termios", "runtime"] }
 libc.workspace = true
 parking_lot.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }
 uuid.workspace = true

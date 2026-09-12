@@ -10,7 +10,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -166,7 +166,14 @@ impl MountNamespace {
                     },
                 )?
             };
-            if !command.arg(MOUNT_HELPER_COMMAND).status()?.success() {
+            if !command
+                .arg(MOUNT_HELPER_COMMAND)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?
+                .success()
+            {
                 return Err(io::Error::other("namespace retirement did not complete"));
             }
         }

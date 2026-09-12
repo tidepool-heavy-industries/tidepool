@@ -6,8 +6,8 @@ use std::os::fd::OwnedFd;
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
-use super::{ProcessInvocation, ProcessMountBoundary};
-use crate::MountNamespace;
+use super::{OverlayMountMode, ProcessInvocation, ProcessMountBoundary};
+use crate::{MountNamespace, OverlayRotation};
 
 struct Bootstrap(Child);
 
@@ -40,8 +40,23 @@ impl ProcessMountBoundary {
                 "view preparation deadline elapsed",
             ));
         }
-        let invocation = self.wrap(
-            bubblewrap,
+        let mut bootstrap_boundary = self.clone();
+        let mut empty_lowers = Vec::new();
+        for overlay in &mut bootstrap_boundary.overlay_views {
+            if overlay.layers.len() == 1 {
+                let parent = overlay
+                    .upper
+                    .parent()
+                    .ok_or_else(|| io::Error::other("overlay upper has no parent"))?;
+                let empty = tempfile::Builder::new()
+                    .prefix("bootstrap-empty-")
+                    .tempdir_in(parent)?;
+                overlay.layers.insert(0, empty.path().to_owned());
+                empty_lowers.push(empty);
+            }
+        }
+        let invocation = bootstrap_boundary.wrap_with_options(
+            bubblewrap.into(),
             ProcessInvocation {
                 program: "/bin/sh".into(),
                 args: vec![
@@ -49,6 +64,8 @@ impl ProcessMountBoundary {
                     "printf '%s\n' \"$$\"; read release || exit 0".into(),
                 ],
             },
+            &[],
+            OverlayMountMode::Prepared,
         );
         let mut bootstrap = Bootstrap(
             Command::new(invocation.program)
@@ -92,6 +109,22 @@ impl ProcessMountBoundary {
             .parse()
             .map_err(io::Error::other)?;
         let namespace = MountNamespace::capture_bootstrap(pid, bootstrap.0.id())?;
+        let mut overlays = self.overlay_views.iter().collect::<Vec<_>>();
+        overlays.sort_by_key(|overlay| overlay.target.components().count());
+        for overlay in overlays {
+            let preserved = self.preserved_mounts_under(&overlay.target);
+            let rotation = OverlayRotation::prepare(
+                &overlay.target,
+                &overlay.layers,
+                &overlay.upper,
+                &overlay.work,
+            )?
+            .preserving_mounts(&preserved)?;
+            namespace.mount_initial_overlay(
+                rotation,
+                self.project_read_only && overlay.target == self.project_root,
+            )?;
+        }
         let monitor_pid = i32::try_from(bootstrap.0.id())
             .ok()
             .and_then(rustix::process::Pid::from_raw)
@@ -102,6 +135,11 @@ impl ProcessMountBoundary {
         super::service_scope::wait_readable(&monitor, deadline)?;
         if !bootstrap.0.wait()?.success() {
             return Err(io::Error::other("view bootstrap failed after capture"));
+        }
+        // The covered read-only mount retains these empty lowerdirs until the
+        // namespace retires; their resource owner removes them afterward.
+        for lower in empty_lowers {
+            let _path = lower.keep();
         }
         Ok(namespace)
     }

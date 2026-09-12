@@ -57,6 +57,12 @@ enum ViewMount<'a> {
     Overlay(&'a OverlayView),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlayMountMode {
+    Direct,
+    Prepared,
+}
+
 impl ViewMount<'_> {
     fn target(&self) -> &Path {
         match self {
@@ -291,7 +297,7 @@ impl ProcessMountBoundary {
         bubblewrap: impl Into<String>,
         command: ProcessInvocation,
     ) -> ProcessInvocation {
-        self.wrap_with_options(bubblewrap.into(), command, &[])
+        self.wrap_with_options(bubblewrap.into(), command, &[], OverlayMountMode::Direct)
     }
 
     fn wrap_with_options(
@@ -299,6 +305,7 @@ impl ProcessMountBoundary {
         bubblewrap: String,
         command: ProcessInvocation,
         options: &[String],
+        overlay_mode: OverlayMountMode,
     ) -> ProcessInvocation {
         let mut args = vec![
             "--bind".into(),
@@ -361,18 +368,25 @@ impl ProcessMountBoundary {
                     ]);
                 }
                 ViewMount::Overlay(overlay) => {
-                    // Bubblewrap assembles the initial merged view before
-                    // nested mounts are attached. Rotation uses fsopen after
-                    // the namespace and its mountpoints exist.
+                    // Prepared views use a read-only merged scaffold so
+                    // nested mountpoints exist; fsopen replaces it before
+                    // actor entry. Direct invocations keep Bubblewrap's view.
                     for layer in &overlay.layers {
                         args.extend(["--overlay-src".into(), layer.to_string_lossy().into_owned()]);
                     }
-                    args.extend([
-                        "--overlay".into(),
-                        overlay.upper.to_string_lossy().into_owned(),
-                        overlay.work.to_string_lossy().into_owned(),
-                        overlay.target.to_string_lossy().into_owned(),
-                    ]);
+                    if overlay_mode == OverlayMountMode::Prepared {
+                        args.extend([
+                            "--ro-overlay".into(),
+                            overlay.target.to_string_lossy().into_owned(),
+                        ]);
+                    } else {
+                        args.extend([
+                            "--overlay".into(),
+                            overlay.upper.to_string_lossy().into_owned(),
+                            overlay.work.to_string_lossy().into_owned(),
+                            overlay.target.to_string_lossy().into_owned(),
+                        ]);
+                    }
                 }
             }
         }
