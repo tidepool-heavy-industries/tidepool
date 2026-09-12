@@ -17,6 +17,7 @@ main = do
     liftIO $ do
       lexicalIslands flags
       commentsPragmasAndLayout flags
+      declarationsBecomeOneCellItem flags
 
 lexicalIslands :: DynFlags -> IO ()
 lexicalIslands flags = do
@@ -95,6 +96,35 @@ commentsPragmasAndLayout flags = do
         , ""
         , "next <- pure (withWhere value)"
         ]
+
+declarationsBecomeOneCellItem :: DynFlags -> IO ()
+declarationsBecomeOneCellItem flags =
+  case analyzeCellWithFlags flags cell of
+    Left failure -> fail ("cell analysis failed: " ++ show failure)
+    Right items -> do
+      assertEqual "grouped cell item count" 3 (length items)
+      assertEqual
+        "grouped cell kinds"
+        [KDecl, KBind, KExpr]
+        (map (sbKind . cellAnalysisVerdict) items)
+      case items of
+        declaration : _ -> do
+          let source = cellAnalysisSource declaration
+          assertContains "group includes signature" "evenCell :: Int -> Bool" source
+          assertContains "group includes first equation" "evenCell 0 = True" source
+          assertContains "group includes mutual reference" "oddCell n = evenCell" source
+        [] -> fail "grouped cell returned no declaration item"
+  where
+    cell = unlines
+      [ "evenCell :: Int -> Bool"
+      , "evenCell 0 = True"
+      , "evenCell n = oddCell (n - 1)"
+      , "oddCell :: Int -> Bool"
+      , "oddCell 0 = False"
+      , "oddCell n = evenCell (n - 1)"
+      , "answer <- pure (evenCell 4)"
+      , "answer"
+      ]
 
 split :: DynFlags -> String -> IO [CellSourceItem]
 split flags source =

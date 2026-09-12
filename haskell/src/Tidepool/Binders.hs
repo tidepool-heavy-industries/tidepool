@@ -61,7 +61,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
-import Data.List (intercalate, isInfixOf, isPrefixOf, nub, sort)
+import Data.List (intercalate, isInfixOf, isPrefixOf, nub, partition, sort)
 import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -250,13 +250,49 @@ analyzeCellWithFlags
   -> String
   -> Either CellSplitError [CellAnalysisItem]
 analyzeCellWithFlags dflags source =
-  fmap (map classify) (splitCellWithFlags dflags source)
+  fmap groupDeclarations (map classify <$> splitCellWithFlags dflags source)
   where
     classify item = CellAnalysisItem
       { cellAnalysisSpan = cellSourceSpan item
       , cellAnalysisSource = cellSourceText item
       , cellAnalysisVerdict = classifyWithFlags dflags (cellSourceText item)
       }
+    groupDeclarations classified =
+      case partition isDeclaration classified of
+        ([], executable) -> executable
+        (declarations, executable) -> declarationGroup declarations : executable
+    isDeclaration =
+      (== KDecl) . sbKind . cellAnalysisVerdict
+    declarationGroup declarations@(firstDeclaration : _) =
+      let firstSpan = cellAnalysisSpan firstDeclaration
+          lastSpan' = foldl
+            (\_ declaration -> cellAnalysisSpan declaration)
+            firstSpan
+            declarations
+          verdicts = map cellAnalysisVerdict declarations
+       in CellAnalysisItem
+            { cellAnalysisSpan = CellSourceSpan
+                { cellStartLine = cellStartLine firstSpan
+                , cellStartColumn = cellStartColumn firstSpan
+                , cellEndLine = cellEndLine lastSpan'
+                , cellEndColumn = cellEndColumn lastSpan'
+                }
+            , cellAnalysisSource = concatMap locatedDeclaration declarations
+            , cellAnalysisVerdict = StmtBinders
+                KDecl
+                (nub (concatMap sbBinders verdicts))
+                (concatMap sbDeclItems verdicts)
+            }
+    declarationGroup [] =
+      error "declarationGroup: empty declaration group"
+    locatedDeclaration item =
+      "{-# LINE " ++ show (cellStartLine (cellAnalysisSpan item))
+      ++ " \"<cell>\" #-}\n"
+      ++ cellAnalysisSource item
+      ++ if null (cellAnalysisSource item)
+          || last (cellAnalysisSource item) == '\n'
+        then ""
+        else "\n"
 
 analyzeCell :: String -> IO (Either CellSplitError [CellAnalysisItem])
 analyzeCell source = do
