@@ -30,6 +30,23 @@ passes, not when a neighboring unit test or a source-generation assertion passes
 
 ## Verification evidence
 
+## Next cell repair
+
+The recovered notebook patch is 942 lines, not only the visible prologue edit.
+It attempts to compile all staged statements against temporary declaration/value
+interfaces before executing. Review and adapt it against the combined source:
+`resident_actor.rs` already contains rejection changes, so the patch does not
+apply wholesale. The other runtime/actor hunks apply in a check-only trial.
+
+Do not copy `validate_declared_heads_in` unchanged: it identifies same-cell types
+by occurrence name, so a reference to an older qualified type with the same name
+would be mistaken for a new declaration. Preserve the complete nominal identity.
+The prologue patch alone also does not establish matching flags during staged
+execution: the existing declaration renderer hoists LANGUAGE text but not general
+OPTIONS_GHC. Complete the compiler-owned prologue path across both phases.
+
+## Completed checks
+
 Initial combined baseline: `git merge codex/overlay-efficiency` from coordinator
 `26f8f7494` completed without conflicts.
 
