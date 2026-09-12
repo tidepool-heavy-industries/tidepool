@@ -4,6 +4,11 @@ Concrete check and iteration costs observed during the corpus and notebook
 integration pass. These are follow-up candidates, not evidence that the tests
 are nondeterministic.
 
+- **Flaky gate to revisit: `Project.RoutingChecks.routing`.** The full recipe
+  pass failed late on an exact-output assertion; the corrected isolated case
+  compiled, but its final result was lost with an interrupted terminal session.
+  Treat this recipe as unconfirmed until a clean post-fix run completes. The
+  observed failure was assertion brittleness, not demonstrated randomness.
 - The full `shoal check --recipes` run reached a late
   `Project.RoutingChecks.routing` assertion after roughly 26 minutes. The CLI
   has no recipe selector, so isolating that case required a temporary workspace
