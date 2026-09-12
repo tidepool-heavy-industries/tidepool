@@ -697,6 +697,25 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         ),
         "committed"
     );
+    assert_eq!(
+        shell(
+            fallback.workspace.as_ref().unwrap(),
+            "stat -c '%y' src/main.rs"
+        ),
+        shell(&workspace, "stat -c '%y' src/main.rs"),
+        "matching tracked source should retain the donor mtime"
+    );
+    assert_ne!(
+        shell(fallback.workspace.as_ref().unwrap(), "stat -c '%y' file"),
+        shell(&workspace, "stat -c '%y' file"),
+        "different working bytes must keep the committed checkout's fresh mtime"
+    );
+    assert!(
+        build(fallback.workspace.as_ref().unwrap())
+            .iter()
+            .all(|fresh| *fresh),
+        "committed fallback should reuse its inherited build artifacts"
+    );
     *backend.busy.lock() = false;
     *backend.lose_finish.lock() = true;
     let mut publication = workspace.publication.lock().await;

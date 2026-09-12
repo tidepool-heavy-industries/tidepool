@@ -151,6 +151,102 @@ impl PreparedSourceWorktree {
 }
 
 impl WorktreeManager {
+    /// Preserve Cargo freshness after a committed fallback materializes a new
+    /// checkout. Only exact tracked regular-file matches get donor mtimes.
+    /// Missing, filtered, or changing files retain their fresh checkout times.
+    #[cfg(target_os = "linux")]
+    pub fn restore_matching_mtimes_from_view(
+        &self,
+        handle: &WorktreeHandle,
+        donor: &tidepool_node::MountNamespace,
+        visible_root: &Path,
+    ) -> Result<usize, WorktreeError> {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+
+        fn stable(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+            use std::os::unix::fs::MetadataExt;
+            (
+                before.dev(),
+                before.ino(),
+                before.len(),
+                before.mtime(),
+                before.mtime_nsec(),
+                before.ctime(),
+                before.ctime_nsec(),
+            ) == (
+                after.dev(),
+                after.ino(),
+                after.len(),
+                after.mtime(),
+                after.mtime_nsec(),
+                after.ctime(),
+                after.ctime_nsec(),
+            )
+        }
+
+        fn identical(mut donor: &fs::File, mut target: &fs::File) -> std::io::Result<bool> {
+            let mut source_bytes = [0u8; 65_536];
+            let mut target_bytes = [0u8; 65_536];
+            loop {
+                let count = donor.read(&mut source_bytes)?;
+                if count == 0 {
+                    return Ok(target.read(&mut target_bytes[..1])? == 0);
+                }
+                target.read_exact(&mut target_bytes[..count])?;
+                if source_bytes[..count] != target_bytes[..count] {
+                    return Ok(false);
+                }
+            }
+        }
+
+        let tracked = self
+            .git
+            .try_run(handle.cwd(), &["ls-files", "--cached", "-z"])?;
+        let mut restored = 0;
+        for name in tracked.nul_fields() {
+            let relative = Path::new(name);
+            if !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let Ok(source) = donor.open_view_file(&visible_root.join(relative)) else {
+                continue;
+            };
+            let Ok(target) = fs::File::open(handle.cwd().join(relative)) else {
+                continue;
+            };
+            let (Ok(before), Ok(destination)) = (source.metadata(), target.metadata()) else {
+                continue;
+            };
+            if !before.is_file()
+                || !destination.is_file()
+                || before.len() != destination.len()
+                || before.mode() & 0o111 != destination.mode() & 0o111
+                || !identical(&source, &target).unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(after) = source.metadata() else {
+                continue;
+            };
+            if !stable(&before, &after) {
+                continue;
+            }
+            if let Ok(modified) = before.modified() {
+                if target
+                    .set_times(fs::FileTimes::new().set_modified(modified))
+                    .is_ok()
+                {
+                    restored += 1;
+                }
+            }
+        }
+        Ok(restored)
+    }
+
     /// Preserve working files before the lifecycle owner retires their mounts.
     /// The caller must have stopped writers and closed hosted-work admission.
     /// Index, HEAD and objects already live in the shared Git administrative tree.

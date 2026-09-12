@@ -73,6 +73,26 @@ impl Descriptors {
 }
 
 impl MountNamespace {
+    /// Open one regular-file candidate through the retained view. The caller
+    /// supplies an absolute path visible inside that view; kernel resolution
+    /// confines symlinks to its root and refuses magic links.
+    pub fn open_view_file(&self, path: &Path) -> io::Result<std::fs::File> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "view file path must be absolute",
+            ));
+        }
+        let fd = rustix::fs::openat2(
+            &self.descriptors.root,
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        )?;
+        Ok(std::fs::File::from(fd))
+    }
+
     /// Detach covered generations after the owning lifecycle has stopped all
     /// users and preserved working files. This is not proof of process cleanup.
     pub fn detach_retired_tree(&self, target: &Path) -> io::Result<()> {

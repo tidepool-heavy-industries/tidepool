@@ -421,7 +421,7 @@ impl NativeForkAdmission {
             let reason = (!explicit_ref)
                 .then(|| SourceFallback::Unavailable("no unique live source owner".into()));
             return tokio::task::spawn_blocking(move || {
-                layout.prepare_committed(authorized, policy, build, reason)
+                layout.prepare_committed(authorized, policy, build, reason, None)
             })
             .await
             .map_err(io::Error::other)?;
@@ -447,6 +447,7 @@ impl NativeForkAdmission {
                     Some(SourceFallback::Unavailable(
                         "source owner retired while publication was queued".into(),
                     )),
+                    None,
                 )
             })
             .await
@@ -456,6 +457,7 @@ impl NativeForkAdmission {
         // abandons the await. Host death ends the wave instead of replaying it.
         let backend = self.backend.clone();
         tokio::spawn(async move {
+            let donor_view = parent.workspace.view.clone();
             if publication.is_pending() {
                 parent
                     .settle_publication(&mut publication, backend.as_ref())
@@ -481,6 +483,7 @@ impl NativeForkAdmission {
                             policy,
                             build,
                             Some(SourceFallback::Busy),
+                            Some(donor_view),
                         )
                     })
                     .await
@@ -493,6 +496,7 @@ impl NativeForkAdmission {
                             policy,
                             build,
                             Some(SourceFallback::Unavailable(detail)),
+                            Some(donor_view),
                         )
                     })
                     .await
@@ -555,15 +559,23 @@ impl NativeForkAdmission {
             let admitted = tokio::task::spawn_blocking(move || match captured {
                 Some(captured) => match captured? {
                     SourceCapture::Ready(captured) => {
-                        layout.prepare_captured(captured, policy, build)
+                        layout.prepare_captured(captured, policy, build, Some(donor_view))
                     }
-                    SourceCapture::Fallback(reason) => {
-                        layout.prepare_committed(authorized, policy, build, Some(reason))
-                    }
+                    SourceCapture::Fallback(reason) => layout.prepare_committed(
+                        authorized,
+                        policy,
+                        build,
+                        Some(reason),
+                        Some(donor_view),
+                    ),
                 },
-                None => {
-                    layout.prepare_committed(authorized, policy, build, Some(SourceFallback::Busy))
-                }
+                None => layout.prepare_committed(
+                    authorized,
+                    policy,
+                    build,
+                    Some(SourceFallback::Busy),
+                    Some(donor_view),
+                ),
             })
             .await
             .map_err(io::Error::other)?;
@@ -735,6 +747,7 @@ impl WorkspaceLayout {
         captured: CapturedSource,
         policy: tidepool_actor::ForkWorkspacePolicy,
         build: Option<OverlaySnapshot>,
+        donor: Option<MountNamespace>,
     ) -> io::Result<AdmittedWorkspace> {
         let CapturedSource {
             git,
@@ -748,6 +761,7 @@ impl WorkspaceLayout {
                 .worktrees
                 .finish_committed_source(git)
                 .map_err(io::Error::other)?;
+            self.restore_fallback_mtimes(&handle, donor.as_ref());
             let workspace = self.prepare(
                 path,
                 Some(id.clone()),
@@ -789,11 +803,20 @@ impl WorkspaceLayout {
         policy: tidepool_actor::ForkWorkspacePolicy,
         build: Option<OverlaySnapshot>,
         fallback: Option<SourceFallback>,
+        donor: Option<MountNamespace>,
     ) -> io::Result<AdmittedWorkspace> {
         let handle = authorized
             .materialize_committed()
             .map_err(|error| io::Error::other(format!("{error:?}")))?;
         let id = WorktreeId::from_raw(&handle.handle_receipt.tree_id.raw);
+        if let Some(donor) = donor.as_ref() {
+            let domain_handle = self
+                .worktrees
+                .lookup(&id)
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("materialized checkout missing from registry"))?;
+            self.restore_fallback_mtimes(&domain_handle, Some(donor));
+        }
         let workspace = self.prepare(
             PathBuf::from(&handle.handle_receipt.cwd),
             Some(id.clone()),
@@ -808,6 +831,25 @@ impl WorkspaceLayout {
             workspace,
             notice: fallback.map(|reason| reason.notice()),
         })
+    }
+
+    fn restore_fallback_mtimes(
+        &self,
+        handle: &tidepool_worktree::WorktreeHandle,
+        donor: Option<&MountNamespace>,
+    ) {
+        if let Some(donor) = donor {
+            match self.worktrees.restore_matching_mtimes_from_view(
+                handle,
+                donor,
+                Path::new(ACTOR_PROJECT_ROOT),
+            ) {
+                Ok(restored) => tracing::debug!(restored, "restored matching checkout mtimes"),
+                Err(error) => {
+                    tracing::warn!(%error, "committed checkout mtime restoration skipped")
+                }
+            }
+        }
     }
 }
 
