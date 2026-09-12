@@ -65,17 +65,29 @@ falsifier. Likewise `x <- pure Nothing` installs as
 than rejects. The real risk is agreement and sound identity, not uniformly
 stricter inference.
 
-Before the wire is frozen, the parent will add compiler fixtures that compare a
-whole-cell `do` with staged compilation for:
+The checked probe in `evidence/inference-transport.md` now establishes two
+actual GHC boundaries. A `read` binder fixed downstream is accepted in one
+`do` but rejected as ambiguous when compiled alone. A fresh Astra GHC 9.12.2
+API probe walks `tm_typechecked_source` after zonking and observes both binder
+and use as `x :: Maybe G`, where `G` is declared in the same synthesized
+module. Explicitly pinning a staged bind to an installed user type also
+compiles and is consumed successfully.
 
-1. a monadic binder genuinely fixed by a later statement;
-2. a `Response` whose result is fixed downstream to a type declared in the same
-   cell;
+The remaining blocker is faithful automatic transport: the synthesized
+module's nominal `G` is not the later installed `Lib.G<n>.G`, and no current
+wire relocates a GHC `Type`. Printed/reparsed syntax has not been shown correct
+for shadowing, hidden names, constraints, or skolems. Before the wire is
+frozen, the parent must extend the probe through the owning resident consumer:
+
+1. a `Response` whose result is fixed downstream to a type declared in the same
+   cell, installed and consumed after staging;
+2. a shadowed prior declaration of the same name;
 3. retained constraints/polymorphism, and a negative type mentioning a local
    skolem or otherwise non-replantable name.
 
-An Astra consultation owns the decision between post-zonk AST harvesting plus
-scope-safe replanting and a different representation. If harvest-and-pin cannot
+The Astra consultation returned `NeedEvidence`: harvesting is feasible, but
+transport is not established. It owns the eventual decision between post-zonk
+AST harvesting plus scope-safe replanting and a different representation. If harvest-and-pin cannot
 preserve the promised inference, staged-shape checking is sound but is a product
 degradation and must be escalated. Stage 2 is not a fallback implementation in
 this wave.
