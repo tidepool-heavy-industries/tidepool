@@ -1,4 +1,4 @@
-//! Explicit offline build-cache reclamation. Source and Git state stay intact.
+//! Explicit offline overlay reclamation after run and mount proof.
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -6,10 +6,17 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, serde::Serialize)]
-pub struct BuildStorage {
+pub struct StorageReport {
+    pub kind: StorageKind,
     pub path: PathBuf,
     pub allocated_bytes: u64,
     pub outcome: Outcome,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub enum StorageKind {
+    Build,
+    Source,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -167,7 +174,7 @@ mod tests {
             .open(run.join("host-incarnation.owner.lock"))
             .unwrap();
         owner.try_lock().unwrap();
-        assert!(cleanup(&run, true)
+        assert!(cleanup(&run, true, false)
             .unwrap_err()
             .to_string()
             .contains("already owns"));
@@ -179,15 +186,65 @@ mod tests {
     fn dry_run_and_retained_descriptors_never_remove_source() {
         let root = tempfile::tempdir().unwrap();
         let (run, build, source) = fixture(root.path());
-        let report = cleanup(&run, false).unwrap();
+        let report = cleanup(&run, false, false).unwrap();
         assert_eq!(report.len(), 1);
         assert!(build.exists());
         let held = File::open(build.join("upper/artifact")).unwrap();
-        let report = cleanup(&run, true).unwrap();
+        let report = cleanup(&run, true, false).unwrap();
         assert!(matches!(report[0].outcome, Outcome::Retained(_)));
         assert!(build.exists());
         assert_eq!(fs::read(source).unwrap(), b"unsaved work");
         drop(held);
+    }
+
+    #[test]
+    fn source_option_requires_a_finalized_worktree_record() {
+        let root = tempfile::tempdir().unwrap();
+        let (run, _, source) = fixture(root.path());
+        let report = cleanup(&run, true, true).unwrap();
+        assert_eq!(report.len(), 2);
+        let source_report = report
+            .iter()
+            .find(|entry| matches!(entry.kind, StorageKind::Source))
+            .unwrap();
+        assert!(matches!(source_report.outcome, Outcome::Retained(_)));
+        assert!(source.exists());
+    }
+
+    #[test]
+    fn finalized_source_passes_checkout_gate_before_mount_proof() {
+        use tidepool_worktree::{
+            BranchName, GitOid, WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
+            WorktreeRegistry,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let (run, _, source) = fixture(root.path());
+        let resource = source.parent().unwrap().parent().unwrap();
+        let id = resource.file_name().unwrap().to_str().unwrap();
+        let repository = resource.ancestors().nth(4).unwrap();
+        let cwd = repository.join("worktrees").join(id);
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(cwd.join(".git"), "gitdir: /tmp/test\n").unwrap();
+        let registry = WorktreeRegistry::open(repository.join("registry")).unwrap();
+        let receipt = WorktreeReceipt {
+            worktree_id: WorktreeId::from_raw(id),
+            cwd,
+            branch: BranchName::from_raw("test"),
+            source_head: GitOid::from_raw("0000000000000000000000000000000000000000"),
+            snapshot_ref: None,
+            origin: WorktreeOrigin::CurrentRepository,
+            source_repository: root.path().to_path_buf(),
+            created_at_ms: 0,
+            status: WorktreeRecordStatus::Finalized,
+        };
+        registry.put(&receipt).unwrap();
+        assert!(source_finalized(repository, resource));
+        let report = cleanup(&run, true, true).unwrap();
+        assert!(report.iter().any(|entry| {
+            matches!(entry.kind, StorageKind::Source)
+                && !matches!(&entry.outcome, Outcome::Retained(reason) if reason.contains("finalized checkout"))
+        }), "{report:?}");
     }
 
     #[test]
@@ -197,7 +254,7 @@ mod tests {
         let moved = root.path().join("elsewhere");
         fs::rename(&build, &moved).unwrap();
         std::os::unix::fs::symlink(&moved, &build).unwrap();
-        assert!(cleanup(&run, true)
+        assert!(cleanup(&run, true, false)
             .unwrap_err()
             .to_string()
             .contains("symlinked build"));
@@ -228,7 +285,39 @@ fn bytes(path: &Path) -> io::Result<u64> {
     Ok(bytes)
 }
 
-pub fn cleanup(run_root: &Path, apply: bool) -> io::Result<Vec<BuildStorage>> {
+fn source_finalized(repository: &Path, resource: &Path) -> bool {
+    use tidepool_worktree::{WorktreeId, WorktreeRecordStatus, WorktreeRegistry};
+
+    let Some(id) = resource.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let registry_root = repository.join("registry");
+    if !registry_root.is_dir() {
+        return false;
+    }
+    let Ok(registry) = WorktreeRegistry::open(registry_root) else {
+        return false;
+    };
+    let Ok(Some(receipt)) = registry.get(&WorktreeId::from_raw(id)) else {
+        return false;
+    };
+    let (Ok(cwd), Ok(managed_root), Ok(git_file)) = (
+        receipt.cwd.canonicalize(),
+        repository.join("worktrees").canonicalize(),
+        fs::symlink_metadata(receipt.cwd.join(".git")),
+    ) else {
+        return false;
+    };
+    receipt.status == WorktreeRecordStatus::Finalized
+        && cwd.starts_with(managed_root)
+        && git_file.is_file()
+}
+
+pub fn cleanup(
+    run_root: &Path,
+    apply: bool,
+    include_source: bool,
+) -> io::Result<Vec<StorageReport>> {
     let run_root = run_root.canonicalize()?;
     let run_id = run_root
         .file_name()
@@ -249,7 +338,8 @@ pub fn cleanup(run_root: &Path, apply: bool) -> io::Result<Vec<BuildStorage>> {
         .join("actor-worktrees");
     let mut report = Vec::new();
     for repository in fs::read_dir(repositories)? {
-        let resources = repository?.path().join("worktrees/.resources").join(run_id);
+        let repository = repository?.path();
+        let resources = repository.join("worktrees/.resources").join(run_id);
         if !resources.is_dir() {
             continue;
         }
@@ -257,28 +347,46 @@ pub fn cleanup(run_root: &Path, apply: bool) -> io::Result<Vec<BuildStorage>> {
             return Err(io::Error::other("symlinked resource root retained"));
         }
         for resource in fs::read_dir(resources)? {
-            let build = resource?.path().join("build");
-            if !build.is_dir() {
-                continue;
-            }
-            if build.canonicalize()? != build {
-                return Err(io::Error::other("symlinked build storage retained"));
-            }
-            let allocated_bytes = bytes(&build)?;
-            let outcome = match mounted_reference(&build) {
-                Ok(None) if apply => {
-                    super::overlay_resource::remove_unmounted_storage(&build)?;
-                    Outcome::Removed
+            let resource = resource?.path();
+            for (kind, name) in [
+                (StorageKind::Build, "build"),
+                (StorageKind::Source, "source"),
+            ] {
+                if matches!(kind, StorageKind::Source) && !include_source {
+                    continue;
                 }
-                Ok(None) => Outcome::Reclaimable,
-                Ok(Some(reason)) => Outcome::Retained(reason),
-                Err(error) => Outcome::Retained(error.to_string()),
-            };
-            report.push(BuildStorage {
-                path: build,
-                allocated_bytes,
-                outcome,
-            });
+                let path = resource.join(name);
+                if !path.is_dir() {
+                    continue;
+                }
+                if path.canonicalize()? != path {
+                    return Err(io::Error::other(format!(
+                        "symlinked {name} storage retained"
+                    )));
+                }
+                let allocated_bytes = bytes(&path)?;
+                let outcome = if matches!(kind, StorageKind::Source)
+                    && !source_finalized(&repository, &resource)
+                {
+                    Outcome::Retained("working files have no finalized checkout proof".into())
+                } else {
+                    match mounted_reference(&path) {
+                        Ok(None) if apply => {
+                            super::overlay_resource::remove_unmounted_storage(&path)?;
+                            Outcome::Removed
+                        }
+                        Ok(None) => Outcome::Reclaimable,
+                        Ok(Some(reason)) => Outcome::Retained(reason),
+                        Err(error) => Outcome::Retained(error.to_string()),
+                    }
+                };
+                report.push(StorageReport {
+                    kind,
+                    path,
+                    allocated_bytes,
+                    outcome,
+                });
+            }
         }
     }
     Ok(report)

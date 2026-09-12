@@ -19,7 +19,7 @@ pub(super) struct OverlayResourceLease {
     latest: Arc<Mutex<Option<OverlaySnapshot>>>,
     publication: PublicationState,
     empty_upper: Option<SourceStamp>,
-    claimed: bool,
+    custody: CustodyGuard,
 }
 
 /// Publication is exclusive, but readers of completed generations need not
@@ -63,27 +63,27 @@ impl SharedOverlayResource {
             if !matches!(resource.publication, PublicationState::Writable) {
                 return Err(io::Error::other("workspace publication remains unsettled"));
             }
-        }
-        if let Some(resource) = slot.take() {
-            *resource.storage.state.lock() = OverlayResourceState::Reclaimable;
-            if resource.claimed {
-                for storage in resource.storages() {
-                    storage
-                        .claims
-                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                }
+            if resource
+                .storage
+                .uncertain
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Err(io::Error::other("inherited mount custody is unconfirmed"));
             }
+        }
+        if let Some(mut resource) = slot.take() {
+            resource.custody.settled = true;
+            *resource.storage.state.lock() = OverlayResourceState::Reclaimable;
             resource.latest.lock().take();
             let OverlayResourceLease {
-                storage, layers, ..
+                storage,
+                layers,
+                custody,
+                ..
             } = resource;
             drop(layers);
+            drop(custody);
             if let Ok(mut storage) = Arc::try_unwrap(storage) {
-                if *storage.claims.get_mut() != 0 {
-                    return Err(io::Error::other(
-                        "storage retained by unconfirmed descendant processes",
-                    ));
-                }
                 storage.release()?;
             }
         }
@@ -109,7 +109,26 @@ struct OverlayStorage {
     path: PathBuf,
     root: PathBuf,
     state: Mutex<OverlayResourceState>,
-    claims: std::sync::atomic::AtomicUsize,
+    uncertain: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug)]
+struct CustodyGuard {
+    dependencies: Vec<Arc<OverlayStorage>>,
+    exposed: bool,
+    settled: bool,
+}
+
+impl Drop for CustodyGuard {
+    fn drop(&mut self) {
+        if self.exposed && !self.settled {
+            for storage in &self.dependencies {
+                storage
+                    .uncertain
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
 }
 
 /// Offline lifecycle cleanup has proved that no namespace references this tree.
@@ -121,7 +140,7 @@ pub(super) fn remove_unmounted_storage(path: &Path) -> io::Result<()> {
             .ok_or_else(|| io::Error::other("storage lacks parent"))?
             .to_owned(),
         state: Mutex::new(OverlayResourceState::RetainedUnconfirmed),
-        claims: std::sync::atomic::AtomicUsize::new(0),
+        uncertain: std::sync::atomic::AtomicBool::new(false),
     };
     storage.release()
 }
@@ -179,7 +198,7 @@ impl OverlayResourceLease {
             root: parent.to_path_buf(),
             path,
             state: Mutex::new(OverlayResourceState::Unsubmitted),
-            claims: std::sync::atomic::AtomicUsize::new(0),
+            uncertain: std::sync::atomic::AtomicBool::new(false),
         });
         let latest = inherited.clone();
         let layers = match inherited {
@@ -198,6 +217,13 @@ impl OverlayResourceLease {
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
         let empty_upper = Some(SourceStamp::from(&std::fs::symlink_metadata(&upper)?));
+        let custody = CustodyGuard {
+            dependencies: std::iter::once(storage.clone())
+                .chain(layers.iter().map(|layer| layer.storage.clone()))
+                .collect(),
+            exposed: false,
+            settled: false,
+        };
         Ok(Self {
             storage,
             layers,
@@ -206,7 +232,7 @@ impl OverlayResourceLease {
             latest: Arc::new(Mutex::new(latest)),
             publication: PublicationState::Writable,
             empty_upper,
-            claimed: false,
+            custody,
         })
     }
 
@@ -351,25 +377,11 @@ impl OverlayResourceLease {
     }
 
     pub(super) fn process_may_exist(&mut self) {
-        // A lost host drops its in-memory leases while mounted children may
-        // survive. Preserve both this resource and its inherited dependencies.
-        if !self.claimed {
-            *self.storage.state.lock() = OverlayResourceState::RetainedUnconfirmed;
-            for storage in self.storages() {
-                storage
-                    .claims
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            }
-            self.claimed = true;
-        }
-    }
-
-    fn storages(&self) -> Vec<&Arc<OverlayStorage>> {
-        let mut seen = std::collections::BTreeSet::new();
-        std::iter::once(&self.storage)
-            .chain(self.layers.iter().map(|layer| &layer.storage))
-            .filter(|storage| seen.insert(storage.path.clone()))
-            .collect()
+        // A lost host may drop in-memory leases while mounts survive. Mark
+        // every dependency uncertain; explicit retirement or offline mount
+        // proof is required before deletion.
+        self.custody.exposed = true;
+        *self.storage.state.lock() = OverlayResourceState::RetainedUnconfirmed;
     }
 
     /// Caller holds workspace admission across source and optional build rotation.
@@ -480,18 +492,23 @@ impl OverlayResourceLease {
     }
 
     #[cfg(test)]
-    pub(super) fn release(self) -> io::Result<()> {
+    pub(super) fn release(mut self) -> io::Result<()> {
         if *self.storage.state.lock() == OverlayResourceState::RetainedUnconfirmed {
             return Err(io::Error::other(
                 "overlay resource retained: exact process and hosted work cleanup is unconfirmed",
             ));
         }
         // Snapshot and descendant leases still own the directory. Last-owner
-        // reclamation happens in OverlayStorage, never at actor retirement alone.
+        // reclamation is an explicit offline decision if they outlive retirement.
+        self.custody.settled = true;
         let Self {
-            storage, layers, ..
+            storage,
+            layers,
+            custody,
+            ..
         } = self;
         drop(layers);
+        drop(custody);
         match Arc::try_unwrap(storage) {
             Ok(mut storage) => storage.release(),
             Err(_) => Ok(()),
@@ -709,15 +726,8 @@ impl OverlayStorage {
 
 impl Drop for OverlayStorage {
     fn drop(&mut self) {
-        if *self.claims.get_mut() == 0
-            && matches!(
-                *self.state.get_mut(),
-                OverlayResourceState::Unsubmitted | OverlayResourceState::Reclaimable
-            )
-        {
-            if let Err(error) = self.release() {
-                tracing::warn!(path = %self.path.display(), %error, "overlay storage reclamation failed");
-            }
+        if *self.state.get_mut() != OverlayResourceState::Released {
+            tracing::debug!(path = %self.path.display(), state = ?self.state.get_mut(), "overlay storage retained for explicit cleanup");
         }
     }
 }
@@ -769,6 +779,11 @@ mod tests {
             .unwrap();
         child.retire().await.unwrap();
         assert!(!child_path.exists());
+        assert!(
+            parent_path.exists(),
+            "drop never reclaims inherited storage"
+        );
+        remove_unmounted_storage(&parent_path).unwrap();
         assert!(!parent_path.exists());
         child.retire().await.unwrap();
     }
@@ -975,10 +990,12 @@ mod tests {
     }
 
     #[test]
-    fn prelaunch_drop_and_explicit_release_reclaim_exclusive_storage() {
+    fn prelaunch_drop_retains_and_explicit_release_reclaims_exclusive_storage() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("build");
         drop(OverlayResourceLease::allocate_path(path.clone(), None).unwrap());
+        assert!(path.exists());
+        remove_unmounted_storage(&path).unwrap();
         assert!(!path.exists());
         let shared = SharedOverlayResource::new(
             OverlayResourceLease::allocate_path(path.clone(), None).unwrap(),

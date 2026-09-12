@@ -35,6 +35,9 @@ enum Command {
         /// Remove only storage whose mounts are confirmed unused.
         #[arg(long)]
         apply: bool,
+        /// Include source layers only when their worktree is finalized.
+        #[arg(long)]
+        source: bool,
     },
     /// Run the private process-scope supervisor for one prepared launch.
     #[command(hide = true)]
@@ -190,11 +193,15 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         Command::CommandResources { socket, policy } => {
             tidepool::shoal::resources::serve(socket, policy).await
         }
-        Command::Cleanup { run_root, apply } => {
+        Command::Cleanup {
+            run_root,
+            apply,
+            source,
+        } => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&tidepool::actor_host::workspace_cleanup::cleanup(
-                    &run_root, apply
+                    &run_root, apply, source
                 )?)?
             );
             Ok(())
