@@ -9,5 +9,6 @@ pub mod execution_descriptor;
 pub mod gc;
 pub mod layout;
 pub mod managed_reference;
+pub mod static_region;
 
 pub use layout::*;
