@@ -2522,9 +2522,9 @@ wiredInDataCons = map dcToMeta wiredInList
       , trueDataCon, falseDataCon
       , charDataCon, unitDataCon
       , intDataCon, wordDataCon, doubleDataCon, floatDataCon
-      , tupleDataCon Boxed 2  -- (,)
-      , tupleDataCon Boxed 3  -- (,,)
-      , ordLTDataCon, ordEQDataCon, ordGTDataCon
+      ] ++ map (tupleDataCon Boxed) [2 .. 5]  -- (,) (,,) (,,,) (,,,,)
+        ++
+      [ ordLTDataCon, ordEQDataCon, ordGTDataCon
       ]
 
 -- | Match the value arguments retained by 'isValueArg'. Representation fields
