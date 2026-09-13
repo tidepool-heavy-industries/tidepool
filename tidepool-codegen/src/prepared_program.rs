@@ -560,6 +560,7 @@ impl CompiledProgram {
         pipeline.finalize()?;
         let mut descriptors = plan.constructors.clone();
         descriptors.push(Arc::clone(&plan.boxed_array));
+        descriptors.push(Arc::clone(&plan.mut_var));
         descriptors.push(Arc::clone(&plan.bytes_array));
         descriptors.extend(
             plan.functions
@@ -577,6 +578,13 @@ impl CompiledProgram {
                 .map(|pap| Arc::clone(&pap.descriptor)),
         );
         let mut descriptor_registry = BTreeMap::new();
+        descriptor_registry.insert(
+            plan.mut_var.initial_header_word(),
+            DescriptorMetadata {
+                descriptor: Arc::clone(&plan.mut_var),
+                meaning: DescriptorMeaning::External,
+            },
+        );
         descriptor_registry.insert(
             plan.boxed_array.initial_header_word(),
             DescriptorMetadata {

@@ -49,6 +49,9 @@ pub(super) struct ProgramPlan<'a> {
     pub values: BTreeMap<ValueId, RuntimeRep>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
     pub boxed_array: Arc<ObjectDescriptor>,
+    /// Fixed one-slot mutable cells share the boxed payload ledger, not array
+    /// identity. Hosts must authenticate this distinct descriptor before access.
+    pub mut_var: Arc<ObjectDescriptor>,
     pub bytes_array: Arc<ObjectDescriptor>,
     /// Compact slots, not ValueId-indexed allocation controlled by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
@@ -315,6 +318,10 @@ impl<'a> ProgramPlan<'a> {
             )?),
             bytes_array: Arc::new(ObjectDescriptor::external(
                 tidepool_heap::external_storage::ExternalStorageKind::Bytes,
+                target,
+            )?),
+            mut_var: Arc::new(ObjectDescriptor::external(
+                tidepool_heap::external_storage::ExternalStorageKind::BoxedArray,
                 target,
             )?),
             top_slots,
