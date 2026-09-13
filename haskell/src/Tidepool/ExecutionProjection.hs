@@ -15,6 +15,7 @@ import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.List (find)
 import Data.Maybe (isNothing, listToMaybe)
+import Tidepool.PreparedBuiltins (wiredInErrorKind)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -659,6 +660,8 @@ projectArg (StgVarArg binder) = do
 projectArg (StgLitArg literal) = projectLiteralAtom literal
 
 projectReference :: Id -> P ValueRef
+projectReference binder | Just kind <- wiredInErrorKind binder =
+  Local <$> internWiredInError binder kind
 projectReference binder = do
   known <- gets values
   case lookupVarEnv known binder of
@@ -674,6 +677,29 @@ projectReference binder = do
         Nothing -> case nullaryWorkerConstructor binder of
           Just con -> Local <$> internNullaryWorker binder con
           Nothing -> Global <$> internGlobal binder
+
+-- | Synthesized functions preserve bare references and partial application;
+-- failure occurs only upon saturation, through an ordinary operation body.
+internWiredInError :: Id -> Schema.WiredInErrorKind -> P ValueId
+internWiredInError binder kind = do
+  let symbol = idSymbol "value" binder
+  existing <- gets (Map.lookup symbol . implicitValues)
+  case existing of
+    Just identity -> pure identity
+    Nothing -> do
+      identity <- freshValue
+      parameters <- if kind == Schema.WiredAbsentSumField then pure []
+        else pure <$> freshValue
+      signature <- internSignature (Signature
+        (map (const AddressRep) parameters) NoSuccess)
+      operation <- internSyntheticOperation (Schema.WiredInErrorIdentity kind) signature
+      let rhs = Function signature parameters []
+            (Operation operation (map (Ref . Local) parameters))
+      modify' (\current -> current
+        { implicitValues = Map.insert symbol identity (implicitValues current)
+        , implicitTops = TopBinding symbol (HeapBinding identity rhs) : implicitTops current
+        })
+      pure identity
 
 -- | A genuinely nullary data-con worker denotes an evaluated object, not an
 -- executable import. Requiring no representation arguments also excludes
