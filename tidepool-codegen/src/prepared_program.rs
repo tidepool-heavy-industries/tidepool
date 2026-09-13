@@ -4,6 +4,7 @@
 //! tables are invocation-owned. No invocation pointer is embedded in code.
 
 use crate::entry_abi::EntryAbi;
+mod failures;
 use crate::pipeline::{CodegenPipeline, PipelineError};
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, Value as SsaValue};
 use cranelift_frontend::FunctionBuilder;

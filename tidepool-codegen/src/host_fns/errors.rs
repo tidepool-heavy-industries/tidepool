@@ -35,6 +35,13 @@ pub enum RuntimeError {
     /// or incomplete guarded equation.
     #[error("pattern match failure: {0}")]
     PatternMatchFailure(String),
+    #[error("unsupported runtime capability: {0}")]
+    UnsupportedCapability(String),
+    #[error("GHC wired-in failure {kind:?}: {message}")]
+    WiredInError {
+        kind: tidepool_repr::execution_schema::WiredInErrorKind,
+        message: String,
+    },
     #[error("Haskell undefined forced")]
     Undefined,
     #[error("case trap: scrutinee constructor not among case alternatives (tag mismatch; diagnostics on server stderr)")]
@@ -97,6 +104,13 @@ impl RuntimeError {
     /// failures mean the live machine can no longer prove heap integrity.
     pub fn machine_disposition(&self) -> MachineDisposition {
         match self {
+            Self::WiredInError { kind, .. } => {
+                if kind.is_integrity_failure() {
+                    MachineDisposition::Unavailable
+                } else {
+                    MachineDisposition::Reusable
+                }
+            }
             Self::CaseTrap
             | Self::ExpectedConstructor
             | Self::NoSuccessReturned
@@ -110,6 +124,7 @@ impl RuntimeError {
             | Self::IncompleteRootSnapshot(_)
             | Self::IncompletePromotion(_) => MachineDisposition::Unavailable,
             Self::DivisionByZero
+            | Self::UnsupportedCapability(_)
             | Self::Overflow
             | Self::Underflow
             | Self::UserError
