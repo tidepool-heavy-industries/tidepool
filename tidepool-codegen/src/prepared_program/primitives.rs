@@ -712,6 +712,15 @@ pub(super) fn recognize_operation(
     {
         return Some(PrimitiveOperation::Raise);
     }
+    // GHC gives raiseIO# a state-threaded polymorphic result type. Preserve
+    // that wire contract, but use the same terminal exception-root transfer
+    // as raise#: no successful result or state token is fabricated.
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "raiseIO#")
+        && signature.arguments == [RuntimeRep::LiftedRef, RuntimeRep::Void]
+        && matches!(&signature.results, ResultContract::Returns(_))
+    {
+        return Some(PrimitiveOperation::Raise);
+    }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "dataToTagSmall#")
         && signature.arguments == [RuntimeRep::LiftedRef]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -1881,6 +1890,35 @@ mod tests {
             results: ResultContract::NoSuccess,
         };
         assert!(recognize_operation(&declaration, &wrong_argument).is_none());
+    }
+
+    #[test]
+    fn raise_io_accepts_the_pinned_state_threaded_returning_contract() {
+        let declaration = OperationDecl {
+            identity: OperationIdentity::PrimOp("raiseIO#".into()),
+            signature: tidepool_repr::execution_schema::SignatureId(0),
+        };
+        let pinned = Signature {
+            arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Void],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        assert!(matches!(
+            recognize_operation(&declaration, &pinned),
+            Some(PrimitiveOperation::Raise)
+        ));
+
+        for rejected in [
+            Signature {
+                arguments: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Void],
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            assert!(recognize_operation(&declaration, &rejected).is_none());
+        }
     }
 
     #[test]

@@ -16,8 +16,9 @@ use tidepool_heap::execution_descriptor::{
 use tidepool_heap::managed_reference::untag;
 use tidepool_repr::execution_schema::{
     link_program, testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, Group,
-    HeapBinding, HeapRhs, MachineImports, ResultContract, RuntimeRep, SignatureId, TopBinding,
-    UpdatePolicy, ValueId, ValueRef,
+    HeapBinding, HeapRhs, MachineImports, OperationDecl, OperationId, OperationIdentity,
+    ResultContract, RuntimeRep, Signature, SignatureId, TopBinding, UpdatePolicy, ValueId,
+    ValueRef,
 };
 
 struct Invocation<'a> {
@@ -195,6 +196,65 @@ fn captured_caf_program(policy: UpdatePolicy) -> CompiledProgram {
     CompiledProgram::compile(&linked).unwrap()
 }
 
+fn captured_raise_io_caf_program(policy: UpdatePolicy) -> CompiledProgram {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+    wire.signatures.push(Signature {
+        arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Void],
+        results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+    });
+    wire.operations.push(OperationDecl {
+        identity: OperationIdentity::PrimOp("raiseIO#".into()),
+        signature: SignatureId(1),
+    });
+    wire.constructors.push(ConstructorDecl {
+        identity: testing::identity("W5", "RaisedException"),
+        family: testing::identity("W5", "RaisedException"),
+        host_id: tidepool_repr::DataConId(900),
+        result_rep: RuntimeRep::LiftedRef,
+        tag: 1,
+        family_size: 1,
+        strict_fields: vec![],
+        field_reps: vec![],
+        layout: CheckedLayout {
+            fields: vec![],
+            alignment: 1,
+            payload_size: 0,
+            root_mask: vec![],
+        },
+    });
+    wire.expressions.nodes = vec![ExprFrame::Operation {
+        operation: OperationId(0),
+        arguments: vec![Atom::Ref(ValueRef::Local(ValueId(1))), Atom::Void],
+    }];
+    wire.bindings = vec![Group::Recursive(vec![
+        TopBinding {
+            identity: testing::identity("W5", "raised-thunk"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: policy,
+                    captures: vec![ValueRef::Local(ValueId(1))],
+                    body: 0,
+                },
+            },
+        },
+        TopBinding {
+            identity: testing::identity("W5", "raised-exception"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        },
+    ])];
+    let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+    CompiledProgram::compile(&linked).unwrap()
+}
+
 impl Drop for Invocation<'_> {
     fn drop(&mut self) {
         self.machine.clear_gc_state();
@@ -297,6 +357,28 @@ fn w5_a1_cancellation_preserves_captured_managed_value_for_retry() {
                     UpdatePolicy::SingleEntry => DescriptorState::Evaluating,
                 },
                 "{policy:?} {point:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn raise_io_restores_caf_capture_and_preserves_first_cause_on_retry() {
+    for policy in [UpdatePolicy::Memoize, UpdatePolicy::SingleEntry] {
+        let program = captured_raise_io_caf_program(policy);
+        let mut invocation = Invocation::new(&program);
+        let captured = invocation.install_captured_constructor();
+
+        for _ in 0..2 {
+            let (status, output) = invocation.force();
+            assert_eq!(status, CallStatus::LanguageFailure, "{policy:?}");
+            assert_eq!(output, 0xdead_beef, "raised call published an output");
+            assert_eq!(invocation.state(), DescriptorState::Live, "{policy:?}");
+            assert_eq!(invocation.captured_slot(), captured, "{policy:?}");
+            assert_eq!(
+                invocation.machine.take_runtime_error(),
+                Some(RuntimeError::RaisedException),
+                "settlement replaced the first cause for {policy:?}",
             );
         }
     }
