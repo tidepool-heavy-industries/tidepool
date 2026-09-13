@@ -43,6 +43,7 @@ mod entry;
 mod fallible;
 mod floating;
 mod forcing;
+mod formatting;
 mod plan;
 mod primitives;
 #[cfg(test)]
@@ -257,6 +258,14 @@ impl CompiledProgram {
             (
                 "prepared_write_int_bytes",
                 byte_arrays::prepared_write_int_bytes as *const u8,
+            ),
+            (
+                "prepared_render_double_bytes",
+                formatting::prepared_render_double_bytes as *const u8,
+            ),
+            (
+                "prepared_render_double_prec_bytes",
+                formatting::prepared_render_double_prec_bytes as *const u8,
             ),
             (
                 "prepared_no_success_returned",

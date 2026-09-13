@@ -7,6 +7,7 @@ use tidepool_bridge::Value;
 use tidepool_heap::execution_descriptor::{
     DescriptorState, DescriptorTraceError, ObjectDescriptor, ObjectKind,
 };
+use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
 use tidepool_heap::managed_reference::{tag_of, tag_valid, untag};
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{RuntimeRep, StorageLayout};
@@ -28,6 +29,15 @@ pub enum ObservationFailure {
     Integrity(#[from] DescriptorTraceError),
 }
 
+fn external_observation_error(error: ExternalStorageValidationError) -> ObservationFailure {
+    match error {
+        ExternalStorageValidationError::BookkeepingAllocation => {
+            ObservationFailure::AllocationFailed
+        }
+        other => ObservationFailure::Integrity(DescriptorTraceError::ExternalPayload(other)),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ObservationSeed {
     pub(super) word: usize,
@@ -43,7 +53,9 @@ impl ObservationBudget {
     /// Materialization costs one unit per value node and per copied payload
     /// byte. An atomic byte-array leaf cannot bypass the observation bound.
     pub(super) fn charge_bytes(&mut self, bytes: usize) -> Result<(), ObservationFailure> {
-        self.remaining = self.remaining.checked_sub(bytes)
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes)
             .ok_or(ObservationFailure::BudgetExceeded { limit: self.limit })?;
         Ok(())
     }
@@ -75,6 +87,7 @@ pub(super) struct ObservationHeap<'a> {
     starts: Vec<u64>,
     constructors: Option<&'a BTreeMap<usize, ConstructorObservation>>,
     registry: Option<&'a BTreeMap<usize, DescriptorMetadata>>,
+    external_owner: Option<&'a crate::machine_state::MachineState>,
 }
 
 /// Extend exact-start metadata across newly initialized nursery words. The
@@ -161,6 +174,7 @@ impl<'a> ObservationHeap<'a> {
         registry: &'a BTreeMap<usize, DescriptorMetadata>,
         starts: &[u64],
         old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
+        external_owner: &'a crate::machine_state::MachineState,
     ) -> Result<Self, ObservationFailure> {
         let descriptors: BTreeMap<_, _> = registry
             .values()
@@ -179,6 +193,7 @@ impl<'a> ObservationHeap<'a> {
             starts: starts.to_vec(),
             constructors: None,
             registry: Some(registry),
+            external_owner: Some(external_owner),
         })
     }
 
@@ -236,6 +251,7 @@ impl<'a> ObservationHeap<'a> {
             starts,
             constructors,
             registry,
+            external_owner: None,
         })
     }
 
@@ -472,6 +488,28 @@ impl<'a> ObservationHeap<'a> {
                             // presenting the first child to that worklist first.
                             fields.reverse();
                             return Ok(ObservationFrame::Constructor(observation.identity, fields));
+                        }
+                        ObjectKind::External(ExternalStorageKind::Bytes) => {
+                            let owner = self
+                                .external_owner
+                                .ok_or(ObservationFailure::Unobservable(descriptor.kind()))?;
+                            let handle = unsafe {
+                                descriptor.external_payload_slot(
+                                    object.cast_mut(),
+                                    descriptor.allocation_extent() as usize,
+                                )?
+                            };
+                            let published = unsafe { handle.read() };
+                            let view = owner
+                                .external_active_view(published, ExternalStorageKind::Bytes)
+                                .map_err(external_observation_error)?;
+                            budget.charge_bytes(view.logical_len)?;
+                            let bytes = owner
+                                .copy_external_bytes(published)
+                                .map_err(external_observation_error)?;
+                            return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitByteArray(
+                                bytes,
+                            ))));
                         }
                         kind => return Err(ObservationFailure::Unobservable(kind)),
                     }
@@ -733,6 +771,91 @@ mod tests {
             limited,
             Err(ObservationFailure::BudgetExceeded { limit: 1 })
         ));
+    }
+
+    #[test]
+    fn external_byte_observation_is_bounded_owned_and_rejects_revocation() {
+        assert!(matches!(
+            external_observation_error(ExternalStorageValidationError::BookkeepingAllocation),
+            ObservationFailure::AllocationFailed
+        ));
+        let machine = crate::machine_state::MachineState::new();
+        let descriptor =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::Bytes, &target()).unwrap());
+        let mut nursery = vec![0_u64; descriptor.allocation_extent() as usize / 8];
+        let object = nursery.as_mut_ptr().cast::<u8>();
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, 3)
+            .unwrap();
+        machine.store_external_bytes(payload, 0, b"abc").unwrap();
+        unsafe {
+            descriptor.initialize_header(object);
+            descriptor
+                .external_payload_slot(object, descriptor.allocation_extent() as usize)
+                .unwrap()
+                .write(payload);
+        }
+        let static_region = statics();
+        let constructors = BTreeMap::new();
+        let mut heap = ObservationHeap::new(
+            &nursery,
+            &static_region,
+            vec![descriptor.clone()],
+            &constructors,
+        )
+        .unwrap();
+        heap.external_owner = Some(&machine);
+        let encoded = object as usize | usize::from(descriptor.tag());
+        let reps = [RuntimeRep::UnliftedRef];
+        let layout = StorageLayout::for_reps(&target(), &reps).unwrap();
+        assert!(matches!(
+            heap.observe_results(&[encoded as u64], &reps, &layout, 3),
+            Err(ObservationFailure::BudgetExceeded { limit: 3 })
+        ));
+        let values = heap
+            .observe_results(&[encoded as u64], &reps, &layout, 4)
+            .unwrap();
+        machine
+            .revoke_external_payload(payload, ExternalStorageKind::Bytes)
+            .unwrap();
+        assert!(matches!(
+            heap.observe_results(&[encoded as u64], &reps, &layout, 4),
+            Err(ObservationFailure::Integrity(
+                DescriptorTraceError::ExternalPayload(ExternalStorageValidationError::Revoked(_))
+            ))
+        ));
+        drop(heap);
+        let wrong_kind = machine
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        unsafe {
+            descriptor
+                .external_payload_slot(object, descriptor.allocation_extent() as usize)
+                .unwrap()
+                .write(wrong_kind);
+        }
+        let mut heap = ObservationHeap::new(
+            &nursery,
+            &static_region,
+            vec![descriptor.clone()],
+            &constructors,
+        )
+        .unwrap();
+        heap.external_owner = Some(&machine);
+        assert!(matches!(
+            heap.observe_results(&[encoded as u64], &reps, &layout, 4),
+            Err(ObservationFailure::Integrity(
+                DescriptorTraceError::ExternalPayload(
+                    ExternalStorageValidationError::KindMismatch { .. }
+                )
+            ))
+        ));
+        drop(heap);
+        drop(machine);
+        drop(nursery);
+        assert!(
+            matches!(values.as_slice(), [Value::Lit(Literal::LitByteArray(bytes))] if bytes == b"abc")
+        );
     }
 
     #[test]

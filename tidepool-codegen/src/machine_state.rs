@@ -1184,6 +1184,71 @@ impl MachineState {
         self.store_external_elements(published, index, &[value])
     }
 
+    /// Store a fully checked byte range through the ledger owner. Bytes have
+    /// no managed edges, but writes still advance the revision used to guard
+    /// staged external sweep plans.
+    pub(crate) fn store_external_bytes(
+        &self,
+        published: *mut u8,
+        byte_offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let record =
+            Self::checked_external_record(&storage, published, ExternalStorageKind::Bytes)?;
+        let end = byte_offset.checked_add(bytes.len()).ok_or(
+            ExternalStorageValidationError::IndexOutOfBounds {
+                index: byte_offset,
+                len: record.logical_len,
+            },
+        )?;
+        if end > record.logical_len {
+            return Err(ExternalStorageValidationError::IndexOutOfBounds {
+                index: end.saturating_sub(1),
+                len: record.logical_len,
+            });
+        }
+        if !bytes.is_empty() {
+            // The active record and checked complete span prove this copy stays
+            // within its ledger-owned allocation. No safepoint intervenes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    published.add(8).add(byte_offset),
+                    bytes.len(),
+                );
+            }
+            self.external_changed();
+        }
+        Ok(())
+    }
+
+    /// Snapshot an active byte payload while its ledger owner is borrowed.
+    /// This call is noncollecting and returns owned storage; no payload borrow
+    /// survives into later observation or forcing steps.
+    pub(crate) fn copy_external_bytes(
+        &self,
+        published: *mut u8,
+    ) -> Result<Vec<u8>, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let record =
+            Self::checked_external_record(&storage, published, ExternalStorageKind::Bytes)?;
+        let len = record.logical_len;
+        let mut copied = Vec::new();
+        copied
+            .try_reserve_exact(len)
+            .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+        if len != 0 {
+            // SAFETY: the checked active record authenticates the complete
+            // byte span; capacity was reserved before initializing the copy.
+            unsafe {
+                std::ptr::copy_nonoverlapping(published.add(8), copied.as_mut_ptr(), len);
+                copied.set_len(len);
+            }
+        }
+        Ok(copied)
+    }
+
     /// Checked compare-and-swap with the same owner barrier as ordinary writes.
     pub(crate) fn compare_exchange_external_element(
         &self,
@@ -1591,7 +1656,10 @@ impl MachineState {
                 )
             }
         };
-        Ok(ExternalPayloadView { pointer_slots, logical_len: record.logical_len })
+        Ok(ExternalPayloadView {
+            pointer_slots,
+            logical_len: record.logical_len,
+        })
     }
 
     /// Mutator and observation view. A revoked payload stays in the structural
@@ -2474,10 +2542,16 @@ mod tests {
 
     #[test]
     fn every_external_ledger_mutation_invalidates_a_sweep_plan() {
-        for mutation in 0..7 {
+        for mutation in 0..8 {
             let ms = MachineState::new();
             let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
-            let plan = ms.plan_external_sweep(&HashSet::from([boxed])).unwrap();
+            let bytes = (mutation == 7)
+                .then(|| unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 8) });
+            let mut marked = HashSet::from([boxed]);
+            if let Some(bytes) = bytes {
+                marked.insert(bytes);
+            }
+            let plan = ms.plan_external_sweep(&marked).unwrap();
             match mutation {
                 0 => {
                     unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 1) };
@@ -2506,6 +2580,12 @@ mod tests {
                 }
                 6 => {
                     ms.set_external_logical_len(boxed, 1);
+                }
+                7 => {
+                    let bytes = bytes.unwrap();
+                    ms.store_external_bytes(bytes, 0, &7_i64.to_ne_bytes())
+                        .unwrap();
+                    assert_eq!(unsafe { bytes.add(8).cast::<i64>().read_unaligned() }, 7);
                 }
                 _ => unreachable!(),
             }

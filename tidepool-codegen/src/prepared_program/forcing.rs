@@ -252,7 +252,7 @@ pub(super) fn observe_results(
 }
 
 fn current_heap<'a>(
-    machine: &MachineState,
+    machine: &'a MachineState,
     vmctx: &VMContext,
     statics: &'a StaticRegion,
     registry: &'a BTreeMap<usize, super::DescriptorMetadata>,
@@ -287,6 +287,7 @@ fn current_heap<'a>(
         registry,
         starts,
         Some(old_space),
+        machine,
     )
     .map_err(ExecutionError::from)
 }

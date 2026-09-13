@@ -37,6 +37,77 @@ pub(super) trait ScalarFamily {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BasicScalarOperation {
+    PlusAddr,
+    Chr,
+    EqChar,
+    Clz8,
+}
+
+pub(super) struct BasicScalarFamily;
+
+impl ScalarFamily for BasicScalarFamily {
+    type Operation = BasicScalarOperation;
+
+    fn recognize(identity: &OperationIdentity, signature: &Signature) -> Option<Self::Operation> {
+        let OperationIdentity::PrimOp(name) = identity else {
+            return None;
+        };
+        use RuntimeRep::*;
+        match name.as_str() {
+            "plusAddr#"
+                if signature.arguments == [Address, Int(64)]
+                    && returns_exact(signature, &[Address]) =>
+            {
+                Some(BasicScalarOperation::PlusAddr)
+            }
+            "chr#" if signature.arguments == [Int(64)] && returns_exact(signature, &[Word(64)]) => {
+                Some(BasicScalarOperation::Chr)
+            }
+            "eqChar#"
+                if signature.arguments == [Word(64), Word(64)]
+                    && returns_exact(signature, &[Int(64)]) =>
+            {
+                Some(BasicScalarOperation::EqChar)
+            }
+            "clz8#"
+                if signature.arguments == [Word(64)] && returns_exact(signature, &[Word(64)]) =>
+            {
+                Some(BasicScalarOperation::Clz8)
+            }
+            _ => None,
+        }
+    }
+
+    fn emit(
+        operation: Self::Operation,
+        builder: &mut FunctionBuilder<'_>,
+        arguments: &[ir::Value],
+    ) -> Vec<ir::Value> {
+        let value = match operation {
+            // Addr# is an untagged machine word here. Arithmetic never inspects memory.
+            BasicScalarOperation::PlusAddr => builder.ins().iadd(arguments[0], arguments[1]),
+            BasicScalarOperation::Chr => arguments[0],
+            BasicScalarOperation::EqChar => {
+                let equal =
+                    builder
+                        .ins()
+                        .icmp(ir::condcodes::IntCC::Equal, arguments[0], arguments[1]);
+                let one = builder.ins().iconst(ir::types::I64, 1);
+                let zero = builder.ins().iconst(ir::types::I64, 0);
+                builder.ins().select(equal, one, zero)
+            }
+            BasicScalarOperation::Clz8 => {
+                let low = builder.ins().ireduce(ir::types::I8, arguments[0]);
+                let count = builder.ins().clz(low);
+                builder.ins().uextend(ir::types::I64, count)
+            }
+        };
+        vec![value]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IntegerKind {
     Add,
     Sub,
@@ -460,6 +531,9 @@ pub(super) fn recognize_operation(
     if let Some(operation) = super::byte_arrays::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::ByteArray(operation));
     }
+    if let Some(operation) = super::formatting::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::Formatting(operation));
+    }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
         && signature.arguments == [RuntimeRep::Float(64)]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -490,8 +564,12 @@ pub(super) fn recognize_operation(
             }
         }
     }
-    IntegerFamily::recognize(&declaration.identity, signature)
-        .map(PrimitiveOperation::Integer)
+    BasicScalarFamily::recognize(&declaration.identity, signature)
+        .map(PrimitiveOperation::BasicScalar)
+        .or_else(|| {
+            IntegerFamily::recognize(&declaration.identity, signature)
+                .map(PrimitiveOperation::Integer)
+        })
         .or_else(|| {
             super::floating::FloatingFamily::recognize(&declaration.identity, signature)
                 .map(PrimitiveOperation::Floating)
@@ -502,10 +580,12 @@ pub(super) fn recognize_operation(
 pub(super) enum PrimitiveOperation {
     Array(super::arrays::ArrayOperation),
     ByteArray(super::byte_arrays::ByteOperation),
+    Formatting(super::formatting::FormattingOperation),
     DoubleToInt,
     IndexCharOffAddr,
     Raise,
     PrimitiveFailure(super::fallible::PrimitiveFailure),
+    BasicScalar(BasicScalarOperation),
     Integer(IntegerOperation),
     Floating(super::floating::FloatingOperation),
 }
@@ -588,6 +668,36 @@ pub(super) fn emit_operation(
             )
             .map(Some)
         }
+        PrimitiveOperation::Formatting(super::formatting::FormattingOperation::NeedsPrecedence) => {
+            Ok(Some(super::formatting::emit_needs_precedence(
+                builder,
+                arguments[0],
+            )))
+        }
+        PrimitiveOperation::Formatting(super::formatting::FormattingOperation::Bytes) => {
+            super::formatting::emit_render_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                gc,
+                bytes_array,
+                arguments,
+                false,
+            )
+            .map(Some)
+        }
+        PrimitiveOperation::Formatting(super::formatting::FormattingOperation::PrecBytes) => {
+            super::formatting::emit_render_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                gc,
+                bytes_array,
+                arguments,
+                true,
+            )
+            .map(Some)
+        }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(
                 builder,
@@ -619,6 +729,9 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::Integer(operation) => {
             Ok(Some(IntegerFamily::emit(operation, builder, arguments)))
+        }
+        PrimitiveOperation::BasicScalar(operation) => {
+            Ok(Some(BasicScalarFamily::emit(operation, builder, arguments)))
         }
         PrimitiveOperation::Floating(operation) => Ok(Some(super::floating::FloatingFamily::emit(
             operation, builder, arguments,
@@ -842,6 +955,171 @@ mod tests {
             bits,
             bytes: bytes[8 - usize::from(bits / 8)..].to_vec(),
         })
+    }
+
+    #[test]
+    fn basic_scalars_require_exact_primop_signatures() {
+        use RuntimeRep::*;
+        for (name, accepted, wrong_argument, wrong_result) in [
+            (
+                "plusAddr#",
+                sig(vec![Address, Int(64)], vec![Address]),
+                sig(vec![Word(64), Int(64)], vec![Address]),
+                sig(vec![Address, Int(64)], vec![Word(64)]),
+            ),
+            (
+                "chr#",
+                sig(vec![Int(64)], vec![Word(64)]),
+                sig(vec![Word(64)], vec![Word(64)]),
+                sig(vec![Int(64)], vec![Int(64)]),
+            ),
+            (
+                "eqChar#",
+                sig(vec![Word(64), Word(64)], vec![Int(64)]),
+                sig(vec![Word(64), Int(64)], vec![Int(64)]),
+                sig(vec![Word(64), Word(64)], vec![Word(64)]),
+            ),
+            (
+                "clz8#",
+                sig(vec![Word(64)], vec![Word(64)]),
+                sig(vec![Word(8)], vec![Word(64)]),
+                sig(vec![Word(64)], vec![Word(8)]),
+            ),
+        ] {
+            let identity = OperationIdentity::PrimOp(name.into());
+            assert!(BasicScalarFamily::recognize(&identity, &accepted).is_some());
+            assert!(BasicScalarFamily::recognize(&identity, &wrong_argument).is_none());
+            assert!(BasicScalarFamily::recognize(&identity, &wrong_result).is_none());
+            assert!(BasicScalarFamily::recognize(
+                &identity,
+                &Signature {
+                    arguments: accepted.arguments.clone(),
+                    results: ResultContract::NoSuccess,
+                },
+            )
+            .is_none());
+        }
+        assert!(BasicScalarFamily::recognize(
+            &OperationIdentity::Intrinsic {
+                symbol: "chr#".into(),
+                convention: tidepool_repr::execution_schema::ForeignConvention::CCall,
+            },
+            &sig(vec![Int(64)], vec![Word(64)]),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn basic_scalars_run_through_the_prepared_adapter() {
+        let chr = run_scalar(
+            "chr#",
+            vec![RuntimeRep::Int(64)],
+            RuntimeRep::Word(64),
+            vec![int(64, -1)],
+        );
+        assert!(matches!(
+            chr,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(u64::MAX))
+        ));
+
+        for (left, right, expected) in [(0x10ffff, 0x10ffff, 1), (0x10ffff, 65, 0)] {
+            let equal = run_scalar(
+                "eqChar#",
+                vec![RuntimeRep::Word(64); 2],
+                RuntimeRep::Int(64),
+                vec![word(64, left), word(64, right)],
+            );
+            assert!(matches!(
+                equal,
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value)) if value == expected
+            ));
+        }
+
+        for (input, expected) in [(0, 8), (0x80, 0), (0x10, 3), (0x100, 8)] {
+            let count = run_scalar(
+                "clz8#",
+                vec![RuntimeRep::Word(64)],
+                RuntimeRep::Word(64),
+                vec![word(64, input)],
+            );
+            assert!(matches!(
+                count,
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(value)) if value == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn plus_addr_moves_within_pinned_bytes_before_adapter_observation() {
+        use tidepool_repr::execution_schema::{testing, *};
+
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Word(64)]);
+        wire.signatures.push(sig(
+            vec![RuntimeRep::Address, RuntimeRep::Int(64)],
+            vec![RuntimeRep::Address],
+        ));
+        wire.signatures.push(sig(
+            vec![RuntimeRep::Address, RuntimeRep::Int(64)],
+            vec![RuntimeRep::Word(64)],
+        ));
+        wire.operations.push(OperationDecl {
+            identity: OperationIdentity::PrimOp("plusAddr#".into()),
+            signature: SignatureId(1),
+        });
+        wire.operations.push(OperationDecl {
+            identity: OperationIdentity::PrimOp("indexCharOffAddr#".into()),
+            signature: SignatureId(2),
+        });
+        wire.expressions.nodes = vec![
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![
+                    Atom::Scalar(ScalarLiteral::Bytes(b"AB".to_vec())),
+                    int(64, 1),
+                ],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(1),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(1))), int(64, 0)],
+            },
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(1),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Address]),
+                kind: CaseKind::Polymorphic,
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: 1,
+                }],
+            },
+        ];
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!("fixture entry is nonrecursive")
+        };
+        let HeapRhs::Function { body, .. } = &mut entry.binding.rhs else {
+            unreachable!("fixture entry is a function")
+        };
+        *body = 2;
+
+        let prepared = testing::prepare(wire).unwrap();
+        let linked = link_program(prepared, &MachineImports::default()).unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
+        let result = compiled
+            .run_entry(
+                ValueId(0),
+                &[],
+                &super::super::RunOptions::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(
+                tidepool_repr::Literal::LitWord(66)
+            )]
+        ));
     }
 
     #[test]

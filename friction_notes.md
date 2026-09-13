@@ -377,3 +377,16 @@ are nondeterministic.
   pinned toolchain and checked the owning Rust target, but did not establish
   extractor freshness. Report those as separate checks rather than rebuilding
   the worker for every independent Rust edit.
+- A corpus child has a watchdog through the shared testing helper, not an
+  inline timer in the runner. Two source investigations missed that indirection.
+  Follow the owning helper before diagnosing a hang or killing the parent.
+- A rebuilt test binary does not refresh a separately built projection probe.
+  Record the actual executable identity when checking a producer correction;
+  stale probes can make a fixed typed diagnostic appear absent.
+- The corpus script reuses build-directory executable paths throughout a run.
+  Current coordination freezes Cargo builds for that run; copying runner/probe
+  binaries into the result directory would make provenance independent of the
+  build lease and permit unrelated compilation safely.
+- Focused scalar compilation hit another worker's half-written byte-array
+  expression despite disjoint ownership. A shared tree isolates files, not
+  compilation revisions; ephemeral worktrees would remove this interruption.

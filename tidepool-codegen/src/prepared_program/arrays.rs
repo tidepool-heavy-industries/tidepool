@@ -135,7 +135,7 @@ pub(super) fn array_error(
     machine.prepared_call_status() as i32
 }
 
-fn storage_error(
+pub(super) fn storage_error(
     error: ExternalStorageValidationError,
     index: i64,
 ) -> crate::host_fns::RuntimeError {

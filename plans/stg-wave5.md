@@ -6,6 +6,36 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Current local work supersedes the chronological records below. The last pushed
+head remains `18e4e1f70`; later local parcel commits are not yet a full-wave gate.
+The completed `target/prepared-corpus/suite.kteZM6` replay contains all 812 tops:
+708 project and validate, 425 admit and compile, 256 execute, 136 match. Its
+first expression blockers are `plusAddr#` (125), `writeWordArray#` (15), `clz8#`
+(6), `tagToEnum#` (5), `chr#` (5), and `eqChar#` (2). The remaining 125 admission
+rows first stop at globals; 104 projection rows first encounter
+`stg_cloneMyStackzh`. These are first-blocker cohorts, not an exhaustive feature
+inventory. This replay predates the formatting and scalar parcels below.
+
+Boxed arrays, byte Word8/Int access, owner-mediated byte stores, and minor
+external lifetime management are implemented. Machine-word byte operations
+passed six focused byte-family tests; address/character/count-leading-zero
+operations passed three focused tests. The native formatting/byte-observation
+selection passed four tests, including moving collection and owned snapshots.
+Formatting source/projection tests passed before the additional source-authority
+and enum-projection regressions; those additions still need their focused fold.
+No new corpus match count or workspace-green claim follows from these tests.
+
+The formatting substitution requires the exact shipped source bytes, pinned at
+extractor build time, as well as the resolved complete module identity and
+checked types/layout. Same-named home source alone is not authority. Returning
+Haskell definitions preserve demand semantics before optimization; precedence
+is forced only for negative values (including negative zero, excluding NaN).
+Byte observation charges both nodes and copied bytes. Formatting's internal
+Rust `String` allocation still follows Rust's abort-on-OOM behavior; this is a
+known limitation, not a typed-allocation guarantee.
+
+### Earlier checkpoint evidence (chronological)
+
 Pushed source head: `18e4e1f70`. Primitive byte access passed six adapter
 tests; the machine-state selection passed 16 tests and the byte-pool bounds
 unit test passed. Real recovered `showDouble` walking and the recovery suites
@@ -32,7 +62,7 @@ fixture needed a zero-field helper correction and Rc ownership before publishing
 its payload address. Source-walk preallocation removes a late allocation-failure
 path after forwarding; it is not a reachable-graph preflight.
 
-Prepared array primitive emission remains unimplemented. Young/Retained ledger
+At that earlier checkpoint, array primitive emission was unimplemented. Young/Retained ledger
 policy and final-copy minor reclamation are now implemented locally; production
 integration verification passed GC 2/2, promotion 1/1 and machine-state 27/27.
 Fresh source review accepted the scoped lifetime integration. These results
