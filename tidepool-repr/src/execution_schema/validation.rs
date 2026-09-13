@@ -455,6 +455,12 @@ impl<'w, 'p> Walker<'w, 'p> {
         }
         if let Some(actual_id) = ty.callable {
             let actual = self.validator.signature(actual_id)?;
+            // Only the global declaration can discharge a call's normal-result
+            // obligation. Prefix/partial-application checks still apply.
+            let dead_end = match atom {
+                Atom::Ref(ValueRef::Global(id)) => self.validator.global(*id)?.dead_end,
+                _ => false,
+            };
             let common = actual.arguments.len().min(signature.arguments.len());
             if actual.arguments[..common] != signature.arguments[..common] {
                 return Err(ParseError::InvalidSignature(
@@ -467,12 +473,12 @@ impl<'w, 'p> Walker<'w, 'p> {
                         "partial application must return a function reference".into(),
                     ))
                 }
-                std::cmp::Ordering::Equal if signature.results != actual.results => {
+                std::cmp::Ordering::Equal if !dead_end && signature.results != actual.results => {
                     return Err(ParseError::InvalidSignature(
                         "saturated application result disagrees with entry signature".into(),
                     ))
                 }
-                std::cmp::Ordering::Greater if actual.results != [RuntimeRep::LiftedRef] => {
+                std::cmp::Ordering::Greater if !dead_end && actual.results != [RuntimeRep::LiftedRef] => {
                     return Err(ParseError::InvalidSignature(
                         "oversaturation requires a returned function reference".into(),
                     ))
@@ -1213,6 +1219,32 @@ mod tests {
 
     fn replace_root(program: &mut WireProgram, frame: ExprFrame<usize>) {
         program.expressions.nodes = vec![frame];
+    }
+
+    #[test]
+    fn dead_end_global_requires_canonical_entry_evidence() {
+        let mut program = valid_program();
+        program.globals.push(super::super::GlobalDecl {
+            identity: symbol("bottom"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            dead_end: true,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        // wave4:PRELUDE_RUST — malformed evidence must reject even when unused.
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidSignature(_))
+        ));
+        program.globals[0].entry_signature = Some(SignatureId(0));
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidSignature(_))
+        ));
+        program.signatures.push(Signature { arguments: vec![RuntimeRep::Void], results: vec![] });
+        program.globals[0].entry_signature = Some(SignatureId(1));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
     }
 
     fn set_top_rhs(program: &mut WireProgram, rhs: HeapRhs) {

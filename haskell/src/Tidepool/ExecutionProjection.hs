@@ -31,6 +31,7 @@ import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
+import GHC.Types.Id (isDeadEndId)
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
@@ -490,15 +491,22 @@ importedEntry :: Id -> P (Maybe Signature, Bool)
 importedEntry binder = case importedIdLFInfo binder of
   LFReEntrant _ arity _ _ -> do
     (arguments, result) <- splitRepArguments arity (varType binder)
-    signature <- Signature arguments <$> repsForType result
+    signature <- Signature arguments <$> entryResults result
     pure (Just signature, True)
   LFThunk{} -> do
-    signature <- Signature [] <$> repsForType (varType binder)
+    signature <- Signature [] <$> entryResults (varType binder)
     pure (Just signature, False)
   LFCon{} -> pure (Nothing, True)
   LFUnlifted -> pure (Nothing, True)
   LFUnknown{} -> pure (Nothing, False)
   LFLetNoEscape -> failShape "imported join has no heap/global entry"
+  where
+    -- wave4:PRELUDE_HASKELL: globalDeadEnd carries the independent evidence.
+    -- An empty vector here is not an assertion that a bottoming call returns
+    -- zero values, nor that it raises instead of diverging.
+    entryResults ty
+      | isDeadEndId binder = pure []
+      | otherwise = repsForType ty
 
 signatureForArgs :: [StgArg] -> Type -> P Signature
 signatureForArgs args result = Signature <$> (concat <$> mapM argReps args) <*> repsForType result

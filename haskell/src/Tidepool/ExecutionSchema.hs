@@ -20,7 +20,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 4
+schemaVersion = 5
 executionAbiVersion = 3
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -68,6 +68,8 @@ data ConstructorDecl = ConstructorDecl
 data GlobalDecl = GlobalDecl
   { globalIdentity :: SymbolIdentity, globalRep :: RuntimeRep
   , globalEntrySignature :: Maybe SignatureId
+  -- No normal result after saturation; entry result reps are empty.
+  , globalDeadEnd :: Bool
   , globalRequiredEvaluated :: Bool, globalRequiredGeneration :: Maybe Word64
   } deriving stock (Eq, Show, Generic)
 data OperationDecl = OperationDecl { operationIdentity :: Text, operationSignature :: SignatureId }

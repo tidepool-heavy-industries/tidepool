@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 4;
+pub const SCHEMA_VERSION: u64 = 5;
 pub const EXECUTION_ABI_VERSION: u64 = 3;
 
 macro_rules! dense_id {
@@ -259,6 +259,9 @@ pub struct GlobalDecl {
     /// Required entry evidence when GHC knows the closure's entry arity.
     /// Unknown lifted values must not acquire an entry from their full type.
     pub entry_signature: Option<SignatureId>,
+    /// No normal result after saturation. The entry signature then has empty
+    /// results; this does not imply raising rather than divergence.
+    pub dead_end: bool,
     pub required_evaluated: bool,
     pub required_generation: Option<u64>,
 }
@@ -620,6 +623,7 @@ pub struct ImportedValue {
     /// Semantic signature supplied by the binding owner. Signature IDs are
     /// module-local table indices and therefore cannot cross the link boundary.
     pub entry_signature: Option<Signature>,
+    pub dead_end: bool,
     pub evaluated: bool,
     pub generation: u64,
 }
