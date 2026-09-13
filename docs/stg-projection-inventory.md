@@ -283,6 +283,17 @@ foreign pointer access or arbitrary foreign calls.
 
 ### Remaining forms
 
+The pinned `GHC.Internal.Stack.CloneStack.$wgo` is the recursive
+`getDecodedStackArray` worker: `[UnliftedRef, Int64, Void] -> Returns[LiftedRef]`.
+It owns IPE lookup and InfoProv string decoding, including UTF8 cleanup through
+`bracket`. It is represented by `ghc:decodeStackEntries`, an exact deferred
+function capability, not by pretending its internal catch/masking operations
+are no-ops. The pinned `collectBacktraces` unfolding calls it only in the IPE
+branch; the default configuration enables HasCallStack and disables IPE.
+Changing that configuration can reach a typed capability failure, never a
+fabricated decoded stack. The native catalog checks the signature separately
+from the lower-level `ghc:decodeStack` primcall signature.
+
 The producer still rejects unsupported literal shapes such as `BigNat` and
 relocatable labels, and rejects primitive/foreign calls without a wire/native
 contract. Validated projection can therefore be broader than connected native

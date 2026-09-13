@@ -86,3 +86,23 @@ the incompatible Core body or guess a replacement binder type. Native lowering
 records the bounded decoded message directly. The remaining integration work is
 session presentation of raised exception operands; the wired-in path already
 retains its message without requiring exception-heap observation.
+
+## Single-precision exceptional decode behavior
+
+The pinned-GHC oracle exposed incorrect NaN/infinity sentinels in the shared
+Double decoder; that owner now preserves the raw IEEE sign and payload. The
+adjacent `decode_float_int` still has analogous sentinel branches. Its
+single-precision exceptional contract has not been checked against the oracle
+in this delivery pass. Verify it before wiring `decodeFloat_Int#` into prepared
+execution; do not copy those branches as an assumed GHC contract.
+
+## Internal IO exception handling is not a status catch-all
+
+The deferred IPE decoder owns an encoding-cleanup closure that uses catch and
+masking. It is not implemented by swallowing the prepared `LanguageFailure`
+status: that status also covers host capability and resource failures. A future
+real catch implementation must distinguish raised Haskell operands, transfer
+their GC root before consuming the first cause, and continue unwinding host
+cancellation and integrity failures. Masking needs scoped observable state and
+restoration, and must not suppress host cancellation. The current exact IPE
+function boundary avoids claiming these semantics in Wave 5.

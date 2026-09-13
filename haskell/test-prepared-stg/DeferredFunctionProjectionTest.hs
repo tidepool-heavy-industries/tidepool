@@ -53,6 +53,7 @@ verifyDeferredFunctionProjection = do
   collect <- loadCollectStackTrace source
   verifyLoadedId False (requiredExpected "collectStackTrace") collect
   verifyLookalikes prepared
+  verifyWorkerLookalike prepared
 
 expectations :: [Expected]
 expectations =
@@ -65,6 +66,9 @@ expectations =
   , Expected "ccsToStringsBare" "GHC.Internal.Stack.CCS" "$wgo"
       (DeferredFunction "ghc:ccsToStrings"
         (Signature [AddressRep, LiftedRefRep, VoidRep] (Returns [LiftedRefRep])))
+  , Expected "decodeStackEntriesBare" "GHC.Internal.Stack.CloneStack" "$wgo"
+      (DeferredFunction "ghc:decodeStackEntries"
+        (Signature [UnliftedRefRep, IntRep 64, VoidRep] (Returns [LiftedRefRep])))
   ]
 
 verifyImported :: PreparedPipelineResult -> Expected -> IO ()
@@ -81,6 +85,7 @@ verifyImported prepared expected = do
   verifyLoadedId True expected binder
   program <- projectOrFail context (closureModules closure)
   assertCapability expected program
+  assertSynthesizedTop expected binder program
   unless (null [ failure | failure <- closureFailures closure
       , Text.pack (expectedOccurrence expected) `Text.isInfixOf` Text.pack (show failure) ])
     (ioError (userError ("catalogued Id remained a recovery residual: "
@@ -147,6 +152,27 @@ verifyLookalikes prepared = mapM_ verify
     unless (all (not . isDeferredCapability . operationIdentity) (programOperations program))
       (ioError (userError ("source-module lookalike emitted a deferred capability: " <> occurrence)))
 
+verifyWorkerLookalike :: PreparedPipelineResult -> IO ()
+verifyWorkerLookalike prepared = do
+  let context = fixtureContext "decodeStackEntriesLookalike"
+  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) context
+    (pprModules prepared)
+  program <- projectOrFail context (closureModules closure)
+  let matching =
+        [ symbol
+        | group <- programBindings program
+        , TopBinding symbol _ <- groupItems group
+        , symbolUnit symbol == "main"
+        , symbolModule symbol == "DeferredFunctionProjection"
+        , symbolOccurrence symbol == "$wgo"
+        ]
+  unless (not (null matching))
+    (ioError (userError "projection omitted the source-module $wgo lookalike"))
+  unless (all ((/= CapabilityIdentity "ghc:decodeStackEntries") . operationIdentity)
+      (programOperations program))
+    (ioError (userError
+      "source-module $wgo lookalike emitted the IPE decoder capability"))
+
 projectOrFail :: ProjectionContext -> [PreparedModule] -> IO WireProgram
 projectOrFail context modules = case projectPreparedTarget context modules of
   Left failure -> ioError (userError ("deferred function projection failed: " <> show failure))
@@ -161,6 +187,37 @@ assertCapability expected program = case
   [signature] | signature == deferredSignature (expectedDeferred expected) -> pure ()
   signatures -> ioError (userError ("wrong capability signature for "
     <> expectedOccurrence expected <> ": " <> show signatures))
+
+assertSynthesizedTop :: Expected -> Id -> WireProgram -> IO ()
+assertSynthesizedTop expected binder program = case
+    [ (entrySignature, parameters, body)
+    | group <- programBindings program
+    , TopBinding symbol (HeapBinding _ (Function signature parameters _ body))
+        <- groupItems group
+    , symbol == symbolFor binder
+    , let entrySignature = signatureAt program signature
+    ] of
+  [(entrySignature, parameters, Operation operation arguments)] -> do
+    unless (entrySignature == deferredSignature (expectedDeferred expected))
+      (ioError (userError ("synthesized deferred top has the wrong signature for "
+        <> renderId binder <> ": " <> show entrySignature)))
+    let expectedArguments = zipWith deferredArgument
+          (signatureArguments entrySignature) parameters
+    unless (arguments == expectedArguments)
+      (ioError (userError ("synthesized deferred top has the wrong arguments for "
+        <> renderId binder <> ": " <> show arguments)))
+    case programOperations program !! fromIntegralOperation operation of
+      OperationDecl identity signature -> unless
+        (identity == CapabilityIdentity (deferredCapability (expectedDeferred expected))
+          && signatureAt program signature == entrySignature)
+        (ioError (userError ("synthesized deferred top operation diverged for "
+          <> renderId binder)))
+  found -> ioError (userError ("expected one synthesized deferred function top for "
+    <> renderId binder <> ", got " <> show found))
+  where
+    deferredArgument VoidRep _ = Void
+    deferredArgument _ parameter = Ref (Local parameter)
+    fromIntegralOperation (OperationId index) = fromIntegral index
 
 signatureAt :: WireProgram -> SignatureId -> Signature
 signatureAt program (SignatureId index) =
@@ -211,9 +268,6 @@ collectExpectation = Expected "collectStackTraceBare"
 groupItems :: Group a -> [a]
 groupItems (NonRecursive item) = [item]
 groupItems (Recursive items) = items
-
-topSymbol :: TopBinding -> SymbolIdentity
-topSymbol (TopBinding symbol _) = symbol
 
 isDeferredCapability :: OperationIdentity -> Bool
 isDeferredCapability CapabilityIdentity{} = True

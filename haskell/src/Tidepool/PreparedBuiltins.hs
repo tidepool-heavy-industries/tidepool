@@ -55,6 +55,12 @@ deferredFunctions =
     , DeferredFunction "ghc:ccsToStrings"
         (Signature [AddressRep, LiftedRefRep, VoidRep] (Returns [LiftedRefRep]))
     )
+  -- The pinned getDecodedStackArray worker owns IPE lookup and decoding;
+  -- deferring only its foreign leaf leaves the encoding cleanup closure live.
+  , ( ("ghc-internal", "GHC.Internal.Stack.CloneStack", "$wgo")
+    , DeferredFunction "ghc:decodeStackEntries"
+        (Signature [UnliftedRefRep, IntRep 64, VoidRep] (Returns [LiftedRefRep]))
+    )
   ]
 
 wiredInErrorKind :: Id -> Maybe WiredInErrorKind

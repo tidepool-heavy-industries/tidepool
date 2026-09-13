@@ -431,3 +431,12 @@ are nondeterministic.
   emits keepAlive with a Returns contract, but native admission also accepted
   NoSuccess, which removed the post-call liveness use. A malformed-artifact
   rejection test now protects that distinction.
+- An address-result primitive test must use an already-admitted observation
+  path. Adding an unsupported comparison to inspect the result makes admission
+  reject the test before the primitive under test runs. State the observation
+  operation in the fixture contract, not just its expected final scalar.
+- The operation audit now consumes projected artifacts and the admission owner's
+  exact classifier. It lists every unsupported pair in one pass, rather than
+  discovering one more primitive after each full corpus replay. Raw STG
+  inventories remain useful for source evidence but cannot substitute for the
+  producer's capability rewriting when checking native admission.
