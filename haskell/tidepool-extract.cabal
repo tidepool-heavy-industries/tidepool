@@ -171,6 +171,7 @@ test-suite execution-schema-projection
     directory,
     filepath,
     ghc >= 9.12 && < 9.13,
+    text,
     tidepool-extract-internal
   default-language: GHC2024
   default-extensions: OverloadedStrings

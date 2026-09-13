@@ -252,3 +252,24 @@ are nondeterministic.
   runner 6/6. Prepared engine evidence is 26/27; the remaining nested-function
   fixture fails with `InvalidScope("value ValueId(1) is out of scope")`. This
   is not a corpus or workspace gate result.
+
+## Wave 4 identity/corpus follow-up — 2026-09-13
+
+- Binder reachability and wire identity must use different scopes. The
+  inventory walk retains GHC binder `Unique` values; only the complete-module
+  `VarEnv` assigns stable wire symbols. Missing home tops and unknown internal
+  names are typed projection failures, not opportunities to synthesize local
+  imports; genuine external package imports remain admissible.
+- Manifest v2 separates actual prepared coverage from historical provenance.
+  The Suite producer enumerated 812 actual tops, with 802 projection passes
+  and 802 validation passes; 10 rows were rejected at projection. The old
+  347-name ledger mapped 255 names and left 92 explicitly unmapped. These
+  denominators must not be combined.
+- Reached comparison evidence was 56 passed and 0 failed, but 67 rows lacked
+  expectations. Admission and execution remain bounded by the connected
+  native subset, so this is not a full-corpus success claim.
+- Exact oracle identity is deliberately narrow: only an external occurrence
+  gets a key, while local and rejected rows do not. Suffix aliases are rejected
+  by consumer validation. Ambiguous exact external legacy matches fail the
+  producer, and an all-tops source or identity-enumeration failure aborts
+  rather than emitting a falsely successful empty manifest.

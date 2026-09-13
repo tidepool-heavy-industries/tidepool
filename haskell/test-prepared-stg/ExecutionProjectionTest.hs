@@ -7,15 +7,23 @@ import Data.ByteString qualified as BS
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Text qualified as Text
 import GHC.Builtin.Types
   ( doubleRepDataConTy, intRepDataConTy, liftedRepTy, tupleRepDataConTyCon
   , mkPromotedListTy, runtimeRepTy, unliftedRepTy, zeroBitRepTy )
 import GHC.Core.Type (mkTyConApp)
 import GHC.Types.Basic (TypeOrConstraint(TypeLike, ConstraintLike))
 import GHC.Types.Literal (Literal(..))
+import GHC.Types.Name (nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Var (Id, varName)
+import GHC.Stg.Syntax
+import Tidepool.PreparedStg (PreparedModule(..))
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
-import Tidepool.PreparedStg (PreparedModule)
+import Tidepool.GhcPipeline
+  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
+  , runPipelineSelected )
 
 projectProjectionContract :: [PreparedModule] -> IO WireProgram
 projectProjectionContract modules = do
@@ -56,6 +64,9 @@ projectProjectionContract modules = do
       verifyDemandedApplicationResults program
       verifySpecificApplicationShapes program
       verifyTargetClosure context modules
+      verifySameOccurrenceIdentity program
+      verifyMissingHomeTop context modules
+      verifySuiteCollisionRegression
       verifyVoidParameters program
       verifyUnboxedReturn program
       case projectPrepared context [] of
@@ -120,7 +131,7 @@ topIdentityAllocationContract = do
   let internal = symbol "A" "local" "reverse"
       external = symbol "A" "value" "reverse"
       retained = Map.singleton internal 7
-  unless (Map.lookup external retained == Nothing)
+  unless (Map.notMember external retained)
     (ioError (userError
       "internal and external same-spelled identities shared retained-generation state"))
 
@@ -360,6 +371,89 @@ verifyTargetClosure context modules = do
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items
 
+-- This checks the wire reference, not merely the retained occurrence list:
+-- a local binder with the same spelling must not displace the home top.
+verifySameOccurrenceIdentity :: WireProgram -> IO ()
+verifySameOccurrenceIdentity program = do
+  top <- namedTop "sameOccurrenceTop"
+  result <- namedTop "sameOccurrenceResult"
+  unless (hasReferenceTo (heapBody result) (heapBindingId top))
+    (ioError (userError
+      "same-occurrence projection did not retain the exact home top reference"))
+  where
+    namedTop occurrence = case
+      [ binding
+      | group <- programBindings program
+      , TopBinding symbol binding <- groupItems group
+      , symbolOccurrence symbol == occurrence
+      ] of
+        [binding] -> pure binding
+        bindings -> ioError (userError
+          ("expected one " <> show occurrence <> " binding, got " <> show (length bindings)))
+    hasReferenceTo expression expected = case expression of
+      Call (Ref (Local target)) _ _ -> target == expected
+      Enter (Ref (Local target)) _ -> target == expected
+      Case scrutinee _ _ _ alternatives -> hasReferenceTo scrutinee expected
+        || any (\alternative -> hasReferenceTo (alternativeBody alternative) expected) alternatives
+      Let group body -> any (\binding -> hasReferenceTo (heapBody binding) expected) (groupItems group)
+        || hasReferenceTo body expected
+      LetJoins group body -> any (\binding -> hasReferenceTo (joinBody binding) expected) (groupItems group)
+        || hasReferenceTo body expected
+      _ -> False
+    heapBody (HeapBinding _ (Function _ _ _ body)) = body
+    heapBody (HeapBinding _ (Thunk _ _ _ body)) = body
+    heapBody HeapBinding{} = Return []
+    alternativeBody (Alternative _ _ body) = body
+    joinBody (JoinBinding _ _ _ body) = body
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+verifyMissingHomeTop :: ProjectionContext -> [PreparedModule] -> IO ()
+verifyMissingHomeTop context modules = case projectPrepared context stripped of
+  Left (MissingPreparedTop _) -> pure ()
+  Left failure -> ioError (userError
+    ("absent home top produced the wrong typed rejection: " <> show failure))
+  Right _ -> ioError (userError
+    "absent home top was projected as an import or otherwise accepted")
+  where
+    stripped =
+      [ prepared { pmBindings = filter (not . isMissingTop . fst) (pmBindings prepared) }
+      | prepared <- modules
+      ]
+    isMissingTop binding = any
+      ((== "sameOccurrenceTop") . occNameString . nameOccName . varName)
+      (topBindersForTest binding)
+
+verifySuiteCollisionRegression :: IO ()
+verifySuiteCollisionRegression = do
+  prepared <- runPipelineSelected PreparedStg "test/Suite.hs" ["lib", "test"]
+  let context identity = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty identity
+      identity = SymbolIdentity "main" "Suite" "value" "ho_myany"
+  case projectPreparedTarget (context identity) (pprModules prepared) of
+    Left failure -> ioError (userError ("Suite collision repro changed: " <> show failure))
+    Right program -> do
+      let localSats = localSatOccurrences program
+      unless (Set.size localSats >= 2
+          && all (Text.isPrefixOf "sat.") (Set.toList localSats))
+        (ioError (userError
+          ("known Suite sat collision lost a home dependency: " <> show localSats)))
+      unless (all genuineGlobal (programGlobals program))
+        (ioError (userError
+          "known Suite sat collision emitted a fake internal global"))
+  where
+    localSatOccurrences program = Set.fromList
+      [ symbolOccurrence symbol
+      | group <- programBindings program
+      , TopBinding symbol _ <- groupItems group
+      , symbolNamespace symbol == "local"
+      , Text.isPrefixOf "sat." (symbolOccurrence symbol)
+      ]
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+    genuineGlobal global = symbolUnit (globalIdentity global) /= "<interactive>"
+      && symbolModule (globalIdentity global) /= "<local>"
+
 verifyVoidParameters :: WireProgram -> IO ()
 verifyVoidParameters program = case
   [ (signatureAt signature, parameters)
@@ -396,3 +490,9 @@ verifyUnboxedReturn program = case
     signatureAt (SignatureId index) = programSignatures program !! fromIntegral index
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items
+
+topBindersForTest :: CgStgTopBinding -> [Id]
+topBindersForTest (StgTopStringLit binder _) = [binder]
+topBindersForTest (StgTopLifted binding) = case binding of
+  StgNonRec binder _ -> [binder]
+  StgRec pairs -> map fst pairs

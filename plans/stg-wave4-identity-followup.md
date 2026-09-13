@@ -3,6 +3,15 @@
 Baseline: `05e27a073`. This closes projection and measurement defects before
 Wave 5; it does not implement laziness, imports, effects, or resident cutover.
 
+Completed baseline verification: workspace test targets compile; repr 2/2,
+runtime 6/6, corpus comparator 7/7, runner 7/7 pass. Engine contracts are 26/27:
+the remaining self-capture fixture uses Atom encoding where ValueRef is required.
+Suite comparison is now 56 passed, zero mismatches, one missing expectation.
+Project.Work.candidate passes through execution with no expectation; the actor
+cohort lacks its generated production Effects.Core environment. Fixture freshness
+is stale. Logs are in `target/wave4-checkpoint-checks/`; these results precede
+the follow-up edits, not evidence that the new manifest/reachability works.
+
 ## Shared decisions
 
 Reachability uses GHC binder Unique throughout the existing inventory walk.
@@ -56,3 +65,49 @@ review. Update inventory/friction notes from observed outcomes, not promises.
 Initial lead rounds: one ownership/dependency plan; one shared seed/edit round;
 three worker assignments. Subsequent reviews/corrections are recorded as they
 happen. Token accounting is unavailable. Outcome assessment remains required.
+
+Harness thread retention prevented creating a third new worker and had evicted
+the previous Rust worker. Parcel C therefore reuses `wave4_projection_read`
+(Luna High) with a fresh explicit ownership assignment; it no longer owns the
+Haskell probe. A and B are `identity_projection` and `identity_corpus_producer`.
+
+Progress evidence:
+
+- C: comparator 7/7, runner 12/12, prepared-program contracts 27/27 passed.
+  The capture fixture now reaches its intended compiler rejection. One missing
+  test-only import was corrected after compilation; no assertion was weakened.
+- A: projection suite passed, but lead review found its new same-spelling test
+  covered a local shadow of an external top, not two internal tops. Stronger
+  collision coverage is required before accepting that parcel as complete.
+- B: source-ready manifest review required all-top compilation failures to abort
+  rather than emit a successful empty denominator; ambiguous legacy mappings
+  must likewise fail explicitly. Pure mapping self-tests were then added.
+- C review required the legacy name to equal the mapped external occurrence,
+  rejecting an otherwise well-formed but forbidden suffix-stripping alias.
+- A review removed duplicate identity allocation from its extra Unique-keyed
+  lookup table: any auxiliary view must derive from the single identity owner.
+
+Lead follow-up events so far: A identity-owner correction, A guard-order
+clarification, A collision-test rejection; B empty-denominator/ambiguity
+correction and self-test assignment; C legacy-alias correction; serialized test
+grants and exact-result reviews. These events are counted contemporaneously;
+earlier full-wave accounting remains incomplete.
+
+The v2 corpus run is preserved as `plans/stg-wave4-corpus-identity.json`.
+It enumerated 812 STG tops, of which 802 projected and all 802 validated.
+Legacy mapping retained all 347 names: 255 exact mappings and 92 unmapped.
+Of the 217 historical expectation keys, 207 have manifest oracle keys. Ten
+rounding/printf names have exact legacy-to-STG identity mappings but no oracle
+key on their rejected rows: STG projection rejects their foreign/prim calls.
+Among the 207 mapped oracle cases, 56 admitted, executed, and matched; 151
+failed closed-strict admission and never reached execution. Across all STG
+tops, admission passed 191, execution passed 123, and comparison passed 56 with
+67 missing expectations. The 68 execution failures are 21 entries requiring
+managed host arguments, 46 Address observations, and one 100,000-node budget
+exhaustion on `thunk_letrec_knot_xs`. These are separate current limitations,
+not 68 evidence-backed wrong returned values.
+
+The Project.Work priority target projects, validates, admits, compiles, and
+runs; it has no comparison expectation. The actor stdlib target still fails
+source compilation because the production generated Effects.Core module is
+not present in this corpus setup. No tiny prepared-probe stub is substituted.

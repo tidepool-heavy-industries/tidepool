@@ -40,13 +40,14 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (mkUniqSet, nonDetEltsUniqSet)
-import GHC.Types.Unique.FM (lookupUFM)
+import GHC.Types.Unique (Unique)
+import GHC.Types.Unique.FM (UniqFM, listToUFM, lookupUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (Module, unitString)
-import Tidepool.ExecutionIR (ExactName(..), topBindingReferences)
+import Tidepool.ExecutionIR (topBindingReferences)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.Identity (varId)
@@ -80,6 +81,7 @@ data PState = PState
   , signatures :: [(Signature, SignatureId)]
   , target :: TargetDescriptor
   , retainedGenerations :: Map SymbolIdentity Word64
+  , homeModules :: Set (Text, Text)
   }
 
 type P a = StateT PState (Either ProjectionError) a
@@ -87,12 +89,12 @@ type P a = StateT PState (Either ProjectionError) a
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
-projectPrepared context modules = projectPreparedWithTopSymbols context modules
-  (buildTopIdentityMap modules)
+projectPrepared context modules =
+  projectPreparedWithTopSymbols context modules (buildTopIdentityMap modules)
 
 -- | Corpus tooling enumerates the same identities that projection resolves,
 -- before any target filtering. Preserve module/binding emission order and never
@@ -115,7 +117,10 @@ projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
 projectPreparedWithTopSymbols context modules topIdentityMap = do
   let initial = PState 0 0 emptyVarEnv emptyVarEnv topIdentityMap Map.empty
         emptyVarEnv [] [] [] [] [] [] (projectionTarget context)
-        (projectionRetainedGenerations context)
+        (projectionRetainedGenerations context) (Set.fromList
+          [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
+             Text.pack (moduleNameString (moduleName (pmModule prepared))))
+          | prepared <- modules ])
   (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     (pure . topValue) (findTop bindingGroups)
@@ -154,6 +159,7 @@ projectPreparedTarget context modules =
     ] topIdentityMap
   where
     topIdentityMap = buildTopIdentityMap modules
+    topUniqueIdentityMap = buildTopUniqueIdentityMap topIdentityMap modules
     allBindings =
       [ (pmModule prepared, binding)
       | prepared <- modules
@@ -176,7 +182,7 @@ projectPreparedTarget context modules =
       [ (mappedTopIdentity binder, Set.fromList
           [ symbol
           | unique <- nonDetEltsUniqSet (topBindingReferences modul topLevel binding)
-          , Just symbol <- [lookupUFM topIdentityMap unique]
+          , Just symbol <- [lookupUFM topUniqueIdentityMap unique]
           ])
       | (modul, binding) <- allBindings
       , binder <- topBinders binding
@@ -198,17 +204,6 @@ projectPreparedTarget context modules =
 
     orElse (Just value) _ = value
     orElse Nothing fallback = fallback
-
-    -- Top binders retain their defining module in the GHC Name. Keeping this
-    -- conversion local avoids making the provisional inventory depend on the
-    -- wire schema's symbol type.
-    exactNameOf fallback binder = case nameModule_maybe (varName binder) of
-      Just modul -> ExactName (unitString (moduleUnit modul))
-        (moduleNameString (moduleName modul))
-        (occNameString (nameOccName (varName binder)))
-      Nothing -> ExactName (unitString (moduleUnit fallback))
-        (moduleNameString (moduleName fallback))
-        (occNameString (nameOccName (varName binder)))
 
 topBinders :: CgStgTopBinding -> [Id]
 topBinders (StgTopStringLit binder _) = [binder]
@@ -234,6 +229,16 @@ buildTopIdentityMap modules = foldl insert emptyVarEnv (zip binders assigned)
     assigned = assignTopIdentitySpellings
       (zip symbols (map (isExternalName . varName . snd) binders))
     insert mappings ((_, binder), symbol) = extendVarEnv mappings binder symbol
+
+buildTopUniqueIdentityMap :: VarEnv SymbolIdentity -> [PreparedModule]
+  -> UniqFM Unique SymbolIdentity
+buildTopUniqueIdentityMap topIdentityMap modules = listToUFM
+  [ (varUnique binder, symbol)
+  | prepared <- modules
+  , (binding, _) <- pmBindings prepared
+  , binder <- topBinders binding
+  , Just symbol <- [lookupVarEnv topIdentityMap binder]
+  ]
 
 -- | Deterministic identity allocation shared by projection and collision
 -- regressions. The Bool marks an externally named top, whose spelling is
@@ -493,34 +498,46 @@ withScope action = do
   pure result
 
 internGlobal :: Id -> P GlobalId
-internGlobal binder | not (isExternalName (varName binder)) =
-  lift (Left (UnboundPreparedInternal
-    (Text.pack (occNameString (nameOccName (varName binder))))))
-internGlobal binder = do
-  known <- gets globals
-  case lookupVarEnv known binder of
-    Just identity -> pure identity
-    Nothing -> do
-      reps <- repsForType (varType binder)
-      rep <- case reps of
-        [] -> pure VoidRep
-        [single] -> pure single
-        _ -> failRepresentation "global value has more than one representation component"
-      (entry, deadEnd, evaluated) <- importedEntry binder
-      signature <- traverse internSignature entry
-      existing <- gets globalDecls
-      generations <- gets retainedGenerations
-      let identity = GlobalId (fromIntegral (length existing))
-          symbol = idSymbol "value" binder
-          retainedGeneration = if isExternalName (varName binder)
-            then Map.lookup symbol generations
-            else Nothing
-          declaration = GlobalDecl symbol rep signature deadEnd evaluated
-            retainedGeneration
-      modify' (\current -> current
-        { globals = extendVarEnv (globals current) binder identity
-        , globalDecls = globalDecls current <> [declaration] })
-      pure identity
+internGlobal binder
+  | not (isExternalName (varName binder)) =
+      lift (Left (UnboundPreparedInternal
+        (Text.pack (occNameString (nameOccName (varName binder))))))
+  | otherwise = case nameModule_maybe (varName binder) of
+      Nothing -> lift (Left (InvalidPreparedIdentity
+        ("global has no defining module: "
+          <> Text.pack (occNameString (nameOccName (varName binder))))))
+      Just module_ -> do
+        homes <- gets homeModules
+        if homeKey module_ `Set.member` homes
+          then lift (Left (MissingPreparedTop (idSymbol "value" binder)))
+          else internExternalGlobal binder
+  where
+    homeKey module_ =
+      (Text.pack (unitString (moduleUnit module_)),
+       Text.pack (moduleNameString (moduleName module_)))
+    internExternalGlobal externalBinder = do
+      known <- gets globals
+      case lookupVarEnv known externalBinder of
+        Just identity -> pure identity
+        Nothing -> do
+          reps <- repsForType (varType externalBinder)
+          rep <- case reps of
+            [] -> pure VoidRep
+            [single] -> pure single
+            _ -> failRepresentation "global value has more than one representation component"
+          (entry, deadEnd, evaluated) <- importedEntry externalBinder
+          signature <- traverse internSignature entry
+          existing <- gets globalDecls
+          generations <- gets retainedGenerations
+          let identity = GlobalId (fromIntegral (length existing))
+              symbol = idSymbol "value" externalBinder
+              retainedGeneration = Map.lookup symbol generations
+              declaration = GlobalDecl symbol rep signature deadEnd evaluated
+                retainedGeneration
+          modify' (\current -> current
+            { globals = extendVarEnv (globals current) externalBinder identity
+            , globalDecls = globalDecls current <> [declaration] })
+          pure identity
 
 internSignature :: Signature -> P SignatureId
 internSignature signature = do

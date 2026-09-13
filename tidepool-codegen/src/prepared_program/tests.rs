@@ -462,7 +462,7 @@ fn nested_invalid_enter_wire() -> Vec<u8> {
             enter_frame(1, 0),
             return_frame(vec![atom_scalar(scalar_int(7))]),
             let_recursive_frame(
-                vec![heap_binding(1, function_rhs(0, vec![atom_ref(1)], 0))],
+                vec![heap_binding(1, function_rhs(0, vec![value_ref_local(1)], 0))],
                 1,
             ),
         ],

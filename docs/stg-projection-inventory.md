@@ -150,3 +150,29 @@ The prepared engine is 26/27: the remaining
 `nested_function_rejection_reports_the_nested_expression_owner` fixture fails
 with `InvalidScope("value ValueId(1) is out of scope")`. These counts are
 boundary evidence only; they do not claim a green corpus or workspace gate.
+
+## Identity and corpus follow-up — 2026-09-13
+
+Reachability now follows GHC binder `Unique` values throughout the prepared
+inventory walk. Only the complete-module `VarEnv` converts that identity to a
+stable wire symbol. A projected home top that is absent from that map is a
+typed projection failure; an unknown internal name cannot be turned into an
+import declaration. Genuine external package imports remain valid.
+
+Corpus manifest version 2 records every actual prepared top in the selected
+module before any requested-target filtering. Program names are the complete
+`unit:module:namespace:occurrence` identity. Only a projected external
+(`value` namespace) top receives an exact occurrence `expectation_key`; local
+tops and rejected rows carry no key. The supplied historical target list is a
+separate ledger whose entries map to an exact external identity or `null`.
+Suffix stripping and guessed aliases are not mapping rules; duplicate or
+ambiguous exact external matches reject the producer. All-tops compilation or
+identity-enumeration failure aborts instead of writing a successful empty
+corpus. Consumer validation likewise rejects suffix-alias oracle keys.
+
+The current Suite run contains 812 actual tops: 802 projected and validated,
+with 10 projection rejections. Historical coverage is a separate denominator:
+255 of 347 legacy names mapped and 92 remained unmapped. The comparator has
+56 passes and 0 failures among reached rows, but 67 rows have missing
+expectations, so this is not full corpus coverage. Runtime admission,
+execution, and workspace freshness limits remain.

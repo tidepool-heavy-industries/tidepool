@@ -65,7 +65,7 @@ find "$repo_root/haskell/test/suite_cbor" -maxdepth 1 -type f -name '*.cbor' \
 suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
 echo "==> projecting Suite.hs prepared corpus ($suite_count targets)"
 "$projection_probe" \
-  "$repo_root/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
+  --all-tops "$repo_root/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
   "$repo_root/haskell/lib"
 suite_report="$suite_root/results.json"
 "$prepared_runner" run \
@@ -91,3 +91,18 @@ echo "  comparison expectations are historical and may be missing; inspect resul
 report_totals priority "$priority_report"
 report_totals actor-stdlib "$actor_report"
 report_totals suite "$suite_report"
+
+report_legacy_totals() {
+  local cohort="$1"
+  local manifest="$2"
+  jq -r --arg cohort "$cohort" '
+    ([.legacy_targets[] | select(.identity != null)] | length) as $mapped
+    | ([.legacy_targets[] | select(.identity == null)] | length) as $unmapped
+    | (.programs | length) as $stg_tops
+    | "  \($cohort) manifest: stg_tops=\($stg_tops) legacy_mapped=\($mapped) legacy_unmapped=\($unmapped)"
+  ' "$manifest"
+}
+
+report_legacy_totals priority "$priority_root/manifest.json"
+report_legacy_totals actor-stdlib "$actor_root/manifest.json"
+report_legacy_totals suite "$suite_root/manifest.json"

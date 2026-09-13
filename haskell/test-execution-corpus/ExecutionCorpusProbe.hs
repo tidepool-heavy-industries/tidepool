@@ -2,7 +2,7 @@
 
 module Main (main) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, unless)
 import Control.Exception
   ( AsyncException, SomeException, evaluate, fromException, throwIO, try )
 import Data.ByteString qualified as BS
@@ -24,36 +24,69 @@ import Tidepool.GhcPipeline
   , runPipelineSelected )
 import Tidepool.Json (jsonString)
 
-data Record = Record String Outcome
+data Record = Record String (Maybe String) Outcome
 
 data Outcome
   = Projected FilePath SymbolIdentity
   | Rejected String
 
 main :: IO ()
-main = do
-  arguments <- getArgs
-  (source, moduleNameArg, targetsFile, outputDir, includes) <- case arguments of
+main = getArgs >>= \arguments -> case arguments of
+  ["--self-test"] -> mappingSelfTest
+  _ -> runProbe arguments
+
+runProbe :: [String] -> IO ()
+runProbe arguments = do
+  (allTops, source, moduleNameArg, targetsFile, outputDir, includes) <- case arguments of
+    "--all-tops" : source : moduleNameArg : targetsFile : outputDir : rest
+      | not (null rest) -> pure (True, source, moduleNameArg, targetsFile, outputDir, rest)
     source : moduleNameArg : targetsFile : outputDir : rest
-      | not (null rest) -> pure (source, moduleNameArg, targetsFile, outputDir, rest)
+      | not (null rest) -> pure (False, source, moduleNameArg, targetsFile, outputDir, rest)
     _ -> ioError (userError
-      "usage: execution-corpus-projection SOURCE MODULE TARGETS_FILE OUTPUT_DIR INCLUDE...")
+      "usage: execution-corpus-projection [--all-tops] SOURCE MODULE TARGETS_FILE OUTPUT_DIR INCLUDE...")
   targets <- lines <$> readFile targetsFile
   createDirectoryIfMissing True outputDir
   compiled <- trySync (runPipelineSelected PreparedStg source includes)
-  records <- case compiled of
-    Left failure -> pure (map (rejectedRecord ("source compilation rejected: " <> show failure)) targets)
+  (records, legacyTargets) <- case compiled of
+    Left failure -> if allTops
+      then ioError (userError
+        ("all-tops source compilation rejected: " <> show failure))
+      else pure
+        ( map (rejectedRecord moduleNameArg
+            ("source compilation rejected: " <> show failure)) targets
+        , map (\target -> LegacyTarget target Nothing) targets
+        )
     Right prepared -> do
       enumerated <- trySync (evaluate (forceIdentities
         (preparedTopIdentities (pprModules prepared))))
       case enumerated of
-        Left failure -> pure (map (rejectedRecord
-          ("prepared identity enumeration rejected: " <> show failure)) targets)
-        Right (Left failure) -> pure (map (rejectedRecord
-          ("prepared identity enumeration rejected: " <> show failure)) targets)
-        Right (Right identities) -> forM (zip [0 :: Int ..] targets) $ \(index, occurrence) ->
-          projectOne prepared identities moduleNameArg outputDir index occurrence
-  BS.writeFile (outputDir </> "manifest.json") (toBytes (renderManifest records))
+        Left failure -> if allTops
+          then ioError (userError
+            ("all-tops prepared identity enumeration rejected: " <> show failure))
+          else pure
+            ( map (rejectedRecord moduleNameArg
+                ("prepared identity enumeration rejected: " <> show failure)) targets
+            , map (\target -> LegacyTarget target Nothing) targets
+            )
+        Right (Left failure) -> if allTops
+          then ioError (userError
+            ("all-tops prepared identity enumeration rejected: " <> show failure))
+          else pure
+            ( map (rejectedRecord moduleNameArg
+                ("prepared identity enumeration rejected: " <> show failure)) targets
+            , map (\target -> LegacyTarget target Nothing) targets
+            )
+        Right (Right identities) -> do
+          let selected = filter (inModule moduleNameArg) identities
+          legacy <- mapLegacyTargets moduleNameArg identities targets
+          rows <- if allTops
+            then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
+              projectOneIdentity prepared outputDir index identity
+            else forM (zip [0 :: Int ..] targets) $ \(index, occurrence) ->
+              projectOneTarget prepared selected moduleNameArg outputDir index occurrence
+          pure (rows, legacy)
+  BS.writeFile (outputDir </> "manifest.json")
+    (toBytes (renderManifest records legacyTargets))
 
 forceIdentities :: Either a [b] -> Either a [b]
 forceIdentities result = case result of
@@ -69,10 +102,47 @@ trySync action = do
       Nothing -> pure (Left exception)
     Right value -> pure (Right value)
 
-rejectedRecord :: String -> String -> Record
-rejectedRecord reason occurrence = Record occurrence (Rejected reason)
+rejectedRecord :: String -> String -> String -> Record
+rejectedRecord moduleNameArg reason occurrence =
+  Record (missingName moduleNameArg occurrence) Nothing (Rejected reason)
 
-projectOne
+data LegacyTarget = LegacyTarget String (Maybe SymbolIdentity)
+
+inModule :: String -> SymbolIdentity -> Bool
+inModule moduleNameArg identity = symbolModule identity == Text.pack moduleNameArg
+
+missingName :: String -> String -> String
+missingName moduleNameArg occurrence =
+  "<unknown>:" <> moduleNameArg <> ":value:" <> occurrence
+
+mapLegacyTargets :: String -> [SymbolIdentity] -> [String] -> IO [LegacyTarget]
+mapLegacyTargets moduleNameArg identities = mapM (mapLegacyTarget moduleNameArg identities)
+
+mapLegacyTarget :: String -> [SymbolIdentity] -> String -> IO LegacyTarget
+mapLegacyTarget moduleNameArg identities legacyName = do
+  mapping <- case exactExternalMapping moduleNameArg identities legacyName of
+    Left reason -> ioError (userError reason)
+    Right value -> pure value
+  pure (LegacyTarget legacyName mapping)
+
+exactExternalMapping
+  :: String -> [SymbolIdentity] -> String
+  -> Either String (Maybe SymbolIdentity)
+exactExternalMapping moduleNameArg identities legacyName = case externalMatches of
+  [identity] -> Right (Just identity)
+  [] -> Right Nothing
+  _ -> Left ("legacy target " <> show legacyName
+    <> " has ambiguous exact external matches; mapping rejected")
+  where
+    externalMatches = filter (matchesExternal moduleNameArg legacyName) identities
+
+matchesExternal :: String -> String -> SymbolIdentity -> Bool
+matchesExternal moduleNameArg occurrence identity =
+  inModule moduleNameArg identity
+    && symbolNamespace identity == "value"
+    && symbolOccurrence identity == Text.pack occurrence
+
+projectOneTarget
   :: PreparedPipelineResult
   -> [SymbolIdentity]
   -> String
@@ -80,30 +150,90 @@ projectOne
   -> Int
   -> String
   -> IO Record
-projectOne prepared identities moduleNameArg outputDir index occurrence = do
+projectOneTarget prepared identities moduleNameArg outputDir index occurrence = do
   let candidates = filter matches identities
-      matches identity = symbolModule identity == Text.pack moduleNameArg
-        && symbolOccurrence identity == Text.pack occurrence
-      reject reason = pure (Record occurrence (Rejected reason))
+      matches identity = symbolOccurrence identity == Text.pack occurrence
+      reject reason = pure (Record (missingName moduleNameArg occurrence)
+        Nothing (Rejected reason))
   case candidates of
     [] -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
-    [selected] -> do
-      let context = projectionContext selected
-          artifactName = numericArtifactName index
-      projected <- trySync (evaluate
-        (projectPreparedTarget context (pprModules prepared)))
-      case projected of
-        Left failure -> reject ("target " <> show occurrence <> " projection rejected: " <> show failure)
-        Right (Left failure) -> reject ("target " <> show occurrence <> " rejected: " <> show failure)
-        Right (Right program) -> do
-          encoded <- trySync (evaluate (BS.copy (encodeWireProgram program)))
-          case encoded of
-            Left failure -> reject ("target " <> show occurrence <> " encoding rejected: " <> show failure)
-            Right bytes -> do
-              BS.writeFile (outputDir </> artifactName) bytes
-              pure (Record occurrence (Projected artifactName selected))
+    [selected] -> projectOneIdentity prepared outputDir index selected
     _ -> reject ("target " <> show occurrence <> " is ambiguous in module "
       <> moduleNameArg <> " (" <> show (length candidates) <> " matches)")
+
+projectOneIdentity
+  :: PreparedPipelineResult
+  -> FilePath
+  -> Int
+  -> SymbolIdentity
+  -> IO Record
+projectOneIdentity prepared outputDir index selected = do
+  let context = projectionContext selected
+      artifactName = numericArtifactName index
+      name = identityName selected
+      expectationKey = externalExpectationKey selected
+      reject reason = pure (Record name Nothing (Rejected reason))
+  projected <- trySync (evaluate
+    (projectPreparedTarget context (pprModules prepared)))
+  case projected of
+    Left failure -> reject ("target " <> show (symbolOccurrence selected)
+      <> " projection rejected: " <> show failure)
+    Right (Left failure) -> reject ("target " <> show (symbolOccurrence selected)
+      <> " rejected: " <> show failure)
+    Right (Right program) -> do
+      encoded <- trySync (evaluate (BS.copy (encodeWireProgram program)))
+      case encoded of
+        Left failure -> reject ("target " <> show (symbolOccurrence selected)
+          <> " encoding rejected: " <> show failure)
+        Right bytes -> do
+          BS.writeFile (outputDir </> artifactName) bytes
+          pure (Record name expectationKey (Projected artifactName selected))
+
+identityName :: SymbolIdentity -> String
+identityName identity = intercalate ":"
+  [ Text.unpack (symbolUnit identity)
+  , Text.unpack (symbolModule identity)
+  , Text.unpack (symbolNamespace identity)
+  , Text.unpack (symbolOccurrence identity)
+  ]
+
+externalExpectationKey :: SymbolIdentity -> Maybe String
+externalExpectationKey identity
+  | symbolNamespace identity == "value" =
+      Just (Text.unpack (symbolOccurrence identity))
+  | otherwise = Nothing
+
+mappingSelfTest :: IO ()
+mappingSelfTest = do
+  let external = SymbolIdentity "unit" "Suite" "value" "answer"
+      internal = SymbolIdentity "unit" "Suite" "local" "answer"
+      anotherExternal = SymbolIdentity "unit" "Suite" "value" "answer"
+      identities = [external, internal]
+      assert label condition = unless condition
+        (ioError (userError ("mapping self-test failed: " <> label)))
+  assert "exact external mapping" $
+    exactExternalMapping "Suite" identities "answer" == Right (Just external)
+  assert "internal same-occurrence does not replace external" $
+    exactExternalMapping "Suite" [internal] "answer" == Right Nothing
+  assert "suffixes are not stripped" $
+    exactExternalMapping "Suite" identities "answer.1" == Right Nothing
+  assert "ambiguous exact external mapping rejects" $
+    case exactExternalMapping "Suite" [external, anotherExternal] "answer" of
+      Left _ -> True
+      Right _ -> False
+  assert "canonical identity name" (identityName external == "unit:Suite:value:answer")
+  assert "external expectation key" (externalExpectationKey external == Just "answer")
+  assert "internal expectation key is absent" (externalExpectationKey internal == Nothing)
+  assert "empty identity input is unmapped" $
+    exactExternalMapping "Suite" [] "answer" == Right Nothing
+  assert "duplicate legacy inputs are preserved" $
+    length (mapLegacyTargetsPure "Suite" identities ["answer", "answer"]) == 2
+  putStrLn "execution-corpus-projection mapping self-test: ok"
+
+mapLegacyTargetsPure
+  :: String -> [SymbolIdentity] -> [String] -> [Either String LegacyTarget]
+mapLegacyTargetsPure moduleNameArg identities = map $ \legacyName ->
+  fmap (LegacyTarget legacyName) (exactExternalMapping moduleNameArg identities legacyName)
 
 projectionContext :: SymbolIdentity -> ProjectionContext
 projectionContext identity =
@@ -124,18 +254,29 @@ targetDescriptor = case SystemInfo.arch of
 numericArtifactName :: Int -> FilePath
 numericArtifactName index = show index <> ".prepared.cbor"
 
-renderManifest :: [Record] -> String
-renderManifest records = "{\"version\":1,\"programs\":["
+renderManifest :: [Record] -> [LegacyTarget] -> String
+renderManifest records legacyTargets = "{\"version\":2,\"legacy_targets\":["
+  <> intercalate "," (map renderLegacyTarget legacyTargets)
+  <> "],\"programs\":["
   <> intercalate "," (map renderRecord records)
   <> "]}"
 
 renderRecord :: Record -> String
-renderRecord (Record name outcome) = "{\"name\":" <> jsonString name <> ","
+renderRecord (Record name expectationKey outcome) = "{\"name\":" <> jsonString name
+  <> ",\"expectation_key\":" <> renderMaybeString expectationKey <> ","
   <> case outcome of
     Projected artifact identity -> "\"status\":\"projected\",\"artifact\":"
       <> jsonString artifact <> ",\"identity\":" <> renderIdentity identity <> "}"
     Rejected reason -> "\"status\":\"rejected\",\"reason\":"
       <> jsonString reason <> "}"
+
+renderLegacyTarget :: LegacyTarget -> String
+renderLegacyTarget (LegacyTarget legacyName identity) =
+  "{\"legacy_name\":" <> jsonString legacyName <> ",\"identity\":"
+  <> maybe "null" renderIdentity identity <> "}"
+
+renderMaybeString :: Maybe String -> String
+renderMaybeString = maybe "null" jsonString
 
 renderIdentity :: SymbolIdentity -> String
 renderIdentity identity = "{\"unit\":" <> jsonString (Text.unpack (symbolUnit identity))

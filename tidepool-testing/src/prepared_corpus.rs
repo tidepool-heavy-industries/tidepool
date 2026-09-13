@@ -52,7 +52,7 @@ pub struct ProjectionManifest {
 }
 
 /// Old artifact names are coverage provenance, not STG entry identities.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LegacyTargetMapping {
     pub legacy_name: String,
     pub identity: Option<SourceIdentity>,
@@ -79,7 +79,7 @@ pub enum ProjectionOutcome {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SourceIdentity {
     pub unit: String,
     pub module: String,

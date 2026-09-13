@@ -14,7 +14,7 @@ use tidepool_testing::prepared_corpus::{
     Expectations, Outcome, ProgramRecord, ProjectionManifest, ProjectionOutcome, Stage,
 };
 
-const REPORT_VERSION: u32 = 1;
+const REPORT_VERSION: u32 = 2;
 
 /// Arguments are paths owned by the corpus verification recipe. The child
 /// receives a manifest index, never a command string derived from a program.
@@ -37,8 +37,18 @@ enum Command {
 #[derive(serde::Serialize)]
 struct CorpusReport {
     version: u32,
+    legacy_targets: Vec<tidepool_testing::prepared_corpus::LegacyTargetMapping>,
+    legacy_mapped: usize,
+    legacy_unmapped: usize,
+    stg_programs: usize,
     programs: Vec<ProgramRecord>,
     stage_totals: Vec<StageTotal>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ManifestSummary {
+    legacy_mapped: usize,
+    legacy_unmapped: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -140,7 +150,7 @@ fn run_corpus_with(
     output: PathBuf,
 ) -> Result<(), Box<dyn Error>> {
     let manifest = read_manifest(&manifest_path)?;
-    validate_manifest(&manifest)?;
+    let summary = validate_manifest(&manifest)?;
 
     let mut programs = Vec::with_capacity(manifest.programs.len());
     for (index, row) in manifest.programs.iter().enumerate() {
@@ -170,6 +180,10 @@ fn run_corpus_with(
 
     let report = CorpusReport {
         version: REPORT_VERSION,
+        legacy_targets: manifest.legacy_targets,
+        legacy_mapped: summary.legacy_mapped,
+        legacy_unmapped: summary.legacy_unmapped,
+        stg_programs: programs.len(),
         stage_totals: stage_totals(&programs),
         programs,
     };
@@ -233,7 +247,7 @@ fn run_one(
                     Ok(requirements) => requirements,
                     Err(error) => return fail_active_stage(&output, &mut record, error),
                 };
-            let expected = expectations.expectations.get(&row.name);
+            let expected = expected_for(row, &expectations);
             let persist = |driver_record: &ProgramRecord| {
                 merge_driver_record(&mut record, driver_record);
                 persist_or_exit(&output, &record);
@@ -304,7 +318,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Box<dyn E
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn validate_manifest(manifest: &ProjectionManifest) -> Result<(), Box<dyn Error>> {
+fn validate_manifest(manifest: &ProjectionManifest) -> Result<ManifestSummary, Box<dyn Error>> {
     if manifest.version != REPORT_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -316,8 +330,9 @@ fn validate_manifest(manifest: &ProjectionManifest) -> Result<(), Box<dyn Error>
         .into());
     }
     let mut names = BTreeSet::new();
+    let mut expectation_keys = BTreeSet::new();
     for row in &manifest.programs {
-        if row.name.is_empty() || !names.insert(&row.name) {
+        if row.name.is_empty() || !names.insert(row.name.clone()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -327,11 +342,118 @@ fn validate_manifest(manifest: &ProjectionManifest) -> Result<(), Box<dyn Error>
             )
             .into());
         }
-        if let ProjectionOutcome::Projected { artifact, .. } = &row.projection {
-            validate_relative_artifact(artifact)?;
+        match &row.projection {
+            ProjectionOutcome::Projected { artifact, identity } => {
+                validate_relative_artifact(artifact)?;
+                if canonical_identity(identity) != row.name {
+                    return Err(invalid_manifest(format!(
+                        "program name {:?} is not the canonical identity of {:?}",
+                        row.name, identity
+                    )));
+                }
+                validate_expectation_key(row, identity, &mut expectation_keys)?;
+            }
+            ProjectionOutcome::Rejected { .. } => {
+                if row.expectation_key.is_some() {
+                    return Err(invalid_manifest(format!(
+                        "rejected program {:?} cannot carry an oracle key",
+                        row.name
+                    )));
+                }
+            }
         }
     }
-    Ok(())
+    let mut legacy_names = BTreeSet::new();
+    let mut legacy_mapped = 0;
+    let mut legacy_unmapped = 0;
+    for target in &manifest.legacy_targets {
+        if target.legacy_name.is_empty() || !legacy_names.insert(target.legacy_name.clone()) {
+            return Err(invalid_manifest(format!(
+                "legacy target names must be unique and non-empty: {:?}",
+                target.legacy_name
+            )));
+        }
+        match &target.identity {
+            None => legacy_unmapped += 1,
+            Some(identity) => {
+                if !is_external_identity(identity) {
+                    return Err(invalid_manifest(format!(
+                        "legacy target {:?} maps to an internal identity {:?}",
+                        target.legacy_name, identity
+                    )));
+                }
+                if target.legacy_name != identity.occurrence {
+                    return Err(invalid_manifest(format!(
+                        "legacy target {:?} is not the exact external occurrence {:?}",
+                        target.legacy_name, identity.occurrence
+                    )));
+                }
+                let canonical = canonical_identity(identity);
+                if !names.contains(&canonical) {
+                    return Err(invalid_manifest(format!(
+                        "legacy target {:?} maps to missing program {:?}",
+                        target.legacy_name, canonical
+                    )));
+                }
+                legacy_mapped += 1;
+            }
+        }
+    }
+    Ok(ManifestSummary {
+        legacy_mapped,
+        legacy_unmapped,
+    })
+}
+
+fn invalid_manifest(message: String) -> Box<dyn Error> {
+    io::Error::new(io::ErrorKind::InvalidData, message).into()
+}
+
+fn canonical_identity(identity: &tidepool_testing::prepared_corpus::SourceIdentity) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        identity.unit, identity.module, identity.namespace, identity.occurrence
+    )
+}
+
+fn is_external_identity(identity: &tidepool_testing::prepared_corpus::SourceIdentity) -> bool {
+    identity.namespace == "value"
+        && !(identity.unit == "<interactive>" && identity.module == "<local>")
+}
+
+fn validate_expectation_key(
+    row: &tidepool_testing::prepared_corpus::ProjectionRecord,
+    identity: &tidepool_testing::prepared_corpus::SourceIdentity,
+    keys: &mut BTreeSet<String>,
+) -> Result<(), Box<dyn Error>> {
+    match row.expectation_key.as_deref() {
+        None => Ok(()),
+        Some(key)
+            if is_external_identity(identity)
+                && key == identity.occurrence
+                && keys.insert(key.to_owned()) => Ok(()),
+        Some(key) if !is_external_identity(identity) => Err(invalid_manifest(format!(
+            "internal program {:?} cannot carry oracle key {:?}",
+            row.name, key
+        ))),
+        Some(key) if key != identity.occurrence => Err(invalid_manifest(format!(
+            "oracle key {:?} is not the exact external occurrence {:?}",
+            key, identity.occurrence
+        ))),
+        Some(key) => Err(invalid_manifest(format!(
+            "oracle key {:?} is ambiguous",
+            key
+        ))),
+    }
+}
+
+fn expected_for<'a>(
+    row: &tidepool_testing::prepared_corpus::ProjectionRecord,
+    expectations: &'a Expectations,
+) -> Option<&'a tidepool_testing::prepared_corpus::Expectation> {
+    row.expectation_key
+        .as_deref()
+        .and_then(|key| expectations.expectations.get(key))
 }
 
 fn validate_relative_artifact(artifact: &str) -> Result<(), Box<dyn Error>> {
@@ -513,6 +635,7 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tidepool_testing::prepared_corpus::Expectation;
 
     fn temporary_path(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -526,26 +649,99 @@ mod tests {
     }
 
     fn rejected_manifest() -> String {
-        r#"{"version":1,"programs":[{"name":"rejected","status":"rejected","reason":"projection is unsupported"}]}"#.into()
+        r#"{"version":2,"legacy_targets":[],"programs":[{"name":"rejected","status":"rejected","reason":"projection is unsupported"}]}"#.into()
     }
 
     #[test]
     fn manifest_requires_version_unique_names_and_relative_artifacts() {
         let duplicate: ProjectionManifest = serde_json::from_str(
-            r#"{"version":1,"programs":[{"name":"x","status":"rejected","reason":"no"},{"name":"x","status":"rejected","reason":"no"}]}"#,
+            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"x","status":"rejected","reason":"no"},{"name":"x","status":"rejected","reason":"no"}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&duplicate).is_err());
         let absolute: ProjectionManifest = serde_json::from_str(
-            r#"{"version":1,"programs":[{"name":"x","status":"projected","artifact":"/tmp/x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
+            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:value:x","status":"projected","artifact":"/tmp/x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&absolute).is_err());
         let parent: ProjectionManifest = serde_json::from_str(
-            r#"{"version":1,"programs":[{"name":"x","status":"projected","artifact":"../x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
+            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:value:x","status":"projected","artifact":"../x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&parent).is_err());
+    }
+
+    #[test]
+    fn manifest_keeps_legacy_mapping_separate_from_stg_rows() {
+        let manifest: ProjectionManifest = serde_json::from_str(
+            r#"{
+                "version":2,
+                "legacy_targets":[
+                    {"legacy_name":"value","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}},
+                    {"legacy_name":"retired_local","identity":null}
+                ],
+                "programs":[
+                    {"name":"u:M:value:value","expectation_key":"value","status":"projected","artifact":"0.prepared.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}},
+                    {"name":"u:M:value:ffi","status":"rejected","reason":"unsupported"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let summary = validate_manifest(&manifest).unwrap();
+        assert_eq!(summary.legacy_mapped, 1);
+        assert_eq!(summary.legacy_unmapped, 1);
+        assert_eq!(manifest.programs.len(), 2);
+    }
+
+    #[test]
+    fn manifest_rejects_internal_or_ambiguous_oracle_keys() {
+        let internal: ProjectionManifest = serde_json::from_str(
+            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:local:x","expectation_key":"x","status":"projected","artifact":"x","identity":{"unit":"u","module":"M","namespace":"local","occurrence":"x"}}]}"#,
+        )
+        .unwrap();
+        assert!(validate_manifest(&internal).is_err());
+
+        let ambiguous: ProjectionManifest = serde_json::from_str(
+            r#"{"version":2,"legacy_targets":[],"programs":[
+                {"name":"u:One:value:x","expectation_key":"x","status":"projected","artifact":"one","identity":{"unit":"u","module":"One","namespace":"value","occurrence":"x"}},
+                {"name":"u:Two:value:x","expectation_key":"x","status":"projected","artifact":"two","identity":{"unit":"u","module":"Two","namespace":"value","occurrence":"x"}}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(validate_manifest(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_legacy_identity_not_in_authoritative_rows() {
+        let manifest: ProjectionManifest = serde_json::from_str(
+            r#"{"version":2,"legacy_targets":[{"legacy_name":"old","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"missing"}}],"programs":[{"name":"u:M:value:present","status":"rejected","reason":"unsupported"}]}"#,
+        )
+        .unwrap();
+        assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_legacy_suffix_aliases() {
+        let manifest: ProjectionManifest = serde_json::from_str(
+            r#"{"version":2,"legacy_targets":[{"legacy_name":"value_t123","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}}],"programs":[{"name":"u:M:value:value","status":"rejected","reason":"unsupported"}]}"#,
+        )
+        .unwrap();
+        assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn oracle_lookup_uses_only_the_explicit_expectation_key() {
+        let row: tidepool_testing::prepared_corpus::ProjectionRecord = serde_json::from_str(
+            r#"{"name":"u:M:value:canonical","expectation_key":"historical","status":"rejected","reason":"not run"}"#,
+        )
+        .unwrap();
+        let expectations = Expectations {
+            source_revision: "test".into(),
+            expectations: [("historical".into(), Expectation::Int(7))]
+                .into_iter()
+                .collect(),
+        };
+        assert!(matches!(expected_for(&row, &expectations), Some(Expectation::Int(7))));
     }
 
     #[test]
@@ -629,7 +825,7 @@ mod tests {
         let output = temporary_path("projected-report");
         fs::write(
             &manifest,
-            r#"{"version":1,"programs":[{"name":"projected","status":"projected","artifact":"missing.prepared.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"projected"}}]}"#,
+            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:value:projected","status":"projected","artifact":"missing.prepared.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"projected"}}]}"#,
         )
         .unwrap();
         run_one(
