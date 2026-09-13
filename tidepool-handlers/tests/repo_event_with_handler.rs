@@ -60,6 +60,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use std::time::Duration;
 
+use tidepool_bridge::Value;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_bridge_effects::{
     EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvRepositoryEvent,
@@ -73,7 +74,6 @@ use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_handlers::{
     ConsoleHandler, EventConfig, EventError, ObservationSource, RepoEventHandler, WorktreeReq,
 };

@@ -5,9 +5,9 @@
 //! of them.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+pub mod descriptor_region;
 pub mod execution_descriptor;
 pub mod external_storage;
-pub mod descriptor_region;
 pub mod gc;
 pub mod layout;
 pub mod managed_reference;

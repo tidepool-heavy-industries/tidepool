@@ -18,13 +18,13 @@
 //! `host_alloc_gc`'s contract: any heap pointers the caller holds across it
 //! must be RUST_ROOTS-registered.
 
+use tidepool_bridge::Value;
 use tidepool_codegen::effect_machine::EffContKind;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;

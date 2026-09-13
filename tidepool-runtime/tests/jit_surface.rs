@@ -93,9 +93,9 @@
 
 use std::io::Write;
 use std::path::Path;
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
-use tidepool_bridge::Value;
 use tidepool_runtime::compile_and_run;
 use tidepool_testing::NullDispatcher;
 

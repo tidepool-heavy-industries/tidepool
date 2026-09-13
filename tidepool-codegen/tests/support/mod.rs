@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine, JitError};
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_codegen::suspension::{
@@ -7,7 +8,6 @@ use tidepool_codegen::suspension::{
     SuspensionRun,
 };
 use tidepool_effect::{DispatchEffect, EffectRunPolicy, LivePayloadPolicy};
-use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 
 /// Concise adapters for integration tests that exercise many suspension

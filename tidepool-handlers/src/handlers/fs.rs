@@ -654,10 +654,10 @@ impl tidepool_effect::dispatch::EffectHandler<CapturedOutput> for FsWriteHandler
 mod tests {
     use super::*;
     use crate::test_support::*;
+    use tidepool_bridge::Value;
     use tidepool_bridge::{FromCore, ToCore};
     use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
-    use tidepool_bridge::Value;
     use tidepool_repr::DataConTable;
 
     #[test]

@@ -3,9 +3,9 @@
 //! claims are checkable.
 use std::collections::HashMap;
 use tidepool_bridge::FromCore;
+use tidepool_bridge::Value;
 use tidepool_bridge_effects::FileMeta;
 use tidepool_effect::DispatchEffect;
-use tidepool_bridge::Value;
 
 #[derive(Default)]
 pub struct FsDispatcher {

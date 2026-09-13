@@ -6,8 +6,8 @@
 //! `Value`'s recursive destructor; these tests are what stands between the
 //! eager path and that class of failure.
 
-use tidepool_effect::DispatchEffect;
 use tidepool_bridge::Value;
+use tidepool_effect::DispatchEffect;
 use tidepool_testing::eval_harness::user_lib_dir;
 use tidepool_testing::eval_harness::EvalHarness;
 

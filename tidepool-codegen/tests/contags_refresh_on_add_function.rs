@@ -11,12 +11,12 @@
 //! literally lacks the constructor at bootstrap, and the fix is exercised the
 //! moment a second, complete table arrives via `add_function`.
 
+use tidepool_bridge::Value;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;

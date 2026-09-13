@@ -27,6 +27,7 @@
 use crate::support;
 use support::SuspensionTestExt;
 
+use tidepool_bridge::Value;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::suspension::{ParkKind, ParkedOutcome, RealmId, ResumeInput};
@@ -34,7 +35,6 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;

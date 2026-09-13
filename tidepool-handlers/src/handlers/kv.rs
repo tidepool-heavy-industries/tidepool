@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_bridge::Value;
 use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
@@ -280,8 +280,8 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use tidepool_bridge::ToCore;
-    use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_bridge::Value;
+    use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_repr::DataConTable;
 
     #[test]

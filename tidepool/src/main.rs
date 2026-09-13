@@ -10,7 +10,11 @@ enum Command {
 }
 
 #[derive(clap::Parser)]
-#[command(name = "tidepool", about = "Tidepool utilities", arg_required_else_help = true)]
+#[command(
+    name = "tidepool",
+    about = "Tidepool utilities",
+    arg_required_else_help = true
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,

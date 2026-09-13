@@ -25,10 +25,10 @@
 
 use std::path::Path;
 
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::SessionVarId;
 use tidepool_runtime::session::{
     run_turn, BoundBinder, CompiledTurn, ResidentOutcome, ResidentSession, TemplateSelector,

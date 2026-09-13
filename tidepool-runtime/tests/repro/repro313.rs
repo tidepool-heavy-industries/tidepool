@@ -1,8 +1,8 @@
 //! #313 repro outside the MCP server: stderr (CASE TRAP / [BUG] bad
 //! pointer breadcrumbs) is visible here.
 use std::path::Path;
-use tidepool_effect::DispatchEffect;
 use tidepool_bridge::Value;
+use tidepool_effect::DispatchEffect;
 use tidepool_testing::eval_harness::EvalHarness;
 
 struct TupleDispatcher;

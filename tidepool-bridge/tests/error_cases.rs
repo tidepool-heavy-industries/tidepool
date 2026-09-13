@@ -1,5 +1,5 @@
-use tidepool_bridge::{BridgeError, FromCore, ToCore};
 use tidepool_bridge::Value;
+use tidepool_bridge::{BridgeError, FromCore, ToCore};
 use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
 fn get_table() -> DataConTable {

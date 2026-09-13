@@ -1,7 +1,7 @@
 //! Shared effect dispatchers for tests.
 
-use tidepool_effect::{DispatchEffect, EffectContext, EffectError, Response};
 use tidepool_bridge::Value;
+use tidepool_effect::{DispatchEffect, EffectContext, EffectError, Response};
 
 /// No-op dispatcher for tests whose evaluated code never dispatches an effect
 /// (pure `result` bindings, compile-error assertions): responds `0` to any

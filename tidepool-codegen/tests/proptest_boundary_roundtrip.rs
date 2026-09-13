@@ -25,13 +25,13 @@ use serial_test::serial;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tidepool_bridge::Value;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_codegen::context::VMContext;
 use tidepool_codegen::heap_bridge::{
     bump_alloc_from_vmctx, heap_to_value_forcing, value_to_heap, BridgeError,
 };
 use tidepool_codegen::nursery::Nursery;
-use tidepool_bridge::Value;
 use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
 // ---------------------------------------------------------------------------

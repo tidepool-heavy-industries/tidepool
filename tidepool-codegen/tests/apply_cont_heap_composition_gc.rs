@@ -41,12 +41,12 @@
 //! a nonzero delta over the whole loop is strong evidence `alloc_con`'s
 //! retry, not just SOME retry-protected site, exhausted and recovered.
 
+use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;

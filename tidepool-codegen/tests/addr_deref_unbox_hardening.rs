@@ -35,9 +35,9 @@
 //! `with_signal_protection` only kept the test binary alive) or a silent
 //! wrong answer.
 
+use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
-use tidepool_bridge::Value;
 use tidepool_repr::types::{Literal, PrimOpKind};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 

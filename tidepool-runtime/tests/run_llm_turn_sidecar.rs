@@ -22,9 +22,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
-use tidepool_bridge::Value;
 use tidepool_repr::Literal;
 use tidepool_testing::eval_harness::{extract_env, prelude_path, EvalHarness};
 
