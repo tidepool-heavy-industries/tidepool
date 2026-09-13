@@ -613,6 +613,40 @@ pub enum OperationIdentity {
         symbol: String,
         convention: ForeignConvention,
     },
+    /// An explicitly catalogued missing runtime capability, never an arbitrary
+    /// unresolved import. Keeps GHC's Returns signature; execution fails without
+    /// publishing a result. Native admission checks the exact name/signature.
+    Capability { name: String },
+    /// Authoritative GHC wired-in identity lowered by the producer to an ordinary
+    /// callable top. Its saturated signature is Address -> NoSuccess, except the
+    /// nullary AbsentSumField worker. Runtime disposition is not encoded here.
+    WiredInError { kind: WiredInErrorKind },
+}
+
+/// Stable wire tags in declaration order (0..10). Match producer GHC keys, not
+/// user-visible occurrence strings. The impossible/absent members signal violated
+/// compiler invariants; the remaining members are recoverable language failures.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum WiredInErrorKind {
+    PatternMatch = 0,
+    NonExhaustiveGuards = 1,
+    RecordSelector = 2,
+    RecordConstruction = 3,
+    NoMethodBinding = 4,
+    DeferredType = 5,
+    Impossible = 6,
+    ImpossibleConstraint = 7,
+    Absent = 8,
+    AbsentConstraint = 9,
+    AbsentSumField = 10,
+}
+
+impl WiredInErrorKind {
+    pub fn is_integrity_failure(self) -> bool {
+        matches!(self, Self::Impossible | Self::ImpossibleConstraint | Self::Absent
+            | Self::AbsentConstraint | Self::AbsentSumField)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
