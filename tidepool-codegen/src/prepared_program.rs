@@ -30,6 +30,8 @@ mod run;
 pub use run::{ExecutionError, RunOptions, RunResult};
 #[cfg(test)]
 mod apply_tests;
+#[cfg(test)]
+mod bytes_tests;
 mod entry;
 mod fallible;
 mod floating;
@@ -41,6 +43,8 @@ mod safepoint;
 mod settlement_tests;
 #[cfg(test)]
 mod retention_tests;
+#[cfg(test)]
+mod double_to_int_tests;
 pub use admission::{admit_prepared, admit_program};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -145,6 +149,10 @@ pub struct CompiledProgram {
     pub(crate) statics: StaticImage,
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
     pub(crate) byte_tops: BTreeMap<ValueId, Arc<[u8]>>,
+    /// Own every address embedded in generated code, including scalar literals
+    /// with no top-level Bytes binding. Keys are logical bytes; values are the
+    /// exact allocations whose addresses the emitter used.
+    pub(crate) bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
     pub(crate) heap_top_specs: Vec<plan::HeapTopSpec>,
     /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.
     /// The target is generated code which calls Tail `prepared_enter`.
@@ -518,6 +526,7 @@ impl CompiledProgram {
             statics,
             top_slots: plan.top_slots,
             byte_tops,
+            bytes: plan.bytes,
             heap_top_specs: plan.heap_top_specs,
             force_adapter,
         })

@@ -26,8 +26,9 @@ import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities
   , projectPreparedTarget )
 import Tidepool.ExecutionSchema
-  ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
-import Tidepool.ExecutionSchema (GlobalDecl(..), WireProgram(..))
+  ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
+  , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), TargetDescriptor(..)
+  , TopBinding(..), WireProgram(..) )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
   , recoverPreparedClosure )
@@ -71,10 +72,11 @@ main = do
     closure <- liftIO $ recoverPreparedClosure hsc context modules
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"
-    liftIO $ assert (any namedResidual (closureFailures closure))
-      ("closure omitted the named residual: " ++ show (closureFailures closure))
+    liftIO $ assert (all (not . namedResidual) (closureFailures closure))
+      ("nullary constructor remained a recovery residual: " ++ show (closureFailures closure))
     liftIO $ assert (all (\original -> originalModuleRetained original (closureModules closure)) modules)
       "recovery dropped an original prepared module"
+    liftIO $ assertNullaryRecoveryProjection context closure
     liftIO $ incompleteSubsetContract home context
     liftIO $ putStrLn "prepared recovery closure: ok"
   where
@@ -148,6 +150,35 @@ main = do
     namedResidual (UnsupportedExternalCapability name) =
       occNameString (nameOccName name) == "()"
     namedResidual _ = False
+
+    assertNullaryRecoveryProjection context closure = case
+      projectPreparedTarget context (closureModules closure) of
+        Left failure -> ioError (userError
+          ("recovered caller projection rejected the nullary constructor: " ++ show failure))
+        Right program -> do
+          let nullaryTops =
+                [ binding
+                | group <- programBindings program
+                , TopBinding symbol binding <- groupItems group
+                , symbolNamespace symbol == Text.pack "value"
+                , symbolOccurrence symbol == Text.pack "()"
+                ]
+              nullaryGlobals =
+                [ globalIdentity global
+                | global <- programGlobals program
+                , symbolOccurrence (globalIdentity global) == Text.pack "()"
+                ]
+          assert (length nullaryTops == 1)
+            ("recovered projection did not intern exactly one () object: " ++ show nullaryTops)
+          assert (all fieldFree nullaryTops)
+            "recovered projection emitted a non-field-free () object"
+          assert (null nullaryGlobals)
+            ("recovered projection leaked () as an imported global: " ++ show nullaryGlobals)
+      where
+        groupItems (NonRecursive item) = [item]
+        groupItems (Recursive items) = items
+        fieldFree (HeapBinding _ (Constructor _ [])) = True
+        fieldFree _ = False
 
     originalModuleRetained original recovered =
       any ((== pmModule original) . pmModule) recovered

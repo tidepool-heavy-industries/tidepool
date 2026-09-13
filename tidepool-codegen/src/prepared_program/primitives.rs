@@ -439,6 +439,12 @@ pub(super) fn recognize_operation(
     declaration: &OperationDecl,
     signature: &Signature,
 ) -> Option<ScalarOperation> {
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
+        && signature.arguments == [RuntimeRep::Float(64)]
+        && signature.results == [RuntimeRep::Int(64)]
+    {
+        return Some(ScalarOperation::DoubleToInt);
+    }
     IntegerFamily::recognize(&declaration.identity, signature)
         .map(ScalarOperation::Integer)
         .or_else(|| {
@@ -449,6 +455,7 @@ pub(super) fn recognize_operation(
 
 #[derive(Clone, Copy)]
 pub(super) enum ScalarOperation {
+    DoubleToInt,
     Integer(IntegerOperation),
     Floating(super::floating::FloatingOperation),
 }
@@ -461,6 +468,9 @@ pub(super) fn emit_operation(
     pipeline: &mut CodegenPipeline,
 ) -> Result<Vec<ir::Value>, super::CompileError> {
     match operation {
+        ScalarOperation::DoubleToInt => {
+            super::fallible::emit_double_to_int(builder, vmctx, pipeline, arguments[0])
+        }
         ScalarOperation::Integer(operation)
             if matches!(
                 operation.kind,

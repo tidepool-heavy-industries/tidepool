@@ -14,7 +14,7 @@ import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.List (find)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (isNothing, listToMaybe)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -25,7 +25,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (primOpOcc)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
-  ( DataCon, dataConName, dataConRepArgTys, dataConWorkId
+  ( DataCon, dataConName, dataConRepArgTys, dataConRepArity, dataConWorkId
   , dataConTag, dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCon qualified as GHC
@@ -36,7 +36,7 @@ import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
-import GHC.Types.Id (isDeadEndId)
+import GHC.Types.Id (isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
@@ -79,6 +79,8 @@ data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv JoinId
   , topSymbols :: VarEnv SymbolIdentity, topValues :: Map SymbolIdentity ValueId
+  , implicitTops :: [TopBinding]
+  , implicitValues :: Map SymbolIdentity ValueId
   , globals :: VarEnv GlobalId, globalDecls :: [GlobalDecl]
   , constructors :: [(DataCon, ConstructorId)], constructorDecls :: [ConstructorDecl]
   , operations :: [(Schema.OperationIdentity, Signature, OperationId)]
@@ -94,7 +96,7 @@ type P a = StateT PState (Either ProjectionError) a
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -120,7 +122,7 @@ preparedTopIdentities modules = traverse identityOf
 projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
   -> VarEnv SymbolIdentity -> Either ProjectionError WireProgram
 projectPreparedWithTopSymbols context modules topIdentityMap = do
-  let initial = PState 0 0 emptyVarEnv emptyVarEnv topIdentityMap Map.empty
+  let initial = PState 0 0 emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
         emptyVarEnv [] [] [] [] [] [] (projectionTarget context)
         (projectionRetainedGenerations context) (Set.fromList
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
@@ -136,7 +138,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
     , programGlobals = globalDecls final
     , programConstructors = constructorDecls final
     , programOperations = operationDecls final
-    , programBindings = bindingGroups
+    , programBindings = map NonRecursive (reverse (implicitTops final)) ++ bindingGroups
     , programEntry = entry
     }
   where
@@ -172,6 +174,7 @@ preparedTargetReferences context modules =
         , binder <- preparedReferencedIds (extractPreparedFacts
             (pmModule prepared) (pmTagSigs prepared) (map fst (pmBindings prepared)))
         , isExternalName (varName binder)
+        , isNothing (nullaryWorkerConstructor binder)
         , not (elementOfUniqSet (varUnique binder) defined) ]
   in Map.elems (Map.fromList [(idSymbol "value" binder, binder) | binder <- referenced])
 
@@ -461,7 +464,42 @@ projectReference binder = do
         Just home -> case Map.lookup home tops of
           Just identity -> pure (Local identity)
           Nothing -> lift (Left (MissingPreparedTop home))
-        Nothing -> Global <$> internGlobal binder
+        Nothing -> case nullaryWorkerConstructor binder of
+          Just con -> Local <$> internNullaryWorker binder con
+          Nothing -> Global <$> internGlobal binder
+
+-- | A genuinely nullary data-con worker denotes an evaluated object, not an
+-- executable import. Requiring no representation arguments also excludes
+-- workers whose logical Void arguments still require application.
+nullaryWorkerConstructor :: Id -> Maybe DataCon
+nullaryWorkerConstructor binder = do
+  con <- isDataConWorkId_maybe binder
+  if dataConRepArity con == 0 && null (dataConRepArgTys con)
+      && not (isUnboxedTupleDataCon con)
+    then Just con
+    else Nothing
+
+-- | Materialize one ordinary constructor top per authoritative worker identity.
+-- These field-free objects precede source tops and need no body recovery.
+internNullaryWorker :: Id -> DataCon -> P ValueId
+internNullaryWorker binder con = do
+  let symbol = idSymbol "value" binder
+  existing <- gets (Map.lookup symbol . implicitValues)
+  case existing of
+    Just identity -> pure identity
+    Nothing -> do
+      collision <- gets (Map.member symbol . topValues)
+      if collision
+        then failIdentity ("constructor worker collides with prepared top: " <> symbolText symbol)
+        else pure ()
+      constructor <- internConstructor con
+      identity <- freshValue
+      modify' (\current -> current
+        { implicitValues = Map.insert symbol identity (implicitValues current)
+        , implicitTops = TopBinding symbol (HeapBinding identity (Constructor constructor []))
+            : implicitTops current
+        })
+      pure identity
 
 bindingBinders :: CgStgBinding -> [Id]
 bindingBinders (StgNonRec binder _) = [binder]

@@ -230,6 +230,7 @@ impl<'code> PreparedInvocation<'code> {
             &top_table,
             &statics,
             &program.byte_tops,
+            &program.bytes,
         ) {
             Ok(heap_used) => heap_used,
             Err(cause) => {

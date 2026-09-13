@@ -19,6 +19,7 @@ const REPORT_VERSION: u32 = 2;
 /// Arguments are paths owned by the corpus verification recipe. The child
 /// receives a manifest index, never a command string derived from a program.
 enum Command {
+    EffectsCore,
     Run {
         manifest: PathBuf,
         expectations: PathBuf,
@@ -64,6 +65,12 @@ struct StageTotal {
 fn main() -> Result<(), Box<dyn Error>> {
     let command = parse_arguments()?;
     match command {
+        Command::EffectsCore => {
+            // Use the production generator's universal vocabulary, not the
+            // small prepared-STG fixture's substitute Effects.Core module.
+            println!("{}", tidepool_mcp::ensure_effects_core_module()?.display());
+            Ok(())
+        }
         Command::Run {
             manifest,
             expectations,
@@ -85,6 +92,9 @@ fn parse_arguments() -> Result<Command, Box<dyn Error>> {
 }
 
 fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
+    if matches!(values.as_slice(), [mode] if mode == "effects-core") {
+        return Ok(Command::EffectsCore);
+    }
     let [mode, manifest, expectations, metadata, output, rest @ ..] = values.as_slice() else {
         return Err(usage().into());
     };
@@ -128,7 +138,7 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
+        "usage: prepared-corpus effects-core | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
     )
 }
 
@@ -775,7 +785,16 @@ mod tests {
     }
 
     #[test]
-    fn cli_accepts_only_typed_run_or_child_shapes() {
+    fn cli_accepts_only_typed_command_shapes() {
+        assert!(matches!(
+            parse_values(vec![OsString::from("effects-core")]).unwrap(),
+            Command::EffectsCore
+        ));
+        assert!(parse_values(vec![
+            OsString::from("effects-core"),
+            OsString::from("unexpected")
+        ])
+        .is_err());
         let run = parse_values(
             [
                 "run",

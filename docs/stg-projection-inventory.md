@@ -73,22 +73,21 @@ compiler.
 
 ## Connected native execution boundary
 
-The following strict-subset description records the Wave 4 accepted boundary.
-Wave 5 currently adds exact defining-module body recovery and generated thunk
-entry/CAF allocation. Focused recovery and lazy-entry tests pass, but local
-Enter, settlement interleavings, forcing observation and broader closure
-execution are still under integration/review. Do not read this inventory as
-claiming full lazy, imported, primitive, or retained execution yet. The current
-parcel evidence and remaining acceptance obligations are in
-[`stg-wave5.md`](../plans/stg-wave5.md).
+This is the current Wave 5 executable subset. It includes exact defining-module
+body recovery, generated lazy entry and settlement, generated PAP/application
+dispatch, forcing, invocation-local selective promotion, scoped old-space
+admission, and the admitted scalar families. It is still a subset: this
+inventory does not claim full lazy, imported, primitive, array, external-edge,
+or session-retention execution.
 
 `tidepool-codegen::prepared_program::CompiledProgram` is a closed, pinned
 execution path for the Linux x86-64 little-endian 64-bit SysV profile. Its
-whole-program admission pass rejects globals/imports, thunk RHSs, operations,
-indirect/partial calls, and calls whose local callee signature is not exactly
-the declared call signature. Admission walks nested expression ownership
-iteratively and reports the owning binding and arena node for unsupported
-expressions. `run_entry` also rejects managed host arguments.
+whole-program admission pass rejects globals/imports, unsupported thunk
+signatures, unsupported operations, and application signatures/forms without
+an admitted exact/partial/excess classification. Admission
+walks nested expression ownership iteratively and reports the owning binding
+and arena node for unsupported expressions. `run_entry` also rejects managed
+host arguments.
 
 The currently emitted strict subset is:
 
@@ -96,12 +95,33 @@ The currently emitted strict subset is:
   summed reserve and sibling initialization after the only possible safepoint;
 - `Return`, saturated exact direct `Call`, evaluated `Enter`, `Case` in all
   four classifications, `LetJoins`/`Jump`, zero results, and multi-results;
-- scalar physical arguments/results and managed references through the internal
-  multi-result ABI, with status checked before payload publication.
+- generated thunk entry/settlement with blackhole, update, final poll, and
+  failure-before-publication handling;
+- exact, partial, and excess application. PAPs flatten the original callee
+  and supplied prefix; logical `Void` arguments advance arity but occupy no
+  payload slot;
+- forcing of managed roots through the prepared force adapter, with roots
+  snapshotted before each force and the heap reader reconstructed afterward;
+- invocation-local selective promotion with complete-root sibling fixup in one
+  no-mutator interval, exact-start old/static admission, and terminal
+  `IncompletePromotion` handling;
+- scalar physical arguments/results, including `Int`, `Word`, `Float`,
+  `Double`, and the `rintDouble` intrinsic. Logical `Void` positions remain in
+  signatures and layouts even when omitted from physical ABI payloads.
 
-This is an executable connected subset, not a producer cutover. Thunks,
-globals/imports, effects, foreign/primitive operations, partial or indirect
-calls, and managed host arguments remain outside this closed path. `Atom::Rubbish`
+The implementation anchors for these claims are
+[`entry.rs`](../tidepool-codegen/src/prepared_program/entry.rs),
+[`apply.rs`](../tidepool-codegen/src/prepared_program/apply.rs),
+[`forcing.rs`](../tidepool-codegen/src/prepared_program/forcing.rs),
+[`old_space/prepared.rs`](../tidepool-codegen/src/old_space/prepared.rs),
+[`gc/promotion.rs`](../tidepool-heap/src/gc/promotion.rs),
+[`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs),
+[`floating.rs`](../tidepool-codegen/src/prepared_program/floating.rs), and
+[`execution_schema.rs`](../tidepool-repr/src/execution_schema.rs).
+
+This is an executable connected subset, not a producer cutover. Globals/imports,
+effects, unimplemented foreign/primitive operations, and managed host arguments remain
+outside this closed path. `Atom::Rubbish`
 is represented by the schema but native `atom_value` demand currently reports
 `Unsupported`; `NullAddress` has only the explicit `Address` lowering and is
 still rejected by observation, which does not materialize addresses. No
@@ -145,10 +165,33 @@ workspace or producer corpus is green.
 The producer still rejects unsupported literal shapes such as `BigNat` and
 relocatable labels, and rejects primitive/foreign calls without a wire/native
 contract. Validated projection can therefore be broader than connected native
-execution. Thunk forcing, imported/global resolution into owned executable
-handles, effects, old-space/external payload integration, and full corpus
-execution remain separate work. No generated fixture regeneration, production
-cutover, or compatibility promise is implied by this inventory.
+execution. The producer/runtime `NoSuccess` local-bottoming contract is not
+yet represented in the connected native success path. Array primops and GC tracing of external
+boxed-array payload edges are also not implemented; existing array
+representations must not be read as evidence that their collection/update
+semantics are connected. Imported/global resolution outside the owned
+executable subset, effects, foreign calls, unsupported primitive operations,
+and full corpus execution remain separate work. No session-retention or
+effect-support contract is asserted here. No production cutover or
+compatibility promise is implied by this inventory.
+
+## Wave 5 checkpoint — 2026-09-13
+
+At `50beeb099`, the focused checkpoint passed 79 prepared-program tests, 64
+heap tests, and the workspace test compilation. The generated fixtures were
+then refreshed with the extractor variables unset and the freshness check
+passed; only `.source-fingerprint` changed and all 695 generated fixture files
+were byte-identical. Freshness is not semantic-green evidence: the latest
+Suite report has 109 comparison matches out of 812 tops, 67 missing
+expectations, 11 projection failures, 501 admission failures, 124 execution
+failures, and zero comparison mismatches. The optimized divergent
+`thunk_blackhole` row still hit the 120-second watchdog. Test anchors are
+[`settlement_tests.rs`](../tidepool-codegen/src/prepared_program/settlement_tests.rs),
+[`apply_tests.rs`](../tidepool-codegen/src/prepared_program/apply_tests.rs),
+[`entry_tests.rs`](../tidepool-codegen/src/prepared_program/entry_tests.rs),
+[`retention_tests.rs`](../tidepool-codegen/src/prepared_program/retention_tests.rs),
+and the heap GC tests under
+[`tidepool-heap/src/gc`](../tidepool-heap/src/gc).
 
 ## Reviewed Wave 4 contracts — 2026-09-12
 
@@ -184,9 +227,10 @@ ambiguous exact external matches reject the producer. All-tops compilation or
 identity-enumeration failure aborts instead of writing a successful empty
 corpus. Consumer validation likewise rejects suffix-alias oracle keys.
 
-The current Suite run contains 812 actual tops: 802 projected and validated,
-with 10 projection rejections. Historical coverage is a separate denominator:
+The current Suite run contains 812 actual tops: 801 projected and validated,
+with 11 projection rejections. Historical coverage is a separate denominator:
 255 of 347 legacy names mapped and 92 remained unmapped. The comparator has
-56 passes and 0 failures among reached rows, but 67 rows have missing
-expectations, so this is not full corpus coverage. Runtime admission,
-execution, and workspace freshness limits remain.
+109 matches and 0 failures among reached rows, but 67 rows have missing
+expectations, so this is not full corpus coverage. The original closed-global
+cohort has 0 of 516 matches; this is not a semantic parity claim. Runtime
+admission, execution, and workspace freshness limits remain.

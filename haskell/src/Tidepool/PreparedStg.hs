@@ -21,7 +21,8 @@ import Control.Exception
   , throwIO, try )
 import Data.Map.Strict (Map)
 import GHC.Core.Lint (displayLintResults)
-import GHC.Core (CoreBind)
+import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
+import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.Lint.Interactive (interactiveInScope)
 import GHC.Core.Opt.Pipeline.Types (CoreToDo(CorePrep))
 import GHC.Core.TyCon (TyCon, isDataTyCon)
@@ -41,8 +42,10 @@ import GHC.IfaceToCore (typecheckIface)
 import GHC.Stg.Pipeline (StgCgInfos, StgPipelineOpts(..), StgToDo(..), stg2stg)
 import GHC.Stg.Syntax (CgStgTopBinding)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
-import GHC.Types.Var.Set (IdSet)
-import GHC.Types.Var (Id)
+import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Types.Var (Id, isId, varName)
+import GHC.Types.Name (isExternalName, nameModule_maybe)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Module (moduleName)
 import GHC.Unit.Types (Module, moduleUnit, toUnitId)
@@ -154,9 +157,28 @@ instance Show RecoveredModuleFailure where
 
 prepareRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModule
 prepareRecoveredModule hscEnv input = do
-  prepared <- prepareBindings hscEnv (recoveredModule input) (recoveredLocation input)
+  prepared <- prepareBindingsWithScope
+    (recoveredSubsetScope (recoveredModule input) (recoveredBindings input))
+    hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) (recoveredBindings input) mempty []
   pure prepared { pmCoverage = ExactBodySubset }
+
+-- | An exact subset can reference other external tops in its defining module.
+-- Admit only those free Ids to GHC's preparation scope; they remain dependency
+-- edges for recovery, not supplied definitions. Complete source modules never
+-- use this scope extension, so missing source definitions still fail lint.
+recoveredSubsetScope :: Module -> [CoreBind] -> [Id]
+recoveredSubsetScope owner bindings =
+  filter (not . (`elemVarSet` supplied))
+    (nonDetEltsUniqSet (unionVarSets
+      [exprSomeFreeVars belongsToOwner rhs | binding <- bindings, rhs <- bodies binding]))
+  where
+    supplied = mkVarSet (bindersOfBinds bindings)
+    belongsToOwner identifier = isId identifier
+      && isExternalName (varName identifier)
+      && nameModule_maybe (varName identifier) == Just owner
+    bodies (NonRec _ rhs) = [rhs]
+    bodies (Rec pairs) = map snd pairs
 
 -- | Acquire the defining context for an exact recovered group and prepare it
 -- through the same owner as source modules.  In particular, this does not
@@ -218,7 +240,11 @@ prepareRecoveredBodies hscEnv owner bindings = do
 
 prepareBindings :: HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> Map String Id -> [YieldSite] -> IO PreparedModule
-prepareBindings hscEnv thisModule location tycons optimizedCore siblings yieldSites = do
+prepareBindings = prepareBindingsWithScope []
+
+prepareBindingsWithScope :: [Id] -> HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
+  -> Map String Id -> [YieldSite] -> IO PreparedModule
+prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimizedCore siblings yieldSites = do
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
         gopt_set
@@ -232,7 +258,7 @@ prepareBindings hscEnv thisModule location tycons optimizedCore siblings yieldSi
           Opt_DoStgLinting
       logger = hsc_logger hscEnv
       dataTyCons = filter isDataTyCon tycons
-      interactiveVars = interactiveInScope (hsc_IC hscEnv)
+      interactiveVars = subsetScope ++ interactiveInScope (hsc_IC hscEnv)
       coreLint = lintCoreBindings preparedFlags CorePrep [] optimizedCore
       stgOptions = initStgPipelineOpts preparedFlags False
       profile = PreparedPassProfile

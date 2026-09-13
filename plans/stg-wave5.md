@@ -6,7 +6,19 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
-`3ab9ec613` is pushed. The focused prepared-program library selection passed
+The next source checkpoint passes `execution-schema-projection`,
+`prepared-recovery-test`, and `recovered-body-test` through the dev shell;
+the scoped recovery regression retains same-owner dependency edges rather
+than declaring their bodies resolved. Focused codegen `bytes_tests` passes
+3/3 and `double_to_int_tests` passes 4/4. The bytes worker corrected one
+test-builder multiple-owner defect before its second run. Changed Rust file
+format checks and `git diff --check` pass. Workspace `cargo fmt --all -- --check`
+still reports formatting drift across legacy migration files; it did not
+modify them. Fixture regeneration and integrated corpus replay are pending
+for these source edits. The corpus numbers below remain the prior checkpoint.
+
+`50beeb099` is pushed, including the retention verification below. The earlier
+`3ab9ec613` focused prepared-program library selection passed
 73 tests, including six real-adapter PAP cases and five settlement cases.
 This is not a current workspace-compile or full-fixture claim.
 
@@ -58,8 +70,9 @@ The actor corpus source imports the production-generated Effects.Core types.
 Its previous missing-module result was harness configuration, not engine
 admission. The runner now obtains that include directory from the existing
 MCP generator; its focused command-parser test passes. Reprojection moved to
-a separate filename/declared-module mismatch in the source pipeline; a scoped
-corpus input alias repair is in progress, not an engine pass.
+a separate filename/declared-module mismatch, repaired by a qualified input
+alias. The next actor-only run reports that awaitSettled is re-exported, not
+defined in Tidepool.Agent.Watch; it has not reached engine admission.
 The prepared-STG test stub is deliberately not used for this production probe.
 
 ## Contracts
@@ -237,6 +250,47 @@ requires the intended mechanisms and interaction tests, not a named remainder
 alone. Review entry/update, remembered slots and recovered-body preparation.
 
 ## Trial record
+
+### Recovery-majority follow-up
+
+Source/artifact diagnosis partitions the 473 current closed-global rows:
+314 include unsupported constructor-worker references and 381 include
+defining-module preparation failures, with 222 in both groups. Exact lookup
+has succeeded for the preparation failures. These are not evidence for a
+second identity-resolution rewrite. The first bounded correction materializes
+authoritative nullary constructor workers as ordinary field-free tops; workers
+with logical zero-width arguments are not nullary. A separate diagnostic
+parcel captures the actual GHC error behind defining-preparation ExitFailure 1.
+
+Contemporaneous lead events: three diagnostic/accounting assignments, one
+inventory follow-up, one projection seed, one test implementation assignment,
+and one seed collision correction from independent review. The corpus
+accounting worker returned all 812 mappings without ambiguity or disagreement.
+The nullary-worker brief points at the owner implementation and focused tests;
+its sufficiency and test outcome remain pending. No token usage is exposed.
+
+The subset-preparation reproduction names `stimesMonoid1` as an out-of-scope
+same-owner reference in `$fMonoidProduct1`. The seed adds only free external
+Ids from that defining module to the recovered-subset preparation scope,
+excluding supplied binders; source-module lint is unchanged. `patError`'s
+binder/RHS type mismatch is a distinct residual, not repaired by this scope.
+Lead events added: one subset-scope seed and assignment, one inventory wording
+correction, one build-lease handoff, and two nullary-test review messages. The
+first nullary test brief was insufficient: source `(:)` construction does not
+prove a first-class worker import survives STG. The fixture must demonstrate
+the intended GHC form before asserting the projected result.
+
+Nullary projection and recovery suites subsequently passed (one test target
+each). Final source review requested removal of a duplicated test-side STG
+walker and a tautological non-nullary assertion; that cleanup is not included
+in the preceding result. The scalar inventory also found a real compiled-code
+lifetime defect: literal-only byte allocations were dropped with ProgramPlan.
+The owner seed retains the complete pinning map. Its worker parcel threads
+heap-top initialization through that map and adds GHC's implicit trailing NUL
+to storage, leaving logical wire keys unchanged. Lead also seeded checked
+double2Int# lowering: exact F64-to-I64 signature, truncation toward zero, and
+typed Overflow for GHC's undefined NaN/out-of-range domain. Both Rust test
+parcels are pending; no new corpus success is claimed from these edits.
 
 ### Integrated recovery/lazy checkpoint
 

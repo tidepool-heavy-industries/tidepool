@@ -398,7 +398,12 @@ fn collect_literal(literal: &ScalarLiteral, bytes: &mut BTreeMap<Vec<u8>, Arc<[u
 }
 
 fn pin_bytes(value: &[u8], bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>) {
-    bytes
-        .entry(value.to_vec())
-        .or_insert_with(|| Arc::<[u8]>::from(value.to_vec()));
+    bytes.entry(value.to_vec()).or_insert_with(|| {
+        // GHC's primitive string literals have an implicit trailing NUL; the
+        // wire payload is the logical key, not the complete backing storage.
+        let mut storage = Vec::with_capacity(value.len() + 1);
+        storage.extend_from_slice(value);
+        storage.push(0);
+        Arc::<[u8]>::from(storage)
+    });
 }

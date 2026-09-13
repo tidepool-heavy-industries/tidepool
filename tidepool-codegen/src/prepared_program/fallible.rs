@@ -165,3 +165,25 @@ pub(super) fn emit(
     };
     Ok(vec![values])
 }
+
+/// GHC double2Int# truncates toward zero. Its out-of-range/NaN domain is
+/// undefined; the prepared engine reports Overflow rather than allowing a
+/// native conversion trap. For this pinned 64-bit profile, both bounds are
+/// exactly representable doubles and the upper bound is exclusive.
+pub(super) fn emit_double_to_int(
+    builder: &mut FunctionBuilder<'_>,
+    vmctx: Value,
+    pipeline: &mut CodegenPipeline,
+    value: Value,
+) -> Result<Vec<Value>, super::CompileError> {
+    use ir::condcodes::{FloatCC, IntCC};
+
+    let lower = builder.ins().f64const(-9_223_372_036_854_775_808.0);
+    let upper = builder.ins().f64const(9_223_372_036_854_775_808.0);
+    let above_lower = builder.ins().fcmp(FloatCC::GreaterThanOrEqual, value, lower);
+    let below_upper = builder.ins().fcmp(FloatCC::LessThan, value, upper);
+    let in_range = builder.ins().band(above_lower, below_upper);
+    let invalid = builder.ins().icmp_imm(IntCC::Equal, in_range, 0);
+    guard(builder, pipeline, vmctx, invalid, PrimitiveFailure::Overflow)?;
+    Ok(vec![builder.ins().fcvt_to_sint(types::I64, value)])
+}

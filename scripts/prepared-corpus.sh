@@ -14,6 +14,7 @@ echo "==> building prepared corpus runner"
 cargo build -p tidepool-testing --bin prepared-corpus
 prepared_runner="$(cargo metadata --no-deps --format-version 1 \
   | jq -r '.target_directory')/debug/prepared-corpus"
+effects_core="$("$prepared_runner" effects-core)"
 
 echo "==> building prepared corpus projection probe"
 ( cd haskell && cabal build execution-corpus-projection )
@@ -50,9 +51,12 @@ priority_report="$priority_root/results.json"
 
 printf '%s\n' awaitSettled >"$actor_targets"
 echo "==> projecting actor stdlib Tidepool.Agent.Watch.awaitSettled"
+actor_source="$actor_root/source/Tidepool.Agent.Watch.hs"
+mkdir -p "$(dirname "$actor_source")"
+ln -s "$repo_root/haskell/lib/Tidepool/Agent/Watch.hs" "$actor_source"
 "$projection_probe" \
-  "$repo_root/haskell/lib/Tidepool/Agent/Watch.hs" Tidepool.Agent.Watch \
-  "$actor_targets" "$actor_root" "$repo_root/haskell/lib"
+  "$actor_source" Tidepool.Agent.Watch \
+  "$actor_targets" "$actor_root" "$repo_root/haskell/lib" "$effects_core"
 actor_report="$actor_root/results.json"
 "$prepared_runner" run \
   "$actor_root/manifest.json" "$priority_expectations" "$metadata" \

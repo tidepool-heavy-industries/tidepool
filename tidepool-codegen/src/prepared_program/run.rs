@@ -93,6 +93,7 @@ pub(super) fn initialize_heap_tops(
     top_table: &super::invocation::RootWords,
     statics: &tidepool_heap::static_region::StaticRegion,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
+    bytes: &std::collections::BTreeMap<Vec<u8>, Arc<[u8]>>,
 ) -> Result<usize, RuntimeError> {
     let mut offsets = std::collections::BTreeMap::new();
     let mut total = 0usize;
@@ -133,6 +134,7 @@ pub(super) fn initialize_heap_tops(
                     &spec.reps,
                     &pointer,
                     byte_tops,
+                    bytes,
                 )?;
             }
             HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => {
@@ -144,6 +146,7 @@ pub(super) fn initialize_heap_tops(
                     &spec.reps,
                     &pointer,
                     byte_tops,
+                    bytes,
                 )?;
             }
             HeapRhs::Bytes(_) => return Err(RuntimeError::BadPointer),
@@ -164,6 +167,7 @@ fn write_atoms(
     reps: &[RuntimeRep],
     pointer: &impl Fn(ValueId) -> Result<usize, RuntimeError>,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
+    bytes: &std::collections::BTreeMap<Vec<u8>, Arc<[u8]>>,
 ) -> Result<(), RuntimeError> {
     for (logical, (atom, rep)) in atoms.iter().zip(reps).enumerate() {
         let Some(stored) = descriptor
@@ -197,10 +201,9 @@ fn write_atoms(
                 tidepool_repr::execution_schema::ScalarLiteral::NullAddress => {
                     vec![0; field.size() as usize]
                 }
-                tidepool_repr::execution_schema::ScalarLiteral::Bytes(bytes) => byte_tops
-                    .values()
-                    .find(|candidate| candidate.as_ref() == bytes.as_slice())
-                    .map(|bytes| bytes.as_ptr() as usize)
+                tidepool_repr::execution_schema::ScalarLiteral::Bytes(literal) => bytes
+                    .get(literal)
+                    .map(|storage| storage.as_ptr() as usize)
                     .ok_or(RuntimeError::BadPointer)?
                     .to_ne_bytes()
                     .to_vec(),

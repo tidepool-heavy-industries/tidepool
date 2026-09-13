@@ -12,13 +12,18 @@ import GHC.Builtin.Types
   ( doubleRepDataConTy, intRepDataConTy, liftedRepTy, tupleRepDataConTyCon
   , mkPromotedListTy, runtimeRepTy, unliftedRepTy, zeroBitRepTy )
 import GHC.Core.Type (mkTyConApp)
+import GHC.Core.DataCon (dataConName, dataConRepArity)
 import GHC.Types.Basic (TypeOrConstraint(TypeLike, ConstraintLike))
 import GHC.Types.Literal (Literal(..))
+import GHC.Types.Id (isDataConWorkId_maybe)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (Id, varName)
 import GHC.Stg.Syntax
+import System.Directory (getCurrentDirectory)
+import System.FilePath ((</>))
 import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedFacts (PreparedFacts(..))
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
@@ -54,6 +59,7 @@ projectProjectionContract modules = do
         (ioError (userError "M3 projection emitted invalid constructor tag/family facts"))
       verifyDistinctConstructorHostIds program
       verifyTopIdentityStability modules program
+      verifyNullaryWorkerProjection
       unless (any groupIsRecursive (programBindings program)
         || any (groupAny (rhsIsRecursive . heapBindingRhs . topHeap)) (programBindings program))
         (ioError (userError "M3 projection omitted recursive control/data"))
@@ -143,16 +149,108 @@ verifyTopIdentityStability modules program = do
       ("prepared top identity enumeration failed: " <> show failure))
     Right identities -> pure identities
   let actual =
-        [ symbol
+        [ top
         | group <- programBindings program
-        , TopBinding symbol _ <- groupItems group
+        , top <- groupItems group
         ]
-  unless (expected == actual)
+      implicitCount = length actual - length expected
+      (implicit, original) = splitAt (max 0 implicitCount) actual
+      actualOriginal = map topSymbol original
+  unless (implicitCount >= 0 && expected == actualOriginal)
     (ioError (userError
-      ("full projection changed prepared top identities: " <> show (expected, actual))))
+      ("projection changed prepared top identities after implicit prefix: "
+        <> show (expected, map topSymbol actual))))
+  mapM_ (verifyImplicitConstructor program) implicit
   where
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items
+    topSymbol (TopBinding symbol _) = symbol
+
+verifyImplicitConstructor :: WireProgram -> TopBinding -> IO ()
+verifyImplicitConstructor program (TopBinding _ (HeapBinding _ rhs)) = case rhs of
+  Constructor constructor atoms -> do
+    unless (null atoms)
+      (ioError (userError "implicit constructor top unexpectedly retained fields"))
+    case constructorAt constructor of
+      Nothing -> ioError (userError "implicit constructor top referenced an unknown constructor")
+      Just declaration -> unless
+        (null (constructorFieldReps declaration)
+          && null (constructorStrictFields declaration)
+          && null (layoutFields (constructorLayout declaration)))
+        (ioError (userError "implicit constructor top was not field-free"))
+  _ -> ioError (userError "implicit top was not an actual constructor object")
+  where
+    constructorAt (ConstructorId index) = case
+      drop (fromIntegral index) (programConstructors program) of
+        declaration : _ -> Just declaration
+        [] -> Nothing
+
+verifyNullaryWorkerProjection :: IO ()
+verifyNullaryWorkerProjection = do
+  root <- getCurrentDirectory
+  prepared <- runPipelineSelected PreparedStg
+    (root </> "test-prepared-stg" </> "NullaryWorkers.hs")
+    [root </> "test-prepared-stg"]
+  assertNullaryWorkerReferences prepared
+  let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        (SymbolIdentity "main" "NullaryWorkers" "value" "result" Nothing)
+  program <- case projectPreparedTarget context (pprModules prepared) of
+    Left failure -> ioError (userError ("nullary worker projection failed: " <> show failure))
+    Right value -> pure value
+  let nonNullaryConstructors =
+        [ occNameString (nameOccName (dataConName constructor))
+        | module_ <- pprModules prepared
+        , (constructor, _) <- preparedConstructors (pmFacts module_)
+        , dataConRepArity constructor > 0
+        ]
+      implicit =
+        [ (symbol, binding)
+        | NonRecursive (TopBinding symbol binding) <- programBindings program
+        , symbolNamespace symbol == "value"
+        , symbolOccurrence symbol `elem` ["[]", "True", "Nothing"]
+        ]
+      matching occurrence =
+        [ binding
+        | (symbol, binding) <- implicit
+        , symbolOccurrence symbol == occurrence
+        ]
+      globals = map (symbolOccurrence . globalIdentity) (programGlobals program)
+      topOccurrences =
+        [ symbolOccurrence symbol
+        | group <- programBindings program
+        , top <- groupItems group
+        , TopBinding symbol _ <- [top]
+        ]
+  unless (length implicit == 3 && all ((== 1) . length . matching) ["[]", "True", "Nothing"])
+    (ioError (userError ("nullary workers were not interned exactly once: " <> show
+      [(symbolOccurrence symbol, heapBindingRhs binding) | (symbol, binding) <- implicit])))
+  unless (all (fieldFree . snd) implicit)
+    (ioError (userError "nullary worker implicit top was not field-free"))
+  unless (all (`notElem` globals) ["[]", "True", "Nothing"])
+    (ioError (userError ("nullary workers leaked into imported globals: " <> show globals)))
+  unless (":" `elem` nonNullaryConstructors)
+    (ioError (userError "nullary fixture did not retain a non-nullary constructor worker"))
+  unless (":" `notElem` topOccurrences)
+    (ioError (userError "non-nullary constructor worker was incorrectly materialized as an implicit top"))
+  where
+    fieldFree (HeapBinding _ (Constructor _ [])) = True
+    fieldFree _ = False
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+assertNullaryWorkerReferences :: PreparedPipelineResult -> IO ()
+assertNullaryWorkerReferences prepared = do
+  let occurrences =
+        [ occNameString (nameOccName (varName binder))
+        | module_ <- pprModules prepared
+        , binder <- preparedReferencedIds (pmFacts module_)
+        , Just _ <- [isDataConWorkId_maybe binder]
+        ]
+  unless (all (`elem` occurrences) ["[]", "True", "Nothing"])
+    (ioError (userError
+      ("nullary fixture did not retain typed worker references: "
+        <> show occurrences)))
 
 verifyDistinctConstructorHostIds :: WireProgram -> IO ()
 verifyDistinctConstructorHostIds program = unless

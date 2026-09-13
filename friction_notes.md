@@ -325,3 +325,12 @@ are nondeterministic.
 - A corpus probe omitted the real generated Effects.Core include and therefore
   reported a missing-module failure before reaching engine admission. Reuse
   the production generator's directory, never the similarly named fixture stub.
+- Recovering a body successfully was obscured by a later generic ExitFailure
+  residual. The saved GHC lint diagnostic distinguished missing subset scope
+  from a binder/body type mismatch. Preserve stage-specific diagnostic evidence
+  so corpus accounting does not send the next repair to the wrong owner.
+- Primitive porting exposed a producer/consumer lifetime gap: the compilation
+  plan pinned scalar string literals, but the compiled owner retained only
+  top-level strings. Code-address inventories must include every embedded
+  allocation, and primitive strings need GHC's implicit terminal NUL in backing
+  storage without changing their logical wire bytes.
