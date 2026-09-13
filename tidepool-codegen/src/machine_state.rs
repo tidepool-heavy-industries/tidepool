@@ -1203,21 +1203,26 @@ impl MachineState {
         let storage = self.external_storage.borrow();
         for (published, start) in [(source, source_start), (destination, destination_start)] {
             let record = Self::checked_external_record(
-                &storage, published, ExternalStorageKind::BoxedArray,
+                &storage,
+                published,
+                ExternalStorageKind::BoxedArray,
             )?;
             let end = start.checked_add(count).ok_or(
                 ExternalStorageValidationError::IndexOutOfBounds {
-                    index: start, len: record.logical_len,
+                    index: start,
+                    len: record.logical_len,
                 },
             )?;
             if end > record.logical_len {
                 return Err(ExternalStorageValidationError::IndexOutOfBounds {
-                    index: end.saturating_sub(1), len: record.logical_len,
+                    index: end.saturating_sub(1),
+                    len: record.logical_len,
                 });
             }
         }
         let mut values = Vec::new();
-        values.try_reserve_exact(count)
+        values
+            .try_reserve_exact(count)
             .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
         // Both complete ranges belong to authenticated active allocations. The
         // owned snapshot handles overlapping ranges without aliased Rust slices.
@@ -2617,6 +2622,106 @@ mod tests {
             .unwrap();
         assert!(ms.external_storage.borrow().contains_key(&payload));
         assert!(!ms.external_storage.borrow().contains_key(&dead_young));
+    }
+
+    #[test]
+    fn w5_bulk_boxed_copy_supports_overlapping_ranges_in_both_directions() {
+        let ms = MachineState::new();
+        let payload = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 5)
+            .unwrap();
+        let values = (1..=5)
+            .map(|value| value as usize as *mut u8)
+            .collect::<Vec<_>>();
+        ms.store_external_elements(payload, 0, &values).unwrap();
+
+        // Source starts before destination: snapshotting is required to avoid
+        // reading values already overwritten by the forward overlap.
+        ms.copy_external_elements(payload, 0, payload, 1, 4)
+            .unwrap();
+        let slots = unsafe { std::slice::from_raw_parts(payload.add(8).cast::<*mut u8>(), 5) };
+        assert_eq!(slots, [1usize, 1, 2, 3, 4].map(|value| value as *mut u8));
+
+        // Source starts after destination: the same owner must preserve the
+        // reverse overlap rather than behaving like a forward-only copy.
+        ms.copy_external_elements(payload, 1, payload, 0, 4)
+            .unwrap();
+        let slots = unsafe { std::slice::from_raw_parts(payload.add(8).cast::<*mut u8>(), 5) };
+        assert_eq!(slots, [1usize, 2, 3, 4, 4].map(|value| value as *mut u8));
+    }
+
+    #[test]
+    fn w5_bulk_boxed_copy_rejects_incomplete_spans_without_revision_or_write() {
+        let ms = MachineState::new();
+        let source = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        let destination = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        let source_values = [1usize, 2, 3].map(|value| value as *mut u8);
+        let destination_values = [9usize, 9, 9].map(|value| value as *mut u8);
+        ms.store_external_elements(source, 0, &source_values)
+            .unwrap();
+        ms.store_external_elements(destination, 0, &destination_values)
+            .unwrap();
+
+        for (source_start, destination_start) in [(2, 0), (0, 2)] {
+            let before = ms.external_revision.get();
+            assert!(matches!(
+                ms.copy_external_elements(source, source_start, destination, destination_start, 2),
+                Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+            ));
+            assert_eq!(ms.external_revision.get(), before);
+            let slots =
+                unsafe { std::slice::from_raw_parts(destination.add(8).cast::<*mut u8>(), 3) };
+            assert_eq!(slots, [9usize, 9, 9].map(|value| value as *mut u8));
+        }
+    }
+
+    #[test]
+    fn w5_bulk_boxed_copy_accepts_zero_length_endpoint_without_revision() {
+        let ms = MachineState::new();
+        let payload = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        let values = [1usize, 2, 3].map(|value| value as *mut u8);
+        ms.store_external_elements(payload, 0, &values).unwrap();
+        let before = ms.external_revision.get();
+
+        ms.copy_external_elements(payload, 3, payload, 3, 0)
+            .unwrap();
+
+        assert_eq!(ms.external_revision.get(), before);
+        let slots = unsafe { std::slice::from_raw_parts(payload.add(8).cast::<*mut u8>(), 3) };
+        assert_eq!(slots, values);
+    }
+
+    #[test]
+    fn w5_bulk_boxed_copy_remembers_retained_destination_slots() {
+        let ms = MachineState::new();
+        let source = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        let destination = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        let source_values = [1usize, 2, 3].map(|value| value as *mut u8);
+        ms.store_external_elements(source, 0, &source_values)
+            .unwrap();
+        ms.retain_external_payloads(&[(destination as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+        // Isolate the copy's barrier admission from the retention transition.
+        ms.clear_remembered_slots();
+        let before = ms.external_revision.get();
+
+        ms.copy_external_elements(source, 0, destination, 1, 2)
+            .unwrap();
+
+        assert_eq!(ms.remembered_slots_count(), 2);
+        assert_ne!(ms.external_revision.get(), before);
+        let slots = unsafe { std::slice::from_raw_parts(destination.add(8).cast::<*mut u8>(), 3) };
+        assert_eq!(slots, [0usize, 1, 2].map(|value| value as *mut u8));
     }
 
     #[test]

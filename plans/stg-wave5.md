@@ -6,6 +6,14 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Post-checkpoint completion audit found another explicit plan obligation not
+covered by the corpus's finite operation inventory: boxed-array bulk copy/clone.
+Mutable overlapping copy is now a bounded implementation parcel, seeded at
+`6d707028c` with the existing MachineState bulk-store/barrier owner and an
+exact-signature acceptance test. The verified checkpoint below predates this
+parcel. The two recovery decisions are therefore not the only remaining work;
+the family-completeness audit remains distinct from corpus recognition counts.
+
 Current frozen source is `66aeaa669`. The final focused fold passed 157
 prepared-program tests and 38 machine-state tests; all workspace test targets
 compiled (`cargo test --workspace --no-run --quiet`). Canonical fixtures-check

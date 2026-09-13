@@ -23,6 +23,7 @@ pub(super) enum ArrayOperation {
     SizeofBoxed,
     UnsafeFreezeBoxed,
     ShrinkSmallBoxed,
+    CopyBoxed,
     CasBoxed,
 }
 
@@ -92,6 +93,13 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![]) =>
         {
             Some(ArrayOperation::ShrinkSmallBoxed)
+        }
+        "copySmallMutableArray#" | "copyMutableArray#"
+            if signature.arguments
+                == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void]
+                && signature.results == ResultContract::Returns(vec![]) =>
+        {
+            Some(ArrayOperation::CopyBoxed)
         }
         "casSmallArray#" | "casArray#"
             if signature.arguments == [UnliftedRef, Int(64), LiftedRef, LiftedRef, Void]
@@ -386,6 +394,65 @@ pub(super) unsafe extern "C" fn prepared_shrink_boxed(
     }
 }
 
+fn checked_element_span(value: i64, len: usize) -> Result<usize, crate::host_fns::RuntimeError> {
+    usize::try_from(value)
+        .map_err(|_| crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: value, len })
+}
+
+fn boxed_range_error(error: ExternalStorageValidationError) -> crate::host_fns::RuntimeError {
+    match error {
+        ExternalStorageValidationError::IndexOutOfBounds { index, len } => {
+            crate::host_fns::RuntimeError::ArrayIndexOutOfBounds {
+                index: i64::try_from(index).unwrap_or(i64::MAX),
+                len,
+            }
+        }
+        other => storage_error(other, 0),
+    }
+}
+
+/// Copy a complete boxed-array span through the ledger owner. Both wrappers and
+/// all signed ranges are authenticated before the owner snapshots the source;
+/// the owner then uses its retained-slot barrier for the destination range.
+/// No collection or callback occurs while the source snapshot is live.
+pub(super) unsafe extern "C" fn prepared_copy_boxed(
+    vmctx: *mut crate::context::VMContext,
+    descriptor: *const ObjectDescriptor,
+    source: *mut u8,
+    source_offset: i64,
+    destination: *mut u8,
+    destination_offset: i64,
+    count: i64,
+) -> i32 {
+    use crate::prepared_control::CallStatus;
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        let (source, source_len) =
+            unsafe { active_boxed_payload(machine, vmctx, source, descriptor) }?;
+        let (destination, destination_len) =
+            unsafe { active_boxed_payload(machine, vmctx, destination, descriptor) }?;
+        let source_offset = checked_element_span(source_offset, source_len)?;
+        let destination_offset = checked_element_span(destination_offset, destination_len)?;
+        let count = checked_element_span(count, source_len)?;
+        machine
+            .copy_external_elements(
+                source,
+                source_offset,
+                destination,
+                destination_offset,
+                count,
+            )
+            .map_err(boxed_range_error)
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => array_error(machine, error),
+    }
+}
+
 pub(super) unsafe extern "C" fn prepared_cas_boxed(
     vmctx: *mut crate::context::VMContext,
     reference: *mut u8,
@@ -624,6 +691,36 @@ pub(super) fn emit_shrink_boxed(
     Ok(Vec::new())
 }
 
+pub(super) fn emit_copy_boxed(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    builder.declare_value_needs_stack_map(arguments[0]);
+    builder.declare_value_needs_stack_map(arguments[2]);
+    let host = declare_host(builder, pipeline, "prepared_copy_boxed", 7)?;
+    let owner = builder
+        .ins()
+        .iconst(types::I64, descriptor.initial_header_word() as i64);
+    let call = builder.ins().call(
+        host,
+        &[
+            vmctx,
+            owner,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            arguments[4],
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    finish_checked_call(builder, status);
+    Ok(Vec::new())
+}
+
 pub(super) fn emit_cas_boxed(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
@@ -754,6 +851,25 @@ mod tests {
             ),
             Some(ArrayOperation::WriteBoxed)
         ));
+        for name in ["copySmallMutableArray#", "copyMutableArray#"] {
+            assert!(matches!(
+                recognize(
+                    &primop(name),
+                    &signature(
+                        vec![
+                            RuntimeRep::UnliftedRef,
+                            RuntimeRep::Int(64),
+                            RuntimeRep::UnliftedRef,
+                            RuntimeRep::Int(64),
+                            RuntimeRep::Int(64),
+                            RuntimeRep::Void,
+                        ],
+                        vec![]
+                    )
+                ),
+                Some(ArrayOperation::CopyBoxed)
+            ));
+        }
         assert!(recognize(
             &primop("writeArray#"),
             &signature(
@@ -950,6 +1066,249 @@ mod tests {
         if let Group::NonRecursive(top) = &mut wire.bindings[0] {
             if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
                 *body = new_case;
+            }
+        }
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
+    }
+
+    fn copy_program(
+        copy_name: &str,
+        source_offset: i64,
+        destination_offset: i64,
+        count: i64,
+        read_index: i64,
+        garbage: usize,
+        distinct_destination: bool,
+    ) -> crate::prepared_program::CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.signatures.extend([
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            },
+        ]);
+        wire.constructors = (0_u64..=5).map(empty_constructor).collect();
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Arrays", "initial"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        }));
+        wire.operations = [
+            "newSmallArray#",
+            "writeSmallArray#",
+            copy_name,
+            "readSmallArray#",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| OperationDecl {
+            identity: OperationIdentity::PrimOp(name.into()),
+            signature: SignatureId(index as u32 + 1),
+        })
+        .collect();
+        let int = |value: i64| {
+            Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: value.to_be_bytes().to_vec(),
+            })
+        };
+        let local = |id| Atom::Ref(ValueRef::Local(ValueId(id)));
+        let mut nodes = vec![
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![int(5), local(1), Atom::Void],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![int(5), local(1), Atom::Void],
+            },
+        ];
+        let mut writes = Vec::new();
+        for index in 0_u32..5 {
+            let value = nodes.len();
+            nodes.push(ExprFrame::Construct {
+                constructor: ConstructorId(index + 1),
+                fields: vec![],
+            });
+            let write = nodes.len();
+            nodes.push(ExprFrame::Operation {
+                operation: OperationId(1),
+                arguments: vec![
+                    local(100),
+                    int(i64::from(index)),
+                    local(200 + index),
+                    Atom::Void,
+                ],
+            });
+            writes.push((write, value, index));
+        }
+        let copy = nodes.len();
+        nodes.push(ExprFrame::Operation {
+            operation: OperationId(2),
+            arguments: vec![
+                local(100),
+                int(source_offset),
+                if distinct_destination {
+                    local(101)
+                } else {
+                    local(100)
+                },
+                int(destination_offset),
+                int(count),
+                Atom::Void,
+            ],
+        });
+        let read = nodes.len();
+        nodes.push(ExprFrame::Operation {
+            operation: OperationId(3),
+            arguments: vec![
+                if distinct_destination {
+                    local(101)
+                } else {
+                    local(100)
+                },
+                int(read_index),
+                Atom::Void,
+            ],
+        });
+        let ret = nodes.len();
+        nodes.push(ExprFrame::Return(vec![local(102)]));
+        let mut continuation = nodes.len();
+        nodes.push(ExprFrame::Case {
+            scrutinee: read,
+            binder: ValueId(102),
+            kind: CaseKind::Polymorphic,
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![],
+                body: ret,
+            }],
+        });
+        for index in 0..garbage {
+            let construct = nodes.len();
+            nodes.push(ExprFrame::Construct {
+                constructor: ConstructorId(0),
+                fields: vec![],
+            });
+            let case = nodes.len();
+            nodes.push(ExprFrame::Case {
+                scrutinee: construct,
+                binder: ValueId(300 + index as u32),
+                kind: CaseKind::Polymorphic,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: continuation,
+                }],
+            });
+            continuation = case;
+        }
+        let copy_case = nodes.len();
+        nodes.push(ExprFrame::Case {
+            scrutinee: copy,
+            binder: ValueId(103),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(vec![]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![],
+                body: continuation,
+            }],
+        });
+        continuation = copy_case;
+        for (write, construct, index) in writes.into_iter().rev() {
+            let write_case = nodes.len();
+            nodes.push(ExprFrame::Case {
+                scrutinee: write,
+                binder: ValueId(400 + write_case as u32),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: continuation,
+                }],
+            });
+            let value_case = nodes.len();
+            nodes.push(ExprFrame::Case {
+                scrutinee: construct,
+                binder: ValueId(200 + index),
+                kind: CaseKind::Polymorphic,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: write_case,
+                }],
+            });
+            continuation = value_case;
+        }
+        let destination_case = nodes.len();
+        nodes.push(ExprFrame::Case {
+            scrutinee: 1,
+            binder: ValueId(105),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![ValueId(101)],
+                body: continuation,
+            }],
+        });
+        let root = nodes.len();
+        nodes.push(ExprFrame::Case {
+            scrutinee: 0,
+            binder: ValueId(104),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![ValueId(100)],
+                body: destination_case,
+            }],
+        });
+        wire.expressions.nodes = nodes;
+        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+            if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+                *body = root;
             }
         }
         let linked =
@@ -1426,6 +1785,174 @@ mod tests {
         );
         assert!(matches!(result.values.as_slice(),
             [tidepool_bridge::Value::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
+    }
+
+    #[test]
+    fn prepared_mutable_array_copy_handles_overlap_distinct_ranges_and_gc() {
+        for name in ["copySmallMutableArray#", "copyMutableArray#"] {
+            for (source_offset, destination_offset, read_index, expected) in [
+                (0, 1, 1, 1001), // shift right: source[0] reaches destination[1]
+                (1, 0, 0, 1002), // shift left: source[1] reaches destination[0]
+            ] {
+                let result = copy_program(
+                    name,
+                    source_offset,
+                    destination_offset,
+                    4,
+                    read_index,
+                    32,
+                    false,
+                )
+                .run_entry(
+                    ValueId(0),
+                    &[],
+                    &crate::prepared_program::RunOptions {
+                        nursery_bytes: 128,
+                        collect_before_observation: true,
+                        ..Default::default()
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+                assert!(result.collections >= 2);
+                assert!(matches!(
+                    result.values.as_slice(),
+                    [tidepool_bridge::Value::Con(id, fields)]
+                        if *id == tidepool_repr::DataConId(expected) && fields.is_empty()
+                ));
+            }
+            let result = copy_program(name, 1, 2, 2, 2, 32, true)
+                .run_entry(
+                    ValueId(0),
+                    &[],
+                    &crate::prepared_program::RunOptions {
+                        nursery_bytes: 128,
+                        collect_before_observation: true,
+                        ..Default::default()
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+            assert!(matches!(
+                result.values.as_slice(),
+                [tidepool_bridge::Value::Con(id, fields)]
+                    if *id == tidepool_repr::DataConId(1002) && fields.is_empty()
+            ));
+        }
+    }
+
+    #[test]
+    fn prepared_mutable_array_copy_bounds_fail_before_any_write() {
+        for (source_offset, destination_offset, count) in [(-1, 0, 1), (0, -1, 1), (0, 0, 6)] {
+            let error = copy_program(
+                "copySmallMutableArray#",
+                source_offset,
+                destination_offset,
+                count,
+                0,
+                0,
+                false,
+            )
+            .run_entry(
+                ValueId(0),
+                &[],
+                &Default::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::prepared_program::ExecutionError::Runtime(failure)
+                    if failure.disposition == crate::machine_state::MachineDisposition::Reusable
+                        && matches!(failure.cause, crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn prepared_mutable_array_copy_host_rejects_destination_overrun_without_write() {
+        use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let descriptor =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        let machine = crate::machine_state::MachineState::new();
+        let extent = descriptor.allocation_extent() as usize;
+        machine
+            .install_prepared_buffer(
+                vec![0_u64; extent / 8 * 2],
+                vec![descriptor.clone(), descriptor.clone()],
+            )
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let second = unsafe { start.add(extent) };
+        let source = machine
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        let destination = machine
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        machine
+            .store_external_elements(
+                source,
+                0,
+                &[1usize as *mut u8, 2usize as *mut u8, 3usize as *mut u8],
+            )
+            .unwrap();
+        machine
+            .store_external_elements(
+                destination,
+                0,
+                &[9usize as *mut u8, 9usize as *mut u8, 9usize as *mut u8],
+            )
+            .unwrap();
+        unsafe {
+            descriptor.initialize_header(start);
+            descriptor.initialize_header(second);
+            descriptor
+                .external_payload_slot(start, extent)
+                .unwrap()
+                .write(source);
+            descriptor
+                .external_payload_slot(second, extent)
+                .unwrap()
+                .write(destination);
+        }
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        vmctx.alloc_ptr = unsafe { second.add(extent) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let status = unsafe {
+            prepared_copy_boxed(
+                &mut vmctx,
+                Arc::as_ptr(&descriptor),
+                (start as usize | usize::from(descriptor.tag())) as *mut u8,
+                0,
+                (second as usize | usize::from(descriptor.tag())) as *mut u8,
+                2,
+                2,
+            )
+        };
+        assert_eq!(
+            status,
+            crate::prepared_control::CallStatus::LanguageFailure as i32
+        );
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: 3, len: 3 })
+        );
+        let slots = unsafe { std::slice::from_raw_parts(destination.add(8).cast::<*mut u8>(), 3) };
+        assert_eq!(
+            slots,
+            [9usize as *mut u8, 9usize as *mut u8, 9usize as *mut u8]
+        );
     }
 
     #[test]

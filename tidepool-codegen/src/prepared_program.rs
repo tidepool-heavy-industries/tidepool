@@ -230,6 +230,10 @@ impl CompiledProgram {
                 arrays::prepared_shrink_boxed as *const u8,
             ),
             (
+                "prepared_copy_boxed",
+                arrays::prepared_copy_boxed as *const u8,
+            ),
+            (
                 "prepared_cas_boxed",
                 arrays::prepared_cas_boxed as *const u8,
             ),

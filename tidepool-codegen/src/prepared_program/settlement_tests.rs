@@ -14,7 +14,11 @@ use tidepool_heap::execution_descriptor::{
     DescriptorState, ObjectDescriptor, FORWARDING_POINTER_OFFSET,
 };
 use tidepool_heap::managed_reference::untag;
-use tidepool_repr::execution_schema::{UpdatePolicy, ValueId};
+use tidepool_repr::execution_schema::{
+    link_program, testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, Group,
+    HeapBinding, HeapRhs, MachineImports, ResultContract, RuntimeRep, SignatureId, TopBinding,
+    UpdatePolicy, ValueId, ValueRef,
+};
 
 struct Invocation<'a> {
     program: &'a CompiledProgram,
@@ -84,6 +88,51 @@ impl<'a> Invocation<'a> {
         )
     }
 
+    fn install_captured_constructor(&mut self) -> usize {
+        let capture = self
+            .program
+            .descriptor_registry
+            .values()
+            .find_map(|metadata| match &metadata.meaning {
+                DescriptorMeaning::Constructor(observation)
+                    if observation.identity == tidepool_repr::DataConId(900) =>
+                {
+                    Some(Arc::clone(&metadata.descriptor))
+                }
+                _ => None,
+            })
+            .expect("captured constructor descriptor");
+        let object = self.vmctx.alloc_ptr;
+        unsafe { capture.initialize_header(object) };
+        let stored = self.descriptor.payload().logical_to_stored()[0]
+            .expect("thunk capture has a managed slot");
+        let field = &self.descriptor.payload().fields()[stored as usize];
+        let tagged = object as usize | usize::from(capture.tag());
+        unsafe {
+            std::ptr::write_unaligned(
+                (*self.root as *mut u8)
+                    .add((self.descriptor.payload_base() + field.offset()) as usize)
+                    .cast::<usize>(),
+                tagged,
+            );
+            self.vmctx.alloc_ptr = object.add(capture.allocation_extent() as usize);
+        }
+        tagged
+    }
+
+    fn captured_slot(&self) -> usize {
+        let stored = self.descriptor.payload().logical_to_stored()[0]
+            .expect("thunk capture has a managed slot");
+        let field = &self.descriptor.payload().fields()[stored as usize];
+        unsafe {
+            std::ptr::read_unaligned(
+                (*self.root as *const u8)
+                    .add((self.descriptor.payload_base() + field.offset()) as usize)
+                    .cast::<usize>(),
+            )
+        }
+    }
+
     fn state(&self) -> DescriptorState {
         assert_eq!(self.machine.disposition(), MachineDisposition::Reusable);
         unsafe {
@@ -94,6 +143,56 @@ impl<'a> Invocation<'a> {
         }
         .unwrap()
     }
+}
+
+fn captured_caf_program(policy: UpdatePolicy) -> CompiledProgram {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+    wire.constructors.push(ConstructorDecl {
+        identity: testing::identity("W5", "CapturedUnit"),
+        family: testing::identity("W5", "CapturedUnit"),
+        host_id: tidepool_repr::DataConId(900),
+        result_rep: RuntimeRep::LiftedRef,
+        tag: 1,
+        family_size: 1,
+        strict_fields: vec![],
+        field_reps: vec![],
+        layout: CheckedLayout {
+            fields: vec![],
+            alignment: 1,
+            payload_size: 0,
+            root_mask: vec![],
+        },
+    });
+    wire.expressions.nodes = vec![ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(
+        ValueId(1),
+    ))])];
+    wire.bindings = vec![Group::Recursive(vec![
+        TopBinding {
+            identity: testing::identity("W5", "captured-thunk"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: policy,
+                    captures: vec![ValueRef::Local(ValueId(1))],
+                    body: 0,
+                },
+            },
+        },
+        TopBinding {
+            identity: testing::identity("W5", "captured-constructor"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        },
+    ])];
+    let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+    CompiledProgram::compile(&linked).unwrap()
 }
 
 impl Drop for Invocation<'_> {
@@ -158,6 +257,46 @@ fn w5_a1_cancellation_settles_live_and_does_not_publish_output() {
                 invocation.force().0,
                 CallStatus::Success,
                 "a settled reusable thunk must permit retry: {point:?} {policy:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn w5_a1_cancellation_preserves_captured_managed_value_for_retry() {
+    for policy in [UpdatePolicy::Memoize, UpdatePolicy::SingleEntry] {
+        for (point, occurrence) in [
+            (PreparedSafepoint::FunctionEntry, 1),
+            (PreparedSafepoint::ThunkEntry, 2),
+            (PreparedSafepoint::ThunkCommit, 1),
+        ] {
+            let program = captured_caf_program(policy);
+            let mut invocation = Invocation::new(&program);
+            let captured = invocation.install_captured_constructor();
+            invocation
+                .machine
+                .fail_prepared_at(point, occurrence, RuntimeError::Cancelled);
+
+            let (status, output) = invocation.force();
+            assert_eq!(status, CallStatus::Cancelled, "{policy:?} {point:?}");
+            assert_eq!(output, 0xdead_beef);
+            assert_eq!(invocation.state(), DescriptorState::Live);
+            assert_eq!(invocation.captured_slot(), captured);
+            assert_eq!(
+                invocation.machine.take_runtime_error(),
+                Some(RuntimeError::Cancelled)
+            );
+
+            let (status, result) = invocation.force();
+            assert_eq!(status, CallStatus::Success, "{policy:?} {point:?}");
+            assert_eq!(result, captured);
+            assert_eq!(
+                invocation.state(),
+                match policy {
+                    UpdatePolicy::Memoize => DescriptorState::Updated,
+                    UpdatePolicy::SingleEntry => DescriptorState::Evaluating,
+                },
+                "{policy:?} {point:?}",
             );
         }
     }

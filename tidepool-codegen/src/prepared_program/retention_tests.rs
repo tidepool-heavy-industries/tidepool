@@ -112,6 +112,61 @@ fn static_constructor_program() -> CompiledProgram {
     compile_wire(wire)
 }
 
+fn boxed_array_program() -> CompiledProgram {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::UnliftedRef]);
+    wire.signatures.push(Signature {
+        arguments: vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
+        results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+    });
+    wire.constructors.push(constructor(0, Vec::new()));
+    wire.bindings.push(Group::NonRecursive(TopBinding {
+        identity: testing::identity("W5A5", "array-initial"),
+        binding: HeapBinding {
+            id: ValueId(1),
+            rhs: HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: Vec::new(),
+            },
+        },
+    }));
+    wire.operations.push(OperationDecl {
+        identity: OperationIdentity::PrimOp("newSmallArray#".into()),
+        signature: SignatureId(1),
+    });
+    wire.expressions.nodes = vec![
+        ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments: vec![
+                Atom::Scalar(ScalarLiteral::Int {
+                    bits: 64,
+                    bytes: 1_i64.to_be_bytes().to_vec(),
+                }),
+                Atom::Ref(ValueRef::Local(ValueId(1))),
+                Atom::Void,
+            ],
+        },
+        ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(4)))]),
+        ExprFrame::Case {
+            scrutinee: 0,
+            binder: ValueId(2),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![ValueId(4)],
+                body: 1,
+            }],
+        },
+    ];
+    if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+        if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+            *body = 2;
+        }
+    }
+    compile_wire(wire)
+}
+
 fn options() -> RunOptions {
     RunOptions {
         nursery_bytes: 64,
@@ -188,6 +243,83 @@ fn w5_a5_old_thunk_update_remembers_young_result() {
             if *id == tidepool_repr::DataConId(951)
                 && matches!(fields.as_slice(), [tidepool_bridge::Value::Con(child, rest)]
                     if *child == tidepool_repr::DataConId(950) && rest.is_empty())
+    ));
+}
+
+#[test]
+fn w5_a5_promoted_array_remembers_young_store_through_minor_gc() {
+    let program = boxed_array_program();
+    let mut invocation = enter(&program);
+    invocation.promote_result(0).unwrap();
+    assert_scope_clear(&invocation);
+
+    let array_descriptor = program
+        .descriptors
+        .iter()
+        .find(|descriptor| {
+            descriptor.kind()
+                == tidepool_heap::execution_descriptor::ObjectKind::External(
+                    tidepool_heap::external_storage::ExternalStorageKind::BoxedArray,
+                )
+        })
+        .unwrap();
+    let constructor_descriptor = program
+        .descriptors
+        .iter()
+        .find(|descriptor| {
+            descriptor.kind() == tidepool_heap::execution_descriptor::ObjectKind::Constructor
+        })
+        .unwrap();
+    let array = unsafe { *invocation.results.as_mut_ptr().cast::<*mut u8>() };
+    let array_object = tidepool_heap::managed_reference::untag(array as usize) as *mut u8;
+    let array_extent = array_descriptor.allocation_extent() as usize;
+    let payload = unsafe {
+        array_descriptor
+            .external_payload_slot(array_object, array_extent)
+            .unwrap()
+            .read()
+    };
+
+    // Make a fresh nursery constructor after the array has been promoted.
+    // The payload owner is the only root once the store below succeeds.
+    let young = invocation.vmctx.alloc_ptr;
+    let young_extent = constructor_descriptor.allocation_extent() as usize;
+    let nursery_end = invocation.vmctx.alloc_limit as usize;
+    assert!((young as usize) + young_extent <= nursery_end);
+    unsafe { constructor_descriptor.initialize_header(young) };
+    invocation.vmctx.alloc_ptr = unsafe { young.add(young_extent) };
+    let young_reference = (young as usize | usize::from(constructor_descriptor.tag())) as *mut u8;
+
+    invocation.machine.clear_remembered_slots();
+    invocation
+        .machine
+        .store_external_element(payload, 0, young_reference)
+        .unwrap();
+    assert_eq!(invocation.machine.remembered_slots_count(), 1);
+
+    collect(&mut invocation);
+    let moved = unsafe { payload.add(8).cast::<*mut u8>().read() };
+    assert_ne!(
+        moved, young_reference,
+        "minor GC must rewrite the retained slot"
+    );
+
+    // The ordinary result is the external handle, which is intentionally not
+    // directly observable. Re-root the moved managed value through the same
+    // invocation result storage, then use the normal observation path.
+    unsafe {
+        invocation
+            .results
+            .as_mut_ptr()
+            .cast::<*mut u8>()
+            .write(moved)
+    };
+    let result = invocation.observe(10_000).unwrap();
+    assert_scope_clear(&invocation);
+    assert!(matches!(
+        result.values.as_slice(),
+        [tidepool_bridge::Value::Con(id, fields)]
+            if *id == tidepool_repr::DataConId(950) && fields.is_empty()
     ));
 }
 

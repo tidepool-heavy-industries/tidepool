@@ -705,6 +705,10 @@ pub(super) fn emit_operation(
             super::arrays::emit_shrink_boxed(builder, pipeline, vmctx, boxed_array, arguments)
                 .map(Some)
         }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::CopyBoxed) => {
+            super::arrays::emit_copy_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
         PrimitiveOperation::Array(super::arrays::ArrayOperation::CasBoxed) => {
             super::arrays::emit_cas_boxed(builder, pipeline, vmctx, boxed_array, arguments)
                 .map(Some)
