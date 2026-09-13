@@ -46,6 +46,7 @@ import Tidepool.GhcPipeline
   , withResidentPipelineSelected, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
+import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.PreparedStg (PreparedModule(..))
@@ -430,6 +431,7 @@ trySynchronous action = do
 
 writePreparedArtifacts :: FilePath -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> IO ()
 writePreparedArtifacts outDir input hscEnv modules targets = do
+  formattingAuthority <- resolveFormattingAuthority hscEnv
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
       matching = [prepared | prepared <- modules,
@@ -446,7 +448,7 @@ writePreparedArtifacts outDir input hscEnv modules targets = do
           (T.pack (unitString (moduleUnit (pmModule preparedModule))))
           (T.pack targetModule) "value" (T.pack target) Nothing
         context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-          (TargetDescriptor architecture LittleEndian 64 64 abi []) Map.empty entry
+          (TargetDescriptor architecture LittleEndian 64 64 abi []) Map.empty entry formattingAuthority
     recovered <- recoverPreparedClosure hscEnv context modules
     reportRecoveryResiduals target (closureFailures recovered)
     program <- either (ioError . userError . ("prepared projection failed: " <>) . show) pure

@@ -68,6 +68,7 @@ main = do
               (Text.pack "sysv64") []
           , projectionRetainedGenerations = mempty
           , projectionEntry = entry
+          , projectionFormattingAuthority = Nothing
           }
     closure <- liftIO $ recoverPreparedClosure hsc context modules
     liftIO $ assert (any recoveredFst (closureModules closure))

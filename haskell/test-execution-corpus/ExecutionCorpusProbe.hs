@@ -24,6 +24,8 @@ import Tidepool.GhcPipeline
   , runPipelineSelected )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
+import Tidepool.PreparedFormatting
+  ( FormattingAuthority, resolveFormattingAuthority )
 import Tidepool.Json (jsonString)
 
 data Record = Record String (Maybe String) [RecoveryFailure] Outcome
@@ -60,6 +62,8 @@ runProbe arguments = do
         , map (\target -> LegacyTarget target Nothing) targets
         )
     Right prepared -> do
+      formattingAuthority <- resolveFormattingAuthority
+        (prHscEnv (pprPipelineResult prepared))
       enumerated <- trySync (evaluate (forceIdentities
         (preparedTopIdentities (pprModules prepared))))
       case enumerated of
@@ -84,9 +88,9 @@ runProbe arguments = do
           legacy <- mapLegacyTargets moduleNameArg identities targets
           rows <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
-              projectOneIdentity prepared outputDir index identity
+              projectOneIdentity prepared formattingAuthority outputDir index identity
             else forM (zip [0 :: Int ..] (zip targets legacy)) $ \(index, (occurrence, legacyTarget)) ->
-              projectOneTarget prepared moduleNameArg outputDir index occurrence
+              projectOneTarget prepared formattingAuthority moduleNameArg outputDir index occurrence
                 (legacyTargetIdentity legacyTarget)
           pure (rows, legacy)
   BS.writeFile (outputDir </> "manifest.json")
@@ -151,27 +155,29 @@ matchesExternal moduleNameArg occurrence identity =
 
 projectOneTarget
   :: PreparedPipelineResult
+  -> Maybe FormattingAuthority
   -> String
   -> FilePath
   -> Int
   -> String
   -> Maybe SymbolIdentity
   -> IO Record
-projectOneTarget prepared moduleNameArg outputDir index occurrence mapped = do
+projectOneTarget prepared formattingAuthority moduleNameArg outputDir index occurrence mapped = do
   let reject reason = pure (Record (missingName moduleNameArg occurrence)
         Nothing [] (Rejected reason))
   case mapped of
     Nothing -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
-    Just selected -> projectOneIdentity prepared outputDir index selected
+    Just selected -> projectOneIdentity prepared formattingAuthority outputDir index selected
 
 projectOneIdentity
   :: PreparedPipelineResult
+  -> Maybe FormattingAuthority
   -> FilePath
   -> Int
   -> SymbolIdentity
   -> IO Record
-projectOneIdentity prepared outputDir index selected = do
-  let context = projectionContext selected
+projectOneIdentity prepared formattingAuthority outputDir index selected = do
+  let context = projectionContext formattingAuthority selected
       artifactName = numericArtifactName index
       name = identityName selected
       expectationKey = externalExpectationKey selected
@@ -264,14 +270,15 @@ mapLegacyTargetsPure
 mapLegacyTargetsPure moduleNameArg identities = map $ \legacyName ->
   fmap (LegacyTarget legacyName) (exactExternalMapping moduleNameArg identities legacyName)
 
-projectionContext :: SymbolIdentity -> ProjectionContext
-projectionContext identity =
+projectionContext :: Maybe FormattingAuthority -> SymbolIdentity -> ProjectionContext
+projectionContext formattingAuthority identity =
   ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"
     , projectionToolchain = "ghc-9.12.2"
     , projectionTarget = targetDescriptor
     , projectionRetainedGenerations = mempty
     , projectionEntry = identity
+    , projectionFormattingAuthority = formattingAuthority
     }
 
 targetDescriptor :: TargetDescriptor

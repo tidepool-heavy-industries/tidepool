@@ -2,7 +2,7 @@
 
 module ExecutionProjectionTest (projectProjectionContract) where
 
-import Control.Monad (unless)
+import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
@@ -19,6 +19,8 @@ import GHC.Types.Id (isDataConWorkId_maybe)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (Id, varName)
+import GHC.Unit.Module (mkModule, moduleName, moduleNameString)
+import GHC.Unit.Types (stringToUnit)
 import GHC.Stg.Syntax
 import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
@@ -27,12 +29,15 @@ import Tidepool.PreparedFacts (PreparedFacts(..))
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
+  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
   , runPipelineSelected )
+import Tidepool.PreparedFormatting
+  (FormattingAuthority(..), classifyFormatting, resolveFormattingAuthority)
 
 projectProjectionContract :: [PreparedModule] -> IO WireProgram
 projectProjectionContract modules = do
   verifyPreparedFormatting
+  verifyTagToEnumProjection
   topIdentityAllocationContract
   literalProjectionContract
   case projectPrepared context modules of
@@ -87,7 +92,7 @@ projectProjectionContract modules = do
   where
     context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
       (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
-      (SymbolIdentity "main" "M3Vertical" "value" "result" Nothing)
+      (SymbolIdentity "main" "M3Vertical" "value" "result" Nothing) Nothing
 
     selectedEntry program = case
       [ heapBindingId binding
@@ -198,7 +203,7 @@ verifyNullaryWorkerProjection = do
   assertNullaryWorkerReferences prepared
   let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
         (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
-        (SymbolIdentity "main" "NullaryWorkers" "value" "result" Nothing)
+        (SymbolIdentity "main" "NullaryWorkers" "value" "result" Nothing) Nothing
   program <- case projectPreparedTarget context (pprModules prepared) of
     Left failure -> ioError (userError ("nullary worker projection failed: " <> show failure))
     Right value -> pure value
@@ -531,7 +536,7 @@ verifySuiteCollisionRegression :: IO ()
 verifySuiteCollisionRegression = do
   prepared <- runPipelineSelected PreparedStg "test/Suite.hs" ["lib", "test"]
   let context identity = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty identity
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty identity Nothing
       identity = SymbolIdentity "main" "Suite" "value" "ho_myany" Nothing
   case projectPreparedTarget (context identity) (pprModules prepared) of
     Left failure -> ioError (userError ("Suite collision repro changed: " <> show failure))
@@ -600,7 +605,7 @@ verifyRintDoubleStateToken = do
     "test-prepared-stg/RintDouble.hs" ["test-prepared-stg"]
   let identity = SymbolIdentity "main" "RintDouble" "value" "roundSimpleUp" Nothing
       context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty identity
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty identity Nothing
   case projectPreparedTarget context (pprModules prepared) of
     Left failure -> ioError (userError
       ("state-bearing rintDouble projection failed: " <> show failure))
@@ -631,7 +636,7 @@ verifyBottomingSentinelContracts = do
     verify prepared (entryName, operationName) = do
       let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
             (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
-            (SymbolIdentity "main" "RaiseContract" "value" entryName Nothing)
+            (SymbolIdentity "main" "RaiseContract" "value" entryName Nothing) Nothing
       program <- case projectPreparedTarget context (pprModules prepared) of
         Left failure -> ioError (userError
           ("bottoming sentinel projection failed: " <> show (entryName, failure)))
@@ -685,7 +690,7 @@ verifySmallArrayOperationContracts = do
     verify prepared (entryName, operationName, expected) = do
       let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
             (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
-            (SymbolIdentity "main" "ArrayContract" "value" entryName Nothing)
+            (SymbolIdentity "main" "ArrayContract" "value" entryName Nothing) Nothing
       program <- case projectPreparedTarget context (pprModules prepared) of
         Left failure -> ioError (userError
           ("small-array projection failed: " <> show (entryName, failure)))
@@ -706,18 +711,155 @@ verifySmallArrayOperationContracts = do
 -- an error placeholder or lose the successful continuation as bottoming Core.
 verifyPreparedFormatting :: IO ()
 verifyPreparedFormatting = do
+  verifyFormattingSourceAuthority
   prepared <- runPipelineSelected PreparedStg
     "test-prepared-stg/FormattingContract.hs" ["test-prepared-stg", "lib"]
-  let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+  authority <- resolveFormattingAuthority (prHscEnv (pprPipelineResult prepared))
+  unless (authority /= Nothing)
+    (ioError (userError "W5_FORMATTING: shipped module was not resolved"))
+  let context entry = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
         (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
-        (SymbolIdentity "main" "FormattingContract" "value" "formatValue" Nothing)
-  program <- either (ioError . userError . show) pure
-    (projectPreparedTarget context (pprModules prepared))
-  unless (any isFormatting (programOperations program))
-    (ioError (userError "W5_FORMATTING: prepared bytes intrinsic missing"))
+        (SymbolIdentity "main" "FormattingContract" "value" entry Nothing) authority
+      cases =
+        [ ("formatValue", ["prepared_render_double_bytes"])
+        , ("continuation", ["prepared_render_double_bytes"])
+        , ("positiveLazyPrecedence", ["prepared_double_needs_precedence"
+              , "prepared_render_double_bytes", "prepared_render_double_prec_bytes"])
+        , ("negativeZero", ["prepared_double_needs_precedence"
+              , "prepared_render_double_bytes", "prepared_render_double_prec_bytes"])
+        , ("partialApplication", ["prepared_double_needs_precedence"])
+        , ("firstClassApplication", ["prepared_render_double_bytes"])
+        ]
+  forM_ cases $ \(entry, required) -> do
+    let selectedContext = context (Text.pack entry)
+    program <- either
+      (\failure -> ioError (userError ("W5_FORMATTING " <> entry <> ": " <> show failure)))
+      pure (projectPreparedTarget selectedContext (pprModules prepared))
+    let names = [Text.unpack name | OperationDecl (IntrinsicIdentity name CCall) _ <- programOperations program]
+    unless (all (`elem` names) required)
+      (ioError (userError ("W5_FORMATTING missing intrinsic: " <> show (entry, required, names))))
+    unless (all (not . sourceFormattingDependency . globalIdentity) (programGlobals program))
+      (ioError (userError ("W5_FORMATTING retained a reference-body dependency: " <> entry)))
+    unless (all (not . (`elem` ["show", "showsPrec", "pack"])
+          . occNameString . nameOccName . varName)
+          (preparedTargetReferences selectedContext (pprModules prepared)))
+      (ioError (userError ("W5_FORMATTING recovery followed a replacement body: " <> entry)))
+    verifyFormattingSignatures program
+    if entry == "positiveLazyPrecedence" then verifyLazyPrecedenceBranch program else pure ()
+  let wrappers = [binder | modul <- pprModules prepared
+        , moduleNameString (moduleName (pmModule modul)) == "Tidepool.Double"
+        , (binding, _) <- pmBindings modul, binder <- topBindersForTest binding
+        , occNameString (nameOccName (varName binder)) == "renderDouble"]
+  case (authority, wrappers) of
+    (Just (FormattingAuthority owner), [binder]) -> unless
+      (case classifyFormatting
+        (FormattingAuthority (mkModule (stringToUnit "wrong-unit") (moduleName owner))) binder of
+        Right Nothing -> True
+        _ -> False)
+      (ioError (userError "W5_FORMATTING same-named wrapper matched the wrong unit"))
+    _ -> ioError (userError "W5_FORMATTING could not isolate wrapper and trusted owner")
   where
-    isFormatting (OperationDecl (IntrinsicIdentity "prepared_render_double_bytes" CCall) _) = True
-    isFormatting _ = False
+    sourceFormattingDependency symbol = symbolOccurrence symbol `elem`
+      ["show", "showsPrec", "pack"]
+    verifyFormattingSignatures program = forM_ (programOperations program) $ \operation ->
+      case operation of
+        OperationDecl (IntrinsicIdentity name CCall) (SignatureId index)
+          | Just expected <- lookup name expectedFormattingSignatures ->
+              case drop (fromIntegral index) (programSignatures program) of
+                actual : _ -> unless (actual == expected)
+                  (ioError (userError ("W5_FORMATTING intrinsic signature drift: " <> show (name, actual))))
+                [] -> ioError (userError "W5_FORMATTING intrinsic signature missing")
+        _ -> pure ()
+    expectedFormattingSignatures =
+      [ ("prepared_render_double_bytes", Signature [FloatRep 64] (Returns [UnliftedRefRep]))
+      , ("prepared_render_double_prec_bytes", Signature [IntRep 64, FloatRep 64] (Returns [UnliftedRefRep]))
+      , ("prepared_double_needs_precedence", Signature [FloatRep 64] (Returns [IntRep 64]))
+      ]
+    verifyLazyPrecedenceBranch program = case
+      [ (parameters, body)
+      | group <- programBindings program
+      , TopBinding symbol (HeapBinding _ (Function _ parameters _ body)) <- case group of
+          NonRecursive top -> [top]
+          Recursive tops -> tops
+      , symbolOccurrence symbol == "renderDoublePrec"
+      ] of
+      [([precedence, value], Case (Enter (Ref (Local forced)) _) _ _ _
+        [Alternative _ [_] (Case (Operation _ _) _ _ (PrimitiveCase (IntRep 64))
+          [Alternative (LiteralPattern (IntLiteral 64 zero)) [] plain
+          , Alternative DefaultPattern [] (Case (Enter (Ref (Local forcedPrec)) _) _ _ _ _)])])]
+          | forced == value && forcedPrec == precedence && zero == BS.replicate 8 0
+          , not (containsEnter precedence plain) -> pure ()
+      _ -> ioError (userError "W5_FORMATTING precedence was forced before the negative branch")
+    containsEnter wanted expression = case expression of
+      Enter (Ref (Local identity)) _ -> identity == wanted
+      Case scrutinee _ _ _ alternatives -> containsEnter wanted scrutinee
+        || any (\(Alternative _ _ body) -> containsEnter wanted body) alternatives
+      Let group body -> any (containsEnterRhs wanted) (groupBindings group)
+        || containsEnter wanted body
+      _ -> False
+    containsEnterRhs wanted binding = case heapBindingRhs binding of
+      Function _ _ _ body -> containsEnter wanted body
+      Thunk _ _ _ body -> containsEnter wanted body
+      _ -> False
+    groupBindings (NonRecursive binding) = [binding]
+    groupBindings (Recursive bindings) = bindings
+
+verifyFormattingSourceAuthority :: IO ()
+verifyFormattingSourceAuthority = do
+  let fixture = "test-prepared-stg/FormattingContract.hs"
+      check source expected = do
+        prepared <- runPipelineSelected PreparedStg fixture [source, "test-prepared-stg", "lib"]
+        actual <- resolveFormattingAuthority (prHscEnv (pprPipelineResult prepared))
+        unless ((actual /= Nothing) == expected)
+          (ioError (userError ("W5_FORMATTING source authority mismatch: " <> source)))
+  check "test-prepared-stg/formatting-shadow" False
+  check "test-prepared-stg/formatting-copy" True
+
+verifyTagToEnumProjection :: IO ()
+verifyTagToEnumProjection = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/EnumContract.hs" ["test-prepared-stg"]
+  mapM_ (verify prepared)
+    [ ("colour", "Colour", [(0, "Red"), (1, "Green"), (2, "Blue")])
+    , ("boolean", "Bool", [(0, "False"), (1, "True")])
+    ]
+  where
+    verify prepared (entry, family, expected) = do
+      let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+            (SymbolIdentity "main" "EnumContract" "value" entry Nothing) Nothing
+      program <- either
+        (\failure -> ioError (userError ("tagToEnum projection failed: " <> show (entry, failure))))
+        pure (projectPreparedTarget context (pprModules prepared))
+      unless (all (\operation -> case operationIdentity operation of
+          PrimOpIdentity "tagToEnum#" -> False
+          _ -> True) (programOperations program))
+        (ioError (userError ("tagToEnum remained an operation: " <> show entry)))
+      let bodies =
+            [ body
+            | group <- programBindings program
+            , TopBinding symbol (HeapBinding _ (Function _ _ _ body)) <- case group of
+                NonRecursive top -> [top]
+                Recursive tops -> tops
+            , symbolOccurrence symbol == entry
+            ]
+      alternatives <- case bodies of
+        [Case (Return [_]) _ (Returns [IntRep 64]) (PrimitiveCase (IntRep 64)) alts] -> pure alts
+        _ -> ioError (userError ("tagToEnum did not lower to a primitive Int case: " <> show (entry, bodies)))
+      let actual = [ (tag, constructor)
+            | Alternative (LiteralPattern (IntLiteral 64 bytes)) []
+                (Construct (ConstructorId index) []) <- alternatives
+            , BS.length bytes == 8
+            , let tag = fromIntegral (BS.last bytes) :: Int
+            , bytes == BS.pack (replicate 7 0 <> [fromIntegral tag])
+            , declaration <- take 1 (drop (fromIntegral index) (programConstructors program))
+            , symbolOccurrence (constructorFamily declaration) == family
+            , let constructor = symbolOccurrence (constructorIdentity declaration)
+            , constructorTag declaration == fromIntegral tag + 1
+            ]
+      unless (length actual == length alternatives && actual == expected)
+        (ioError (userError ("tagToEnum constructor family/tag mismatch: "
+          <> show (entry, alternatives, actual))))
 
 verifyByteArrayOperationContracts :: IO ()
 verifyByteArrayOperationContracts = do
@@ -749,7 +891,7 @@ verifyByteArrayOperationContracts = do
     verify prepared (entryName, operationName, expected) = do
       let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
             (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
-            (SymbolIdentity "main" "ByteArrayContract" "value" entryName Nothing)
+            (SymbolIdentity "main" "ByteArrayContract" "value" entryName Nothing) Nothing
       program <- case projectPreparedTarget context (pprModules prepared) of
         Left failure -> ioError (userError
           ("byte-array projection failed: " <> show (entryName, failure)))

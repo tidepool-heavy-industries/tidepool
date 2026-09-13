@@ -9,7 +9,7 @@ module Tidepool.ExecutionProjection
   , assignTopIdentitySpellings
   ) where
 
-import Control.Monad (foldM, forM)
+import Control.Monad (foldM, forM, unless)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
@@ -23,11 +23,13 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (PrimOp(..), primOpOcc)
+import GHC.Builtin.Types (doubleDataCon, intDataCon)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
   ( DataCon, dataConName, dataConRepArgTys, dataConRepArity, dataConWorkId
   , dataConTag, dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
+import GHC.Core.Type (splitTyConApp_maybe)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (unpackFS)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
@@ -58,6 +60,8 @@ import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
+import Tidepool.PreparedFormatting
+  (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -65,6 +69,7 @@ data ProjectionContext = ProjectionContext
   , projectionTarget :: TargetDescriptor
   , projectionRetainedGenerations :: Map SymbolIdentity Word64
   , projectionEntry :: SymbolIdentity
+  , projectionFormattingAuthority :: Maybe FormattingAuthority
   } deriving stock (Eq, Show)
 
 data ProjectionError
@@ -94,6 +99,7 @@ data PState = PState
   , target :: TargetDescriptor
   , retainedGenerations :: Map SymbolIdentity Word64
   , homeModules :: Set (Text, Text)
+  , formattingAuthority :: Maybe FormattingAuthority
   }
 
 type P a = StateT PState (Either ProjectionError) a
@@ -101,7 +107,7 @@ type P a = StateT PState (Either ProjectionError) a
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -133,6 +139,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
           | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
+        (projectionFormattingAuthority context)
   (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     (pure . topValue) (findTop bindingGroups)
@@ -177,11 +184,34 @@ preparedTargetReferences context modules =
         , (binding, _) <- pmBindings prepared, binder <- topBinders binding]
       referenced = [ binder | prepared <- selected
         , binder <- preparedReferencedIds (extractPreparedFacts
-            (pmModule prepared) (pmTagSigs prepared) (map fst (pmBindings prepared)))
+            (pmModule prepared) (pmTagSigs prepared)
+            (concatMap (recoveryReferences context . fst) (pmBindings prepared)))
         , isExternalName (varName binder)
         , isNothing (nullaryWorkerConstructor binder)
         , not (elementOfUniqSet (varUnique binder) defined) ]
   in Map.elems (Map.fromList [(idSymbol "value" binder, binder) | binder <- referenced])
+
+-- A registered replacement has no source-body dependencies. Split recursive
+-- groups for this fact query so unrelated siblings retain their own references.
+recoveryReferences :: ProjectionContext -> CgStgTopBinding -> [CgStgTopBinding]
+recoveryReferences context (StgTopLifted (StgRec pairs)) =
+  [ StgTopLifted (StgNonRec binder rhs)
+  | (binder, rhs) <- pairs, not (registeredFormatting context binder) ]
+recoveryReferences context binding
+  | any (registeredFormatting context) (topBinders binding) = []
+  | otherwise = [binding]
+
+formattingSpec :: ProjectionContext -> Id -> Either ProjectionError (Maybe FormattingSpec)
+formattingSpec context binder = case projectionFormattingAuthority context of
+  Nothing -> Right Nothing
+  Just authority -> case classifyFormatting authority binder of
+    Left failure -> Left (UnsupportedPreparedShape (Text.pack (show failure)))
+    Right spec -> Right spec
+
+registeredFormatting :: ProjectionContext -> Id -> Bool
+registeredFormatting context binder = case formattingSpec context binder of
+  Right (Just _) -> True
+  _ -> False
 
 selectPreparedTarget :: ProjectionContext -> [PreparedModule]
   -> (VarEnv SymbolIdentity, [PreparedModule])
@@ -214,11 +244,12 @@ selectPreparedTarget context modules =
     dependencies = Map.fromListWith (<>)
       [ (mappedTopIdentity binder, Set.fromList
           [ symbol
-          | unique <- nonDetEltsUniqSet (topBindingReferences modul topLevel binding)
+          | unique <- if registeredFormatting context binder then [] else
+              nonDetEltsUniqSet (topBindingReferences modul topLevel single)
           , Just symbol <- [lookupUFM topUniqueIdentityMap unique]
           ])
       | (modul, binding) <- allBindings
-      , binder <- topBinders binding
+      , (binder, single) <- individualTops binding
       ]
     reachableSymbols = close Set.empty seedSymbols
     isReachable (binding, _) = any
@@ -237,6 +268,14 @@ selectPreparedTarget context modules =
 
     orElse (Just value) _ = value
     orElse Nothing fallback = fallback
+
+individualTops :: CgStgTopBinding -> [(Id, CgStgTopBinding)]
+individualTops (StgTopStringLit binder bytes) =
+  [(binder, StgTopStringLit binder bytes)]
+individualTops (StgTopLifted (StgNonRec binder rhs)) =
+  [(binder, StgTopLifted (StgNonRec binder rhs))]
+individualTops (StgTopLifted (StgRec pairs)) =
+  [(binder, StgTopLifted (StgNonRec binder rhs)) | (binder, rhs) <- pairs]
 
 topBinders :: CgStgTopBinding -> [Id]
 topBinders (StgTopStringLit binder _) = [binder]
@@ -356,7 +395,105 @@ projectTop (StgTopLifted (StgRec pairs)) = Recursive <$> mapM (uncurry projectTo
 projectTopPair :: Id -> CgStgRhs -> P TopBinding
 projectTopPair binder rhs = do
   symbol <- topIdentity binder
-  TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> projectRhs binder rhs)
+  replacement <- formattingSpecFor binder
+  let project = maybe (projectRhs binder rhs) (\spec -> projectFormattingRhs spec rhs) replacement
+  TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> project)
+
+formattingSpecFor :: Id -> P (Maybe FormattingSpec)
+formattingSpecFor binder = do
+  authority <- gets formattingAuthority
+  case authority of
+    Nothing -> pure Nothing
+    Just owner -> case classifyFormatting owner binder of
+      Left failure -> failShape (Text.pack (show failure))
+      Right result -> pure result
+
+-- A registered wrapper is a normal function top. The source body has already
+-- established non-bottoming demand facts in GHC; only its dependencies and
+-- executable body are replaced at this projection boundary.
+projectFormattingRhs :: FormattingSpec -> CgStgRhs -> P HeapRhs
+projectFormattingRhs spec (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
+  let expected = case formattingKind spec of
+        RenderDouble -> [LiftedRefRep]
+        RenderDoublePrec -> [LiftedRefRep, LiftedRefRep]
+  actual <- concat <$> mapM (argumentRepsForType . varType) parameters
+  result <- repsForType resultType
+  unless (actual == expected && result == [LiftedRefRep])
+    (failRepresentation "registered formatting wrapper has unexpected prepared entry reps")
+  textConstructor <- internConstructor (formattingTextConstructor spec)
+  textFields <- concat <$> mapM (repsForType . scaledThing)
+    (dataConRepArgTys (formattingTextConstructor spec))
+  unless (textFields == [UnliftedRefRep, IntRep 64, IntRep 64])
+    (failRepresentation "Text constructor must contain byte array, offset, length")
+  parameters' <- mapM bindValue parameters
+  signature <- internSignature (Signature expected (Returns [LiftedRefRep]))
+  body <- formattingBody spec textConstructor parameters'
+  pure (Function signature parameters' [] body)
+  where scaledThing (Scaled _ ty) = ty
+projectFormattingRhs _ _ = failShape "registered formatting wrapper is not a reentrant closure"
+
+formattingBody :: FormattingSpec -> ConstructorId -> [ValueId] -> P Expr
+formattingBody spec textConstructor parameters = do
+  (boxedDouble, boxedPrecedence) <- case (formattingKind spec, parameters) of
+    (RenderDouble, [value]) -> pure (value, Nothing)
+    (RenderDoublePrec, [precedence, value]) -> pure (value, Just precedence)
+    _ -> failShape "registered formatting wrapper has unexpected prepared arity"
+  enter <- internSignature (Signature [] (Returns [LiftedRefRep]))
+  doubleConstructor <- internConstructor doubleDataCon
+  doubleCase <- freshValue
+  rawDouble <- freshValue
+  let doubleAtom = Ref (Local rawDouble)
+      doubleFamily = AlgebraicCase (nameSymbol "type"
+        (GHC.tyConName (dataConTyCon doubleDataCon)))
+  rendered <- case formattingKind spec of
+    RenderDouble -> renderText textConstructor RenderDouble [doubleAtom]
+    RenderDoublePrec -> do
+      precedence <- maybe
+        (failShape "precedence wrapper omitted its boxed Int") pure boxedPrecedence
+      needSignature <- internSignature (Signature [FloatRep 64] (Returns [IntRep 64]))
+      need <- internSyntheticOperation
+        (Schema.IntrinsicIdentity "prepared_double_needs_precedence" Schema.CCall)
+        needSignature
+      decision <- freshValue
+      plain <- renderText textConstructor RenderDouble [doubleAtom]
+      intConstructor <- internConstructor intDataCon
+      intCase <- freshValue
+      rawInt <- freshValue
+      negative <- renderText textConstructor RenderDoublePrec
+        [Ref (Local rawInt), doubleAtom]
+      let intFamily = AlgebraicCase (nameSymbol "type"
+            (GHC.tyConName (dataConTyCon intDataCon)))
+          forcePrecedence = Case (Enter (Ref (Local precedence)) enter)
+            intCase (Returns [LiftedRefRep]) intFamily
+            [Alternative (ConstructorPattern intConstructor) [rawInt] negative]
+      pure (Case (Operation need [doubleAtom]) decision (Returns [IntRep 64])
+        (PrimitiveCase (IntRep 64))
+        [ Alternative (LiteralPattern (IntLiteral 64 (BS.replicate 8 0))) [] plain
+        , Alternative DefaultPattern [] forcePrecedence ])
+  pure (Case (Enter (Ref (Local boxedDouble)) enter) doubleCase
+    (Returns [LiftedRefRep]) doubleFamily
+    [Alternative (ConstructorPattern doubleConstructor) [rawDouble] rendered])
+
+renderText :: ConstructorId -> FormattingIntrinsic -> [Atom] -> P Expr
+renderText textConstructor kind arguments = do
+  let (label, argumentReps) = case kind of
+        RenderDouble -> ("prepared_render_double_bytes", [FloatRep 64])
+        RenderDoublePrec -> ("prepared_render_double_prec_bytes", [IntRep 64, FloatRep 64])
+  renderSignature <- internSignature (Signature argumentReps (Returns [UnliftedRefRep]))
+  render <- internSyntheticOperation (Schema.IntrinsicIdentity label Schema.CCall) renderSignature
+  sizeSignature <- internSignature (Signature [UnliftedRefRep] (Returns [IntRep 64]))
+  size <- internSyntheticOperation (Schema.PrimOpIdentity "sizeofByteArray#") sizeSignature
+  bytesCase <- freshValue
+  bytesValue <- freshValue
+  lengthCase <- freshValue
+  lengthValue <- freshValue
+  let bytes = Ref (Local bytesValue)
+      text = Construct textConstructor
+        [bytes, Scalar (IntLiteral 64 (BS.replicate 8 0)), Ref (Local lengthValue)]
+  pure (Case (Operation render arguments) bytesCase (Returns [UnliftedRefRep])
+    MultiValueCase [Alternative DefaultPattern [bytesValue]
+      (Case (Operation size [bytes]) lengthCase (Returns [IntRep 64])
+        MultiValueCase [Alternative DefaultPattern [lengthValue] text])])
 
 projectRhs :: Id -> CgStgRhs -> P HeapRhs
 projectRhs binder (StgRhsClosure captures _ update parameters body resultType) = withScope $ do
@@ -411,6 +548,8 @@ projectExpr _ (StgLit literal) = Return . pure <$> projectLiteralAtom literal
 projectExpr _ (StgConApp con _ args _)
   | isUnboxedTupleDataCon con = Return <$> mapM projectArg args
   | otherwise = Construct <$> internConstructor con <*> mapM projectArg args
+projectExpr _ (StgOpApp (StgPrimOp TagToEnumOp) args resultType) =
+  projectTagToEnum args resultType
 projectExpr _ (StgOpApp (StgPrimOp primop) args _)
   | primop `elem` [RaiseOp, RaiseDivZeroOp, RaiseUnderflowOp] = do
     signature <- internSignature =<< signatureForArgsNoSuccess args
@@ -434,6 +573,32 @@ projectExpr expected (StgLet _ binding body) = withScope $
 projectExpr expected (StgLetNoEscape _ binding body) = withScope $
   LetJoins <$> projectJoinGroup binding <*> projectExpr expected body
 projectExpr expected (StgTick _ body) = projectExpr expected body
+
+-- | GHC supplies the complete enumeration through the result type. Lower its
+-- zero-based tag to ordinary classified cases, never reconstruct a family from
+-- constructors encountered elsewhere. An invalid tag takes the typed case-failure
+-- path; there is no fabricated default constructor.
+projectTagToEnum :: [StgArg] -> Type -> P Expr
+projectTagToEnum [argument] resultType = do
+  family <- case splitTyConApp_maybe resultType of
+    Just (tycon, _) | GHC.isEnumerationTyCon tycon -> pure tycon
+    _ -> failRepresentation "tagToEnum# requires GHC enumeration result evidence"
+  bits <- gets (targetWordWidth . target)
+  actual <- argumentRepsForType $ case argument of
+    StgVarArg value -> varType value
+    StgLitArg literal -> literalType literal
+  unless (actual == [IntRep bits])
+    (failRepresentation "tagToEnum# requires a machine Int argument")
+  atom <- projectArg argument
+  binder <- freshValue
+  alternatives <- forM (GHC.tyConDataCons family) $ \constructor -> do
+    identity <- internConstructor constructor
+    let tag = toInteger (dataConTag constructor) - 1
+    pure (Alternative (LiteralPattern (IntLiteral bits (integerBytes bits tag)))
+      [] (Construct identity []))
+  pure (Case (Return [atom]) binder (Returns [IntRep bits])
+    (PrimitiveCase (IntRep bits)) alternatives)
+projectTagToEnum _ _ = failRepresentation "tagToEnum# requires exactly one argument"
 
 projectCaseKind :: AltType -> P CaseKind
 projectCaseKind (AlgAlt tycon) = pure (AlgebraicCase (nameSymbol "type" (GHC.tyConName tycon)))
@@ -730,6 +895,11 @@ internOperation op signature = do
       UnsupportedPrimitiveCall (Text.pack (showSDocUnsafe (ppr call))) operationSignature
     StgFCallOp call _ -> lift . Left $
       UnsupportedForeignCall (Text.pack (showSDocUnsafe (ppr call))) operationSignature
+  internSyntheticOperation operationIdentity signature
+
+internSyntheticOperation :: Schema.OperationIdentity -> SignatureId -> P OperationId
+internSyntheticOperation operationIdentity signature = do
+  operationSignature <- signatureForId signature
   known <- gets operations
   case find (matches operationIdentity operationSignature) known of
     Just (_, _, identity) -> pure identity
@@ -742,8 +912,8 @@ internOperation op signature = do
         , operationDecls = operationDecls current <> [declaration] })
       pure identity
   where
-    matches operationIdentity operationSignature (knownIdentity, knownSignature, _) =
-      operationIdentity == knownIdentity && operationSignature == knownSignature
+    matches wantedIdentity wantedSignature (knownIdentity, knownSignature, _) =
+      wantedIdentity == knownIdentity && wantedSignature == knownSignature
 
 signatureForId :: SignatureId -> P Signature
 signatureForId identity = do
