@@ -1,69 +1,137 @@
 # Prepared-STG projection inventory
 
-This records the execution handoff after Tidepool's pinned GHC 9.12.2
-`stg2stg`, not compatibility with rendered STG. The relevant GHC facts are the
-[STG syntax](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Syntax.hs),
-[pipeline ordering](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Pipeline.hs#L70-L97),
-and [unarisation invariants](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Unarise.hs#L328-L349).
-`PreparedStg` owns that handoff; `ExecutionProjection` and `ExecutionSchema`
-are the current wire boundary.
+This is the execution handoff after the pinned GHC 9.12.2 `stg2stg` and
+unarisation pipeline. The wire format is a finite prepared representation; it
+is not rendered STG, a Core compatibility format, or a production-execution
+parity claim.
 
-## Wave 3 ABI and collector evidence (provisional)
+## Wire contract (schema 5, execution ABI 3)
 
-The schema remains v4 while the managed-reference ABI is v3 in both Rust and
-Haskell. Managed-reference tag 0 carries no evaluatedness evidence; tags 1–6
-are authoritative constructor tags, and tag 7 means evaluated with descriptor
-inspection. Constructors numbered 7 or higher and functions/PAPs therefore
-use canonical tag 7; raw address and scalar bits are never masked or retagged.
-Allocation publishes an untagged address and the existing constructor emitter
-adds its constant descriptor tag only after initialization. Tagged nulls and
-contradictory evidence reject.
+`ProgramEnvelope.schema_version` is 5 and `execution_abi_version` is 3.
+`RuntimeRep` is the physical representation boundary: `Void`, lifted/unlifted
+references, addresses, fixed-width `Int`/`Word`, and 32/64-bit floats. Layouts
+are canonical for the target pointer width, alignment, payload size, and root
+mask; validation recomputes and compares them.
 
-The collector's proven linear walk, pinned descriptor identity, exact object
-starts, iterative updated-chain handling, and semispace ownership are the
-intended contract. Old-space/external payload ownership and broader retained
-heap integration remain deferred. Terra's correction now passes the forwarded
-incoming-tag regression after the root-order fixture fix; `descriptor_at` uses
-the raw pointer/local dereference contract and capacity growth passes. This
-does not claim old-space integration or broader native execution.
+Global declarations carry six wire fields. The appended `dead_end` bit is
+evidence that a callable has no normal result after saturation, not a language
+error or a synonym for an ordinary zero-result signature. A dead-end global
+must carry an entry signature whose results are empty. Linking requires the
+imported value to agree on entry signature and `dead_end`; ordinary zero-result
+entries remain distinct. See
+[`codec.rs`](../tidepool-repr/src/execution_schema/codec.rs),
+[`validation.rs`](../tidepool-repr/src/execution_schema/validation.rs), and
+[`link.rs`](../tidepool-repr/src/execution_schema/link.rs).
 
-Schema v4 encodes one program-wide postorder expression arena. Every top,
-closure, join, and alternative body is an index into that arena, rather than a
-nested expression. Wire `ValueId`s identify semantic binder occurrences;
-GHC may reuse an `Id` unique in disjoint RHS scopes, so projection allocates
-fresh wire IDs at each lexical binding site and restores the lookup environment
-when leaving that scope. The validator enforces program-wide wire binder
-uniqueness and structural ownership of every expression node.
+Constructor declarations carry an appended `host_id` (`DataConId`). It is the
+stable internal constructor identity used by observation and is distinct from
+the family-relative runtime tag. Validation rejects duplicate host IDs across
+distinct declarations while allowing the same tag in different families.
+The Haskell producer obtains this identity from
+`varId (dataConWorkId con)`; it does not mint one from encounter order.
 
-| Prepared fact | Wire mapping | Status and consumer consequence |
-|---|---|---|
-| Top `StgTopStringLit` / lifted non-recursive and recursive groups | `Bytes`, `NonRecursive`, `Recursive`, and `TopBinding` | Preserved. `stg2stg` dependency-sorts top bindings and annotates their non-global free variables before tag inference ([pipeline](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Pipeline.hs#L83-L97)). Projection keeps the supplied module/group order, including recursive groups. It does **not** emit module boundaries or the per-top `IdSet`; those annotations are used by selected-entry closure, not reconstructed by the runtime. |
-| `StgRhsClosure` captures (`DIdSet` at CodeGen) | `Function`/`Thunk` capture `[ValueRef]` | References and their emitted sequence are preserved: `dVarSetElems` is the deterministic enumeration used for the serialized list. The missing fact is an explicit capture representation/layout vector; consumers wanting closure-slot layout must obtain representations from referenced declarations/signatures, not infer one from a set. |
-| `ReEntrant`, `Updatable`, `SingleEntry`, `JumpedTo` | `Function`; `Thunk Memoize`; `Thunk SingleEntry`; `JoinBinding` | Preserved exactly at the applicable allocation boundary. GHC defines re-entrant as neither updated nor blackholed, updatable as updated (and possibly blackholed), single-entry as not updated but safely blackholed, and jumped-to as a join point with no heap closure ([definition](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Syntax.hs#L615-L640)). A heap `JumpedTo` or non-`JumpedTo` join is rejected. |
-| Closure parameters, result `Type`, entry `idArity` | `Signature` argument/result `RuntimeRep`s and parameter `ValueId`s | Local closure ABI is represented at physical-representation level, not as full GHC `Type` or source `idArity`. Post-unarisation `RepArity` can exceed `idArity` ([GHC note](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Unarise.hs#L328-L337)). Call sites use actual STG argument representations plus result representations demanded by the continuation. Only imported entry evidence consumes representation groups from the declared function type. Every parameter occurrence receives a fresh wire ID, including zero-representation parameters whose wired-in GHC binder may recur. |
-| Imported/global value and entry | Atomic `GlobalDecl.rep`, optional `entry_signature`, required evaluatedness | Preserved through projection, validation and linking. Projection uses GHC's `importedIdLFInfo`: known functions consume exactly the LF representation arity, known thunks have zero-argument entries, and unknown lifted imports retain unknown entry evidence. It does not substitute the full source function type for entry arity or turn raw imported addresses into managed references. Functions/constructors/unlifted values carry known evaluatedness. Argument consumption follows GHC's unwrapped callable type, retaining void positions and whole multi-component groups. See [imported LF classification](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/StgToCmm/Closure.hs#L232-L285). Production resolution to owned executable/value handles remains pending. |
-| Post-unarisation `StgApp` / `StgOpApp` void positions | `Atom.Void` and `VoidRep` in argument signatures | Preserved. A zero-representation variable becomes `Atom.Void`; `argumentRepsForType` emits `[VoidRep]`, so saturation position survives. GHC intentionally retains void arguments for function and operation calls, because call arity needs them ([syntax note](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Syntax.hs#L200-L229)). |
-| `StgConApp`'s `[[PrimRep]]` | ordinary constructor `Construct`; unboxed tuple `Return` | Not a current post-unarisation wire gap. GHC documents `[[PrimRep]]` as representation of an **unboxed-sum** constructor application only, empty otherwise ([Unarise note](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Unarise.hs#L156-L181)). Unarisation lowers unboxed tuples/sums to tuple returns; post-unarisation has no sums and no tuple binders ([invariants](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Unarise.hs#L328-L349)). Projection must only receive this prepared stage, not raw pre-unarised STG. |
-| `StgRhsCon` / ordinary `StgConApp`: `DataCon`, arguments, constructor number | `ConstructorDecl` identity/family/result representation/field representations/strictness/layout plus `Constructor`/`Construct` atoms | Heap constructor ABI is preserved. Field strictness comes from GHC's representation-level strictness after field representations are resolved, rather than copying source strictness across flattened components; multi-representation components are explicitly `NotMarkedStrict` in GHC ([RepType](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Types/RepType.hs#L130-L157)). Schema v3 carries `dataConTag` and `tyConFamilySize` as the one-based tag and authoritative family cardinality. Validation checks tag range, uniqueness within a family, and agreement on family size; partial inventories remain legal. These are GHC data-constructor facts, not tags assigned from encounter order. The separate STG constructor-number annotation is not treated as interchangeable evidence. GHC never allocates an unboxed tuple/sum RHS ([syntax](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Syntax.hs#L399-L410)). |
-| Constructor and RHS argument voids | field atoms and constructor field layout | Preserved by the post-unarisation convention: constructor applications, constructor RHSs, and alternatives omit void arguments; they are saturated so no arity fact is lost ([syntax note](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Syntax.hs#L200-L229)). Constructor declarations carry remaining field reps, strictness and layout. |
-| `StgCase`: binder reps, `AltType`, ordered alternatives, alternative binders/patterns | `Case` binder/reps, `CaseKind`, ordered `Alternative`s | Preserved, including algebraic family identity, primitive representation, multi-value and polymorphic classification. Tuple `DataAlt` under `MultiValAlt` is deliberately normalized to `DefaultPattern`; it is the sole tuple-return alternative after unarisation, not a lost constructor choice. |
-| `StgLit`, `StgLitArg`, `LitAlt` | `ScalarLiteral`, or `Atom.Rubbish RuntimeRep` | `LitChar`, `LitString`, fixed-width and target-word `LitNumber`, `LitFloat`, and `LitDouble` are encoded; `LitNumBigNat` rejects. `LitNullAddr` is preserved as `NullAddressLiteral`. `LitRubbish` is preserved as a distinct typed atom after `runtimeRepPrimRep_maybe` resolves exactly one physical representation. Its `TypeOrConstraint` discriminator is deliberately erased: both kinds resolve through the same physical representation, and GHC's kind-representation derivation makes that same erasure. The projection rejects zero- and multi-representation rubbish, as unarisation must split/remove those forms ([literal definition](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Types/Literal.hs#L111-L143), [literalType](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Types/Literal.hs#L759-L783), [unarisation](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Unarise.hs#L586-L601)). Native demand and GC handling for NullAddress/Rubbish is not implemented yet, so projection preservation alone does not make either executable. `LitLabel` (symbol plus function/data flag) explicitly rejects rather than being silently erased. |
-| `StgOpApp` operation and result type | `OperationDecl` and argument/result signature | `StgPrimOp` is represented by its occurrence name plus signature. `StgPrimCallOp` and `StgFCallOp` are rejected: GHC's latter carries foreign-call/type data ([syntax](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/Syntax.hs#L648-L660)), and no foreign-call contract is fabricated on the wire. |
-| `StgTick`, RHS cost-centre stack, constructor ticks | projected body/heap value only | Deliberately excluded. Profiling, HPC, source/debug and cost-centre semantics must not be claimed by execution projection. |
-| `StgCgInfos` tag signatures | retained as `PreparedModule.pmTagSigs`, absent from `WireProgram` | Concrete omission. `StgCgInfos` maps binding names to `TagInfo`: unknown, properly tagged, tagged, or the component facts of an unboxed-tuple result ([TagSig](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Stg/InferTags/TagSig.hs#L20-L40)). Runtime consumers cannot reconstruct inferred occurrence/result taggedness from the wire program. |
-| Prepared module location, pass profile, facts, sibling sites | compiler-side `PreparedModule` only (envelope retains projection profile) | Deliberately excluded from the executable schema: no source provenance, site elaboration, imported-id evidence, or compiler diagnostic inventory crosses the boundary. |
+Character literals have no wire `Char` scalar. Projection maps `LitChar` to a
+target-width `Word` literal using canonical big-endian bytes. Scalar tag 3 is
+retired and stale tag-3 scalar decoding is rejected; it is not reassigned.
+The remaining scalar forms are fixed-width `Int`, `Word`, `Float`, `Double`,
+bytes/address literals, and typed `Rubbish` atoms. `NullAddress` and `Rubbish`
+are preserved as explicit forms, but preservation does not imply native
+execution support.
 
-## Importer rules
+Wire identities are internal deterministic handles. `ValueId` and `JoinId`
+are allocated by monotonic projection traversal and lexical environments are
+restored when scopes close. Signature, constructor, operation, and global IDs
+are interned deterministically by the producer. Symbol identities retain the
+unit/module/namespace/occurrence tuple; top-level occurrence spelling is
+reserved before target filtering and collision resolution is deterministic.
+Constructor host IDs retain GHC identity, rather than family tags or local
+table positions.
 
-Zero-argument `StgApp` is also GHC's lone-variable expression: projection
-returns zero-bit and unlifted values directly, retaining Enter only for a
-lifted value (and Jump for a join). Treating a scalar local as a closure entry
-would discard the representation distinction already established by GHC.
+## Projected and validated forms
 
-Treat the produced program as post-unarisation CgSTG. In particular, use wire
-signatures and explicit `Void` atoms for function saturation, not source arity
-or atom count; use constructor declarations for non-void fields; and never
-attempt to recreate tag, profiling, module, or capture-layout facts that are
-not serialized. `NullAddress` and typed `Rubbish` are now serialized, but remain
-non-executable until native demand and GC handling lands. Other unsupported
-literal and foreign-call forms remain explicit projection failures.
+Projection preserves post-unarisation groups (`NonRecursive` and `Recursive`),
+closure captures, function signatures and parameter representations, joins,
+constructors, ordered cases, literal patterns, explicit `Void` positions, and
+the flat postorder expression arena. Constructor declarations carry field
+representations, strictness, canonical storage layout, family identity/tag,
+and host identity. Unboxed tuple/multi-value results are represented by
+multiple result components and `MultiValue` cases; no pre-unarisation sum
+layout is reconstructed.
+
+The validator checks bounds, ownership, scopes, unique wire binders, canonical
+layouts, constructor family/tag evidence, host-ID uniqueness, callable
+saturation, and dead-end evidence before a program can be linked. Link-time
+imports must match the declared representation, entry signature, and
+evaluatedness/dead-end evidence. These checks establish a valid artifact; they
+do not promise that every validated form is executable by the native connected
+compiler.
+
+## Connected native execution boundary
+
+`tidepool-codegen::prepared_program::CompiledProgram` is a closed, pinned
+execution path for the Linux x86-64 little-endian 64-bit SysV profile. Its
+whole-program admission pass rejects globals/imports, thunk RHSs, operations,
+indirect/partial calls, and calls whose local callee signature is not exactly
+the declared call signature. Admission walks nested expression ownership
+iteratively and reports the owning binding and arena node for unsupported
+expressions. `run_entry` also rejects managed host arguments.
+
+The currently emitted strict subset is:
+
+- constructor/function `Let` allocation, including recursive groups with one
+  summed reserve and sibling initialization after the only possible safepoint;
+- `Return`, saturated exact direct `Call`, evaluated `Enter`, `Case` in all
+  four classifications, `LetJoins`/`Jump`, zero results, and multi-results;
+- scalar physical arguments/results and managed references through the internal
+  multi-result ABI, with status checked before payload publication.
+
+This is an executable connected subset, not a producer cutover. Thunks,
+globals/imports, effects, foreign/primitive operations, partial or indirect
+calls, and managed host arguments remain outside this closed path. `Atom::Rubbish`
+is represented by the schema but native `atom_value` demand currently reports
+`Unsupported`; `NullAddress` has only the explicit `Address` lowering and is
+still rejected by observation, which does not materialize addresses. No
+placeholder value is fabricated. Legacy
+Core CBOR and the reference evaluator are not fallback inputs to this path.
+
+## Static image ownership
+
+`prepared_program::image` owns compile-time immutable top construction. It
+reserves every top object, initializes headers and payloads, records managed
+relocations, and publishes a fallible `StaticImage` only after all validation
+passes. `run_entry` instantiates that image per invocation and builds the
+private prepared-top table; compiled code retains no invocation pointer.
+
+The machine/collector owns nursery and static-region admission. Static exact
+starts and descriptor/tag evidence are checked, static fields are not scanned
+as mutable nursery storage, and nursery-to-static managed edges remain valid
+through collection. Cyclic static relocations are valid when their declared
+top objects exist; escaping or missing managed relocations remain image
+construction errors.
+
+## Non-forcing observation ownership
+
+`prepared_program::observe::ObservationHeap` owns non-forcing materialization
+of the rooted result vector. It proves nursery/static object membership and
+descriptor state before reads, maps descriptor headers to constructor host IDs
+and logical field representations, preserves source field order, and uses an
+iterative recursion worklist. A single budget is shared across every result
+and every expanded constructor/scalar occurrence, including duplicate DAG
+occurrences. Budget exhaustion, functions/PAPs, addresses, bad tags, and
+descriptor failures are typed errors; partially built `Value` trees are
+dropped stack-safely. Observation performs no forcing, native call, or GC.
+
+Focused tests cover deep small-stack chains, cycles, source-order child errors,
+distinct host IDs sharing family-relative tags, static/nursery edges, and
+zero/multiple results. They are contract evidence, not a claim that the
+workspace or producer corpus is green.
+
+## Explicit boundary gaps
+
+The producer still rejects unsupported literal shapes such as `BigNat` and
+relocatable labels, and rejects primitive/foreign calls without a wire/native
+contract. Validated projection can therefore be broader than connected native
+execution. Thunk forcing, imported/global resolution into owned executable
+handles, effects, old-space/external payload integration, and full corpus
+execution remain separate work. No generated fixture regeneration, production
+cutover, or compatibility promise is implied by this inventory.

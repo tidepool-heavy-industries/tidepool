@@ -97,6 +97,7 @@ mod tests {
                     entry_signature: global
                         .entry_signature
                         .map(|id| prepared.signatures()[id.0 as usize].clone()),
+                    dead_end: global.dead_end,
                     evaluated: global.required_evaluated,
                     generation: global.required_generation.unwrap_or(0),
                 };

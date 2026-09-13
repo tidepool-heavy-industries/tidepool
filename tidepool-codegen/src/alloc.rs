@@ -7,8 +7,14 @@ use crate::layout::*;
 /// Failure does not publish payload components. Cranelift nevertheless needs
 /// ABI-shaped returns; callers branch on status before observing any payload.
 pub(crate) fn emit_prepared_failure_return(builder: &mut FunctionBuilder<'_>, status: Value) {
-    let payload_types: Vec<_> = builder.func.signature.returns.iter().skip(1)
-        .map(|parameter| parameter.value_type).collect();
+    let payload_types: Vec<_> = builder
+        .func
+        .signature
+        .returns
+        .iter()
+        .skip(1)
+        .map(|parameter| parameter.value_type)
+        .collect();
     let mut values = vec![status];
     for ty in payload_types {
         let value = if ty == types::F32 {
@@ -37,6 +43,19 @@ pub fn emit_prepared_alloc_fast_path(
     let extent = u64::from(descriptor.allocation_extent());
     debug_assert_eq!(descriptor.allocation_alignment(), 8);
     debug_assert!(descriptor.allocation_extent() >= 16 && extent % 8 == 0);
+    emit_prepared_reserve_fast_path(builder, vmctx_val, gc_trigger, extent)
+}
+
+/// Reserve one contiguous prepared-nursery region. All callers must derive
+/// every object address after this call: its slow path may collect and rewrite
+/// live managed SSA values before it returns.
+pub fn emit_prepared_reserve_fast_path(
+    builder: &mut FunctionBuilder,
+    vmctx_val: Value,
+    gc_trigger: ir::FuncRef,
+    extent: u64,
+) -> Value {
+    debug_assert!(extent >= 16 && extent % 8 == 0);
     let flags = MemFlags::trusted();
     let extent_val = builder.ins().iconst(types::I64, extent as i64);
 

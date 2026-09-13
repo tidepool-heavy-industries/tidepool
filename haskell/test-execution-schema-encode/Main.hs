@@ -18,8 +18,8 @@ main = do
   assert (first == second) "prepared execution encoding is not deterministic"
   assert (BS.take 7 first == BS.pack [0x8d, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
-  assert (termNumber (termList (decode first) !! 1) == 4)
-    "prepared execution schema is not v4"
+  assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
+    "prepared execution schema is not v5"
 
   let localBody = Let
         (NonRecursive (HeapBinding (ValueId 8)
@@ -127,10 +127,10 @@ representativeWith body = WireProgram envelope signatures globals constructors o
     , Signature [] [IntRep 64]
     ]
   globals = [GlobalDecl (exact "Fixture.Dependency" "imported") LiftedRefRep
-    (Just (SignatureId 0)) False (Just 7)]
+    (Just (SignatureId 0)) False False (Just 7)]
   layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]
   constructors = [ConstructorDecl (exact "Fixture.Vertical" "Box")
-    (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1]
+    (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1 0]
   operations = [OperationDecl "sub-int64" (SignatureId 0)]
   binding = HeapBinding (ValueId 0)
     (Thunk (SignatureId 1) Memoize [Global (GlobalId 0)] body)

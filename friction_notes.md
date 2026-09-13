@@ -222,3 +222,20 @@ are nondeterministic.
   from lead assignment/review/correction interventions; complete lead totals
   and token usage are unavailable. Brief-size insufficiency remains part of
   the record; E's sub-item escalation is resolved.
+
+## Wave 4 integration friction — 2026-09-12
+
+- Shared-tree tests encountered temporarily undefined emitter helpers and ran
+  zero tests. A build-slot lease prevents simultaneous builds, but does not
+  freeze the source being compiled. A worker-ready revision acknowledgment is
+  needed before integrated checks; a quiet build queue alone is not readiness.
+- Flat-wire handwritten fixtures introduced forward/self child references while
+  adding Case and Let coverage. Validate fixture construction before debugging
+  generated execution; keep these failures distinct from emitter failures.
+- Allocator emission changes the active native block. Scheduling a continuation
+  with the pre-allocation block is invalid even when its Rust types compile.
+  The worklist boundary must use the allocator's continuation block explicitly.
+- Several emitter handbacks ended at partial progress or awaiting a build slot,
+  requiring parent follow-up merely to resume the same assigned obligation.
+  Typed worker states should distinguish ready-for-build from task-complete;
+  a slot grant should resume the existing obligation without a new assignment.

@@ -66,8 +66,6 @@ mod letrec_field_freevar_deps;
 mod letrec_lazy_guard;
 #[path = "../normalize_differential.rs"]
 mod normalize_differential;
-#[path = "../prepared_thunks.rs"]
-mod prepared_thunks;
 #[path = "../raise_lazy_trivial_guard.rs"]
 mod raise_lazy_trivial_guard;
 #[path = "../scaffold.rs"]

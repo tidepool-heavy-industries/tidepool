@@ -551,8 +551,19 @@ impl MachineState {
     /// A live heap must be retired by its owning run before another is installed.
     pub(crate) fn install_prepared_buffer(
         &self,
+        buffer: Vec<u64>,
+        layouts: Vec<std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>>,
+    ) -> Result<(), RuntimeError> {
+        self.install_prepared_buffer_with_static_region(buffer, layouts, None)
+    }
+
+    /// Install a prepared nursery whose descriptor space admits one immutable
+    /// invocation-owned static region as an external managed space.
+    pub(crate) fn install_prepared_buffer_with_static_region(
+        &self,
         mut buffer: Vec<u64>,
         layouts: Vec<std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>>,
+        static_region: Option<Arc<tidepool_heap::static_region::StaticRegion>>,
     ) -> Result<(), RuntimeError> {
         let mut active = self
             .gc_state
@@ -563,6 +574,11 @@ impl MachineState {
         }
         let space = tidepool_heap::gc::raw::DescriptorSpace::new(layouts.iter().cloned())
             .map_err(|_| RuntimeError::HeapOverflow)?;
+        let space = if let Some(region) = static_region {
+            space.with_static_region(region)
+        } else {
+            space
+        };
         *active = Some(GcState {
             active_start: buffer.as_mut_ptr().cast(),
             active_size: std::mem::size_of_val(buffer.as_slice()),

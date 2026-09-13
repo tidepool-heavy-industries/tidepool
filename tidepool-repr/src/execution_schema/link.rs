@@ -17,9 +17,11 @@ pub fn link_program(
         let wrong_entry = declaration.entry_signature.is_some_and(|signature| {
             imported.entry_signature.as_ref() != Some(&prepared.signatures()[signature.0 as usize])
         });
+        let wrong_dead_end = declaration.dead_end != imported.dead_end;
         if imported.identity != declaration.identity
             || imported.rep != declaration.rep
             || wrong_entry
+            || wrong_dead_end
             || (imported.rep != super::RuntimeRep::LiftedRef && imported.entry_signature.is_some())
             || (declaration.required_evaluated && !imported.evaluated)
             || declaration
@@ -75,6 +77,7 @@ mod tests {
                 identity: identity(),
                 rep: RuntimeRep::LiftedRef,
                 entry_signature: Some(SignatureId(0)),
+                dead_end: false,
                 required_evaluated: true,
                 required_generation,
             }],
@@ -110,6 +113,7 @@ mod tests {
                 arguments: vec![],
                 results: vec![RuntimeRep::LiftedRef],
             }),
+            dead_end: false,
             evaluated: true,
             generation,
         };
@@ -172,6 +176,27 @@ mod tests {
         unevaluated.values.get_mut(&identity()).unwrap().evaluated = false;
         assert!(matches!(
             link_program(prepared(Some(7)), &unevaluated),
+            Err(LinkError::ImportContract(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_import_without_matching_dead_end_evidence() {
+        let mut dead_end_declaration = prepared(Some(7));
+        dead_end_declaration.wire.signatures[0].results.clear();
+        dead_end_declaration.wire.globals[0].dead_end = true;
+        let mut snapshot = imports(7);
+        let imported = snapshot.values.get_mut(&identity()).unwrap();
+        imported.dead_end = true;
+        imported.entry_signature.as_mut().unwrap().results.clear();
+        assert!(link_program(dead_end_declaration, &snapshot).is_ok());
+
+        snapshot.values.get_mut(&identity()).unwrap().dead_end = false;
+        let mut dead_end_declaration = prepared(Some(7));
+        dead_end_declaration.wire.signatures[0].results.clear();
+        dead_end_declaration.wire.globals[0].dead_end = true;
+        assert!(matches!(
+            link_program(dead_end_declaration, &snapshot),
             Err(LinkError::ImportContract(_))
         ));
     }

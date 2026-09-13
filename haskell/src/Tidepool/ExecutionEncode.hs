@@ -96,6 +96,7 @@ encodeConstructor constructor = array
   , encodeRep (constructorResultRep constructor)
   , encodeWord32 (constructorTag constructor)
   , encodeWord32 (constructorFamilySize constructor)
+  , encodeWord64 (constructorHostId constructor)
   ]
 
 encodeGlobal :: GlobalDecl -> Encoding
@@ -105,6 +106,7 @@ encodeGlobal global = array
   , case globalEntrySignature global of
       Nothing -> tag 0
       Just signature -> tagged 1 [encodeSignatureId signature]
+  , encodeBool (globalDeadEnd global)
   , encodeBool (globalRequiredEvaluated global)
   , case globalRequiredGeneration global of
       Nothing -> tag 0
@@ -127,7 +129,6 @@ encodeScalar scalar = case scalar of
   IntLiteral bits bytes -> tagged 0 [encodeWord8 bits, encodeBytes bytes]
   WordLiteral bits bytes -> tagged 1 [encodeWord8 bits, encodeBytes bytes]
   FloatLiteral bits bytes -> tagged 2 [encodeWord8 bits, encodeBytes bytes]
-  CharLiteral codepoint -> tagged 3 [encodeWord32 codepoint]
   BytesLiteral bytes -> tagged 4 [encodeBytes bytes]
   NullAddressLiteral -> tag 5
 

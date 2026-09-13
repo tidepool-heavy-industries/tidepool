@@ -3,20 +3,23 @@
 //! Compiled addresses/descriptors are program-owned; heap pointers and top
 //! tables are invocation-owned. No invocation pointer is embedded in code.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use cranelift_codegen::ir::{self, InstBuilder, Value as SsaValue};
-use cranelift_frontend::FunctionBuilder;
-use cranelift_module::FuncId;
-use tidepool_heap::execution_descriptor::ObjectDescriptor;
-use tidepool_heap::static_region::{StaticImage, StaticImageError};
-use tidepool_repr::execution_schema::{GlobalId, LinkedProgram, RuntimeRep, Signature, ValueId};
-use tidepool_repr::DataConId;
 use crate::entry_abi::EntryAbi;
 use crate::pipeline::{CodegenPipeline, PipelineError};
+use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, Value as SsaValue};
+use cranelift_frontend::FunctionBuilder;
+use cranelift_module::{FuncId, Module};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use tidepool_heap::execution_descriptor::ObjectDescriptor;
+use tidepool_heap::static_region::{StaticImage, StaticImageError};
+use tidepool_repr::execution_schema::{
+    Architecture, Endianness, GlobalId, LinkedProgram, RuntimeRep, Signature, TargetDescriptor,
+    ValueId,
+};
+use tidepool_repr::DataConId;
 
-mod admission;
 mod adapter;
+mod admission;
 mod emit;
 mod image;
 mod observe;
@@ -28,6 +31,8 @@ pub use admission::admit_program;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Unsupported {
+    #[error("closed execution target {0:?} does not match the pinned native host profile")]
+    Target(TargetDescriptor),
     #[error("closed execution cannot admit global {0:?}")]
     Global(GlobalId),
     #[error("thunk {0:?} is outside this execution checkpoint")]
@@ -68,6 +73,14 @@ pub(crate) struct ConstructorObservation {
     pub fields: Vec<RuntimeRep>,
 }
 
+/// Prepared descriptor mismatches are compiler-contract failures. The JIT can
+/// only report them through a host boundary; the machine owns first-cause
+/// precedence and turns the recorded cause into the entry status.
+unsafe extern "C" fn prepared_case_trap(vmctx: *mut crate::context::VMContext) {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    machine.set_first_cause(crate::host_fns::RuntimeError::CaseTrap);
+}
+
 pub struct CompiledProgram {
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
@@ -81,17 +94,78 @@ pub struct CompiledProgram {
 
 impl CompiledProgram {
     pub fn compile(linked: &LinkedProgram) -> Result<Self, CompileError> {
+        let target = &linked.prepared().envelope().target;
+        let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            && target.architecture == Architecture::X86_64;
+        if !host_matches
+            || target.endianness != Endianness::Little
+            || target.pointer_width != 64
+            || target.word_width != 64
+            || !matches!(target.abi.as_str(), "sysv64" | "system-v")
+        {
+            return Err(Unsupported::Target(target.clone()).into());
+        }
         admit_program(linked)?;
+        use crate::entry_abi::{EnvironmentMode, NativeAbiProfile};
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
-        use crate::entry_abi::{EnvironmentMode, NativeAbiProfile};
         let plan = plan::ProgramPlan::new(linked.prepared())?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         let statics = image::build_static_image(&plan)?;
         let mut pipeline = CodegenPipeline::new(&[
-            ("prepared_gc_trigger", crate::host_fns::prepared_gc_trigger as *const u8),
+            (
+                "prepared_gc_trigger",
+                crate::host_fns::prepared_gc_trigger as *const u8,
+            ),
+            (
+                "runtime_bad_thunk_state_trap",
+                crate::host_fns::runtime_bad_thunk_state_trap as *const u8,
+            ),
+            ("prepared_case_trap", prepared_case_trap as *const u8),
         ])?;
+        #[cfg(test)]
+        {
+            pipeline.emitted_ir = Some(BTreeMap::new());
+        }
+        let mut prepared_gc_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_gc_signature.params.push(AbiParam::new(types::I64));
+        prepared_gc_signature.params.push(AbiParam::new(types::I64));
+        prepared_gc_signature
+            .returns
+            .push(AbiParam::new(types::I32));
+        let prepared_gc = pipeline
+            .module
+            .declare_function(
+                "prepared_gc_trigger",
+                Linkage::Import,
+                &prepared_gc_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut bad_thunk_state_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        bad_thunk_state_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        bad_thunk_state_signature
+            .params
+            .push(AbiParam::new(types::I8));
+        bad_thunk_state_signature
+            .returns
+            .push(AbiParam::new(types::I64));
+        let bad_thunk_state = pipeline
+            .module
+            .declare_function(
+                "runtime_bad_thunk_state_trap",
+                Linkage::Import,
+                &bad_thunk_state_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut case_trap_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        case_trap_signature.params.push(AbiParam::new(types::I64));
+        let case_trap = pipeline
+            .module
+            .declare_function("prepared_case_trap", Linkage::Import, &case_trap_signature)
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut signatures = BTreeMap::new();
         for (&id, function) in &plan.functions {
             signatures.insert(id, function.signature.clone());
@@ -101,7 +175,9 @@ impl CompiledProgram {
                 arguments: vec![],
                 results: vec![match &binding.rhs {
                     HeapRhs::Bytes(_) => RuntimeRep::Address,
-                    HeapRhs::Constructor { constructor, .. } => plan.program.constructors()[constructor.0 as usize].result_rep,
+                    HeapRhs::Constructor { constructor, .. } => {
+                        plan.program.constructors()[constructor.0 as usize].result_rep
+                    }
                     _ => RuntimeRep::LiftedRef,
                 }],
             });
@@ -111,32 +187,86 @@ impl CompiledProgram {
         for (&id, signature) in &signatures {
             let abi = EntryAbi::lower_internal(&profile, signature, EnvironmentMode::Captured)?;
             let native = abi.cranelift_signature(&profile, CallConv::Tail)?;
-            let function = pipeline.declare_function_with_signature(&format!("prepared_entry_{}", id.0), Linkage::Local, &native)?;
+            let function = pipeline.declare_function_with_signature(
+                &format!("prepared_entry_{}", id.0),
+                Linkage::Local,
+                &native,
+            )?;
             functions.insert(id, function);
             abis.insert(id, abi);
         }
         // Every function address has been declared, including recursive peers.
         for &id in functions.keys() {
-            emit::emit_function(&plan, id, &functions, &mut pipeline)?;
+            emit::emit_function(
+                &plan,
+                id,
+                &functions,
+                prepared_gc,
+                bad_thunk_state,
+                case_trap,
+                &mut pipeline,
+            )?;
         }
         let mut entries = BTreeMap::new();
         for (&id, &slot) in &plan.top_slots {
             let abi = abis[&id].clone();
-            let adapter = adapter::emit_adapter(&mut pipeline, &format!("prepared_adapter_{}", id.0), functions[&id], &abi, slot)?;
-            entries.insert(id, CompiledEntry { function: functions[&id], adapter, signature: signatures[&id].clone(), abi });
+            let adapter = adapter::emit_adapter(
+                &mut pipeline,
+                &format!("prepared_adapter_{}", id.0),
+                functions[&id],
+                &abi,
+                slot,
+            )?;
+            entries.insert(
+                id,
+                CompiledEntry {
+                    function: functions[&id],
+                    adapter,
+                    signature: signatures[&id].clone(),
+                    abi,
+                },
+            );
         }
         pipeline.finalize()?;
         let mut descriptors = plan.constructors.clone();
-        descriptors.extend(plan.functions.values().map(|function| function.descriptor.clone()));
-        let constructors = plan.program.constructors().iter().zip(&plan.constructors)
-            .map(|(declaration, descriptor)| (descriptor.initial_header_word(), ConstructorObservation {
-                identity: declaration.host_id, fields: declaration.field_reps.clone(),
-            })).collect();
-        let byte_tops = plan.top_bindings.iter().filter_map(|(&id, binding)| match &binding.rhs {
-            HeapRhs::Bytes(bytes) => Some((id, plan.bytes[bytes].clone())), _ => None,
-        }).collect();
-        Ok(Self { pipeline, entries, descriptors, constructors, statics,
-            bytes: plan.bytes, top_slots: plan.top_slots, byte_tops })
+        descriptors.extend(
+            plan.functions
+                .values()
+                .map(|function| function.descriptor.clone()),
+        );
+        let constructors = plan
+            .program
+            .constructors()
+            .iter()
+            .zip(&plan.constructors)
+            .map(|(declaration, descriptor)| {
+                (
+                    descriptor.initial_header_word(),
+                    ConstructorObservation {
+                        identity: declaration.host_id,
+                        fields: declaration.field_reps.clone(),
+                    },
+                )
+            })
+            .collect();
+        let byte_tops = plan
+            .top_bindings
+            .iter()
+            .filter_map(|(&id, binding)| match &binding.rhs {
+                HeapRhs::Bytes(bytes) => Some((id, plan.bytes[bytes].clone())),
+                _ => None,
+            })
+            .collect();
+        Ok(Self {
+            pipeline,
+            entries,
+            descriptors,
+            constructors,
+            statics,
+            bytes: plan.bytes,
+            top_slots: plan.top_slots,
+            byte_tops,
+        })
     }
 }
 
@@ -152,7 +282,9 @@ pub(crate) fn emit_direct_call(
     let returned = builder.inst_results(call).to_vec();
     let success = builder.create_block();
     let failure = builder.create_block();
-    let ok = builder.ins().icmp_imm(ir::condcodes::IntCC::Equal, returned[0], 0);
+    let ok = builder
+        .ins()
+        .icmp_imm(ir::condcodes::IntCC::Equal, returned[0], 0);
     builder.ins().brif(ok, success, &[], failure, &[]);
     builder.switch_to_block(failure);
     builder.seal_block(failure);
@@ -160,7 +292,10 @@ pub(crate) fn emit_direct_call(
     builder.switch_to_block(success);
     builder.seal_block(success);
     let payload = returned[1..].to_vec();
-    for (&value, rep) in payload.iter().zip(results.iter().filter(|rep| **rep != RuntimeRep::Void)) {
+    for (&value, rep) in payload
+        .iter()
+        .zip(results.iter().filter(|rep| **rep != RuntimeRep::Void))
+    {
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             builder.declare_value_needs_stack_map(value);
         }
@@ -169,12 +304,4 @@ pub(crate) fn emit_direct_call(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn multivalue_managed_results_survive_collection_after_return() {
-        // wave4:ABI_CONTRACT — real adapter, enough mixed scalar/reference
-        // results to force implicit sret, live caller across callee collection,
-        // live returned managed values across a subsequent collection.
-        todo!("wave4:ABI_CONTRACT")
-    }
-}
+mod tests;

@@ -4,6 +4,7 @@ module Tidepool.ExecutionProjection
   , projectPrepared
   , projectPreparedTarget
   , projectLiteralAtomForTest
+  , assignTopIdentitySpellingForTest
   ) where
 
 import Control.Monad (foldM, forM)
@@ -11,6 +12,7 @@ import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.List (find)
+import Data.Maybe (listToMaybe)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -21,7 +23,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (primOpOcc)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
-  ( DataCon, dataConName, dataConRepArgTys
+  ( DataCon, dataConName, dataConRepArgTys, dataConWorkId
   , dataConTag, dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCon qualified as GHC
@@ -32,7 +34,7 @@ import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (isDeadEndId)
-import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
+import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
@@ -41,10 +43,11 @@ import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (unitString)
+import GHC.Unit.Types (Module, unitString)
 import Tidepool.ExecutionIR (ExactName(..), topBindingReferences)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
+import Tidepool.Identity (varId)
 import Tidepool.PreparedStg (PreparedModule(..))
 
 data ProjectionContext = ProjectionContext
@@ -66,10 +69,10 @@ data ProjectionError
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv JoinId
-  , topValues :: Map SymbolIdentity ValueId
+  , topSymbols :: VarEnv SymbolIdentity, topValues :: Map SymbolIdentity ValueId
   , globals :: VarEnv GlobalId, globalDecls :: [GlobalDecl]
   , constructors :: [(DataCon, ConstructorId)], constructorDecls :: [ConstructorDecl]
-  , operations :: [(Text, OperationId)], operationDecls :: [OperationDecl]
+  , operations :: [((Text, Signature), OperationId)], operationDecls :: [OperationDecl]
   , signatures :: [(Signature, SignatureId)]
   , target :: TargetDescriptor
   , retainedGenerations :: Map SymbolIdentity Word64
@@ -80,16 +83,22 @@ type P a = StateT PState (Either ProjectionError) a
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
-projectPrepared context modules = do
-  let initial = PState 0 0 emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] []
-        (projectionTarget context) (projectionRetainedGenerations context)
+projectPrepared context modules = projectPreparedWithTopSymbols context modules
+  (buildTopIdentityMap modules)
+
+projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
+  -> VarEnv SymbolIdentity -> Either ProjectionError WireProgram
+projectPreparedWithTopSymbols context modules topIdentityMap = do
+  let initial = PState 0 0 emptyVarEnv emptyVarEnv topIdentityMap Map.empty
+        emptyVarEnv [] [] [] [] [] [] (projectionTarget context)
+        (projectionRetainedGenerations context)
   (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
-    (pure . topValue) (findTop (projectionEntry context) bindingGroups)
+    (pure . topValue) (findTop bindingGroups)
   pure WireProgram
     { programEnvelope = ProgramEnvelope schemaVersion (projectionProfile context)
         (projectionToolchain context) executionAbiVersion (projectionTarget context)
@@ -102,8 +111,9 @@ projectPrepared context modules = do
     }
   where
     topValue (TopBinding _ binding) = heapBindingId binding
-    findTop wanted = foldr (findGroup wanted) Nothing
-    findGroup wanted group found = case filter ((== wanted) . topSymbol) (groupItems group) of
+    findTop = foldr findGroup Nothing
+    findGroup group found = case filter
+      ((== projectionEntry context) . topSymbol) (groupItems group) of
       top : _ -> Just top
       [] -> found
     groupItems (NonRecursive top) = [top]
@@ -115,13 +125,15 @@ projectPrepared context modules = do
 -- avoids rejecting unrelated polymorphic bindings while retaining every
 -- supplied top-level dependency of the entry.
 projectPreparedTarget :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
+projectPreparedTarget _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPreparedTarget context modules =
-  projectPrepared context
+  projectPreparedWithTopSymbols context
     [ prepared { pmBindings = filter isReachable (pmBindings prepared) }
     | prepared <- modules
     , any isReachable (pmBindings prepared)
-    ]
+    ] topIdentityMap
   where
+    topIdentityMap = buildTopIdentityMap modules
     allBindings =
       [ (pmModule prepared, binding)
       | prepared <- modules
@@ -133,7 +145,7 @@ projectPreparedTarget context modules =
       , binder <- topBinders binding
       ]
     topIdentities = Map.fromList
-      [ (exactNameOf modul binder, idSymbol "value" binder)
+      [ (exactNameOf modul binder, mappedTopIdentity binder)
       | (modul, binding) <- allBindings
       , binder <- topBinders binding
       ]
@@ -142,11 +154,11 @@ projectPreparedTarget context modules =
       [ symbol
       | (_, binding) <- allBindings
       , binder <- topBinders binding
-      , let symbol = idSymbol "value" binder
+      , let symbol = mappedTopIdentity binder
       , symbol == entry
       ]
     dependencies = Map.fromListWith (<>)
-      [ (idSymbol "value" binder, Set.fromList
+      [ (mappedTopIdentity binder, Set.fromList
           [ symbol
           | name <- Set.toList (topBindingReferences modul topLevel binding)
           , Just symbol <- [Map.lookup name topIdentities]
@@ -156,7 +168,7 @@ projectPreparedTarget context modules =
       ]
     reachableSymbols = close Set.empty seedSymbols
     isReachable (binding, _) = any
-      (\binder -> idSymbol "value" binder `Set.member` reachableSymbols)
+      (\binder -> mappedTopIdentity binder `Set.member` reachableSymbols)
       (topBinders binding)
     close :: Set SymbolIdentity -> [SymbolIdentity] -> Set SymbolIdentity
     close visited [] = visited
@@ -165,6 +177,12 @@ projectPreparedTarget context modules =
       | otherwise = close (Set.insert symbol visited)
           (maybe pending (\next -> Set.toList next <> pending)
             (Map.lookup symbol dependencies))
+
+    mappedTopIdentity binder = lookupVarEnv topIdentityMap binder
+      `orElse` idSymbol "value" binder
+
+    orElse (Just value) _ = value
+    orElse Nothing fallback = fallback
 
     -- Top binders retain their defining module in the GHC Name. Keeping this
     -- conversion local avoids making the provisional inventory depend on the
@@ -181,6 +199,72 @@ topBinders :: CgStgTopBinding -> [Id]
 topBinders (StgTopStringLit binder _) = [binder]
 topBinders (StgTopLifted binding) = bindingBinders binding
 
+-- | Assign stable identities to internal tops before any target reachability
+-- filtering.  Internal names may repeat (and a generated suffix may already
+-- be an authored spelling), so reserve every original spelling first and claim
+-- either that spelling or the first unused suffix in emission order. The
+-- allocation is local to a symbol namespace; external names are retained
+-- byte-for-byte while constraining generated suffixes around them.
+buildTopIdentityMap :: [PreparedModule] -> VarEnv SymbolIdentity
+buildTopIdentityMap modules = foldl insert emptyVarEnv (zip binders assigned)
+  where
+    binders =
+      [ (pmModule prepared, binder)
+      | prepared <- modules
+      , (binding, _) <- pmBindings prepared
+      , binder <- topBinders binding
+      ]
+    raw (fallback, binder) = idSymbolFor fallback "value" binder
+    symbols = map raw binders
+    assigned = assignTopIdentitySpellingForTest
+      (zip symbols (map (isExternalName . varName . snd) binders))
+    insert mappings ((_, binder), symbol) = extendVarEnv mappings binder symbol
+
+-- | Deterministic identity allocation shared by projection and collision
+-- regressions. The Bool marks an externally named top, whose spelling is
+-- retained exactly; all original spellings reserve suffixes for internal tops.
+assignTopIdentitySpellingForTest
+  :: [(SymbolIdentity, Bool)] -> [SymbolIdentity]
+assignTopIdentitySpellingForTest entries = snd (foldl allocateOne
+  (externalClaims, []) entries)
+  where
+    reserved :: Map (Text, Text, Text) (Set Text)
+    reserved = Map.fromListWith Set.union
+      [ (namespaceKey symbol, Set.singleton (symbolOccurrence symbol))
+      | (symbol, _) <- entries
+      ]
+    externalClaims :: Map (Text, Text, Text) (Set Text)
+    externalClaims = Map.fromListWith Set.union
+      [ (namespaceKey symbol, Set.singleton (symbolOccurrence symbol))
+      | (symbol, external) <- entries
+      , external
+      ]
+    allocateOne (claimedByNamespace, assigned) (symbol, external)
+      | external = (claimedByNamespace, assigned <> [symbol])
+      | otherwise =
+          let key = namespaceKey symbol
+              claimed = Map.findWithDefault Set.empty key claimedByNamespace
+              reservedNames = Map.findWithDefault Set.empty key reserved
+              occurrence = chooseOccurrence (symbolOccurrence symbol)
+                claimed reservedNames
+              nextClaimed = Set.insert occurrence claimed
+          in (Map.insert key nextClaimed claimedByNamespace,
+              assigned <> [symbol { symbolOccurrence = occurrence }])
+
+    chooseOccurrence :: Text -> Set Text -> Set Text -> Text
+    chooseOccurrence original claimed reservedNames
+      | original `Set.notMember` claimed = original
+      | otherwise = case listToMaybe
+          [ candidate | n <- [1 :: Int ..]
+          , let candidate = original <> "." <> Text.pack (show n)
+          , candidate `Set.notMember` (claimed `Set.union` reservedNames)
+          ] of
+          Just value -> value
+          Nothing -> original
+
+    namespaceKey symbol =
+      (symbolUnit symbol, symbolModule symbol, symbolNamespace symbol)
+
 preallocate :: [PreparedModule] -> P ()
 preallocate = mapM_ (mapM_ allocateTop . pmBindings)
   where
@@ -193,14 +277,16 @@ projectModule = mapM (projectTop . fst) . pmBindings
 projectTop :: CgStgTopBinding -> P (Group TopBinding)
 projectTop (StgTopStringLit binder bytes) = do
   identity <- requireTopValue binder
-  pure (NonRecursive (TopBinding (idSymbol "value" binder)
+  symbol <- topIdentity binder
+  pure (NonRecursive (TopBinding symbol
     (HeapBinding identity (Bytes bytes))))
 projectTop (StgTopLifted (StgNonRec binder rhs)) = NonRecursive <$> projectTopPair binder rhs
 projectTop (StgTopLifted (StgRec pairs)) = Recursive <$> mapM (uncurry projectTopPair) pairs
 
 projectTopPair :: Id -> CgStgRhs -> P TopBinding
-projectTopPair binder rhs = TopBinding (idSymbol "value" binder)
-  <$> (HeapBinding <$> requireTopValue binder <*> projectRhs binder rhs)
+projectTopPair binder rhs = do
+  symbol <- topIdentity binder
+  TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> projectRhs binder rhs)
 
 projectRhs :: Id -> CgStgRhs -> P HeapRhs
 projectRhs binder (StgRhsClosure captures _ update parameters body resultType) = withScope $ do
@@ -323,9 +409,12 @@ projectReference binder = do
   case lookupVarEnv known binder of
     Just identity -> pure (Local identity)
     Nothing -> do
+      topNames <- gets topSymbols
       tops <- gets topValues
-      maybe (Global <$> internGlobal binder) (pure . Local)
-        (Map.lookup (idSymbol "value" binder) tops)
+      let symbol = lookupVarEnv topNames binder
+      case symbol >>= (`Map.lookup` tops) of
+        Just identity -> pure (Local identity)
+        Nothing -> Global <$> internGlobal binder
 
 bindingBinders :: CgStgBinding -> [Id]
 bindingBinders (StgNonRec binder _) = [binder]
@@ -333,7 +422,7 @@ bindingBinders (StgRec pairs) = map fst pairs
 
 allocateTopValue :: Id -> P ValueId
 allocateTopValue binder = do
-  let symbol = idSymbol "value" binder
+  symbol <- topIdentity binder
   known <- gets topValues
   case Map.lookup symbol known of
     Just _ -> failIdentity ("duplicate top-level value: " <> symbolText symbol)
@@ -343,8 +432,14 @@ allocateTopValue binder = do
       pure identity
 
 requireTopValue :: Id -> P ValueId
-requireTopValue binder = gets (Map.lookup (idSymbol "value" binder) . topValues) >>= maybe
-  (failIdentity ("missing top-level value allocation: " <> symbolText (idSymbol "value" binder))) pure
+requireTopValue binder = do
+  symbol <- topIdentity binder
+  gets (Map.lookup symbol . topValues) >>= maybe
+    (failIdentity ("missing top-level value allocation: " <> symbolText symbol)) pure
+
+topIdentity :: Id -> P SymbolIdentity
+topIdentity binder = gets (\st -> lookupVarEnv (topSymbols st) binder) >>= maybe
+  (pure (idSymbol "value" binder)) pure
 
 -- GHC uniques can be reused by binders in disjoint RHS scopes. Each lexical
 -- binder gets a fresh wire ID, while the VarEnv tracks only the current scope.
@@ -391,13 +486,14 @@ internGlobal binder = do
         [] -> pure VoidRep
         [single] -> pure single
         _ -> failRepresentation "global value has more than one representation component"
-      (entry, evaluated) <- importedEntry binder
+      (entry, deadEnd, evaluated) <- importedEntry binder
       signature <- traverse internSignature entry
       existing <- gets globalDecls
       generations <- gets retainedGenerations
       let identity = GlobalId (fromIntegral (length existing))
           symbol = idSymbol "value" binder
-          declaration = GlobalDecl symbol rep signature evaluated (Map.lookup symbol generations)
+          declaration = GlobalDecl symbol rep signature deadEnd evaluated
+            (Map.lookup symbol generations)
       modify' (\current -> current
         { globals = extendVarEnv (globals current) binder identity
         , globalDecls = globalDecls current <> [declaration] })
@@ -442,6 +538,7 @@ internConstructor con = do
             (nameSymbol "constructor" (dataConName con))
             (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
             resultRep reps fieldStrictness layout tag familySize
+            (varId (dataConWorkId con))
       modify' (\current -> current
         { constructors = constructors current <> [(con, identity)]
         , constructorDecls = constructorDecls current <> [declaration] })
@@ -463,18 +560,26 @@ internOperation :: StgOp -> SignatureId -> P OperationId
 internOperation op signature = case op of
   StgPrimOp primop -> do
       let operationName = Text.pack (occNameString (primOpOcc primop))
+      operationSignature <- signatureForId signature
       known <- gets operations
-      case lookup operationName known of
+      case lookup (operationName, operationSignature) known of
        Just identity -> pure identity
        Nothing -> do
         prior <- gets operationDecls
         let identity = OperationId (fromIntegral (length prior))
             declaration = OperationDecl operationName signature
         modify' (\current -> current
-          { operations = operations current <> [(operationName, identity)]
+          { operations = operations current <> [((operationName, operationSignature), identity)]
           , operationDecls = operationDecls current <> [declaration] })
         pure identity
   _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
+
+signatureForId :: SignatureId -> P Signature
+signatureForId identity = do
+  known <- gets signatures
+  case find ((== identity) . snd) known of
+    Just (signature, _) -> pure signature
+    Nothing -> failIdentity "operation refers to an unknown signature"
 
 signatureFor :: [Id] -> Type -> P Signature
 signatureFor args result = Signature <$> (concat <$> mapM (argumentRepsForType . varType) args) <*> repsForType result
@@ -487,18 +592,18 @@ signatureFor args result = Signature <$> (concat <$> mapM (argumentRepsForType .
 -- `importedIdLFInfo` is partial for GHC's wired-in unused-argument descriptor.
 -- Such a zero-width argument is projected directly as Void and never reaches
 -- internGlobal, so this query remains restricted to genuine imported entries.
-importedEntry :: Id -> P (Maybe Signature, Bool)
+importedEntry :: Id -> P (Maybe Signature, Bool, Bool)
 importedEntry binder = case importedIdLFInfo binder of
   LFReEntrant _ arity _ _ -> do
     (arguments, result) <- splitRepArguments arity (varType binder)
     signature <- Signature arguments <$> entryResults result
-    pure (Just signature, True)
+    pure (Just signature, isDeadEndId binder, True)
   LFThunk{} -> do
     signature <- Signature [] <$> entryResults (varType binder)
-    pure (Just signature, False)
-  LFCon{} -> pure (Nothing, True)
-  LFUnlifted -> pure (Nothing, True)
-  LFUnknown{} -> pure (Nothing, False)
+    pure (Just signature, isDeadEndId binder, False)
+  LFCon{} -> pure (Nothing, False, True)
+  LFUnlifted -> pure (Nothing, False, True)
+  LFUnknown{} -> pure (Nothing, False, False)
   LFLetNoEscape -> failShape "imported join has no heap/global entry"
   where
     -- wave4:PRELUDE_HASKELL: globalDeadEnd carries the independent evidence.
@@ -617,7 +722,10 @@ projectLiteralAtom literal = Scalar <$> projectLiteral literal
 
 projectLiteral :: Literal -> P ScalarLiteral
 projectLiteral literal = case literal of
-  LitChar character -> pure (CharLiteral (fromIntegral (fromEnum character)))
+  LitChar character -> do
+    machine <- gets target
+    let bits = targetWordWidth machine
+    pure (WordLiteral bits (integerBytes bits (fromIntegral (fromEnum character))))
   LitString bytes -> pure (BytesLiteral bytes)
   LitNumber kind value -> numeric kind value
   LitFloat value -> pure (FloatLiteral 32 (wordBytes 4 (fromIntegral (castFloatToWord32 (fromRational value)))))
@@ -652,13 +760,26 @@ wordBytes count value = BS.pack
 idSymbol :: Text -> Id -> SymbolIdentity
 idSymbol namespace = nameSymbol namespace . varName
 
+idSymbolFor :: Module -> Text -> Id -> SymbolIdentity
+idSymbolFor fallback namespace binder = nameSymbolFor fallback namespace (varName binder)
+
 nameSymbol :: Text -> Name -> SymbolIdentity
-nameSymbol namespace name = case nameModule_maybe name of
+nameSymbol namespace = nameSymbolWithFallback Nothing namespace
+
+nameSymbolFor :: Module -> Text -> Name -> SymbolIdentity
+nameSymbolFor fallback namespace = nameSymbolWithFallback (Just fallback) namespace
+
+nameSymbolWithFallback :: Maybe Module -> Text -> Name -> SymbolIdentity
+nameSymbolWithFallback fallback namespace name = case nameModule_maybe name of
   Just modul -> SymbolIdentity (Text.pack (unitString (moduleUnit modul)))
     (Text.pack (moduleNameString (moduleName modul))) namespace
     (Text.pack (occNameString (nameOccName name)))
-  Nothing -> SymbolIdentity "<interactive>" "<local>" namespace
-    (Text.pack (occNameString (nameOccName name)))
+  Nothing -> case fallback of
+    Just modul -> SymbolIdentity (Text.pack (unitString (moduleUnit modul)))
+      (Text.pack (moduleNameString (moduleName modul))) namespace
+      (Text.pack (occNameString (nameOccName name)))
+    Nothing -> SymbolIdentity "<interactive>" "<local>" namespace
+      (Text.pack (occNameString (nameOccName name)))
 
 symbolText :: SymbolIdentity -> Text
 symbolText symbol = symbolUnit symbol <> ":" <> symbolModule symbol <> ":"

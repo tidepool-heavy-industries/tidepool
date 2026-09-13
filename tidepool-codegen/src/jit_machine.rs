@@ -3979,6 +3979,7 @@ mod tests {
             tail_callee: std::ptr::null_mut(),
             tail_arg: std::ptr::null_mut(),
             machine_state: &machine_state as *const MachineState as *mut MachineState,
+            prepared_tops: std::ptr::null(),
         };
         let vmctx_ptr = &mut vmctx as *mut VMContext;
 

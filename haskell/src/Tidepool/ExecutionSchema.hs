@@ -64,6 +64,7 @@ data ConstructorDecl = ConstructorDecl
   , constructorFieldReps :: [RuntimeRep], constructorStrictFields :: [Bool]
   , constructorLayout :: CheckedLayout
   , constructorTag :: Word32, constructorFamilySize :: Word32
+  , constructorHostId :: Word64
   } deriving stock (Eq, Show, Generic)
 data GlobalDecl = GlobalDecl
   { globalIdentity :: SymbolIdentity, globalRep :: RuntimeRep
@@ -77,7 +78,7 @@ data OperationDecl = OperationDecl { operationIdentity :: Text, operationSignatu
 
 data ValueRef = Local ValueId | Global GlobalId deriving stock (Eq, Show, Generic)
 data ScalarLiteral = IntLiteral Word8 ByteString | WordLiteral Word8 ByteString
-  | FloatLiteral Word8 ByteString | CharLiteral Word32 | BytesLiteral ByteString | NullAddressLiteral
+  | FloatLiteral Word8 ByteString | BytesLiteral ByteString | NullAddressLiteral
   deriving stock (Eq, Show, Generic)
 -- | Rubbish retains its physical representation, not a fabricated scalar value.
 -- TYPE versus CONSTRAINT is erased after GHC resolves that representation.

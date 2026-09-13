@@ -68,6 +68,7 @@ fn global_with_generation(generation: Cbor) -> Cbor {
         Cbor::Array(vec![int(0)]),
         Cbor::Bool(true),
         generation,
+        Cbor::Bool(false),
     ])
 }
 

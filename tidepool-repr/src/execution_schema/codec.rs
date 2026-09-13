@@ -4,9 +4,9 @@ use ciborium::value::Value;
 
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
-    ConstructorId, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl, GlobalId,
-    Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId, ParseError,
-    ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
+    ConstructorId, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl,
+    GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId,
+    ParseError, ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
     TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
 
@@ -349,9 +349,10 @@ impl Decoder {
     }
 
     fn constructor(&mut self, value: &Value) -> Result<ConstructorDecl, ParseError> {
-        let fields = array(value, 8, "constructor declaration")?;
+        let fields = array(value, 9, "constructor declaration")?;
         Ok(ConstructorDecl {
             identity: self.symbol(&fields[0])?,
+            host_id: crate::DataConId(unsigned(&fields[8], "constructor host ID")?),
             family: self.symbol(&fields[1])?,
             field_reps: self.list(&fields[2], false, |this, value| this.rep(value))?,
             strict_fields: self.list(&fields[3], false, |_this, value| {
@@ -365,13 +366,14 @@ impl Decoder {
     }
 
     fn global(&mut self, value: &Value) -> Result<GlobalDecl, ParseError> {
-        let fields = array(value, 5, "global declaration")?;
+        let fields = array(value, 6, "global declaration")?;
         Ok(GlobalDecl {
             identity: self.symbol(&fields[0])?,
             rep: self.rep(&fields[1])?,
             entry_signature: self.optional_signature(&fields[2])?,
             required_evaluated: bool_value(&fields[3], "required evaluated")?,
             required_generation: self.optional_generation(&fields[4])?,
+            dead_end: bool_value(&fields[5], "dead-end evidence")?,
         })
     }
 
@@ -452,15 +454,13 @@ impl Decoder {
                 bits: u8_value(&fields[1], "float bits")?,
                 bytes: self.bytes(&fields[2], "float payload")?,
             }),
-            (3, 2) => Ok(ScalarLiteral::Char(u32_value(
-                &fields[1],
-                "character codepoint",
-            )?)),
             (4, 2) => Ok(ScalarLiteral::Bytes(
                 self.bytes(&fields[1], "byte literal")?,
             )),
             (5, 1) => Ok(ScalarLiteral::NullAddress),
-            (0..=5, _) => Err(ParseError::Malformed("wrong scalar field count".into())),
+            (0..=2 | 4..=5, _) => {
+                Err(ParseError::Malformed("wrong scalar field count".into()))
+            }
             _ => Err(ParseError::InvalidTag(tag)),
         }
     }
@@ -903,6 +903,15 @@ mod tests {
         );
         // A literal pattern cannot smuggle an atom through the scalar grammar.
         assert!(decoder.scalar(&rubbish).is_err());
+    }
+
+    #[test]
+    fn retired_character_scalar_tag_is_not_decoded() {
+        let mut decoder = Decoder::new(DecodeLimits::default());
+        assert!(matches!(
+            decoder.scalar(&Value::Array(vec![number(3), number(65)])),
+            Err(ParseError::InvalidTag(3))
+        ));
     }
 
     #[test]

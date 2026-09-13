@@ -3,6 +3,7 @@
 module ExecutionProjectionTest (projectProjectionContract) where
 
 import Control.Monad (unless)
+import Data.ByteString qualified as BS
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -18,6 +19,7 @@ import Tidepool.PreparedStg (PreparedModule)
 
 projectProjectionContract :: [PreparedModule] -> IO WireProgram
 projectProjectionContract modules = do
+  topIdentityAllocationContract
   literalProjectionContract
   case projectPrepared context modules of
     Left failure -> ioError (userError ("M3 projection failed: " <> show failure))
@@ -42,6 +44,7 @@ projectProjectionContract modules = do
         (ioError (userError "M3 projection omitted the strict constructor field"))
       unless (all constructorTagsAreUsable (programConstructors program))
         (ioError (userError "M3 projection emitted invalid constructor tag/family facts"))
+      verifyDistinctConstructorHostIds program
       unless (any groupIsRecursive (programBindings program)
         || any (groupAny (rhsIsRecursive . heapBindingRhs . topHeap)) (programBindings program))
         (ioError (userError "M3 projection omitted recursive control/data"))
@@ -93,6 +96,37 @@ projectProjectionContract modules = do
       || any (\(Alternative _ _ body) -> exprIsRecursive body) alternatives
     exprIsRecursive _ = False
 
+topIdentityAllocationContract :: IO ()
+topIdentityAllocationContract = do
+  let symbol modul occurrence = SymbolIdentity "unit" modul "value" occurrence
+      assigned = assignTopIdentitySpellingForTest
+        [ (symbol "A" "sat", False)
+        , (symbol "A" "sat.1", False)
+        , (symbol "A" "sat", False)
+        , (symbol "B" "sat", False)
+        , (symbol "A" "external", True)
+        ]
+      occurrences = map symbolOccurrence assigned
+  unless (occurrences == ["sat", "sat.1", "sat.2", "sat", "external"])
+    (ioError (userError
+      ("internal top identity suffixing was not deterministic: " <> show assigned)))
+
+verifyDistinctConstructorHostIds :: WireProgram -> IO ()
+verifyDistinctConstructorHostIds program = unless
+  (all distinctHostId sameTagFamilies)
+  (ioError (userError
+    "M3 projection collapsed distinct same-tag constructor identities"))
+  where
+    constructors = programConstructors program
+    sameTagFamilies =
+      [ (left, right)
+      | left <- constructors
+      , right <- constructors
+      , constructorTag left == constructorTag right
+      , constructorFamily left /= constructorFamily right
+      ]
+    distinctHostId (left, right) = constructorHostId left /= constructorHostId right
+
 -- GHC may reuse an Id unique in unrelated top-level RHSs. Every semantic
 -- binder, including parameters and alternatives, still needs its own wire ID.
 verifyProgramWideValueIds :: WireProgram -> IO ()
@@ -123,6 +157,8 @@ verifyProgramWideValueIds program = unless (length binders == length (nub binder
 literalProjectionContract :: IO ()
 literalProjectionContract = do
   expect "null address" LitNullAddr (Scalar NullAddressLiteral)
+  expect "target-width character" (LitChar 'A')
+    (Scalar (WordLiteral 64 (BS.pack [0,0,0,0,0,0,0,65])))
   expect "type rubbish" (LitRubbish TypeLike intRepDataConTy) (Rubbish (IntRep 64))
   expect "constraint rubbish" (LitRubbish ConstraintLike intRepDataConTy) (Rubbish (IntRep 64))
   expect "lifted rubbish" (LitRubbish TypeLike liftedRepTy) (Rubbish LiftedRefRep)

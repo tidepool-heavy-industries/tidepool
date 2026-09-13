@@ -126,6 +126,22 @@ impl DescriptorSpace {
         }
         self.updated_path.clear();
     }
+
+    fn static_reference(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
+        self.static_region
+            .as_ref()
+            .map_or(Ok(None), |region| region.admit(encoded))
+    }
+
+    fn root_slot_overlaps_static(&self, address: usize) -> bool {
+        self.static_region.as_ref().is_some_and(|region| {
+            let range = region.address_range();
+            let Some(end) = address.checked_add(std::mem::size_of::<*mut u8>()) else {
+                return true;
+            };
+            address < range.end && range.start < end
+        })
+    }
 }
 
 fn bitmap_words(bytes: usize) -> Result<usize, DescriptorTraceError> {
@@ -199,6 +215,7 @@ pub unsafe fn cheney_copy_descriptors(
         if address == 0
             || (address < from_end && from_base < end)
             || (address < to_end && to_base < end)
+            || descriptors.root_slot_overlaps_static(address)
         {
             return Err(DescriptorTraceError::InvalidRange);
         }
@@ -312,10 +329,8 @@ unsafe fn evacuate_descriptor(
     if address == 0 {
         return Err(DescriptorTraceError::TaggedNull { value: encoded });
     }
-    if let Some(region) = &descriptors.static_region {
-        if let Some(reference) = region.admit(encoded)? {
-            return Ok(reference);
-        }
+    if let Some(reference) = descriptors.static_reference(encoded)? {
+        return Ok(reference);
     }
     if address < from_base || address >= from_end || (address - from_base) % 8 != 0 {
         return Err(DescriptorTraceError::InvalidManagedPointer { address });
@@ -339,6 +354,10 @@ unsafe fn evacuate_descriptor(
             descriptor.constructor_tag(),
         ) {
             return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
+        }
+        let stored_target = std::ptr::read(pointer.add(8).cast::<usize>());
+        if let Some(reference) = descriptors.static_reference(stored_target)? {
+            return Ok(reference);
         }
         let target = forwarded_target(pointer, to_base, *free)?;
         let target_address = untag(target);
@@ -505,6 +524,11 @@ unsafe fn resolve_updated(
                     tag: current_tag,
                 });
             }
+            let stored_target = std::ptr::read(current.add(8).cast::<usize>());
+            if let Some(reference) = descriptors.static_reference(stored_target)? {
+                forward_updated_path(descriptors, from_base, reference);
+                return Ok(reference);
+            }
             let target = forwarded_target(current, to_base, *free)?;
             let target_address = untag(target);
             let destination = &*descriptor_at(target_address as *const u8);
@@ -572,6 +596,10 @@ unsafe fn resolve_updated(
             return Err(DescriptorTraceError::InvalidUpdatedTarget);
         }
         let target_address = untag(target);
+        if let Some(reference) = descriptors.static_reference(target)? {
+            forward_updated_path(descriptors, from_base, reference);
+            return Ok(reference);
+        }
         if target_address == 0
             || target_address < from_base
             || target_address >= from_end
@@ -1577,6 +1605,8 @@ mod tests {
 mod descriptor_copy_tests {
     use super::*;
     use crate::execution_descriptor::{DescriptorState, ObjectKind};
+    use crate::static_region::{StaticImage, StaticRelocation};
+    use std::collections::BTreeMap;
     use tidepool_repr::execution_schema::{
         Architecture, Endianness, RuntimeRep, StorageLayout, TargetDescriptor,
     };
@@ -1617,6 +1647,33 @@ mod descriptor_copy_tests {
             )
             .unwrap(),
         )
+    }
+
+    fn static_cycle() -> Arc<crate::static_region::StaticRegion> {
+        let first = constructor_descriptor(1, &[RuntimeRep::LiftedRef]);
+        let second = constructor_descriptor(2, &[RuntimeRep::LiftedRef]);
+        let mut words = vec![0_u64; 4];
+        words[0] = first.initial_header_word() as u64;
+        words[2] = second.initial_header_word() as u64;
+        let image = StaticImage::new(
+            words,
+            vec![
+                StaticRelocation {
+                    slot_offset: 8,
+                    target_offset: 16,
+                    tag: second.tag(),
+                },
+                StaticRelocation {
+                    slot_offset: 24,
+                    target_offset: 0,
+                    tag: first.tag(),
+                },
+            ],
+            BTreeMap::from([(tidepool_repr::execution_schema::ValueId(1), 0)]),
+            [first, second],
+        )
+        .unwrap();
+        Arc::new(image.instantiate().unwrap())
     }
 
     unsafe fn write_object(
@@ -2072,6 +2129,192 @@ mod descriptor_copy_tests {
         );
         unsafe {
             collect_updated_chain(&mut space, &thunk, &result, larger_chain_len);
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_preserves_nursery_edges_to_static_objects() {
+        let static_region = static_cycle();
+        let nursery = descriptor(ObjectKind::Constructor, &[RuntimeRep::LiftedRef]);
+        let extent = nursery.allocation_extent() as usize;
+        let mut from = [0_u64; 4];
+        let mut to = [0_u64; 4];
+        let mut space = DescriptorSpace::new([Arc::clone(&nursery)])
+            .unwrap()
+            .with_static_region(Arc::clone(&static_region));
+        unsafe {
+            let object = write_object(from.as_mut_ptr().cast(), 0, &nursery, DescriptorState::Live);
+            let static_root = static_region
+                .entry(tidepool_repr::execution_schema::ValueId(1))
+                .unwrap();
+            std::ptr::write(object.add(8).cast::<usize>(), static_root);
+            let mut root = object;
+            let copied = cheney_copy_descriptors(
+                &[&mut root],
+                from.as_ptr().cast(),
+                extent,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, extent);
+            assert_eq!(untag(root as usize), to.as_mut_ptr() as usize);
+            assert_eq!(std::ptr::read(root.add(8).cast::<usize>()), static_root);
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_accepts_cyclic_static_root_without_copying() {
+        let static_region = static_cycle();
+        let mut from = [0_u64; 2];
+        let mut to = [0_u64; 2];
+        let mut space = DescriptorSpace::new([])
+            .unwrap()
+            .with_static_region(Arc::clone(&static_region));
+        let mut root = static_region
+            .entry(tidepool_repr::execution_schema::ValueId(1))
+            .unwrap() as *mut u8;
+        unsafe {
+            let copied = cheney_copy_descriptors(
+                &[&mut root],
+                from.as_ptr().cast(),
+                0,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, 0);
+            assert_eq!(
+                root as usize,
+                static_region
+                    .entry(tidepool_repr::execution_schema::ValueId(1))
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_rejects_static_interior_and_tagged_edges() {
+        let static_region = static_cycle();
+        let entry = static_region
+            .entry(tidepool_repr::execution_schema::ValueId(1))
+            .unwrap();
+        let mut from = [0_u64; 2];
+        let mut to = [0_u64; 2];
+        for (value, expected) in [
+            (
+                untag(entry) + 8,
+                DescriptorTraceError::InvalidManagedPointer {
+                    address: untag(entry) + 8,
+                },
+            ),
+            (
+                entry | 2,
+                DescriptorTraceError::InvalidManagedTag {
+                    address: untag(entry),
+                    tag: 3,
+                },
+            ),
+        ] {
+            let mut space = DescriptorSpace::new([])
+                .unwrap()
+                .with_static_region(Arc::clone(&static_region));
+            let mut root = value as *mut u8;
+            unsafe {
+                let error = cheney_copy_descriptors(
+                    &[&mut root],
+                    from.as_ptr().cast(),
+                    0,
+                    std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                    &mut space,
+                )
+                .err()
+                .unwrap();
+                assert_eq!(error, expected);
+                assert_eq!(root as usize, value);
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_rejects_root_slots_inside_static_region_before_mutation() {
+        let static_region = static_cycle();
+        let entry = static_region
+            .entry(tidepool_repr::execution_schema::ValueId(1))
+            .unwrap();
+        let slot = (untag(entry) + 8) as *mut *mut u8;
+        let before = unsafe { std::ptr::read(slot) };
+        let mut from = [0_u64; 2];
+        let mut to = [0_u64; 2];
+        let mut space = DescriptorSpace::new([])
+            .unwrap()
+            .with_static_region(Arc::clone(&static_region));
+        unsafe {
+            let error = cheney_copy_descriptors(
+                &[slot],
+                from.as_ptr().cast(),
+                0,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error, DescriptorTraceError::InvalidRange);
+            assert_eq!(std::ptr::read(slot), before);
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_forwards_updated_chains_to_static_objects() {
+        let static_region = static_cycle();
+        let thunk = descriptor(ObjectKind::Thunk, &[RuntimeRep::LiftedRef]);
+        let extent = thunk.allocation_extent() as usize;
+        let source_bytes = extent * 2;
+        let mut from = vec![0_u64; source_bytes / 8];
+        let mut to = vec![0_u64; source_bytes / 8];
+        let mut space = DescriptorSpace::new([Arc::clone(&thunk)])
+            .unwrap()
+            .with_static_region(Arc::clone(&static_region));
+        unsafe {
+            let first = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &thunk,
+                DescriptorState::Updated,
+            );
+            let second = write_object(
+                from.as_mut_ptr().cast(),
+                extent,
+                &thunk,
+                DescriptorState::Updated,
+            );
+            let static_root = static_region
+                .entry(tidepool_repr::execution_schema::ValueId(1))
+                .unwrap();
+            std::ptr::write(first.add(8).cast::<usize>(), second as usize);
+            std::ptr::write(second.add(8).cast::<usize>(), static_root);
+            let mut roots = [first, second];
+            let copied = cheney_copy_descriptors(
+                &[roots.as_mut_ptr(), roots.as_mut_ptr().add(1)],
+                from.as_ptr().cast(),
+                source_bytes,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, 0);
+            assert_eq!(roots[0] as usize, static_root);
+            assert_eq!(roots[1] as usize, static_root);
+            assert_eq!(std::ptr::read(first.add(8).cast::<usize>()), static_root);
+            assert_eq!(std::ptr::read(second.add(8).cast::<usize>()), static_root);
+            assert_eq!(
+                thunk.state(first, extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+            assert_eq!(
+                thunk.state(second, extent).unwrap(),
+                DescriptorState::Forwarded
+            );
         }
     }
 

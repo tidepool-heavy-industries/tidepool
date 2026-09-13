@@ -3,17 +3,18 @@
 //! Here `prepared` refers to the GHC prepared-STG handoff. It is distinct from
 //! cell preparation in `workbench.rs` and `resident_workbench.rs`.
 //!
-//! Parsing, linking, native compilation, execution, cancellation, disposition,
+//! Parsing, linking, compiled-owner construction, execution, cancellation, disposition,
 //! and retained-program reuse cross this boundary in that order. The legacy
 //! `CoreExpr` machine is not a fallback for any operation in this module.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::MachineDisposition;
-use tidepool_codegen::prepared_control::{CallStatus, ControlError};
-use tidepool_codegen::prepared_native::{
-    CollectionEvidence, NativeConstructor, PreparedNativeError, PreparedNativeProgram,
+use tidepool_codegen::machine_state::MachineFailure;
+use tidepool_codegen::prepared_program::{
+    CompileError, CompiledProgram, ExecutionError, RunOptions,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, LinkError, LinkedProgram, MachineImports,
@@ -50,12 +51,12 @@ pub enum PreparedRuntimeError {
     Link(#[from] LinkError),
     #[error("prepared execution cancelled")]
     Cancelled,
-    #[error("prepared native compilation rejected: {0}")]
-    NativeCompile(PreparedNativeError),
-    #[error("prepared native execution failed: {0}")]
-    NativeRun(PreparedNativeError),
+    #[error("prepared compilation rejected: {0}")]
+    Compile(CompileError),
+    #[error("prepared execution failed: {0}")]
+    Run(ExecutionError),
     #[error("prepared runtime is unavailable after an integrity failure")]
-    Unavailable,
+    Unavailable(MachineFailure),
 }
 
 impl PreparedRuntimeError {
@@ -64,15 +65,13 @@ impl PreparedRuntimeError {
         match self {
             Self::Parse(_) | Self::Link(_) => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
-            Self::Unavailable => PreparedFailureKind::Integrity,
-            Self::NativeCompile(_) => PreparedFailureKind::Rejected,
-            Self::NativeRun(error) => match error {
-                PreparedNativeError::MissingBinding(_)
-                | PreparedNativeError::Unsupported(_)
-                | PreparedNativeError::Constructor(_)
-                | PreparedNativeError::Arguments { .. } => PreparedFailureKind::Rejected,
-                PreparedNativeError::Pipeline(_) => PreparedFailureKind::Rejected,
-                PreparedNativeError::Runtime(failure) => {
+            Self::Unavailable(_) => PreparedFailureKind::Integrity,
+            Self::Compile(_) => PreparedFailureKind::Rejected,
+            Self::Run(error) => match error {
+                ExecutionError::MissingEntry(_)
+                | ExecutionError::Unsupported(_)
+                | ExecutionError::Arguments { .. } => PreparedFailureKind::Rejected,
+                ExecutionError::Runtime(failure) => {
                     if failure.disposition == MachineDisposition::Unavailable {
                         PreparedFailureKind::Integrity
                     } else if matches!(
@@ -84,30 +83,26 @@ impl PreparedRuntimeError {
                         PreparedFailureKind::Language
                     }
                 }
-                PreparedNativeError::Control(ControlError::CallFailed(
-                    CallStatus::LanguageFailure,
-                )) => PreparedFailureKind::Language,
-                PreparedNativeError::Control(ControlError::CallFailed(CallStatus::Cancelled)) => {
-                    PreparedFailureKind::Cancelled
+                ExecutionError::Observation(_) | ExecutionError::Static(_) => {
+                    PreparedFailureKind::Language
                 }
-                PreparedNativeError::ResultArea
-                | PreparedNativeError::Descriptor(_)
-                | PreparedNativeError::Control(_) => PreparedFailureKind::Integrity,
             },
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct PreparedRunResult {
-    pub value: NativeConstructor,
-    pub collection: Option<CollectionEvidence>,
+    pub values: Vec<Value>,
+    pub collections: u64,
 }
 
-/// A linked program retained across entries with a monotonic reuse decision.
+/// A linked program and its lazily compiled owner retained across entries with
+/// a monotonic reuse decision.
 pub struct PreparedRuntime {
     linked: LinkedProgram,
-    disposition: MachineDisposition,
+    compiled: Option<CompiledProgram>,
+    terminal: Option<MachineFailure>,
 }
 
 impl PreparedRuntime {
@@ -121,13 +116,16 @@ impl PreparedRuntime {
         let linked = link_program(prepared, &imports)?;
         Ok(Self {
             linked,
-            disposition: MachineDisposition::Reusable,
+            compiled: None,
+            terminal: None,
         })
     }
 
     #[must_use]
     pub fn disposition(&self) -> MachineDisposition {
-        self.disposition
+        self.terminal
+            .as_ref()
+            .map_or(MachineDisposition::Reusable, |failure| failure.disposition)
     }
 
     #[must_use]
@@ -142,49 +140,61 @@ impl PreparedRuntime {
         collect: bool,
         cancel: &PreparedCancelHandle,
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
-        if self.disposition == MachineDisposition::Unavailable {
-            return Err(PreparedRuntimeError::Unavailable);
+        if let Some(failure) = &self.terminal {
+            return Err(PreparedRuntimeError::Unavailable(failure.clone()));
         }
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let native = match binding {
-            Some(binding) => PreparedNativeProgram::compile_binding(&self.linked, binding),
-            None => PreparedNativeProgram::compile(&self.linked),
+        if self.compiled.is_none() {
+            self.compiled = Some(
+                CompiledProgram::compile(&self.linked).map_err(PreparedRuntimeError::Compile)?,
+            );
         }
-        .map_err(PreparedRuntimeError::NativeCompile)?;
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let result = if collect {
-            let evidence = native
-                .execute_after_collection(arguments)
-                .map_err(|error| self.classify_execution(error))?;
-            PreparedRunResult {
-                value: evidence.result.clone(),
-                collection: Some(evidence),
-            }
-        } else {
-            PreparedRunResult {
-                value: native
-                    .execute_with_arguments(arguments)
-                    .map_err(|error| self.classify_execution(error))?,
-                collection: None,
-            }
-        };
+        let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
+        let result = self
+            .compiled
+            .as_ref()
+            .expect("compiled program installed above")
+            .run_entry(
+                entry,
+                arguments,
+                &RunOptions {
+                    collect_before_observation: collect,
+                    ..RunOptions::default()
+                },
+                Arc::clone(&cancel.0),
+            )
+            .map_err(|error| self.classify_execution(error))?;
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        Ok(result)
+        Ok(PreparedRunResult {
+            values: result.values,
+            collections: result.collections,
+        })
     }
 
-    fn classify_execution(&mut self, error: PreparedNativeError) -> PreparedRuntimeError {
-        let error = PreparedRuntimeError::NativeRun(error);
-        if error.kind() == PreparedFailureKind::Integrity {
-            self.disposition = MachineDisposition::Unavailable;
+    fn classify_execution(&mut self, error: ExecutionError) -> PreparedRuntimeError {
+        let terminal = terminal_failure(&error);
+        let error = PreparedRuntimeError::Run(error);
+        if self.terminal.is_none() {
+            if let Some(failure) = terminal {
+                self.terminal = Some(failure);
+            }
         }
         error
     }
+}
+
+fn terminal_failure(error: &ExecutionError) -> Option<MachineFailure> {
+    let ExecutionError::Runtime(failure) = error else {
+        return None;
+    };
+    (failure.disposition == MachineDisposition::Unavailable).then(|| failure.clone())
 }
 
 pub fn run_prepared_once(
@@ -206,28 +216,104 @@ mod tests {
     use super::*;
     use tidepool_codegen::host_fns::RuntimeError;
     use tidepool_codegen::machine_state::MachineFailure;
+    use tidepool_repr::execution_schema::{
+        Architecture, Endianness, ImportedValue, TargetDescriptor, EXECUTION_ABI_VERSION,
+        SCHEMA_VERSION,
+    };
 
-    #[test]
-    fn native_failure_retains_disposition_separately_from_first_cause() {
-        let error = PreparedRuntimeError::NativeRun(PreparedNativeError::Runtime(MachineFailure {
-            cause: RuntimeError::Cancelled,
-            disposition: MachineDisposition::Unavailable,
-        }));
-        assert_eq!(error.kind(), PreparedFailureKind::Integrity);
+    fn m3_runtime() -> PreparedRuntime {
+        const ARTIFACT: &[u8] =
+            include_bytes!("../../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
+        let requirements = ProgramRequirements {
+            schema_version: SCHEMA_VERSION,
+            projection_profile: "ghc-9.12-prepared-stg".into(),
+            toolchain: "ghc-9.12.2".into(),
+            execution_abi_version: EXECUTION_ABI_VERSION,
+            target: TargetDescriptor {
+                architecture: Architecture::X86_64,
+                endianness: Endianness::Little,
+                pointer_width: 64,
+                word_width: 64,
+                abi: "sysv64".into(),
+                features: vec![],
+            },
+        };
+        let prepared = parse_program(ARTIFACT, &requirements, DecodeLimits::default()).unwrap();
+        let imports = MachineImports {
+            values: prepared
+                .globals()
+                .iter()
+                .map(|global| {
+                    let value = ImportedValue {
+                        identity: global.identity.clone(),
+                        rep: global.rep,
+                        entry_signature: global
+                            .entry_signature
+                            .map(|id| prepared.signatures()[id.0 as usize].clone()),
+                        dead_end: global.dead_end,
+                        evaluated: global.required_evaluated,
+                        generation: global.required_generation.unwrap_or(0),
+                    };
+                    (value.identity.clone(), value)
+                })
+                .collect(),
+        };
+        PreparedRuntime::from_artifact(ARTIFACT, &requirements, DecodeLimits::default(), imports)
+            .unwrap()
     }
 
     #[test]
-    fn native_language_and_cancellation_are_not_integrity_failures() {
+    fn compiled_failure_retains_disposition_separately_from_first_cause() {
+        let failure = MachineFailure {
+            cause: RuntimeError::Cancelled,
+            disposition: MachineDisposition::Unavailable,
+        };
+        let error = PreparedRuntimeError::Unavailable(failure.clone());
+        assert_eq!(error.kind(), PreparedFailureKind::Integrity);
+        assert!(matches!(
+            error,
+            PreparedRuntimeError::Unavailable(retained) if retained == failure
+        ));
+        assert_eq!(
+            terminal_failure(&ExecutionError::Runtime(failure.clone())),
+            Some(failure)
+        );
+    }
+
+    #[test]
+    fn terminal_failure_is_replayed_before_cancellation() {
+        let mut runtime = m3_runtime();
+        let failure = MachineFailure {
+            cause: RuntimeError::Cancelled,
+            disposition: MachineDisposition::Unavailable,
+        };
+        let reported = runtime.classify_execution(ExecutionError::Runtime(failure.clone()));
+        assert!(matches!(
+            reported,
+            PreparedRuntimeError::Run(ExecutionError::Runtime(retained))
+                if retained == failure
+        ));
+
+        let cancel = runtime.new_cancel_handle();
+        cancel.cancel();
+        let replayed = runtime.run_entry(None, &[], false, &cancel).unwrap_err();
+        assert!(matches!(
+            replayed,
+            PreparedRuntimeError::Unavailable(retained) if retained == failure
+        ));
+    }
+
+    #[test]
+    fn compiled_language_and_cancellation_are_not_integrity_failures() {
         for (cause, expected) in [
             (RuntimeError::Cancelled, PreparedFailureKind::Cancelled),
             (RuntimeError::HeapOverflow, PreparedFailureKind::Language),
             (RuntimeError::DivisionByZero, PreparedFailureKind::Language),
         ] {
-            let error =
-                PreparedRuntimeError::NativeRun(PreparedNativeError::Runtime(MachineFailure {
-                    cause,
-                    disposition: MachineDisposition::Reusable,
-                }));
+            let error = PreparedRuntimeError::Run(ExecutionError::Runtime(MachineFailure {
+                cause,
+                disposition: MachineDisposition::Reusable,
+            }));
             assert_eq!(error.kind(), expected);
         }
     }

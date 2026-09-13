@@ -1064,7 +1064,6 @@ impl<'w, 'p> Walker<'w, 'p> {
                         | ScalarLiteral::Word { bytes, .. }
                         | ScalarLiteral::Float { bytes, .. }
                         | ScalarLiteral::Bytes(bytes) => bytes.clone(),
-                        ScalarLiteral::Char(value) => value.to_be_bytes().to_vec(),
                         ScalarLiteral::NullAddress => vec![],
                     };
                     if matches!(literal, ScalarLiteral::NullAddress) {
@@ -1257,6 +1256,7 @@ mod tests {
     fn empty_constructor(name: &str, tag: u32, family_size: u32) -> ConstructorDecl {
         ConstructorDecl {
             identity: symbol(name),
+            host_id: crate::DataConId(u64::from(tag)),
             family: symbol("Family"),
             tag,
             family_size,
@@ -1299,6 +1299,22 @@ mod tests {
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidLayout(_))
+        ));
+    }
+
+    #[test]
+    fn constructor_host_ids_are_distinct_from_family_tags() {
+        let mut program = valid_program();
+        let mut other = empty_constructor("Other", 1, 1);
+        other.family = symbol("OtherFamily");
+        other.host_id = crate::DataConId(2);
+        program.constructors = vec![empty_constructor("A", 1, 1), other];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        program.constructors[1].host_id = program.constructors[0].host_id;
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::DuplicateDefinition(message)) if message.contains("host id")
         ));
     }
 
@@ -1374,6 +1390,7 @@ mod tests {
                 identity: symbol("imported_value"),
                 rep,
                 entry_signature: None,
+                dead_end: false,
                 required_evaluated: true,
                 required_generation: None,
             });
@@ -1395,10 +1412,143 @@ mod tests {
             identity: symbol("address"),
             rep: RuntimeRep::Address,
             entry_signature: Some(SignatureId(0)),
+            dead_end: false,
             required_evaluated: true,
             required_generation: None,
         });
         assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
+    }
+
+    fn callable_program(
+        actual: Signature,
+        application: Signature,
+        arguments: Vec<Atom>,
+        dead_end: bool,
+    ) -> WireProgram {
+        let mut program = valid_program();
+        let argument_count = arguments.len();
+        program.signatures = vec![actual, application];
+        program.globals.push(crate::execution_schema::GlobalDecl {
+            identity: symbol("callee"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
+            dead_end,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        program.expressions.nodes = vec![ExprFrame::Call {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(1),
+            arguments,
+        }];
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        binding.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(1),
+            parameters: (0..argument_count)
+                .map(|index| ValueId(10 + index as u32))
+                .collect(),
+            captures: vec![],
+            body: 0,
+        };
+        program
+    }
+
+    fn int_atom(value: i64) -> Atom {
+        Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })
+    }
+
+    fn word_atom(value: u64) -> Atom {
+        Atom::Scalar(ScalarLiteral::Word {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn callable_application_checks_saturation_and_argument_prefixes() {
+        let actual = Signature {
+            arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
+            results: vec![RuntimeRep::Int(64)],
+        };
+        let saturated = callable_program(
+            actual.clone(),
+            Signature {
+                arguments: actual.arguments.clone(),
+                results: actual.results.clone(),
+            },
+            vec![int_atom(1), word_atom(2)],
+            false,
+        );
+        validate_program(&saturated, &requirements(), DecodeLimits::default()).unwrap();
+
+        let undersaturated = callable_program(
+            actual.clone(),
+            Signature {
+                arguments: vec![RuntimeRep::Int(64)],
+                results: vec![RuntimeRep::LiftedRef],
+            },
+            vec![int_atom(1)],
+            false,
+        );
+        validate_program(&undersaturated, &requirements(), DecodeLimits::default()).unwrap();
+
+        let oversaturated = callable_program(
+            Signature {
+                arguments: vec![RuntimeRep::Int(64)],
+                results: vec![RuntimeRep::LiftedRef],
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
+                results: vec![RuntimeRep::Int(64)],
+            },
+            vec![int_atom(1), word_atom(2)],
+            false,
+        );
+        validate_program(&oversaturated, &requirements(), DecodeLimits::default()).unwrap();
+
+        let prefix_mismatch = callable_program(
+            actual.clone(),
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
+                results: vec![RuntimeRep::LiftedRef],
+            },
+            vec![int_atom(1), int_atom(2)],
+            false,
+        );
+        assert_invalid_signature(prefix_mismatch);
+
+        let saturated_result_mismatch = callable_program(
+            actual,
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
+                results: vec![RuntimeRep::Word(64)],
+            },
+            vec![int_atom(1), word_atom(2)],
+            false,
+        );
+        assert_invalid_signature(saturated_result_mismatch);
+    }
+
+    #[test]
+    fn dead_end_saturation_does_not_require_a_normal_result() {
+        let program = callable_program(
+            Signature {
+                arguments: vec![RuntimeRep::Int(64)],
+                results: vec![],
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Int(64)],
+                results: vec![RuntimeRep::Word(64)],
+            },
+            vec![int_atom(1)],
+            true,
+        );
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
     }
 
     fn integer(value: i64) -> Atom {
@@ -1532,6 +1682,7 @@ mod tests {
         );
         program.constructors.push(ConstructorDecl {
             identity: symbol("C"),
+            host_id: crate::DataConId(2),
             family: symbol("Other"),
             tag: 1,
             family_size: 1,
@@ -1991,6 +2142,7 @@ mod tests {
         let mut program = valid_program();
         program.constructors.push(ConstructorDecl {
             identity: symbol("C"),
+            host_id: crate::DataConId(3),
             family: symbol("T"),
             tag: 1,
             family_size: 1,
@@ -2024,6 +2176,7 @@ mod tests {
         let mut program = valid_program();
         program.constructors.push(ConstructorDecl {
             identity: symbol("Padded"),
+            host_id: crate::DataConId(4),
             family: symbol("T"),
             tag: 1,
             family_size: 1,
@@ -2353,10 +2506,20 @@ impl<'a> Validator<'a> {
                         "only a lifted global can have a callable entry".into(),
                     ));
                 }
+                if global.dead_end && !self.signature(signature)?.results.is_empty() {
+                    return Err(ParseError::InvalidSignature(
+                        "dead-end callable entry must have empty results".into(),
+                    ));
+                }
+            } else if global.dead_end {
+                return Err(ParseError::InvalidSignature(
+                    "dead-end global requires callable entry evidence".into(),
+                ));
             }
         }
 
         let mut constructor_symbols = BTreeSet::new();
+        let mut constructor_host_ids = BTreeSet::new();
         let mut family_sizes = BTreeMap::new();
         let mut family_tags = BTreeSet::new();
         for constructor in &self.wire.constructors {
@@ -2394,6 +2557,11 @@ impl<'a> Validator<'a> {
                     "constructor {:?}",
                     constructor.identity
                 )));
+            }
+            if !constructor_host_ids.insert(constructor.host_id) {
+                return Err(ParseError::DuplicateDefinition(
+                    "constructor host id".into(),
+                ));
             }
             if constructor.field_reps.len() != constructor.strict_fields.len() {
                 return Err(ParseError::InvalidLayout(
@@ -2547,10 +2715,6 @@ impl<'a> Validator<'a> {
                 }
                 Ok(())
             }
-            ScalarLiteral::Char(value) if *value <= 0x10ffff => Ok(()),
-            ScalarLiteral::Char(_) => Err(ParseError::Malformed(
-                "character literal is outside Haskell codepoint range".into(),
-            )),
             ScalarLiteral::Bytes(bytes) => {
                 if bytes.len() > self.limits.max_string_bytes {
                     return Err(ParseError::LimitExceeded("string bytes"));

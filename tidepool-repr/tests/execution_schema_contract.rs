@@ -45,10 +45,12 @@ fn representative_recursive_import_contract_compiles() {
             identity: symbol("Fixture.Dependency", "imported"),
             rep: RuntimeRep::LiftedRef,
             entry_signature: Some(SignatureId(0)),
+            dead_end: false,
             required_evaluated: false,
             required_generation: Some(7),
         }],
         constructors: vec![ConstructorDecl {
+            host_id: tidepool_repr::DataConId(1),
             tag: 1,
             family_size: 1,
             result_rep: RuntimeRep::LiftedRef,

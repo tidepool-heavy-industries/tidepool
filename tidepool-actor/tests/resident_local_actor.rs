@@ -4,12 +4,12 @@ use tidepool_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
     ResidentToolEndpoint,
 };
+use tidepool_bridge::Value;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
-use tidepool_bridge::Value;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
     ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
@@ -318,16 +318,23 @@ async fn resident_cleanup_case(fail_hook: bool) {
                 if identity == actor.identity()));
 
     // The first tree's retirement must preserve the sibling's live closures.
-    let retained = sibling_server
-        .dispatch_tool("current_value", serde_json::Map::new())
+    let retained = sibling_installation
+        .policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "current_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
         .await
         .expect("sibling survives root retirement");
-    assert_eq!(
-        retained.structured_content,
-        Some(serde_json::json!({"current": 73}))
-    );
-    sibling_server
-        .dispatch_tool("finish_value", serde_json::Map::new())
+    assert_eq!(retained, serde_json::json!({"current": 73}));
+    sibling_installation
+        .policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "finish_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
         .await
         .expect("retire sibling");
     sibling_task.await.expect("sibling task");

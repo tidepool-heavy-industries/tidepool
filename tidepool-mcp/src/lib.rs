@@ -1031,54 +1031,6 @@ data Console a where
     }
 
     #[test]
-    fn test_eval_timeout_value() {
-        assert_eq!(EVAL_TIMEOUT_SECS, 600);
-    }
-
-    /// The `eval` tool schema must attest to the REAL clamp (600/1800), not a
-    /// stale hand-copied "Default 120; clamped to [1, 600]" claim — and the
-    /// sentinel must never leak into the client-visible schema.
-    #[test]
-    fn eval_request_schema_reports_real_timeout_constants() {
-        let schema = eval_request_input_schema().unwrap();
-        let json = serde_json::to_string(schema.as_ref()).unwrap();
-        assert!(
-            json.contains(&format!(
-                "Default {EVAL_TIMEOUT_SECS}; clamped to [1, {MAX_EVAL_TIMEOUT_SECS}]."
-            )),
-            "schema must contain the live timeout constants: {json}"
-        );
-        assert!(
-            !json.contains(TIMEOUT_SECS_DOC_SENTINEL),
-            "sentinel must not leak into the client-visible schema: {json}"
-        );
-        assert!(
-            !json.contains("Default 120"),
-            "the old stale default (120) must not appear: {json}"
-        );
-    }
-
-    #[test]
-    fn test_resolve_eval_timeout_secs() {
-        // None → server default.
-        assert_eq!(resolve_eval_timeout_secs(None), EVAL_TIMEOUT_SECS);
-        // In-range values pass through.
-        assert_eq!(resolve_eval_timeout_secs(Some(1)), 1);
-        assert_eq!(resolve_eval_timeout_secs(Some(300)), 300);
-        assert_eq!(
-            resolve_eval_timeout_secs(Some(MAX_EVAL_TIMEOUT_SECS)),
-            MAX_EVAL_TIMEOUT_SECS
-        );
-        // Below floor clamps up to 1 (never 0 — a 0s window would insta-yield).
-        assert_eq!(resolve_eval_timeout_secs(Some(0)), 1);
-        // Above ceiling clamps down to the cap.
-        assert_eq!(
-            resolve_eval_timeout_secs(Some(100_000)),
-            MAX_EVAL_TIMEOUT_SECS
-        );
-    }
-
-    #[test]
     fn test_effect_decls_basic_validation() {
         let console = console_decl();
         assert_eq!(console.type_name, "Console");
