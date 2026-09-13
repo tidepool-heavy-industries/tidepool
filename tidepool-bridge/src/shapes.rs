@@ -122,13 +122,14 @@ pub fn box_char(c: char, c_hash: DataConId) -> Value {
 
 /// Extract a `char` from any of its Value shapes:
 ///   1. bare `LitChar`;
-///   2. `C#(LitChar)`;
-///   3. `C#(Text(backing, off, 1))` — a char smuggled as a single-BYTE Text;
+///   2. bare target-width `LitWord` for an unboxed `Char#`;
+///   3. `C#` around either literal;
+///   4. `C#(Text(backing, off, 1))` — a char smuggled as a single-BYTE Text;
 ///      the byte at `off` is read as a raw 0–255 code point (historical
 ///      renderer semantics, NOT UTF-8 decoding).
 pub fn unbox_char(v: &Value, table: &DataConTable) -> Option<char> {
     match v {
-        Value::Lit(Literal::LitChar(c)) => Some(*c),
+        Value::Lit(Literal::LitChar(_) | Literal::LitWord(_)) => char_payload(v, table),
         Value::Con(id, fields) if fields.len() == 1 && is_con_named(*id, "C#", table) => {
             char_payload(&fields[0], table)
         }
@@ -139,6 +140,9 @@ pub fn unbox_char(v: &Value, table: &DataConTable) -> Option<char> {
 fn char_payload(v: &Value, table: &DataConTable) -> Option<char> {
     match v {
         Value::Lit(Literal::LitChar(c)) => Some(*c),
+        Value::Lit(Literal::LitWord(code_point)) => {
+            u32::try_from(*code_point).ok().and_then(char::from_u32)
+        }
         Value::Con(id, fields) if fields.len() == 3 && is_con_named(*id, "Text", table) => {
             let len = unbox_int(&fields[2], table)?;
             if len != 1 {
@@ -773,6 +777,40 @@ mod tests {
         );
         let c = Value::Con(id(&t, "C#"), vec![text]);
         assert_eq!(unbox_char(&c, &t), Some('y'));
+    }
+
+    #[test]
+    fn target_word_char_validates_code_points_and_converts_strings() {
+        let table = test_table();
+        let c_hash = id(&table, "C#");
+        let cons = id(&table, ":");
+        let nil = Value::Con(id(&table, "[]"), vec![]);
+        for character in ['A', 'λ'] {
+            let bare = Value::Lit(Literal::LitWord(character as u64));
+            let boxed = Value::Con(c_hash, vec![bare.clone()]);
+            assert_eq!(unbox_char(&bare, &table), Some(character));
+            assert_eq!(unbox_char(&boxed, &table), Some(character));
+        }
+        for invalid in [0xd800, 0x11_0000, 0x1_0000_0041] {
+            let bare = Value::Lit(Literal::LitWord(invalid));
+            let boxed = Value::Con(c_hash, vec![bare.clone()]);
+            assert_eq!(unbox_char(&bare, &table), None);
+            assert_eq!(unbox_char(&boxed, &table), None);
+        }
+        let string = Value::Con(
+            cons,
+            vec![
+                Value::Con(c_hash, vec![Value::Lit(Literal::LitWord('A' as u64))]),
+                Value::Con(
+                    cons,
+                    vec![
+                        Value::Con(c_hash, vec![Value::Lit(Literal::LitWord('λ' as u64))]),
+                        nil,
+                    ],
+                ),
+            ],
+        );
+        assert_eq!(String::from_value(&string, &table).unwrap(), "Aλ");
     }
 
     #[test]

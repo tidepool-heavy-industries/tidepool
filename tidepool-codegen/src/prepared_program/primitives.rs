@@ -10,7 +10,7 @@ use cranelift_codegen::{ir, ir::InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
-    OperationDecl, OperationIdentity, ResultContract, RuntimeRep, Signature,
+    ForeignConvention, OperationDecl, OperationIdentity, ResultContract, RuntimeRep, Signature,
 };
 
 fn result_reps(signature: &Signature) -> Option<&[RuntimeRep]> {
@@ -546,6 +546,12 @@ pub(super) fn recognize_operation(
     {
         return Some(PrimitiveOperation::IndexCharOffAddr);
     }
+    if matches!(&declaration.identity, OperationIdentity::Intrinsic { symbol, convention: ForeignConvention::CCall } if symbol == "strlen")
+        && signature.arguments == [RuntimeRep::Address, RuntimeRep::Void]
+        && returns_exact(signature, &[RuntimeRep::Int(64)])
+    {
+        return Some(PrimitiveOperation::CStringLen);
+    }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "raise#")
         && signature.arguments == [RuntimeRep::LiftedRef]
         && matches!(&signature.results, ResultContract::NoSuccess)
@@ -583,6 +589,7 @@ pub(super) enum PrimitiveOperation {
     Formatting(super::formatting::FormattingOperation),
     DoubleToInt,
     IndexCharOffAddr,
+    CStringLen,
     Raise,
     PrimitiveFailure(super::fallible::PrimitiveFailure),
     BasicScalar(BasicScalarOperation),
@@ -719,6 +726,10 @@ pub(super) fn emit_operation(
             arguments[1],
         )
         .map(Some),
+        PrimitiveOperation::CStringLen => {
+            super::static_bytes::emit_c_string_len(builder, pipeline, vmctx, bytes, arguments[0])
+                .map(Some)
+        }
         PrimitiveOperation::Integer(operation)
             if matches!(
                 operation.kind,

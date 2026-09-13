@@ -279,6 +279,10 @@ impl CompiledProgram {
                 "prepared_index_char",
                 static_bytes::prepared_index_char as *const u8,
             ),
+            (
+                "prepared_c_string_len",
+                static_bytes::prepared_c_string_len as *const u8,
+            ),
         ])?;
         #[cfg(test)]
         {

@@ -10,7 +10,6 @@ use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, MachineImports, ProgramRequirements,
 };
 use tidepool_repr::DataConTable;
-use tidepool_repr::Literal;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -572,20 +571,7 @@ pub fn compare_values(
 }
 
 fn canonical_char(value: &Value, constructors: &DataConTable) -> Option<char> {
-    unbox_char(value, constructors).or_else(|| match value {
-        Value::Lit(Literal::LitWord(code_point)) => checked_char(*code_point),
-        Value::Con(id, fields) if constructors.name_of(*id) == Some("C#") && fields.len() == 1 => {
-            match &fields[0] {
-                Value::Lit(Literal::LitWord(code_point)) => checked_char(*code_point),
-                _ => None,
-            }
-        }
-        _ => None,
-    })
-}
-
-fn checked_char(code_point: u64) -> Option<char> {
-    u32::try_from(code_point).ok().and_then(char::from_u32)
+    unbox_char(value, constructors)
 }
 
 fn constructor<'a>(

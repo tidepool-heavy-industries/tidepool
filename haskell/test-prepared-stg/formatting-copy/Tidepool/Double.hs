@@ -1,4 +1,5 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE PackageImports #-}
 -- | Stable extractor intrinsics for rendering 'Double' values.
 --
 -- Backends may replace these exact bindings with managed-Text primitives.
@@ -6,9 +7,9 @@
 -- calls intact, but does not hide bottoming demand information from GHC.
 module Tidepool.Double (renderDouble, renderDoublePrec) where
 
-import Data.Text (Text)
-import Data.Text qualified as Text
-import Prelude (Double, Int, show, showsPrec)
+import "text" Data.Text (Text)
+import "text" Data.Text qualified as Text
+import "base" Prelude (Double, Int, show, showsPrec)
 
 {-# OPAQUE renderDouble #-}
 renderDouble :: Double -> Text

@@ -891,6 +891,13 @@ internOperation op signature = do
           || operationSignature == Signature [FloatRep 64, VoidRep]
               (Returns [FloatRep 64]) ->
           pure (Schema.IntrinsicIdentity "rintDouble" Schema.CCall)
+    -- GHC.CString's c_strlen is a ghc-prim foreign import with no Haskell body.
+    StgFCallOp (Foreign.CCall (Foreign.CCallSpec
+      (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlayRisky)) _
+      | unpackFS label == "strlen"
+      , unitString unit == "ghc-prim"
+      , operationSignature == Signature [AddressRep, VoidRep] (Returns [IntRep 64]) ->
+          pure (Schema.IntrinsicIdentity "strlen" Schema.CCall)
     StgPrimCallOp call -> lift . Left $
       UnsupportedPrimitiveCall (Text.pack (showSDocUnsafe (ppr call))) operationSignature
     StgFCallOp call _ -> lift . Left $

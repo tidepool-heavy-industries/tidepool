@@ -11,15 +11,16 @@ import Data.Text qualified as Text
 import GHC.Builtin.Types
   ( doubleRepDataConTy, intRepDataConTy, liftedRepTy, tupleRepDataConTyCon
   , mkPromotedListTy, runtimeRepTy, unliftedRepTy, zeroBitRepTy )
-import GHC.Core.Type (mkTyConApp)
+import GHC.Core.Type (mkTyConApp, splitFunTys, splitTyConApp_maybe)
 import GHC.Core.DataCon (dataConName, dataConRepArity)
+import GHC.Core.TyCon (tyConName)
 import GHC.Types.Basic (TypeOrConstraint(TypeLike, ConstraintLike))
 import GHC.Types.Literal (Literal(..))
-import GHC.Types.Id (isDataConWorkId_maybe)
-import GHC.Types.Name (nameOccName)
+import GHC.Types.Id (idType, isDataConWorkId_maybe)
+import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (Id, varName)
-import GHC.Unit.Module (mkModule, moduleName, moduleNameString)
+import GHC.Unit.Module (mkModule, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (stringToUnit)
 import GHC.Stg.Syntax
 import System.Directory (getCurrentDirectory)
@@ -82,6 +83,7 @@ projectProjectionContract modules = do
       verifyVoidParameters program
       verifyUnboxedReturn program
       verifyRintDoubleStateToken
+      verifyCStringLengthProjection
       verifyBottomingSentinelContracts
       verifySmallArrayOperationContracts
       verifyByteArrayOperationContracts
@@ -624,6 +626,30 @@ verifyRintDoubleStateToken = do
   where
     unSignatureId (SignatureId value) = value
 
+verifyCStringLengthProjection :: IO ()
+verifyCStringLengthProjection = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/CStringLengthProjection.hs" ["test-prepared-stg"]
+  let context entry = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+        (SymbolIdentity "main" "CStringLengthProjection" "value" entry Nothing) Nothing
+  case projectPreparedTarget (context "lengthOf") (pprModules prepared) of
+    Left failure -> ioError (userError
+      ("GHC.CString strlen projection failed: " <> show failure))
+    Right program -> case
+      [ programSignatures program !! fromIntegral index
+      | OperationDecl (IntrinsicIdentity "strlen" CCall) (SignatureId index)
+          <- programOperations program
+      ] of
+      [Signature [AddressRep, VoidRep] (Returns [IntRep 64])] -> pure ()
+      signatures -> ioError (userError
+        ("expected exact ghc-prim strlen operation, got " <> show signatures))
+  case projectPreparedTarget (context "wrongLength") (pprModules prepared) of
+    Left (UnsupportedForeignCall _ (Signature [AddressRep, VoidRep] (Returns [WordRep 64]))) ->
+      pure ()
+    other -> ioError (userError
+      ("wrong-signature strlen was not rejected: " <> show other))
+
 verifyBottomingSentinelContracts :: IO ()
 verifyBottomingSentinelContracts = do
   prepared <- runPipelineSelected PreparedStg
@@ -814,6 +840,50 @@ verifyFormattingSourceAuthority = do
           (ioError (userError ("W5_FORMATTING source authority mismatch: " <> source)))
   check "test-prepared-stg/formatting-shadow" False
   check "test-prepared-stg/formatting-copy" True
+  verifyFormattingDependencyShadow
+
+verifyFormattingDependencyShadow :: IO ()
+verifyFormattingDependencyShadow = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/FormattingDependencyShadow.hs"
+    ["test-prepared-stg/formatting-dependency-shadow", "test-prepared-stg", "lib"]
+  authority <- resolveFormattingAuthority (prHscEnv (pprPipelineResult prepared))
+  let homeShadow = [pmModule modul | modul <- pprModules prepared
+        , moduleNameString (moduleName (pmModule modul)) == "Data.Text"]
+      wrappers = [binder | modul <- pprModules prepared
+        , moduleNameString (moduleName (pmModule modul)) == "Tidepool.Double"
+        , (binding, _) <- pmBindings modul, binder <- topBindersForTest binding
+        , occNameString (nameOccName (varName binder)) == "renderDouble"]
+  case (authority, homeShadow, wrappers) of
+    (Just trusted, [shadowOwner], [binder]) -> do
+      unless (moduleUnit shadowOwner == stringToUnit "main")
+        (ioError (userError "W5_FORMATTING home Data.Text shadow was not loaded"))
+      unless (case classifyFormatting trusted binder of
+        Right (Just _) ->
+          let (_, result) = splitFunTys (idType binder)
+          in case splitTyConApp_maybe result of
+            Just (tycon, []) -> case nameModule_maybe (tyConName tycon) of
+              Just textOwner -> moduleNameString (moduleName textOwner) == "Data.Text.Internal"
+                && moduleUnit textOwner /= moduleUnit shadowOwner
+              Nothing -> False
+            _ -> False
+        _ -> False)
+        (ioError (userError "W5_FORMATTING shipped wrapper did not retain package Text"))
+      let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+            (SymbolIdentity "main" "FormattingDependencyShadow" "value" "trusted" Nothing)
+            (Just trusted)
+      program <- either
+        (\failure -> ioError (userError
+          ("W5_FORMATTING dependency shadow projection failed: " <> show failure)))
+        pure (projectPreparedTarget context (pprModules prepared))
+      unless (any isFormattingIntrinsic (programOperations program))
+        (ioError (userError "W5_FORMATTING shadowed dependency bypassed the intrinsic"))
+    _ -> ioError (userError "W5_FORMATTING dependency shadow or trusted wrapper missing")
+  where
+    isFormattingIntrinsic (OperationDecl (IntrinsicIdentity name CCall) _) =
+      name == "prepared_render_double_bytes"
+    isFormattingIntrinsic _ = False
 
 verifyTagToEnumProjection :: IO ()
 verifyTagToEnumProjection = do

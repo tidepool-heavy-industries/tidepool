@@ -239,6 +239,148 @@ fn index_char_wire(result_rep: RuntimeRep) -> WireProgram {
     wire
 }
 
+fn c_string_len_wire(operation: OperationIdentity, operation_signature: Signature) -> WireProgram {
+    let mut wire = testing::wire_program();
+    wire.signatures = vec![
+        Signature {
+            arguments: vec![RuntimeRep::Address],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        },
+        operation_signature,
+    ];
+    wire.operations = vec![OperationDecl {
+        identity: operation,
+        signature: SignatureId(1),
+    }];
+    wire.expressions.nodes[0] = ExprFrame::Operation {
+        operation: OperationId(0),
+        arguments: vec![Atom::Ref(ValueRef::Local(ValueId(1))), Atom::Void],
+    };
+    wire.bindings = vec![
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("CStringLen", "entry"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(0),
+                    parameters: vec![ValueId(1)],
+                    captures: vec![],
+                    body: 0,
+                },
+            },
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("CStringLen", "storage"),
+            binding: HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Bytes(b"ab\0tail".to_vec()),
+            },
+        }),
+    ];
+    wire
+}
+
+fn c_string_len_identity() -> OperationIdentity {
+    OperationIdentity::Intrinsic {
+        symbol: "strlen".into(),
+        convention: ForeignConvention::CCall,
+    }
+}
+
+fn c_string_len_signature() -> Signature {
+    Signature {
+        arguments: vec![RuntimeRep::Address, RuntimeRep::Void],
+        results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+    }
+}
+
+fn c_string_len(program: &CompiledProgram, address: usize) -> Result<i64, ExecutionError> {
+    let result = program.run_entry(
+        ValueId(0),
+        &[address as u64],
+        &RunOptions::default(),
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    match result.values.as_slice() {
+        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))] => Ok(*value),
+        other => panic!("unexpected strlen result: {other:?}"),
+    }
+}
+
+#[test]
+fn c_string_len_real_adapter_stops_at_owned_nul_and_rejects_unknown_addresses() {
+    let program = compile(c_string_len_wire(
+        c_string_len_identity(),
+        c_string_len_signature(),
+    ));
+    let storage = program.bytes.get(b"ab\0tail").unwrap();
+    let base = storage.as_ptr() as usize;
+    assert_eq!(c_string_len(&program, base).unwrap(), 2);
+    assert_eq!(c_string_len(&program, base + 1).unwrap(), 1);
+    assert_eq!(c_string_len(&program, base + 2).unwrap(), 0);
+    assert_eq!(c_string_len(&program, base + 3).unwrap(), 4);
+    assert_eq!(c_string_len(&program, base + storage.len() - 1).unwrap(), 0);
+    for address in [0, usize::MAX, base + storage.len()] {
+        assert!(matches!(
+            c_string_len(&program, address),
+            Err(ExecutionError::Runtime(
+                crate::machine_state::MachineFailure {
+                    cause: RuntimeError::BadPointer,
+                    ..
+                }
+            ))
+        ));
+    }
+}
+
+#[test]
+fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
+    let valid = c_string_len_signature();
+    let invalid = [
+        Signature {
+            arguments: vec![RuntimeRep::Address],
+            ..valid.clone()
+        },
+        Signature {
+            arguments: vec![RuntimeRep::Address, RuntimeRep::Void],
+            results: ResultContract::Returns(vec![RuntimeRep::Word(64)]),
+        },
+    ];
+    for signature in invalid {
+        let mut wire = c_string_len_wire(c_string_len_identity(), signature.clone());
+        wire.signatures[0].results = signature.results.clone();
+        if signature.arguments.len() == 1 {
+            wire.expressions.nodes[0] = ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(1)))],
+            };
+        }
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        assert!(matches!(
+            CompiledProgram::compile(&linked),
+            Err(CompileError::Unsupported(Unsupported::Expression { .. }))
+        ));
+    }
+    for identity in [
+        OperationIdentity::PrimOp("strlen".into()),
+        OperationIdentity::Intrinsic {
+            symbol: "other_strlen".into(),
+            convention: ForeignConvention::CCall,
+        },
+    ] {
+        let linked = link_program(
+            testing::prepare(c_string_len_wire(identity, valid.clone())).unwrap(),
+            &MachineImports::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            CompiledProgram::compile(&linked),
+            Err(CompileError::Unsupported(Unsupported::Expression { .. }))
+        ));
+    }
+}
+
 fn index_char(
     program: &CompiledProgram,
     address: usize,

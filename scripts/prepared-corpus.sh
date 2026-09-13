@@ -10,6 +10,9 @@ run_root="$(mktemp -d "$output_root/run.XXXXXX")"
 priority_root="$(mktemp -d "$output_root/project-work-candidate.XXXXXX")"
 actor_root="$(mktemp -d "$output_root/agent-watch-await-settled.XXXXXX")"
 suite_root="$(mktemp -d "$output_root/suite.XXXXXX")"
+recovered_root="$(mktemp -d "$output_root/recovered-base-contract.XXXXXX")"
+formatting_root="$(mktemp -d "$output_root/formatting-execution-contract.XXXXXX")"
+formatting_shadow_root="$(mktemp -d "$output_root/formatting-dependency-shadow.XXXXXX")"
 echo "==> prepared corpus executable snapshot: $run_root"
 echo "    provenance: $run_root/provenance.json"
 
@@ -103,6 +106,63 @@ suite_report="$suite_root/results.json"
   "$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json" \
   "$metadata" "$suite_report"
 
+assert_contract_report() {
+  local cohort="$1"
+  local expected="$2"
+  local report="$3"
+  jq -e --argjson expected "$expected" '
+    .stg_programs == $expected
+    and (.programs | length) == $expected
+    and ([.stage_totals[].stage] | sort) ==
+      (["projection", "validation", "admission", "compilation", "execution", "comparison"] | sort)
+    and all(.stage_totals[];
+      .passed == $expected and .failed == 0 and .missing_expectation == 0
+      and .running == 0 and .not_reached == 0)
+    and all(.programs[];
+      (.stages | length) == 6 and all(.stages[]; .outcome.status == "passed"))
+  ' "$report" >/dev/null || {
+    echo "contract cohort $cohort did not pass all six stages for $expected rows: $report" >&2
+    return 1
+  }
+}
+
+echo "==> projecting recovered base-call contract (1 target)"
+"$projection_probe" \
+  "$repo_root/haskell/test-prepared-stg/RecoveredBody.hs" RecoveredBody \
+  "$repo_root/haskell/test-prepared-stg/RecoveredBodyTargets" "$recovered_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+recovered_report="$recovered_root/results.json"
+"$prepared_runner" run \
+  "$recovered_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/RecoveredBodyExpectations.json" \
+  "$metadata" "$recovered_report"
+assert_contract_report recovered-base 1 "$recovered_report"
+
+echo "==> projecting formatting execution contract (5 targets)"
+"$projection_probe" \
+  "$repo_root/haskell/test-prepared-stg/FormattingExecutionContract.hs" FormattingExecutionContract \
+  "$repo_root/haskell/test-prepared-stg/FormattingExecutionTargets" "$formatting_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+formatting_report="$formatting_root/results.json"
+"$prepared_runner" run \
+  "$formatting_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/FormattingExecutionExpectations.json" \
+  "$metadata" "$formatting_report"
+assert_contract_report formatting-execution 5 "$formatting_report"
+
+echo "==> projecting formatting dependency-shadow contract (1 target)"
+"$projection_probe" \
+  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadow.hs" FormattingDependencyShadow \
+  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadowTargets" "$formatting_shadow_root" \
+  "$repo_root/haskell/test-prepared-stg/formatting-dependency-shadow" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+formatting_shadow_report="$formatting_shadow_root/results.json"
+"$prepared_runner" run \
+  "$formatting_shadow_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadowExpectations.json" \
+  "$metadata" "$formatting_shadow_report"
+assert_contract_report formatting-dependency-shadow 1 "$formatting_shadow_report"
+
 report_totals() {
   local cohort="$1"
   local report="$2"
@@ -118,10 +178,17 @@ echo "  priority: $priority_root"
 echo "  actor stdlib: $actor_root"
 echo "  suite:    $suite_root"
 echo "  suite targets recorded: $suite_count"
+echo "  recovered base contract: $recovered_root"
+echo "  formatting execution contract: $formatting_root"
+echo "  formatting dependency-shadow contract: $formatting_shadow_root"
 echo "  comparison expectations are historical and may be missing; inspect result rows"
 report_totals priority "$priority_report"
 report_totals actor-stdlib "$actor_report"
 report_totals suite "$suite_report"
+echo "  separate acceptance contracts (not part of Suite or legacy counts):"
+report_totals recovered-base "$recovered_report"
+report_totals formatting-execution "$formatting_report"
+report_totals formatting-dependency-shadow "$formatting_shadow_report"
 
 report_legacy_totals() {
   local cohort="$1"

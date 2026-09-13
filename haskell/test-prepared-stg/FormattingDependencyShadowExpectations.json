@@ -1,0 +1,6 @@
+{
+  "source_revision": "FormattingDependencyShadow.hs",
+  "expectations": {
+    "trusted": { "kind": "text", "value": "1.5" }
+  }
+}

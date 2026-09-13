@@ -1,0 +1,6 @@
+{
+  "source_revision": "RecoveredBody.hs",
+  "expectations": {
+    "caller": { "kind": "int", "value": 1 }
+  }
+}

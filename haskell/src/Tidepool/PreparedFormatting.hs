@@ -29,9 +29,10 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
 import System.FilePath (takeDirectory, (</>))
 
--- | Pin the exact shipped implementation at extractor build time. The source
--- is an explicit Cabal dependency, so rebuilding the extractor refreshes this
--- authority when the shipped module changes.
+-- | Pin the exact shipped implementation at extractor build time. Its explicit
+-- package imports keep the Text and Prelude dependencies independent of home
+-- module shadows. The source is an explicit Cabal dependency, so rebuilding
+-- the extractor refreshes this authority when the shipped module changes.
 shippedDoubleSource :: ByteString
 shippedDoubleSource = BS.pack $(do
   here <- loc_filename <$> location
