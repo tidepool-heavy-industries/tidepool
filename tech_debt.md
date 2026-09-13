@@ -61,3 +61,26 @@ that is not stack capture or IPE decoding. Neither an empty snapshot nor a
 default-off specialization preserves the mutable backtrace contract. Supporting
 this path requires an explicit stack snapshot, ownership, and decoding design;
 it remains outside the current prepared operation catalog.
+
+## Wired-in error binder recovery
+
+The remaining `patError` global has an exact fat-interface RHS but no serialized
+authentic defining binder type. GHC 9.12.2 deliberately omits wired-in names
+from ordinary interface declarations; an external extra-declaration binder
+stores its name, not its type or IdInfo. Deserialization resolves that name to
+the wired-in representation-polymorphic error Id, while the serialized source
+RHS has a lifted result. Installing a different lookup environment cannot
+retrieve information that was never written.
+
+See the pinned [interface writer](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Iface/Make.hs),
+[external binder encoding](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/CoreToIface.hs),
+and [wired-in resolution](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/IfaceToCore.hs).
+The prepared `NoSuccess` contract removes result representations at the
+execution boundary; it does not make a mismatched Core binder/RHS well typed.
+
+An explicit future recovery contract could investigate deriving a defining
+binder type from the exact RHS while preserving authoritative wired-in identity
+and no-success evidence separately, with consistent reference rewriting and
+preparation lint. That is reconstruction, not authentic binder retrieval,
+and has not been proved correct here. The current recovery rejection remains;
+no guessed coercion, lookup bypass, or fabricated error body was introduced.

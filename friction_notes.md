@@ -412,3 +412,7 @@ are nondeterministic.
   unrelated sibling churn. Formatting with the repository edition restored
   the shared tree without reverting anyone's semantic edits. Formatter scope
   belongs in the same ownership contract as source-edit scope.
+- Rust-only corpus replays can reuse an unchanged, identified Haskell projection
+  and snapshot the rebuilt runner before releasing the build slot. Record both
+  source revisions and executable/artifact hashes: this saves a projection
+  cycle without pretending the replay is a new canonical fixtures-check.

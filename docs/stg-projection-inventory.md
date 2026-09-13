@@ -121,6 +121,19 @@ The currently emitted strict subset is:
   `Double`, exact-signature integer/floating families, `double2Int#`,
   `plusAddr#`, `chr#`, `eqChar#`, `clz8#`, `subWordC#` (wrapped `Word64`
   difference and `Int64` unsigned borrow), and the `rintDouble` intrinsic.
+  `ord#` preserves a `Word64` character's bits as `Int64`; `geChar#` compares
+  two `Word64` characters unsigned and returns `Int64` 0 or 1. `clz#` returns
+  the leading-zero count of a `Word64`, including 64 for zero. The exact
+  `plusWord2#` and `timesWord2#` contracts return `[Word64, Word64]` in
+  high/low order; `quotRemWord2#` takes high, low, divisor and returns
+  quotient/remainder in that order. Division by zero and high greater than or
+  equal to divisor are typed failures that publish neither result. No 128-bit
+  wire representation or general 128-bit arithmetic is admitted. The exact
+  `dataToTagSmall#` contract is `[LiftedRef] -> [Int64]` within the primop's
+  defined small-constructor domain: generated Tail entry forces the reference
+  first, and failure status prevents scalar publication. A noncollecting host
+  reads the full descriptor family tag and returns its zero-based value;
+  pointer low tag bits are checked as evidence, not used as the answer.
   `indexCharOffAddr#` checks a signed offset against retained, NUL-terminated
   pinned byte storage before returning a `Word(64)` character. The exact
   C-call `strlen` intrinsic likewise scans only within that pinned owner for
@@ -130,7 +143,8 @@ The currently emitted strict subset is:
 - exact-signature boxed small/ordinary array new/read/index/write/size/freeze,
   small-array shrink, and boxed CAS; and byte-array new/freeze/size plus
   Word8, Word64, and Int64 read/index/write, `shrinkMutableByteArray#`, and
-  `resizeMutableByteArray#` and `copyAddrToByteArray#`. Resize admits exactly
+  `resizeMutableByteArray#`, `copyAddrToByteArray#`, `copyByteArray#`, and
+  `compareByteArrays#`. Resize admits exactly
   `[UnliftedRef, Int64, Void] -> [UnliftedRef]`: it reserves a new managed
   wrapper, allocates a fresh external byte payload, copies the common prefix,
   zeroes growth, and revokes the old payload only after successful allocation
@@ -141,7 +155,16 @@ The currently emitted strict subset is:
   span of compiled-program-owned pinned bytes, including an empty span at the
   owner's end; it does not admit arbitrary host pointers. Array host paths
   authenticate active descriptor-backed payloads, check bounds, and report
-  typed failures. Focused resize tests in
+  typed failures. `copyByteArray#` admits exactly
+  `[UnliftedRef, Int64, UnliftedRef, Int64, Int64, Void] -> []`, validates both
+  complete active byte spans before any write, and rejects source/destination
+  aliases (including an empty copy) with a typed failure. Its noncollecting
+  copy updates the external revision only for nonempty writes.
+  `compareByteArrays#` admits exactly
+  `[UnliftedRef, Int64, UnliftedRef, Int64, Int64] -> [Int64]`; it accepts
+  aliases and compares unsigned bytes, returning -1, 0, or 1 only after both
+  spans validate. Both paths return status failures without a partial copy or
+  comparison result. Focused resize tests in
   [`bytes_tests.rs`](../tidepool-codegen/src/prepared_program/bytes_tests.rs)
   and [`machine_state.rs`](../tidepool-codegen/src/machine_state.rs) cover
   reserve-time collection, prefix/growth, revoked aliases, failed sizes, and
@@ -159,6 +182,12 @@ The currently emitted strict subset is:
   status without publishing a result. PAP completion and excess application
   stop at the saturated prefix; a partial application returns a lifted value.
 
+A read-only audit of operation declarations in the 709 projected artifacts of
+`suite.Ej6U9S` found all 77 distinct exact operation-identity/signature pairs
+recognized by the current native operation catalog. This is recognition
+coverage for that finite artifact set, not coverage of all GHC primops or a
+new corpus execution/comparison result.
+
 The implementation anchors for these claims are
 [`entry.rs`](../tidepool-codegen/src/prepared_program/entry.rs),
 [`apply.rs`](../tidepool-codegen/src/prepared_program/apply.rs),
@@ -168,6 +197,8 @@ The implementation anchors for these claims are
 [`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs),
 [`arrays.rs`](../tidepool-codegen/src/prepared_program/arrays.rs),
 [`byte_arrays.rs`](../tidepool-codegen/src/prepared_program/byte_arrays.rs),
+[`data_tag.rs`](../tidepool-codegen/src/prepared_program/data_tag.rs),
+[`wide_words.rs`](../tidepool-codegen/src/prepared_program/wide_words.rs),
 [`static_bytes.rs`](../tidepool-codegen/src/prepared_program/static_bytes.rs),
 [`formatting.rs`](../tidepool-codegen/src/prepared_program/formatting.rs),
 [`floating.rs`](../tidepool-codegen/src/prepared_program/floating.rs), and

@@ -6,6 +6,56 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Current frozen source is `66aeaa669`. The final focused fold passed 157
+prepared-program tests and 38 machine-state tests; all workspace test targets
+compiled (`cargo test --workspace --no-run --quiet`). Canonical fixtures-check
+completed with exit zero; the separate recovered-base (1), formatting (5),
+and dependency-shadow (1) contracts passed every stage. These are not claims
+that all workspace tests ran or every corpus program succeeded.
+
+The canonical report is `target/prepared-corpus/suite.YLOpbr/results.json`,
+with provenance at `target/prepared-corpus/run.L8I8mi/provenance.json` and
+gate logs under `target/final-fold.83uMyj/`. It confirms 812 rows: 709
+project/validate, 708 admit/compile, 525 execute, and 173 match; zero
+comparison mismatches, 534 missing expectations, and 105 comparisons not
+reached. Projection rejects 103 rows, admission rejects one, and execution
+has 183 unsuccessful or deliberately omitted outcomes. The durable ledger
+retains every row and reason rather than treating command exit zero as green.
+
+Scoped edition-2021 Rust formatting and diff checks passed. The broad
+`just changed 9d3bd3cc0` gate again exited 1 at `cargo fmt --all -- --check`
+on files outside the primitive parcel (first: `tidepool/src/main.rs:10`).
+Clippy and nextest were not reached. Exact log:
+`target/final-fold.83uMyj/changed.log`; reproduction:
+`target/tidepool-test-runs/20260913T155712Z-781497-changed/reproduce.sh`.
+No unrelated formatting repair was folded into this checkpoint.
+
+The intervening Rust-only replay at `4b8efbafb` reused the unchanged Haskell
+projection from `fbf74b81a` and an immutable rebuilt runner. Its 812 rows reach
+709 project/validate, 708 admit/compile, 525 execute, and 173 matching results
+with zero comparison mismatches. All 157 previous matches survived. This mixed
+provenance is explicit in the durable corpus ledger, not a new fixture check.
+All 160 preceding operation-admission blockers were cleared. Constructor-tag
+lowering subsequently landed with forced entry, descriptor identity, moving-GC
+and failure contracts, rather than deriving family identity from pointer bits.
+
+The expectation denominator is 217 unique keys, not 812 expected results:
+175 map to projected rows, of which 173 match. The two are the deliberately
+non-finite `thunk_blackhole` and `qq_patch_invert_involution`, blocked by
+`patError` recovery. The other 42 expected Suite values fail projection on
+the shared GHC stack capability. Original cohort and harness-limit rows stay
+in the ledger; missing observations do not count as successes.
+
+Full-wave closure remains blocked on two explicit semantic decisions: a real
+GHC stack/backtrace capability, and recovery of a wired-in error binder whose
+original type GHC did not serialize. A fresh independent source consultation
+confirmed that `patError` is not fixable by bypassing lookup: deriving a binder
+type from its exact RHS would require a new reconstruction contract. Neither
+that contract nor a fabricated stack/error implementation is silently adopted.
+See `tech_debt.md` for the evidence and decision boundary.
+
+### Previous canonical checkpoint
+
 Frozen source `fbf74b81a` has a new complete corpus replay at
 `target/prepared-corpus/suite.Ej6U9S/results.json`: 812 tops, 709 project and
 validate, 548 admit and compile, 371 execute, 157 match, zero comparison
@@ -672,6 +722,21 @@ necessary to find gaps absent from separately green producer/consumer tests.
 Per-worker and planner token totals are not exposed. Lease notifications and
 reactivation remained real lead work; immutable corpus executables remove one
 reason to serialize unrelated builds, not the need to coordinate shared files.
+
+The final primitive parcels used Sol Medium, with lead-owned checked-span,
+wide-division and descriptor-tag seeds. Byte copying/comparison and wide-word
+integration passed focused tests and independent read-only review without a
+production-semantic correction. Constructor-tag integration needed test fixes:
+a u8/u32 tag mismatch, a malformed arena fixture, an incoherent signature
+rejection fixture, and the expected terminal disposition for a function value.
+Review also required an explicit assertion that the lazy-body test collected.
+The implementation contract remained unchanged. Thus fixture construction and
+acceptance evidence needed correction; these were not first-attempt clean
+handbacks. Final verification and JSON accounting were separate delegated
+parcels with a serialized build lease and no authority to repair gate failures.
+The fresh Astra consultation on wired-in binder recovery returned a design
+boundary, not an implementation. No exact aggregate round or token total is
+claimed where it was not captured contemporaneously.
 
 ### Recovery-majority follow-up
 
