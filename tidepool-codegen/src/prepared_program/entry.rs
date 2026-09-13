@@ -12,7 +12,7 @@ use cranelift_module::{FuncId, Module};
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::execution_descriptor::{DescriptorState, FORWARDING_POINTER_OFFSET};
-use tidepool_repr::execution_schema::UpdatePolicy;
+use tidepool_repr::execution_schema::{ResultContract, UpdatePolicy};
 
 /// A view of the compiled owner's callable metadata while definitions are
 /// emitted. Function IDs are module relocations, not cast Rust function values.
@@ -20,6 +20,7 @@ pub(super) struct ThunkEntry {
     pub descriptor: Arc<ObjectDescriptor>,
     pub body: FuncId,
     pub policy: UpdatePolicy,
+    pub results: ResultContract,
 }
 
 pub(super) fn signature() -> ir::Signature {
@@ -200,6 +201,24 @@ pub(super) fn emit_prepared_enter(
             .declare_func_in_func(thunk.body, builder.func);
         let call = builder.ins().call(body_ref, &[vmctx, reference]);
         let returned = builder.inst_results(call).to_vec();
+        if thunk.results == ResultContract::NoSuccess {
+            let unexpected = builder.create_block();
+            let failed = builder.create_block();
+            let succeeded = builder.ins().icmp_imm(IntCC::Equal, returned[0], CallStatus::Success as i64);
+            builder.ins().brif(succeeded, unexpected, &[], failed, &[]);
+            builder.switch_to_block(unexpected);
+            builder.seal_block(unexpected);
+            super::no_success::emit_terminal(
+                &mut builder, pipeline, vmctx,
+                super::no_success::TerminalCause::UnexpectedSuccess,
+            )?;
+            builder.switch_to_block(failed);
+            builder.seal_block(failed);
+            emit_thunk_failure(&mut builder, reference, live_header, returned[0]);
+            builder.switch_to_block(next);
+            builder.seal_block(next);
+            continue;
+        }
         let body_ok = builder.create_block();
         let settle = builder.create_block();
         builder.append_block_param(settle, types::I32);
@@ -299,8 +318,6 @@ pub(super) fn emit_thunk_completion(
     use crate::prepared_control::CallStatus;
     let success = builder.create_block();
     let failed = builder.create_block();
-    let restore = builder.create_block();
-    let unwind = builder.create_block();
     let ok = builder
         .ins()
         .icmp_imm(IntCC::Equal, status, CallStatus::Success as i64);
@@ -331,6 +348,20 @@ pub(super) fn emit_thunk_completion(
 
     builder.switch_to_block(failed);
     builder.seal_block(failed);
+    emit_thunk_failure(builder, thunk, live_header, status);
+}
+
+/// A failed body owns no result. Restore only reusable machines; terminal
+/// failures must not dereference either side of a potentially half-moved heap.
+fn emit_thunk_failure(
+    builder: &mut FunctionBuilder<'_>,
+    thunk: Value,
+    live_header: Value,
+    status: Value,
+) {
+    use crate::prepared_control::CallStatus;
+    let restore = builder.create_block();
+    let unwind = builder.create_block();
     let terminal =
         builder
             .ins()

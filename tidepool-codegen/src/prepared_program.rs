@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
-    Architecture, Endianness, GlobalId, LinkedProgram, RuntimeRep, Signature, TargetDescriptor,
+    Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature, TargetDescriptor,
     ValueId,
 };
 use tidepool_repr::DataConId;
@@ -24,6 +24,9 @@ mod apply;
 mod emit;
 mod image;
 mod invocation;
+mod no_success;
+#[cfg(test)]
+mod no_success_tests;
 mod observe;
 pub use observe::ObservationFailure;
 mod run;
@@ -195,6 +198,8 @@ impl CompiledProgram {
             ("prepared_case_trap", prepared_case_trap as *const u8),
             ("prepared_bad_state", prepared_bad_state as *const u8),
             ("prepared_blackhole", prepared_blackhole as *const u8),
+            ("prepared_raise", no_success::raise as *const u8),
+            ("prepared_no_success_returned", no_success::unexpected_success as *const u8),
             (
                 "prepared_primitive_failure",
                 fallible::prepared_primitive_failure as *const u8,
@@ -282,25 +287,30 @@ impl CompiledProgram {
         for (&id, function) in &plan.functions {
             signatures.insert(id, function.signature.clone());
         }
+        for (&id, thunk) in &plan.thunks {
+            signatures.insert(id, thunk.signature.clone());
+        }
         for (&id, binding) in &plan.top_bindings {
             signatures.entry(id).or_insert_with(|| Signature {
                 arguments: vec![],
-                results: vec![match &binding.rhs {
+                results: ResultContract::Returns(vec![match &binding.rhs {
                     HeapRhs::Bytes(_) => RuntimeRep::Address,
                     HeapRhs::Constructor { constructor, .. } => {
                         plan.program.constructors()[constructor.0 as usize].result_rep
                     }
                     _ => RuntimeRep::LiftedRef,
-                }],
+                }]),
             });
         }
         let mut thunk_bodies = BTreeMap::new();
         let thunk_native_signature = entry::signature();
-        for &id in plan.thunks.keys() {
+        for (&id, thunk) in &plan.thunks {
+            let body_abi = EntryAbi::lower_internal(&profile, &thunk.signature, EnvironmentMode::Captured)?;
+            let body_signature = body_abi.cranelift_signature(&profile, cranelift_codegen::isa::CallConv::Tail)?;
             let body = pipeline.declare_function_with_signature(
                 &format!("prepared_thunk_body_{}", id.0),
                 Linkage::Local,
-                &thunk_native_signature,
+                &body_signature,
             )?;
             thunk_bodies.insert(id, body);
         }
@@ -385,6 +395,7 @@ impl CompiledProgram {
                 descriptor: Arc::clone(&thunk.descriptor),
                 body: thunk_bodies[&id],
                 policy: thunk.policy,
+                results: thunk.signature.results.clone(),
             })
             .collect::<Vec<_>>();
         let mut enter_evaluated = plan.constructors.clone();
@@ -553,10 +564,12 @@ impl CompiledProgram {
 /// observable only in the success block and are explicitly marked for GC.
 pub(crate) fn emit_direct_call(
     builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    vmctx: SsaValue,
     callee: ir::FuncRef,
     arguments: &[SsaValue],
-    results: &[RuntimeRep],
-) -> Vec<SsaValue> {
+    results: &ResultContract,
+) -> Result<Option<Vec<SsaValue>>, CompileError> {
     let call = builder.ins().call(callee, arguments);
     let returned = builder.inst_results(call).to_vec();
     let success = builder.create_block();
@@ -570,6 +583,10 @@ pub(crate) fn emit_direct_call(
     crate::alloc::emit_prepared_failure_return(builder, returned[0]);
     builder.switch_to_block(success);
     builder.seal_block(success);
+    let ResultContract::Returns(results) = results else {
+        no_success::emit_terminal(builder, pipeline, vmctx, no_success::TerminalCause::UnexpectedSuccess)?;
+        return Ok(None);
+    };
     let payload = returned[1..].to_vec();
     for (&value, rep) in payload
         .iter()
@@ -579,7 +596,7 @@ pub(crate) fn emit_direct_call(
             builder.declare_value_needs_stack_map(value);
         }
     }
-    payload
+    Ok(Some(payload))
 }
 
 #[cfg(test)]
