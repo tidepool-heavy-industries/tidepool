@@ -573,6 +573,12 @@ pub(super) fn recognize_operation(
     if let Some(operation) = super::byte_arrays::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::ByteArray(operation));
     }
+    if let Some(operation) = super::addresses::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::Address(operation));
+    }
+    if let Some(operation) = super::fingerprint::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::Fingerprint(operation));
+    }
     if let Some(operation) = super::formatting::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Formatting(operation));
     }
@@ -665,6 +671,8 @@ pub(super) fn recognize_operation(
 
 #[derive(Clone, Copy)]
 pub(super) enum PrimitiveOperation {
+    Fingerprint(super::fingerprint::FingerprintOperation),
+    Address(super::addresses::AddressOperation),
     Capability(super::capabilities::Capability),
     Array(super::arrays::ArrayOperation),
     ByteArray(super::byte_arrays::ByteOperation),
@@ -707,6 +715,26 @@ pub(super) fn emit_operation(
     bytes_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
+        PrimitiveOperation::Fingerprint(operation) => {
+            super::fingerprint::emit(builder, pipeline, vmctx, bytes, operation, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Address(super::addresses::AddressOperation::ReadWord8) => {
+            super::addresses::emit_read_word8(builder, pipeline, vmctx, bytes, arguments).map(Some)
+        }
+        PrimitiveOperation::Address(super::addresses::AddressOperation::WriteWord8) => {
+            super::addresses::emit_write_word8(builder, pipeline, vmctx, arguments).map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Contents) => {
+            super::byte_arrays::emit_byte_array_contents(
+                builder,
+                pipeline,
+                vmctx,
+                bytes_array,
+                arguments,
+            )
+            .map(Some)
+        }
         PrimitiveOperation::Capability(capability) => {
             super::capabilities::emit_unsupported(builder, pipeline, vmctx, capability)?;
             Ok(None)

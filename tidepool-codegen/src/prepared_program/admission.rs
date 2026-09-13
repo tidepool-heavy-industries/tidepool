@@ -121,6 +121,8 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
                             Some(signature) => {
                                 super::primitives::recognize_operation(declaration, signature)
                                     .is_none()
+                                    && super::lifetime::callback_signature(declaration, signature)
+                                        .is_none()
                             }
                             None => true,
                         }

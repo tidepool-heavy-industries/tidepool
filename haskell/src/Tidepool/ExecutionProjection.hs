@@ -1015,6 +1015,19 @@ internOperation op signature = do
       , unitString unit == "ghc-prim"
       , operationSignature == Signature [AddressRep, VoidRep] (Returns [IntRep 64]) ->
           pure (Schema.IntrinsicIdentity "strlen" Schema.CCall)
+    -- Fingerprinting is on the ordinary exception/Typeable path. These C
+    -- leaves retain their pinned ABI and execute against authenticated byte
+    -- storage; they are not deferred stack capabilities.
+    StgFCallOp (Foreign.CCall (Foreign.CCallSpec
+      (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlayRisky)) _
+      | unitString unit == "ghc-internal"
+      , Just arguments <- lookup (unpackFS label)
+          [ ("__hsbase_MD5Init", [AddressRep, VoidRep])
+          , ("__hsbase_MD5Update", [AddressRep, AddressRep, IntRep 32, VoidRep])
+          , ("__hsbase_MD5Final", [AddressRep, AddressRep, VoidRep])
+          ]
+      , operationSignature == Signature arguments (Returns []) ->
+          pure (Schema.IntrinsicIdentity (Text.pack (unpackFS label)) Schema.CCall)
     StgPrimCallOp (PrimCall label unit)
       | unitString unit == "ghc-internal"
       , unpackFS label == "stg_cloneMyStackzh"

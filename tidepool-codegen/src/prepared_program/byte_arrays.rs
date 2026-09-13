@@ -30,6 +30,7 @@ impl Element {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ByteOperation {
     New,
+    Contents,
     Resize,
     Freeze,
     Size,
@@ -54,6 +55,18 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
         {
             Some(ByteOperation::New)
+        }
+        "newPinnedByteArray#"
+            if signature.arguments == [Int(64), Void]
+                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+        {
+            Some(ByteOperation::New)
+        }
+        "byteArrayContents#" | "mutableByteArrayContents#"
+            if signature.arguments == [UnliftedRef]
+                && signature.results == ResultContract::Returns(vec![Address]) =>
+        {
+            Some(ByteOperation::Contents)
         }
         "resizeMutableByteArray#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
@@ -261,6 +274,36 @@ pub(super) unsafe extern "C" fn prepared_freeze_bytes(
     }
     match unsafe { active_bytes(machine, vmctx, reference, descriptor) } {
         Ok(_) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
+/// Publish the data address only after authenticating both the managed wrapper
+/// and its active external-byte owner. The returned scalar remains a capability
+/// whose later use must be checked against that same owner ledger.
+pub(super) unsafe extern "C" fn prepared_byte_array_contents(
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+    output: *mut usize,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        if output.is_null() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let (published, _) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
+        let address = machine
+            .external_byte_address(published)
+            .map_err(|error| super::arrays::storage_error(error, 0))?;
+        unsafe { output.write(address) };
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
         Err(error) => super::arrays::array_error(machine, error),
     }
 }
@@ -585,6 +628,29 @@ pub(super) fn emit_freeze_bytes(
     super::arrays::finish_checked_call(builder, status);
     builder.declare_value_needs_stack_map(arguments[0]);
     Ok(vec![arguments[0]])
+}
+
+pub(super) fn emit_byte_array_contents(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_byte_array_contents", 4)?;
+    let owner = owner_value(builder, descriptor);
+    let output = super::arrays::output_slot(builder);
+    let call = builder
+        .ins()
+        .call(host, &[vmctx, arguments[0], owner, output]);
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    Ok(vec![builder.ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        output,
+        0,
+    )])
 }
 
 pub(super) fn emit_sizeof_bytes(
@@ -1189,6 +1255,33 @@ mod tests {
         let op = |name: &str| OperationIdentity::PrimOp(name.into());
         assert_eq!(
             recognize(
+                &op("newPinnedByteArray#"),
+                &sig(
+                    vec![RuntimeRep::Int(64), RuntimeRep::Void],
+                    vec![RuntimeRep::UnliftedRef]
+                )
+            ),
+            Some(ByteOperation::New)
+        );
+        for name in ["byteArrayContents#", "mutableByteArrayContents#"] {
+            assert_eq!(
+                recognize(
+                    &op(name),
+                    &sig(vec![RuntimeRep::UnliftedRef], vec![RuntimeRep::Address])
+                ),
+                Some(ByteOperation::Contents)
+            );
+            assert!(recognize(
+                &op(name),
+                &sig(
+                    vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+                    vec![RuntimeRep::Address]
+                )
+            )
+            .is_none());
+        }
+        assert_eq!(
+            recognize(
                 &op("readWord8Array#"),
                 &sig(
                     vec![
@@ -1407,6 +1500,74 @@ mod tests {
             assert_eq!(output, 0x55);
             assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
         }
+    }
+
+    #[test]
+    fn byte_array_contents_authenticates_owner_before_publishing_address() {
+        use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let descriptor =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::Bytes, &target).unwrap());
+        let machine = crate::machine_state::MachineState::new();
+        let extent = descriptor.allocation_extent() as usize;
+        machine
+            .install_prepared_buffer(vec![0_u64; extent / 8], vec![descriptor.clone()])
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        vmctx.alloc_ptr = unsafe { start.add(extent) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let reference = (start as usize | usize::from(descriptor.tag())) as *mut u8;
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, 3)
+            .unwrap();
+        unsafe {
+            descriptor.initialize_header(start);
+            descriptor
+                .external_payload_slot(start, extent)
+                .unwrap()
+                .write(payload);
+        }
+        let mut output = usize::MAX;
+        assert_eq!(
+            unsafe {
+                prepared_byte_array_contents(
+                    &mut vmctx,
+                    reference,
+                    Arc::as_ptr(&descriptor),
+                    &mut output,
+                )
+            },
+            CallStatus::Success as i32
+        );
+        assert_eq!(output, machine.external_byte_address(payload).unwrap());
+
+        machine
+            .revoke_external_payload(payload, ExternalStorageKind::Bytes)
+            .unwrap();
+        output = usize::MAX;
+        assert_eq!(
+            unsafe {
+                prepared_byte_array_contents(
+                    &mut vmctx,
+                    reference,
+                    Arc::as_ptr(&descriptor),
+                    &mut output,
+                )
+            },
+            CallStatus::IntegrityFailure as i32
+        );
+        assert_eq!(output, usize::MAX);
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
     }
 
     #[test]

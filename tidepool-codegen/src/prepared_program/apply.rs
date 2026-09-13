@@ -39,7 +39,7 @@ impl Dispatchers {
         self.by_id.get(id)
     }
 
-    fn find(&self, signature: &Signature) -> Option<FuncId> {
+    pub(super) fn find(&self, signature: &Signature) -> Option<FuncId> {
         self.entries
             .iter()
             .find_map(|(candidate, function)| (candidate == signature).then_some(*function))
@@ -169,6 +169,14 @@ pub(super) fn declare_dispatchers(
     let mut demanded = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let mut source_ids = BTreeMap::new();
+    for declaration in plan.program.operations() {
+        let signature = &plan.program.signatures()[declaration.signature.0 as usize];
+        if let Some(callback) = super::lifetime::callback_signature(declaration, signature) {
+            if seen.insert(signature_key(&callback)) {
+                demanded.push(callback);
+            }
+        }
+    }
     for frame in &plan.program.expressions().nodes {
         let tidepool_repr::execution_schema::ExprFrame::Call { signature, .. } = frame else {
             continue;

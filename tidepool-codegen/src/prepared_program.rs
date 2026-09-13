@@ -4,8 +4,13 @@
 //! tables are invocation-owned. No invocation pointer is embedded in code.
 
 use crate::entry_abi::EntryAbi;
+mod addresses;
 mod capabilities;
 mod failures;
+mod fingerprint;
+mod lifetime;
+#[cfg(test)]
+mod lifetime_tests;
 use crate::pipeline::{CodegenPipeline, PipelineError};
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, Value as SsaValue};
 use cranelift_frontend::FunctionBuilder;
@@ -26,6 +31,7 @@ mod apply;
 mod emit;
 mod image;
 mod invocation;
+pub(crate) mod md5_kernel;
 mod no_success;
 #[cfg(test)]
 mod no_success_tests;
@@ -78,6 +84,8 @@ pub enum Unsupported {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
+    #[error("checked keepAlive call lacks dispatcher for {0:?}")]
+    MissingKeepAliveDispatcher(Signature),
     #[error(transparent)]
     Unsupported(#[from] Unsupported),
     #[error(transparent)]
@@ -192,142 +200,153 @@ impl CompiledProgram {
         let plan = plan::ProgramPlan::new(linked.prepared())?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         let statics = image::build_static_image(&plan)?;
-        let mut pipeline = CodegenPipeline::new(&[
-            (
-                "prepared_gc_trigger",
-                crate::host_fns::prepared_gc_trigger as *const u8,
-            ),
-            ("write_barrier", crate::host_fns::write_barrier as *const u8),
-            ("prepared_poll", safepoint::prepared_poll_at as *const u8),
-            (
-                "prepared_stack_overflow",
-                safepoint::prepared_stack_overflow as *const u8,
-            ),
-            ("prepared_case_trap", prepared_case_trap as *const u8),
-            ("prepared_bad_state", prepared_bad_state as *const u8),
-            ("prepared_blackhole", prepared_blackhole as *const u8),
-            ("prepared_raise", no_success::raise as *const u8),
-            (
-                "prepared_wired_in_error",
-                failures::prepared_wired_in_error as *const u8,
-            ),
-            (
-                "prepared_unsupported_capability",
-                capabilities::unsupported as *const u8,
-            ),
-            (
-                "prepared_new_boxed",
-                arrays::prepared_new_boxed as *const u8,
-            ),
-            (
-                "prepared_read_boxed",
-                arrays::prepared_read_boxed as *const u8,
-            ),
-            (
-                "prepared_write_boxed",
-                arrays::prepared_write_boxed as *const u8,
-            ),
-            (
-                "prepared_sizeof_boxed",
-                arrays::prepared_sizeof_boxed as *const u8,
-            ),
-            (
-                "prepared_freeze_boxed",
-                arrays::prepared_freeze_boxed as *const u8,
-            ),
-            (
-                "prepared_shrink_boxed",
-                arrays::prepared_shrink_boxed as *const u8,
-            ),
-            (
-                "prepared_copy_boxed",
-                arrays::prepared_copy_boxed as *const u8,
-            ),
-            (
-                "prepared_cas_boxed",
-                arrays::prepared_cas_boxed as *const u8,
-            ),
-            (
-                "prepared_new_bytes",
-                byte_arrays::prepared_new_bytes as *const u8,
-            ),
-            (
-                "prepared_resize_bytes",
-                byte_arrays::prepared_resize_bytes as *const u8,
-            ),
-            (
-                "prepared_freeze_bytes",
-                byte_arrays::prepared_freeze_bytes as *const u8,
-            ),
-            (
-                "prepared_sizeof_bytes",
-                byte_arrays::prepared_sizeof_bytes as *const u8,
-            ),
-            (
-                "prepared_shrink_bytes",
-                byte_arrays::prepared_shrink_bytes as *const u8,
-            ),
-            (
-                "prepared_copy_bytes",
-                byte_arrays::prepared_copy_bytes as *const u8,
-            ),
-            (
-                "prepared_compare_bytes",
-                byte_arrays::prepared_compare_bytes as *const u8,
-            ),
-            (
-                "prepared_read_word8_bytes",
-                byte_arrays::prepared_read_word8_bytes as *const u8,
-            ),
-            (
-                "prepared_read_int_bytes",
-                byte_arrays::prepared_read_int_bytes as *const u8,
-            ),
-            (
-                "prepared_write_word8_bytes",
-                byte_arrays::prepared_write_word8_bytes as *const u8,
-            ),
-            (
-                "prepared_write_int_bytes",
-                byte_arrays::prepared_write_int_bytes as *const u8,
-            ),
-            (
-                "prepared_render_double_bytes",
-                formatting::prepared_render_double_bytes as *const u8,
-            ),
-            (
-                "prepared_render_double_prec_bytes",
-                formatting::prepared_render_double_prec_bytes as *const u8,
-            ),
-            (
-                "prepared_no_success_returned",
-                no_success::unexpected_success as *const u8,
-            ),
-            (
-                "prepared_primitive_failure",
-                fallible::prepared_primitive_failure as *const u8,
-            ),
-            (
-                "prepared_quot_rem_word2",
-                wide_words::prepared_quot_rem_word2 as *const u8,
-            ),
-            (
-                "prepared_data_to_tag_small",
-                data_tag::prepared_data_to_tag_small as *const u8,
-            ),
-            (
-                "prepared_index_char",
-                static_bytes::prepared_index_char as *const u8,
-            ),
-            (
-                "prepared_c_string_len",
-                static_bytes::prepared_c_string_len as *const u8,
-            ),
-            (
-                "prepared_copy_addr_to_byte_array",
-                static_bytes::prepared_copy_addr_to_byte_array as *const u8,
-            ),
-        ])?;
+        let mut pipeline = CodegenPipeline::new(
+            &[
+                (
+                    "prepared_gc_trigger",
+                    crate::host_fns::prepared_gc_trigger as *const u8,
+                ),
+                ("write_barrier", crate::host_fns::write_barrier as *const u8),
+                ("prepared_poll", safepoint::prepared_poll_at as *const u8),
+                (
+                    "prepared_stack_overflow",
+                    safepoint::prepared_stack_overflow as *const u8,
+                ),
+                ("prepared_case_trap", prepared_case_trap as *const u8),
+                ("prepared_bad_state", prepared_bad_state as *const u8),
+                ("prepared_blackhole", prepared_blackhole as *const u8),
+                ("prepared_raise", no_success::raise as *const u8),
+                ("prepared_keep_alive", lifetime::keep_alive as *const u8),
+                (
+                    "prepared_byte_array_contents",
+                    byte_arrays::prepared_byte_array_contents as *const u8,
+                ),
+                (
+                    "prepared_wired_in_error",
+                    failures::prepared_wired_in_error as *const u8,
+                ),
+                (
+                    "prepared_unsupported_capability",
+                    capabilities::unsupported as *const u8,
+                ),
+                (
+                    "prepared_new_boxed",
+                    arrays::prepared_new_boxed as *const u8,
+                ),
+                (
+                    "prepared_read_boxed",
+                    arrays::prepared_read_boxed as *const u8,
+                ),
+                (
+                    "prepared_write_boxed",
+                    arrays::prepared_write_boxed as *const u8,
+                ),
+                (
+                    "prepared_sizeof_boxed",
+                    arrays::prepared_sizeof_boxed as *const u8,
+                ),
+                (
+                    "prepared_freeze_boxed",
+                    arrays::prepared_freeze_boxed as *const u8,
+                ),
+                (
+                    "prepared_shrink_boxed",
+                    arrays::prepared_shrink_boxed as *const u8,
+                ),
+                (
+                    "prepared_copy_boxed",
+                    arrays::prepared_copy_boxed as *const u8,
+                ),
+                (
+                    "prepared_cas_boxed",
+                    arrays::prepared_cas_boxed as *const u8,
+                ),
+                (
+                    "prepared_new_bytes",
+                    byte_arrays::prepared_new_bytes as *const u8,
+                ),
+                (
+                    "prepared_resize_bytes",
+                    byte_arrays::prepared_resize_bytes as *const u8,
+                ),
+                (
+                    "prepared_freeze_bytes",
+                    byte_arrays::prepared_freeze_bytes as *const u8,
+                ),
+                (
+                    "prepared_sizeof_bytes",
+                    byte_arrays::prepared_sizeof_bytes as *const u8,
+                ),
+                (
+                    "prepared_shrink_bytes",
+                    byte_arrays::prepared_shrink_bytes as *const u8,
+                ),
+                (
+                    "prepared_copy_bytes",
+                    byte_arrays::prepared_copy_bytes as *const u8,
+                ),
+                (
+                    "prepared_compare_bytes",
+                    byte_arrays::prepared_compare_bytes as *const u8,
+                ),
+                (
+                    "prepared_read_word8_bytes",
+                    byte_arrays::prepared_read_word8_bytes as *const u8,
+                ),
+                (
+                    "prepared_read_int_bytes",
+                    byte_arrays::prepared_read_int_bytes as *const u8,
+                ),
+                (
+                    "prepared_write_word8_bytes",
+                    byte_arrays::prepared_write_word8_bytes as *const u8,
+                ),
+                (
+                    "prepared_write_int_bytes",
+                    byte_arrays::prepared_write_int_bytes as *const u8,
+                ),
+                (
+                    "prepared_render_double_bytes",
+                    formatting::prepared_render_double_bytes as *const u8,
+                ),
+                (
+                    "prepared_render_double_prec_bytes",
+                    formatting::prepared_render_double_prec_bytes as *const u8,
+                ),
+                (
+                    "prepared_no_success_returned",
+                    no_success::unexpected_success as *const u8,
+                ),
+                (
+                    "prepared_primitive_failure",
+                    fallible::prepared_primitive_failure as *const u8,
+                ),
+                (
+                    "prepared_quot_rem_word2",
+                    wide_words::prepared_quot_rem_word2 as *const u8,
+                ),
+                (
+                    "prepared_data_to_tag_small",
+                    data_tag::prepared_data_to_tag_small as *const u8,
+                ),
+                (
+                    "prepared_index_char",
+                    static_bytes::prepared_index_char as *const u8,
+                ),
+                (
+                    "prepared_c_string_len",
+                    static_bytes::prepared_c_string_len as *const u8,
+                ),
+                (
+                    "prepared_copy_addr_to_byte_array",
+                    static_bytes::prepared_copy_addr_to_byte_array as *const u8,
+                ),
+            ]
+            .into_iter()
+            .chain(addresses::host_functions())
+            .chain(fingerprint::host_functions())
+            .collect::<Vec<_>>(),
+        )?;
         #[cfg(test)]
         {
             pipeline.emitted_ir = Some(BTreeMap::new());

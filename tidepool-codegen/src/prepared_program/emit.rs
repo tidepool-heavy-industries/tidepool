@@ -405,9 +405,6 @@ fn emit_function_at(
                             .signatures()
                             .get(declaration.signature.0 as usize)
                             .ok_or_else(|| unsupported(id, node))?;
-                        let operation =
-                            super::primitives::recognize_operation(declaration, signature)
-                                .ok_or_else(|| unsupported(id, node))?;
                         let physical_arguments = emit_atoms(
                             &mut builder,
                             &values,
@@ -418,6 +415,36 @@ fn emit_function_at(
                             id,
                             node,
                         )?;
+                        if let Some(callback_signature) =
+                            super::lifetime::callback_signature(declaration, signature)
+                        {
+                            let [retained, callback] = physical_arguments.as_slice() else {
+                                return Err(unsupported(id, node));
+                            };
+                            if let Some(output) = super::lifetime::emit(
+                                &mut builder,
+                                pipeline,
+                                dispatchers,
+                                vmctx,
+                                *retained,
+                                *callback,
+                                &callback_signature,
+                            )? {
+                                finish_returning(
+                                    &mut builder,
+                                    pipeline,
+                                    vmctx,
+                                    &destination,
+                                    output,
+                                    id,
+                                    node,
+                                )?;
+                            }
+                            continue;
+                        }
+                        let operation =
+                            super::primitives::recognize_operation(declaration, signature)
+                                .ok_or_else(|| unsupported(id, node))?;
                         let output = super::primitives::emit_operation(
                             operation,
                             &mut builder,
