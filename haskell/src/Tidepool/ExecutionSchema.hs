@@ -11,7 +11,7 @@ module Tidepool.ExecutionSchema
   , UpdatePolicy(..), HeapBinding(..), HeapRhs(..), JoinBinding(..)
   , AlternativePattern(..), Alternative(..), CaseKind(..), Expr(..), FieldLayout(..)
   , CheckedLayout(..), ConstructorDecl(..), GlobalDecl(..), OperationDecl(..)
-  , OperationIdentity(..), ForeignConvention(..)
+  , OperationIdentity(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
   ) where
 
@@ -21,7 +21,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 7
+schemaVersion = 8
 executionAbiVersion = 5
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -81,10 +81,30 @@ data GlobalDecl = GlobalDecl
   , globalRequiredEvaluated :: Bool, globalRequiredGeneration :: Maybe Word64
   } deriving stock (Eq, Show, Generic)
 -- | Operation signatures distinguish instantiated uses of one identity.
--- Unknown foreign capabilities remain projection errors, never primop names.
+-- Catalogued missing capabilities have their own identity; other unresolved
+-- foreign calls remain projection errors, never primop names.
 data ForeignConvention = CCall deriving stock (Eq, Ord, Show, Generic)
-data OperationIdentity = PrimOpIdentity Text | IntrinsicIdentity Text ForeignConvention
+data OperationIdentity
+  = PrimOpIdentity Text
+  | IntrinsicIdentity Text ForeignConvention
+  | CapabilityIdentity Text
+  | WiredInErrorIdentity WiredInErrorKind
   deriving stock (Eq, Ord, Show, Generic)
+-- | Declaration order is the stable wire-tag order and mirrors GHC's
+-- authoritative wired-in error keys.
+data WiredInErrorKind
+  = WiredPatternMatch
+  | WiredNonExhaustiveGuards
+  | WiredRecordSelector
+  | WiredRecordConstruction
+  | WiredNoMethodBinding
+  | WiredDeferredType
+  | WiredImpossible
+  | WiredImpossibleConstraint
+  | WiredAbsent
+  | WiredAbsentConstraint
+  | WiredAbsentSumField
+  deriving stock (Eq, Ord, Show, Enum, Bounded, Generic)
 data OperationDecl = OperationDecl { operationIdentity :: OperationIdentity, operationSignature :: SignatureId }
   deriving stock (Eq, Show, Generic)
 

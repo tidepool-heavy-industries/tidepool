@@ -21,8 +21,8 @@ main = do
   assert (BS.take 7 first == BS.pack [0x8d, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
-    "prepared execution schema is not v7"
-  let globalFields = termList (head (termList (termList (decode first) !! 7)))
+    "prepared execution schema is not v8"
+  let globalFields = termList (firstTerm (termList (termList (decode first) !! 7)))
   assert (drop 3 globalFields == [TBool False, TList [TInt 1, TInt 7]])
     "global wire fields must end with evaluated, tagged generation"
   let schema6Fields = termList (decode (encodeWireProgram schema6Representative))
@@ -34,6 +34,16 @@ main = do
     "record-parent identity did not use the tagged parent form"
   assert (schema6Identity == [TInt 1, TString "rintDouble", TList [TInt 0]])
     "intrinsic operation identity did not use the CCall form"
+  let identityTerms = map (termList . firstTerm . termList)
+        (termList (termList (decode (encodeWireProgram identityRepresentative)) !! 9))
+  assert (take 2 identityTerms ==
+      [ [TInt 2, TString "ffi.lookup"]
+      , [TInt 3, TInt 0]
+      ])
+    "new operation identities did not use capability and wired-in tags"
+  assert (drop 2 identityTerms ==
+      [[TInt 3, TInt (fromIntegral tagValue)] | tagValue <- [1 :: Int .. 10]])
+    "wired-in error kinds did not preserve their stable declaration-order tags"
 
   case arguments of
     [] -> pure ()
@@ -173,3 +183,13 @@ schema6Representative = representative
  where
   layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]
   exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence Nothing
+
+identityRepresentative :: WireProgram
+identityRepresentative = representative
+  { programOperations =
+      OperationDecl (CapabilityIdentity "ffi.lookup") (SignatureId 0)
+      : [ OperationDecl (WiredInErrorIdentity kind) (SignatureId 2)
+        | kind <- [minBound .. maxBound]
+        ]
+  , programSignatures = programSignatures representative <> [Signature [AddressRep] NoSuccess]
+  }

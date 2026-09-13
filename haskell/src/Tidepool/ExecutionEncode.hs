@@ -125,6 +125,8 @@ encodeOperation operation = array
   [ case operationIdentity operation of
       PrimOpIdentity name -> tagged 0 [encodeString name]
       IntrinsicIdentity symbol CCall -> tagged 1 [encodeString symbol, tag 0]
+      CapabilityIdentity name -> tagged 2 [encodeString name]
+      WiredInErrorIdentity kind -> tagged 3 [encodeWord (fromIntegral (fromEnum kind))]
   , encodeSignatureId (operationSignature operation)
   ]
 

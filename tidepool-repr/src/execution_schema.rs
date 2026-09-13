@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 7;
+pub const SCHEMA_VERSION: u64 = 8;
 pub const EXECUTION_ABI_VERSION: u64 = 5;
 
 macro_rules! dense_id {
@@ -616,11 +616,15 @@ pub enum OperationIdentity {
     /// An explicitly catalogued missing runtime capability, never an arbitrary
     /// unresolved import. Keeps GHC's Returns signature; execution fails without
     /// publishing a result. Native admission checks the exact name/signature.
-    Capability { name: String },
+    Capability {
+        name: String,
+    },
     /// Authoritative GHC wired-in identity lowered by the producer to an ordinary
     /// callable top. Its saturated signature is Address -> NoSuccess, except the
     /// nullary AbsentSumField worker. Runtime disposition is not encoded here.
-    WiredInError { kind: WiredInErrorKind },
+    WiredInError {
+        kind: WiredInErrorKind,
+    },
 }
 
 /// Stable wire tags in declaration order (0..10). Match producer GHC keys, not
@@ -644,8 +648,14 @@ pub enum WiredInErrorKind {
 
 impl WiredInErrorKind {
     pub fn is_integrity_failure(self) -> bool {
-        matches!(self, Self::Impossible | Self::ImpossibleConstraint | Self::Absent
-            | Self::AbsentConstraint | Self::AbsentSumField)
+        matches!(
+            self,
+            Self::Impossible
+                | Self::ImpossibleConstraint
+                | Self::Absent
+                | Self::AbsentConstraint
+                | Self::AbsentSumField
+        )
     }
 }
 

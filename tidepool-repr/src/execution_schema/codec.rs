@@ -455,7 +455,30 @@ impl Decoder {
                     convention: super::ForeignConvention::CCall,
                 }
             }
-            (0 | 1, _) => return Err(ParseError::Malformed("invalid operation identity".into())),
+            (2, 2) => super::OperationIdentity::Capability {
+                name: self.text(&identity[1], "capability name")?,
+            },
+            (3, 2) => {
+                let kind_tag = unsigned(&identity[1], "wired-in error kind")?;
+                let kind = match kind_tag {
+                    0 => super::WiredInErrorKind::PatternMatch,
+                    1 => super::WiredInErrorKind::NonExhaustiveGuards,
+                    2 => super::WiredInErrorKind::RecordSelector,
+                    3 => super::WiredInErrorKind::RecordConstruction,
+                    4 => super::WiredInErrorKind::NoMethodBinding,
+                    5 => super::WiredInErrorKind::DeferredType,
+                    6 => super::WiredInErrorKind::Impossible,
+                    7 => super::WiredInErrorKind::ImpossibleConstraint,
+                    8 => super::WiredInErrorKind::Absent,
+                    9 => super::WiredInErrorKind::AbsentConstraint,
+                    10 => super::WiredInErrorKind::AbsentSumField,
+                    tag => return Err(ParseError::InvalidTag(tag)),
+                };
+                super::OperationIdentity::WiredInError { kind }
+            }
+            (0..=3, _) => {
+                return Err(ParseError::Malformed("invalid operation identity".into()));
+            }
             (tag, _) => return Err(ParseError::InvalidTag(tag)),
         };
         Ok(OperationDecl {

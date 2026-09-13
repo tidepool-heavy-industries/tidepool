@@ -1,8 +1,9 @@
 use tidepool_repr::execution_schema::parse_program;
 use tidepool_repr::execution_schema::testing::{envelope, identity, target, wire_program};
 use tidepool_repr::execution_schema::{
-    DecodeLimits, ForeignConvention, GlobalDecl, GlobalId, OperationIdentity, ProgramRequirements,
-    ResultContract, RuntimeRep, SignatureId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    DecodeLimits, ForeignConvention, GlobalDecl, GlobalId, OperationDecl, OperationIdentity,
+    ProgramRequirements, ResultContract, RuntimeRep, Signature, SignatureId, WiredInErrorKind,
+    EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 
 const M3_ARTIFACT: &[u8] =
@@ -42,6 +43,108 @@ fn w5_no_success_case_merge_preserves_successful_representations() {
         result.merge_alternative(&ResultContract::Returns(vec![])),
         None
     );
+}
+
+#[test]
+fn capability_identity_requires_a_nonempty_name_and_successful_return() {
+    let mut valid = wire_program();
+    valid.operations.push(OperationDecl {
+        identity: OperationIdentity::Capability {
+            name: "ffi.lookup".into(),
+        },
+        signature: SignatureId(0),
+    });
+    tidepool_repr::execution_schema::testing::prepare(valid).unwrap();
+
+    let mut empty_name = wire_program();
+    empty_name.operations.push(OperationDecl {
+        identity: OperationIdentity::Capability {
+            name: String::new(),
+        },
+        signature: SignatureId(0),
+    });
+    assert!(matches!(
+        tidepool_repr::execution_schema::testing::prepare(empty_name),
+        Err(tidepool_repr::execution_schema::ParseError::Malformed(detail))
+            if detail.contains("empty identity text")
+    ));
+
+    let mut no_success = wire_program();
+    no_success.signatures.push(Signature {
+        arguments: vec![],
+        results: ResultContract::NoSuccess,
+    });
+    no_success.operations.push(OperationDecl {
+        identity: OperationIdentity::Capability {
+            name: "ffi.lookup".into(),
+        },
+        signature: SignatureId(1),
+    });
+    assert!(matches!(
+        tidepool_repr::execution_schema::testing::prepare(no_success),
+        Err(tidepool_repr::execution_schema::ParseError::InvalidSignature(_))
+    ));
+}
+
+#[test]
+fn wired_in_error_identity_requires_its_exact_nonreturning_signature() {
+    const KINDS: [WiredInErrorKind; 11] = [
+        WiredInErrorKind::PatternMatch,
+        WiredInErrorKind::NonExhaustiveGuards,
+        WiredInErrorKind::RecordSelector,
+        WiredInErrorKind::RecordConstruction,
+        WiredInErrorKind::NoMethodBinding,
+        WiredInErrorKind::DeferredType,
+        WiredInErrorKind::Impossible,
+        WiredInErrorKind::ImpossibleConstraint,
+        WiredInErrorKind::Absent,
+        WiredInErrorKind::AbsentConstraint,
+        WiredInErrorKind::AbsentSumField,
+    ];
+
+    for kind in KINDS {
+        let expected_arguments = if kind == WiredInErrorKind::AbsentSumField {
+            vec![]
+        } else {
+            vec![RuntimeRep::Address]
+        };
+        let mut valid = wire_program();
+        valid.signatures.push(Signature {
+            arguments: expected_arguments.clone(),
+            results: ResultContract::NoSuccess,
+        });
+        valid.operations.push(OperationDecl {
+            identity: OperationIdentity::WiredInError { kind },
+            signature: SignatureId(1),
+        });
+        tidepool_repr::execution_schema::testing::prepare(valid).unwrap();
+
+        for signature in [
+            Signature {
+                arguments: expected_arguments.clone(),
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: if expected_arguments.is_empty() {
+                    vec![RuntimeRep::Address]
+                } else {
+                    vec![]
+                },
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            let mut invalid = wire_program();
+            invalid.signatures.push(signature);
+            invalid.operations.push(OperationDecl {
+                identity: OperationIdentity::WiredInError { kind },
+                signature: SignatureId(1),
+            });
+            assert!(matches!(
+                tidepool_repr::execution_schema::testing::prepare(invalid),
+                Err(tidepool_repr::execution_schema::ParseError::InvalidSignature(_))
+            ));
+        }
+    }
 }
 
 #[test]

@@ -2862,6 +2862,30 @@ impl<'a> Validator<'a> {
             self.bump_work(1)?;
             self.check_operation_identity(&operation.identity)?;
             let signature = self.signature(operation.signature)?;
+            match &operation.identity {
+                super::OperationIdentity::Capability { .. }
+                    if matches!(signature.results, ResultContract::NoSuccess) =>
+                {
+                    return Err(ParseError::InvalidSignature(
+                        "capability operation must have a successful result contract".into(),
+                    ));
+                }
+                super::OperationIdentity::WiredInError { kind } => {
+                    let arguments = if *kind == super::WiredInErrorKind::AbsentSumField {
+                        &[][..]
+                    } else {
+                        &[RuntimeRep::Address][..]
+                    };
+                    if signature.arguments != arguments
+                        || signature.results != ResultContract::NoSuccess
+                    {
+                        return Err(ParseError::InvalidSignature(format!(
+                            "wired-in error {kind:?} must have signature {arguments:?} -> NoSuccess"
+                        )));
+                    }
+                }
+                _ => {}
+            }
             let key = (
                 operation.identity.clone(),
                 signature.arguments.clone(),
@@ -3151,6 +3175,8 @@ impl<'a> Validator<'a> {
         match identity {
             super::OperationIdentity::PrimOp(name) => self.check_text(name),
             super::OperationIdentity::Intrinsic { symbol, .. } => self.check_text(symbol),
+            super::OperationIdentity::Capability { name } => self.check_text(name),
+            super::OperationIdentity::WiredInError { .. } => Ok(()),
         }
     }
 

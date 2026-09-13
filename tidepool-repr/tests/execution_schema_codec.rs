@@ -72,6 +72,14 @@ fn global_with_generation(generation: Cbor) -> Cbor {
     ])
 }
 
+fn with_operation(mut program: Cbor, identity: Cbor, signature: u64) -> Cbor {
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    fields[9] = Cbor::Array(vec![Cbor::Array(vec![identity, int(signature)])]);
+    program
+}
+
 #[test]
 fn valid_closed_shape_reaches_semantic_validation() {
     let result = parse_program(
@@ -253,6 +261,66 @@ fn codec_rejects_malformed_record_parents_and_intrinsic_identities() {
         ),
         Err(ParseError::Malformed(detail)) if detail.contains("foreign convention")
     ));
+}
+
+#[test]
+fn codec_decodes_capability_and_wired_in_error_identities() {
+    let returning = Cbor::Array(vec![Cbor::Array(vec![
+        Cbor::Array(vec![]),
+        Cbor::Array(vec![int(0), Cbor::Array(vec![])]),
+    ])]);
+    let capability = with_operation(
+        root(returning),
+        Cbor::Array(vec![int(2), Cbor::Text("ffi.lookup".into())]),
+        0,
+    );
+    assert!(matches!(
+        parse_program(&bytes(&capability), &requirements(), DecodeLimits::default()),
+        Err(ParseError::InvalidReference(detail)) if detail.contains("entry value")
+    ));
+
+    let no_success = Cbor::Array(vec![Cbor::Array(vec![
+        Cbor::Array(vec![Cbor::Array(vec![int(3)])]),
+        Cbor::Array(vec![int(1)]),
+    ])]);
+    let wired = with_operation(root(no_success), Cbor::Array(vec![int(3), int(0)]), 0);
+    assert!(matches!(
+        parse_program(&bytes(&wired), &requirements(), DecodeLimits::default()),
+        Err(ParseError::InvalidReference(detail)) if detail.contains("entry value")
+    ));
+}
+
+#[test]
+fn codec_rejects_unknown_wired_in_kind_and_malformed_identity_arity() {
+    let signatures = Cbor::Array(vec![]);
+    let unknown_kind = with_operation(
+        root(signatures.clone()),
+        Cbor::Array(vec![int(3), int(11)]),
+        0,
+    );
+    assert_eq!(
+        parse_program(
+            &bytes(&unknown_kind),
+            &requirements(),
+            DecodeLimits::default()
+        ),
+        Err(ParseError::InvalidTag(11))
+    );
+
+    for identity in [
+        Cbor::Array(vec![int(2)]),
+        Cbor::Array(vec![int(3), int(0), int(1)]),
+    ] {
+        let malformed = with_operation(root(signatures.clone()), identity, 0);
+        assert!(matches!(
+            parse_program(
+                &bytes(&malformed),
+                &requirements(),
+                DecodeLimits::default()
+            ),
+            Err(ParseError::Malformed(detail)) if detail.contains("operation identity")
+        ));
+    }
 }
 
 #[test]
