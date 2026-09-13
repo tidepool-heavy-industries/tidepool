@@ -17,6 +17,7 @@ pub(super) enum Capability {
     StackFrames,
     CollectStackTrace,
     CostCentreStrings,
+    DecodeStackEntries,
 }
 
 impl Capability {
@@ -29,6 +30,7 @@ impl Capability {
             Self::StackFrames => "ghc:stackFrames",
             Self::CollectStackTrace => "ghc:collectStackTrace",
             Self::CostCentreStrings => "ghc:ccsToStrings",
+            Self::DecodeStackEntries => "ghc:decodeStackEntries",
         }
     }
 }
@@ -53,6 +55,11 @@ pub(super) fn recognize(name: &str, signature: &Signature) -> Option<Capability>
         "ghc:ccsToStrings" => (
             Capability::CostCentreStrings,
             &[Address, LiftedRef, Void],
+            &[LiftedRef],
+        ),
+        "ghc:decodeStackEntries" => (
+            Capability::DecodeStackEntries,
+            &[UnliftedRef, Int(64), Void],
             &[LiftedRef],
         ),
         _ => return None,
@@ -81,6 +88,7 @@ pub(super) unsafe extern "C" fn unsupported(
         4 => Capability::StackFrames,
         5 => Capability::CollectStackTrace,
         6 => Capability::CostCentreStrings,
+        7 => Capability::DecodeStackEntries,
         _ => {
             machine.set_first_cause(RuntimeError::BadPointer);
             return machine.prepared_call_status() as i32;
@@ -224,6 +232,12 @@ mod tests {
                 vec![LiftedRef],
                 Capability::CostCentreStrings,
             ),
+            (
+                "ghc:decodeStackEntries",
+                vec![UnliftedRef, Int(64), Void],
+                vec![LiftedRef],
+                Capability::DecodeStackEntries,
+            ),
         ] {
             assert!(matches!(
                 recognize(
@@ -247,6 +261,34 @@ mod tests {
                 arguments: vec![Void],
                 results: ResultContract::Returns(vec![LiftedRef]),
             }
+        )
+        .is_none());
+        for rejected in [
+            Signature {
+                arguments: vec![LiftedRef, Int(64), Void],
+                results: ResultContract::Returns(vec![LiftedRef]),
+            },
+            Signature {
+                arguments: vec![UnliftedRef, Int(32), Void],
+                results: ResultContract::Returns(vec![LiftedRef]),
+            },
+            Signature {
+                arguments: vec![UnliftedRef, Int(64), Void],
+                results: ResultContract::Returns(vec![UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![UnliftedRef, Int(64), Void],
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            assert!(recognize("ghc:decodeStackEntries", &rejected).is_none());
+        }
+        assert!(recognize(
+            "ghc:decodeStackEntries-lookalike",
+            &Signature {
+                arguments: vec![UnliftedRef, Int(64), Void],
+                results: ResultContract::Returns(vec![LiftedRef]),
+            },
         )
         .is_none());
     }
@@ -315,6 +357,96 @@ mod tests {
                 disposition: MachineDisposition::Reusable,
             })) if name == "ghc:lookupIPE"
         ));
+    }
+
+    #[test]
+    fn reached_decode_stack_entries_is_reusable_and_publishes_no_result() {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.signatures.push(Signature {
+            arguments: vec![RuntimeRep::Int(64), RuntimeRep::Void],
+            results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+        });
+        wire.signatures.push(Signature {
+            arguments: vec![
+                RuntimeRep::UnliftedRef,
+                RuntimeRep::Int(64),
+                RuntimeRep::Void,
+            ],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.operations = vec![
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("newByteArray#".into()),
+                signature: SignatureId(1),
+            },
+            OperationDecl {
+                identity: OperationIdentity::Capability {
+                    name: "ghc:decodeStackEntries".into(),
+                },
+                signature: SignatureId(2),
+            },
+        ];
+        let zero = Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: 0_i64.to_be_bytes().to_vec(),
+        });
+        wire.expressions.nodes = vec![
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![zero.clone(), Atom::Void],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(1),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(10))), zero, Atom::Void],
+            },
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(11),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+                kind: CaseKind::MultiValue,
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(10)],
+                    body: 1,
+                }],
+            },
+        ];
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Function { body, .. } = &mut entry.binding.rhs else {
+            unreachable!()
+        };
+        *body = 2;
+
+        let program = compile(wire).unwrap();
+        assert!(matches!(
+            program.run_entry(
+                ValueId(0),
+                &[],
+                &super::super::RunOptions::default(),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            Err(super::super::ExecutionError::Runtime(MachineFailure {
+                cause: RuntimeError::UnsupportedCapability(name),
+                disposition: MachineDisposition::Reusable,
+            })) if name == "ghc:decodeStackEntries"
+        ));
+
+        let machine = crate::machine_state::MachineState::new();
+        machine.set_first_cause(RuntimeError::Cancelled);
+        let mut vmctx = crate::context::VMContext::new(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            crate::host_fns::gc_trigger,
+        );
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        assert_eq!(
+            unsafe { unsupported(&mut vmctx, Capability::DecodeStackEntries as u8 as u64) },
+            crate::prepared_control::CallStatus::Cancelled as i32,
+        );
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
     }
 
     #[test]

@@ -62,7 +62,7 @@ mod safepoint;
 mod settlement_tests;
 mod static_bytes;
 mod wide_words;
-pub use admission::{admit_prepared, admit_program};
+pub use admission::{admit_prepared, admit_program, supports_operation};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Unsupported {
@@ -78,6 +78,15 @@ pub enum Unsupported {
     StaticHeapEdge(ValueId),
     #[error("unsupported expression at node {node} in binding {binding:?}")]
     Expression { binding: ValueId, node: usize },
+    #[error(
+        "unsupported operation {identity:?} with signature {signature:?} at node {node} in binding {binding:?}"
+    )]
+    Operation {
+        binding: ValueId,
+        node: usize,
+        identity: tidepool_repr::execution_schema::OperationIdentity,
+        signature: Signature,
+    },
     #[error("entry {0:?} cannot accept managed host arguments")]
     HostArguments(ValueId),
 }
@@ -328,6 +337,10 @@ impl CompiledProgram {
                 (
                     "prepared_data_to_tag_small",
                     data_tag::prepared_data_to_tag_small as *const u8,
+                ),
+                (
+                    floating::DECODE_DOUBLE_INT64_HOST,
+                    floating::prepared_decode_double_int64 as *const u8,
                 ),
                 (
                     "prepared_index_char",

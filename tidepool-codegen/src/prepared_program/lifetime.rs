@@ -32,8 +32,34 @@ pub(super) fn callback_signature(
     })
 }
 
+pub(super) fn recognize_touch(identity: &OperationIdentity, signature: &Signature) -> bool {
+    matches!(identity, OperationIdentity::PrimOp(name) if name == "touch#")
+        && signature.arguments == [RuntimeRep::LiftedRef, RuntimeRep::Void]
+        && signature.results == ResultContract::Returns(vec![])
+}
+
 pub(super) extern "C" fn keep_alive(reference: usize) {
     std::hint::black_box(reference);
+}
+
+/// Retain an explicit opaque use of a managed owner through every preceding
+/// safepoint. The stack-map declaration lets moving collection update the SSA
+/// value before this noncollecting host boundary consumes it.
+pub(super) fn emit_touch(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    retained: Value,
+) -> Result<Vec<Value>, super::CompileError> {
+    builder.declare_value_needs_stack_map(retained);
+    let mut abi = ir::Signature::new(pipeline.isa.default_call_conv());
+    abi.params.push(AbiParam::new(types::I64));
+    let host = pipeline
+        .module
+        .declare_function("prepared_keep_alive", Linkage::Import, &abi)
+        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
+    let host = pipeline.module.declare_func_in_func(host, builder.func);
+    builder.ins().call(host, &[retained]);
+    Ok(Vec::new())
 }
 
 pub(super) fn emit(

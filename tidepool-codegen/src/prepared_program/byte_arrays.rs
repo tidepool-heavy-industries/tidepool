@@ -13,6 +13,7 @@ use tidepool_repr::execution_schema::{OperationIdentity, ResultContract, Runtime
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Element {
+    Address,
     Word8,
     Word64,
     Int64,
@@ -20,6 +21,7 @@ pub(super) enum Element {
 impl Element {
     fn bytes(self) -> usize {
         match self {
+            Self::Address => 8,
             Self::Word8 => 1,
             Self::Word64 => 8,
             Self::Int64 => 8,
@@ -140,6 +142,12 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![Word(64)]) =>
         {
             Some(ByteOperation::Read(Element::Word64))
+        }
+        "indexAddrArray#"
+            if signature.arguments == [UnliftedRef, Int(64)]
+                && signature.results == ResultContract::Returns(vec![Address]) =>
+        {
+            Some(ByteOperation::Read(Element::Address))
         }
         "writeWordArray#"
             if signature.arguments == [UnliftedRef, Int(64), Word(64), Void]
@@ -474,6 +482,7 @@ unsafe fn prepared_read_bytes(
         let offset = checked_offset(index, len, element)?;
         let data = unsafe { published.add(8).add(offset) };
         let value = match element {
+            Element::Address => (unsafe { data.cast::<u64>().read_unaligned() }) as i64,
             Element::Word8 => i64::from(unsafe { data.read() }),
             Element::Word64 => (unsafe { data.cast::<u64>().read_unaligned() }) as i64,
             Element::Int64 => unsafe { data.cast::<i64>().read_unaligned() },
@@ -523,6 +532,9 @@ unsafe fn prepared_write_bytes(
         let (published, len) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
         let offset = checked_offset(index, len, element)?;
         match element {
+            Element::Address => machine
+                .store_external_bytes(published, offset, &value.to_ne_bytes())
+                .map_err(|error| super::arrays::storage_error(error, index))?,
             Element::Word8 => machine
                 .store_external_bytes(published, offset, &[value as u8])
                 .map_err(|error| super::arrays::storage_error(error, index))?,
@@ -761,6 +773,7 @@ pub(super) fn emit_read_bytes(
     element: Element,
 ) -> Result<Vec<Value>, super::CompileError> {
     let name = match element {
+        Element::Address => "prepared_read_int_bytes",
         Element::Word8 => "prepared_read_word8_bytes",
         Element::Word64 => "prepared_read_int_bytes",
         Element::Int64 => "prepared_read_int_bytes",
@@ -774,6 +787,9 @@ pub(super) fn emit_read_bytes(
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
     let value = match element {
+        Element::Address => builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), output, 0),
         Element::Word8 => builder
             .ins()
             .load(types::I8, MemFlags::trusted(), output, 0),
@@ -796,6 +812,7 @@ pub(super) fn emit_write_bytes(
     element: Element,
 ) -> Result<Vec<Value>, super::CompileError> {
     let name = match element {
+        Element::Address => "prepared_write_int_bytes",
         Element::Word8 => "prepared_write_word8_bytes",
         Element::Word64 => "prepared_write_int_bytes",
         Element::Int64 => "prepared_write_int_bytes",
@@ -803,6 +820,7 @@ pub(super) fn emit_write_bytes(
     let host = super::arrays::declare_host(builder, pipeline, name, 5)?;
     let owner = owner_value(builder, descriptor);
     let value = match element {
+        Element::Address => arguments[2],
         Element::Word8 => builder.ins().uextend(types::I64, arguments[2]),
         Element::Word64 => arguments[2],
         Element::Int64 => arguments[2],
@@ -838,6 +856,7 @@ mod tests {
     ) -> crate::prepared_program::CompiledProgram {
         let mut wire = testing::wire_program();
         let (write_name, read_name, rep, value) = match element {
+            Element::Address => unreachable!("address indexing has a dedicated fixture"),
             Element::Word8 => (
                 "writeWord8Array#",
                 "indexWord8Array#",
@@ -1016,6 +1035,140 @@ mod tests {
         crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
+    fn index_address_program(length: i64, index: i64) -> crate::prepared_program::CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures.extend([
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Word(64),
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Address]),
+            },
+        ]);
+        wire.operations = vec![
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("newByteArray#".into()),
+                signature: SignatureId(1),
+            },
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("writeWordArray#".into()),
+                signature: SignatureId(2),
+            },
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("indexAddrArray#".into()),
+                signature: SignatureId(3),
+            },
+        ];
+        wire.expressions.nodes = vec![
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![int(length), Atom::Void],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(1),
+                arguments: vec![
+                    Atom::Ref(ValueRef::Local(ValueId(100))),
+                    int(0),
+                    Atom::Scalar(ScalarLiteral::Word {
+                        bits: 64,
+                        bytes: u64::MAX.to_be_bytes().to_vec(),
+                    }),
+                    Atom::Void,
+                ],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(1),
+                arguments: vec![
+                    Atom::Ref(ValueRef::Local(ValueId(100))),
+                    int(1),
+                    Atom::Scalar(ScalarLiteral::Word {
+                        bits: 64,
+                        bytes: 0_u64.to_be_bytes().to_vec(),
+                    }),
+                    Atom::Void,
+                ],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(2),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(100))), int(index)],
+            },
+            ExprFrame::Return(vec![int(0)]),
+            ExprFrame::Return(vec![int(1)]),
+            ExprFrame::Case {
+                scrutinee: 3,
+                binder: ValueId(103),
+                kind: CaseKind::Primitive(RuntimeRep::Address),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Address]),
+                alternatives: vec![
+                    Alternative {
+                        pattern: AlternativePattern::Literal(ScalarLiteral::NullAddress),
+                        binders: vec![],
+                        body: 5,
+                    },
+                    Alternative {
+                        pattern: AlternativePattern::Default,
+                        binders: vec![],
+                        body: 4,
+                    },
+                ],
+            },
+            ExprFrame::Case {
+                scrutinee: 2,
+                binder: ValueId(102),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: 6,
+                }],
+            },
+            ExprFrame::Case {
+                scrutinee: 1,
+                binder: ValueId(101),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: 7,
+                }],
+            },
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(104),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(100)],
+                    body: 8,
+                }],
+            },
+        ];
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!("fixture entry is nonrecursive")
+        };
+        let HeapRhs::Function { body, .. } = &mut entry.binding.rhs else {
+            unreachable!("fixture entry is a function")
+        };
+        *body = 9;
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
+    }
+
     #[test]
     fn byte_and_int_roundtrip_through_real_adapter_and_collection() {
         for (element, expected) in [
@@ -1072,6 +1225,44 @@ mod tests {
                 tidepool_repr::Literal::LitWord(u64::MAX)
             )]
         ));
+    }
+
+    #[test]
+    fn address_index_reads_one_machine_word_from_byte_array_owner() {
+        let result = index_address_program(16, 1)
+            .run_entry(
+                ValueId(0),
+                &[],
+                &Default::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                1
+            ))]
+        ));
+
+        for (length, index) in [(16, -1), (16, 2)] {
+            let error = index_address_program(length, index)
+                .run_entry(
+                    ValueId(0),
+                    &[],
+                    &Default::default(),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::prepared_program::ExecutionError::Runtime(failure)
+                    if failure.cause
+                        == RuntimeError::ArrayIndexOutOfBounds {
+                            index,
+                            len: length.max(0) as usize / 8,
+                        }
+            ));
+        }
     }
 
     #[test]
@@ -1320,6 +1511,28 @@ mod tests {
             ),
             Some(ByteOperation::Read(Element::Word64))
         );
+        assert_eq!(
+            recognize(
+                &op("indexAddrArray#"),
+                &sig(
+                    vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64)],
+                    vec![RuntimeRep::Address]
+                )
+            ),
+            Some(ByteOperation::Read(Element::Address))
+        );
+        assert!(recognize(
+            &op("indexAddrArray#"),
+            &sig(
+                vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Void
+                ],
+                vec![RuntimeRep::Address]
+            )
+        )
+        .is_none());
         assert_eq!(
             recognize(
                 &op("indexWordArray#"),

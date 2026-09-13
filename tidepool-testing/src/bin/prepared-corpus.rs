@@ -20,6 +20,10 @@ const REPORT_VERSION: u32 = 2;
 /// receives a manifest index, never a command string derived from a program.
 enum Command {
     EffectsCore,
+    AuditOperations {
+        manifest: PathBuf,
+        output: PathBuf,
+    },
     Run {
         manifest: PathBuf,
         expectations: PathBuf,
@@ -62,6 +66,38 @@ struct StageTotal {
     not_reached: usize,
 }
 
+#[derive(serde::Serialize)]
+struct OperationAuditReport {
+    version: u32,
+    manifest_programs: usize,
+    projected_programs: usize,
+    decoded_programs: usize,
+    projection_omissions: Vec<AuditOmission>,
+    decode_omissions: Vec<AuditOmission>,
+    operations: Vec<AuditedOperation>,
+}
+
+#[derive(serde::Serialize)]
+struct AuditOmission {
+    program: String,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+struct AuditedOperation {
+    identity: String,
+    signature: String,
+    supported: bool,
+    programs: Vec<String>,
+}
+
+struct OperationAccumulator {
+    identity: tidepool_repr::execution_schema::OperationIdentity,
+    signature: tidepool_repr::execution_schema::Signature,
+    supported: bool,
+    programs: Vec<String>,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let command = parse_arguments()?;
     match command {
@@ -71,6 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", tidepool_mcp::ensure_effects_core_module()?.display());
             Ok(())
         }
+        Command::AuditOperations { manifest, output } => audit_operations(manifest, output),
         Command::Run {
             manifest,
             expectations,
@@ -94,6 +131,14 @@ fn parse_arguments() -> Result<Command, Box<dyn Error>> {
 fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
     if matches!(values.as_slice(), [mode] if mode == "effects-core") {
         return Ok(Command::EffectsCore);
+    }
+    if let [mode, manifest, output] = values.as_slice() {
+        if mode == "audit-operations" {
+            return Ok(Command::AuditOperations {
+                manifest: PathBuf::from(manifest),
+                output: PathBuf::from(output),
+            });
+        }
     }
     let [mode, manifest, expectations, metadata, output, rest @ ..] = values.as_slice() else {
         return Err(usage().into());
@@ -138,8 +183,104 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: prepared-corpus effects-core | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
+        "usage: prepared-corpus effects-core | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
     )
+}
+
+fn audit_operations(manifest_path: PathBuf, output: PathBuf) -> Result<(), Box<dyn Error>> {
+    let manifest = read_manifest(&manifest_path)?;
+    validate_manifest(&manifest)?;
+    let requirements = tidepool_toolchain::prepared_artifact::production_requirements()?;
+    let mut projected_programs = 0;
+    let mut decoded_programs = 0;
+    let mut projection_omissions = Vec::new();
+    let mut decode_omissions = Vec::new();
+    let mut operations = Vec::new();
+
+    for row in &manifest.programs {
+        match &row.projection {
+            ProjectionOutcome::Rejected { reason } => projection_omissions.push(AuditOmission {
+                program: row.name.clone(),
+                reason: reason.clone(),
+            }),
+            ProjectionOutcome::Projected { artifact, .. } => {
+                projected_programs += 1;
+                let parsed = manifest_artifact_path(&manifest_path, artifact)
+                    .and_then(|path| fs::read(path).map_err(|error| error.into()))
+                    .and_then(|bytes| {
+                        tidepool_repr::execution_schema::parse_program(
+                            &bytes,
+                            &requirements,
+                            tidepool_repr::execution_schema::DecodeLimits::default(),
+                        )
+                        .map_err(|error| error.into())
+                    });
+                match parsed {
+                    Ok(program) => {
+                        decoded_programs += 1;
+                        record_operations(&mut operations, &row.name, &program);
+                    }
+                    Err(error) => decode_omissions.push(AuditOmission {
+                        program: row.name.clone(),
+                        reason: error.to_string(),
+                    }),
+                }
+            }
+        }
+    }
+
+    let operations = operations
+        .into_iter()
+        .map(|operation: OperationAccumulator| AuditedOperation {
+            identity: format!("{:?}", operation.identity),
+            signature: format!("{:?}", operation.signature),
+            supported: operation.supported,
+            programs: operation.programs,
+        })
+        .collect();
+    write_json(
+        &output,
+        &OperationAuditReport {
+            version: 1,
+            manifest_programs: manifest.programs.len(),
+            projected_programs,
+            decoded_programs,
+            projection_omissions,
+            decode_omissions,
+            operations,
+        },
+    )
+}
+
+fn record_operations(
+    accumulated: &mut Vec<OperationAccumulator>,
+    program_name: &str,
+    program: &tidepool_repr::execution_schema::PreparedProgram,
+) {
+    for declaration in program.operations() {
+        let signature = &program.signatures()[declaration.signature.0 as usize];
+        if let Some(existing) = accumulated.iter_mut().find(|existing| {
+            existing.identity == declaration.identity && existing.signature == *signature
+        }) {
+            if existing
+                .programs
+                .last()
+                .is_none_or(|name| name != program_name)
+            {
+                existing.programs.push(program_name.to_owned());
+            }
+            continue;
+        }
+        accumulated.push(OperationAccumulator {
+            identity: declaration.identity.clone(),
+            signature: signature.clone(),
+            supported: tidepool_codegen::prepared_program::supports_operation(
+                declaration,
+                signature,
+            ),
+            programs: vec![program_name.to_owned()],
+        });
+    }
 }
 
 fn run_corpus(
@@ -809,6 +950,14 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(run, Command::Run { .. }));
+        let audit = parse_values(
+            ["audit-operations", "manifest.json", "audit.json"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap();
+        assert!(matches!(audit, Command::AuditOperations { .. }));
         let child = parse_values(
             [
                 "child",
@@ -839,6 +988,135 @@ mod tests {
             .collect(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn operation_audit_groups_exact_pairs_and_classifies_with_native_catalog() {
+        use tidepool_repr::execution_schema::{
+            testing, OperationDecl, OperationIdentity, ResultContract, RuntimeRep, Signature,
+            SignatureId,
+        };
+
+        let mut wire = testing::wire_program();
+        let signature = Signature {
+            arguments: vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        };
+        wire.signatures.push(signature.clone());
+        wire.operations.extend([
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("+#".into()),
+                signature: SignatureId(1),
+            },
+            OperationDecl {
+                identity: OperationIdentity::PrimOp("notARealPrimOp#".into()),
+                signature: SignatureId(1),
+            },
+        ]);
+        let program = testing::prepare(wire).unwrap();
+        let mut operations = Vec::new();
+        record_operations(&mut operations, "first", &program);
+        record_operations(&mut operations, "first", &program);
+        record_operations(&mut operations, "second", &program);
+
+        assert_eq!(operations.len(), 2);
+        assert!(operations[0].supported);
+        assert!(!operations[1].supported);
+        assert_eq!(
+            operations[0].identity,
+            OperationIdentity::PrimOp("+#".into())
+        );
+        assert_eq!(operations[0].signature, signature);
+        assert_eq!(operations[0].programs, ["first", "second"]);
+        assert_eq!(operations[1].programs, ["first", "second"]);
+    }
+
+    #[test]
+    fn operation_audit_reports_projection_and_decode_omissions() {
+        let manifest = temporary_path("audit-manifest");
+        let output = temporary_path("audit-output");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock is after the Unix epoch")
+            .as_nanos();
+        let artifact_name = format!(
+            "prepared-corpus-audit-artifact-{}-{nonce}.cbor",
+            std::process::id()
+        );
+        let invalid_name = format!(
+            "prepared-corpus-audit-invalid-{}-{nonce}.cbor",
+            std::process::id()
+        );
+        let parent = manifest.parent().unwrap();
+        let artifact = parent.join(&artifact_name);
+        let invalid = parent.join(&invalid_name);
+        fs::write(
+            &artifact,
+            include_bytes!("../../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor"),
+        )
+        .unwrap();
+        fs::write(&invalid, b"not cbor").unwrap();
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "legacy_targets": [],
+                "programs": [
+                    {
+                        "name": "u:M:value:decoded",
+                        "status": "projected",
+                        "artifact": artifact_name,
+                        "identity": {
+                            "unit": "u", "module": "M", "namespace": "value",
+                            "occurrence": "decoded"
+                        }
+                    },
+                    {
+                        "name": "u:M:value:invalid",
+                        "status": "projected",
+                        "artifact": invalid_name,
+                        "identity": {
+                            "unit": "u", "module": "M", "namespace": "value",
+                            "occurrence": "invalid"
+                        }
+                    },
+                    {
+                        "name": "u:M:value:rejected",
+                        "status": "rejected",
+                        "reason": "projection unsupported"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        audit_operations(manifest.clone(), output.clone()).unwrap();
+        let report: serde_json::Value = read_json(&output).unwrap();
+        assert_eq!(report["manifest_programs"], 3);
+        assert_eq!(report["projected_programs"], 2);
+        assert_eq!(report["decoded_programs"], 1);
+        assert_eq!(report["projection_omissions"].as_array().unwrap().len(), 1);
+        assert_eq!(report["decode_omissions"].as_array().unwrap().len(), 1);
+        let operations = report["operations"].as_array().unwrap();
+        let double_to_int = operations
+            .iter()
+            .find(|operation| operation["identity"] == "PrimOp(\"double2Int#\")")
+            .expect("the current cross-language fixture retains double2Int#");
+        assert_eq!(
+            double_to_int["signature"],
+            "Signature { arguments: [Float(64)], results: Returns([Int(64)]) }"
+        );
+        assert_eq!(double_to_int["supported"], true);
+        assert_eq!(
+            double_to_int["programs"],
+            serde_json::json!(["u:M:value:decoded"])
+        );
+
+        fs::remove_file(manifest).unwrap();
+        fs::remove_file(output).unwrap();
+        fs::remove_file(artifact).unwrap();
+        fs::remove_file(invalid).unwrap();
     }
 
     #[test]

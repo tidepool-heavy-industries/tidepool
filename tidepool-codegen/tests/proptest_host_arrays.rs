@@ -987,8 +987,8 @@ fn check_double(bits: u64) -> Result<(), String> {
         ));
     }
 
-    // --- decode: documented sentinels for the non-finite / zero cases ---
-    if d == 0.0 || d.is_nan() {
+    // --- decode: GHC's raw IEEE mapping, including exceptional payloads ---
+    if d == 0.0 {
         if (m1, e1) != (0, 0) {
             return Err(format!(
                 "decode of {d:?} should be (0,0), got ({m1},{e1}) (B1)"
@@ -996,36 +996,21 @@ fn check_double(bits: u64) -> Result<(), String> {
         }
         return Ok(());
     }
-    if d.is_infinite() {
-        let want = if d > 0.0 { 1 } else { -1 };
-        if m1 != want || e1 != 0 {
-            return Err(format!(
-                "decode of {d:?} should be ({want},0), got ({m1},{e1}) (B1)"
-            ));
-        }
-        return Ok(());
-    }
 
-    // --- decode: structural invariants (exact, all finite nonzero) ---
+    // --- decode: structural invariants (exact, every nonzero bit pattern) ---
     // GHC's decodeDouble_Int64# does NOT reduce trailing zeros — the mantissa
-    // is the raw significand. For a NORMAL double: 2^52 <= |m1| < 2^53 (the
-    // raw 52-bit fraction plus the implicit leading bit). For a SUBNORMAL
-    // (raw exponent field == 0): 0 < |m1| < 2^52 (no implicit bit, no
-    // canonical lower bound, just nonzero since d != 0).
+    // is the raw significand. Normal, infinity and NaN patterns all receive
+    // the implicit leading bit; NaN payloads and the sign bit are preserved.
     if m1 == 0 {
         return Err(format!("decode of nonzero {d:?} gave zero mantissa (B1)"));
     }
-    let raw_exp = (bits >> 52) & 0x7ff;
     let abs_m1 = m1.unsigned_abs();
-    if raw_exp == 0 {
-        if abs_m1 >= (1u64 << 52) {
-            return Err(format!(
-                "decode mantissa {m1} of subnormal {d:?} out of range [1, 2^52) (B1)"
-            ));
-        }
-    } else if !(1u64 << 52..1u64 << 53).contains(&abs_m1) {
+    // Pinned GHC's __decodeDouble_2Int normalizes every nonzero subnormal to
+    // the same 53-bit interval used by nonzero-exponent patterns; the compiled
+    // min-subnormal oracle is (2^52, -1126).
+    if !(1u64 << 52..1u64 << 53).contains(&abs_m1) {
         return Err(format!(
-            "decode mantissa {m1} of normal {d:?} not in canonical range [2^52, 2^53) (B1)"
+            "decode mantissa {m1} of nonzero {d:?} not in canonical range [2^52, 2^53) (B1)"
         ));
     }
 

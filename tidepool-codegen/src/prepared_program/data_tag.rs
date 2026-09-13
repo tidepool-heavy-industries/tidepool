@@ -205,7 +205,7 @@ mod tests {
         assert!(matches!(
             CompiledProgram::compile(&linked),
             Err(super::super::CompileError::Unsupported(
-                Unsupported::Expression { .. }
+                Unsupported::Operation { .. }
             ))
         ));
     }

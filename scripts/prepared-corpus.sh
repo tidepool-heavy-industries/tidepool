@@ -13,6 +13,7 @@ suite_root="$(mktemp -d "$output_root/suite.XXXXXX")"
 recovered_root="$(mktemp -d "$output_root/recovered-base-contract.XXXXXX")"
 formatting_root="$(mktemp -d "$output_root/formatting-execution-contract.XXXXXX")"
 formatting_shadow_root="$(mktemp -d "$output_root/formatting-dependency-shadow.XXXXXX")"
+fingerprint_root="$(mktemp -d "$output_root/fingerprint-execution-contract.XXXXXX")"
 echo "==> prepared corpus executable snapshot: $run_root"
 echo "    provenance: $run_root/provenance.json"
 
@@ -157,6 +158,18 @@ formatting_shadow_report="$formatting_shadow_root/results.json"
   "$metadata" "$formatting_shadow_report"
 assert_contract_report formatting-dependency-shadow 1 "$formatting_shadow_report"
 
+echo "==> projecting fingerprint execution contract (3 targets)"
+"$projection_probe" \
+  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionContract.hs" FingerprintExecutionContract \
+  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionTargets" "$fingerprint_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+fingerprint_report="$fingerprint_root/results.json"
+"$prepared_runner" run \
+  "$fingerprint_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionExpectations.json" \
+  "$metadata" "$fingerprint_report"
+assert_contract_report fingerprint-execution 3 "$fingerprint_report"
+
 report_totals() {
   local cohort="$1"
   local report="$2"
@@ -175,6 +188,7 @@ echo "  suite targets recorded: $suite_count"
 echo "  recovered base contract: $recovered_root"
 echo "  formatting execution contract: $formatting_root"
 echo "  formatting dependency-shadow contract: $formatting_shadow_root"
+echo "  fingerprint execution contract: $fingerprint_root"
 echo "  comparison expectations are historical and may be missing; inspect result rows"
 echo "  named limitation: awaitSettled's continuation is not executed by this dependency-only probe"
 report_totals priority "$priority_report"
@@ -184,6 +198,7 @@ echo "  separate acceptance contracts (not part of Suite or legacy counts):"
 report_totals recovered-base "$recovered_report"
 report_totals formatting-execution "$formatting_report"
 report_totals formatting-dependency-shadow "$formatting_shadow_report"
+report_totals fingerprint-execution "$fingerprint_report"
 
 report_legacy_totals() {
   local cohort="$1"

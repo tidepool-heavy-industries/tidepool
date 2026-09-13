@@ -900,7 +900,7 @@ fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
         assert!(matches!(
             CompiledProgram::compile(&linked),
-            Err(CompileError::Unsupported(Unsupported::Expression { .. }))
+            Err(CompileError::Unsupported(Unsupported::Operation { .. }))
         ));
     }
     for identity in [
@@ -917,7 +917,7 @@ fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
         .unwrap();
         assert!(matches!(
             CompiledProgram::compile(&linked),
-            Err(CompileError::Unsupported(Unsupported::Expression { .. }))
+            Err(CompileError::Unsupported(Unsupported::Operation { .. }))
         ));
     }
 }
@@ -1143,6 +1143,6 @@ fn index_char_rejects_wrong_char_rep_before_native_emission() {
     .unwrap();
     assert!(matches!(
         CompiledProgram::compile(&linked),
-        Err(CompileError::Unsupported(Unsupported::Expression { .. }))
+        Err(CompileError::Unsupported(Unsupported::Operation { .. }))
     ));
 }

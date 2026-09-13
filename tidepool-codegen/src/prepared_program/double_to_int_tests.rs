@@ -126,6 +126,6 @@ fn double2int_rejects_wrong_signature_before_native_emission() {
     let result = CompiledProgram::compile(&linked);
     assert!(matches!(
         result,
-        Err(CompileError::Unsupported(Unsupported::Expression { .. }))
+        Err(CompileError::Unsupported(Unsupported::Operation { .. }))
     ));
 }

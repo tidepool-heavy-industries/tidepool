@@ -1,0 +1,26 @@
+{
+  "source_revision": "FingerprintExecutionContract.hs native GHC 9.12.2",
+  "expectations": {
+    "emptyFingerprint": {
+      "kind": "tuple",
+      "value": [
+        { "kind": "int", "value": -3162216497309240828 },
+        { "kind": "int", "value": -1621285313438006658 }
+      ]
+    },
+    "abcFingerprint": {
+      "kind": "tuple",
+      "value": [
+        { "kind": "int", "value": -8070080442485551184 },
+        { "kind": "int", "value": -2984127896297046158 }
+      ]
+    },
+    "multiblockFingerprint": {
+      "kind": "tuple",
+      "value": [
+        { "kind": "int", "value": 6335989228138383701 },
+        { "kind": "int", "value": -6032050334228564358 }
+      ]
+    }
+  }
+}

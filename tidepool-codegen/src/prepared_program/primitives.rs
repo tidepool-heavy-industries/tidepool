@@ -42,6 +42,9 @@ pub(super) enum BasicScalarOperation {
     Chr,
     Ord,
     EqChar,
+    NeChar,
+    LeChar,
+    GtChar,
     GeChar,
     Clz8,
     Clz,
@@ -75,6 +78,24 @@ impl ScalarFamily for BasicScalarFamily {
                     && returns_exact(signature, &[Int(64)]) =>
             {
                 Some(BasicScalarOperation::EqChar)
+            }
+            "neChar#"
+                if signature.arguments == [Word(64), Word(64)]
+                    && returns_exact(signature, &[Int(64)]) =>
+            {
+                Some(BasicScalarOperation::NeChar)
+            }
+            "leChar#"
+                if signature.arguments == [Word(64), Word(64)]
+                    && returns_exact(signature, &[Int(64)]) =>
+            {
+                Some(BasicScalarOperation::LeChar)
+            }
+            "gtChar#"
+                if signature.arguments == [Word(64), Word(64)]
+                    && returns_exact(signature, &[Int(64)]) =>
+            {
+                Some(BasicScalarOperation::GtChar)
             }
             "geChar#"
                 if signature.arguments == [Word(64), Word(64)]
@@ -114,6 +135,29 @@ impl ScalarFamily for BasicScalarFamily {
                 let zero = builder.ins().iconst(ir::types::I64, 0);
                 builder.ins().select(equal, one, zero)
             }
+            BasicScalarOperation::NeChar => {
+                let not_equal =
+                    builder
+                        .ins()
+                        .icmp(ir::condcodes::IntCC::NotEqual, arguments[0], arguments[1]);
+                builder.ins().uextend(ir::types::I64, not_equal)
+            }
+            BasicScalarOperation::LeChar => {
+                let less_or_equal = builder.ins().icmp(
+                    ir::condcodes::IntCC::UnsignedLessThanOrEqual,
+                    arguments[0],
+                    arguments[1],
+                );
+                builder.ins().uextend(ir::types::I64, less_or_equal)
+            }
+            BasicScalarOperation::GtChar => {
+                let greater = builder.ins().icmp(
+                    ir::condcodes::IntCC::UnsignedGreaterThan,
+                    arguments[0],
+                    arguments[1],
+                );
+                builder.ins().uextend(ir::types::I64, greater)
+            }
             BasicScalarOperation::GeChar => {
                 let greater_or_equal = builder.ins().icmp(
                     ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
@@ -136,7 +180,10 @@ impl ScalarFamily for BasicScalarFamily {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IntegerKind {
     Add,
+    AddIntC,
+    AddWordC,
     Sub,
+    SubIntC,
     SubWordC,
     Mul,
     Quot,
@@ -442,8 +489,44 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "uncheckedIShiftL#" => generic_shift(signature, true, IntegerKind::Shl),
         "uncheckedIShiftRA#" => generic_shift(signature, true, IntegerKind::Shra),
         "uncheckedIShiftRL#" => generic_shift(signature, true, IntegerKind::Shrl),
+        "addIntC#"
+            if signature.arguments == [int_rep(64), int_rep(64)]
+                && returns_exact(signature, &[int_rep(64), int_rep(64)]) =>
+        {
+            Some(IntegerOperation {
+                kind: IntegerKind::AddIntC,
+                signed: true,
+                bits: 64,
+                result_bits: 64,
+                narrow_bits: 0,
+            })
+        }
         "plusWord#" => generic_binary(signature, false, IntegerKind::Add),
+        "addWordC#"
+            if signature.arguments == [word_rep(64), word_rep(64)]
+                && returns_exact(signature, &[word_rep(64), int_rep(64)]) =>
+        {
+            Some(IntegerOperation {
+                kind: IntegerKind::AddWordC,
+                signed: false,
+                bits: 64,
+                result_bits: 64,
+                narrow_bits: 0,
+            })
+        }
         "minusWord#" => generic_binary(signature, false, IntegerKind::Sub),
+        "subIntC#"
+            if signature.arguments == [int_rep(64), int_rep(64)]
+                && returns_exact(signature, &[int_rep(64), int_rep(64)]) =>
+        {
+            Some(IntegerOperation {
+                kind: IntegerKind::SubIntC,
+                signed: true,
+                bits: 64,
+                result_bits: 64,
+                narrow_bits: 0,
+            })
+        }
         "subWordC#"
             if signature.arguments == [word_rep(64), word_rep(64)]
                 && returns_exact(signature, &[word_rep(64), int_rep(64)]) =>
@@ -484,6 +567,7 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "int8ToWord8#" => convert_between(signature, true, 8, false, 8),
         "word8ToInt8#" => convert_between(signature, false, 8, true, 8),
         "int32ToInt#" => convert_between(signature, true, 32, true, 64),
+        "intToInt32#" => convert_between(signature, true, 64, true, 32),
         "int64ToInt#" => convert_between(signature, true, 64, true, 64),
         "intToInt64#" => convert_between(signature, true, 64, true, 64),
         "int64ToWord64#" => convert_between(signature, true, 64, false, 64),
@@ -585,6 +669,12 @@ pub(super) fn recognize_operation(
     if let Some(operation) = super::wide_words::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::WideWord(operation));
     }
+    if super::floating::recognize_decode_double_int64(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::DecodeDoubleInt64);
+    }
+    if super::lifetime::recognize_touch(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::Touch);
+    }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
         && signature.arguments == [RuntimeRep::Float(64)]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -677,6 +767,8 @@ pub(super) enum PrimitiveOperation {
     Array(super::arrays::ArrayOperation),
     ByteArray(super::byte_arrays::ByteOperation),
     Formatting(super::formatting::FormattingOperation),
+    DecodeDoubleInt64,
+    Touch,
     DoubleToInt,
     IndexCharOffAddr,
     CopyAddrToByteArray,
@@ -722,8 +814,25 @@ pub(super) fn emit_operation(
         PrimitiveOperation::Address(super::addresses::AddressOperation::ReadWord8) => {
             super::addresses::emit_read_word8(builder, pipeline, vmctx, bytes, arguments).map(Some)
         }
+        PrimitiveOperation::Address(super::addresses::AddressOperation::ReadInt8) => {
+            super::addresses::emit_read_int8(builder, pipeline, vmctx, bytes, arguments).map(Some)
+        }
+        PrimitiveOperation::Address(super::addresses::AddressOperation::ReadWord32) => {
+            super::addresses::emit_read_word32(builder, pipeline, vmctx, bytes, arguments).map(Some)
+        }
+        PrimitiveOperation::Address(super::addresses::AddressOperation::ReadAddress) => {
+            super::addresses::emit_read_address(builder, pipeline, vmctx, bytes, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Address(super::addresses::AddressOperation::ReadWideChar) => {
+            super::addresses::emit_read_wide_char(builder, pipeline, vmctx, bytes, arguments)
+                .map(Some)
+        }
         PrimitiveOperation::Address(super::addresses::AddressOperation::WriteWord8) => {
             super::addresses::emit_write_word8(builder, pipeline, vmctx, arguments).map(Some)
+        }
+        PrimitiveOperation::Address(super::addresses::AddressOperation::WriteWideChar) => {
+            super::addresses::emit_write_wide_char(builder, pipeline, vmctx, arguments).map(Some)
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Contents) => {
             super::byte_arrays::emit_byte_array_contents(
@@ -944,6 +1053,12 @@ pub(super) fn emit_operation(
         PrimitiveOperation::WideWord(operation) => {
             super::wide_words::emit(operation, builder, pipeline, vmctx, arguments).map(Some)
         }
+        PrimitiveOperation::DecodeDoubleInt64 => {
+            super::floating::emit_decode_double_int64(builder, pipeline, arguments[0]).map(Some)
+        }
+        PrimitiveOperation::Touch => {
+            super::lifetime::emit_touch(builder, pipeline, arguments[0]).map(Some)
+        }
         PrimitiveOperation::Floating(operation) => Ok(Some(super::floating::FloatingFamily::emit(
             operation, builder, arguments,
         ))),
@@ -968,7 +1083,43 @@ impl ScalarFamily for IntegerFamily {
         let result_ty = integer_type(operation.result_bits);
         let value = match operation.kind {
             IntegerKind::Add => builder.ins().iadd(arguments[0], arguments[1]),
+            IntegerKind::AddIntC => {
+                let sum = builder.ins().iadd(arguments[0], arguments[1]);
+                // Signed addition overflows exactly when both operands have the
+                // opposite sign from the wrapped result.
+                let left_changed = builder.ins().bxor(arguments[0], sum);
+                let right_changed = builder.ins().bxor(arguments[1], sum);
+                let changed = builder.ins().band(left_changed, right_changed);
+                let zero = builder.ins().iconst(ir::types::I64, 0);
+                let overflow =
+                    builder
+                        .ins()
+                        .icmp(ir::condcodes::IntCC::SignedLessThan, changed, zero);
+                return vec![sum, builder.ins().uextend(ir::types::I64, overflow)];
+            }
+            IntegerKind::AddWordC => {
+                let sum = builder.ins().iadd(arguments[0], arguments[1]);
+                let carry =
+                    builder
+                        .ins()
+                        .icmp(ir::condcodes::IntCC::UnsignedLessThan, sum, arguments[0]);
+                return vec![sum, builder.ins().uextend(ir::types::I64, carry)];
+            }
             IntegerKind::Sub => builder.ins().isub(arguments[0], arguments[1]),
+            IntegerKind::SubIntC => {
+                let difference = builder.ins().isub(arguments[0], arguments[1]);
+                // Signed subtraction overflows when the operands differ in
+                // sign and the wrapped result differs in sign from the left.
+                let operands_differ = builder.ins().bxor(arguments[0], arguments[1]);
+                let left_changed = builder.ins().bxor(arguments[0], difference);
+                let changed = builder.ins().band(operands_differ, left_changed);
+                let zero = builder.ins().iconst(ir::types::I64, 0);
+                let overflow =
+                    builder
+                        .ins()
+                        .icmp(ir::condcodes::IntCC::SignedLessThan, changed, zero);
+                return vec![difference, builder.ins().uextend(ir::types::I64, overflow)];
+            }
             IntegerKind::SubWordC => {
                 let difference = builder.ins().isub(arguments[0], arguments[1]);
                 let borrowed = builder.ins().icmp(
@@ -1200,6 +1351,24 @@ mod tests {
                 sig(vec![Word(64), Word(64)], vec![Word(64)]),
             ),
             (
+                "neChar#",
+                sig(vec![Word(64), Word(64)], vec![Int(64)]),
+                sig(vec![Word(64), Int(64)], vec![Int(64)]),
+                sig(vec![Word(64), Word(64)], vec![Word(64)]),
+            ),
+            (
+                "leChar#",
+                sig(vec![Word(64), Word(64)], vec![Int(64)]),
+                sig(vec![Word(64), Int(64)], vec![Int(64)]),
+                sig(vec![Word(64), Word(64)], vec![Word(64)]),
+            ),
+            (
+                "gtChar#",
+                sig(vec![Word(64), Word(64)], vec![Int(64)]),
+                sig(vec![Word(64), Int(64)], vec![Int(64)]),
+                sig(vec![Word(64), Word(64)], vec![Word(64)]),
+            ),
+            (
                 "clz8#",
                 sig(vec![Word(64)], vec![Word(64)]),
                 sig(vec![Word(8)], vec![Word(64)]),
@@ -1252,6 +1421,40 @@ mod tests {
             assert!(matches!(
                 equal,
                 tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value)) if value == expected
+            ));
+        }
+
+        for (name, left, right, expected) in [
+            ("neChar#", 65, 65, 0),
+            ("neChar#", 65, 66, 1),
+            ("gtChar#", 66, 65, 1),
+            ("gtChar#", 65, 65, 0),
+            ("gtChar#", 65, 66, 0),
+        ] {
+            let comparison = run_scalar(
+                name,
+                vec![RuntimeRep::Word(64); 2],
+                RuntimeRep::Int(64),
+                vec![word(64, left), word(64, right)],
+            );
+            assert!(matches!(
+                comparison,
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))
+                    if value == expected
+            ));
+        }
+
+        for (left, right, expected) in [(65, 66, 1), (65, 65, 1), (66, 65, 0)] {
+            let less_or_equal = run_scalar(
+                "leChar#",
+                vec![RuntimeRep::Word(64); 2],
+                RuntimeRep::Int(64),
+                vec![word(64, left), word(64, right)],
+            );
+            assert!(matches!(
+                less_or_equal,
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))
+                    if value == expected
             ));
         }
 
@@ -1355,6 +1558,197 @@ mod tests {
 
         let fabricated_width = sig(vec![RuntimeRep::Int(8); 2], vec![RuntimeRep::Int(8)]);
         assert!(IntegerFamily::recognize(&identity, &fabricated_width).is_none());
+    }
+
+    #[test]
+    fn int_to_int32_requires_exact_signature_and_truncates() {
+        use RuntimeRep::*;
+
+        let identity = OperationIdentity::PrimOp("intToInt32#".into());
+        let accepted = sig(vec![Int(64)], vec![Int(32)]);
+        assert!(IntegerFamily::recognize(&identity, &accepted).is_some());
+        for rejected in [
+            sig(vec![Int(32)], vec![Int(32)]),
+            sig(vec![Int(64)], vec![Int(64)]),
+            sig(vec![Int(64)], vec![Word(32)]),
+            Signature {
+                arguments: vec![Int(64)],
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            assert!(IntegerFamily::recognize(&identity, &rejected).is_none());
+        }
+
+        for (input, expected) in [
+            (-1, -1),
+            (0x1_0000_0001, 1),
+            (0x8000_0000, i64::from(i32::MIN)),
+        ] {
+            let result = run_scalar("intToInt32#", vec![Int(64)], Int(32), vec![int(64, input)]);
+            assert!(matches!(
+                result,
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))
+                    if value == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn add_word_c_requires_exact_signature_and_reports_unsigned_carry() {
+        use RuntimeRep::*;
+
+        let identity = OperationIdentity::PrimOp("addWordC#".into());
+        let accepted = sig(vec![Word(64), Word(64)], vec![Word(64), Int(64)]);
+        assert!(matches!(
+            IntegerFamily::recognize(&identity, &accepted),
+            Some(IntegerOperation {
+                kind: IntegerKind::AddWordC,
+                ..
+            })
+        ));
+        for rejected in [
+            sig(vec![Int(64), Word(64)], vec![Word(64), Int(64)]),
+            sig(vec![Word(64), Word(64)], vec![Word(64)]),
+            sig(vec![Word(64), Word(64)], vec![Word(64), Word(64)]),
+            Signature {
+                arguments: vec![Word(64), Word(64)],
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            assert!(IntegerFamily::recognize(&identity, &rejected).is_none());
+        }
+
+        for (left, right, sum, carry) in [
+            (0, 0, 0, 0),
+            (u64::MAX - 1, 1, u64::MAX, 0),
+            (u64::MAX, 1, 0, 1),
+            (u64::MAX, u64::MAX, u64::MAX - 1, 1),
+        ] {
+            let values = run_tuple_result(
+                "addWordC#",
+                vec![Word(64), Word(64)],
+                [Word(64), Int(64)],
+                vec![word(64, left), word(64, right)],
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    values.as_slice(),
+                    [
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(actual_sum)),
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_carry)),
+                    ] if *actual_sum == sum && *actual_carry == carry
+                ),
+                "addWordC#({left}, {right}) returned {values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_int_c_requires_exact_signature_and_reports_signed_overflow() {
+        use RuntimeRep::*;
+
+        let identity = OperationIdentity::PrimOp("addIntC#".into());
+        let accepted = sig(vec![Int(64), Int(64)], vec![Int(64), Int(64)]);
+        assert!(matches!(
+            IntegerFamily::recognize(&identity, &accepted),
+            Some(IntegerOperation {
+                kind: IntegerKind::AddIntC,
+                ..
+            })
+        ));
+        for rejected in [
+            sig(vec![Word(64), Int(64)], vec![Int(64), Int(64)]),
+            sig(vec![Int(64), Int(64)], vec![Int(64)]),
+            sig(vec![Int(64), Int(64)], vec![Int(64), Word(64)]),
+            Signature {
+                arguments: vec![Int(64), Int(64)],
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            assert!(IntegerFamily::recognize(&identity, &rejected).is_none());
+        }
+
+        for (left, right) in [
+            (i64::MAX, 1),
+            (i64::MIN, -1),
+            (i64::MAX, i64::MIN),
+            (-41, 17),
+            (0, 0),
+        ] {
+            let (sum, overflow) = left.overflowing_add(right);
+            let values = run_tuple_result(
+                "addIntC#",
+                vec![Int(64), Int(64)],
+                [Int(64), Int(64)],
+                vec![int(64, left), int(64, right)],
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    values.as_slice(),
+                    [
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_sum)),
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_overflow)),
+                    ] if *actual_sum == sum && *actual_overflow == overflow as i64
+                ),
+                "addIntC#({left}, {right}) returned {values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sub_int_c_requires_exact_signature_and_reports_signed_overflow() {
+        use RuntimeRep::*;
+
+        let identity = OperationIdentity::PrimOp("subIntC#".into());
+        let accepted = sig(vec![Int(64), Int(64)], vec![Int(64), Int(64)]);
+        assert!(matches!(
+            IntegerFamily::recognize(&identity, &accepted),
+            Some(IntegerOperation {
+                kind: IntegerKind::SubIntC,
+                ..
+            })
+        ));
+        for rejected in [
+            sig(vec![Word(64), Int(64)], vec![Int(64), Int(64)]),
+            sig(vec![Int(64), Int(64)], vec![Int(64)]),
+            sig(vec![Int(64), Int(64)], vec![Int(64), Word(64)]),
+            Signature {
+                arguments: vec![Int(64), Int(64)],
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            assert!(IntegerFamily::recognize(&identity, &rejected).is_none());
+        }
+
+        for (left, right) in [
+            (i64::MIN, 1),
+            (i64::MAX, -1),
+            (i64::MAX, i64::MIN),
+            (-41, 17),
+            (17, -41),
+            (0, 0),
+        ] {
+            let (difference, overflow) = left.overflowing_sub(right);
+            let values = run_tuple_result(
+                "subIntC#",
+                vec![Int(64), Int(64)],
+                [Int(64), Int(64)],
+                vec![int(64, left), int(64, right)],
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    values.as_slice(),
+                    [
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_difference)),
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_overflow)),
+                    ] if *actual_difference == difference && *actual_overflow == overflow as i64
+                ),
+                "subIntC#({left}, {right}) returned {values:?}"
+            );
+        }
     }
 
     #[test]

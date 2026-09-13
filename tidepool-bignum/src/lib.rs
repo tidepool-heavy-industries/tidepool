@@ -50,18 +50,15 @@ fn scale_pow2(mut x: f64, e: i64) -> f64 {
 }
 
 /// `decodeDouble_Int64#`: decompose a `Double` into `(mantissa, exponent)`
-/// such that `mantissa * 2^exponent == d`, in GHC's CANONICAL form — for a
-/// nonzero finite `d`, `2^52 <= |mantissa| < 2^53` (the raw 52-bit fraction
-/// field plus the implicit leading 1 bit, NOT reduced by trailing zeros; GHC's
-/// own `decodeDouble_Int64#` does not perform that reduction). The JIT and the
-/// tree-walker both call this — it is THE numeric policy for that primop, not
-/// an implementation each backend happens to agree on.
+/// such that `mantissa * 2^exponent == d` for finite values, in GHC's raw IEEE
+/// form. A nonzero exponent field, including infinity and NaN, uses the raw
+/// 52-bit fraction plus the implicit leading bit. Subnormals are normalized to
+/// a 53-bit significand with a correspondingly reduced exponent. GHC does not
+/// remove trailing zeros or invent exceptional-value sentinels. This is the
+/// shared numeric owner consumed by native primitive adapters.
 pub fn decode_double_int64(d: f64) -> (i64, i64) {
-    if d == 0.0 || d.is_nan() {
+    if d == 0.0 {
         return (0, 0);
-    }
-    if d.is_infinite() {
-        return (if d > 0.0 { 1 } else { -1 }, 0);
     }
     let bits = d.to_bits();
     let sign: i64 = if bits >> 63 == 0 { 1 } else { -1 };
@@ -72,7 +69,8 @@ pub fn decode_double_int64(d: f64) -> (i64, i64) {
         let shift = raw_man.leading_zeros() - 11;
         (raw_man << shift, 1 - 1023 - 52 - shift as i32)
     } else {
-        // normal: implicit leading 1
+        // Every nonzero exponent field, including infinity and NaN, receives
+        // the implicit leading bit in GHC's raw IEEE mapping.
         (raw_man | (1i64 << 52), raw_exp - 1023 - 52)
     };
     (sign * man, exp as i64)
@@ -244,6 +242,24 @@ mod tests {
             );
         }
         assert_eq!(decode_double_int64(-0.0), (0, 0));
+    }
+
+    #[test]
+    fn decode_double_int64_matches_pinned_ghc_ieee_patterns() {
+        for (bits, expected) in [
+            (0x0000_0000_0000_0000, (0, 0)),
+            (0x8000_0000_0000_0000, (0, 0)),
+            (0x3ff0_0000_0000_0000, (1_i64 << 52, -52)),
+            (0xbff0_0000_0000_0000, (-(1_i64 << 52), -52)),
+            (0x0000_0000_0000_0001, (1_i64 << 52, -1126)),
+            (0x7fef_ffff_ffff_ffff, ((1_i64 << 53) - 1, 971)),
+            (0x7ff0_0000_0000_0000, (1_i64 << 52, 972)),
+            (0xfff0_0000_0000_0000, (-(1_i64 << 52), 972)),
+            (0x7ff8_0000_0000_0001, (0x0018_0000_0000_0001, 972)),
+            (0xfff8_0000_0000_0abc, (-0x0018_0000_0000_0abc, 972)),
+        ] {
+            assert_eq!(decode_double_int64(f64::from_bits(bits)), expected);
+        }
     }
 
     #[test]

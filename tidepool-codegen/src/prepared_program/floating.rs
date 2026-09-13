@@ -1,8 +1,11 @@
 //! Pure floating operations retain GHC identities and exact representations.
 
 use super::primitives::ScalarFamily;
-use cranelift_codegen::ir::{condcodes::FloatCC, types, InstBuilder, Value};
+use cranelift_codegen::ir::{
+    self, condcodes::FloatCC, types, AbiParam, InstBuilder, MemFlags, Value,
+};
 use cranelift_frontend::FunctionBuilder;
+use cranelift_module::{Linkage, Module};
 use tidepool_repr::execution_schema::{
     ForeignConvention, OperationIdentity, ResultContract, RuntimeRep, Signature,
 };
@@ -12,6 +15,59 @@ fn returns_exact(signature: &Signature, expected: &[RuntimeRep]) -> bool {
         ResultContract::Returns(reps) => reps == expected,
         ResultContract::NoSuccess => false,
     }
+}
+
+pub(super) const DECODE_DOUBLE_INT64_HOST: &str = "prepared_decode_double_int64";
+
+pub(super) fn recognize_decode_double_int64(
+    identity: &OperationIdentity,
+    signature: &Signature,
+) -> bool {
+    matches!(identity, OperationIdentity::PrimOp(name) if name == "decodeDouble_Int64#")
+        && signature.arguments == [RuntimeRep::Float(64)]
+        && returns_exact(signature, &[RuntimeRep::Int(64), RuntimeRep::Int(64)])
+}
+
+/// Decode one bit-exact Double into GHC's `(mantissa, exponent)` result.
+///
+/// # Safety
+/// `output` points to two writable `i64` words in the generated caller's frame.
+pub(super) unsafe extern "C" fn prepared_decode_double_int64(bits: u64, output: *mut i64) {
+    let (mantissa, exponent) = tidepool_bignum::decode_double_int64(f64::from_bits(bits));
+    unsafe {
+        output.write(mantissa);
+        output.add(1).write(exponent);
+    }
+}
+
+pub(super) fn emit_decode_double_int64(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    argument: Value,
+) -> Result<Vec<Value>, super::CompileError> {
+    let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
+    signature.params = vec![AbiParam::new(types::I64), AbiParam::new(types::I64)];
+    let host = pipeline
+        .module
+        .declare_function(DECODE_DOUBLE_INT64_HOST, Linkage::Import, &signature)
+        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
+    let host = pipeline.module.declare_func_in_func(host, builder.func);
+    let slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        16,
+        3,
+    ));
+    let output = builder.ins().stack_addr(types::I64, slot, 0);
+    let bits = builder.ins().bitcast(types::I64, MemFlags::new(), argument);
+    builder.ins().call(host, &[bits, output]);
+    Ok(vec![
+        builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), output, 0),
+        builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), output, 8),
+    ])
 }
 
 pub(super) struct FloatingFamily;
@@ -393,5 +449,62 @@ mod tests {
             )
             .is_none());
         }
+    }
+
+    #[test]
+    fn decode_double_int64_real_adapter_matches_pinned_ieee_results() {
+        for (bits, expected) in [
+            (0x3ff0_0000_0000_0000, (1_i64 << 52, -52)),
+            (0x0000_0000_0000_0001, (1_i64 << 52, -1126)),
+            (0x7ff0_0000_0000_0000, (1_i64 << 52, 972)),
+            (0x7ff8_0000_0000_0001, (0x0018_0000_0000_0001, 972)),
+            (0xfff8_0000_0000_0abc, (-0x0018_0000_0000_0abc, 972)),
+        ] {
+            let values = run(
+                "decodeDouble_Int64#",
+                vec![RuntimeRep::Float(64)],
+                vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
+                vec![float(64, bits)],
+            );
+            assert!(matches!(values.as_slice(),
+                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(mantissa)),
+                 tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(exponent))]
+                    if (*mantissa, *exponent) == expected));
+        }
+    }
+
+    #[test]
+    fn decode_double_int64_requires_exact_identity_and_signature() {
+        let valid = Signature {
+            arguments: vec![RuntimeRep::Float(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64), RuntimeRep::Int(64)]),
+        };
+        assert!(recognize_decode_double_int64(
+            &OperationIdentity::PrimOp("decodeDouble_Int64#".into()),
+            &valid,
+        ));
+        for signature in [
+            Signature {
+                arguments: vec![RuntimeRep::Float(32)],
+                ..valid.clone()
+            },
+            Signature {
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+                ..valid.clone()
+            },
+            Signature {
+                results: ResultContract::NoSuccess,
+                ..valid.clone()
+            },
+        ] {
+            assert!(!recognize_decode_double_int64(
+                &OperationIdentity::PrimOp("decodeDouble_Int64#".into()),
+                &signature,
+            ));
+        }
+        assert!(!recognize_decode_double_int64(
+            &OperationIdentity::PrimOp("decodeDouble_Int64#lookalike".into()),
+            &valid,
+        ));
     }
 }

@@ -47,13 +47,30 @@ impl PinnedBytes {
     /// A complete span from one pinned allocation. This also admits an empty
     /// span at its end; unknown addresses never become raw slices.
     pub(super) fn read_range(&self, address: usize, length: usize) -> Option<&[u8]> {
+        self.read_range_offset(address, 0, length)
+    }
+
+    /// Resolve a signed byte offset only within the pinned allocation owning
+    /// the original address. The offset cannot acquire authority over a
+    /// neighboring allocation, even when its numeric target lands inside one.
+    pub(super) fn read_range_offset(
+        &self,
+        address: usize,
+        offset: i64,
+        length: usize,
+    ) -> Option<&[u8]> {
         let candidate = self
             .by_address
             .partition_point(|storage| storage.as_ptr() as usize <= address)
             .checked_sub(1)?;
         let storage = &self.by_address[candidate];
-        let offset = address.checked_sub(storage.as_ptr() as usize)?;
-        storage.get(offset..offset.checked_add(length)?)
+        let base = storage.as_ptr() as usize;
+        if address.checked_sub(base)? > storage.len() {
+            return None;
+        }
+        let target = address.checked_add_signed(isize::try_from(offset).ok()?)?;
+        let target_offset = target.checked_sub(base)?;
+        storage.get(target_offset..target_offset.checked_add(length)?)
     }
 
     /// Permit an interior/one-past address with a signed offset only when the
@@ -61,17 +78,8 @@ impl PinnedBytes {
     /// slice, not through the untrusted numeric address. Backing storage includes
     /// GHC's implicit terminal NUL; logical wire bytes do not.
     pub(super) fn read_byte(&self, address: usize, index: i64) -> Option<u8> {
-        let target = address.checked_add_signed(isize::try_from(index).ok()?)?;
-        let candidate = self
-            .by_address
-            .partition_point(|storage| storage.as_ptr() as usize <= target)
-            .checked_sub(1)?;
-        let storage = &self.by_address[candidate];
-        let base = storage.as_ptr() as usize;
-        if address.checked_sub(base)? > storage.len() {
-            return None;
-        }
-        storage.get(target.checked_sub(base)?).copied()
+        self.read_range_offset(address, index, 1)
+            .and_then(|bytes| bytes.first().copied())
     }
 }
 
@@ -464,6 +472,36 @@ mod tests {
         assert_eq!(pool.read_range(base + 4, 0), None);
         assert_eq!(pool.read_range(0, 0), None);
         assert_eq!(pool.read_range(usize::MAX, 1), None);
+    }
+
+    #[test]
+    fn signed_ranges_retain_the_original_pinned_owner() {
+        let first: Arc<[u8]> = Arc::from(&b"abcd"[..]);
+        let second: Arc<[u8]> = Arc::from(&b"wxyz"[..]);
+        let first_address = first.as_ptr() as usize;
+        let second_address = second.as_ptr() as usize;
+        let pool = PinnedBytes::new(BTreeMap::from([
+            (b"first".to_vec(), first),
+            (b"second".to_vec(), second),
+        ]));
+
+        assert_eq!(
+            pool.read_range_offset(first_address + 4, -4, 4),
+            Some(&b"abcd"[..])
+        );
+        assert_eq!(
+            pool.read_range_offset(first_address + 2, -1, 3),
+            Some(&b"bcd"[..])
+        );
+        assert_eq!(pool.read_range_offset(first_address + 2, -3, 1), None);
+        assert_eq!(pool.read_range_offset(first_address + 2, i64::MAX, 1), None);
+
+        let cross_owner_offset =
+            i64::try_from(second_address as i128 - first_address as i128).unwrap();
+        assert_eq!(
+            pool.read_range_offset(first_address, cross_owner_offset, 1),
+            None
+        );
     }
 
     #[test]

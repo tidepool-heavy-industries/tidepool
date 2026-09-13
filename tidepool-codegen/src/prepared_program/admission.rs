@@ -1,9 +1,15 @@
 use super::Unsupported;
 use std::collections::BTreeMap;
 use tidepool_repr::execution_schema::{
-    Atom, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, PreparedProgram,
-    ResultContract, RuntimeRep, ValueId, ValueRef,
+    Atom, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, OperationDecl,
+    PreparedProgram, ResultContract, RuntimeRep, Signature, ValueId, ValueRef,
 };
+
+/// Whether one validated operation declaration has an exact native lowering.
+pub fn supports_operation(declaration: &OperationDecl, signature: &Signature) -> bool {
+    super::primitives::recognize_operation(declaration, signature).is_some()
+        || super::lifetime::callback_signature(declaration, signature).is_some()
+}
 
 fn items<T>(group: &Group<T>) -> &[T] {
     match group {
@@ -113,17 +119,27 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
 
     let owners = expression_owners(program);
     for (node, frame) in program.expressions().nodes.iter().enumerate() {
+        if let ExprFrame::Operation { operation, .. } = frame {
+            if let Some(declaration) = program.operations().get(operation.0 as usize) {
+                if let Some(signature) = program.signatures().get(declaration.signature.0 as usize)
+                {
+                    if !supports_operation(declaration, signature) {
+                        return Err(Unsupported::Operation {
+                            binding: owners[node].unwrap_or(program.entry()),
+                            node,
+                            identity: declaration.identity.clone(),
+                            signature: signature.clone(),
+                        });
+                    }
+                }
+            }
+        }
         let rejected = match frame {
             ExprFrame::Operation { operation, .. } => {
                 match program.operations().get(operation.0 as usize) {
                     Some(declaration) => {
                         match program.signatures().get(declaration.signature.0 as usize) {
-                            Some(signature) => {
-                                super::primitives::recognize_operation(declaration, signature)
-                                    .is_none()
-                                    && super::lifetime::callback_signature(declaration, signature)
-                                        .is_none()
-                            }
+                            Some(signature) => !supports_operation(declaration, signature),
                             None => true,
                         }
                     }
@@ -551,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_reports_the_nested_binding_owning_an_operation() {
+    fn admission_reports_the_nested_binding_operation_identity_and_signature() {
         let bytes = wire(
             vec![sig(&[], &[RuntimeRep::Int(64)])],
             vec![],
@@ -566,9 +582,16 @@ mod tests {
         );
         assert_eq!(
             admit_program(&linked(bytes)),
-            Err(Unsupported::Expression {
+            Err(Unsupported::Operation {
                 binding: ValueId(1),
-                node: 0
+                node: 0,
+                identity: tidepool_repr::execution_schema::OperationIdentity::PrimOp("op".into()),
+                signature: tidepool_repr::execution_schema::Signature {
+                    arguments: vec![],
+                    results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                        RuntimeRep::Int(64)
+                    ]),
+                },
             })
         );
     }

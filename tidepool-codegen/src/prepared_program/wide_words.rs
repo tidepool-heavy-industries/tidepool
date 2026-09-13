@@ -1,7 +1,9 @@
-//! Exact native-word operations: wide results remain two Word64 values, never
-//! an admitted 128-bit schema representation. Scalar results are high/low for
-//! add/multiply, quotient/remainder for division. Division is noncollecting;
-//! its host wrapper must record failure before publishing either result slot.
+//! Exact native-word operations: unsigned wide results remain two Word64
+//! values, never an admitted 128-bit schema representation. `timesInt2#`
+//! returns `(isHighNeeded, high, low)` as three Int64 values. Other scalar
+//! results are high/low for add/multiply and quotient/remainder for division.
+//! Division is noncollecting; its host wrapper must record failure before
+//! publishing either result slot.
 
 use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
 use cranelift_codegen::ir::{self, types, InstBuilder, MemFlags, Value};
@@ -12,6 +14,7 @@ use tidepool_repr::execution_schema::{OperationIdentity, ResultContract, Runtime
 pub(super) enum WideWordOperation {
     Plus2,
     Times2,
+    TimesInt2,
     QuotRem2,
 }
 
@@ -19,13 +22,17 @@ pub(super) fn recognize(
     identity: &OperationIdentity,
     signature: &Signature,
 ) -> Option<WideWordOperation> {
-    use RuntimeRep::Word;
+    use RuntimeRep::{Int, Word};
     let OperationIdentity::PrimOp(name) = identity else {
         return None;
     };
     let operation = match name.as_str() {
         "plusWord2#" if signature.arguments == [Word(64), Word(64)] => WideWordOperation::Plus2,
         "timesWord2#" if signature.arguments == [Word(64), Word(64)] => WideWordOperation::Times2,
+        "timesInt2#" if signature.arguments == [Int(64), Int(64)] => {
+            return (signature.results == ResultContract::Returns(vec![Int(64), Int(64), Int(64)]))
+                .then_some(WideWordOperation::TimesInt2);
+        }
         "quotRemWord2#" if signature.arguments == [Word(64), Word(64), Word(64)] => {
             WideWordOperation::QuotRem2
         }
@@ -113,6 +120,16 @@ pub(super) fn emit(
             let low = builder.ins().imul(arguments[0], arguments[1]);
             vec![high, low]
         }
+        WideWordOperation::TimesInt2 => {
+            let high = builder.ins().smulhi(arguments[0], arguments[1]);
+            let low = builder.ins().imul(arguments[0], arguments[1]);
+            let low_sign = builder.ins().sshr_imm(low, 63);
+            let high_needed = builder
+                .ins()
+                .icmp(ir::condcodes::IntCC::NotEqual, high, low_sign);
+            let high_needed = builder.ins().uextend(types::I64, high_needed);
+            vec![high_needed, high, low]
+        }
         WideWordOperation::QuotRem2 => {
             let host =
                 super::arrays::declare_host(builder, pipeline, "prepared_quot_rem_word2", 5)?;
@@ -149,6 +166,13 @@ mod tests {
 
     fn word(value: u64) -> Atom {
         Atom::Scalar(ScalarLiteral::Word {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })
+    }
+
+    fn int(value: i64) -> Atom {
+        Atom::Scalar(ScalarLiteral::Int {
             bits: 64,
             bytes: value.to_be_bytes().to_vec(),
         })
@@ -198,6 +222,17 @@ mod tests {
         (*high, *low)
     }
 
+    fn int_triple(values: Vec<tidepool_bridge::Value>) -> (i64, i64, i64) {
+        use tidepool_bridge::Value;
+        use tidepool_repr::Literal;
+        let [Value::Lit(Literal::LitInt(high_needed)), Value::Lit(Literal::LitInt(high)), Value::Lit(Literal::LitInt(low))] =
+            values.as_slice()
+        else {
+            panic!("expected three Int64 results: {values:?}");
+        };
+        (*high_needed, *high, *low)
+    }
+
     #[test]
     fn wide_word_exact_signatures() {
         let w = RuntimeRep::Word(64);
@@ -239,6 +274,71 @@ mod tests {
                     }
                 ),
                 None
+            );
+        }
+    }
+
+    #[test]
+    fn times_int2_requires_exact_identity_and_signature() {
+        let i = RuntimeRep::Int(64);
+        let exact = Signature {
+            arguments: vec![i, i],
+            results: ResultContract::Returns(vec![i, i, i]),
+        };
+        assert_eq!(
+            recognize(&OperationIdentity::PrimOp("timesInt2#".into()), &exact),
+            Some(WideWordOperation::TimesInt2)
+        );
+        for signature in [
+            Signature {
+                arguments: vec![i],
+                ..exact.clone()
+            },
+            Signature {
+                results: ResultContract::Returns(vec![i, i]),
+                ..exact.clone()
+            },
+            Signature {
+                results: ResultContract::NoSuccess,
+                ..exact.clone()
+            },
+        ] {
+            assert_eq!(
+                recognize(&OperationIdentity::PrimOp("timesInt2#".into()), &signature),
+                None
+            );
+        }
+        assert_eq!(
+            recognize(&OperationIdentity::PrimOp("timesInt2".into()), &exact),
+            None
+        );
+    }
+
+    #[test]
+    fn times_int2_real_adapter_uses_ghc_result_order() {
+        let i = RuntimeRep::Int(64);
+        for (left, right) in [
+            (-7_i64, 9_i64),
+            (i64::MAX, 2),
+            (i64::MIN, -1),
+            (i64::MIN, i64::MIN),
+        ] {
+            let product = i128::from(left) * i128::from(right);
+            let low = product as i64;
+            let high = (product >> 64) as i64;
+            let high_needed = i64::from(high != (low >> 63));
+            assert_eq!(
+                int_triple(
+                    run_operation(
+                        "timesInt2#",
+                        vec![i, i],
+                        vec![i, i, i],
+                        vec![int(left), int(right)]
+                    )
+                    .unwrap()
+                ),
+                (high_needed, high, low),
+                "{left} * {right}"
             );
         }
     }
