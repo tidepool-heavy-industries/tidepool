@@ -633,7 +633,8 @@ internOperation op signature = do
     StgFCallOp (Foreign.CCall (Foreign.CCallSpec
       (Foreign.StaticTarget _ label _ _) Foreign.CCallConv _)) _
       | unpackFS label == "rintDouble"
-      , operationSignature == Signature [FloatRep 64] [FloatRep 64] ->
+      , operationSignature == Signature [FloatRep 64] [FloatRep 64]
+          || operationSignature == Signature [FloatRep 64, VoidRep] [FloatRep 64] ->
           pure (Schema.IntrinsicIdentity "rintDouble" Schema.CCall)
     _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
   known <- gets operations

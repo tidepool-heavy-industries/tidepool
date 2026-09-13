@@ -69,6 +69,7 @@ projectProjectionContract modules = do
       verifySuiteCollisionRegression
       verifyVoidParameters program
       verifyUnboxedReturn program
+      verifyRintDoubleStateToken
       case projectPrepared context [] of
         Left (UnsupportedPreparedShape _) -> pure ()
         other -> ioError (userError ("empty program did not produce typed rejection: " <> show other))
@@ -490,6 +491,31 @@ verifyUnboxedReturn program = case
     signatureAt (SignatureId index) = programSignatures program !! fromIntegral index
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items
+
+verifyRintDoubleStateToken :: IO ()
+verifyRintDoubleStateToken = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/RintDouble.hs" ["test-prepared-stg"]
+  let identity = SymbolIdentity "main" "RintDouble" "value" "roundSimpleUp" Nothing
+      context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty identity
+  case projectPreparedTarget context (pprModules prepared) of
+    Left failure -> ioError (userError
+      ("state-bearing rintDouble projection failed: " <> show failure))
+    Right program -> case
+      [ signatureId
+      | OperationDecl (IntrinsicIdentity "rintDouble" CCall) signatureId
+          <- programOperations program
+      ] of
+      [signatureId] ->
+        let signature = programSignatures program !! fromIntegral (unSignatureId signatureId)
+        in unless (signature == Signature [FloatRep 64, VoidRep] [FloatRep 64])
+          (ioError (userError
+            ("state-bearing rintDouble signature changed: " <> show signature)))
+      signatures -> ioError (userError
+        ("expected one state-bearing rintDouble operation, got " <> show signatures))
+  where
+    unSignatureId (SignatureId value) = value
 
 topBindersForTest :: CgStgTopBinding -> [Id]
 topBindersForTest (StgTopStringLit binder _) = [binder]
