@@ -25,7 +25,7 @@ import Tidepool.FatIface (FatIfaceMissing, newFatIfaceCache)
 import Tidepool.PreparedStg
   (PreparedModule(..), RecoveredModuleFailure(..), prepareRecoveredBodies)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
-import Tidepool.PreparedBuiltins (wiredInErrorKind)
+import Tidepool.PreparedBuiltins (deferredFunction, wiredInErrorKind)
 
 data RecoveryFailure
   = MissingImplementation Name FatIfaceMissing
@@ -88,6 +88,7 @@ recoverPreparedClosure env context home = do
               nextGroups nextPrepared finalFailures
       lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder
         | Just _ <- wiredInErrorKind binder = pure (groups, dirty, failures)
+        | Just _ <- deferredFunction binder = pure (groups, dirty, failures)
         | maybe False (`Set.member` homeOwnersRef) (nameModule_maybe (varName binder)) =
             pure (groups, dirty, failures ++ [MissingHomeImplementation (varName binder)])
         | otherwise = do

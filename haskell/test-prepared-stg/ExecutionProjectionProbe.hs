@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Data.ByteString qualified as BS
+import DeferredFunctionProjectionTest (verifyDeferredFunctionProjection)
 import ExecutionProjectionTest (projectProjectionContract)
 import System.Environment (getArgs)
 import Tidepool.ExecutionEncode (encodeWireProgram)
@@ -13,6 +14,7 @@ import System.FilePath ((</>))
 main :: IO ()
 main = do
   root <- getCurrentDirectory
+  verifyDeferredFunctionProjection
   let fixtureDir = root </> "test-prepared-stg"
   result <- runPipelineSelected PreparedStg
     (fixtureDir </> "M3Vertical.hs") [fixtureDir]

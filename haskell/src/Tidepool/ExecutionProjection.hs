@@ -14,8 +14,9 @@ import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.List (find)
-import Data.Maybe (isNothing, listToMaybe)
-import Tidepool.PreparedBuiltins (wiredInErrorKind)
+import Data.Maybe (isJust, isNothing, listToMaybe)
+import Tidepool.PreparedBuiltins
+  ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -81,6 +82,7 @@ data ProjectionError
   | MissingPreparedEntry SymbolIdentity
   | MissingPreparedTop SymbolIdentity
   | UnboundPreparedInternal Text
+  | DeferredFunctionSignatureMismatch SymbolIdentity Signature (Maybe Signature)
   | UnsupportedPrimitiveCall Text Signature
   | UnsupportedForeignCall Text Signature
   deriving stock (Eq, Show)
@@ -197,9 +199,9 @@ preparedTargetReferences context modules =
 recoveryReferences :: ProjectionContext -> CgStgTopBinding -> [CgStgTopBinding]
 recoveryReferences context (StgTopLifted (StgRec pairs)) =
   [ StgTopLifted (StgNonRec binder rhs)
-  | (binder, rhs) <- pairs, not (registeredFormatting context binder) ]
+  | (binder, rhs) <- pairs, not (registeredReplacement context binder) ]
 recoveryReferences context binding
-  | any (registeredFormatting context) (topBinders binding) = []
+  | any (registeredReplacement context) (topBinders binding) = []
   | otherwise = [binding]
 
 formattingSpec :: ProjectionContext -> Id -> Either ProjectionError (Maybe FormattingSpec)
@@ -213,6 +215,10 @@ registeredFormatting :: ProjectionContext -> Id -> Bool
 registeredFormatting context binder = case formattingSpec context binder of
   Right (Just _) -> True
   _ -> False
+
+registeredReplacement :: ProjectionContext -> Id -> Bool
+registeredReplacement context binder =
+  registeredFormatting context binder || isJust (deferredFunction binder)
 
 selectPreparedTarget :: ProjectionContext -> [PreparedModule]
   -> (VarEnv SymbolIdentity, [PreparedModule])
@@ -245,7 +251,7 @@ selectPreparedTarget context modules =
     dependencies = Map.fromListWith (<>)
       [ (mappedTopIdentity binder, Set.fromList
           [ symbol
-          | unique <- if registeredFormatting context binder then [] else
+          | unique <- if registeredReplacement context binder then [] else
               nonDetEltsUniqSet (topBindingReferences modul topLevel single)
           , Just symbol <- [lookupUFM topUniqueIdentityMap unique]
           ])
@@ -396,8 +402,11 @@ projectTop (StgTopLifted (StgRec pairs)) = Recursive <$> mapM (uncurry projectTo
 projectTopPair :: Id -> CgStgRhs -> P TopBinding
 projectTopPair binder rhs = do
   symbol <- topIdentity binder
-  replacement <- formattingSpecFor binder
-  let project = maybe (projectRhs binder rhs) (\spec -> projectFormattingRhs spec rhs) replacement
+  formatting <- formattingSpecFor binder
+  let project = case deferredFunction binder of
+        Just deferred -> projectDeferredRhs binder deferred rhs
+        Nothing -> maybe (projectRhs binder rhs)
+          (\spec -> projectFormattingRhs spec rhs) formatting
   TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> project)
 
 formattingSpecFor :: Id -> P (Maybe FormattingSpec)
@@ -501,7 +510,7 @@ projectRhs binder (StgRhsClosure captures _ update parameters body resultType) =
   captureRefs <- mapM projectReference (dVarSetElems captures)
   parameterIds <- mapM bindValue parameters
   resultContract <- resultContractFor binder (length parameters) resultType
-  projectedBody <- projectExpr resultContract body
+  projectedBody <- projectBody resultContract resultType body
   case update of
     ReEntrant -> Function <$> (internSignature =<< signatureFor parameters resultContract)
       <*> pure parameterIds <*> pure captureRefs <*> pure projectedBody
@@ -513,6 +522,21 @@ projectRhs binder (StgRhsClosure captures _ update parameters body resultType) =
       pure (Thunk signature Schema.SingleEntry captureRefs projectedBody)
     JumpedTo -> failShape ("heap binding marked JumpedTo: " <> symbolText (idSymbol "value" binder))
 projectRhs _ (StgRhsCon _ con _ _ args _) = Constructor <$> internConstructor con <*> mapM projectArg args
+
+-- | A bottoming enclosing binding need not call a statically bottoming callee
+-- (a function parameter is the ordinary counterexample). Preserve that callee's
+-- concrete result convention, then discharge the enclosing no-success promise
+-- with an empty case. A returned value takes the typed integrity path, never a
+-- fabricated successful result. Runtime-polymorphic dead ends still require
+-- their own callee evidence; no representation is guessed for them.
+projectBody :: ResultContract -> Type -> CgStgExpr -> P Expr
+projectBody NoSuccess resultType body
+  | Just _ <- typePrimRep_maybe resultType = do
+      results <- Returns <$> repsForType resultType
+      expression <- projectExpr results body
+      binder <- freshValue
+      pure (Case expression binder results MultiValueCase [])
+projectBody expected _ body = projectExpr expected body
 
 projectExpr :: ResultContract -> CgStgExpr -> P Expr
 projectExpr expected (StgApp function args) = do
@@ -649,7 +673,7 @@ projectJoin identity binder (StgRhsClosure _ _ JumpedTo parameters body resultTy
   resultContract <- resultContractFor binder (length parameters) resultType
   JoinBinding identity <$> (internSignature =<< signatureFor parameters resultContract)
     <*> mapM bindValue parameters
-    <*> projectExpr resultContract body
+    <*> projectBody resultContract resultType body
 projectJoin _ binder _ = failShape
   ("let-no-escape binding lacks JumpedTo form: " <> symbolText (idSymbol "join" binder))
 
@@ -662,6 +686,8 @@ projectArg (StgLitArg literal) = projectLiteralAtom literal
 projectReference :: Id -> P ValueRef
 projectReference binder | Just kind <- wiredInErrorKind binder =
   Local <$> internWiredInError binder kind
+projectReference binder | Just deferred <- deferredFunction binder =
+  Local <$> deferredFunctionReference binder deferred
 projectReference binder = do
   known <- gets values
   case lookupVarEnv known binder of
@@ -677,6 +703,68 @@ projectReference binder = do
         Nothing -> case nullaryWorkerConstructor binder of
           Just con -> Local <$> internNullaryWorker binder con
           Nothing -> Global <$> internGlobal binder
+
+deferredFunctionReference :: Id -> DeferredFunction -> P ValueId
+deferredFunctionReference binder deferred = do
+  topNames <- gets topSymbols
+  tops <- gets topValues
+  case lookupVarEnv topNames binder of
+    Just symbol -> case Map.lookup symbol tops of
+      Just identity -> pure identity
+      Nothing -> lift (Left (MissingPreparedTop symbol))
+    Nothing -> internDeferredFunction binder deferred
+
+projectDeferredRhs :: Id -> DeferredFunction -> CgStgRhs -> P HeapRhs
+projectDeferredRhs binder deferred
+    (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
+  result <- resultContractFor binder (length parameters) resultType
+  actual <- signatureFor parameters result
+  requireDeferredSignature binder deferred (Just actual)
+  parameterIds <- mapM bindValue parameters
+  deferredFunctionRhs deferred parameterIds
+projectDeferredRhs binder deferred _ = do
+  requireDeferredSignature binder deferred Nothing
+  failShape "unreachable deferred function signature check"
+
+internDeferredFunction :: Id -> DeferredFunction -> P ValueId
+internDeferredFunction binder deferred = do
+  let symbol = idSymbol "value" binder
+  existing <- gets (Map.lookup symbol . implicitValues)
+  case existing of
+    Just identity -> pure identity
+    Nothing -> do
+      (actual, _) <- importedEntry binder
+      requireDeferredSignature binder deferred actual
+      identity <- freshValue
+      parameters <- mapM (const freshValue)
+        (signatureArguments (deferredSignature deferred))
+      rhs <- deferredFunctionRhs deferred parameters
+      modify' (\current -> current
+        { implicitValues = Map.insert symbol identity (implicitValues current)
+        , implicitTops = TopBinding symbol (HeapBinding identity rhs) : implicitTops current
+        })
+      pure identity
+
+requireDeferredSignature
+  :: Id -> DeferredFunction -> Maybe Signature -> P ()
+requireDeferredSignature binder deferred actual =
+  unless (actual == Just (deferredSignature deferred))
+    (lift (Left (DeferredFunctionSignatureMismatch (idSymbol "value" binder)
+      (deferredSignature deferred) actual)))
+
+deferredFunctionRhs :: DeferredFunction -> [ValueId] -> P HeapRhs
+deferredFunctionRhs deferred parameters = do
+  let signatureValue = deferredSignature deferred
+      arguments = zipWith deferredArgument
+        (signatureArguments signatureValue) parameters
+  signature <- internSignature signatureValue
+  operation <- internSyntheticOperation
+    (Schema.CapabilityIdentity (deferredCapability deferred)) signature
+  pure (Function signature parameters [] (Operation operation arguments))
+
+deferredArgument :: RuntimeRep -> ValueId -> Atom
+deferredArgument VoidRep _ = Void
+deferredArgument _ identity = Ref (Local identity)
 
 -- | Synthesized functions preserve bare references and partial application;
 -- failure occurs only upon saturation, through an ordinary operation body.

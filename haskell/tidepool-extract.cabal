@@ -168,7 +168,9 @@ test-suite execution-schema-projection
   type:             exitcode-stdio-1.0
   main-is:          ExecutionProjectionProbe.hs
   hs-source-dirs:   test-prepared-stg
-  other-modules:    ExecutionProjectionTest
+  other-modules:
+    DeferredFunctionProjectionTest
+    ExecutionProjectionTest
   build-depends:
     base >= 4.20 && < 5,
     bytestring,
@@ -176,6 +178,7 @@ test-suite execution-schema-projection
     directory,
     filepath,
     ghc >= 9.12 && < 9.13,
+    process,
     text,
     tidepool-extract-internal
   default-language: GHC2024
