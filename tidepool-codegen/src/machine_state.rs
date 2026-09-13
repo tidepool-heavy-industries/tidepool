@@ -652,7 +652,7 @@ impl MachineState {
         &self,
         encoded: usize,
     ) -> Result<i64, RuntimeError> {
-        use tidepool_heap::execution_descriptor::{ObjectKind, DescriptorState};
+        use tidepool_heap::execution_descriptor::{DescriptorState, ObjectKind};
         use tidepool_heap::managed_reference::{tag_valid, untag};
         let reference = untag(encoded) as *const usize;
         if reference.is_null() {
@@ -677,8 +677,15 @@ impl MachineState {
         if descriptor.kind() != ObjectKind::Constructor {
             return Err(RuntimeError::ExpectedConstructor);
         }
-        let tag = descriptor.constructor_tag().ok_or(RuntimeError::ExpectedConstructor)?;
-        if !tag_valid((encoded & 7) as u8, descriptor.kind(), DescriptorState::Live, Some(tag)) {
+        let tag = descriptor
+            .constructor_tag()
+            .ok_or(RuntimeError::ExpectedConstructor)?;
+        if !tag_valid(
+            (encoded & 7) as u8,
+            descriptor.kind(),
+            DescriptorState::Live,
+            Some(tag),
+        ) {
             return Err(RuntimeError::BadPointer);
         }
         Ok(i64::from(tag.get() - 1))
@@ -2150,6 +2157,123 @@ mod tests {
             Some(RuntimeError::RaisedException)
         );
         assert!(machine.prepared_exception.get().is_null());
+    }
+
+    fn prepared_tag_fixture(
+        family_tag: u32,
+    ) -> (
+        MachineState,
+        Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>,
+        usize,
+    ) {
+        use tidepool_heap::execution_descriptor::ObjectDescriptor;
+        use tidepool_repr::execution_schema::{testing, StorageLayout};
+
+        let descriptor = Arc::new(
+            ObjectDescriptor::constructor(
+                family_tag,
+                StorageLayout::for_reps(&testing::target(), &[]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let extent = descriptor.allocation_extent() as usize;
+        let machine = MachineState::new();
+        machine
+            .install_prepared_buffer(
+                vec![0_u64; extent.div_ceil(8)],
+                vec![Arc::clone(&descriptor)],
+            )
+            .unwrap();
+        let address = machine.gc_active_range().unwrap().0;
+        unsafe { descriptor.initialize_header(address) };
+        (machine, descriptor, address as usize)
+    }
+
+    #[test]
+    fn prepared_constructor_tag_uses_full_family_identity_with_raw_and_seven_evidence() {
+        for family_tag in [1_u32, 2, 6, 7, 8, 42] {
+            let (machine, descriptor, address) = prepared_tag_fixture(family_tag);
+            let expected = i64::from(family_tag - 1);
+            assert_eq!(
+                unsafe { machine.prepared_constructor_tag(address) },
+                Ok(expected)
+            );
+            assert_eq!(
+                unsafe { machine.prepared_constructor_tag(address | 7) },
+                Ok(expected)
+            );
+            assert_eq!(
+                unsafe {
+                    machine.prepared_constructor_tag(address | usize::from(descriptor.tag()))
+                },
+                Ok(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_constructor_tag_rejects_contradictory_low_bits_and_null() {
+        let (machine, _, address) = prepared_tag_fixture(2);
+        assert_eq!(
+            unsafe { machine.prepared_constructor_tag(address | 1) },
+            Err(RuntimeError::BadPointer)
+        );
+        let (machine, _, address) = prepared_tag_fixture(8);
+        assert_eq!(
+            unsafe { machine.prepared_constructor_tag(address | 1) },
+            Err(RuntimeError::BadPointer)
+        );
+        for encoded in [0, 7] {
+            assert_eq!(
+                unsafe { machine.prepared_constructor_tag(encoded) },
+                Err(RuntimeError::BadPointer)
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_constructor_tag_rejects_function_and_nonlive_headers() {
+        use tidepool_heap::execution_descriptor::{DescriptorState, ObjectDescriptor, ObjectKind};
+        use tidepool_repr::execution_schema::{testing, StorageLayout};
+
+        let function = Arc::new(
+            ObjectDescriptor::new(
+                ObjectKind::Function,
+                StorageLayout::for_reps(&testing::target(), &[]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let machine = MachineState::new();
+        machine
+            .install_prepared_buffer(vec![0_u64; 2], vec![Arc::clone(&function)])
+            .unwrap();
+        let address = machine.gc_active_range().unwrap().0;
+        unsafe { function.initialize_header(address) };
+        let error = unsafe { machine.prepared_constructor_tag(address as usize | 7) }.unwrap_err();
+        assert_eq!(error, RuntimeError::ExpectedConstructor);
+        assert_eq!(error.machine_disposition(), MachineDisposition::Unavailable);
+
+        let (machine, descriptor, address) = prepared_tag_fixture(1);
+        for state in [
+            DescriptorState::Forwarded,
+            DescriptorState::Evaluating,
+            DescriptorState::Updated,
+        ] {
+            unsafe {
+                (address as *mut usize).write(descriptor.initial_header_word() | state as usize)
+            };
+            assert_eq!(
+                unsafe { machine.prepared_constructor_tag(address | 1) },
+                Err(RuntimeError::BadThunkState(state as u8))
+            );
+        }
+        unsafe { (address as *mut usize).write(usize::MAX & !7) };
+        assert_eq!(
+            unsafe { machine.prepared_constructor_tag(address) },
+            Err(RuntimeError::BadPointer)
+        );
     }
 
     fn prepared_exception_fixture(

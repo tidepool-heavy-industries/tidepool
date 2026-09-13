@@ -37,6 +37,7 @@ mod arrays;
 mod byte_arrays;
 #[cfg(test)]
 mod bytes_tests;
+mod data_tag;
 #[cfg(test)]
 mod double_to_int_tests;
 mod entry;
@@ -295,6 +296,10 @@ impl CompiledProgram {
             (
                 "prepared_quot_rem_word2",
                 wide_words::prepared_quot_rem_word2 as *const u8,
+            ),
+            (
+                "prepared_data_to_tag_small",
+                data_tag::prepared_data_to_tag_small as *const u8,
             ),
             (
                 "prepared_index_char",

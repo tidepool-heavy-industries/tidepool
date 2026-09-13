@@ -425,6 +425,7 @@ fn emit_function_at(
                             vmctx,
                             pipeline,
                             &plan.bytes,
+                            prepared_enter,
                             prepared_gc,
                             &plan.boxed_array,
                             &plan.bytes_array,

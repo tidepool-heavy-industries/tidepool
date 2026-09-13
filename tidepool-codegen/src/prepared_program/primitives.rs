@@ -613,6 +613,12 @@ pub(super) fn recognize_operation(
     {
         return Some(PrimitiveOperation::Raise);
     }
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "dataToTagSmall#")
+        && signature.arguments == [RuntimeRep::LiftedRef]
+        && returns_exact(signature, &[RuntimeRep::Int(64)])
+    {
+        return Some(PrimitiveOperation::DataToTagSmall);
+    }
     if signature.arguments == [RuntimeRep::Void] && signature.results == ResultContract::NoSuccess {
         if let OperationIdentity::PrimOp(name) = &declaration.identity {
             let cause = match name.as_str() {
@@ -647,6 +653,7 @@ pub(super) enum PrimitiveOperation {
     CopyAddrToByteArray,
     CStringLen,
     Raise,
+    DataToTagSmall,
     PrimitiveFailure(super::fallible::PrimitiveFailure),
     BasicScalar(BasicScalarOperation),
     WideWord(super::wide_words::WideWordOperation),
@@ -661,11 +668,15 @@ pub(super) fn emit_operation(
     vmctx: ir::Value,
     pipeline: &mut CodegenPipeline,
     bytes: &Arc<super::static_bytes::PinnedBytes>,
+    prepared_enter: cranelift_module::FuncId,
     gc: cranelift_module::FuncId,
     boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     bytes_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
+        PrimitiveOperation::DataToTagSmall => {
+            super::data_tag::emit(builder, pipeline, vmctx, prepared_enter, arguments[0]).map(Some)
+        }
         PrimitiveOperation::PrimitiveFailure(cause) => {
             super::fallible::emit_terminal(builder, pipeline, vmctx, cause)?;
             Ok(None)
