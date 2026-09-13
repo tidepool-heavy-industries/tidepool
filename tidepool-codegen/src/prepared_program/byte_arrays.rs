@@ -511,12 +511,19 @@ unsafe fn prepared_read_bytes(
         }
         let (published, len) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
         let offset = checked_offset(index, len, element)?;
-        let data = unsafe { published.add(8).add(offset) };
+        let bytes = machine
+            .read_external_payload_offset(published, offset, element.bytes())
+            .map_err(|error| super::arrays::storage_error(error, index))?;
         let value = match element {
-            Element::Address => (unsafe { data.cast::<u64>().read_unaligned() }) as i64,
-            Element::Word8 => i64::from(unsafe { data.read() }),
-            Element::Word64 => (unsafe { data.cast::<u64>().read_unaligned() }) as i64,
-            Element::Int64 => unsafe { data.cast::<i64>().read_unaligned() },
+            Element::Word8 => i64::from(bytes[0]),
+            Element::Address | Element::Word64 => {
+                let bytes: [u8; 8] = bytes.try_into().map_err(|_| RuntimeError::BadPointer)?;
+                u64::from_ne_bytes(bytes) as i64
+            }
+            Element::Int64 => {
+                let bytes: [u8; 8] = bytes.try_into().map_err(|_| RuntimeError::BadPointer)?;
+                i64::from_ne_bytes(bytes)
+            }
         };
         unsafe { output.write(value) };
         Ok(())
@@ -563,13 +570,10 @@ unsafe fn prepared_write_bytes(
         let (published, len) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
         let offset = checked_offset(index, len, element)?;
         match element {
-            Element::Address => machine
-                .store_external_bytes(published, offset, &value.to_ne_bytes())
-                .map_err(|error| super::arrays::storage_error(error, index))?,
             Element::Word8 => machine
                 .store_external_bytes(published, offset, &[value as u8])
                 .map_err(|error| super::arrays::storage_error(error, index))?,
-            Element::Word64 | Element::Int64 => machine
+            Element::Address | Element::Word64 | Element::Int64 => machine
                 .store_external_bytes(published, offset, &value.to_ne_bytes())
                 .map_err(|error| super::arrays::storage_error(error, index))?,
         }
@@ -606,6 +610,35 @@ fn owner_value(builder: &mut FunctionBuilder<'_>, descriptor: &ObjectDescriptor)
         .ins()
         .iconst(types::I64, descriptor.initial_header_word() as i64)
 }
+/// Shared fresh-wrapper reservation for the byte-array allocators, which
+/// differ only in the host symbol name and the arguments forwarded after it.
+fn emit_new_bytes_shared(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    gc: cranelift_module::FuncId,
+    descriptor: &ObjectDescriptor,
+    host_symbol: &str,
+    extra_arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let gc = pipeline.module.declare_func_in_func(gc, builder.func);
+    let object = crate::alloc::emit_prepared_alloc_fast_path(builder, vmctx, descriptor, gc);
+    let header = owner_value(builder, descriptor);
+    builder.ins().store(MemFlags::trusted(), header, object, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().store(MemFlags::trusted(), zero, object, 8);
+    let host =
+        super::arrays::declare_host(builder, pipeline, host_symbol, 2 + extra_arguments.len())?;
+    let mut call_arguments = vec![vmctx, object];
+    call_arguments.extend_from_slice(extra_arguments);
+    let call = builder.ins().call(host, &call_arguments);
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    let result = builder.ins().bor_imm(object, i64::from(descriptor.tag()));
+    builder.declare_value_needs_stack_map(result);
+    Ok(vec![result])
+}
+
 pub(super) fn emit_new_bytes(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
@@ -614,19 +647,15 @@ pub(super) fn emit_new_bytes(
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let gc = pipeline.module.declare_func_in_func(gc, builder.func);
-    let object = crate::alloc::emit_prepared_alloc_fast_path(builder, vmctx, descriptor, gc);
-    let header = owner_value(builder, descriptor);
-    builder.ins().store(MemFlags::trusted(), header, object, 0);
-    let zero = builder.ins().iconst(types::I64, 0);
-    builder.ins().store(MemFlags::trusted(), zero, object, 8);
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_new_bytes", 3)?;
-    let call = builder.ins().call(host, &[vmctx, object, arguments[0]]);
-    let status = builder.inst_results(call)[0];
-    super::arrays::finish_checked_call(builder, status);
-    let result = builder.ins().bor_imm(object, i64::from(descriptor.tag()));
-    builder.declare_value_needs_stack_map(result);
-    Ok(vec![result])
+    emit_new_bytes_shared(
+        builder,
+        pipeline,
+        vmctx,
+        gc,
+        descriptor,
+        "prepared_new_bytes",
+        &[arguments[0]],
+    )
 }
 
 pub(super) fn emit_new_aligned_bytes(
@@ -637,21 +666,15 @@ pub(super) fn emit_new_aligned_bytes(
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let gc = pipeline.module.declare_func_in_func(gc, builder.func);
-    let object = crate::alloc::emit_prepared_alloc_fast_path(builder, vmctx, descriptor, gc);
-    let header = owner_value(builder, descriptor);
-    builder.ins().store(MemFlags::trusted(), header, object, 0);
-    let zero = builder.ins().iconst(types::I64, 0);
-    builder.ins().store(MemFlags::trusted(), zero, object, 8);
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_new_aligned_bytes", 4)?;
-    let call = builder
-        .ins()
-        .call(host, &[vmctx, object, arguments[0], arguments[1]]);
-    let status = builder.inst_results(call)[0];
-    super::arrays::finish_checked_call(builder, status);
-    let result = builder.ins().bor_imm(object, i64::from(descriptor.tag()));
-    builder.declare_value_needs_stack_map(result);
-    Ok(vec![result])
+    emit_new_bytes_shared(
+        builder,
+        pipeline,
+        vmctx,
+        gc,
+        descriptor,
+        "prepared_new_aligned_bytes",
+        &[arguments[0], arguments[1]],
+    )
 }
 
 pub(super) fn emit_resize_bytes(
@@ -698,19 +721,22 @@ pub(super) fn emit_freeze_bytes(
     Ok(vec![arguments[0]])
 }
 
-pub(super) fn emit_byte_array_contents(
+/// Shared owner-authenticated host call that publishes one i64 to the output
+/// slot. `leading_arguments` is everything before that slot; the callers here
+/// differ only in the host symbol name and how many owner-scoped arguments
+/// precede it.
+fn emit_owned_call_returning_i64(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
-    vmctx: Value,
-    descriptor: &ObjectDescriptor,
-    arguments: &[Value],
+    host_symbol: &str,
+    leading_arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_byte_array_contents", 4)?;
-    let owner = owner_value(builder, descriptor);
+    let host =
+        super::arrays::declare_host(builder, pipeline, host_symbol, leading_arguments.len() + 1)?;
     let output = super::arrays::output_slot(builder);
-    let call = builder
-        .ins()
-        .call(host, &[vmctx, arguments[0], owner, output]);
+    let mut call_arguments = leading_arguments.to_vec();
+    call_arguments.push(output);
+    let call = builder.ins().call(host, &call_arguments);
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
     Ok(vec![builder.ins().load(
@@ -721,6 +747,22 @@ pub(super) fn emit_byte_array_contents(
     )])
 }
 
+pub(super) fn emit_byte_array_contents(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let owner = owner_value(builder, descriptor);
+    emit_owned_call_returning_i64(
+        builder,
+        pipeline,
+        "prepared_byte_array_contents",
+        &[vmctx, arguments[0], owner],
+    )
+}
+
 pub(super) fn emit_sizeof_bytes(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
@@ -728,20 +770,13 @@ pub(super) fn emit_sizeof_bytes(
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_sizeof_bytes", 4)?;
     let owner = owner_value(builder, descriptor);
-    let output = super::arrays::output_slot(builder);
-    let call = builder
-        .ins()
-        .call(host, &[vmctx, arguments[0], owner, output]);
-    let status = builder.inst_results(call)[0];
-    super::arrays::finish_checked_call(builder, status);
-    Ok(vec![builder.ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        output,
-        0,
-    )])
+    emit_owned_call_returning_i64(
+        builder,
+        pipeline,
+        "prepared_sizeof_bytes",
+        &[vmctx, arguments[0], owner],
+    )
 }
 
 pub(super) fn emit_shrink_bytes(
@@ -794,11 +829,11 @@ pub(super) fn emit_compare_bytes(
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_compare_bytes", 8)?;
     let owner = owner_value(builder, descriptor);
-    let output = super::arrays::output_slot(builder);
-    let call = builder.ins().call(
-        host,
+    emit_owned_call_returning_i64(
+        builder,
+        pipeline,
+        "prepared_compare_bytes",
         &[
             vmctx,
             owner,
@@ -807,17 +842,8 @@ pub(super) fn emit_compare_bytes(
             arguments[2],
             arguments[3],
             arguments[4],
-            output,
         ],
-    );
-    let status = builder.inst_results(call)[0];
-    super::arrays::finish_checked_call(builder, status);
-    Ok(vec![builder.ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        output,
-        0,
-    )])
+    )
 }
 
 pub(super) fn emit_read_bytes(
@@ -846,9 +872,14 @@ pub(super) fn emit_read_bytes(
         Element::Address => builder
             .ins()
             .load(types::I64, MemFlags::trusted(), output, 0),
-        Element::Word8 => builder
-            .ins()
-            .load(types::I8, MemFlags::trusted(), output, 0),
+        Element::Word8 => {
+            // The host always writes a full i64 through `*mut i64`; narrowing
+            // the load itself is only correct on a little-endian target.
+            let loaded = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), output, 0);
+            builder.ins().ireduce(types::I8, loaded)
+        }
         Element::Word64 => builder
             .ins()
             .load(types::I64, MemFlags::trusted(), output, 0),

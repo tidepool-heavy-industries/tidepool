@@ -1312,6 +1312,32 @@ impl MachineState {
         Ok(())
     }
 
+    /// Read a fully checked byte range through the ledger owner, giving reads
+    /// the same owner-ledger authentication `store_external_bytes` gives
+    /// writes rather than trusting a payload pointer obtained earlier.
+    pub(crate) fn read_external_payload_offset(
+        &self,
+        published: *mut u8,
+        byte_offset: usize,
+        count: usize,
+    ) -> Result<Vec<u8>, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let data = Self::checked_external_byte_range(&storage, published, byte_offset, count)?;
+        let mut copied = Vec::new();
+        copied
+            .try_reserve_exact(count)
+            .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+        if count != 0 {
+            // The ledger borrow and checked complete span keep the allocation
+            // active and in range for the entire owned snapshot.
+            unsafe {
+                std::ptr::copy_nonoverlapping(data, copied.as_mut_ptr(), count);
+                copied.set_len(count);
+            }
+        }
+        Ok(copied)
+    }
+
     /// Authenticate a complete byte range. The returned pointer is usable only
     /// while the supplied ledger borrow remains live, with no callback or GC.
     fn checked_external_byte_range(
