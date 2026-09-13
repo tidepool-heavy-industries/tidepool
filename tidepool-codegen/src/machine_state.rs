@@ -1452,6 +1452,43 @@ impl MachineState {
         }
     }
 
+    /// Replace an active byte payload with a fresh identity, preserving its
+    /// prefix and zero-initializing growth. No collection or callback occurs.
+    /// Allocation and validation precede revocation: failure leaves the old
+    /// identity usable, while success leaves it structurally owned but revoked
+    /// until a complete liveness trace permits reclamation.
+    pub(crate) fn resize_external_bytes(
+        &self,
+        published: *mut u8,
+        new_len: usize,
+    ) -> Result<*mut u8, ExternalStorageValidationError> {
+        {
+            let storage = self.external_storage.borrow();
+            Self::checked_external_record(&storage, published, ExternalStorageKind::Bytes)?;
+        }
+        let replacement = self.allocate_external_storage(ExternalStorageKind::Bytes, new_len)?;
+        let mut storage = self.external_storage.borrow_mut();
+        let old = storage.get_mut(&published).ok_or(
+            ExternalStorageValidationError::Untracked(published as usize),
+        )?;
+        Self::validate_external_access(published, old, ExternalStorageKind::Bytes, true)?;
+        let copy_len = old.logical_len.min(new_len);
+        // Both allocations remain ledger-owned and disjoint. The replacement
+        // was zero-initialized; only the common prefix requires a copy.
+        if copy_len != 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    published.add(8),
+                    replacement.add(8),
+                    copy_len,
+                );
+            }
+        }
+        old.activity = ExternalActivity::Revoked;
+        self.external_changed();
+        Ok(replacement)
+    }
+
     /// Logical shrink preserves the allocation and published identity, including
     /// its byte-array capacity prefix. All validation precedes mutation.
     pub(crate) fn shrink_external_payload(
