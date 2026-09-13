@@ -34,6 +34,8 @@ pub(super) enum ByteOperation {
     Freeze,
     Size,
     Shrink,
+    Copy,
+    Compare,
     Read(Element),
     Write(Element),
 }
@@ -82,6 +84,19 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![]) =>
         {
             Some(ByteOperation::Shrink)
+        }
+        "copyByteArray#"
+            if signature.arguments
+                == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void]
+                && signature.results == ResultContract::Returns(vec![]) =>
+        {
+            Some(ByteOperation::Copy)
+        }
+        "compareByteArrays#"
+            if signature.arguments == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64)]
+                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+        {
+            Some(ByteOperation::Compare)
         }
         "readWord8Array#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
@@ -304,6 +319,98 @@ pub(super) unsafe extern "C" fn prepared_shrink_bytes(
     }
 }
 
+fn checked_byte_span_arg(value: i64, len: usize) -> Result<usize, RuntimeError> {
+    usize::try_from(value).map_err(|_| RuntimeError::ArrayIndexOutOfBounds { index: value, len })
+}
+
+fn byte_range_error(error: ExternalStorageValidationError) -> RuntimeError {
+    match error {
+        ExternalStorageValidationError::AliasedByteCopy => RuntimeError::AliasedByteCopy,
+        ExternalStorageValidationError::IndexOutOfBounds { index, len } => {
+            RuntimeError::ArrayIndexOutOfBounds {
+                index: i64::try_from(index).unwrap_or(i64::MAX),
+                len,
+            }
+        }
+        other => super::arrays::storage_error(other, 0),
+    }
+}
+
+/// Both wrappers and complete spans are admitted before the owner copies.
+/// No collection, callback, or partial write occurs in this host call.
+pub(super) unsafe extern "C" fn prepared_copy_bytes(
+    vmctx: *mut crate::context::VMContext,
+    descriptor: *const ObjectDescriptor,
+    source: *mut u8,
+    source_offset: i64,
+    destination: *mut u8,
+    destination_offset: i64,
+    count: i64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        let (source, source_len) = unsafe { active_bytes(machine, vmctx, source, descriptor) }?;
+        let (destination, destination_len) =
+            unsafe { active_bytes(machine, vmctx, destination, descriptor) }?;
+        let source_offset = checked_byte_span_arg(source_offset, source_len)?;
+        let destination_offset = checked_byte_span_arg(destination_offset, destination_len)?;
+        let count = checked_byte_span_arg(count, source_len)?;
+        machine
+            .copy_external_byte_range(
+                source,
+                source_offset,
+                destination,
+                destination_offset,
+                count,
+            )
+            .map_err(byte_range_error)
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
+/// Compare authenticated byte spans without allocation or mutation. Aliases
+/// are valid; the result slot is published only after complete validation.
+pub(super) unsafe extern "C" fn prepared_compare_bytes(
+    vmctx: *mut crate::context::VMContext,
+    descriptor: *const ObjectDescriptor,
+    left: *mut u8,
+    left_offset: i64,
+    right: *mut u8,
+    right_offset: i64,
+    count: i64,
+    output: *mut i64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        if output.is_null() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let (left, left_len) = unsafe { active_bytes(machine, vmctx, left, descriptor) }?;
+        let (right, right_len) = unsafe { active_bytes(machine, vmctx, right, descriptor) }?;
+        let left_offset = checked_byte_span_arg(left_offset, left_len)?;
+        let right_offset = checked_byte_span_arg(right_offset, right_len)?;
+        let count = checked_byte_span_arg(count, left_len)?;
+        let ordering = machine
+            .compare_external_byte_ranges(left, left_offset, right, right_offset, count)
+            .map_err(byte_range_error)?;
+        unsafe { output.write(ordering) };
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
 unsafe fn prepared_read_bytes(
     vmctx: *mut crate::context::VMContext,
     reference: *mut u8,
@@ -518,6 +625,65 @@ pub(super) fn emit_shrink_bytes(
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
     Ok(Vec::new())
+}
+
+pub(super) fn emit_copy_bytes(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_copy_bytes", 7)?;
+    let owner = owner_value(builder, descriptor);
+    let call = builder.ins().call(
+        host,
+        &[
+            vmctx,
+            owner,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            arguments[4],
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    Ok(Vec::new())
+}
+
+pub(super) fn emit_compare_bytes(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_compare_bytes", 8)?;
+    let owner = owner_value(builder, descriptor);
+    let output = super::arrays::output_slot(builder);
+    let call = builder.ins().call(
+        host,
+        &[
+            vmctx,
+            owner,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            arguments[4],
+            output,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    Ok(vec![builder.ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        output,
+        0,
+    )])
 }
 
 pub(super) fn emit_read_bytes(
@@ -1149,6 +1315,33 @@ mod tests {
             )
         )
         .is_none());
+        let span_arguments = vec![
+            RuntimeRep::UnliftedRef,
+            RuntimeRep::Int(64),
+            RuntimeRep::UnliftedRef,
+            RuntimeRep::Int(64),
+            RuntimeRep::Int(64),
+        ];
+        let mut copy_arguments = span_arguments.clone();
+        copy_arguments.push(RuntimeRep::Void);
+        assert_eq!(
+            recognize(&op("copyByteArray#"), &sig(copy_arguments.clone(), vec![])),
+            Some(ByteOperation::Copy)
+        );
+        assert!(recognize(&op("copyByteArray#"), &sig(span_arguments.clone(), vec![])).is_none());
+        assert!(recognize(
+            &op("copyByteArray#"),
+            &sig(copy_arguments, vec![RuntimeRep::Int(64)])
+        )
+        .is_none());
+        assert_eq!(
+            recognize(
+                &op("compareByteArrays#"),
+                &sig(span_arguments.clone(), vec![RuntimeRep::Int(64)])
+            ),
+            Some(ByteOperation::Compare)
+        );
+        assert!(recognize(&op("compareByteArrays#"), &sig(span_arguments, vec![])).is_none());
         assert!(recognize(
             &op("writeIntArray#"),
             &sig(

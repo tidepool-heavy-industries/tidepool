@@ -254,6 +254,302 @@ fn resize_bytes_invalid_lengths_leave_old_active_and_new_wrapper_empty() {
     }
 }
 
+fn byte_copy_compare_wire(
+    source_offset: i64,
+    destination_offset: i64,
+    count: i64,
+    perform_copy: bool,
+    reverse_compare: bool,
+) -> WireProgram {
+    let mut wire = testing::wire_program();
+    use RuntimeRep::{Int, UnliftedRef, Void, Word};
+    wire.signatures[0].results = ResultContract::Returns(vec![UnliftedRef, Int(64)]);
+    wire.signatures.extend([
+        Signature {
+            arguments: vec![Int(64), Void],
+            results: ResultContract::Returns(vec![UnliftedRef]),
+        },
+        Signature {
+            arguments: vec![UnliftedRef, Int(64), Word(8), Void],
+            results: ResultContract::Returns(vec![]),
+        },
+        Signature {
+            arguments: vec![UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void],
+            results: ResultContract::Returns(vec![]),
+        },
+        Signature {
+            arguments: vec![UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64)],
+            results: ResultContract::Returns(vec![Int(64)]),
+        },
+        Signature {
+            arguments: vec![UnliftedRef, Void],
+            results: ResultContract::Returns(vec![UnliftedRef]),
+        },
+    ]);
+    wire.operations = [
+        "newByteArray#",
+        "writeWord8Array#",
+        "copyByteArray#",
+        "compareByteArrays#",
+        "unsafeFreezeByteArray#",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, name)| OperationDecl {
+        identity: OperationIdentity::PrimOp(name.into()),
+        signature: SignatureId(index as u32 + 1),
+    })
+    .collect();
+    let int = |value: i64| {
+        Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })
+    };
+    let byte = |value: u8| {
+        Atom::Scalar(ScalarLiteral::Word {
+            bits: 8,
+            bytes: vec![value],
+        })
+    };
+    let local = |id| Atom::Ref(ValueRef::Local(ValueId(id)));
+    let operation = |id, arguments| ExprFrame::Operation {
+        operation: OperationId(id),
+        arguments,
+    };
+    let case = |scrutinee, binder, kind, results, binders, body| ExprFrame::Case {
+        scrutinee,
+        binder: ValueId(binder),
+        kind,
+        scrutinee_results: ResultContract::Returns(results),
+        alternatives: vec![Alternative {
+            pattern: AlternativePattern::Default,
+            binders,
+            body,
+        }],
+    };
+    let comparison = if reverse_compare {
+        vec![
+            local(101),
+            int(destination_offset),
+            local(100),
+            int(source_offset),
+            int(count),
+        ]
+    } else {
+        vec![
+            local(100),
+            int(source_offset),
+            local(101),
+            int(destination_offset),
+            int(count),
+        ]
+    };
+    let copy_arguments = if perform_copy {
+        vec![
+            local(100),
+            int(source_offset),
+            local(101),
+            int(destination_offset),
+            int(count),
+            Atom::Void,
+        ]
+    } else {
+        vec![local(100), int(4), local(101), int(4), int(0), Atom::Void]
+    };
+    wire.expressions.nodes = vec![
+        operation(0, vec![int(4), Atom::Void]),
+        operation(1, vec![local(100), int(0), byte(b'a'), Atom::Void]),
+        operation(1, vec![local(100), int(1), byte(0xff), Atom::Void]),
+        operation(1, vec![local(100), int(2), byte(b'c'), Atom::Void]),
+        operation(1, vec![local(100), int(3), byte(b'd'), Atom::Void]),
+        operation(0, vec![int(4), Atom::Void]),
+        operation(2, copy_arguments),
+        operation(3, comparison),
+        operation(4, vec![local(101), Atom::Void]),
+        ExprFrame::Return(vec![local(103), local(102)]),
+        case(
+            8,
+            208,
+            CaseKind::MultiValue,
+            vec![UnliftedRef],
+            vec![ValueId(103)],
+            9,
+        ),
+        case(7, 102, CaseKind::Polymorphic, vec![Int(64)], vec![], 10),
+        case(6, 206, CaseKind::MultiValue, vec![], vec![], 11),
+        case(
+            5,
+            205,
+            CaseKind::MultiValue,
+            vec![UnliftedRef],
+            vec![ValueId(101)],
+            12,
+        ),
+        case(4, 204, CaseKind::MultiValue, vec![], vec![], 13),
+        case(3, 203, CaseKind::MultiValue, vec![], vec![], 14),
+        case(2, 202, CaseKind::MultiValue, vec![], vec![], 15),
+        case(1, 201, CaseKind::MultiValue, vec![], vec![], 16),
+        case(
+            0,
+            200,
+            CaseKind::MultiValue,
+            vec![UnliftedRef],
+            vec![ValueId(100)],
+            17,
+        ),
+    ];
+    if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+        if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+            *body = 18;
+        }
+    }
+    wire
+}
+
+#[test]
+fn byte_copy_compare_real_adapter_handles_interior_and_empty_spans_across_gc() {
+    for (source_offset, destination_offset, count, perform_copy, reverse, expected, ordering) in [
+        (1, 1, 2, true, false, &[0, 0xff, b'c', 0][..], 0),
+        (4, 4, 0, true, false, &[0, 0, 0, 0][..], 0),
+        (1, 1, 1, false, false, &[0, 0, 0, 0][..], 1),
+        (1, 1, 1, false, true, &[0, 0, 0, 0][..], -1),
+    ] {
+        let program = compile(byte_copy_compare_wire(
+            source_offset,
+            destination_offset,
+            count,
+            perform_copy,
+            reverse,
+        ));
+        let result = program
+            .run_entry(
+                ValueId(0),
+                &[],
+                &RunOptions {
+                    nursery_bytes: 16,
+                    collect_before_observation: true,
+                    ..Default::default()
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(result.collections >= 2);
+        assert!(matches!(
+            result.values.as_slice(),
+            [
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_ordering)),
+            ] if bytes == expected && *actual_ordering == ordering
+        ));
+    }
+}
+
+#[test]
+fn byte_copy_compare_hosts_reject_bad_ranges_alias_copy_and_revocation() {
+    use crate::prepared_control::CallStatus;
+    use tidepool_heap::{
+        execution_descriptor::ObjectDescriptor, external_storage::ExternalStorageKind,
+    };
+
+    for (source_offset, destination_offset, count, alias, revoked, expected) in [
+        (
+            3,
+            0,
+            2,
+            false,
+            false,
+            RuntimeError::ArrayIndexOutOfBounds { index: 4, len: 4 },
+        ),
+        (
+            0,
+            3,
+            2,
+            false,
+            false,
+            RuntimeError::ArrayIndexOutOfBounds { index: 4, len: 4 },
+        ),
+        (
+            -1,
+            0,
+            1,
+            false,
+            false,
+            RuntimeError::ArrayIndexOutOfBounds { index: -1, len: 4 },
+        ),
+        (0, 0, 1, true, false, RuntimeError::AliasedByteCopy),
+        (0, 0, 1, false, true, RuntimeError::BadPointer),
+    ] {
+        let descriptor = Arc::new(
+            ObjectDescriptor::external(ExternalStorageKind::Bytes, &testing::target()).unwrap(),
+        );
+        let extent = descriptor.allocation_extent() as usize;
+        let machine = crate::machine_state::MachineState::new();
+        machine
+            .install_prepared_buffer(vec![0_u64; extent * 2 / 8], vec![descriptor.clone()])
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let second = unsafe { start.add(extent) };
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        vmctx.alloc_ptr = unsafe { start.add(extent * 2) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let source_ref = (start as usize | usize::from(descriptor.tag())) as *mut u8;
+        let destination_ref = (second as usize | usize::from(descriptor.tag())) as *mut u8;
+        let source = machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        let destination = machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        machine.store_external_bytes(source, 0, b"abcd").unwrap();
+        machine
+            .store_external_bytes(destination, 0, b"zzzz")
+            .unwrap();
+        unsafe {
+            descriptor.initialize_header(start);
+            descriptor.initialize_header(second);
+            descriptor
+                .external_payload_slot(start, extent)
+                .unwrap()
+                .write(source);
+            descriptor
+                .external_payload_slot(second, extent)
+                .unwrap()
+                .write(destination);
+        }
+        if revoked {
+            machine
+                .revoke_external_payload(source, ExternalStorageKind::Bytes)
+                .unwrap();
+        }
+        let before = machine.external_storage_stats();
+        let status = unsafe {
+            super::byte_arrays::prepared_copy_bytes(
+                &mut vmctx,
+                Arc::as_ptr(&descriptor),
+                source_ref,
+                source_offset,
+                if alias { source_ref } else { destination_ref },
+                destination_offset,
+                count,
+            )
+        };
+        assert_eq!(
+            status,
+            if revoked {
+                CallStatus::IntegrityFailure as i32
+            } else {
+                CallStatus::LanguageFailure as i32
+            }
+        );
+        assert_eq!(machine.take_runtime_error(), Some(expected.clone()));
+        assert_eq!(machine.external_storage_stats(), before);
+        assert_eq!(machine.copy_external_bytes(destination).unwrap(), b"zzzz");
+    }
+}
+
 #[test]
 fn scalar_only_bytes_keep_the_exact_embedded_address_alive() {
     for payload in [Vec::new(), b"a\0b".to_vec()] {

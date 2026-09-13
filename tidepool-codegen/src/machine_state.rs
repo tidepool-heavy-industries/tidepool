@@ -1232,12 +1232,17 @@ impl MachineState {
         count: usize,
     ) -> Result<*mut u8, ExternalStorageValidationError> {
         let record = Self::checked_external_record(storage, published, ExternalStorageKind::Bytes)?;
-        let end = offset.checked_add(count).ok_or(
-            ExternalStorageValidationError::IndexOutOfBounds { index: offset, len: record.logical_len },
-        )?;
+        let end =
+            offset
+                .checked_add(count)
+                .ok_or(ExternalStorageValidationError::IndexOutOfBounds {
+                    index: offset,
+                    len: record.logical_len,
+                })?;
         if end > record.logical_len {
             return Err(ExternalStorageValidationError::IndexOutOfBounds {
-                index: end.saturating_sub(1), len: record.logical_len,
+                index: end.saturating_sub(1),
+                len: record.logical_len,
             });
         }
         Ok(unsafe { published.add(8).add(offset) })
@@ -1256,7 +1261,8 @@ impl MachineState {
     ) -> Result<(), ExternalStorageValidationError> {
         let storage = self.external_storage.borrow();
         let from = Self::checked_external_byte_range(&storage, source, source_offset, count)?;
-        let to = Self::checked_external_byte_range(&storage, destination, destination_offset, count)?;
+        let to =
+            Self::checked_external_byte_range(&storage, destination, destination_offset, count)?;
         if source == destination {
             return Err(ExternalStorageValidationError::AliasedByteCopy);
         }
@@ -1267,6 +1273,28 @@ impl MachineState {
             self.external_changed();
         }
         Ok(())
+    }
+
+    /// Compare two complete active byte spans as unsigned bytes. This is a
+    /// noncollecting, read-only ledger operation; aliases are valid here.
+    pub(crate) fn compare_external_byte_ranges(
+        &self,
+        left: *mut u8,
+        left_offset: usize,
+        right: *mut u8,
+        right_offset: usize,
+        count: usize,
+    ) -> Result<i64, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let left = Self::checked_external_byte_range(&storage, left, left_offset, count)?;
+        let right = Self::checked_external_byte_range(&storage, right, right_offset, count)?;
+        let left = unsafe { std::slice::from_raw_parts(left, count) };
+        let right = unsafe { std::slice::from_raw_parts(right, count) };
+        Ok(match left.cmp(right) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        })
     }
 
     /// Snapshot an active byte payload while its ledger owner is borrowed.
@@ -1514,20 +1542,18 @@ impl MachineState {
         }
         let replacement = self.allocate_external_storage(ExternalStorageKind::Bytes, new_len)?;
         let mut storage = self.external_storage.borrow_mut();
-        let old = storage.get_mut(&published).ok_or(
-            ExternalStorageValidationError::Untracked(published as usize),
-        )?;
+        let old = storage
+            .get_mut(&published)
+            .ok_or(ExternalStorageValidationError::Untracked(
+                published as usize,
+            ))?;
         Self::validate_external_access(published, old, ExternalStorageKind::Bytes, true)?;
         let copy_len = old.logical_len.min(new_len);
         // Both allocations remain ledger-owned and disjoint. The replacement
         // was zero-initialized; only the common prefix requires a copy.
         if copy_len != 0 {
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    published.add(8),
-                    replacement.add(8),
-                    copy_len,
-                );
+                std::ptr::copy_nonoverlapping(published.add(8), replacement.add(8), copy_len);
             }
         }
         old.activity = ExternalActivity::Revoked;
@@ -2592,10 +2618,108 @@ mod tests {
     #[test]
     fn byte_copy_rejects_aliases_without_mutation() {
         let ms = MachineState::new();
-        let bytes = ms.allocate_external_storage(ExternalStorageKind::Bytes, 4).unwrap();
+        let bytes = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
         ms.store_external_bytes(bytes, 0, b"abcd").unwrap();
-        assert_eq!(ms.copy_external_byte_range(bytes, 0, bytes, 1, 3), Err(ExternalStorageValidationError::AliasedByteCopy));
+        assert_eq!(
+            ms.copy_external_byte_range(bytes, 0, bytes, 1, 3),
+            Err(ExternalStorageValidationError::AliasedByteCopy)
+        );
         assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"abcd");
+    }
+
+    #[test]
+    fn byte_copy_checks_both_complete_ranges_before_writing() {
+        let ms = MachineState::new();
+        let source = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        let destination = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        ms.store_external_bytes(source, 0, b"a\xffcd").unwrap();
+        ms.store_external_bytes(destination, 0, b"zzzz").unwrap();
+
+        for (source_offset, destination_offset, count) in [(3, 0, 2), (0, 3, 2)] {
+            let before = ms.external_revision.get();
+            assert!(matches!(
+                ms.copy_external_byte_range(
+                    source,
+                    source_offset,
+                    destination,
+                    destination_offset,
+                    count,
+                ),
+                Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+            ));
+            assert_eq!(ms.external_revision.get(), before);
+            assert_eq!(ms.copy_external_bytes(destination).unwrap(), b"zzzz");
+        }
+
+        let before = ms.external_revision.get();
+        ms.copy_external_byte_range(source, 4, destination, 4, 0)
+            .unwrap();
+        assert_eq!(ms.external_revision.get(), before);
+        ms.copy_external_byte_range(source, 1, destination, 1, 2)
+            .unwrap();
+        assert_eq!(ms.copy_external_bytes(destination).unwrap(), b"z\xffcz");
+        assert_ne!(ms.external_revision.get(), before);
+    }
+
+    #[test]
+    fn byte_compare_is_unsigned_alias_safe_and_read_only() {
+        let ms = MachineState::new();
+        let left = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 3)
+            .unwrap();
+        let right = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 3)
+            .unwrap();
+        ms.store_external_bytes(left, 0, &[0x80, 0xff, 1]).unwrap();
+        ms.store_external_bytes(right, 0, &[0x7f, 0xff, 2]).unwrap();
+        let before = ms.external_revision.get();
+
+        assert_eq!(ms.compare_external_byte_ranges(left, 0, right, 0, 3), Ok(1));
+        assert_eq!(
+            ms.compare_external_byte_ranges(right, 0, left, 0, 3),
+            Ok(-1)
+        );
+        assert_eq!(ms.compare_external_byte_ranges(left, 1, right, 1, 1), Ok(0));
+        assert_eq!(ms.compare_external_byte_ranges(left, 0, left, 0, 3), Ok(0));
+        assert_eq!(ms.compare_external_byte_ranges(left, 3, left, 3, 0), Ok(0));
+        assert!(matches!(
+            ms.compare_external_byte_ranges(left, 2, right, 0, 2),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert_eq!(ms.external_revision.get(), before);
+    }
+
+    #[test]
+    fn byte_copy_and_compare_reject_revoked_ranges_without_mutation() {
+        let ms = MachineState::new();
+        let source = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        let destination = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        ms.store_external_bytes(source, 0, b"ab").unwrap();
+        ms.store_external_bytes(destination, 0, b"zz").unwrap();
+        ms.revoke_external_payload(source, ExternalStorageKind::Bytes)
+            .unwrap();
+        let before = ms.external_revision.get();
+
+        assert!(matches!(
+            ms.copy_external_byte_range(source, 0, destination, 0, 2),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(matches!(
+            ms.compare_external_byte_ranges(source, 0, destination, 0, 2),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert_eq!(ms.copy_external_bytes(destination).unwrap(), b"zz");
+        assert_eq!(ms.external_revision.get(), before);
     }
 
     #[test]

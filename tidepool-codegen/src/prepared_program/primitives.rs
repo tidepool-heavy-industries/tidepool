@@ -40,8 +40,11 @@ pub(super) trait ScalarFamily {
 pub(super) enum BasicScalarOperation {
     PlusAddr,
     Chr,
+    Ord,
     EqChar,
+    GeChar,
     Clz8,
+    Clz,
 }
 
 pub(super) struct BasicScalarFamily;
@@ -64,16 +67,30 @@ impl ScalarFamily for BasicScalarFamily {
             "chr#" if signature.arguments == [Int(64)] && returns_exact(signature, &[Word(64)]) => {
                 Some(BasicScalarOperation::Chr)
             }
+            "ord#" if signature.arguments == [Word(64)] && returns_exact(signature, &[Int(64)]) => {
+                Some(BasicScalarOperation::Ord)
+            }
             "eqChar#"
                 if signature.arguments == [Word(64), Word(64)]
                     && returns_exact(signature, &[Int(64)]) =>
             {
                 Some(BasicScalarOperation::EqChar)
             }
+            "geChar#"
+                if signature.arguments == [Word(64), Word(64)]
+                    && returns_exact(signature, &[Int(64)]) =>
+            {
+                Some(BasicScalarOperation::GeChar)
+            }
             "clz8#"
                 if signature.arguments == [Word(64)] && returns_exact(signature, &[Word(64)]) =>
             {
                 Some(BasicScalarOperation::Clz8)
+            }
+            "clz#"
+                if signature.arguments == [Word(64)] && returns_exact(signature, &[Word(64)]) =>
+            {
+                Some(BasicScalarOperation::Clz)
             }
             _ => None,
         }
@@ -87,7 +104,7 @@ impl ScalarFamily for BasicScalarFamily {
         let value = match operation {
             // Addr# is an untagged machine word here. Arithmetic never inspects memory.
             BasicScalarOperation::PlusAddr => builder.ins().iadd(arguments[0], arguments[1]),
-            BasicScalarOperation::Chr => arguments[0],
+            BasicScalarOperation::Chr | BasicScalarOperation::Ord => arguments[0],
             BasicScalarOperation::EqChar => {
                 let equal =
                     builder
@@ -97,11 +114,20 @@ impl ScalarFamily for BasicScalarFamily {
                 let zero = builder.ins().iconst(ir::types::I64, 0);
                 builder.ins().select(equal, one, zero)
             }
+            BasicScalarOperation::GeChar => {
+                let greater_or_equal = builder.ins().icmp(
+                    ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                    arguments[0],
+                    arguments[1],
+                );
+                builder.ins().uextend(ir::types::I64, greater_or_equal)
+            }
             BasicScalarOperation::Clz8 => {
                 let low = builder.ins().ireduce(ir::types::I8, arguments[0]);
                 let count = builder.ins().clz(low);
                 builder.ins().uextend(ir::types::I64, count)
             }
+            BasicScalarOperation::Clz => builder.ins().clz(arguments[0]),
         };
         vec![value]
     }
@@ -547,6 +573,9 @@ pub(super) fn recognize_operation(
     if let Some(operation) = super::formatting::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Formatting(operation));
     }
+    if let Some(operation) = super::wide_words::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::WideWord(operation));
+    }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
         && signature.arguments == [RuntimeRep::Float(64)]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -620,6 +649,7 @@ pub(super) enum PrimitiveOperation {
     Raise,
     PrimitiveFailure(super::fallible::PrimitiveFailure),
     BasicScalar(BasicScalarOperation),
+    WideWord(super::wide_words::WideWordOperation),
     Integer(IntegerOperation),
     Floating(super::floating::FloatingOperation),
 }
@@ -693,6 +723,14 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Shrink) => {
             super::byte_arrays::emit_shrink_bytes(builder, pipeline, vmctx, bytes_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Copy) => {
+            super::byte_arrays::emit_copy_bytes(builder, pipeline, vmctx, bytes_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Compare) => {
+            super::byte_arrays::emit_compare_bytes(builder, pipeline, vmctx, bytes_array, arguments)
                 .map(Some)
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Read(element)) => {
@@ -796,6 +834,9 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::BasicScalar(operation) => {
             Ok(Some(BasicScalarFamily::emit(operation, builder, arguments)))
+        }
+        PrimitiveOperation::WideWord(operation) => {
+            super::wide_words::emit(operation, builder, pipeline, vmctx, arguments).map(Some)
         }
         PrimitiveOperation::Floating(operation) => Ok(Some(super::floating::FloatingFamily::emit(
             operation, builder, arguments,

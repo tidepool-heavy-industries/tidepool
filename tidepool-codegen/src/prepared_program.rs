@@ -253,6 +253,14 @@ impl CompiledProgram {
                 byte_arrays::prepared_shrink_bytes as *const u8,
             ),
             (
+                "prepared_copy_bytes",
+                byte_arrays::prepared_copy_bytes as *const u8,
+            ),
+            (
+                "prepared_compare_bytes",
+                byte_arrays::prepared_compare_bytes as *const u8,
+            ),
+            (
                 "prepared_read_word8_bytes",
                 byte_arrays::prepared_read_word8_bytes as *const u8,
             ),
@@ -283,6 +291,10 @@ impl CompiledProgram {
             (
                 "prepared_primitive_failure",
                 fallible::prepared_primitive_failure as *const u8,
+            ),
+            (
+                "prepared_quot_rem_word2",
+                wide_words::prepared_quot_rem_word2 as *const u8,
             ),
             (
                 "prepared_index_char",
