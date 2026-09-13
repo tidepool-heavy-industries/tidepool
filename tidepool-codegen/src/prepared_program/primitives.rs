@@ -48,6 +48,11 @@ pub(super) enum BasicScalarOperation {
     GeChar,
     Clz8,
     Clz,
+    /// Compares pointer bits, not value equality: it does not force either
+    /// argument, and a match is not stable across a moving collector — a
+    /// later collection can leave two still-equal values at different
+    /// addresses.
+    ReallyUnsafePtrEquality,
 }
 
 pub(super) struct BasicScalarFamily;
@@ -78,6 +83,12 @@ impl ScalarFamily for BasicScalarFamily {
                     && returns_exact(signature, &[Int(64)]) =>
             {
                 Some(BasicScalarOperation::EqChar)
+            }
+            "reallyUnsafePtrEquality#"
+                if signature.arguments == [LiftedRef, LiftedRef]
+                    && returns_exact(signature, &[Int(64)]) =>
+            {
+                Some(BasicScalarOperation::ReallyUnsafePtrEquality)
             }
             "neChar#"
                 if signature.arguments == [Word(64), Word(64)]
@@ -127,6 +138,15 @@ impl ScalarFamily for BasicScalarFamily {
             BasicScalarOperation::PlusAddr => builder.ins().iadd(arguments[0], arguments[1]),
             BasicScalarOperation::Chr | BasicScalarOperation::Ord => arguments[0],
             BasicScalarOperation::EqChar => {
+                let equal =
+                    builder
+                        .ins()
+                        .icmp(ir::condcodes::IntCC::Equal, arguments[0], arguments[1]);
+                let one = builder.ins().iconst(ir::types::I64, 1);
+                let zero = builder.ins().iconst(ir::types::I64, 0);
+                builder.ins().select(equal, one, zero)
+            }
+            BasicScalarOperation::ReallyUnsafePtrEquality => {
                 let equal =
                     builder
                         .ins()
@@ -1398,6 +1418,12 @@ mod tests {
                 sig(vec![Word(8)], vec![Word(64)]),
                 sig(vec![Word(64)], vec![Word(8)]),
             ),
+            (
+                "reallyUnsafePtrEquality#",
+                sig(vec![LiftedRef, LiftedRef], vec![Int(64)]),
+                sig(vec![LiftedRef, UnliftedRef], vec![Int(64)]),
+                sig(vec![LiftedRef, LiftedRef], vec![Word(64)]),
+            ),
         ] {
             let identity = OperationIdentity::PrimOp(name.into());
             assert!(BasicScalarFamily::recognize(&identity, &accepted).is_some());
@@ -1418,6 +1444,21 @@ mod tests {
                 convention: tidepool_repr::execution_schema::ForeignConvention::CCall,
             },
             &sig(vec![Int(64)], vec![Word(64)]),
+        )
+        .is_none());
+        // GHC's real type is levity-polymorphic over BoxedRep: an all-unlifted
+        // pair must keep being rejected alongside the mixed pair above.
+        assert!(BasicScalarFamily::recognize(
+            &OperationIdentity::PrimOp("reallyUnsafePtrEquality#".into()),
+            &sig(vec![UnliftedRef, UnliftedRef], vec![Int(64)]),
+        )
+        .is_none());
+        assert!(BasicScalarFamily::recognize(
+            &OperationIdentity::Intrinsic {
+                symbol: "reallyUnsafePtrEquality#".into(),
+                convention: tidepool_repr::execution_schema::ForeignConvention::CCall,
+            },
+            &sig(vec![LiftedRef, LiftedRef], vec![Int(64)]),
         )
         .is_none());
     }
@@ -1494,6 +1535,132 @@ mod tests {
                 tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(value)) if value == expected
             ));
         }
+    }
+
+    #[test]
+    fn really_unsafe_ptr_equality_compares_pointer_identity_without_forcing() {
+        use tidepool_repr::execution_schema::{testing, *};
+
+        fn base_wire() -> WireProgram {
+            let mut wire = testing::wire_program();
+            wire.constructors.push(ConstructorDecl {
+                identity: testing::identity("W6", "Unit"),
+                family: testing::identity("W6", "Unit"),
+                host_id: tidepool_repr::DataConId(960),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: 1,
+                family_size: 1,
+                field_reps: vec![],
+                strict_fields: vec![],
+                layout: CheckedLayout {
+                    fields: vec![],
+                    alignment: 1,
+                    payload_size: 0,
+                    root_mask: vec![],
+                },
+            });
+            wire.signatures.push(sig(
+                vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+                vec![RuntimeRep::Int(64)],
+            ));
+            wire.operations.push(OperationDecl {
+                identity: OperationIdentity::PrimOp("reallyUnsafePtrEquality#".into()),
+                signature: SignatureId(1),
+            });
+            wire
+        }
+
+        fn set_entry_body(wire: &mut WireProgram, body: usize) {
+            let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+                unreachable!("fixture entry is nonrecursive")
+            };
+            let HeapRhs::Function {
+                body: entry_body, ..
+            } = &mut entry.binding.rhs
+            else {
+                unreachable!("fixture entry is a function")
+            };
+            *entry_body = body;
+        }
+
+        fn run(wire: WireProgram) -> tidepool_bridge::Value {
+            let prepared = testing::prepare(wire).unwrap();
+            let linked = link_program(prepared, &MachineImports::default()).unwrap();
+            let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
+            compiled
+                .run_entry(
+                    ValueId(0),
+                    &[],
+                    &super::super::RunOptions::default(),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap()
+                .values
+                .into_iter()
+                .next()
+                .unwrap()
+        }
+
+        // Same reference: one allocation, referenced on both sides.
+        let mut same = base_wire();
+        same.expressions.nodes[0] = ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments: vec![
+                Atom::Ref(ValueRef::Local(ValueId(1))),
+                Atom::Ref(ValueRef::Local(ValueId(1))),
+            ],
+        };
+        same.expressions.nodes.push(ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            }),
+            body: 0,
+        });
+        set_entry_body(&mut same, 1);
+        assert!(matches!(
+            run(same),
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1))
+        ));
+
+        // Distinct references: two separate allocations of the same nullary
+        // constructor.
+        let mut distinct = base_wire();
+        distinct.expressions.nodes[0] = ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments: vec![
+                Atom::Ref(ValueRef::Local(ValueId(1))),
+                Atom::Ref(ValueRef::Local(ValueId(2))),
+            ],
+        };
+        distinct.expressions.nodes.push(ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            }),
+            body: 0,
+        });
+        distinct.expressions.nodes.push(ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            }),
+            body: 1,
+        });
+        set_entry_body(&mut distinct, 2);
+        assert!(matches!(
+            run(distinct),
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(0))
+        ));
     }
 
     #[test]
