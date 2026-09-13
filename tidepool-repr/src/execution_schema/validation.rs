@@ -1185,6 +1185,528 @@ pub(super) fn validate_program(
     Validator::new(wire, limits).validate(requirements)
 }
 
+struct Validator<'a> {
+    wire: &'a WireProgram,
+    limits: DecodeLimits,
+    work: usize,
+    top_values: BTreeSet<ValueId>,
+    defined_values: BTreeSet<ValueId>,
+}
+
+impl<'a> Validator<'a> {
+    fn new(wire: &'a WireProgram, limits: DecodeLimits) -> Self {
+        Self {
+            wire,
+            limits,
+            work: 0,
+            top_values: BTreeSet::new(),
+            defined_values: BTreeSet::new(),
+        }
+    }
+
+    fn validate(mut self, requirements: &ProgramRequirements) -> Result<(), ParseError> {
+        self.check_envelope(requirements)?;
+        self.check_table_len(self.wire.signatures.len())?;
+        self.check_table_len(self.wire.globals.len())?;
+        self.check_table_len(self.wire.constructors.len())?;
+        self.check_table_len(self.wire.operations.len())?;
+        self.check_table_len(self.wire.bindings.len())?;
+
+        for signature in &self.wire.signatures {
+            self.bump_work(
+                signature.arguments.len()
+                    + signature
+                        .results
+                        .returned_reps()
+                        .map_or(0, <[RuntimeRep]>::len)
+                    + 1,
+            )?;
+            for rep in signature
+                .arguments
+                .iter()
+                .chain(signature.results.returned_reps().unwrap_or(&[]))
+            {
+                self.check_rep(*rep)?;
+            }
+        }
+
+        let mut global_symbols = BTreeSet::new();
+        for global in &self.wire.globals {
+            self.bump_work(1)?;
+            self.check_symbol(&global.identity)?;
+            if !global_symbols.insert(global.identity.clone()) {
+                return Err(ParseError::DuplicateDefinition(format!(
+                    "global {:?}",
+                    global.identity
+                )));
+            }
+            self.check_rep(global.rep)?;
+            if let Some(signature) = global.entry_signature {
+                self.check_signature(signature)?;
+                if global.rep != RuntimeRep::LiftedRef {
+                    return Err(ParseError::InvalidSignature(
+                        "only a lifted global can have a callable entry".into(),
+                    ));
+                }
+            }
+        }
+
+        let mut constructor_symbols = BTreeSet::new();
+        let mut constructor_host_ids = BTreeSet::new();
+        let mut family_sizes = BTreeMap::new();
+        let mut family_tags = BTreeSet::new();
+        for constructor in &self.wire.constructors {
+            self.bump_work(constructor.field_reps.len() + 1)?;
+            self.check_symbol(&constructor.identity)?;
+            self.check_symbol(&constructor.family)?;
+            if constructor.tag == 0 || constructor.tag > constructor.family_size {
+                return Err(ParseError::InvalidLayout(
+                    "constructor tag must be within its nonempty GHC family".into(),
+                ));
+            }
+            if family_sizes
+                .insert(&constructor.family, constructor.family_size)
+                .is_some_and(|size| size != constructor.family_size)
+            {
+                return Err(ParseError::InvalidLayout(
+                    "inconsistent constructor family size".into(),
+                ));
+            }
+            if !family_tags.insert((&constructor.family, constructor.tag)) {
+                return Err(ParseError::DuplicateDefinition(
+                    "constructor tag within family".into(),
+                ));
+            }
+            if !matches!(
+                constructor.result_rep,
+                RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
+            ) {
+                return Err(ParseError::InvalidSignature(
+                    "heap constructor requires a managed result representation".into(),
+                ));
+            }
+            if !constructor_symbols.insert(constructor.identity.clone()) {
+                return Err(ParseError::DuplicateDefinition(format!(
+                    "constructor {:?}",
+                    constructor.identity
+                )));
+            }
+            if !constructor_host_ids.insert(constructor.host_id) {
+                return Err(ParseError::DuplicateDefinition(
+                    "constructor host id".into(),
+                ));
+            }
+            if constructor.field_reps.len() != constructor.strict_fields.len() {
+                return Err(ParseError::InvalidLayout(
+                    "constructor field/strictness length mismatch".into(),
+                ));
+            }
+            for rep in &constructor.field_reps {
+                self.check_rep(*rep)?;
+            }
+            self.check_layout(&constructor.field_reps, &constructor.layout)?;
+        }
+
+        let mut operation_contracts = BTreeSet::new();
+        for operation in &self.wire.operations {
+            self.bump_work(1)?;
+            self.check_operation_identity(&operation.identity)?;
+            let signature = self.signature(operation.signature)?;
+            match &operation.identity {
+                super::OperationIdentity::Capability { .. }
+                    if matches!(signature.results, ResultContract::NoSuccess) =>
+                {
+                    return Err(ParseError::InvalidSignature(
+                        "capability operation must have a successful result contract".into(),
+                    ));
+                }
+                super::OperationIdentity::WiredInError { kind } => {
+                    let arguments = if *kind == super::WiredInErrorKind::AbsentSumField {
+                        &[][..]
+                    } else {
+                        &[RuntimeRep::Address][..]
+                    };
+                    if signature.arguments != arguments
+                        || signature.results != ResultContract::NoSuccess
+                    {
+                        return Err(ParseError::InvalidSignature(format!(
+                            "wired-in error {kind:?} must have signature {arguments:?} -> NoSuccess"
+                        )));
+                    }
+                }
+                _ => {}
+            }
+            let key = (
+                operation.identity.clone(),
+                signature.arguments.clone(),
+                signature.results.clone(),
+            );
+            if !operation_contracts.insert(key) {
+                return Err(ParseError::DuplicateDefinition(format!(
+                    "operation {:?}",
+                    operation.identity
+                )));
+            }
+        }
+
+        let mut top_symbols = BTreeSet::new();
+        for group in &self.wire.bindings {
+            match group {
+                Group::NonRecursive(binding) => {
+                    self.register_top(binding, &mut top_symbols)?;
+                }
+                Group::Recursive(bindings) => {
+                    if bindings.is_empty() {
+                        return Err(ParseError::Malformed(
+                            "recursive top-level group is empty".into(),
+                        ));
+                    }
+                    self.check_table_len(bindings.len())?;
+                    for binding in bindings {
+                        self.register_top(binding, &mut top_symbols)?;
+                    }
+                }
+            }
+        }
+        if !self.top_values.contains(&self.wire.entry) {
+            return Err(ParseError::InvalidReference(format!(
+                "entry value {:?} is not a top-level binding",
+                self.wire.entry
+            )));
+        }
+
+        if self.wire.expressions.nodes.len() > self.limits.max_nodes {
+            return Err(ParseError::LimitExceeded("nodes"));
+        }
+        check_flat_tree(&self.wire.expressions, &self.wire.bindings)?;
+
+        self.walk_bindings(false)?;
+        self.walk_bindings(true)?;
+        Ok(())
+    }
+
+    fn binding_type<B>(&self, binding: &HeapBinding<B>) -> Result<ValueType, ParseError> {
+        Ok(match &binding.rhs {
+            HeapRhs::Bytes(_) => ValueType {
+                rep: RuntimeRep::Address,
+                callable: None,
+            },
+            HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => ValueType {
+                rep: RuntimeRep::LiftedRef,
+                callable: Some(*signature),
+            },
+            HeapRhs::Constructor { constructor, .. } => ValueType {
+                rep: self.constructor(*constructor)?.result_rep,
+                callable: None,
+            },
+        })
+    }
+
+    fn walk_bindings(&mut self, typed: bool) -> Result<(), ParseError> {
+        let wire = self.wire;
+        let mut walker = Walker::new(self, &wire.expressions, typed)?;
+        // Top declaration metadata is published before any RHS walks. Errors
+        // in this phase intentionally precede RHS errors; source order applies
+        // to the subsequent walks.
+        for group in &wire.bindings {
+            match group {
+                Group::NonRecursive(binding) => walker.publish_top(&binding.binding)?,
+                Group::Recursive(bindings) => {
+                    for binding in bindings {
+                        walker.publish_top(&binding.binding)?;
+                    }
+                }
+            }
+        }
+        for group in &wire.bindings {
+            match group {
+                Group::NonRecursive(binding) => {
+                    let mark = walker.undo.len();
+                    walker.hide_top(&binding.binding)?;
+                    let result = walker.walk_top_binding(&binding.binding);
+                    walker.restore(mark);
+                    result?;
+                }
+                Group::Recursive(bindings) => {
+                    for binding in bindings {
+                        walker.walk_top_binding(&binding.binding)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn register_top(
+        &mut self,
+        binding: &super::TopBinding,
+        symbols: &mut BTreeSet<SymbolIdentity>,
+    ) -> Result<(), ParseError> {
+        self.bump_work(1)?;
+        self.check_symbol(&binding.identity)?;
+        if !symbols.insert(binding.identity.clone()) {
+            return Err(ParseError::DuplicateDefinition(format!(
+                "top-level symbol {:?}",
+                binding.identity
+            )));
+        }
+        if !self.top_values.insert(binding.binding.id) {
+            return Err(ParseError::DuplicateDefinition(format!(
+                "value id {:?}",
+                binding.binding.id
+            )));
+        }
+        let index = usize::try_from(binding.binding.id.0)
+            .map_err(|_| ParseError::LimitExceeded("value ids"))?;
+        if index >= self.limits.max_table_entries {
+            return Err(ParseError::LimitExceeded("value ids"));
+        }
+        self.defined_values.insert(binding.binding.id);
+        Ok(())
+    }
+
+    fn check_scalar(&mut self, literal: &ScalarLiteral) -> Result<(), ParseError> {
+        match literal {
+            ScalarLiteral::NullAddress => Ok(()),
+            ScalarLiteral::Int { bits, bytes } | ScalarLiteral::Word { bits, bytes } => {
+                self.check_integer_width(*bits, bytes)
+            }
+            ScalarLiteral::Float { bits, bytes } => {
+                if !matches!(*bits, 32 | 64) || bytes.len() != usize::from(*bits) / 8 {
+                    return Err(ParseError::Malformed("invalid float literal width".into()));
+                }
+                Ok(())
+            }
+            ScalarLiteral::Bytes(bytes) => {
+                if bytes.len() > self.limits.max_string_bytes {
+                    return Err(ParseError::LimitExceeded("string bytes"));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn check_integer_width(&self, bits: u8, bytes: &[u8]) -> Result<(), ParseError> {
+        if !matches!(bits, 8 | 16 | 32 | 64) || bytes.len() != usize::from(bits) / 8 {
+            return Err(ParseError::Malformed(
+                "invalid integer literal width".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_layout(
+        &mut self,
+        reps: &[RuntimeRep],
+        layout: &CheckedLayout,
+    ) -> Result<(), ParseError> {
+        for rep in reps {
+            self.check_rep(*rep)?;
+        }
+        let expected =
+            crate::execution_schema::StorageLayout::for_reps(&self.wire.envelope.target, reps)
+                .map_err(|error| ParseError::InvalidLayout(error.to_string()))?;
+        if layout.fields.len() != expected.fields().len()
+            || layout.root_mask.len() != expected.fields().len()
+        {
+            return Err(ParseError::InvalidLayout(
+                "stored fields/layout/root mask length mismatch".into(),
+            ));
+        }
+
+        for (field, expected_field) in layout.fields.iter().zip(expected.fields()) {
+            if field.rep != expected_field.rep() || field.offset != expected_field.offset() {
+                return Err(ParseError::InvalidLayout(
+                    "layout field does not match canonical storage layout".into(),
+                ));
+            }
+        }
+        let expected_root_mask: Vec<_> = expected
+            .fields()
+            .iter()
+            .map(|field| matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef))
+            .collect();
+        if layout.root_mask != expected_root_mask {
+            return Err(ParseError::InvalidLayout(
+                "incorrect canonical layout root mask".into(),
+            ));
+        }
+        if layout.alignment != expected.alignment()
+            || layout.payload_size != expected.payload_size()
+        {
+            return Err(ParseError::InvalidLayout(
+                "layout payload size is inconsistent".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_rep(&self, rep: RuntimeRep) -> Result<(), ParseError> {
+        let valid = match rep {
+            RuntimeRep::Void
+            | RuntimeRep::LiftedRef
+            | RuntimeRep::UnliftedRef
+            | RuntimeRep::Address => true,
+            RuntimeRep::Int(bits) | RuntimeRep::Word(bits) => {
+                matches!(bits, 8 | 16 | 32 | 64)
+            }
+            RuntimeRep::Float(bits) => matches!(bits, 32 | 64),
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(ParseError::InvalidSignature(format!(
+                "unsupported runtime representation {rep:?}"
+            )))
+        }
+    }
+
+    fn check_envelope(&mut self, requirements: &ProgramRequirements) -> Result<(), ParseError> {
+        let envelope = &self.wire.envelope;
+        if envelope.schema_version != SCHEMA_VERSION
+            || requirements.schema_version != SCHEMA_VERSION
+            || envelope.schema_version != requirements.schema_version
+        {
+            return Err(ParseError::UnsupportedVersion(envelope.schema_version));
+        }
+        if envelope.execution_abi_version != EXECUTION_ABI_VERSION
+            || requirements.execution_abi_version != EXECUTION_ABI_VERSION
+            || envelope.execution_abi_version != requirements.execution_abi_version
+            || envelope.projection_profile != requirements.projection_profile
+            || envelope.toolchain != requirements.toolchain
+            || envelope.target != requirements.target
+        {
+            return Err(ParseError::UnsupportedTarget(format!(
+                "artifact {:?} does not match requirements {:?}",
+                envelope.target, requirements.target
+            )));
+        }
+        self.check_text(&envelope.projection_profile)?;
+        self.check_text(&envelope.toolchain)?;
+        self.check_text(&envelope.target.abi)?;
+        if !matches!(envelope.target.pointer_width, 32 | 64)
+            || !matches!(envelope.target.word_width, 32 | 64)
+        {
+            return Err(ParseError::UnsupportedTarget(
+                "unsupported pointer or word width".into(),
+            ));
+        }
+        if !envelope
+            .target
+            .features
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        {
+            return Err(ParseError::Malformed(
+                "target features must be sorted and unique".into(),
+            ));
+        }
+        for feature in &envelope.target.features {
+            self.check_text(feature)?;
+        }
+        Ok(())
+    }
+
+    fn check_symbol(&mut self, symbol: &SymbolIdentity) -> Result<(), ParseError> {
+        self.check_text(&symbol.unit)?;
+        self.check_text(&symbol.module)?;
+        self.check_text(&symbol.namespace)?;
+        self.check_text(&symbol.occurrence)?;
+        if let Some(parent) = &symbol.record_parent {
+            self.check_text(parent)?;
+        }
+        Ok(())
+    }
+
+    fn check_operation_identity(
+        &mut self,
+        identity: &super::OperationIdentity,
+    ) -> Result<(), ParseError> {
+        match identity {
+            super::OperationIdentity::PrimOp(name) => self.check_text(name),
+            super::OperationIdentity::Intrinsic { symbol, .. } => self.check_text(symbol),
+            super::OperationIdentity::Capability { name } => self.check_text(name),
+            super::OperationIdentity::WiredInError { .. } => Ok(()),
+        }
+    }
+
+    fn check_text(&mut self, text: &str) -> Result<(), ParseError> {
+        self.bump_work(text.len())?;
+        if text.is_empty() {
+            return Err(ParseError::Malformed("empty identity text".into()));
+        }
+        if text.len() > self.limits.max_string_bytes {
+            return Err(ParseError::LimitExceeded("string bytes"));
+        }
+        Ok(())
+    }
+
+    fn check_unique_values(&self, ids: &[ValueId], kind: &str) -> Result<(), ParseError> {
+        let mut unique = BTreeSet::new();
+        for id in ids {
+            if !unique.insert(*id) {
+                return Err(ParseError::DuplicateDefinition(format!("{kind} {id:?}")));
+            }
+        }
+        Ok(())
+    }
+
+    fn signature(&self, id: SignatureId) -> Result<&super::Signature, ParseError> {
+        self.wire
+            .signatures
+            .get(id.0 as usize)
+            .ok_or_else(|| ParseError::InvalidReference(format!("signature {:?}", id)))
+    }
+
+    fn check_signature(&self, id: SignatureId) -> Result<(), ParseError> {
+        self.signature(id).map(|_| ())
+    }
+
+    fn global(&self, id: GlobalId) -> Result<&super::GlobalDecl, ParseError> {
+        self.wire
+            .globals
+            .get(id.0 as usize)
+            .ok_or_else(|| ParseError::InvalidReference(format!("global {:?}", id)))
+    }
+
+    fn constructor(&self, id: ConstructorId) -> Result<&super::ConstructorDecl, ParseError> {
+        self.wire
+            .constructors
+            .get(id.0 as usize)
+            .ok_or_else(|| ParseError::InvalidReference(format!("constructor {:?}", id)))
+    }
+
+    fn operation(&self, id: OperationId) -> Result<&super::OperationDecl, ParseError> {
+        self.wire
+            .operations
+            .get(id.0 as usize)
+            .ok_or_else(|| ParseError::InvalidReference(format!("operation {:?}", id)))
+    }
+
+    fn check_table_len(&self, len: usize) -> Result<(), ParseError> {
+        if len > self.limits.max_table_entries {
+            Err(ParseError::LimitExceeded("table entries"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn bump_node(&mut self) -> Result<(), ParseError> {
+        self.bump_work(1)
+    }
+
+    fn bump_work(&mut self, amount: usize) -> Result<(), ParseError> {
+        self.work = self
+            .work
+            .checked_add(amount)
+            .ok_or(ParseError::LimitExceeded("work"))?;
+        if self.work > self.limits.max_work {
+            return Err(ParseError::LimitExceeded("work"));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2739,527 +3261,5 @@ mod tests {
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidScope(message)) if message.contains("ValueId(99)")
         ));
-    }
-}
-
-struct Validator<'a> {
-    wire: &'a WireProgram,
-    limits: DecodeLimits,
-    work: usize,
-    top_values: BTreeSet<ValueId>,
-    defined_values: BTreeSet<ValueId>,
-}
-
-impl<'a> Validator<'a> {
-    fn new(wire: &'a WireProgram, limits: DecodeLimits) -> Self {
-        Self {
-            wire,
-            limits,
-            work: 0,
-            top_values: BTreeSet::new(),
-            defined_values: BTreeSet::new(),
-        }
-    }
-
-    fn validate(mut self, requirements: &ProgramRequirements) -> Result<(), ParseError> {
-        self.check_envelope(requirements)?;
-        self.check_table_len(self.wire.signatures.len())?;
-        self.check_table_len(self.wire.globals.len())?;
-        self.check_table_len(self.wire.constructors.len())?;
-        self.check_table_len(self.wire.operations.len())?;
-        self.check_table_len(self.wire.bindings.len())?;
-
-        for signature in &self.wire.signatures {
-            self.bump_work(
-                signature.arguments.len()
-                    + signature
-                        .results
-                        .returned_reps()
-                        .map_or(0, <[RuntimeRep]>::len)
-                    + 1,
-            )?;
-            for rep in signature
-                .arguments
-                .iter()
-                .chain(signature.results.returned_reps().unwrap_or(&[]))
-            {
-                self.check_rep(*rep)?;
-            }
-        }
-
-        let mut global_symbols = BTreeSet::new();
-        for global in &self.wire.globals {
-            self.bump_work(1)?;
-            self.check_symbol(&global.identity)?;
-            if !global_symbols.insert(global.identity.clone()) {
-                return Err(ParseError::DuplicateDefinition(format!(
-                    "global {:?}",
-                    global.identity
-                )));
-            }
-            self.check_rep(global.rep)?;
-            if let Some(signature) = global.entry_signature {
-                self.check_signature(signature)?;
-                if global.rep != RuntimeRep::LiftedRef {
-                    return Err(ParseError::InvalidSignature(
-                        "only a lifted global can have a callable entry".into(),
-                    ));
-                }
-            }
-        }
-
-        let mut constructor_symbols = BTreeSet::new();
-        let mut constructor_host_ids = BTreeSet::new();
-        let mut family_sizes = BTreeMap::new();
-        let mut family_tags = BTreeSet::new();
-        for constructor in &self.wire.constructors {
-            self.bump_work(constructor.field_reps.len() + 1)?;
-            self.check_symbol(&constructor.identity)?;
-            self.check_symbol(&constructor.family)?;
-            if constructor.tag == 0 || constructor.tag > constructor.family_size {
-                return Err(ParseError::InvalidLayout(
-                    "constructor tag must be within its nonempty GHC family".into(),
-                ));
-            }
-            if family_sizes
-                .insert(&constructor.family, constructor.family_size)
-                .is_some_and(|size| size != constructor.family_size)
-            {
-                return Err(ParseError::InvalidLayout(
-                    "inconsistent constructor family size".into(),
-                ));
-            }
-            if !family_tags.insert((&constructor.family, constructor.tag)) {
-                return Err(ParseError::DuplicateDefinition(
-                    "constructor tag within family".into(),
-                ));
-            }
-            if !matches!(
-                constructor.result_rep,
-                RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
-            ) {
-                return Err(ParseError::InvalidSignature(
-                    "heap constructor requires a managed result representation".into(),
-                ));
-            }
-            if !constructor_symbols.insert(constructor.identity.clone()) {
-                return Err(ParseError::DuplicateDefinition(format!(
-                    "constructor {:?}",
-                    constructor.identity
-                )));
-            }
-            if !constructor_host_ids.insert(constructor.host_id) {
-                return Err(ParseError::DuplicateDefinition(
-                    "constructor host id".into(),
-                ));
-            }
-            if constructor.field_reps.len() != constructor.strict_fields.len() {
-                return Err(ParseError::InvalidLayout(
-                    "constructor field/strictness length mismatch".into(),
-                ));
-            }
-            for rep in &constructor.field_reps {
-                self.check_rep(*rep)?;
-            }
-            self.check_layout(&constructor.field_reps, &constructor.layout)?;
-        }
-
-        let mut operation_contracts = BTreeSet::new();
-        for operation in &self.wire.operations {
-            self.bump_work(1)?;
-            self.check_operation_identity(&operation.identity)?;
-            let signature = self.signature(operation.signature)?;
-            match &operation.identity {
-                super::OperationIdentity::Capability { .. }
-                    if matches!(signature.results, ResultContract::NoSuccess) =>
-                {
-                    return Err(ParseError::InvalidSignature(
-                        "capability operation must have a successful result contract".into(),
-                    ));
-                }
-                super::OperationIdentity::WiredInError { kind } => {
-                    let arguments = if *kind == super::WiredInErrorKind::AbsentSumField {
-                        &[][..]
-                    } else {
-                        &[RuntimeRep::Address][..]
-                    };
-                    if signature.arguments != arguments
-                        || signature.results != ResultContract::NoSuccess
-                    {
-                        return Err(ParseError::InvalidSignature(format!(
-                            "wired-in error {kind:?} must have signature {arguments:?} -> NoSuccess"
-                        )));
-                    }
-                }
-                _ => {}
-            }
-            let key = (
-                operation.identity.clone(),
-                signature.arguments.clone(),
-                signature.results.clone(),
-            );
-            if !operation_contracts.insert(key) {
-                return Err(ParseError::DuplicateDefinition(format!(
-                    "operation {:?}",
-                    operation.identity
-                )));
-            }
-        }
-
-        let mut top_symbols = BTreeSet::new();
-        for group in &self.wire.bindings {
-            match group {
-                Group::NonRecursive(binding) => {
-                    self.register_top(binding, &mut top_symbols)?;
-                }
-                Group::Recursive(bindings) => {
-                    if bindings.is_empty() {
-                        return Err(ParseError::Malformed(
-                            "recursive top-level group is empty".into(),
-                        ));
-                    }
-                    self.check_table_len(bindings.len())?;
-                    for binding in bindings {
-                        self.register_top(binding, &mut top_symbols)?;
-                    }
-                }
-            }
-        }
-        if !self.top_values.contains(&self.wire.entry) {
-            return Err(ParseError::InvalidReference(format!(
-                "entry value {:?} is not a top-level binding",
-                self.wire.entry
-            )));
-        }
-
-        if self.wire.expressions.nodes.len() > self.limits.max_nodes {
-            return Err(ParseError::LimitExceeded("nodes"));
-        }
-        check_flat_tree(&self.wire.expressions, &self.wire.bindings)?;
-
-        self.walk_bindings(false)?;
-        self.walk_bindings(true)?;
-        Ok(())
-    }
-
-    fn binding_type<B>(&self, binding: &HeapBinding<B>) -> Result<ValueType, ParseError> {
-        Ok(match &binding.rhs {
-            HeapRhs::Bytes(_) => ValueType {
-                rep: RuntimeRep::Address,
-                callable: None,
-            },
-            HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => ValueType {
-                rep: RuntimeRep::LiftedRef,
-                callable: Some(*signature),
-            },
-            HeapRhs::Constructor { constructor, .. } => ValueType {
-                rep: self.constructor(*constructor)?.result_rep,
-                callable: None,
-            },
-        })
-    }
-
-    fn walk_bindings(&mut self, typed: bool) -> Result<(), ParseError> {
-        let wire = self.wire;
-        let mut walker = Walker::new(self, &wire.expressions, typed)?;
-        // Top declaration metadata is published before any RHS walks. Errors
-        // in this phase intentionally precede RHS errors; source order applies
-        // to the subsequent walks.
-        for group in &wire.bindings {
-            match group {
-                Group::NonRecursive(binding) => walker.publish_top(&binding.binding)?,
-                Group::Recursive(bindings) => {
-                    for binding in bindings {
-                        walker.publish_top(&binding.binding)?;
-                    }
-                }
-            }
-        }
-        for group in &wire.bindings {
-            match group {
-                Group::NonRecursive(binding) => {
-                    let mark = walker.undo.len();
-                    walker.hide_top(&binding.binding)?;
-                    let result = walker.walk_top_binding(&binding.binding);
-                    walker.restore(mark);
-                    result?;
-                }
-                Group::Recursive(bindings) => {
-                    for binding in bindings {
-                        walker.walk_top_binding(&binding.binding)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn register_top(
-        &mut self,
-        binding: &super::TopBinding,
-        symbols: &mut BTreeSet<SymbolIdentity>,
-    ) -> Result<(), ParseError> {
-        self.bump_work(1)?;
-        self.check_symbol(&binding.identity)?;
-        if !symbols.insert(binding.identity.clone()) {
-            return Err(ParseError::DuplicateDefinition(format!(
-                "top-level symbol {:?}",
-                binding.identity
-            )));
-        }
-        if !self.top_values.insert(binding.binding.id) {
-            return Err(ParseError::DuplicateDefinition(format!(
-                "value id {:?}",
-                binding.binding.id
-            )));
-        }
-        let index = usize::try_from(binding.binding.id.0)
-            .map_err(|_| ParseError::LimitExceeded("value ids"))?;
-        if index >= self.limits.max_table_entries {
-            return Err(ParseError::LimitExceeded("value ids"));
-        }
-        self.defined_values.insert(binding.binding.id);
-        Ok(())
-    }
-
-    fn check_scalar(&mut self, literal: &ScalarLiteral) -> Result<(), ParseError> {
-        match literal {
-            ScalarLiteral::NullAddress => Ok(()),
-            ScalarLiteral::Int { bits, bytes } | ScalarLiteral::Word { bits, bytes } => {
-                self.check_integer_width(*bits, bytes)
-            }
-            ScalarLiteral::Float { bits, bytes } => {
-                if !matches!(*bits, 32 | 64) || bytes.len() != usize::from(*bits) / 8 {
-                    return Err(ParseError::Malformed("invalid float literal width".into()));
-                }
-                Ok(())
-            }
-            ScalarLiteral::Bytes(bytes) => {
-                if bytes.len() > self.limits.max_string_bytes {
-                    return Err(ParseError::LimitExceeded("string bytes"));
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn check_integer_width(&self, bits: u8, bytes: &[u8]) -> Result<(), ParseError> {
-        if !matches!(bits, 8 | 16 | 32 | 64) || bytes.len() != usize::from(bits) / 8 {
-            return Err(ParseError::Malformed(
-                "invalid integer literal width".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn check_layout(
-        &mut self,
-        reps: &[RuntimeRep],
-        layout: &CheckedLayout,
-    ) -> Result<(), ParseError> {
-        for rep in reps {
-            self.check_rep(*rep)?;
-        }
-        let expected =
-            crate::execution_schema::StorageLayout::for_reps(&self.wire.envelope.target, reps)
-                .map_err(|error| ParseError::InvalidLayout(error.to_string()))?;
-        if layout.fields.len() != expected.fields().len()
-            || layout.root_mask.len() != expected.fields().len()
-        {
-            return Err(ParseError::InvalidLayout(
-                "stored fields/layout/root mask length mismatch".into(),
-            ));
-        }
-
-        for (field, expected_field) in layout.fields.iter().zip(expected.fields()) {
-            if field.rep != expected_field.rep() || field.offset != expected_field.offset() {
-                return Err(ParseError::InvalidLayout(
-                    "layout field does not match canonical storage layout".into(),
-                ));
-            }
-        }
-        let expected_root_mask: Vec<_> = expected
-            .fields()
-            .iter()
-            .map(|field| matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef))
-            .collect();
-        if layout.root_mask != expected_root_mask {
-            return Err(ParseError::InvalidLayout(
-                "incorrect canonical layout root mask".into(),
-            ));
-        }
-        if layout.alignment != expected.alignment()
-            || layout.payload_size != expected.payload_size()
-        {
-            return Err(ParseError::InvalidLayout(
-                "layout payload size is inconsistent".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn check_rep(&self, rep: RuntimeRep) -> Result<(), ParseError> {
-        let valid = match rep {
-            RuntimeRep::Void
-            | RuntimeRep::LiftedRef
-            | RuntimeRep::UnliftedRef
-            | RuntimeRep::Address => true,
-            RuntimeRep::Int(bits) | RuntimeRep::Word(bits) => {
-                matches!(bits, 8 | 16 | 32 | 64)
-            }
-            RuntimeRep::Float(bits) => matches!(bits, 32 | 64),
-        };
-        if valid {
-            Ok(())
-        } else {
-            Err(ParseError::InvalidSignature(format!(
-                "unsupported runtime representation {rep:?}"
-            )))
-        }
-    }
-
-    fn check_envelope(&mut self, requirements: &ProgramRequirements) -> Result<(), ParseError> {
-        let envelope = &self.wire.envelope;
-        if envelope.schema_version != SCHEMA_VERSION
-            || requirements.schema_version != SCHEMA_VERSION
-            || envelope.schema_version != requirements.schema_version
-        {
-            return Err(ParseError::UnsupportedVersion(envelope.schema_version));
-        }
-        if envelope.execution_abi_version != EXECUTION_ABI_VERSION
-            || requirements.execution_abi_version != EXECUTION_ABI_VERSION
-            || envelope.execution_abi_version != requirements.execution_abi_version
-            || envelope.projection_profile != requirements.projection_profile
-            || envelope.toolchain != requirements.toolchain
-            || envelope.target != requirements.target
-        {
-            return Err(ParseError::UnsupportedTarget(format!(
-                "artifact {:?} does not match requirements {:?}",
-                envelope.target, requirements.target
-            )));
-        }
-        self.check_text(&envelope.projection_profile)?;
-        self.check_text(&envelope.toolchain)?;
-        self.check_text(&envelope.target.abi)?;
-        if !matches!(envelope.target.pointer_width, 32 | 64)
-            || !matches!(envelope.target.word_width, 32 | 64)
-        {
-            return Err(ParseError::UnsupportedTarget(
-                "unsupported pointer or word width".into(),
-            ));
-        }
-        if !envelope
-            .target
-            .features
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
-        {
-            return Err(ParseError::Malformed(
-                "target features must be sorted and unique".into(),
-            ));
-        }
-        for feature in &envelope.target.features {
-            self.check_text(feature)?;
-        }
-        Ok(())
-    }
-
-    fn check_symbol(&mut self, symbol: &SymbolIdentity) -> Result<(), ParseError> {
-        self.check_text(&symbol.unit)?;
-        self.check_text(&symbol.module)?;
-        self.check_text(&symbol.namespace)?;
-        self.check_text(&symbol.occurrence)?;
-        if let Some(parent) = &symbol.record_parent {
-            self.check_text(parent)?;
-        }
-        Ok(())
-    }
-
-    fn check_operation_identity(
-        &mut self,
-        identity: &super::OperationIdentity,
-    ) -> Result<(), ParseError> {
-        match identity {
-            super::OperationIdentity::PrimOp(name) => self.check_text(name),
-            super::OperationIdentity::Intrinsic { symbol, .. } => self.check_text(symbol),
-            super::OperationIdentity::Capability { name } => self.check_text(name),
-            super::OperationIdentity::WiredInError { .. } => Ok(()),
-        }
-    }
-
-    fn check_text(&mut self, text: &str) -> Result<(), ParseError> {
-        self.bump_work(text.len())?;
-        if text.is_empty() {
-            return Err(ParseError::Malformed("empty identity text".into()));
-        }
-        if text.len() > self.limits.max_string_bytes {
-            return Err(ParseError::LimitExceeded("string bytes"));
-        }
-        Ok(())
-    }
-
-    fn check_unique_values(&self, ids: &[ValueId], kind: &str) -> Result<(), ParseError> {
-        let mut unique = BTreeSet::new();
-        for id in ids {
-            if !unique.insert(*id) {
-                return Err(ParseError::DuplicateDefinition(format!("{kind} {id:?}")));
-            }
-        }
-        Ok(())
-    }
-
-    fn signature(&self, id: SignatureId) -> Result<&super::Signature, ParseError> {
-        self.wire
-            .signatures
-            .get(id.0 as usize)
-            .ok_or_else(|| ParseError::InvalidReference(format!("signature {:?}", id)))
-    }
-
-    fn check_signature(&self, id: SignatureId) -> Result<(), ParseError> {
-        self.signature(id).map(|_| ())
-    }
-
-    fn global(&self, id: GlobalId) -> Result<&super::GlobalDecl, ParseError> {
-        self.wire
-            .globals
-            .get(id.0 as usize)
-            .ok_or_else(|| ParseError::InvalidReference(format!("global {:?}", id)))
-    }
-
-    fn constructor(&self, id: ConstructorId) -> Result<&super::ConstructorDecl, ParseError> {
-        self.wire
-            .constructors
-            .get(id.0 as usize)
-            .ok_or_else(|| ParseError::InvalidReference(format!("constructor {:?}", id)))
-    }
-
-    fn operation(&self, id: OperationId) -> Result<&super::OperationDecl, ParseError> {
-        self.wire
-            .operations
-            .get(id.0 as usize)
-            .ok_or_else(|| ParseError::InvalidReference(format!("operation {:?}", id)))
-    }
-
-    fn check_table_len(&self, len: usize) -> Result<(), ParseError> {
-        if len > self.limits.max_table_entries {
-            Err(ParseError::LimitExceeded("table entries"))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn bump_node(&mut self) -> Result<(), ParseError> {
-        self.bump_work(1)
-    }
-
-    fn bump_work(&mut self, amount: usize) -> Result<(), ParseError> {
-        self.work = self
-            .work
-            .checked_add(amount)
-            .ok_or(ParseError::LimitExceeded("work"))?;
-        if self.work > self.limits.max_work {
-            return Err(ParseError::LimitExceeded("work"));
-        }
-        Ok(())
     }
 }
