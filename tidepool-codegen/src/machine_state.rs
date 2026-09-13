@@ -124,13 +124,13 @@ impl GcRootSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ExternalGeneration {
     Young,
     Retained,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ExternalActivity {
     Active,
     Revoked,
@@ -1085,75 +1085,254 @@ impl MachineState {
         );
     }
 
-    /// Prepared array stores validate before mutation and share this barrier
-    /// owner. Young payload slots are not roots: remembering them would keep
-    /// unreachable Young cycles alive. Retained payload slots use the existing
-    /// remembered set, never a parallel external-root registry.
+    fn validate_external_access(
+        published: *mut u8,
+        record: &ExternalStorage,
+        expected: ExternalStorageKind,
+        active_only: bool,
+    ) -> Result<(), ExternalStorageValidationError> {
+        if active_only && record.activity == ExternalActivity::Revoked {
+            return Err(ExternalStorageValidationError::Revoked(published as usize));
+        }
+        if record.kind != expected {
+            return Err(ExternalStorageValidationError::KindMismatch {
+                expected,
+                actual: record.kind,
+            });
+        }
+        Self::validate_external_record(published, record)
+    }
+
+    fn structural_external_record<'a>(
+        storage: &'a HashMap<*mut u8, ExternalStorage>,
+        published: *mut u8,
+        expected: ExternalStorageKind,
+    ) -> Result<&'a ExternalStorage, ExternalStorageValidationError> {
+        let record = storage
+            .get(&published)
+            .ok_or(ExternalStorageValidationError::Untracked(
+                published as usize,
+            ))?;
+        Self::validate_external_access(published, record, expected, false)?;
+        Ok(record)
+    }
+
+    fn checked_external_record<'a>(
+        storage: &'a HashMap<*mut u8, ExternalStorage>,
+        published: *mut u8,
+        expected: ExternalStorageKind,
+    ) -> Result<&'a ExternalStorage, ExternalStorageValidationError> {
+        let record = Self::structural_external_record(storage, published, expected)?;
+        if record.activity == ExternalActivity::Revoked {
+            return Err(ExternalStorageValidationError::Revoked(published as usize));
+        }
+        Ok(record)
+    }
+
+    /// Store an entire checked range without a safepoint between validation,
+    /// remembered-set admission, and writes. Young slots are not roots;
+    /// Retained slots are remembered before the values become visible.
+    pub(crate) fn store_external_elements(
+        &self,
+        published: *mut u8,
+        start: usize,
+        values: &[*mut u8],
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let record =
+            Self::checked_external_record(&storage, published, ExternalStorageKind::BoxedArray)?;
+        let end = start.checked_add(values.len()).ok_or(
+            ExternalStorageValidationError::IndexOutOfBounds {
+                index: start,
+                len: record.logical_len,
+            },
+        )?;
+        if end > record.logical_len {
+            return Err(ExternalStorageValidationError::IndexOutOfBounds {
+                index: end - 1,
+                len: record.logical_len,
+            });
+        }
+        // SAFETY: validation and the checked range place every slot in the allocation.
+        let first = unsafe { published.add(8).cast::<*mut u8>().add(start) };
+        if record.generation == ExternalGeneration::Retained {
+            let mut remembered = self.remembered_slots.borrow_mut();
+            remembered
+                .try_reserve(values.len())
+                .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+            for index in 0..values.len() {
+                remembered.insert(unsafe { first.add(index) });
+            }
+        }
+        for (index, &value) in values.iter().enumerate() {
+            unsafe { first.add(index).write(value) };
+        }
+        if !values.is_empty() {
+            self.external_changed();
+        }
+        Ok(())
+    }
+
+    /// The one-element prepared store shares the checked range owner.
     pub(crate) fn store_external_element(
         &self,
         published: *mut u8,
         index: usize,
         value: *mut u8,
     ) -> Result<(), ExternalStorageValidationError> {
+        self.store_external_elements(published, index, &[value])
+    }
+
+    /// Checked compare-and-swap with the same owner barrier as ordinary writes.
+    pub(crate) fn compare_exchange_external_element(
+        &self,
+        published: *mut u8,
+        index: usize,
+        expected: *mut u8,
+        value: *mut u8,
+    ) -> Result<*mut u8, ExternalStorageValidationError> {
         let storage = self.external_storage.borrow();
-        let record = storage
-            .get(&published)
-            .ok_or(ExternalStorageValidationError::Untracked(
-                published as usize,
-            ))?;
-        if record.activity == ExternalActivity::Revoked {
-            return Err(ExternalStorageValidationError::Revoked(published as usize));
-        }
-        if record.kind != ExternalStorageKind::BoxedArray {
-            return Err(ExternalStorageValidationError::KindMismatch {
-                expected: ExternalStorageKind::BoxedArray,
-                actual: record.kind,
-            });
-        }
-        Self::validate_external_record(published, record)?;
+        let record =
+            Self::checked_external_record(&storage, published, ExternalStorageKind::BoxedArray)?;
         if index >= record.logical_len {
             return Err(ExternalStorageValidationError::IndexOutOfBounds {
                 index,
                 len: record.logical_len,
             });
         }
-        // SAFETY: owner validation and the logical bound prove this slot.
+        // SAFETY: owner validation and index check prove this slot.
         let slot = unsafe { published.add(8).cast::<*mut u8>().add(index) };
-        if record.generation == ExternalGeneration::Retained {
-            let mut remembered = self.remembered_slots.borrow_mut();
-            remembered
-                .try_reserve(1)
-                .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
-            remembered.insert(slot);
+        let old = unsafe { slot.read() };
+        if old == expected {
+            if record.generation == ExternalGeneration::Retained {
+                let mut remembered = self.remembered_slots.borrow_mut();
+                remembered
+                    .try_reserve(1)
+                    .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+                remembered.insert(slot);
+            }
+            // No callback or safepoint splits this operation.
+            unsafe { slot.write(value) };
+            self.external_changed();
         }
-        // No failure, callback or safepoint may split the barrier and store.
-        unsafe { slot.write(value) };
-        self.external_changed();
-        Ok(())
+        Ok(old)
     }
 
-    /// wave5:external-lifetime: validate and reserve all bookkeeping first,
-    /// then mark selected payloads Retained and remember their boxed slots.
+    /// Validate and reserve all bookkeeping first, then mark selected payloads
+    /// Retained and remember their boxed slots.
     /// Called after both promotion copies succeed, before execution resumes.
     /// Failure at that point is incomplete promotion, never reusable.
     pub(crate) fn retain_external_payloads(
         &self,
-        _selected: &[(usize, ExternalStorageKind)],
+        selected: &[(usize, ExternalStorageKind)],
     ) -> Result<(), ExternalStorageValidationError> {
-        Err(ExternalStorageValidationError::Unsupported(
-            "wave5:external-lifetime",
-        ))
+        let mut storage = self.external_storage.borrow_mut();
+        let mut slots = Vec::new();
+        for &(address, kind) in selected {
+            let published = address as *mut u8;
+            let record = Self::structural_external_record(&storage, published, kind)?;
+            if kind == ExternalStorageKind::BoxedArray {
+                slots
+                    .try_reserve(record.logical_len)
+                    .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+                for index in 0..record.logical_len {
+                    // SAFETY: record validation proved the whole boxed span.
+                    slots.push(unsafe { published.add(8).cast::<*mut u8>().add(index) });
+                }
+            }
+        }
+        let mut remembered = self.remembered_slots.borrow_mut();
+        remembered
+            .try_reserve(slots.len())
+            .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+        for (&published, record) in storage.iter_mut() {
+            if selected
+                .iter()
+                .any(|&(address, _)| address == published as usize)
+            {
+                record.generation = ExternalGeneration::Retained;
+            }
+        }
+        for slot in slots {
+            remembered.insert(slot);
+        }
+        if !selected.is_empty() {
+            self.external_changed();
+        }
+        Ok(())
     }
 
-    /// wave5:external-lifetime: stage only unmarked Young allocations after
-    /// the entire minor operation succeeds, never between growth recopies.
+    /// Stage only unmarked Young allocations after the entire minor operation
+    /// succeeds, never between growth recopies.
     pub(crate) fn plan_external_minor_sweep(
         &self,
-        _marked: &HashSet<*mut u8>,
+        marked: &HashSet<*mut u8>,
     ) -> Result<ExternalSweepPlan, ExternalStorageValidationError> {
-        Err(ExternalStorageValidationError::Unsupported(
-            "wave5:external-lifetime",
-        ))
+        let storage = self.external_storage.borrow();
+        for &published in marked {
+            if !storage.contains_key(&published) {
+                return Err(ExternalStorageValidationError::Untracked(
+                    published as usize,
+                ));
+            }
+        }
+        for (&published, record) in storage.iter() {
+            Self::validate_external_record(published, record)?;
+        }
+        let dead = Self::stage_external_dead(&storage, marked, true)?;
+        Ok(ExternalSweepPlan {
+            revision: self
+                .external_revision
+                .get()
+                .ok_or(ExternalStorageValidationError::LedgerChanged)?,
+            allocated_objects: self.external_allocated_objects.get(),
+            live_objects: storage.len(),
+            dead,
+        })
+    }
+
+    /// Allocate and own a prepared external payload before publishing its
+    /// address. Ledger admission and layout arithmetic are fallible; after
+    /// admission, no callback or collection splits ownership from prefix
+    /// initialization.
+    pub(crate) fn allocate_external_storage(
+        &self,
+        kind: ExternalStorageKind,
+        logical_len: usize,
+    ) -> Result<*mut u8, ExternalStorageValidationError> {
+        let size = match kind {
+            ExternalStorageKind::Bytes => 16usize.checked_add(logical_len),
+            ExternalStorageKind::BoxedArray => logical_len
+                .checked_mul(std::mem::size_of::<*mut u8>())
+                .and_then(|bytes| 8usize.checked_add(bytes)),
+        }
+        .ok_or(ExternalStorageValidationError::SpanOverflow { kind, logical_len })?;
+        let layout = Layout::from_size_align(size, 8)
+            .map_err(|_| ExternalStorageValidationError::SpanOverflow { kind, logical_len })?;
+        self.external_storage
+            .borrow_mut()
+            .try_reserve(1)
+            .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+        // SAFETY: layout is nonempty and valid; the ledger owns the returned
+        // allocation before any pointer is returned to a caller.
+        let base = unsafe { std::alloc::alloc_zeroed(layout) };
+        if base.is_null() {
+            return Err(ExternalStorageValidationError::BookkeepingAllocation);
+        }
+        let published = match kind {
+            ExternalStorageKind::Bytes => unsafe { base.add(8) },
+            ExternalStorageKind::BoxedArray => base,
+        };
+        self.register_external_storage(published, base, layout, kind, logical_len);
+        // SAFETY: both representations reserve their length prefix; byte
+        // arrays additionally reserve the capacity prefix at allocation base.
+        unsafe {
+            if kind == ExternalStorageKind::Bytes {
+                base.cast::<u64>().write(size as u64);
+            }
+            published.cast::<u64>().write(logical_len as u64);
+        }
+        Ok(published)
     }
 
     /// Take ownership of a fresh allocation before its pointer is initialized
@@ -1188,12 +1367,83 @@ impl MachineState {
         );
         self.external_allocated_objects
             .set(self.external_allocated_objects.get().saturating_add(1));
+        self.external_changed();
     }
 
     pub(crate) fn set_external_logical_len(&self, ptr: *mut u8, logical_len: usize) {
         if let Some(record) = self.external_storage.borrow_mut().get_mut(&ptr) {
-            record.logical_len = logical_len;
+            if record.logical_len != logical_len {
+                let old_len = record.logical_len;
+                let kind = record.kind;
+                record.logical_len = logical_len;
+                if kind == ExternalStorageKind::BoxedArray && logical_len < old_len {
+                    let start = (ptr as usize) + 8 + logical_len * 8;
+                    let end = (ptr as usize) + 8 + old_len * 8;
+                    self.forget_remembered_range(start as *const u8, end as *const u8);
+                }
+                self.external_changed();
+            }
         }
+    }
+
+    /// Logical shrink preserves the allocation and published identity, including
+    /// its byte-array capacity prefix. All validation precedes mutation.
+    pub(crate) fn shrink_external_payload(
+        &self,
+        published: *mut u8,
+        kind: ExternalStorageKind,
+        new_len: usize,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let mut storage = self.external_storage.borrow_mut();
+        let record =
+            storage
+                .get_mut(&published)
+                .ok_or(ExternalStorageValidationError::Untracked(
+                    published as usize,
+                ))?;
+        Self::validate_external_access(published, record, kind, true)?;
+        let old_len = record.logical_len;
+        if new_len > old_len {
+            return Err(ExternalStorageValidationError::LengthIncrease {
+                old: old_len,
+                new: new_len,
+            });
+        }
+        if new_len == old_len {
+            return Ok(());
+        }
+        // SAFETY: validation proved the length prefix lies in the allocation.
+        unsafe { published.cast::<u64>().write(new_len as u64) };
+        record.logical_len = new_len;
+        if kind == ExternalStorageKind::BoxedArray {
+            let first = unsafe { published.add(8).cast::<*mut u8>().add(new_len) };
+            let end = unsafe { published.add(8).cast::<*mut u8>().add(old_len) };
+            self.forget_remembered_range(first.cast(), end.cast());
+        }
+        self.external_changed();
+        Ok(())
+    }
+
+    /// Revoke mutator access while keeping the allocation in the ledger for
+    /// structural validation and a later sweep.
+    pub(crate) fn revoke_external_payload(
+        &self,
+        published: *mut u8,
+        kind: ExternalStorageKind,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let mut storage = self.external_storage.borrow_mut();
+        let record =
+            storage
+                .get_mut(&published)
+                .ok_or(ExternalStorageValidationError::Untracked(
+                    published as usize,
+                ))?;
+        Self::validate_external_access(published, record, kind, true)?;
+        // Revocation does not retire GC edges: a live old wrapper may still
+        // contain a nursery child that minor collection must evacuate.
+        record.activity = ExternalActivity::Revoked;
+        self.external_changed();
+        Ok(())
     }
 
     #[allow(
@@ -1343,6 +1593,20 @@ impl MachineState {
         Ok(ExternalPayloadView { pointer_slots })
     }
 
+    /// Mutator and observation view. A revoked payload stays in the structural
+    /// GC ledger, but cannot be exposed to ordinary operations.
+    pub(crate) fn external_active_view(
+        &self,
+        published: *mut u8,
+        expected: ExternalStorageKind,
+    ) -> Result<ExternalPayloadView, ExternalStorageValidationError> {
+        {
+            let storage = self.external_storage.borrow();
+            Self::checked_external_record(&storage, published, expected)?;
+        }
+        self.external_payload_view(published, expected)
+    }
+
     /// Validate wrapper-declared payloads and remember every boxed element
     /// slot. This is called when wrappers first move into old-space, before
     /// the tenure fixup minor collection, so initialization performed while
@@ -1351,12 +1615,27 @@ impl MachineState {
         &self,
         payloads: impl IntoIterator<Item = (*mut u8, ExternalStorageKind)>,
     ) -> Result<(), ExternalStorageValidationError> {
-        for (published, kind) in payloads {
-            for slot in self.external_payload_view(published, kind)?.pointer_slots {
-                self.register_remembered_slot(slot);
-            }
-        }
-        Ok(())
+        let selected: Vec<_> = payloads
+            .into_iter()
+            .map(|(ptr, kind)| (ptr as usize, kind))
+            .collect();
+        self.retain_external_payloads(&selected)
+    }
+
+    fn stage_external_dead(
+        storage: &HashMap<*mut u8, ExternalStorage>,
+        marked: &HashSet<*mut u8>,
+        young_only: bool,
+    ) -> Result<Vec<*mut u8>, ExternalStorageValidationError> {
+        let mut dead = Vec::new();
+        dead.try_reserve(storage.len())
+            .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+        dead.extend(storage.iter().filter_map(|(&published, record)| {
+            (!marked.contains(&published)
+                && (!young_only || record.generation == ExternalGeneration::Young))
+                .then_some(published)
+        }));
+        Ok(dead)
     }
 
     /// Validate the complete ledger and stage the exact unmarked allocation
@@ -1380,11 +1659,7 @@ impl MachineState {
         for (&published, record) in storage.iter() {
             Self::validate_external_record(published, record)?;
         }
-        let dead = storage
-            .keys()
-            .copied()
-            .filter(|pointer| !marked.contains(pointer))
-            .collect();
+        let dead = Self::stage_external_dead(&storage, marked, false)?;
         Ok(ExternalSweepPlan {
             revision: self
                 .external_revision
@@ -1443,6 +1718,7 @@ impl MachineState {
         );
         self.external_freed_objects
             .set(self.external_freed_objects.get().saturating_add(1));
+        self.external_changed();
         true
     }
 
@@ -1943,6 +2219,40 @@ mod tests {
     }
 
     #[test]
+    fn prepared_external_allocation_owns_zero_length_payloads_and_rejects_overflow() {
+        let ms = MachineState::new();
+        let bytes = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 0)
+            .unwrap();
+        let boxed = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 0)
+            .unwrap();
+        assert_eq!(unsafe { bytes.sub(8).cast::<u64>().read() }, 16);
+        assert_eq!(unsafe { bytes.cast::<u64>().read() }, 0);
+        assert_eq!(unsafe { boxed.cast::<u64>().read() }, 0);
+        assert!(ms
+            .external_payload_view(bytes, ExternalStorageKind::Bytes)
+            .unwrap()
+            .pointer_slots
+            .is_empty());
+        assert!(ms
+            .external_payload_view(boxed, ExternalStorageKind::BoxedArray)
+            .unwrap()
+            .pointer_slots
+            .is_empty());
+        let before = ms.external_storage_stats();
+        assert!(matches!(
+            ms.allocate_external_storage(ExternalStorageKind::Bytes, usize::MAX),
+            Err(ExternalStorageValidationError::SpanOverflow { .. })
+        ));
+        assert!(matches!(
+            ms.allocate_external_storage(ExternalStorageKind::BoxedArray, usize::MAX),
+            Err(ExternalStorageValidationError::SpanOverflow { .. })
+        ));
+        assert_eq!(ms.external_storage_stats(), before);
+    }
+
+    #[test]
     fn w5_external_lifetime_young_writes_are_not_roots_and_retention_remembers_slots() {
         let ms = MachineState::new();
         let payload = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
@@ -1957,6 +2267,273 @@ mod tests {
             .unwrap();
         assert!(ms.external_storage.borrow().contains_key(&payload));
         assert!(!ms.external_storage.borrow().contains_key(&dead_young));
+    }
+
+    #[test]
+    fn external_retention_validates_every_payload_before_generation_or_roots_change() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        let byte = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 1) };
+        let before = ms.external_revision.get();
+        assert!(matches!(
+            ms.retain_external_payloads(&[
+                (boxed as usize, ExternalStorageKind::BoxedArray),
+                (byte as usize, ExternalStorageKind::BoxedArray),
+            ]),
+            Err(ExternalStorageValidationError::KindMismatch { .. })
+        ));
+        assert_eq!(ms.remembered_slots_count(), 0);
+        assert_eq!(ms.external_revision.get(), before);
+        assert!(ms
+            .plan_external_minor_sweep(&HashSet::new())
+            .unwrap()
+            .dead
+            .contains(&boxed));
+    }
+
+    #[test]
+    fn external_mutations_reject_bad_identity_kind_length_and_bounds_without_changes() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        let bytes = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 3) };
+        let value = 7usize as *mut u8;
+        let before = ms.external_revision.get();
+        assert!(matches!(
+            ms.store_external_element(boxed.wrapping_add(1), 0, value),
+            Err(ExternalStorageValidationError::Untracked(_))
+        ));
+        assert!(matches!(
+            ms.store_external_element(bytes, 0, value),
+            Err(ExternalStorageValidationError::KindMismatch { .. })
+        ));
+        assert!(matches!(
+            ms.store_external_elements(boxed, 1, &[value, value]),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.compare_exchange_external_element(boxed, 2, std::ptr::null_mut(), value),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.shrink_external_payload(boxed, ExternalStorageKind::BoxedArray, 3),
+            Err(ExternalStorageValidationError::LengthIncrease { .. })
+        ));
+        assert_eq!(ms.external_revision.get(), before);
+        assert_eq!(ms.remembered_slots_count(), 0);
+        assert_eq!(
+            unsafe { boxed.add(8).cast::<*mut u8>().read() },
+            std::ptr::null_mut()
+        );
+        assert_eq!(unsafe { boxed.cast::<u64>().read() }, 2);
+    }
+
+    #[test]
+    fn malformed_external_prefix_blocks_lifetime_changes_without_partial_mutation() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        let before = ms.external_revision.get();
+        unsafe { boxed.cast::<u64>().write(3) };
+        assert!(matches!(
+            ms.retain_external_payloads(&[(boxed as usize, ExternalStorageKind::BoxedArray)]),
+            Err(ExternalStorageValidationError::LogicalLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            ms.shrink_external_payload(boxed, ExternalStorageKind::BoxedArray, 1),
+            Err(ExternalStorageValidationError::LogicalLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            ms.revoke_external_payload(boxed, ExternalStorageKind::BoxedArray),
+            Err(ExternalStorageValidationError::LogicalLengthMismatch { .. })
+        ));
+        assert_eq!(ms.external_revision.get(), before);
+        assert_eq!(ms.remembered_slots_count(), 0);
+        let record = ms.external_storage.borrow();
+        assert_eq!(record[&boxed].generation, ExternalGeneration::Young);
+        assert_eq!(record[&boxed].activity, ExternalActivity::Active);
+        assert_eq!(record[&boxed].logical_len, 2);
+    }
+
+    #[test]
+    fn checked_range_and_cas_remember_only_retained_slots() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        let first = 7usize as *mut u8;
+        let second = 9usize as *mut u8;
+        ms.store_external_elements(boxed, 0, &[first, second])
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 0);
+        assert_eq!(
+            ms.compare_exchange_external_element(boxed, 0, second, second)
+                .unwrap(),
+            first
+        );
+        ms.retain_external_payloads(&[(boxed as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+        ms.clear_remembered_slots();
+        assert_eq!(
+            ms.compare_exchange_external_element(boxed, 0, first, second)
+                .unwrap(),
+            first
+        );
+        assert_eq!(ms.remembered_slots_count(), 1);
+        ms.store_external_elements(boxed, 0, &[first, first])
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 2);
+    }
+
+    #[test]
+    fn external_shrink_preserves_identity_and_capacity_and_forgets_tail() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 3) };
+        let bytes = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 4) };
+        ms.retain_external_payloads(&[(boxed as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 3);
+        ms.shrink_external_payload(boxed, ExternalStorageKind::BoxedArray, 1)
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 1);
+        assert_eq!(
+            ms.external_payload_view(boxed, ExternalStorageKind::BoxedArray)
+                .unwrap()
+                .pointer_slots
+                .len(),
+            1
+        );
+        ms.shrink_external_payload(bytes, ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        assert_eq!(unsafe { bytes.cast::<u64>().read() }, 2);
+        assert_eq!(unsafe { bytes.sub(8).cast::<u64>().read() }, 20);
+        assert!(ms.external_storage.borrow().contains_key(&boxed));
+        assert!(ms.external_storage.borrow().contains_key(&bytes));
+    }
+
+    #[test]
+    fn revoked_external_payload_remains_sweepable_but_rejects_views_and_writes() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 1) };
+        ms.retain_external_payloads(&[(boxed as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+        ms.revoke_external_payload(boxed, ExternalStorageKind::BoxedArray)
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 1);
+        assert_eq!(
+            ms.external_payload_view(boxed, ExternalStorageKind::BoxedArray)
+                .unwrap()
+                .pointer_slots
+                .len(),
+            1
+        );
+        assert!(matches!(
+            ms.external_active_view(boxed, ExternalStorageKind::BoxedArray),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(matches!(
+            ms.store_external_element(boxed, 0, std::ptr::null_mut()),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(matches!(
+            ms.shrink_external_payload(boxed, ExternalStorageKind::BoxedArray, 0),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(ms
+            .plan_external_sweep(&HashSet::new())
+            .unwrap()
+            .dead
+            .contains(&boxed));
+    }
+
+    #[test]
+    fn revoked_young_payload_can_be_retained_for_structural_gc_reachability() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        ms.revoke_external_payload(boxed, ExternalStorageKind::BoxedArray)
+            .unwrap();
+        ms.retain_external_payloads(&[(boxed as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 2);
+        assert_eq!(
+            ms.external_payload_view(boxed, ExternalStorageKind::BoxedArray)
+                .unwrap()
+                .pointer_slots
+                .len(),
+            2
+        );
+        assert!(matches!(
+            ms.external_active_view(boxed, ExternalStorageKind::BoxedArray),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(matches!(
+            ms.store_external_element(boxed, 0, std::ptr::null_mut()),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        ms.commit_external_sweep(ms.plan_external_minor_sweep(&HashSet::new()).unwrap())
+            .unwrap();
+        assert!(ms.external_storage.borrow().contains_key(&boxed));
+    }
+
+    #[test]
+    fn every_external_ledger_mutation_invalidates_a_sweep_plan() {
+        for mutation in 0..7 {
+            let ms = MachineState::new();
+            let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+            let plan = ms.plan_external_sweep(&HashSet::from([boxed])).unwrap();
+            match mutation {
+                0 => {
+                    unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 1) };
+                }
+                1 => {
+                    ms.store_external_element(boxed, 0, std::ptr::null_mut())
+                        .unwrap();
+                }
+                2 => {
+                    ms.retain_external_payloads(&[(
+                        boxed as usize,
+                        ExternalStorageKind::BoxedArray,
+                    )])
+                    .unwrap();
+                }
+                3 => {
+                    ms.shrink_external_payload(boxed, ExternalStorageKind::BoxedArray, 1)
+                        .unwrap();
+                }
+                4 => {
+                    ms.revoke_external_payload(boxed, ExternalStorageKind::BoxedArray)
+                        .unwrap();
+                }
+                5 => {
+                    assert!(ms.release_external_storage(boxed));
+                }
+                6 => {
+                    ms.set_external_logical_len(boxed, 1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    ms.commit_external_sweep(plan),
+                    Err(ExternalStorageValidationError::LedgerChanged)
+                ),
+                "mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn exhausted_external_revision_permanently_forbids_sweep_plans() {
+        let ms = MachineState::new();
+        let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 1) };
+        ms.external_revision.set(Some(u64::MAX));
+        ms.store_external_element(boxed, 0, std::ptr::null_mut())
+            .unwrap();
+        assert_eq!(ms.external_revision.get(), None);
+        assert!(matches!(
+            ms.plan_external_minor_sweep(&HashSet::new()),
+            Err(ExternalStorageValidationError::LedgerChanged)
+        ));
+        assert!(matches!(
+            ms.plan_external_sweep(&HashSet::new()),
+            Err(ExternalStorageValidationError::LedgerChanged)
+        ));
     }
 
     #[test]

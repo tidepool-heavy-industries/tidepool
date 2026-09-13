@@ -177,3 +177,81 @@ fn preparation_error(error: DescriptorTraceError) -> RuntimeError {
         _ => RuntimeError::BadPointer,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use tidepool_heap::external_storage::ExternalStorageKind;
+    use tidepool_repr::execution_schema::{
+        Architecture, Endianness, StorageLayout, TargetDescriptor,
+    };
+
+    #[test]
+    fn promotion_retains_external_payload_after_publishing_consistent_nursery() {
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let wrapper =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        let leaf = Arc::new(
+            ObjectDescriptor::constructor(1, StorageLayout::for_reps(&target, &[]).unwrap(), None)
+                .unwrap(),
+        );
+        let used = wrapper.allocation_extent() as usize + leaf.allocation_extent() as usize;
+        let machine = MachineState::new();
+        machine
+            .install_prepared_buffer(vec![0_u64; used / 8], vec![wrapper.clone(), leaf.clone()])
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let child = unsafe { start.add(wrapper.allocation_extent() as usize) };
+        unsafe {
+            wrapper.initialize_header(start);
+            leaf.initialize_header(child);
+        }
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 1)
+            .unwrap();
+        machine
+            .store_external_element(
+                payload,
+                0,
+                (child as usize | usize::from(leaf.tag())) as *mut u8,
+            )
+            .unwrap();
+        unsafe {
+            wrapper
+                .external_payload_slot(start, wrapper.allocation_extent() as usize)
+                .unwrap()
+                .write(payload);
+        }
+        let mut root = start;
+        machine.register_rust_root(&mut root);
+        let mut vmctx =
+            unsafe { VMContext::new(start, start.add(size), crate::host_fns::gc_trigger) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        vmctx.alloc_ptr = unsafe { start.add(used) };
+        let mut old = super::super::OldSpace::new();
+        unsafe {
+            old.promote_prepared(
+                &machine,
+                &mut vmctx,
+                &[&mut root],
+                &[wrapper.clone(), leaf.clone()],
+            )
+        }
+        .unwrap();
+        assert_eq!(machine.remembered_slots_count(), 1);
+        machine
+            .commit_external_sweep(machine.plan_external_minor_sweep(&HashSet::new()).unwrap())
+            .unwrap();
+        assert_eq!(machine.external_storage_stats().live_objects, 1);
+        assert!(!root.is_null());
+        machine.clear_gc_state();
+    }
+}

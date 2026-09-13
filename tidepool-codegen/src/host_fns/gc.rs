@@ -1568,6 +1568,12 @@ mod tests {
         // A valid request whose live-plus-reserve exceeds the ceiling is
         // rejected after copying. The published cursor must describe that
         // completed copy, not the old source, and the heap stays reusable.
+        let failed_young = ms
+            .allocate_external_storage(
+                tidepool_heap::external_storage::ExternalStorageKind::Bytes,
+                0,
+            )
+            .unwrap();
         perform_gc_request(0, &mut vmctx, max_heap_bytes() & !7);
         assert_eq!(
             ms.prepared_call_status(),
@@ -1584,6 +1590,9 @@ mod tests {
             assert_eq!(*root.add(managed_offset).cast::<*mut u8>(), root);
             assert_eq!(*root.add(address_offset).cast::<usize>(), start as usize);
         }
+        assert_eq!(ms.external_storage_stats().live_objects, 1);
+        assert_eq!(ms.external_storage_stats().freed_objects, 0);
+        assert_eq!(unsafe { failed_young.cast::<u64>().read() }, 0);
         ms.clear_gc_state();
         ms.clear_stack_map_registry();
     }
@@ -1640,12 +1649,10 @@ mod tests {
         }
         ms.register_external_storage(payload, payload, layout, ExternalStorageKind::BoxedArray, 1);
 
-        // An unreachable Young allocation must survive neither the final
-        // successful copy nor any accidental intermediate growth sweep.
-        let dead = unsafe { alloc_zeroed(layout) };
-        assert!(!dead.is_null());
-        let dead_published = unsafe { dead.add(8) };
-        ms.register_external_storage(dead_published, dead, layout, ExternalStorageKind::Bytes, 0);
+        // An unreachable Young allocation is reclaimed after the complete
+        // successful operation, including its growth recopy.
+        ms.allocate_external_storage(ExternalStorageKind::Bytes, 0)
+            .unwrap();
 
         let mut root = start;
         ms.register_rust_root(&mut root);
@@ -1692,6 +1699,25 @@ mod tests {
         );
         assert_eq!(ms.external_storage_stats().live_objects, 1);
         assert_eq!(ms.external_storage_stats().freed_objects, 1);
+
+        // Promotion retains the payload independently of its Young wrapper.
+        // Its remembered slot still keeps the child valid when the wrapper
+        // itself becomes unreachable in the next minor collection.
+        ms.retain_external_payloads(&[(payload as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+        ms.allocate_external_storage(ExternalStorageKind::Bytes, 0)
+            .unwrap();
+        root = std::ptr::null_mut();
+        perform_gc_request(0, &mut vmctx, 0);
+        assert_eq!(
+            ms.prepared_call_status(),
+            crate::prepared_control::CallStatus::Success
+        );
+        assert_eq!(ms.external_storage_stats().live_objects, 1);
+        assert_eq!(ms.external_storage_stats().freed_objects, 2);
+        let moved_child = unsafe { payload.add(8).cast::<*mut u8>().read() } as usize;
+        assert_eq!(untag(moved_child), ms.gc_active_range().unwrap().0 as usize);
+        assert_eq!(root, std::ptr::null_mut());
         ms.clear_gc_state();
         ms.clear_stack_map_registry();
     }

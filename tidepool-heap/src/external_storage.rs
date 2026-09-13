@@ -69,8 +69,11 @@ pub enum ExternalStorageValidationError {
         index: usize,
         len: usize,
     },
+    LengthIncrease {
+        old: usize,
+        new: usize,
+    },
     BookkeepingAllocation,
-    Unsupported(&'static str),
 }
 
 /// A bounded span of managed slots, without a per-visit allocation. This is
