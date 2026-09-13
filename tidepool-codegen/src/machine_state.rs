@@ -1308,6 +1308,167 @@ impl MachineState {
         Ok(unsafe { published.add(8).add(offset) })
     }
 
+    /// Resolve an Addr# span through the existing allocation ledger, not by
+    /// trusting a non-null address. Prefixes, boxed payloads, revoked storage,
+    /// and ranges crossing allocation boundaries are never byte capabilities.
+    /// The result must remain under this ledger borrow until the operation ends;
+    /// generated callers separately keep the managed wrapper live across GC.
+    fn external_address_span(
+        storage: &HashMap<*mut u8, ExternalStorage>,
+        address: usize,
+        count: usize,
+    ) -> Result<(*mut u8, usize), ExternalStorageValidationError> {
+        for (&published, record) in storage {
+            if record.kind != ExternalStorageKind::Bytes {
+                continue;
+            }
+            let Some(start) = (published as usize).checked_add(8) else {
+                continue;
+            };
+            let Some(offset) = address.checked_sub(start) else {
+                continue;
+            };
+            if offset <= record.logical_len {
+                Self::checked_external_byte_range(storage, published, offset, count)?;
+                return Ok((published, offset));
+            }
+        }
+        Err(ExternalStorageValidationError::Untracked(address))
+    }
+
+    /// Resolve a signed offset from an already authenticated address without
+    /// allowing the offset to switch authority to a different allocation.
+    fn external_address_offset_span(
+        storage: &HashMap<*mut u8, ExternalStorage>,
+        address: usize,
+        offset: i64,
+        count: usize,
+    ) -> Result<(*mut u8, usize), ExternalStorageValidationError> {
+        let (published, _) = Self::external_address_span(storage, address, 0)?;
+        let record = Self::checked_external_record(storage, published, ExternalStorageKind::Bytes)?;
+        let offset = isize::try_from(offset).map_err(|_| {
+            ExternalStorageValidationError::IndexOutOfBounds {
+                index: if offset.is_negative() { 0 } else { usize::MAX },
+                len: record.logical_len,
+            }
+        })?;
+        let target = address.checked_add_signed(offset).ok_or(
+            ExternalStorageValidationError::IndexOutOfBounds {
+                index: if offset.is_negative() { 0 } else { usize::MAX },
+                len: record.logical_len,
+            },
+        )?;
+        let start = (published as usize).checked_add(8).ok_or(
+            ExternalStorageValidationError::SpanOverflow {
+                kind: ExternalStorageKind::Bytes,
+                logical_len: record.logical_len,
+            },
+        )?;
+        let target_offset =
+            target
+                .checked_sub(start)
+                .ok_or(ExternalStorageValidationError::IndexOutOfBounds {
+                    index: 0,
+                    len: record.logical_len,
+                })?;
+        Self::checked_external_byte_range(storage, published, target_offset, count)?;
+        Ok((published, target_offset))
+    }
+
+    /// Produce the scalar address of an active byte payload after authenticating
+    /// its published wrapper identity. The ledger remains the sole authority for
+    /// every later dereference of the address.
+    pub(crate) fn external_byte_address(
+        &self,
+        published: *mut u8,
+    ) -> Result<usize, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let record =
+            Self::checked_external_record(&storage, published, ExternalStorageKind::Bytes)?;
+        (published as usize)
+            .checked_add(8)
+            .ok_or(ExternalStorageValidationError::SpanOverflow {
+                kind: ExternalStorageKind::Bytes,
+                logical_len: record.logical_len,
+            })
+    }
+
+    /// Snapshot a complete ledger-authenticated Addr# span. The ledger borrow
+    /// covers validation and the copy; no raw payload pointer escapes it.
+    pub(crate) fn read_external_address(
+        &self,
+        address: usize,
+        count: usize,
+    ) -> Result<Vec<u8>, ExternalStorageValidationError> {
+        self.read_external_address_offset(address, 0, count)
+    }
+
+    /// Snapshot a signed-offset span while retaining the base address's
+    /// original ledger authority.
+    pub(crate) fn read_external_address_offset(
+        &self,
+        address: usize,
+        offset: i64,
+        count: usize,
+    ) -> Result<Vec<u8>, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let (published, offset) =
+            Self::external_address_offset_span(&storage, address, offset, count)?;
+        let mut copied = Vec::new();
+        copied
+            .try_reserve_exact(count)
+            .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+        if count != 0 {
+            // The ledger borrow and checked span keep the allocation active and
+            // in range for the entire owned snapshot.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    published.add(8).add(offset),
+                    copied.as_mut_ptr(),
+                    count,
+                );
+                copied.set_len(count);
+            }
+        }
+        Ok(copied)
+    }
+
+    /// Store a complete ledger-authenticated Addr# span. Bytes contain no
+    /// managed edges, but every nonempty mutation advances the sweep revision.
+    pub(crate) fn store_external_address(
+        &self,
+        address: usize,
+        bytes: &[u8],
+    ) -> Result<(), ExternalStorageValidationError> {
+        self.store_external_address_offset(address, 0, bytes)
+    }
+
+    /// Store a signed-offset span while retaining the base address's original
+    /// ledger authority.
+    pub(crate) fn store_external_address_offset(
+        &self,
+        address: usize,
+        offset: i64,
+        bytes: &[u8],
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let (published, offset) =
+            Self::external_address_offset_span(&storage, address, offset, bytes.len())?;
+        if !bytes.is_empty() {
+            // The ledger borrow and checked span cover the complete write; no
+            // callback or collection can split authentication from mutation.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    published.add(8).add(offset),
+                    bytes.len(),
+                );
+            }
+            self.external_changed();
+        }
+        Ok(())
+    }
+
     /// GHC copyByteArray# forbids source/destination aliases. Validate both
     /// complete ranges and that precondition before any write. This is a
     /// noncollecting ledger mutation; bytes require no managed-edge barrier.
@@ -2970,6 +3131,200 @@ mod tests {
             Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
         ));
         assert_eq!(ms.external_revision.get(), before);
+    }
+
+    #[test]
+    fn external_address_contents_roundtrip_through_authenticated_byte_span() {
+        let ms = MachineState::new();
+        let published = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 6)
+            .unwrap();
+        let address = ms.external_byte_address(published).unwrap();
+        let before = ms.external_revision.get();
+
+        assert_eq!(address, published as usize + 8);
+        ms.store_external_address(address + 1, b"tide").unwrap();
+
+        assert_ne!(ms.external_revision.get(), before);
+        assert_eq!(ms.read_external_address(address, 6).unwrap(), b"\0tide\0");
+        assert_eq!(ms.read_external_address(address + 2, 2).unwrap(), b"id");
+    }
+
+    #[test]
+    fn external_address_offsets_allow_negative_interior_ranges() {
+        let ms = MachineState::new();
+        let published = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 6)
+            .unwrap();
+        ms.store_external_bytes(published, 0, b"abcdef").unwrap();
+        let address = ms.external_byte_address(published).unwrap();
+
+        assert_eq!(
+            ms.read_external_address_offset(address + 4, -3, 3).unwrap(),
+            b"bcd"
+        );
+        ms.store_external_address_offset(address + 5, -2, b"XY")
+            .unwrap();
+        assert_eq!(ms.read_external_address(address, 6).unwrap(), b"abcXYf");
+        assert!(matches!(
+            ms.read_external_address_offset(address + 1, -2, 0),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.read_external_address_offset(address + 5, 2, 0),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn external_address_offsets_cannot_cross_into_another_owner_or_overflow() {
+        let ms = MachineState::new();
+        let first = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        let second = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        ms.store_external_bytes(first, 0, b"aaaa").unwrap();
+        ms.store_external_bytes(second, 0, b"bbbb").unwrap();
+        let first_address = ms.external_byte_address(first).unwrap();
+        let second_address = ms.external_byte_address(second).unwrap();
+        let (base, target) = if first_address < second_address {
+            (first_address, second_address)
+        } else {
+            (second_address, first_address)
+        };
+        let cross_owner = i64::try_from(target - base).unwrap();
+        let before = ms.external_revision.get();
+
+        assert!(matches!(
+            ms.read_external_address_offset(base, cross_owner, 1),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.store_external_address_offset(base, cross_owner, b"x"),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.read_external_address_offset(base, i64::MAX, 1),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.read_external_address_offset(base, i64::MIN, 1),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert_eq!(ms.external_revision.get(), before);
+        assert_eq!(ms.copy_external_bytes(first).unwrap(), b"aaaa");
+        assert_eq!(ms.copy_external_bytes(second).unwrap(), b"bbbb");
+    }
+
+    #[test]
+    fn external_addresses_reject_prefixes_boxed_untracked_and_revoked_storage() {
+        let ms = MachineState::new();
+        let published = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        let address = ms.external_byte_address(published).unwrap();
+        let boxed = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 1)
+            .unwrap();
+
+        for prefix in [published as usize - 8, published as usize] {
+            assert!(matches!(
+                ms.read_external_address(prefix, 0),
+                Err(ExternalStorageValidationError::Untracked(value)) if value == prefix
+            ));
+        }
+        assert!(matches!(
+            ms.external_byte_address(boxed),
+            Err(ExternalStorageValidationError::KindMismatch { .. })
+        ));
+        assert!(matches!(
+            ms.read_external_address(boxed as usize + 8, 0),
+            Err(ExternalStorageValidationError::Untracked(_))
+        ));
+        assert!(matches!(
+            ms.read_external_address(1, 0),
+            Err(ExternalStorageValidationError::Untracked(1))
+        ));
+
+        ms.revoke_external_payload(published, ExternalStorageKind::Bytes)
+            .unwrap();
+        let before = ms.external_revision.get();
+        assert!(matches!(
+            ms.external_byte_address(published),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(matches!(
+            ms.read_external_address(address, 1),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(matches!(
+            ms.store_external_address(address, b"x"),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert_eq!(ms.external_revision.get(), before);
+    }
+
+    #[test]
+    fn external_address_bounds_and_overflow_fail_before_mutation_but_empty_end_is_valid() {
+        let ms = MachineState::new();
+        let published = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 5)
+            .unwrap();
+        ms.store_external_bytes(published, 0, b"abcde").unwrap();
+        let address = ms.external_byte_address(published).unwrap();
+        let before = ms.external_revision.get();
+
+        assert!(matches!(
+            ms.read_external_address(address + 4, 2),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.store_external_address(address + 4, b"xy"),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.read_external_address(address + 1, usize::MAX),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert_eq!(ms.read_external_address(address + 5, 0).unwrap(), b"");
+        ms.store_external_address(address + 5, b"").unwrap();
+        assert_eq!(ms.external_revision.get(), before);
+        assert_eq!(ms.copy_external_bytes(published).unwrap(), b"abcde");
+    }
+
+    #[test]
+    fn external_address_capability_tracks_logical_shrink_and_rejects_resized_old_identity() {
+        let ms = MachineState::new();
+        let published = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        ms.store_external_bytes(published, 0, b"abcd").unwrap();
+        let address = ms.external_byte_address(published).unwrap();
+
+        ms.shrink_external_payload(published, ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        assert_eq!(ms.read_external_address(address + 2, 0).unwrap(), b"");
+        assert!(matches!(
+            ms.read_external_address(address + 2, 1),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            ms.read_external_address(address + 3, 0),
+            Err(ExternalStorageValidationError::Untracked(_))
+        ));
+
+        let replacement = ms.resize_external_bytes(published, 1).unwrap();
+        assert!(matches!(
+            ms.read_external_address(address, 1),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        let replacement_address = ms.external_byte_address(replacement).unwrap();
+        assert_eq!(
+            ms.read_external_address(replacement_address, 1).unwrap(),
+            b"a"
+        );
     }
 
     #[test]
