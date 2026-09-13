@@ -58,12 +58,14 @@
 use std::alloc::Layout;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::context::VMContext;
 use crate::host_fns::{GcState, RuntimeError};
 use crate::stack_map::StackMapRegistry;
+
+pub use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
 
 /// Whether another entry may safely reuse this machine after a failed run.
 ///
@@ -81,13 +83,6 @@ pub enum MachineDisposition {
 pub struct MachineFailure {
     pub cause: RuntimeError,
     pub disposition: MachineDisposition,
-}
-
-/// The two GC-external payload shapes owned by a machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalStorageKind {
-    Bytes,
-    BoxedArray,
 }
 
 /// Lifetime accounting for a machine's GC-external payloads.
@@ -140,55 +135,13 @@ struct ExternalStorage {
     logical_len: usize,
 }
 
-#[allow(
-    dead_code,
-    reason = "consumed by the independently integrated major collector"
-)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExternalStorageValidationError {
-    Untracked(*mut u8),
-    InvalidBase,
-    LayoutAlignment {
-        actual: usize,
-    },
-    PointerAlignment {
-        kind: ExternalStorageKind,
-    },
-    KindMismatch {
-        expected: ExternalStorageKind,
-        actual: ExternalStorageKind,
-    },
-    PublishedPointerMismatch {
-        kind: ExternalStorageKind,
-    },
-    SpanOverflow {
-        kind: ExternalStorageKind,
-        logical_len: usize,
-    },
-    SpanExceedsAllocation {
-        kind: ExternalStorageKind,
-        required: usize,
-        allocated: usize,
-    },
-    CapacityPrefixMismatch {
-        recorded: usize,
-        stored: usize,
-    },
-    LogicalLengthMismatch {
-        kind: ExternalStorageKind,
-        recorded: usize,
-        stored: usize,
-    },
-    LedgerChanged,
-}
-
 /// Validated pointer-bearing slots in one tracked external payload.
 #[allow(
     dead_code,
     reason = "consumed by the independently integrated major collector"
 )]
 pub(crate) struct ExternalPayloadView {
-    pub(crate) pointer_slots: Vec<*mut *mut u8>,
+    pub(crate) pointer_slots: tidepool_heap::external_storage::ExternalPointerSlots,
 }
 
 /// Allocation-bearing sweep plan produced before a major collector commits.
@@ -303,6 +256,21 @@ struct PreparedTestFailure {
     point: crate::prepared_control::PreparedSafepoint,
     remaining: usize,
     cause: RuntimeError,
+}
+
+// SAFETY: prepared collection/promotion borrows this machine for the complete
+// no-mutator interval. Validation authenticates the live allocation and span;
+// no external sweep, resize, or owner disposal runs during slot rewriting.
+unsafe impl tidepool_heap::external_storage::ExternalPayloadOwner for MachineState {
+    fn slots(
+        &self,
+        published: *mut u8,
+        expected: ExternalStorageKind,
+    ) -> Result<tidepool_heap::external_storage::ExternalPointerSlots, ExternalStorageValidationError>
+    {
+        self.external_payload_view(published, expected)
+            .map(|view| view.pointer_slots)
+    }
 }
 
 impl MachineState {
@@ -1249,13 +1217,26 @@ impl MachineState {
         }
         Self::validate_external_record(published, record)?;
         let pointer_slots = if record.kind == ExternalStorageKind::BoxedArray {
-            (0..record.logical_len)
-                // SAFETY: validation proved the complete slot span is inside
-                // the registered allocation.
-                .map(|index| unsafe { published.add(8 + index * 8) as *mut *mut u8 })
-                .collect()
+            // SAFETY: validation proved the complete slot span is inside the
+            // registered allocation. The span is a raw view, not a Rust
+            // borrow; GC callers keep the ledger allocation owned until all
+            // slot traversal and rewriting finishes, then commit any sweep.
+            unsafe {
+                tidepool_heap::external_storage::ExternalPointerSlots::from_validated(
+                    published.add(8).cast(),
+                    record.logical_len,
+                )
+            }
         } else {
-            Vec::new()
+            // SAFETY: an empty span never dereferences its base.  Keep the
+            // representation explicit rather than manufacturing a Vec for
+            // every byte payload view.
+            unsafe {
+                tidepool_heap::external_storage::ExternalPointerSlots::from_validated(
+                    std::ptr::NonNull::<*mut u8>::dangling().as_ptr(),
+                    0,
+                )
+            }
         };
         Ok(ExternalPayloadView { pointer_slots })
     }
@@ -1471,14 +1452,18 @@ pub fn restore_current_machine(prev: *mut MachineState) {
 /// clear `CURRENT_MACHINE`) at any safepoint.
 pub(crate) unsafe fn current_machine<'a>() -> Option<&'a MachineState> {
     let p = CURRENT_MACHINE.with(|c| c.get());
-    if p.is_null() { None } else { Some(&*p) }
+    if p.is_null() {
+        None
+    } else {
+        Some(&*p)
+    }
 }
 
 /// Test-only support for exercising the ambient shims / vmctx-less host fns
 /// outside a full `JitEffectMachine` run.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::{MachineState, install_current_machine, restore_current_machine};
+    use super::{install_current_machine, restore_current_machine, MachineState};
 
     /// Install a fresh throwaway `MachineState` as this thread's current
     /// machine for the duration of `f`, restoring whatever was previously
@@ -1561,7 +1546,7 @@ mod tests {
     #[test]
     fn prepared_raise_root_survives_observation_mark_cleanup() {
         use tidepool_heap::execution_descriptor::ObjectDescriptor;
-        use tidepool_repr::execution_schema::{StorageLayout, testing};
+        use tidepool_repr::execution_schema::{testing, StorageLayout};
 
         let machine = std::rc::Rc::new(MachineState::new());
         let descriptor = Arc::new(
@@ -1604,7 +1589,7 @@ mod tests {
         Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>,
     ) {
         use tidepool_heap::execution_descriptor::ObjectDescriptor;
-        use tidepool_repr::execution_schema::{StorageLayout, testing};
+        use tidepool_repr::execution_schema::{testing, StorageLayout};
 
         let machine = std::rc::Rc::new(MachineState::new());
         let descriptor = Arc::new(
@@ -1893,13 +1878,17 @@ mod tests {
         let view = ms
             .external_payload_view(boxed, ExternalStorageKind::BoxedArray)
             .unwrap();
-        assert_eq!(view.pointer_slots.len(), 2);
-        assert_eq!(view.pointer_slots[0], unsafe {
-            boxed.add(8) as *mut *mut u8
-        });
-        assert_eq!(view.pointer_slots[1], unsafe {
-            boxed.add(16) as *mut *mut u8
-        });
+        let slots: Vec<_> = view.pointer_slots.into_iter().collect();
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0], unsafe { boxed.add(8) as *mut *mut u8 });
+        assert_eq!(slots[1], unsafe { boxed.add(16) as *mut *mut u8 });
+        // SAFETY: the helper registers the exact byte-array layout.
+        let bytes = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 3) };
+        let bytes_view = ms
+            .external_payload_view(bytes, ExternalStorageKind::Bytes)
+            .unwrap();
+        assert!(bytes_view.pointer_slots.is_empty());
+        assert_eq!(bytes_view.pointer_slots.into_iter().next(), None);
         assert!(matches!(
             ms.external_payload_view(boxed, ExternalStorageKind::Bytes),
             Err(ExternalStorageValidationError::KindMismatch { .. })
