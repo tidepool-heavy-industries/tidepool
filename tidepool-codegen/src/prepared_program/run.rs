@@ -85,6 +85,10 @@ pub(super) fn heap_top_extent(specs: &[HeapTopSpec]) -> Result<usize, ExecutionE
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "heap-top initialization independently borrows nursery bounds, binding specifications, root custody, static storage, and pinned-byte storage"
+)]
 pub(super) fn initialize_heap_tops(
     start: *mut u8,
     capacity: usize,

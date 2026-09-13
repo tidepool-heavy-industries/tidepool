@@ -200,6 +200,10 @@ impl BindingTable {
     /// Mark a compiler-issued binding as an automatic observation. Only the
     /// newest `limit` names in its scope remain discoverable. Values referenced
     /// by newer observations or frozen fork tips remain rooted until unused.
+    #[allow(
+        clippy::expect_used,
+        reason = "monotonic observation identities must never wrap; exhaustion is an explicit process-lifetime invariant failure"
+    )]
     pub fn save_observation(
         &mut self,
         id: SessionVarId,

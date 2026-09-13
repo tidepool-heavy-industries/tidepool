@@ -140,6 +140,10 @@ impl<'a> ObservationRoots<'a> {
 /// Materialize results while the invocation nursery is still installed. Each
 /// generated force may copy that nursery, so the heap reader is reconstructed
 /// only after the force returns and is dropped before the next force begins.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "observation independently borrows machine and program custody, VM context, static and old heaps, descriptor roots, seeds, and budget"
+)]
 pub(super) fn observe_results(
     machine: &MachineState,
     program: &CompiledProgram,
@@ -251,6 +255,10 @@ pub(super) fn observe_results(
     Ok(values)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "heap reconstruction independently borrows machine, VM and heap regions plus mutable generation-index custody"
+)]
 fn current_heap<'a>(
     machine: &'a MachineState,
     vmctx: &VMContext,

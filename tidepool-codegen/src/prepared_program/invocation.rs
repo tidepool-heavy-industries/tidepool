@@ -405,6 +405,7 @@ impl<'code> PreparedInvocation<'code> {
     /// Promote the managed result at a logical (Void-inclusive) result index
     /// into invocation-owned descriptor old space. The result slot itself is
     /// the registered root storage; no `RootSlot` or raw pointer escapes.
+    #[cfg(test)]
     pub(super) fn promote_result(&mut self, logical_index: usize) -> Result<(), ExecutionError> {
         if self.machine.prepared_call_status() != CallStatus::Success {
             return Err(runtime_error_from_machine(&self.machine));

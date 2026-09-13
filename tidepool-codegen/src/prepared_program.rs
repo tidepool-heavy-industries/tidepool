@@ -112,9 +112,9 @@ pub enum CompileError {
 }
 
 pub(crate) struct CompiledEntry {
+    #[cfg(test)]
     pub function: FuncId,
     pub adapter: FuncId,
-    pub signature: Signature,
     pub abi: EntryAbi,
 }
 
@@ -123,10 +123,10 @@ pub(crate) struct ConstructorObservation {
     pub fields: Vec<RuntimeRep>,
 }
 
-/// One program-owned descriptor index supplies both entry and observation.
-/// Callable addresses are finalized Tail entries and remain pinned by pipeline;
-/// they are never callable as Rust function pointers. Constructor metadata is
-/// the authoritative observation identity, independent of family-relative tags.
+/// The program-owned descriptor index supplies observation identity. Generated
+/// entry dispatch uses the same descriptors, whose code remains pinned by the
+/// compiled pipeline and is never exposed as a Rust function pointer.
+/// Constructor metadata is authoritative independent of family-relative tags.
 pub(crate) struct DescriptorMetadata {
     pub descriptor: Arc<ObjectDescriptor>,
     pub meaning: DescriptorMeaning,
@@ -136,16 +136,10 @@ pub(crate) enum DescriptorMeaning {
     External,
     Constructor(ConstructorObservation),
     Callable {
+        #[cfg(test)]
         binding: ValueId,
-        address: *const u8,
-        signature: Signature,
-        update: Option<tidepool_repr::execution_schema::UpdatePolicy>,
     },
-    Pap {
-        function: ValueId,
-        pending: usize,
-        signature: Signature,
-    },
+    Pap,
 }
 
 /// Prepared descriptor mismatches are compiler-contract failures. The JIT can
@@ -596,9 +590,9 @@ impl CompiledProgram {
             entries.insert(
                 id,
                 CompiledEntry {
+                    #[cfg(test)]
                     function: functions[&id],
                     adapter,
-                    signature: signatures[&id].clone(),
                     abi,
                 },
             );
@@ -658,52 +652,36 @@ impl CompiledProgram {
                 },
             );
         }
-        for (&id, function) in &plan.functions {
+        for (&_id, function) in &plan.functions {
             descriptor_registry.insert(
                 function.descriptor.initial_header_word(),
                 DescriptorMetadata {
                     descriptor: Arc::clone(&function.descriptor),
                     meaning: DescriptorMeaning::Callable {
-                        binding: id,
-                        address: pipeline.get_function_ptr(functions[&id]),
-                        signature: function.signature.clone(),
-                        update: None,
+                        #[cfg(test)]
+                        binding: _id,
                     },
                 },
             );
         }
-        for (&id, thunk) in &plan.thunks {
+        for (&_id, thunk) in &plan.thunks {
             descriptor_registry.insert(
                 thunk.descriptor.initial_header_word(),
                 DescriptorMetadata {
                     descriptor: Arc::clone(&thunk.descriptor),
                     meaning: DescriptorMeaning::Callable {
-                        binding: id,
-                        address: pipeline.get_function_ptr(prepared_enter),
-                        signature: thunk.signature.clone(),
-                        update: Some(thunk.policy),
+                        #[cfg(test)]
+                        binding: _id,
                     },
                 },
             );
         }
-        for (&(function, pending), pap) in &plan.pap_layouts {
-            let signature = plan
-                .functions
-                .get(&function)
-                .map(|entry| Signature {
-                    arguments: entry.signature.arguments[pending..].to_vec(),
-                    results: entry.signature.results.clone(),
-                })
-                .ok_or(CompileError::MissingRepresentation(function))?;
+        for pap in plan.pap_layouts.values() {
             descriptor_registry.insert(
                 pap.descriptor.initial_header_word(),
                 DescriptorMetadata {
                     descriptor: Arc::clone(&pap.descriptor),
-                    meaning: DescriptorMeaning::Pap {
-                        function,
-                        pending,
-                        signature,
-                    },
+                    meaning: DescriptorMeaning::Pap,
                 },
             );
         }

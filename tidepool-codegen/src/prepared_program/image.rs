@@ -246,6 +246,10 @@ fn top_descriptor(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "static atom initialization independently borrows the plan, object index, image, descriptor, field values, representations, and relocation custody"
+)]
 fn initialize_atoms(
     plan: &ProgramPlan<'_>,
     top_objects: &BTreeMap<ValueId, (usize, Arc<ObjectDescriptor>)>,
@@ -321,6 +325,10 @@ fn initialize_captures(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one static atom independently needs resolution state, image storage, field bounds, representation, value, and relocation custody"
+)]
 fn initialize_atom(
     plan: &ProgramPlan<'_>,
     top_objects: &BTreeMap<ValueId, (usize, Arc<ObjectDescriptor>)>,
@@ -359,6 +367,10 @@ fn initialize_atom(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one static capture independently needs resolution state, image storage, field bounds, representation, value, and relocation custody"
+)]
 fn initialize_capture(
     plan: &ProgramPlan<'_>,
     top_objects: &BTreeMap<ValueId, (usize, Arc<ObjectDescriptor>)>,

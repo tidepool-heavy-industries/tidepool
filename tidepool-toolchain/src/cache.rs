@@ -228,13 +228,16 @@ fn has_untracked_cpp_inputs(source: &str, include: &[PathBuf]) -> bool {
 /// before this checksum existed) is treated as absent, forcing a MISS.
 const SENTINEL_LEN: usize = 128;
 
+/// Cached extractor outputs in `(expression, metadata, asks, prepared)` order.
+type CachedArtifactParts = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Attempts to load the Core expression and metadata from the cache.
 /// Returns `Some((expr_bytes, meta_bytes, asks_bytes, prepared_bytes))` on success.
 /// Beyond mere sentinel existence (completeness), the sentinel's four blake3
 /// digests are recomputed over the loaded bytes and compared: a bit-flip that
 /// still decodes as valid CBOR would otherwise be served as a different
 /// program, so a checksum mismatch falls through to a MISS/recompile instead.
-pub(crate) fn cache_load(key: &CacheKey) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+pub(crate) fn cache_load(key: &CacheKey) -> Option<CachedArtifactParts> {
     let dir = cache_dir()?;
     let sentinel_path = dir.join(format!("{}.ok", key));
     let sentinel = fs::read(&sentinel_path).ok()?;

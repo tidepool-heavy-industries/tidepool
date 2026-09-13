@@ -56,7 +56,6 @@ impl Dispatchers {
 /// logical arguments, so a Void argument advances arity without occupying a slot.
 pub(super) struct PapLayout {
     pub function: ValueId,
-    pub pending: usize,
     pub descriptor: Arc<ObjectDescriptor>,
 }
 
@@ -148,7 +147,6 @@ pub(super) fn layouts<'a>(
                 (function, pending),
                 PapLayout {
                     function,
-                    pending,
                     descriptor,
                 },
             );
@@ -248,6 +246,10 @@ fn signature_key(
 /// Emit the exact-application portion of a dispatcher. PAP allocation and
 /// excess application are deliberately separate paths; an exact mismatch
 /// returns the prepared integrity status instead of falling through to a cast.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dispatcher emission carries independent borrowed ABI, runtime-entry, root, and pipeline state"
+)]
 pub(super) fn emit_dispatchers(
     plan: &ProgramPlan<'_>,
     dispatchers: &Dispatchers,
@@ -317,10 +319,9 @@ pub(super) fn emit_dispatchers(
         let mut next = entered;
         let physical_arguments = logical_arguments(signature, &params[2..]);
         for (&id, function) in &plan.functions {
-            let application = classify(function.signature, 0, signature);
-            if application.is_none() {
+            let Some(application) = classify(function.signature, 0, signature) else {
                 continue;
-            }
+            };
             let Some(&callee_function) = functions.get(&id) else {
                 continue;
             };
@@ -343,7 +344,7 @@ pub(super) fn emit_dispatchers(
             builder.ins().brif(matches, hit, &[], following, &[]);
             builder.switch_to_block(hit);
             builder.seal_block(hit);
-            match application.unwrap() {
+            match application {
                 Application::Exact => {
                     let target = pipeline
                         .module
@@ -583,6 +584,10 @@ fn emit_partial(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "excess-call emission carries independent borrowed ABI, dispatcher, callee, and pipeline state"
+)]
 fn emit_excess(
     builder: &mut FunctionBuilder<'_>,
     vmctx: ir::Value,

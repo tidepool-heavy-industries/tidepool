@@ -143,6 +143,7 @@ pub(super) fn append_exact_starts(
 }
 
 impl<'a> ObservationHeap<'a> {
+    #[cfg(test)]
     pub fn new(
         nursery: &'a [u64],
         statics: &'a StaticRegion,
@@ -150,22 +151,6 @@ impl<'a> ObservationHeap<'a> {
         constructors: &'a BTreeMap<usize, ConstructorObservation>,
     ) -> Result<Self, ObservationFailure> {
         Self::build(nursery, statics, descriptors, Some(constructors), None)
-    }
-
-    pub fn new_with_registry(
-        nursery: &'a [u64],
-        statics: &'a StaticRegion,
-        registry: &'a BTreeMap<usize, DescriptorMetadata>,
-    ) -> Result<Self, ObservationFailure> {
-        Self::build(
-            nursery,
-            statics,
-            registry
-                .values()
-                .map(|metadata| Arc::clone(&metadata.descriptor)),
-            None,
-            Some(registry),
-        )
     }
 
     pub(super) fn new_with_registry_and_starts(
@@ -197,6 +182,7 @@ impl<'a> ObservationHeap<'a> {
         })
     }
 
+    #[cfg(test)]
     fn build(
         nursery: &'a [u64],
         statics: &'a StaticRegion,
@@ -332,6 +318,7 @@ impl<'a> ObservationHeap<'a> {
 
     /// Result storage is already registered as roots by the invocation owner.
     /// No forcing, native call, or collection occurs anywhere in this traversal.
+    #[cfg(test)]
     pub fn observe_results(
         &self,
         words: &[u64],
@@ -429,7 +416,7 @@ impl<'a> ObservationHeap<'a> {
                                         Some(observation)
                                     }
                                     DescriptorMeaning::Callable { .. } => None,
-                                    DescriptorMeaning::Pap { .. } => None,
+                                    DescriptorMeaning::Pap => None,
                                     DescriptorMeaning::External => None,
                                 })
                                 .or_else(|| {

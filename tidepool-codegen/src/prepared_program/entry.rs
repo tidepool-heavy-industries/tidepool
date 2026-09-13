@@ -35,6 +35,10 @@ pub(super) fn signature() -> ir::Signature {
 /// Descriptor comparisons are centralized here; Enter sites call this entry.
 /// Body calls and recursive result entry use the Tail convention without a
 /// Rust bridge. The original thunk stays live in the stack map through both.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "entry emission independently borrows the code pipeline, thunk and descriptor catalogs, and each generated runtime callee"
+)]
 pub(super) fn emit_prepared_enter(
     pipeline: &mut crate::pipeline::CodegenPipeline,
     function: FuncId,
@@ -310,6 +314,10 @@ pub(super) fn emit_prepared_enter(
 /// captures intact; integrity failure must not dereference the heap at all.
 /// Old-space update publication uses the owning noncollecting barrier here,
 /// so individual Enter sites cannot omit remembered-edge maintenance.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thunk completion independently carries builder custody, VM context, rooted thunk state, result status, update policy, and barrier callee"
+)]
 pub(super) fn emit_thunk_completion(
     builder: &mut FunctionBuilder<'_>,
     vmctx: Value,

@@ -53,6 +53,10 @@ enum Work {
 
 /// All generated entry points share (vmctx, tagged_environment, physical args).
 /// Case/let continuations are native blocks, not recursively emitted Rust calls.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "entry emission carries independent borrowed ABI, runtime-entry, and pipeline state"
+)]
 pub(super) fn emit_function(
     plan: &ProgramPlan<'_>,
     id: ValueId,
@@ -81,6 +85,10 @@ pub(super) fn emit_function(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thunk emission carries independent borrowed ABI, runtime-entry, and pipeline state"
+)]
 pub(super) fn emit_thunk_body(
     plan: &ProgramPlan<'_>,
     id: ValueId,
@@ -109,6 +117,10 @@ pub(super) fn emit_thunk_body(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "function emission carries independent borrowed ABI, runtime-entry, and pipeline state"
+)]
 fn emit_function_at(
     plan: &ProgramPlan<'_>,
     id: ValueId,
@@ -828,6 +840,10 @@ fn finish_returning(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "let emission carries independent borrowed environment, root, runtime-entry, and pipeline state"
+)]
 fn emit_let_group(
     builder: &mut FunctionBuilder<'_>,
     vmctx: Value,
@@ -1144,14 +1160,14 @@ fn emit_case_dispatch(
                         .filter_map(|(logical, stored)| stored.map(|stored| (logical, stored)))
                         .map(|(_, stored)| {
                             let field = &descriptor.payload().fields()[stored as usize];
-                            builder.ins().load(
-                                physical_type(field.rep()).expect("validated representation"),
+                            Ok(builder.ins().load(
+                                physical_type(field.rep())?,
                                 MemFlags::trusted(),
                                 object,
                                 (descriptor.payload_base() + field.offset()) as i32,
-                            )
+                            ))
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, CompileError>>()?;
                     jump_to(builder, &alternative_blocks[index].0, fields);
                 }
             }
@@ -1257,6 +1273,10 @@ fn bind_captures(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "enter emission carries independent borrowed environment, ABI, runtime-entry, and pipeline state"
+)]
 fn emit_enter(
     builder: &mut FunctionBuilder<'_>,
     values: &BTreeMap<ValueId, Value>,
@@ -1347,6 +1367,10 @@ fn emit_enter(
     Ok(None)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "constructor emission carries independent borrowed environment, allocation, root, and pipeline state"
+)]
 fn emit_construct(
     builder: &mut FunctionBuilder<'_>,
     vmctx: Value,
@@ -1407,6 +1431,10 @@ fn emit_construct(
     Ok(vec![tagged])
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "call emission carries independent borrowed environment, ABI, dispatcher, and pipeline state"
+)]
 fn emit_exact_call(
     builder: &mut FunctionBuilder<'_>,
     vmctx: Value,
@@ -1477,6 +1505,10 @@ fn atom_ref(atom: &Atom, owner: ValueId, node: usize) -> Result<&ValueRef, Compi
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "atom emission carries independent borrowed environment, literal image, and node provenance"
+)]
 fn atom_value(
     builder: &mut FunctionBuilder<'_>,
     vmctx: Value,
@@ -1518,6 +1550,10 @@ fn atom_value(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "atom-list emission carries independent borrowed environment, literal image, and node provenance"
+)]
 fn emit_atoms(
     builder: &mut FunctionBuilder<'_>,
     values: &BTreeMap<ValueId, Value>,
@@ -1604,9 +1640,11 @@ fn scalar_value(
             let mut word = [0_u8; 8];
             word[8 - bytes.len()..].copy_from_slice(bytes);
             match expected {
-                RuntimeRep::Float(32) => Ok(builder.ins().f32const(f32::from_bits(
-                    u32::from_be_bytes(word[4..].try_into().unwrap()),
-                ))),
+                RuntimeRep::Float(32) => {
+                    Ok(builder.ins().f32const(f32::from_bits(u32::from_be_bytes([
+                        word[4], word[5], word[6], word[7],
+                    ]))))
+                }
                 RuntimeRep::Float(64) => Ok(builder
                     .ins()
                     .f64const(f64::from_bits(u64::from_be_bytes(word)))),

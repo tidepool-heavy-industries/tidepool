@@ -72,6 +72,10 @@ impl PreparedArtifact {
         &self.prepared
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "structured link evidence is retained on this cold artifact-admission path"
+    )]
     pub fn link(self, imports: &MachineImports) -> Result<LinkedProgram, LinkError> {
         link_program(self.prepared, imports)
     }

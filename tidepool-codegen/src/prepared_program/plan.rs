@@ -44,9 +44,6 @@ pub(super) struct ProgramPlan<'a> {
     pub functions: BTreeMap<ValueId, FunctionPlan<'a>>,
     pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
     pub top_bindings: BTreeMap<ValueId, &'a HeapBinding>,
-    /// Logical representations, including Void. ValueIds are globally unique
-    /// after validation, so no lexical search or scope cloning is necessary.
-    pub values: BTreeMap<ValueId, RuntimeRep>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
     pub boxed_array: Arc<ObjectDescriptor>,
     /// Fixed one-slot mutable cells share the boxed payload ledger, not array
@@ -310,7 +307,6 @@ impl<'a> ProgramPlan<'a> {
             functions,
             thunks,
             top_bindings,
-            values,
             constructors,
             boxed_array: Arc::new(ObjectDescriptor::external(
                 tidepool_heap::external_storage::ExternalStorageKind::BoxedArray,

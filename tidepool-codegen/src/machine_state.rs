@@ -661,6 +661,7 @@ impl MachineState {
 
     /// Install one prepared heap with its pinned compiled-layout owners.
     /// A live heap must be retired by its owning run before another is installed.
+    #[cfg(test)]
     pub(crate) fn install_prepared_buffer(
         &self,
         buffer: Vec<u64>,
@@ -1146,11 +1147,11 @@ impl MachineState {
         Self::validate_external_record(published, record)
     }
 
-    fn structural_external_record<'a>(
-        storage: &'a HashMap<*mut u8, ExternalStorage>,
+    fn structural_external_record(
+        storage: &HashMap<*mut u8, ExternalStorage>,
         published: *mut u8,
         expected: ExternalStorageKind,
-    ) -> Result<&'a ExternalStorage, ExternalStorageValidationError> {
+    ) -> Result<&ExternalStorage, ExternalStorageValidationError> {
         let record = storage
             .get(&published)
             .ok_or(ExternalStorageValidationError::Untracked(
@@ -1160,11 +1161,11 @@ impl MachineState {
         Ok(record)
     }
 
-    fn checked_external_record<'a>(
-        storage: &'a HashMap<*mut u8, ExternalStorage>,
+    fn checked_external_record(
+        storage: &HashMap<*mut u8, ExternalStorage>,
         published: *mut u8,
         expected: ExternalStorageKind,
-    ) -> Result<&'a ExternalStorage, ExternalStorageValidationError> {
+    ) -> Result<&ExternalStorage, ExternalStorageValidationError> {
         let record = Self::structural_external_record(storage, published, expected)?;
         if record.activity == ExternalActivity::Revoked {
             return Err(ExternalStorageValidationError::Revoked(published as usize));
@@ -1886,6 +1887,7 @@ impl MachineState {
 
     /// Revoke mutator access while keeping the allocation in the ledger for
     /// structural validation and a later sweep.
+    #[cfg(test)]
     pub(crate) fn revoke_external_payload(
         &self,
         published: *mut u8,

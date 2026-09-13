@@ -2327,7 +2327,10 @@ impl JitEffectMachine {
     /// and reference-bearing payloads to a fixed point before committing
     /// either the old-space replacement or external sweep.
     fn collect_major_quiescent(&mut self) -> Result<(), String> {
-        let session = self.session.as_ref().expect("checked session");
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| "major collection requires session state".to_owned())?;
         let (nursery_start, nursery_used) = match session.heap.as_ref() {
             Some(heap) => (heap.as_ptr() as *mut u8, session.cursor),
             None => (self.nursery.start() as *mut u8, session.cursor),
@@ -2363,7 +2366,11 @@ impl JitEffectMachine {
             }
             let mut rewrite_slots = graph_roots.clone();
             rewrite_slots.extend(nursery.pointer_slots);
-            let old_space = &self.session.as_ref().expect("session").old_space;
+            let old_space = &self
+                .session
+                .as_ref()
+                .ok_or_else(|| "major collection requires session state".to_owned())?
+                .old_space;
             let plan = unsafe { old_space.stage_compaction(&rewrite_slots)? };
             let mut added_slots = false;
             for slot in plan.source_pointer_slots() {
@@ -2409,7 +2416,7 @@ impl JitEffectMachine {
         unsafe {
             self.session
                 .as_mut()
-                .expect("session")
+                .ok_or_else(|| "major collection requires session state".to_owned())?
                 .old_space
                 .commit_compaction(
                     &self.machine_state,
