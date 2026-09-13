@@ -24,6 +24,9 @@ pub struct VMContext {
     /// `JitEffectMachine::install_registries` (or wired directly onto a
     /// manually-constructed VMContext by a test).
     pub machine_state: *mut crate::machine_state::MachineState,
+    /// Invocation-owned compact top-binding table for connected prepared code.
+    /// Entries are immutable static managed values or pinned raw byte addresses.
+    pub prepared_tops: *const usize,
 }
 
 impl VMContext {
@@ -41,6 +44,7 @@ impl VMContext {
             tail_callee: std::ptr::null_mut(),
             tail_arg: std::ptr::null_mut(),
             machine_state: std::ptr::null_mut(),
+            prepared_tops: std::ptr::null(),
         }
     }
 }

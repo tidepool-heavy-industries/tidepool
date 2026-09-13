@@ -24,6 +24,8 @@ pub(super) struct ProgramPlan<'a> {
     pub constructors: Vec<Arc<ObjectDescriptor>>,
     /// Compact slots, not ValueId-indexed allocation controlled by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
+    /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
+    pub bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
 }
 
 impl<'a> ProgramPlan<'a> {

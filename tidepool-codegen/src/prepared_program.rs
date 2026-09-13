@@ -17,6 +17,7 @@ use crate::pipeline::{CodegenPipeline, PipelineError};
 
 mod admission;
 mod emit;
+mod image;
 mod plan;
 pub use admission::admit_program;
 
@@ -68,7 +69,9 @@ pub struct CompiledProgram {
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
     pub(crate) constructors: BTreeMap<usize, ConstructorObservation>,
     pub(crate) statics: StaticImage,
-    pub(crate) bytes: Vec<Arc<[u8]>>,
+    pub(crate) bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
+    pub(crate) top_slots: BTreeMap<ValueId, usize>,
+    pub(crate) byte_tops: BTreeMap<ValueId, Arc<[u8]>>,
 }
 
 impl CompiledProgram {
