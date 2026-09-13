@@ -35,6 +35,12 @@ pub(super) fn recognize(
         {
             Some(AddressOperation::ReadWord8)
         }
+        "indexWord8OffAddr#"
+            if signature.arguments == [Address, Int(64)]
+                && signature.results == ResultContract::Returns(vec![Word(8)]) =>
+        {
+            Some(AddressOperation::ReadWord8)
+        }
         "readInt8OffAddr#"
             if signature.arguments == [Address, Int(64), Void]
                 && signature.results == ResultContract::Returns(vec![Int(8)]) =>
@@ -565,6 +571,42 @@ mod tests {
             ),
             Some(AddressOperation::ReadWideChar)
         );
+        assert_eq!(
+            recognize(
+                &operation("indexWord8OffAddr#"),
+                &signature(vec![Address, Int(64)], vec![Word(8)])
+            ),
+            Some(AddressOperation::ReadWord8)
+        );
+        // Wrong argument reps for the pure index form: no state token slot to
+        // confuse with, so a non-matching second argument must simply fail.
+        assert!(recognize(
+            &operation("indexWord8OffAddr#"),
+            &signature(vec![Address, Int(32)], vec![Word(8)])
+        )
+        .is_none());
+        // Wrong result rep: same arguments as the admitted pair, wider result.
+        assert!(recognize(
+            &operation("indexWord8OffAddr#"),
+            &signature(vec![Address, Int(64)], vec![Word(64)])
+        )
+        .is_none());
+        // A NoSuccess contract never matches any Returns-shaped arm.
+        assert!(recognize(
+            &operation("indexWord8OffAddr#"),
+            &Signature {
+                arguments: vec![Address, Int(64)],
+                results: ResultContract::NoSuccess,
+            }
+        )
+        .is_none());
+        // The state-threaded shape belongs to readWord8OffAddr#, not this
+        // pure spelling: indexWord8OffAddr# never carries a Void token.
+        assert!(recognize(
+            &operation("indexWord8OffAddr#"),
+            &signature(vec![Address, Int(64), Void], vec![Word(8)])
+        )
+        .is_none());
         assert!(recognize(
             &operation("readWord8OffAddr#"),
             &signature(vec![Address, Int(64)], vec![Word(8)])
