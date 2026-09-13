@@ -1223,6 +1223,52 @@ impl MachineState {
         Ok(())
     }
 
+    /// Authenticate a complete byte range. The returned pointer is usable only
+    /// while the supplied ledger borrow remains live, with no callback or GC.
+    fn checked_external_byte_range(
+        storage: &HashMap<*mut u8, ExternalStorage>,
+        published: *mut u8,
+        offset: usize,
+        count: usize,
+    ) -> Result<*mut u8, ExternalStorageValidationError> {
+        let record = Self::checked_external_record(storage, published, ExternalStorageKind::Bytes)?;
+        let end = offset.checked_add(count).ok_or(
+            ExternalStorageValidationError::IndexOutOfBounds { index: offset, len: record.logical_len },
+        )?;
+        if end > record.logical_len {
+            return Err(ExternalStorageValidationError::IndexOutOfBounds {
+                index: end.saturating_sub(1), len: record.logical_len,
+            });
+        }
+        Ok(unsafe { published.add(8).add(offset) })
+    }
+
+    /// GHC copyByteArray# forbids source/destination aliases. Validate both
+    /// complete ranges and that precondition before any write. This is a
+    /// noncollecting ledger mutation; bytes require no managed-edge barrier.
+    pub(crate) fn copy_external_byte_range(
+        &self,
+        source: *mut u8,
+        source_offset: usize,
+        destination: *mut u8,
+        destination_offset: usize,
+        count: usize,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let from = Self::checked_external_byte_range(&storage, source, source_offset, count)?;
+        let to = Self::checked_external_byte_range(&storage, destination, destination_offset, count)?;
+        if source == destination {
+            return Err(ExternalStorageValidationError::AliasedByteCopy);
+        }
+        if count != 0 {
+            // Distinct ledger allocations are disjoint; both complete spans
+            // were authenticated before copying, including their activity.
+            unsafe { std::ptr::copy_nonoverlapping(from, to, count) };
+            self.external_changed();
+        }
+        Ok(())
+    }
+
     /// Snapshot an active byte payload while its ledger owner is borrowed.
     /// This call is noncollecting and returns owned storage; no payload borrow
     /// survives into later observation or forcing steps.
@@ -2541,6 +2587,15 @@ mod tests {
             3
         );
         assert_eq!(ms.external_storage.borrow().len(), 2);
+    }
+
+    #[test]
+    fn byte_copy_rejects_aliases_without_mutation() {
+        let ms = MachineState::new();
+        let bytes = ms.allocate_external_storage(ExternalStorageKind::Bytes, 4).unwrap();
+        ms.store_external_bytes(bytes, 0, b"abcd").unwrap();
+        assert_eq!(ms.copy_external_byte_range(bytes, 0, bytes, 1, 3), Err(ExternalStorageValidationError::AliasedByteCopy));
+        assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"abcd");
     }
 
     #[test]

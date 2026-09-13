@@ -52,6 +52,7 @@ mod safepoint;
 #[cfg(test)]
 mod settlement_tests;
 mod static_bytes;
+mod wide_words;
 pub use admission::{admit_prepared, admit_program};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

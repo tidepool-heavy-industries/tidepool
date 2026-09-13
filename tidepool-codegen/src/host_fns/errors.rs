@@ -60,6 +60,8 @@ pub enum RuntimeError {
     HeapOverflow,
     #[error("array index {index} out of bounds for length {len}")]
     ArrayIndexOutOfBounds { index: i64, len: usize },
+    #[error("copyByteArray# source and destination name the same array")]
+    AliasedByteCopy,
     #[error("external {kind:?} allocation failed ({bytes} bytes)")]
     ExternalAllocationFailed {
         kind: ExternalStorageKind,
@@ -113,6 +115,7 @@ impl RuntimeError {
             | Self::Undefined
             | Self::HeapOverflow
             | Self::ArrayIndexOutOfBounds { .. }
+            | Self::AliasedByteCopy
             | Self::ExternalAllocationFailed { .. }
             | Self::StackOverflow
             | Self::BlackHole

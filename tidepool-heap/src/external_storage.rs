@@ -65,6 +65,7 @@ pub enum ExternalStorageValidationError {
     },
     LedgerChanged,
     Revoked(usize),
+    AliasedByteCopy,
     IndexOutOfBounds {
         index: usize,
         len: usize,
