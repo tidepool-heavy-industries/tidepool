@@ -26,6 +26,19 @@ pub(super) enum ArrayOperation {
     CasBoxed,
 }
 
+#[cfg(test)]
+#[test]
+fn w5_bulk_mutable_copy_signature() {
+    use RuntimeRep::*;
+    let signature = Signature {
+        arguments: vec![UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void],
+        results: ResultContract::Returns(vec![]),
+    };
+    for name in ["copyMutableArray#", "copySmallMutableArray#"] {
+        assert!(recognize(&OperationIdentity::PrimOp(name.into()), &signature).is_some());
+    }
+}
+
 pub(super) fn recognize(
     identity: &OperationIdentity,
     signature: &Signature,

@@ -1188,6 +1188,47 @@ impl MachineState {
         Ok(())
     }
 
+    /// Copy a mutable boxed-array range with memmove semantics. Authenticate both
+    /// complete spans before allocation or mutation, snapshot the source, then
+    /// use the existing bulk store owner for retained-slot barriers and revision.
+    /// No safepoint or callback may occur while the pointer snapshot is live.
+    pub(crate) fn copy_external_elements(
+        &self,
+        source: *mut u8,
+        source_start: usize,
+        destination: *mut u8,
+        destination_start: usize,
+        count: usize,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        for (published, start) in [(source, source_start), (destination, destination_start)] {
+            let record = Self::checked_external_record(
+                &storage, published, ExternalStorageKind::BoxedArray,
+            )?;
+            let end = start.checked_add(count).ok_or(
+                ExternalStorageValidationError::IndexOutOfBounds {
+                    index: start, len: record.logical_len,
+                },
+            )?;
+            if end > record.logical_len {
+                return Err(ExternalStorageValidationError::IndexOutOfBounds {
+                    index: end.saturating_sub(1), len: record.logical_len,
+                });
+            }
+        }
+        let mut values = Vec::new();
+        values.try_reserve_exact(count)
+            .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+        // Both complete ranges belong to authenticated active allocations. The
+        // owned snapshot handles overlapping ranges without aliased Rust slices.
+        let first = unsafe { source.add(8).cast::<*mut u8>().add(source_start) };
+        for index in 0..count {
+            values.push(unsafe { first.add(index).read() });
+        }
+        drop(storage);
+        self.store_external_elements(destination, destination_start, &values)
+    }
+
     /// The one-element prepared store shares the checked range owner.
     pub(crate) fn store_external_element(
         &self,
