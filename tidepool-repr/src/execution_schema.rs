@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 5;
+pub const SCHEMA_VERSION: u64 = 6;
 pub const EXECUTION_ABI_VERSION: u64 = 3;
 
 macro_rules! dense_id {
@@ -60,6 +60,8 @@ pub struct SymbolIdentity {
     pub module: String,
     pub namespace: String,
     pub occurrence: String,
+    /// GHC record-field parent; absent for ordinary names and internal binders.
+    pub record_parent: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -561,8 +563,22 @@ impl<A> HeapRhs<A> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperationDecl {
-    pub identity: String,
+    pub identity: OperationIdentity,
     pub signature: SignatureId,
+}
+
+/// Primops and admitted foreign capabilities occupy distinct identity spaces.
+/// The declaration signature completes the operation's identity; the same
+/// primop may occur at more than one instantiated signature.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum OperationIdentity {
+    PrimOp(String),
+    Intrinsic { symbol: String, convention: ForeignConvention },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ForeignConvention {
+    CCall,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -726,6 +742,8 @@ mod codec;
 mod decode;
 mod link;
 mod validation;
+
+pub mod testing;
 
 pub use decode::parse_program;
 pub use link::link_program;

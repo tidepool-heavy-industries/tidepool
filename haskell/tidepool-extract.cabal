@@ -420,3 +420,17 @@ test-suite extract-fidelity-test
     mtl
   default-language: GHC2024
   default-extensions: OverloadedStrings
+
+test-suite fat-iface-exact-test
+  type:             exitcode-stdio-1.0
+  main-is:          FatIfaceExactTest.hs
+  hs-source-dirs:   test-prepared-stg
+  build-depends:
+    base         >= 4.20 && < 5,
+    directory,
+    filepath,
+    process,
+    ghc          >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall

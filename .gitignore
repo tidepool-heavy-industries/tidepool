@@ -37,6 +37,7 @@ haskell/test/text_cbor/
 
 # Debug artifacts
 *.cbor
+!haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor
 *.log
 dump_*.rs
 test_*.hs

@@ -1,5 +1,5 @@
 use super::{plan::ProgramPlan, CompileError, Unsupported};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ptr;
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
@@ -7,6 +7,104 @@ use tidepool_heap::static_region::{StaticImage, StaticImageError, StaticRelocati
 use tidepool_repr::execution_schema::{
     Atom, HeapBinding, HeapRhs, RuntimeRep, ScalarLiteral, ValueId, ValueRef,
 };
+
+/// Reverse managed-edge closure of CAFs. A constructor or function which
+/// contains a pointer to a mutable top must move with it; static code referring
+/// to a top through VMContext is not a heap edge. The remaining graph is closed
+/// and immutable, so the collector may continue skipping its fields.
+pub(super) fn heap_top_partition(tops: &BTreeMap<ValueId, &HeapBinding>) -> BTreeSet<ValueId> {
+    let mut reverse = BTreeMap::<ValueId, Vec<ValueId>>::new();
+    let mut heap = BTreeSet::new();
+    let mut pending = Vec::new();
+    for (&owner, binding) in tops {
+        if matches!(binding.rhs, HeapRhs::Thunk { .. }) {
+            heap.insert(owner);
+            pending.push(owner);
+        }
+        let mut edge = |reference: &ValueRef| {
+            if let ValueRef::Local(target) = reference {
+                if tops.contains_key(target) {
+                    reverse.entry(*target).or_default().push(owner);
+                }
+            }
+        };
+        match &binding.rhs {
+            HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => {
+                for reference in captures {
+                    edge(reference);
+                }
+            }
+            HeapRhs::Constructor { fields, .. } => {
+                for atom in fields {
+                    if let Atom::Ref(reference) = atom {
+                        edge(reference);
+                    }
+                }
+            }
+            HeapRhs::Bytes(_) => {}
+        }
+    }
+    while let Some(target) = pending.pop() {
+        if let Some(owners) = reverse.get(&target) {
+            for &owner in owners {
+                if heap.insert(owner) {
+                    pending.push(owner);
+                }
+            }
+        }
+    }
+    heap
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    use tidepool_repr::execution_schema::{ConstructorId, SignatureId, UpdatePolicy};
+
+    #[test]
+    fn w5_a1_caf_partition_moves_reverse_closure_only() {
+        let caf = HeapBinding {
+            id: ValueId(0),
+            rhs: HeapRhs::Thunk {
+                signature: SignatureId(0),
+                update: UpdatePolicy::Memoize,
+                captures: vec![],
+                body: 0,
+            },
+        };
+        let container = HeapBinding {
+            id: ValueId(1),
+            rhs: HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![Atom::Ref(ValueRef::Local(caf.id))],
+            },
+        };
+        let closure = HeapBinding {
+            id: ValueId(2),
+            rhs: HeapRhs::Function {
+                signature: SignatureId(0),
+                parameters: vec![],
+                captures: vec![ValueRef::Local(container.id)],
+                body: 0,
+            },
+        };
+        let independent = HeapBinding {
+            id: ValueId(3),
+            rhs: HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![],
+            },
+        };
+        let tops = [&caf, &container, &closure, &independent]
+            .into_iter()
+            .map(|binding| (binding.id, binding))
+            .collect();
+        assert_eq!(
+            heap_top_partition(&tops),
+            BTreeSet::from([caf.id, container.id, closure.id])
+        );
+    }
+}
 
 /// Reserve every top object before initializing any managed edge. Function
 /// captures and constructor fields use the same descriptor logical layout as

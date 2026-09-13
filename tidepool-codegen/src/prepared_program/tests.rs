@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use super::{
     CompileError, CompiledProgram, ExecutionError, ObservationFailure, RunOptions, Unsupported,
 };
+use crate::host_fns::RuntimeError;
 use cranelift_codegen::ir::{self, InstructionData, Opcode, ValueDef};
 use tidepool_bridge::Value;
 use tidepool_repr::execution_schema::{
-    Architecture, DecodeLimits, EXECUTION_ABI_VERSION, Endianness, MachineImports,
-    ProgramRequirements, RuntimeRep, SCHEMA_VERSION, TargetDescriptor, link_program, parse_program,
+    link_program, parse_program, Architecture, DecodeLimits, Endianness, MachineImports,
+    ProgramRequirements, RuntimeRep, TargetDescriptor, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 use tidepool_repr::{DataConId, Literal};
 
@@ -104,6 +105,7 @@ fn symbol(name: &str) -> Vec<u8> {
         text("AbiContract"),
         text("value"),
         text(name),
+        array([uint(0)]),
     ])
 }
 
@@ -462,7 +464,10 @@ fn nested_invalid_enter_wire() -> Vec<u8> {
             enter_frame(1, 0),
             return_frame(vec![atom_scalar(scalar_int(7))]),
             let_recursive_frame(
-                vec![heap_binding(1, function_rhs(0, vec![value_ref_local(1)], 0))],
+                vec![heap_binding(
+                    1,
+                    function_rhs(0, vec![value_ref_local(1)], 0),
+                )],
                 1,
             ),
         ],
@@ -887,6 +892,40 @@ fn connected_join_jump_returns_zero_effect_result() {
     assert!(matches!(
         &result.values[0],
         Value::Lit(Literal::LitInt(value)) if *value == 7
+    ));
+}
+
+#[test]
+fn w5_a1_cancelled_generated_entry_records_cause() {
+    let program = CompiledProgram::compile(&linked_wire(zero_result_wire())).unwrap();
+    let error = program
+        .run_entry(
+            tidepool_repr::execution_schema::ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutionError::Runtime(failure) if failure.cause == RuntimeError::Cancelled
+    ));
+}
+
+#[test]
+fn w5_a1_nonallocating_join_observes_cancel() {
+    let program = CompiledProgram::compile(&linked_wire(join_wire())).unwrap();
+    let error = program
+        .run_entry(
+            tidepool_repr::execution_schema::ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutionError::Runtime(failure) if failure.cause == RuntimeError::Cancelled
     ));
 }
 

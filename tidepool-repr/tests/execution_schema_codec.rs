@@ -63,6 +63,7 @@ fn global_with_generation(generation: Cbor) -> Cbor {
             Cbor::Text("M3.Import".into()),
             Cbor::Text("value".into()),
             Cbor::Text("retained".into()),
+            Cbor::Array(vec![int(0)]),
         ]),
         Cbor::Array(vec![int(1)]),
         Cbor::Array(vec![int(0)]),
@@ -142,6 +143,84 @@ fn codec_accepts_optional_generation_shape_and_rejects_unknown_tag() {
     assert!(matches!(
         parse_program(&bytes(&invalid), &requirements(), DecodeLimits::default()),
         Err(ParseError::InvalidTag(9))
+    ));
+}
+
+#[test]
+fn codec_rejects_malformed_record_parents_and_intrinsic_identities() {
+    let signatures = Cbor::Array(vec![Cbor::Array(vec![
+        Cbor::Array(vec![]),
+        Cbor::Array(vec![]),
+    ])]);
+    let mut malformed_parent = root(signatures.clone());
+    let Cbor::Array(fields) = &mut malformed_parent else {
+        unreachable!()
+    };
+    let Cbor::Array(globals) = &mut fields[7] else {
+        unreachable!()
+    };
+    let mut global = global_with_generation(Cbor::Array(vec![int(0)]));
+    let Cbor::Array(global_fields) = &mut global else {
+        unreachable!()
+    };
+    let Cbor::Array(symbol) = &mut global_fields[0] else {
+        unreachable!()
+    };
+    symbol[4] = Cbor::Array(vec![int(0), Cbor::Text("unexpected".into())]);
+    globals.push(global);
+    assert!(matches!(
+        parse_program(
+            &bytes(&malformed_parent),
+            &requirements(),
+            DecodeLimits::default()
+        ),
+        Err(ParseError::Malformed(detail)) if detail.contains("record parent")
+    ));
+
+    let mut unknown_parent_tag = root(signatures.clone());
+    let Cbor::Array(fields) = &mut unknown_parent_tag else {
+        unreachable!()
+    };
+    let Cbor::Array(globals) = &mut fields[7] else {
+        unreachable!()
+    };
+    let mut global = global_with_generation(Cbor::Array(vec![int(0)]));
+    let Cbor::Array(global_fields) = &mut global else {
+        unreachable!()
+    };
+    let Cbor::Array(symbol) = &mut global_fields[0] else {
+        unreachable!()
+    };
+    symbol[4] = Cbor::Array(vec![int(9)]);
+    globals.push(global);
+    assert!(matches!(
+        parse_program(
+            &bytes(&unknown_parent_tag),
+            &requirements(),
+            DecodeLimits::default()
+        ),
+        Err(ParseError::InvalidTag(9))
+    ));
+
+    let mut malformed_intrinsic = root(signatures);
+    let Cbor::Array(fields) = &mut malformed_intrinsic else {
+        unreachable!()
+    };
+    fields[9] = Cbor::Array(vec![Cbor::Array(vec![
+        Cbor::Array(vec![
+            int(1),
+            Cbor::Text("rintDouble".into()),
+            Cbor::Array(vec![int(0), int(1)]),
+        ]),
+        int(0),
+    ])]);
+    assert!(matches!(
+        parse_program(
+            &bytes(&malformed_intrinsic),
+            &requirements(),
+            DecodeLimits::default()
+        ),
+        Err(ParseError::Malformed(detail)) if detail.contains("foreign convention")
     ));
 }
 
@@ -236,6 +315,7 @@ fn public_parse_rejects_wrong_declared_result_representation() {
         Cbor::Text("Probe".into()),
         Cbor::Text("value".into()),
         Cbor::Text("entry".into()),
+        a(vec![int(0)]),
     ]);
     let top = a(vec![symbol, a(vec![int(0), rhs])]);
     let mut program = root(a(vec![signature]));

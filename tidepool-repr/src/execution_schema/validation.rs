@@ -478,7 +478,9 @@ impl<'w, 'p> Walker<'w, 'p> {
                         "saturated application result disagrees with entry signature".into(),
                     ))
                 }
-                std::cmp::Ordering::Greater if !dead_end && actual.results != [RuntimeRep::LiftedRef] => {
+                std::cmp::Ordering::Greater
+                    if !dead_end && actual.results != [RuntimeRep::LiftedRef] =>
+                {
                     return Err(ParseError::InvalidSignature(
                         "oversaturation requires a returned function reference".into(),
                     ))
@@ -1154,6 +1156,7 @@ mod tests {
             module: "M3.Validation".into(),
             namespace: "value".into(),
             occurrence: name.into(),
+            record_parent: None,
         }
     }
 
@@ -1241,7 +1244,10 @@ mod tests {
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidSignature(_))
         ));
-        program.signatures.push(Signature { arguments: vec![RuntimeRep::Void], results: vec![] });
+        program.signatures.push(Signature {
+            arguments: vec![RuntimeRep::Void],
+            results: vec![],
+        });
         program.globals[0].entry_signature = Some(SignatureId(1));
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
     }
@@ -2077,7 +2083,7 @@ mod tests {
         });
         let mut operation = valid_program();
         operation.operations.push(OperationDecl {
-            identity: "op".into(),
+            identity: super::super::OperationIdentity::PrimOp("op".into()),
             signature: SignatureId(0),
         });
         operation.signatures[0].arguments = vec![RuntimeRep::Int(64)];
@@ -2135,6 +2141,55 @@ mod tests {
         *signature = SignatureId(1);
         *body = 2;
         assert_invalid_signature(jump);
+    }
+
+    #[test]
+    fn operation_identity_and_signature_form_a_unique_contract() {
+        let identity = super::super::OperationIdentity::PrimOp("sameName".into());
+        let mut duplicate = valid_program();
+        duplicate.operations = vec![
+            OperationDecl {
+                identity: identity.clone(),
+                signature: SignatureId(0),
+            },
+            OperationDecl {
+                identity: identity.clone(),
+                signature: SignatureId(0),
+            },
+        ];
+        assert!(matches!(
+            validate_program(&duplicate, &requirements(), DecodeLimits::default()),
+            Err(ParseError::DuplicateDefinition(_))
+        ));
+
+        let mut distinct_signature = valid_program();
+        distinct_signature.signatures.push(Signature {
+            arguments: vec![RuntimeRep::Int(64)],
+            results: vec![RuntimeRep::Int(64)],
+        });
+        distinct_signature.operations = vec![
+            OperationDecl {
+                identity: identity.clone(),
+                signature: SignatureId(0),
+            },
+            OperationDecl {
+                identity,
+                signature: SignatureId(1),
+            },
+            OperationDecl {
+                identity: super::super::OperationIdentity::Intrinsic {
+                    symbol: "sameName".into(),
+                    convention: super::super::ForeignConvention::CCall,
+                },
+                signature: SignatureId(0),
+            },
+        ];
+        validate_program(
+            &distinct_signature,
+            &requirements(),
+            DecodeLimits::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2574,17 +2629,22 @@ impl<'a> Validator<'a> {
             self.check_layout(&constructor.field_reps, &constructor.layout)?;
         }
 
-        let mut operation_names = BTreeSet::new();
+        let mut operation_contracts = BTreeSet::new();
         for operation in &self.wire.operations {
             self.bump_work(1)?;
-            self.check_text(&operation.identity)?;
-            if !operation_names.insert(operation.identity.as_str()) {
+            self.check_operation_identity(&operation.identity)?;
+            let signature = self.signature(operation.signature)?;
+            let key = (
+                operation.identity.clone(),
+                signature.arguments.clone(),
+                signature.results.clone(),
+            );
+            if !operation_contracts.insert(key) {
                 return Err(ParseError::DuplicateDefinition(format!(
-                    "operation {}",
+                    "operation {:?}",
                     operation.identity
                 )));
             }
-            self.check_signature(operation.signature)?;
         }
 
         let mut top_symbols = BTreeSet::new();
@@ -2849,7 +2909,21 @@ impl<'a> Validator<'a> {
         self.check_text(&symbol.unit)?;
         self.check_text(&symbol.module)?;
         self.check_text(&symbol.namespace)?;
-        self.check_text(&symbol.occurrence)
+        self.check_text(&symbol.occurrence)?;
+        if let Some(parent) = &symbol.record_parent {
+            self.check_text(parent)?;
+        }
+        Ok(())
+    }
+
+    fn check_operation_identity(
+        &mut self,
+        identity: &super::OperationIdentity,
+    ) -> Result<(), ParseError> {
+        match identity {
+            super::OperationIdentity::PrimOp(name) => self.check_text(name),
+            super::OperationIdentity::Intrinsic { symbol, .. } => self.check_text(symbol),
+        }
     }
 
     fn check_text(&mut self, text: &str) -> Result<(), ParseError> {

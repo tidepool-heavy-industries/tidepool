@@ -12,23 +12,28 @@ module Tidepool.FatIface
   ) where
 
 import GHC.Core (CoreBind, Bind(..))
-import GHC.Driver.Env (HscEnv)
+import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
 import GHC.Types.Name (Name, nameModule_maybe)
 import GHC.Types.Var (varName)
 import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
 import GHC.Unit.Module.ModIface (mi_extra_decls)
 import GHC.Utils.Outputable (showSDocUnsafe, ppr, text)
 
-import GHC.Iface.Load (findAndReadIface)
+import GHC.Iface.Load (findAndReadIface, readIface)
+import GHC.Iface.Errors.Types
+  ( MissingInterfaceError(..), ReadInterfaceError(..) )
 import GHC.IfaceToCore (tcTopIfaceBindings)
 import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
 import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.Data.Maybe (MaybeErr(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
+import GHC.Unit.Module.Location (ModLocation(ml_hi_file))
 
-import Control.Exception (SomeException, try)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Exception
+  ( SomeAsyncException, SomeException, displayException, fromException, throwIO, try )
 import Control.Monad.IO.Class (liftIO)
-import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
+import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import System.IO (hPutStrLn, stderr)
 import System.Environment (lookupEnv)
@@ -42,23 +47,38 @@ data FatIfaceLookup
   = FatIfaceFound CoreBind
   | FatIfaceMissing FatIfaceMissing
   | FatIfaceLoadFailure Module String
-  | FatIfaceUnsupported String
+
+-- | An interface load is cached as an outcome, not as a map.  In particular,
+-- an unreadable interface and an interface without extra declarations must not
+-- become indistinguishable from a successfully loaded interface with no
+-- matching binding.
+data FatIfaceModule
+  = FatIfaceBindings (Map.Map Name CoreBind)
+  | FatIfaceNoExtraDeclarations
+  | FatIfaceLoadFailureOutcome String
 
 lookupFatIfaceExact :: HscEnv -> FatIfaceCache -> Name -> IO FatIfaceLookup
-lookupFatIfaceExact _ _ name | Nothing <- nameModule_maybe name =
-  pure (FatIfaceMissing NameWithoutModule)
-lookupFatIfaceExact _ _ _ = pure (FatIfaceUnsupported "wave5:B1 exact cached interface outcome")
+lookupFatIfaceExact hscEnv cache name = case nameModule_maybe name of
+  Nothing -> pure (FatIfaceMissing NameWithoutModule)
+  Just modl -> do
+    outcome <- lookupModuleOutcome hscEnv cache modl
+    pure $ case outcome of
+      FatIfaceBindings nameMap -> case Map.lookup name nameMap of
+        Just bind -> FatIfaceFound bind
+        Nothing -> FatIfaceMissing BindingAbsent
+      FatIfaceNoExtraDeclarations -> FatIfaceMissing NoExtraDeclarations
+      FatIfaceLoadFailureOutcome reason -> FatIfaceLoadFailure modl reason
 
 -- | Cache of deserialized fat interface Core, keyed by Module.
 -- Each module's extra-decls are deserialized at most once.
 -- For each Name, we store the full CoreBind it belongs to — this preserves
 -- Rec group structure so that looking up any member returns all siblings
 -- (critical for join points that reference each other within a Rec group).
-newtype FatIfaceCache = FatIfaceCache (IORef (Map.Map Module (Map.Map Name CoreBind)))
+newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceModule))
 
 -- | Create an empty cache.
 newFatIfaceCache :: IO FatIfaceCache
-newFatIfaceCache = FatIfaceCache <$> newIORef Map.empty
+newFatIfaceCache = FatIfaceCache <$> newMVar Map.empty
 
 -- | Look up a Name's CoreBind from the fat interface of its defining module.
 -- For NonRec bindings, returns the single binding.
@@ -76,31 +96,51 @@ lookupFatIface hscEnv (FatIfaceCache cacheRef) name = do
   case nameModule_maybe name of
     Nothing -> return Nothing
     Just modl -> do
-      cache <- readIORef cacheRef
-      nameMap <- case Map.lookup modl cache of
-        Just m -> return m
-        Nothing -> do
-          m <- loadModuleExtraDecls hscEnv modl
-          modifyIORef' cacheRef (Map.insert modl m)
-          return m
-      return (Map.lookup name nameMap)
+      outcome <- lookupModuleOutcome hscEnv (FatIfaceCache cacheRef) modl
+      case outcome of
+        FatIfaceBindings nameMap -> return (Map.lookup name nameMap)
+        FatIfaceNoExtraDeclarations -> return Nothing
+        FatIfaceLoadFailureOutcome _ -> return Nothing
 
--- | Load and deserialize mi_extra_decls for a single module.
+-- | Load one module once and retain whether it loaded, lacked extra
+-- declarations, or failed.  Holding the MVar across the miss path also keeps
+-- the "at most once" cache invariant true when resolution is concurrent.
+lookupModuleOutcome :: HscEnv -> FatIfaceCache -> Module -> IO FatIfaceModule
+lookupModuleOutcome hscEnv (FatIfaceCache cacheRef) modl =
+  modifyMVar cacheRef $ \cache -> case Map.lookup modl cache of
+    Just outcome -> pure (cache, outcome)
+    Nothing -> do
+      outcome <- loadModuleExtraDecls hscEnv modl
+      pure (Map.insert modl outcome cache, outcome)
+
+-- | Load and deserialize mi_extra_decls for a single module, retaining the
+-- exact outcome for both exact and legacy callers.
 -- Uses findAndReadIface to bypass the PIT cache (which strips mi_extra_decls).
-loadModuleExtraDecls :: HscEnv -> Module -> IO (Map.Map Name CoreBind)
+loadModuleExtraDecls :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDecls hscEnv modl = do
-  result <- try $ loadModuleExtraDeclsUnsafe hscEnv modl
+  result <- trySynchronous (loadModuleExtraDeclsUnsafe hscEnv modl)
   case result of
-    Right m -> return m
-    Left (e :: SomeException) -> do
+    Right outcome -> return outcome
+    Left e -> do
       ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
       case ifaceDbg of
         Just _ -> hPutStrLn stderr $
           "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": exception: " ++ show e
         Nothing -> pure ()
-      return Map.empty
+      return (FatIfaceLoadFailureOutcome (show e))
 
-loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO (Map.Map Name CoreBind)
+-- | Catch ordinary interface failures while allowing asynchronous exceptions
+-- (notably cancellation) to escape the cache loader.
+trySynchronous :: IO a -> IO (Either SomeException a)
+trySynchronous action = do
+  result <- try action
+  case result of
+    Left e -> case (fromException e :: Maybe SomeAsyncException) of
+      Just async -> throwIO async
+      Nothing -> pure (Left e)
+    Right value -> pure (Right value)
+
+loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDeclsUnsafe hscEnv modl = do
   ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
   let doc = text "tidepool fat-iface lookup"
@@ -108,21 +148,34 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
       installedMod = mkModule (toUnitId (moduleUnit modl)) (moduleName modl)
   -- Read .hi directly from disk — bypasses PIT, mi_extra_decls intact
   readResult <- findAndReadIface hscEnv doc installedMod modl NotBoot
-  case readResult of
-    Failed _err -> do
+  ifaceResult <- case readResult of
+    -- The finder rejects a @main@ unit as a home interface even when its
+    -- location is known. Retry that exact location through the raw reader;
+    -- this keeps local compiler sessions on the same exact path as installed
+    -- interfaces without consulting the PIT.
+    Failed (HomeModError _ location) -> do
+      rawResult <- readIface (hsc_dflags hscEnv) (hsc_NC hscEnv) modl (ml_hi_file location)
+      pure $ case rawResult of
+        Succeeded iface -> Right iface
+        Failed rawError -> Left (renderReadInterfaceError rawError)
+    Failed err -> pure (Left (renderMissingInterfaceError err))
+    Succeeded (iface, _loc) -> pure (Right iface)
+  case ifaceResult of
+    Left reason -> do
       case ifaceDbg of
         Just _ -> hPutStrLn stderr $
-          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": could not read .hi file"
+          "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": could not read .hi file: "
+            ++ reason
         Nothing -> pure ()
-      return Map.empty
-    Succeeded (iface, _loc) ->
+      return (FatIfaceLoadFailureOutcome reason)
+    Right iface ->
       case mi_extra_decls iface of
         Nothing -> do
           case ifaceDbg of
             Just _ -> hPutStrLn stderr $
               "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": no mi_extra_decls"
             Nothing -> pure ()
-          return Map.empty
+          return FatIfaceNoExtraDeclarations
         Just ifaceBinds -> do
           coreBinds <- initIfaceCheck doc hscEnv $ do
             typeEnvRef <- liftIO $ newIORef emptyTypeEnv
@@ -132,7 +185,7 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
             Just _ -> hPutStrLn stderr $
               "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
             Nothing -> pure ()
-          return (bindingsToMap coreBinds)
+          return (FatIfaceBindings (bindingsToMap coreBinds))
 
 -- | Index CoreBinds into a Name→CoreBind map.
 -- For NonRec bindings, each name maps to its own NonRec.
@@ -143,3 +196,25 @@ bindingsToMap = foldl' addBind Map.empty
   where
     addBind m bind@(NonRec b _) = Map.insert (varName b) bind m
     addBind m bind@(Rec pairs)  = foldl' (\m' (b, _) -> Map.insert (varName b) bind m') m pairs
+
+-- GHC exposes interface-read failures as a closed diagnostic type without an
+-- Outputable instance. Keep the reason typed at the lookup boundary while
+-- rendering each constructor without dropping its useful context.
+renderMissingInterfaceError :: MissingInterfaceError -> String
+renderMissingInterfaceError failure = case failure of
+  BadSourceImport modl -> "bad source import: " ++ showSDocUnsafe (ppr modl)
+  HomeModError _ location -> "home interface error at " ++ show location
+  DynamicHashMismatchError modl location ->
+    "dynamic hash mismatch for " ++ showSDocUnsafe (ppr modl) ++ " at " ++ show location
+  CantFindErr{} -> "interface not found"
+  BadIfaceFile readFailure -> "bad interface file: " ++ renderReadInterfaceError readFailure
+  FailedToLoadDynamicInterface modl readFailure ->
+    "failed to load dynamic interface for " ++ showSDocUnsafe (ppr modl)
+      ++ ": " ++ renderReadInterfaceError readFailure
+
+renderReadInterfaceError :: ReadInterfaceError -> String
+renderReadInterfaceError failure = case failure of
+  ExceptionOccurred path exception -> path ++ ": " ++ displayException exception
+  HiModuleNameMismatchWarn path expected actual ->
+    path ++ ": expected " ++ showSDocUnsafe (ppr expected)
+      ++ ", found " ++ showSDocUnsafe (ppr actual)

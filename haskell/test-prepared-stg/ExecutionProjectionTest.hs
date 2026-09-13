@@ -76,7 +76,7 @@ projectProjectionContract modules = do
   where
     context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
       (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
-      (SymbolIdentity "main" "M3Vertical" "value" "result")
+      (SymbolIdentity "main" "M3Vertical" "value" "result" Nothing)
 
     selectedEntry program = case
       [ heapBindingId binding
@@ -110,7 +110,7 @@ projectProjectionContract modules = do
 
 topIdentityAllocationContract :: IO ()
 topIdentityAllocationContract = do
-  let symbol modul namespace occurrence = SymbolIdentity "unit" modul namespace occurrence
+  let symbol modul namespace occurrence = SymbolIdentity "unit" modul namespace occurrence Nothing
       assigned = assignTopIdentitySpellings
         [ (symbol "A" "local" "sat", False)
         , (symbol "A" "local" "sat.1", False)
@@ -358,7 +358,7 @@ verifyTargetClosure context modules = do
               <> show occurrence)))
       where
         targetContext = context
-          { projectionEntry = SymbolIdentity "main" "M3Vertical" "value" occurrence }
+          { projectionEntry = SymbolIdentity "main" "M3Vertical" "value" occurrence Nothing }
         actual program = Set.fromList
           [ symbolOccurrence symbol
           | group <- programBindings program
@@ -429,7 +429,7 @@ verifySuiteCollisionRegression = do
   prepared <- runPipelineSelected PreparedStg "test/Suite.hs" ["lib", "test"]
   let context identity = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
         (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty identity
-      identity = SymbolIdentity "main" "Suite" "value" "ho_myany"
+      identity = SymbolIdentity "main" "Suite" "value" "ho_myany" Nothing
   case projectPreparedTarget (context identity) (pprModules prepared) of
     Left failure -> ioError (userError ("Suite collision repro changed: " <> show failure))
     Right program -> do

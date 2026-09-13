@@ -5,6 +5,7 @@ import Codec.CBOR.Term (Term(..), decodeTerm)
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import System.Environment (getArgs)
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionSchema
 
@@ -13,16 +14,33 @@ assert condition message = unless condition (ioError (userError message))
 
 main :: IO ()
 main = do
+  arguments <- getArgs
   let first = encodeWireProgram representative
       second = encodeWireProgram representative
   assert (first == second) "prepared execution encoding is not deterministic"
   assert (BS.take 7 first == BS.pack [0x8d, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
-    "prepared execution schema is not v5"
+    "prepared execution schema is not v6"
   let globalFields = termList (head (termList (termList (decode first) !! 7)))
   assert (drop 3 globalFields == [TBool False, TList [TInt 1, TInt 7], TBool False])
     "global wire fields must end with evaluated, tagged generation, dead-end"
+  let schema6Fields = termList (decode (encodeWireProgram schema6Representative))
+      schema6Constructor = termList (schema6Fields !! 8) !! 0
+      schema6Parent = termList (termList schema6Constructor !! 0) !! 4
+      schema6Operation = termList (schema6Fields !! 9) !! 0
+      schema6Identity = termList (termList schema6Operation !! 0)
+  assert (schema6Parent == TList [TInt 1, TString "FixtureRecord"])
+    "record-parent identity did not use the tagged parent form"
+  assert (schema6Identity == [TInt 1, TString "rintDouble", TList [TInt 0]])
+    "intrinsic operation identity did not use the CCall form"
+
+  case arguments of
+    [] -> pure ()
+    ["--write-schema6-fixture", output] ->
+      BS.writeFile output (encodeWireProgram schema6Representative)
+    _ -> ioError (userError
+      "usage: execution-schema-encode [--write-schema6-fixture output.cbor]")
 
   let localBody = Let
         (NonRecursive (HeapBinding (ValueId 8)
@@ -67,9 +85,9 @@ main = do
 
   let twoBodies = (representativeWith (Return []))
         { programBindings = [Recursive
-            [ TopBinding (SymbolIdentity "m3-fixture" "Fixture" "value" "first")
+            [ TopBinding (SymbolIdentity "m3-fixture" "Fixture" "value" "first" Nothing)
                 (HeapBinding (ValueId 0) (Thunk (SignatureId 1) Memoize [] (Return [])))
-            , TopBinding (SymbolIdentity "m3-fixture" "Fixture" "value" "second")
+            , TopBinding (SymbolIdentity "m3-fixture" "Fixture" "value" "second" Nothing)
                 (HeapBinding (ValueId 1) (Function (SignatureId 1) [] [] (Return [])))
             ]]
         }
@@ -121,7 +139,7 @@ representative = representativeWith result
 representativeWith :: Expr -> WireProgram
 representativeWith body = WireProgram envelope signatures globals constructors operations bindings (ValueId 0)
  where
-  exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence
+  exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence Nothing
   target = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
   envelope = ProgramEnvelope schemaVersion "ghc-9.12-prepared-stg" "ghc-9.12.2"
     executionAbiVersion target
@@ -134,7 +152,22 @@ representativeWith body = WireProgram envelope signatures globals constructors o
   layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]
   constructors = [ConstructorDecl (exact "Fixture.Vertical" "Box")
     (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1 0]
-  operations = [OperationDecl "sub-int64" (SignatureId 0)]
+  operations = [OperationDecl (PrimOpIdentity "sub-int64") (SignatureId 0)]
   binding = HeapBinding (ValueId 0)
     (Thunk (SignatureId 1) Memoize [Global (GlobalId 0)] body)
   bindings = [Recursive [TopBinding (exact "Fixture.Vertical" "entry") binding]]
+
+schema6Representative :: WireProgram
+schema6Representative = representative
+  { programConstructors =
+      [ConstructorDecl
+        (SymbolIdentity "m3-fixture" "Fixture" "value" "RecordField" (Just "FixtureRecord"))
+        (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1 0]
+  , programOperations =
+      [OperationDecl (IntrinsicIdentity "rintDouble" CCall) (SignatureId 2)]
+  , programSignatures = programSignatures representative
+      <> [Signature [FloatRep 64] [FloatRep 64]]
+  }
+ where
+  layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]
+  exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence Nothing

@@ -32,6 +32,7 @@ data Outcome
 
 main :: IO ()
 main = getArgs >>= \arguments -> case arguments of
+  [] -> mappingSelfTest
   ["--self-test"] -> mappingSelfTest
   _ -> runProbe arguments
 
@@ -190,12 +191,20 @@ projectOneIdentity prepared outputDir index selected = do
           pure (Record name expectationKey (Projected artifactName selected))
 
 identityName :: SymbolIdentity -> String
-identityName identity = intercalate ":"
-  [ Text.unpack (symbolUnit identity)
-  , Text.unpack (symbolModule identity)
-  , Text.unpack (symbolNamespace identity)
-  , Text.unpack (symbolOccurrence identity)
-  ]
+identityName identity = intercalate ":" $ case symbolRecordParent identity of
+  Nothing ->
+    [ Text.unpack (symbolUnit identity)
+    , Text.unpack (symbolModule identity)
+    , Text.unpack (symbolNamespace identity)
+    , Text.unpack (symbolOccurrence identity)
+    ]
+  Just parent ->
+    [ Text.unpack (symbolUnit identity)
+    , Text.unpack (symbolModule identity)
+    , Text.unpack (symbolNamespace identity)
+    , Text.unpack parent
+    , Text.unpack (symbolOccurrence identity)
+    ]
 
 externalExpectationKey :: SymbolIdentity -> Maybe String
 externalExpectationKey identity
@@ -205,9 +214,11 @@ externalExpectationKey identity
 
 mappingSelfTest :: IO ()
 mappingSelfTest = do
-  let external = SymbolIdentity "unit" "Suite" "value" "answer"
-      internal = SymbolIdentity "unit" "Suite" "local" "answer"
-      anotherExternal = SymbolIdentity "unit" "Suite" "value" "answer"
+  let external = SymbolIdentity "unit" "Suite" "value" "answer" Nothing
+      internal = SymbolIdentity "unit" "Suite" "local" "answer" Nothing
+      anotherExternal = SymbolIdentity "unit" "Suite" "value" "answer" Nothing
+      recordExternal = SymbolIdentity "unit" "Suite" "value" "answer" (Just "RecordA")
+      otherRecordExternal = SymbolIdentity "unit" "Suite" "value" "answer" (Just "RecordB")
       identities = [external, internal]
       assert label condition = unless condition
         (ioError (userError ("mapping self-test failed: " <> label)))
@@ -222,6 +233,10 @@ mappingSelfTest = do
       Left _ -> True
       Right _ -> False
   assert "canonical identity name" (identityName external == "unit:Suite:value:answer")
+  assert "record parent identity name" $
+    identityName recordExternal == "unit:Suite:value:RecordA:answer"
+  assert "record parent keeps field identities distinct" $
+    identityName recordExternal /= identityName otherRecordExternal
   assert "external expectation key" (externalExpectationKey external == Just "answer")
   assert "internal expectation key is absent" (externalExpectationKey internal == Nothing)
   assert "empty identity input is unmapped" $
@@ -283,6 +298,7 @@ renderIdentity identity = "{\"unit\":" <> jsonString (Text.unpack (symbolUnit id
   <> ",\"module\":" <> jsonString (Text.unpack (symbolModule identity))
   <> ",\"namespace\":" <> jsonString (Text.unpack (symbolNamespace identity))
   <> ",\"occurrence\":" <> jsonString (Text.unpack (symbolOccurrence identity))
+  <> ",\"record_parent\":" <> maybe "null" (jsonString . Text.unpack) (symbolRecordParent identity)
   <> "}"
 
 toBytes :: String -> BS.ByteString

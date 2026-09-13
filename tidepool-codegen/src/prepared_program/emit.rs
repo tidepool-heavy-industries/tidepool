@@ -58,6 +58,8 @@ pub(super) fn emit_function(
     id: ValueId,
     functions: &BTreeMap<ValueId, FuncId>,
     prepared_gc: FuncId,
+    prepared_poll: FuncId,
+    prepared_stack_overflow: FuncId,
     prepared_enter_slow: FuncId,
     case_trap: FuncId,
     pipeline: &mut CodegenPipeline,
@@ -78,15 +80,34 @@ pub(super) fn emit_function(
     context.func.signature = abi.cranelift_signature(&profile, CallConv::Tail)?;
     let mut frontend = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
-    let entry = builder.create_block();
-    builder.append_block_params_for_function_params(entry);
-    builder.switch_to_block(entry);
-    builder.seal_block(entry);
-    let parameters = builder.block_params(entry).to_vec();
+    let start = builder.create_block();
+    builder.append_block_params_for_function_params(start);
+    builder.switch_to_block(start);
+    builder.seal_block(start);
+    let parameters = builder.block_params(start).to_vec();
     let vmctx = parameters[0];
     let tagged_environment = parameters[1];
-    builder.declare_value_needs_stack_map(tagged_environment);
     let physical_arguments = &parameters[2..];
+    // Keep every managed value live across the entry safepoint, including
+    // arguments that have not yet been copied into the local-value map.
+    builder.declare_value_needs_stack_map(tagged_environment);
+    for (&value, rep) in physical_arguments.iter().zip(abi.physical_arguments()) {
+        if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+            builder.declare_value_needs_stack_map(value);
+        }
+    }
+
+    // Check native headroom before any generated entry host call. The helper
+    // compares the machine SP with the invocation threshold and records a
+    // typed StackOverflow through VMContext on failure.
+    let preflight_status = emit_preflight(&mut builder, vmctx, prepared_stack_overflow, pipeline);
+    emit_status_guard(&mut builder, preflight_status);
+    let poll = pipeline
+        .module
+        .declare_func_in_func(prepared_poll, builder.func);
+    let entry_status = builder.ins().call(poll, &[vmctx]);
+    let entry_status = builder.inst_results(entry_status)[0];
+    let entry = emit_status_guard(&mut builder, entry_status);
     let mut values = BTreeMap::new();
     if let Some(function) = plan.functions.get(&id) {
         bind_parameters(
@@ -238,6 +259,9 @@ pub(super) fn emit_function(
                     }
                     ExprFrame::Jump { join, arguments } => {
                         let target = joins.get(join).ok_or_else(|| unsupported(id, node))?;
+                        let status = builder.ins().call(poll, &[vmctx]);
+                        let status = builder.inst_results(status)[0];
+                        emit_status_guard(&mut builder, status);
                         let arguments = emit_atoms(
                             &mut builder,
                             &values,
@@ -397,6 +421,82 @@ pub(super) fn emit_function(
         &mut context,
     )?;
     Ok(())
+}
+
+/// Emit a generated native stack preflight. The comparison happens in the
+/// generated frame before any potentially collecting or otherwise external
+/// host call. A null threshold fails closed as a stack-overflow status;
+/// prepared run entries always install a non-null threshold.
+pub(super) fn emit_preflight(
+    builder: &mut FunctionBuilder<'_>,
+    vmctx: Value,
+    stack_overflow: FuncId,
+    pipeline: &mut CodegenPipeline,
+) -> Value {
+    let flags = MemFlags::trusted();
+    let limit = builder.ins().load(
+        types::I64,
+        flags,
+        vmctx,
+        crate::layout::VMCTX_PREPARED_STACK_LIMIT_OFFSET,
+    );
+    let stack_pointer = builder.ins().get_stack_pointer(types::I64);
+    let configured = builder
+        .ins()
+        .icmp_imm(ir::condcodes::IntCC::NotEqual, limit, 0);
+    let enough = builder.ins().icmp(
+        ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+        stack_pointer,
+        limit,
+    );
+    let permitted = builder.ins().band(configured, enough);
+    let success = builder.create_block();
+    let overflow = builder.create_block();
+    let done = builder.create_block();
+    builder.append_block_param(done, types::I32);
+    builder.ins().brif(permitted, success, &[], overflow, &[]);
+
+    builder.switch_to_block(success);
+    builder.seal_block(success);
+    let status = builder.ins().iconst(
+        types::I32,
+        crate::prepared_control::CallStatus::Success as i64,
+    );
+    builder.ins().jump(done, &[status.into()]);
+
+    builder.switch_to_block(overflow);
+    builder.seal_block(overflow);
+    let overflow = pipeline
+        .module
+        .declare_func_in_func(stack_overflow, builder.func);
+    let status = builder.ins().call(overflow, &[vmctx]);
+    let status = builder.inst_results(status)[0];
+    builder.ins().jump(done, &[status.into()]);
+
+    builder.switch_to_block(done);
+    builder.seal_block(done);
+    builder.block_params(done)[0]
+}
+
+/// Branch on a prepared status and terminate the current function on any
+/// failure. The success block becomes the caller's current insertion block.
+pub(super) fn emit_status_guard(builder: &mut FunctionBuilder<'_>, status: Value) -> Block {
+    let success = builder.create_block();
+    let failure = builder.create_block();
+    let ok = builder.ins().icmp_imm(
+        ir::condcodes::IntCC::Equal,
+        status,
+        crate::prepared_control::CallStatus::Success as i64,
+    );
+    builder.ins().brif(ok, success, &[], failure, &[]);
+
+    builder.switch_to_block(failure);
+    builder.seal_block(failure);
+    crate::alloc::emit_prepared_failure_return(builder, status);
+
+    builder.switch_to_block(success);
+    builder.seal_block(success);
+    success
 }
 
 fn unsupported(binding: ValueId, node: usize) -> CompileError {

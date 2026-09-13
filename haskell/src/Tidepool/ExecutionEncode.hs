@@ -56,6 +56,9 @@ encodeSymbol symbol = array
   , encodeString (symbolModule symbol)
   , encodeString (symbolNamespace symbol)
   , encodeString (symbolOccurrence symbol)
+  , case symbolRecordParent symbol of
+      Nothing -> tag 0
+      Just parent -> tagged 1 [encodeString parent]
   ]
 
 encodeRep :: RuntimeRep -> Encoding
@@ -115,7 +118,9 @@ encodeGlobal global = array
 
 encodeOperation :: OperationDecl -> Encoding
 encodeOperation operation = array
-  [ encodeString (operationIdentity operation)
+  [ case operationIdentity operation of
+      PrimOpIdentity name -> tagged 0 [encodeString name]
+      IntrinsicIdentity symbol CCall -> tagged 1 [encodeString symbol, tag 0]
   , encodeSignatureId (operationSignature operation)
   ]
 

@@ -28,6 +28,7 @@ import GHC.Core.DataCon
   , dataConTag, dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCon qualified as GHC
+import GHC.Data.FastString (unpackFS)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
@@ -36,7 +37,7 @@ import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (isDeadEndId)
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (mkUniqSet, nonDetEltsUniqSet)
@@ -77,7 +78,8 @@ data PState = PState
   , topSymbols :: VarEnv SymbolIdentity, topValues :: Map SymbolIdentity ValueId
   , globals :: VarEnv GlobalId, globalDecls :: [GlobalDecl]
   , constructors :: [(DataCon, ConstructorId)], constructorDecls :: [ConstructorDecl]
-  , operations :: [((Text, Signature), OperationId)], operationDecls :: [OperationDecl]
+  , operations :: [(Schema.OperationIdentity, Signature, OperationId)]
+  , operationDecls :: [OperationDecl]
   , signatures :: [(Signature, SignatureId)]
   , target :: TargetDescriptor
   , retainedGenerations :: Map SymbolIdentity Word64
@@ -599,20 +601,24 @@ checkedWord32 label value
 internOperation :: StgOp -> SignatureId -> P OperationId
 internOperation op signature = case op of
   StgPrimOp primop -> do
-      let operationName = Text.pack (occNameString (primOpOcc primop))
+      let operationIdentity = Schema.PrimOpIdentity
+            (Text.pack (occNameString (primOpOcc primop)))
       operationSignature <- signatureForId signature
       known <- gets operations
-      case lookup (operationName, operationSignature) known of
-       Just identity -> pure identity
+      case find (matches operationIdentity operationSignature) known of
+       Just (_, _, identity) -> pure identity
        Nothing -> do
         prior <- gets operationDecls
         let identity = OperationId (fromIntegral (length prior))
-            declaration = OperationDecl operationName signature
+            declaration = OperationDecl operationIdentity signature
         modify' (\current -> current
-          { operations = operations current <> [((operationName, operationSignature), identity)]
+          { operations = operations current <> [(operationIdentity, operationSignature, identity)]
           , operationDecls = operationDecls current <> [declaration] })
         pure identity
   _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
+  where
+    matches operationIdentity operationSignature (knownIdentity, knownSignature, _) =
+      operationIdentity == knownIdentity && operationSignature == knownSignature
 
 signatureForId :: SignatureId -> P Signature
 signatureForId identity = do
@@ -819,16 +825,22 @@ nameSymbolWithFallback fallback namespace name = case nameModule_maybe name of
   Just modul -> SymbolIdentity (Text.pack (unitString (moduleUnit modul)))
     (Text.pack (moduleNameString (moduleName modul))) namespace
     (Text.pack (occNameString (nameOccName name)))
+    (if isExternalName name
+       then Text.pack . unpackFS <$> fieldOcc_maybe (nameOccName name)
+       else Nothing)
   Nothing -> case fallback of
     Just modul -> SymbolIdentity (Text.pack (unitString (moduleUnit modul)))
       (Text.pack (moduleNameString (moduleName modul))) namespace
-      (Text.pack (occNameString (nameOccName name)))
+      (Text.pack (occNameString (nameOccName name))) Nothing
     Nothing -> SymbolIdentity "<interactive>" "<local>" namespace
-      (Text.pack (occNameString (nameOccName name)))
+      (Text.pack (occNameString (nameOccName name))) Nothing
 
 symbolText :: SymbolIdentity -> Text
-symbolText symbol = symbolUnit symbol <> ":" <> symbolModule symbol <> ":"
-  <> symbolNamespace symbol <> ":" <> symbolOccurrence symbol
+symbolText symbol = case symbolRecordParent symbol of
+  Nothing -> symbolUnit symbol <> ":" <> symbolModule symbol <> ":"
+    <> symbolNamespace symbol <> ":" <> symbolOccurrence symbol
+  Just parent -> symbolUnit symbol <> ":" <> symbolModule symbol <> ":"
+    <> symbolNamespace symbol <> ":" <> parent <> ":" <> symbolOccurrence symbol
 
 failShape :: Text -> P a
 failShape = lift . Left . UnsupportedPreparedShape

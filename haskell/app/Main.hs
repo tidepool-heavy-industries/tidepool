@@ -430,7 +430,7 @@ writePreparedArtifacts outDir input modules targets = do
   forM_ targets $ \target -> do
     let entry = SymbolIdentity
           (T.pack (unitString (moduleUnit (pmModule preparedModule))))
-          (T.pack targetModule) "value" (T.pack target)
+          (T.pack targetModule) "value" (T.pack target) Nothing
         context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
           (TargetDescriptor architecture LittleEndian 64 64 abi []) Map.empty entry
     program <- either (ioError . userError . ("prepared projection failed: " <>) . show) pure

@@ -204,6 +204,7 @@ mod tests {
             text("Admission"),
             text("value"),
             text(name),
+            array([uint(0)]),
         ])
     }
     fn none() -> Vec<u8> {
@@ -491,7 +492,7 @@ mod tests {
             vec![sig(&[], &[RuntimeRep::Int(64)])],
             vec![],
             vec![],
-            vec![array([text("op"), uint(0)])],
+            vec![array([array([uint(0), text("op")]), uint(0)])],
             vec![
                 operation(0),
                 ret([atom_int(1)]),

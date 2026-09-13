@@ -530,6 +530,7 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
                 prepared_tops: std::ptr::null(),
+                prepared_stack_limit: std::ptr::null(),
             };
 
             // 1. Allocate a Lit object for the result
@@ -573,6 +574,7 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
                 prepared_tops: std::ptr::null(),
+                prepared_stack_limit: std::ptr::null(),
             };
 
             // 1. Result: a real heap object (Lit) so the force loop can read its tag
@@ -603,6 +605,7 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
                 prepared_tops: std::ptr::null(),
+                prepared_stack_limit: std::ptr::null(),
             };
 
             // Blackholed thunk
@@ -631,6 +634,7 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
                 prepared_tops: std::ptr::null(),
+                prepared_stack_limit: std::ptr::null(),
             };
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
@@ -666,6 +670,7 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
                 prepared_tops: std::ptr::null(),
+                prepared_stack_limit: std::ptr::null(),
             };
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
@@ -710,6 +715,7 @@ mod tests {
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
                 prepared_tops: std::ptr::null(),
+                prepared_stack_limit: std::ptr::null(),
             };
 
             let mut thunk_buf = [0u8; layout::THUNK_MIN_SIZE as usize];
@@ -757,6 +763,7 @@ mod tests {
             tail_arg: std::ptr::null_mut(),
             machine_state: &ms as *const MachineState as *mut MachineState,
             prepared_tops: std::ptr::null(),
+            prepared_stack_limit: std::ptr::null(),
         };
         let vmctx_ptr = &mut vmctx as *mut VMContext;
 

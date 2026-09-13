@@ -9,6 +9,8 @@ module Tidepool.PreparedStg
   , PreparedPassProfile(..)
   , unelaboratedModule
   , prepareModule
+  , RecoveredModuleInput(..)
+  , prepareRecoveredModule
   ) where
 
 import Data.Map.Strict (Map)
@@ -16,7 +18,7 @@ import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind)
 import GHC.Core.Lint.Interactive (interactiveInScope)
 import GHC.Core.Opt.Pipeline.Types (CoreToDo(CorePrep))
-import GHC.Core.TyCon (isDataTyCon)
+import GHC.Core.TyCon (TyCon, isDataTyCon)
 import GHC.CoreToStg (coreToStg)
 import GHC.CoreToStg.Prep (corePrepPgm)
 import GHC.Driver.Config.Core.Lint (lintCoreBindings)
@@ -91,8 +93,30 @@ data PreparedModule = PreparedModule
 -- object-code path, stopping before Cmm.  The caller must supply optimized,
 -- typed module guts before any Tidepool type erasure or cross-module flattening.
 prepareModule :: HscEnv -> ModSummary -> PreparedElaboration -> IO PreparedModule
-prepareModule hscEnv summary elaboration = do
+prepareModule hscEnv summary elaboration =
   let guts = peGuts elaboration
+  in prepareBindings hscEnv (cg_module guts) (ms_location summary)
+       (cg_tycons guts) (peBindings elaboration)
+       (peSitedSiblings elaboration) (peYieldSites elaboration)
+
+-- | Exact optimized bindings retain their defining module and interface
+-- context. No fabricated ModSummary or cross-module Core grouping is needed:
+-- source and recovered inputs use the same preparation owner below.
+data RecoveredModuleInput = RecoveredModuleInput
+  { recoveredModule :: Module
+  , recoveredLocation :: ModLocation
+  , recoveredTyCons :: [TyCon]
+  , recoveredBindings :: [CoreBind]
+  }
+
+prepareRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModule
+prepareRecoveredModule hscEnv input =
+  prepareBindings hscEnv (recoveredModule input) (recoveredLocation input)
+    (recoveredTyCons input) (recoveredBindings input) mempty []
+
+prepareBindings :: HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
+  -> Map String Id -> [YieldSite] -> IO PreparedModule
+prepareBindings hscEnv thisModule location tycons optimizedCore siblings yieldSites = do
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
         gopt_set
@@ -105,10 +129,7 @@ prepareModule hscEnv summary elaboration = do
             Opt_DoCoreLinting)
           Opt_DoStgLinting
       logger = hsc_logger hscEnv
-      thisModule = cg_module guts
-      location = ms_location summary
-      optimizedCore = peBindings elaboration
-      dataTyCons = filter isDataTyCon (cg_tycons guts)
+      dataTyCons = filter isDataTyCon tycons
       interactiveVars = interactiveInScope (hsc_IC hscEnv)
       coreLint = lintCoreBindings preparedFlags CorePrep [] optimizedCore
       stgOptions = initStgPipelineOpts preparedFlags False
@@ -136,7 +157,7 @@ prepareModule hscEnv summary elaboration = do
     , pmPassProfile = profile
     , pmBindings = preparedBindings
     , pmTagSigs = tagSigs
-    , pmSitedSiblings = peSitedSiblings elaboration
-    , pmYieldSites = peYieldSites elaboration
+    , pmSitedSiblings = siblings
+    , pmYieldSites = yieldSites
     , pmFacts = extractPreparedFacts thisModule tagSigs (map fst preparedBindings)
     }

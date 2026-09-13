@@ -85,6 +85,8 @@ pub struct SourceIdentity {
     pub module: String,
     pub namespace: String,
     pub occurrence: String,
+    #[serde(default)]
+    pub record_parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

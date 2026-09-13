@@ -7,6 +7,9 @@ use std::mem;
 /// `machine_state` at 40 is host-fn-only ambient state (see
 /// `crate::machine_state`) and MUST NEVER be loaded by JIT-emitted code —
 /// only passed through as the `vmctx` argument to a host-fn call.
+/// `prepared_tops` at 48 and `prepared_stack_limit` at 56 are connected
+/// prepared-program state. Generated prepared code may load the latter when
+/// performing its native stack preflight; legacy code must leave it unused.
 #[repr(C, align(16))]
 pub struct VMContext {
     /// Current bump-pointer allocation cursor.
@@ -27,6 +30,10 @@ pub struct VMContext {
     /// Invocation-owned compact top-binding table for connected prepared code.
     /// Entries are immutable static managed values or pinned raw byte addresses.
     pub prepared_tops: *const usize,
+    /// Lowest permitted stack pointer for prepared native code. This is the
+    /// native stack low bound plus the finalized-frame reserve; null disables
+    /// the prepared stack preflight for legacy effect-machine entries.
+    pub prepared_stack_limit: *const u8,
 }
 
 impl VMContext {
@@ -45,6 +52,7 @@ impl VMContext {
             tail_arg: std::ptr::null_mut(),
             machine_state: std::ptr::null_mut(),
             prepared_tops: std::ptr::null(),
+            prepared_stack_limit: std::ptr::null(),
         }
     }
 }
@@ -57,5 +65,9 @@ const _: () = {
     assert!(mem::offset_of!(VMContext, gc_trigger) == VMCTX_GC_TRIGGER_OFFSET as usize);
     assert!(mem::offset_of!(VMContext, tail_callee) == VMCTX_TAIL_CALLEE_OFFSET as usize);
     assert!(mem::offset_of!(VMContext, tail_arg) == VMCTX_TAIL_ARG_OFFSET as usize);
+    assert!(
+        mem::offset_of!(VMContext, prepared_stack_limit)
+            == VMCTX_PREPARED_STACK_LIMIT_OFFSET as usize
+    );
     assert!(mem::align_of::<VMContext>() == 16);
 };

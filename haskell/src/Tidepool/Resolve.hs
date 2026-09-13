@@ -1,4 +1,7 @@
-module Tidepool.Resolve (resolveExternals, UnresolvedVar(..)) where
+module Tidepool.Resolve
+  ( resolveExternals, UnresolvedVar(..)
+  , ExactBodyLookup(..), BodyOrigin(..), recoverExactBody
+  ) where
 
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..), maybeUnfoldingTemplate)
 import GHC.Core.FVs (exprSomeFreeVars)
@@ -8,7 +11,8 @@ import GHC.Types.Id (Id, idType, idUnfolding, realIdUnfolding, isGlobalId, isPri
 import GHC.Types.Var (Var, varName)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, unitVarSet, elemVarSet, extendVarSet)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
-import GHC.Types.Name (nameOccName, nameModule_maybe)
+import GHC.Types.Name (Name, nameOccName, nameModule_maybe)
+import GHC.Unit.Types (Module)
 import GHC.Types.Name.Occurrence (occNameString, mkVarOcc)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import Data.Word (Word64)
@@ -44,7 +48,9 @@ import GHC.Data.FastString (fsLit)
 
 -- Fat interface fallback (mi_extra_decls) — for loop-breakers whose
 -- unfoldings are not exposed via realIdUnfolding even with threshold bumps.
-import Tidepool.FatIface (FatIfaceCache, newFatIfaceCache, lookupFatIface)
+import Tidepool.FatIface
+  ( FatIfaceCache, newFatIfaceCache, lookupFatIface
+  , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact )
 
 -- The single "is this a session value module" predicate (Session.hs's own
 -- stated invariant: no bare @Tidepool.Session.…@ strings anywhere else).
@@ -55,6 +61,34 @@ data UnresolvedVar = UnresolvedVar
   , uvName   :: !String
   , uvModule :: !String
   } deriving (Show)
+
+data BodyOrigin = InterfaceUnfolding | FatInterfaceGroup deriving (Eq, Show)
+
+-- | Prepared recovery is exact: a failed lookup never selects an alias or
+-- synthesizes a dictionary. Found groups belong to the returned module and
+-- must be prepared there, not appended to the caller's Core bindings.
+data ExactBodyLookup
+  = ExactBody Module CoreBind BodyOrigin
+  | MissingExactBody Name FatIfaceMissing
+  | BodyInterfaceFailure Module String
+  | UnsupportedBodyCapability Name
+
+recoverExactBody :: HscEnv -> FatIfaceCache -> Id -> IO ExactBodyLookup
+recoverExactBody env cache binder = case nameModule_maybe name of
+  Nothing -> pure (MissingExactBody name NameWithoutModule)
+  Just owner -> case maybeUnfoldingTemplate (realIdUnfolding binder) of
+    Just body ->
+      let group = if binder `elemVarSet` exprSomeFreeVars (const True) body
+            then Rec [(binder, body)] else NonRec binder body
+      in pure (ExactBody owner group InterfaceUnfolding)
+    Nothing -> do
+      result <- lookupFatIfaceExact env cache name
+      pure $ case result of
+        FatIfaceFound group -> ExactBody owner group FatInterfaceGroup
+        FatIfaceMissing reason -> MissingExactBody name reason
+        FatIfaceLoadFailure modul reason -> BodyInterfaceFailure modul reason
+  where
+    name = varName binder
 
 -- | Resolve cross-module references by inlining their unfoldings.
 --

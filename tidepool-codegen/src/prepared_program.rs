@@ -26,7 +26,9 @@ mod observe;
 pub use observe::ObservationFailure;
 mod run;
 pub use run::{ExecutionError, RunOptions, RunResult};
+mod entry;
 mod plan;
+mod safepoint;
 pub use admission::{admit_prepared, admit_program};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -71,6 +73,25 @@ pub(crate) struct CompiledEntry {
 pub(crate) struct ConstructorObservation {
     pub identity: DataConId,
     pub fields: Vec<RuntimeRep>,
+}
+
+/// One program-owned descriptor index supplies both entry and observation.
+/// Callable addresses are finalized Tail entries and remain pinned by pipeline;
+/// they are never callable as Rust function pointers. Constructor metadata is
+/// the authoritative observation identity, independent of family-relative tags.
+pub(crate) struct DescriptorMetadata {
+    pub descriptor: Arc<ObjectDescriptor>,
+    pub meaning: DescriptorMeaning,
+}
+
+pub(crate) enum DescriptorMeaning {
+    Constructor(ConstructorObservation),
+    Callable {
+        binding: ValueId,
+        address: *const u8,
+        signature: Signature,
+        update: Option<tidepool_repr::execution_schema::UpdatePolicy>,
+    },
 }
 
 /// Prepared descriptor mismatches are compiler-contract failures. The JIT can
@@ -235,6 +256,11 @@ impl CompiledProgram {
                 "prepared_gc_trigger",
                 crate::host_fns::prepared_gc_trigger as *const u8,
             ),
+            ("prepared_poll", safepoint::prepared_poll as *const u8),
+            (
+                "prepared_stack_overflow",
+                safepoint::prepared_stack_overflow as *const u8,
+            ),
             ("prepared_enter_slow", prepared_enter_slow as *const u8),
             ("prepared_case_trap", prepared_case_trap as *const u8),
         ])?;
@@ -254,6 +280,25 @@ impl CompiledProgram {
                 "prepared_gc_trigger",
                 Linkage::Import,
                 &prepared_gc_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut prepared_status_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_status_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_status_signature
+            .returns
+            .push(AbiParam::new(types::I32));
+        let prepared_poll = pipeline
+            .module
+            .declare_function("prepared_poll", Linkage::Import, &prepared_status_signature)
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let prepared_stack_overflow = pipeline
+            .module
+            .declare_function(
+                "prepared_stack_overflow",
+                Linkage::Import,
+                &prepared_status_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut prepared_enter_slow_signature =
@@ -317,6 +362,8 @@ impl CompiledProgram {
                 id,
                 &functions,
                 prepared_gc,
+                prepared_poll,
+                prepared_stack_overflow,
                 prepared_enter_slow,
                 case_trap,
                 &mut pipeline,
@@ -418,5 +465,7 @@ pub(crate) fn emit_direct_call(
     payload
 }
 
+#[cfg(test)]
+mod entry_tests;
 #[cfg(test)]
 mod tests;

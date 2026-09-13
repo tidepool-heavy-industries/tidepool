@@ -11,6 +11,7 @@ module Tidepool.ExecutionSchema
   , UpdatePolicy(..), HeapBinding(..), HeapRhs(..), JoinBinding(..)
   , AlternativePattern(..), Alternative(..), CaseKind(..), Expr(..), FieldLayout(..)
   , CheckedLayout(..), ConstructorDecl(..), GlobalDecl(..), OperationDecl(..)
+  , OperationIdentity(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
   ) where
 
@@ -20,7 +21,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 5
+schemaVersion = 6
 executionAbiVersion = 3
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -45,6 +46,7 @@ data ProgramEnvelope = ProgramEnvelope
 data SymbolIdentity = SymbolIdentity
   { symbolUnit :: Text, symbolModule :: Text, symbolNamespace :: Text
   , symbolOccurrence :: Text
+  , symbolRecordParent :: Maybe Text
   } deriving stock (Eq, Ord, Show, Generic)
 
 data RuntimeRep = VoidRep | LiftedRefRep | UnliftedRefRep | AddressRep
@@ -73,7 +75,12 @@ data GlobalDecl = GlobalDecl
   , globalDeadEnd :: Bool
   , globalRequiredEvaluated :: Bool, globalRequiredGeneration :: Maybe Word64
   } deriving stock (Eq, Show, Generic)
-data OperationDecl = OperationDecl { operationIdentity :: Text, operationSignature :: SignatureId }
+-- | Operation signatures distinguish instantiated uses of one identity.
+-- Unknown foreign capabilities remain projection errors, never primop names.
+data ForeignConvention = CCall deriving stock (Eq, Ord, Show, Generic)
+data OperationIdentity = PrimOpIdentity Text | IntrinsicIdentity Text ForeignConvention
+  deriving stock (Eq, Ord, Show, Generic)
+data OperationDecl = OperationDecl { operationIdentity :: OperationIdentity, operationSignature :: SignatureId }
   deriving stock (Eq, Show, Generic)
 
 data ValueRef = Local ValueId | Global GlobalId deriving stock (Eq, Show, Generic)

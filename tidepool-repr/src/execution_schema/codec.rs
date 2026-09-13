@@ -4,9 +4,9 @@ use ciborium::value::Value;
 
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
-    ConstructorId, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl,
-    GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId,
-    ParseError, ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
+    ConstructorId, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl, GlobalId,
+    Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId, ParseError,
+    ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
     TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
 
@@ -248,12 +248,21 @@ impl Decoder {
     }
 
     fn symbol(&mut self, value: &Value) -> Result<SymbolIdentity, ParseError> {
-        let fields = array(value, 4, "symbol")?;
+        let fields = array(value, 5, "symbol")?;
+        let parent = tagged(&fields[4], "record parent")?;
+        let parent_tag = unsigned(&parent[0], "record parent tag")?;
+        let record_parent = match (parent_tag, parent.len()) {
+            (0, 1) => None,
+            (1, 2) => Some(self.text(&parent[1], "record parent")?),
+            (0 | 1, _) => return Err(ParseError::Malformed("invalid record parent".into())),
+            (tag, _) => return Err(ParseError::InvalidTag(tag)),
+        };
         Ok(SymbolIdentity {
             unit: self.text(&fields[0], "symbol unit")?,
             module: self.text(&fields[1], "symbol module")?,
             namespace: self.text(&fields[2], "symbol namespace")?,
             occurrence: self.text(&fields[3], "symbol occurrence")?,
+            record_parent,
         })
     }
 
@@ -412,8 +421,30 @@ impl Decoder {
 
     fn operation(&mut self, value: &Value) -> Result<OperationDecl, ParseError> {
         let fields = array(value, 2, "operation declaration")?;
+        let identity = tagged(&fields[0], "operation identity")?;
+        let identity_tag = unsigned(&identity[0], "operation identity tag")?;
+        let identity = match (identity_tag, identity.len()) {
+            (0, 2) => super::OperationIdentity::PrimOp(self.text(&identity[1], "primop")?),
+            (1, 3) => {
+                let convention = tagged(&identity[2], "foreign convention")?;
+                let convention_tag = unsigned(&convention[0], "foreign convention")?;
+                match (convention_tag, convention.len()) {
+                    (0, 1) => {}
+                    (0, _) => {
+                        return Err(ParseError::Malformed("invalid foreign convention".into()));
+                    }
+                    (tag, _) => return Err(ParseError::InvalidTag(tag)),
+                }
+                super::OperationIdentity::Intrinsic {
+                    symbol: self.text(&identity[1], "intrinsic symbol")?,
+                    convention: super::ForeignConvention::CCall,
+                }
+            }
+            (0 | 1, _) => return Err(ParseError::Malformed("invalid operation identity".into())),
+            (tag, _) => return Err(ParseError::InvalidTag(tag)),
+        };
         Ok(OperationDecl {
-            identity: self.text(&fields[0], "operation identity")?,
+            identity,
             signature: SignatureId(u32_value(&fields[1], "operation signature ID")?),
         })
     }
@@ -458,9 +489,7 @@ impl Decoder {
                 self.bytes(&fields[1], "byte literal")?,
             )),
             (5, 1) => Ok(ScalarLiteral::NullAddress),
-            (0..=2 | 4..=5, _) => {
-                Err(ParseError::Malformed("wrong scalar field count".into()))
-            }
+            (0..=2 | 4..=5, _) => Err(ParseError::Malformed("wrong scalar field count".into())),
             _ => Err(ParseError::InvalidTag(tag)),
         }
     }
@@ -806,6 +835,7 @@ mod tests {
                         text("Fixture"),
                         text("value"),
                         text("entry"),
+                        array(vec![n(0)]),
                     ]),
                     array(vec![
                         n(0),

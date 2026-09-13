@@ -50,6 +50,7 @@ mod tests {
             module: "M3.Import".into(),
             namespace: "value".into(),
             occurrence: "retained".into(),
+            record_parent: None,
         }
     }
 

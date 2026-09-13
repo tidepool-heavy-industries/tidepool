@@ -100,8 +100,12 @@ pub struct CodegenPipeline {
     /// Stack map registry populated during compilation.
     pub stack_maps: StackMapRegistry,
     /// Pending stack maps waiting for finalization to get base pointers.
-    /// Stores (func_id, func_size, raw_maps).
-    pending_stack_maps: Vec<(FuncId, u32, Vec<RawStackMap>)>,
+    /// Stores (func_id, func_size, finalized-frame reserve, raw_maps).
+    pending_stack_maps: Vec<(FuncId, u32, usize, Vec<RawStackMap>)>,
+    /// Largest finalized native frame reserve in this module. The reserve is
+    /// retained only after `finalize`, so callers cannot preflight against a
+    /// frame whose code was not made callable.
+    native_frame_maximum: usize,
     /// Lambda name registry: (func_id, name). Populated during define_function.
     /// Never truncated — `lambda_registry`/`lambda_registry_built_upto` below
     /// track how much of this has already been folded into the accumulated
@@ -205,6 +209,7 @@ impl CodegenPipeline {
             isa,
             stack_maps: StackMapRegistry::new(),
             pending_stack_maps: Vec::new(),
+            native_frame_maximum: 0,
             lambda_names: Vec::new(),
             lambda_registry: Rc::new(LambdaRegistry::new()),
             lambda_registry_built_upto: 0,
@@ -264,6 +269,17 @@ impl CodegenPipeline {
     /// `blocks_emitted` field doc for how to read a delta.
     pub fn blocks_emitted(&self) -> u64 {
         self.blocks_emitted
+    }
+
+    /// Largest native stack reserve among finalized functions.
+    ///
+    /// Cranelift's finalized machine metadata exposes the active frame from
+    /// the current SP through the frame pointer. On the pinned x86-64 SysV
+    /// target, the ABI setup area is 16 bytes (saved RBP plus return address),
+    /// so the reserve includes both the active frame—including outgoing
+    /// argument space—and that setup area before another generated call.
+    pub fn native_frame_maximum(&self) -> usize {
+        self.native_frame_maximum
     }
 
     /// Create the standard function signature for compiled tidepool functions.
@@ -367,6 +383,14 @@ impl CodegenPipeline {
             .frame_layout()
             .ok_or_else(|| PipelineError::Compilation("Cranelift omitted frame layout".into()))?
             .frame_to_fp_offset;
+        // The prepared target is currently pinned to x86-64 SysV. This is the
+        // setup area Cranelift's x64 FrameLayout reserves for RBP and the
+        // return address; frame_to_fp_offset already includes outgoing args,
+        // fixed storage, and callee-save clobbers.
+        const X86_64_SETUP_AREA: usize = 16;
+        let native_frame_reserve = (frame_size as usize)
+            .checked_add(X86_64_SETUP_AREA)
+            .ok_or_else(|| PipelineError::Compilation("native frame reserve overflow".into()))?;
         let mut rooted_maps: BTreeMap<u32, (u32, Vec<RawStackMapEntry>)> = compiled
             .buffer
             .user_stack_maps()
@@ -405,7 +429,8 @@ impl CodegenPipeline {
             )));
         }
 
-        self.pending_stack_maps.push((func_id, func_size, raw_maps));
+        self.pending_stack_maps
+            .push((func_id, func_size, native_frame_reserve, raw_maps));
         self.functions_defined += 1;
         self.blocks_emitted += ctx.func.layout.blocks().count() as u64;
         Ok(())
@@ -422,9 +447,10 @@ impl CodegenPipeline {
 
         // Now register stack maps with actual base pointers
         let pending = std::mem::take(&mut self.pending_stack_maps);
-        for (func_id, func_size, raw_maps) in pending {
+        for (func_id, func_size, frame_reserve, raw_maps) in pending {
             let base_ptr = self.module.get_finalized_function(func_id) as usize;
             self.stack_maps.register(base_ptr, func_size, &raw_maps);
+            self.native_frame_maximum = self.native_frame_maximum.max(frame_reserve);
         }
         self.lambda_names_finalized = self.lambda_names.len();
         self.compilation_state = CompilationState::Ready;
@@ -689,6 +715,24 @@ mod tests {
         // SAFETY: Calling the JIT-compiled function with a dummy vmctx (0).
         let res = unsafe { func(0) };
         assert_eq!(res, 42);
+    }
+
+    #[test]
+    fn w5_a1_stack_limit_reserves_finalized_frames() {
+        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
+        let function = define_trivial_lambda(&mut pipeline, "stack_limit_frame", 42);
+
+        // A compiled-but-unfinalized frame is not callable and must not become
+        // the VMContext preflight reserve early.
+        assert_eq!(pipeline.native_frame_maximum(), 0);
+        pipeline.finalize().unwrap();
+
+        // x86-64 Cranelift's finalized metadata contributes the active frame;
+        // the setup area (saved RBP + return address) makes even this leaf's
+        // reserve nonzero.
+        assert!(pipeline.native_frame_maximum() >= 16);
+        let ptr = pipeline.get_function_ptr(function);
+        assert!(!ptr.is_null());
     }
 
     #[test]

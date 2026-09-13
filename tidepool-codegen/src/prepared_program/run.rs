@@ -1,3 +1,4 @@
+use super::safepoint::NativeStackBounds;
 use super::{CompiledProgram, ObservationFailure, Unsupported};
 use crate::context::VMContext;
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
@@ -86,6 +87,22 @@ impl CompiledProgram {
             });
         }
 
+        // The adapter and its first generated callee can both consume a
+        // finalized native frame before another generated entry preflight.
+        // The OS helper already places the guard/unwind reserve below `low`;
+        // reserve two complete compiled frames above it for this initial hop.
+        let max_native_frame = self.pipeline.native_frame_maximum();
+        let native_frame_reserve = max_native_frame
+            .checked_mul(2)
+            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
+        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
+        bounds
+            .ensure_current_frame_reserve(native_frame_reserve)
+            .map_err(runtime_error_without_machine)?;
+        let prepared_stack_limit = bounds
+            .limit_with_frame_reserve(max_native_frame)
+            .map_err(runtime_error_without_machine)?;
+
         let statics = Arc::new(self.statics.instantiate()?);
         let mut top_table = try_slots(self.top_slots.len())?;
         for (&id, &slot) in &self.top_slots {
@@ -130,6 +147,7 @@ impl CompiledProgram {
         let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         vmctx.prepared_tops = top_table.as_ptr();
+        vmctx.prepared_stack_limit = prepared_stack_limit;
         let root_mark = machine.rust_roots_len();
         let mut cleanup = RunCleanup::new(&machine, &mut vmctx, root_mark);
         let collections_before = machine.gc_generation();

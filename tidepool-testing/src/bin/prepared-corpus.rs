@@ -410,10 +410,16 @@ fn invalid_manifest(message: String) -> Box<dyn Error> {
 }
 
 fn canonical_identity(identity: &tidepool_testing::prepared_corpus::SourceIdentity) -> String {
-    format!(
-        "{}:{}:{}:{}",
-        identity.unit, identity.module, identity.namespace, identity.occurrence
-    )
+    match &identity.record_parent {
+        None => format!(
+            "{}:{}:{}:{}",
+            identity.unit, identity.module, identity.namespace, identity.occurrence
+        ),
+        Some(parent) => format!(
+            "{}:{}:{}:{}:{}",
+            identity.unit, identity.module, identity.namespace, parent, identity.occurrence
+        ),
+    }
 }
 
 fn is_external_identity(identity: &tidepool_testing::prepared_corpus::SourceIdentity) -> bool {
@@ -431,7 +437,10 @@ fn validate_expectation_key(
         Some(key)
             if is_external_identity(identity)
                 && key == identity.occurrence
-                && keys.insert(key.to_owned()) => Ok(()),
+                && keys.insert(key.to_owned()) =>
+        {
+            Ok(())
+        }
         Some(key) if !is_external_identity(identity) => Err(invalid_manifest(format!(
             "internal program {:?} cannot carry oracle key {:?}",
             row.name, key
@@ -741,7 +750,28 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        assert!(matches!(expected_for(&row, &expectations), Some(Expectation::Int(7))));
+        assert!(matches!(
+            expected_for(&row, &expectations),
+            Some(Expectation::Int(7))
+        ));
+    }
+
+    #[test]
+    fn canonical_identity_preserves_legacy_keys_and_distinguishes_record_fields() {
+        let no_parent = tidepool_testing::prepared_corpus::SourceIdentity {
+            unit: "u".into(),
+            module: "M".into(),
+            namespace: "value".into(),
+            occurrence: "field".into(),
+            record_parent: None,
+        };
+        let parent = tidepool_testing::prepared_corpus::SourceIdentity {
+            record_parent: Some("Record".into()),
+            ..no_parent.clone()
+        };
+        assert_eq!(canonical_identity(&no_parent), "u:M:value:field");
+        assert_eq!(canonical_identity(&parent), "u:M:value:Record:field");
+        assert_ne!(canonical_identity(&no_parent), canonical_identity(&parent));
     }
 
     #[test]
@@ -776,22 +806,20 @@ mod tests {
         .unwrap();
         assert!(matches!(child, Command::Child { index: 7, .. }));
         assert!(parse_values(vec![OsString::from("run")]).is_err());
-        assert!(
-            parse_values(
-                [
-                    "child",
-                    "manifest.json",
-                    "expectations.json",
-                    "metadata.cbor",
-                    "out.json",
-                    "not-an-index",
-                ]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            )
-            .is_err()
-        );
+        assert!(parse_values(
+            [
+                "child",
+                "manifest.json",
+                "expectations.json",
+                "metadata.cbor",
+                "out.json",
+                "not-an-index",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -810,11 +838,9 @@ mod tests {
         let record: ProgramRecord = read_json(&output).unwrap();
         assert_eq!(record.name, "rejected");
         assert!(matches!(record.stages[0].outcome, Outcome::Failed { .. }));
-        assert!(
-            record.stages[1..]
-                .iter()
-                .all(|stage| matches!(stage.outcome, Outcome::NotReached))
-        );
+        assert!(record.stages[1..]
+            .iter()
+            .all(|stage| matches!(stage.outcome, Outcome::NotReached)));
         fs::remove_file(manifest).unwrap();
         fs::remove_file(output).unwrap();
     }
