@@ -85,6 +85,7 @@ projectProjectionContract modules = do
       verifyUnboxedReturn program
       verifyRintDoubleStateToken
       verifyCStringLengthProjection
+      verifyTextMemchrProjection
       verifyBottomingSentinelContracts
       verifySmallArrayOperationContracts
       verifyByteArrayOperationContracts
@@ -738,6 +739,32 @@ verifyCStringLengthProjection = do
       pure ()
     other -> ioError (userError
       ("wrong-signature strlen was not rejected: " <> show other))
+
+verifyTextMemchrProjection :: IO ()
+verifyTextMemchrProjection = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/TextMemchrProjection.hs" ["test-prepared-stg"]
+  let context entry = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+        (SymbolIdentity "main" "TextMemchrProjection" "value" entry Nothing) Nothing
+  case projectPreparedTarget (context "commaIndices") (pprModules prepared) of
+    Left failure -> ioError (userError
+      ("text _hs_text_memchr projection failed: " <> show failure))
+    Right program -> case
+      [ programSignatures program !! fromIntegral index
+      | OperationDecl (IntrinsicIdentity "_hs_text_memchr" CCall) (SignatureId index)
+          <- programOperations program
+      ] of
+      [Signature [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 8, VoidRep]
+        (Returns [IntRep 64])] -> pure ()
+      signatures -> ioError (userError
+        ("expected exact text _hs_text_memchr operation, got " <> show signatures))
+  case projectPreparedTarget (context "wrongMemchr") (pprModules prepared) of
+    Left (UnsupportedForeignCall _
+      (Signature [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 8, VoidRep]
+        (Returns [WordRep 64]))) -> pure ()
+    other -> ioError (userError
+      ("wrong-signature _hs_text_memchr was not rejected: " <> show other))
 
 verifyBottomingSentinelContracts :: IO ()
 verifyBottomingSentinelContracts = do

@@ -663,6 +663,9 @@ pub(super) fn recognize_operation(
     if let Some(operation) = super::fingerprint::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Fingerprint(operation));
     }
+    if let Some(operation) = super::text_search::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::TextSearch(operation));
+    }
     if let Some(operation) = super::formatting::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Formatting(operation));
     }
@@ -775,6 +778,7 @@ pub(super) enum PrimitiveOperation {
     Capability(super::capabilities::Capability),
     Array(super::arrays::ArrayOperation),
     ByteArray(super::byte_arrays::ByteOperation),
+    TextSearch(super::text_search::TextSearchOperation),
     Formatting(super::formatting::FormattingOperation),
     DecodeDoubleInt64,
     Touch,
@@ -970,6 +974,10 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Compare) => {
             super::byte_arrays::emit_compare_bytes(builder, pipeline, vmctx, bytes_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::TextSearch(super::text_search::TextSearchOperation::Memchr) => {
+            super::text_search::emit_memchr(builder, pipeline, vmctx, bytes_array, arguments)
                 .map(Some)
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Read(element)) => {
