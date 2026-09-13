@@ -35,6 +35,30 @@ pub enum Expectation {
 #[serde(rename_all = "snake_case")]
 pub enum ExpectedFailure {
     Blackhole,
+    RaisedException,
+}
+
+/// A language-error oracle matches only its exact reusable machine cause.
+/// Cancellation, integrity failure, rejection and watchdog termination never
+/// count as evidence for an expected Haskell exception.
+pub fn matches_expected_failure(
+    error: &tidepool_codegen::prepared_program::ExecutionError,
+    expected: &ExpectedFailure,
+) -> bool {
+    use tidepool_codegen::host_fns::RuntimeError;
+    use tidepool_codegen::machine_state::{MachineDisposition, MachineFailure};
+    use tidepool_codegen::prepared_program::ExecutionError;
+    matches!(
+        (error, expected),
+        (ExecutionError::Runtime(MachineFailure {
+            cause: RuntimeError::BlackHole,
+            disposition: MachineDisposition::Reusable,
+        }), ExpectedFailure::Blackhole)
+        | (ExecutionError::Runtime(MachineFailure {
+            cause: RuntimeError::RaisedException,
+            disposition: MachineDisposition::Reusable,
+        }), ExpectedFailure::RaisedException)
+    )
 }
 
 #[derive(Debug, Deserialize, Serialize)]
