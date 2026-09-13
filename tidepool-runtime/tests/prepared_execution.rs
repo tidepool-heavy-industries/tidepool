@@ -159,7 +159,9 @@ fn one_shot_runs_closed_compiled_program_and_returns_values() {
         &cancel,
     )
     .unwrap();
-    assert_eq!(result.collections, 0);
+    // `run_prepared_once` requests the contract's collection-before-observation
+    // checkpoint, so this closed constructor run performs one ordinary GC.
+    assert_eq!(result.collections, 1);
     assert!(matches!(
         result.values.as_slice(),
         [Value::Con(DataConId(100), fields)] if fields.is_empty()

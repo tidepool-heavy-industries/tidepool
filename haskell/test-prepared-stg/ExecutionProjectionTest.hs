@@ -45,6 +45,7 @@ projectProjectionContract modules = do
       unless (all constructorTagsAreUsable (programConstructors program))
         (ioError (userError "M3 projection emitted invalid constructor tag/family facts"))
       verifyDistinctConstructorHostIds program
+      verifyTopIdentityStability modules program
       unless (any groupIsRecursive (programBindings program)
         || any (groupAny (rhsIsRecursive . heapBindingRhs . topHeap)) (programBindings program))
         (ioError (userError "M3 projection omitted recursive control/data"))
@@ -98,18 +99,48 @@ projectProjectionContract modules = do
 
 topIdentityAllocationContract :: IO ()
 topIdentityAllocationContract = do
-  let symbol modul occurrence = SymbolIdentity "unit" modul "value" occurrence
-      assigned = assignTopIdentitySpellingForTest
-        [ (symbol "A" "sat", False)
-        , (symbol "A" "sat.1", False)
-        , (symbol "A" "sat", False)
-        , (symbol "B" "sat", False)
-        , (symbol "A" "external", True)
+  let symbol modul namespace occurrence = SymbolIdentity "unit" modul namespace occurrence
+      assigned = assignTopIdentitySpellings
+        [ (symbol "A" "local" "sat", False)
+        , (symbol "A" "local" "sat.1", False)
+        , (symbol "A" "local" "sat", False)
+        , (symbol "B" "local" "sat", False)
+        , (symbol "A" "value" "external", True)
+        , (symbol "A" "value" "external", False)
         ]
-      occurrences = map symbolOccurrence assigned
-  unless (occurrences == ["sat", "sat.1", "sat.2", "sat", "external"])
+      identities = [(symbolModule value, symbolNamespace value, symbolOccurrence value)
+                   | value <- assigned]
+  unless (identities ==
+      [("A", "local", "sat"), ("A", "local", "sat.1")
+      ,("A", "local", "sat.2"), ("B", "local", "sat")
+      ,("A", "value", "external"), ("A", "value", "external.1")])
     (ioError (userError
       ("internal top identity suffixing was not deterministic: " <> show assigned)))
+
+  let internal = symbol "A" "local" "reverse"
+      external = symbol "A" "value" "reverse"
+      retained = Map.singleton internal 7
+  unless (Map.lookup external retained == Nothing)
+    (ioError (userError
+      "internal and external same-spelled identities shared retained-generation state"))
+
+verifyTopIdentityStability :: [PreparedModule] -> WireProgram -> IO ()
+verifyTopIdentityStability modules program = do
+  expected <- case preparedTopIdentities modules of
+    Left failure -> ioError (userError
+      ("prepared top identity enumeration failed: " <> show failure))
+    Right identities -> pure identities
+  let actual =
+        [ symbol
+        | group <- programBindings program
+        , TopBinding symbol _ <- groupItems group
+        ]
+  unless (expected == actual)
+    (ioError (userError
+      ("full projection changed prepared top identities: " <> show (expected, actual))))
+  where
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
 
 verifyDistinctConstructorHostIds :: WireProgram -> IO ()
 verifyDistinctConstructorHostIds program = unless
@@ -305,10 +336,15 @@ verifyTargetClosure context modules = do
   where
     verify occurrence expected = case projectPreparedTarget targetContext modules of
       Left failure -> ioError (userError ("M3 target projection failed: " <> show failure))
-      Right program -> unless (actual program == expected)
-        (ioError (userError
-          ("M3 target projection for " <> show occurrence
-            <> " retained the wrong top-level closure: " <> show (actual program))))
+      Right program -> do
+        unless (actual program == expected)
+          (ioError (userError
+            ("M3 target projection for " <> show occurrence
+              <> " retained the wrong top-level closure: " <> show (actual program))))
+        unless (hasExactEntry program)
+          (ioError (userError
+            ("M3 target projection changed the exact entry identity for "
+              <> show occurrence)))
       where
         targetContext = context
           { projectionEntry = SymbolIdentity "main" "M3Vertical" "value" occurrence }
@@ -317,6 +353,10 @@ verifyTargetClosure context modules = do
           | group <- programBindings program
           , TopBinding symbol _ <- groupItems group
           ]
+        hasExactEntry program = any
+          ((== projectionEntry targetContext) . topSymbol)
+          [top | group <- programBindings program, top <- groupItems group]
+        topSymbol (TopBinding symbol _) = symbol
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items
 

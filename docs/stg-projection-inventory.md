@@ -135,3 +135,18 @@ execution. Thunk forcing, imported/global resolution into owned executable
 handles, effects, old-space/external payload integration, and full corpus
 execution remain separate work. No generated fixture regeneration, production
 cutover, or compatibility promise is implied by this inventory.
+
+## Reviewed Wave 4 contracts — 2026-09-12
+
+Prepared `Enter` uses the shared `prepared_enter_slow` provenance-checked
+inspection path; it does not grow a second inline header-chain path. Top-level
+internal identities use the `local` namespace, external exact names use
+`value`, and suffix reservation remains namespace-local before target
+filtering. Retained-generation matching is external-name-only, so an internal
+same-spelled identity cannot capture an import generation.
+
+Focused evidence is repr 2/2, runtime 6/6, comparator 7/7, and runner 6/6.
+The prepared engine is 26/27: the remaining
+`nested_function_rejection_reports_the_nested_expression_owner` fixture fails
+with `InvalidScope("value ValueId(1) is out of scope")`. These counts are
+boundary evidence only; they do not claim a green corpus or workspace gate.

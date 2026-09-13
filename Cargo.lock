@@ -4076,6 +4076,7 @@ dependencies = [
  "frunk",
  "libc",
  "proptest",
+ "serde",
  "serde_json",
  "serial_test",
  "tidepool-bridge",

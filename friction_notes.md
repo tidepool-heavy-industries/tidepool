@@ -239,3 +239,16 @@ are nondeterministic.
   requiring parent follow-up merely to resume the same assigned obligation.
   Typed worker states should distinguish ready-for-build from task-complete;
   a slot grant should resume the existing obligation without a new assignment.
+- The corpus runner and recipe handoff disagreed whether prepared output was a
+  file or a directory. The artifact path contract must be explicit at the
+  runner boundary before corpus aggregation is treated as evidence.
+- A duplicate inline/file `tests` module in prepared codegen blocked the
+  focused test compile until the inline slow-entry tests were renamed; keep
+  module ownership explicit when extracting test files.
+- A runtime wire failure was first attributed to a stale fixture, but canonical
+  byte normalization rejected that explanation. Preserve producer byte-order
+  evidence before changing fixture expectations.
+- Current focused evidence is repr 2/2, runtime 6/6, comparator 7/7, and
+  runner 6/6. Prepared engine evidence is 26/27; the remaining nested-function
+  fixture fails with `InvalidScope("value ValueId(1) is out of scope")`. This
+  is not a corpus or workspace gate result.

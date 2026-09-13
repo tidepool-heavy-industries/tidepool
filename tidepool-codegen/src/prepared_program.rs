@@ -96,6 +96,108 @@ unsafe extern "C" fn prepared_enter_slow(
     machine.prepared_call_status() as i32
 }
 
+#[cfg(test)]
+mod slow_entry_tests {
+    use super::*;
+    use crate::context::VMContext;
+    use crate::host_fns::RuntimeError;
+    use crate::machine_state::MachineState;
+    use crate::prepared_control::CallStatus;
+    use tidepool_heap::execution_descriptor::ObjectDescriptor;
+    use tidepool_repr::execution_schema::{StorageLayout, TargetDescriptor};
+
+    unsafe extern "C" fn no_gc(_: *mut VMContext) {}
+
+    fn target() -> TargetDescriptor {
+        TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        }
+    }
+
+    fn vmctx(machine: &MachineState) -> VMContext {
+        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
+        vmctx.machine_state = (machine as *const MachineState).cast_mut();
+        vmctx
+    }
+
+    #[test]
+    fn prepared_enter_slow_rejects_null_and_preserves_first_cause() {
+        let machine = MachineState::new();
+        let mut vmctx = vmctx(&machine);
+        assert_eq!(
+            unsafe { prepared_enter_slow(&mut vmctx, std::ptr::null()) },
+            CallStatus::IntegrityFailure as i32
+        );
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+    }
+
+    #[test]
+    fn prepared_enter_slow_rejects_unknown_headers() {
+        let machine = MachineState::new();
+        let descriptor = Arc::new(
+            ObjectDescriptor::constructor(
+                1,
+                StorageLayout::for_reps(&target(), &[]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        machine
+            .install_prepared_buffer_with_static_region(vec![0; 4], vec![descriptor], None)
+            .unwrap();
+        let (start, _) = machine.gc_active_range().unwrap();
+        unsafe { start.cast::<usize>().write(0x1000) };
+        let mut vmctx = vmctx(&machine);
+        assert_eq!(
+            unsafe { prepared_enter_slow(&mut vmctx, start.cast()) },
+            CallStatus::IntegrityFailure as i32
+        );
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+    }
+
+    #[test]
+    fn prepared_enter_slow_accepts_live_constructor_headers() {
+        let machine = MachineState::new();
+        let descriptor = Arc::new(
+            ObjectDescriptor::constructor(
+                1,
+                StorageLayout::for_reps(&target(), &[]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let header = descriptor.initial_header_word();
+        machine
+            .install_prepared_buffer_with_static_region(vec![0; 4], vec![descriptor], None)
+            .unwrap();
+        let (start, _) = machine.gc_active_range().unwrap();
+        unsafe { start.cast::<usize>().write(header) };
+        let mut vmctx = vmctx(&machine);
+        assert_eq!(
+            unsafe { prepared_enter_slow(&mut vmctx, start.cast()) },
+            CallStatus::Success as i32
+        );
+        assert_eq!(machine.take_runtime_error(), None);
+    }
+
+    #[test]
+    fn prepared_enter_slow_does_not_overwrite_a_terminal_cause() {
+        let machine = MachineState::new();
+        machine.set_first_cause(RuntimeError::Cancelled);
+        let mut vmctx = vmctx(&machine);
+        assert_eq!(
+            unsafe { prepared_enter_slow(&mut vmctx, std::ptr::null()) },
+            CallStatus::Cancelled as i32
+        );
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
+    }
+}
+
 pub struct CompiledProgram {
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
@@ -133,10 +235,7 @@ impl CompiledProgram {
                 "prepared_gc_trigger",
                 crate::host_fns::prepared_gc_trigger as *const u8,
             ),
-            (
-                "runtime_bad_thunk_state_trap",
-                crate::host_fns::runtime_bad_thunk_state_trap as *const u8,
-            ),
+            ("prepared_enter_slow", prepared_enter_slow as *const u8),
             ("prepared_case_trap", prepared_case_trap as *const u8),
         ])?;
         #[cfg(test)]
@@ -157,22 +256,23 @@ impl CompiledProgram {
                 &prepared_gc_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
-        let mut bad_thunk_state_signature = ir::Signature::new(pipeline.isa.default_call_conv());
-        bad_thunk_state_signature
+        let mut prepared_enter_slow_signature =
+            ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_enter_slow_signature
             .params
             .push(AbiParam::new(types::I64));
-        bad_thunk_state_signature
+        prepared_enter_slow_signature
             .params
-            .push(AbiParam::new(types::I8));
-        bad_thunk_state_signature
+            .push(AbiParam::new(types::I64));
+        prepared_enter_slow_signature
             .returns
-            .push(AbiParam::new(types::I64));
-        let bad_thunk_state = pipeline
+            .push(AbiParam::new(types::I32));
+        let prepared_enter_slow = pipeline
             .module
             .declare_function(
-                "runtime_bad_thunk_state_trap",
+                "prepared_enter_slow",
                 Linkage::Import,
-                &bad_thunk_state_signature,
+                &prepared_enter_slow_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut case_trap_signature = ir::Signature::new(pipeline.isa.default_call_conv());
@@ -217,7 +317,7 @@ impl CompiledProgram {
                 id,
                 &functions,
                 prepared_gc,
-                bad_thunk_state,
+                prepared_enter_slow,
                 case_trap,
                 &mut pipeline,
             )?;

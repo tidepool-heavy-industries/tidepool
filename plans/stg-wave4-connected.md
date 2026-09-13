@@ -118,7 +118,7 @@ projection inventory, this plan, and friction notes.
   0 passed, 3 failed. `one_shot_rejects_missing_import_malformed_and_precancel`
   and `retained_session_caches_closed_program_and_rejects_unclosed_artifact`
   have the same fixture-decoding error. `one_shot_runs_closed_compiled_program_and_returns_values`
-  receives one value while asserting zero. These four observed runtime failures
+  reports one collection while asserting zero. These four observed runtime failures
   remain unresolved in this checkpoint; no workspace-wide test claim is made.
 - `bash scripts/dev-shell.sh cargo build --workspace --tests`: passed, exit 0,
   warnings only, after removing three stale MCP tests referencing retired eval
@@ -130,6 +130,109 @@ projection inventory, this plan, and friction notes.
 
 The larger counts and chronological failures below remain trial evidence;
 this section identifies the latest checkpoint results.
+
+#### Review corrections after `820f76ff9`
+
+The three runtime decoding failures were a real cross-language field-order bug,
+not stale fixtures: Haskell emitted dead-end/evaluated/generation while Rust
+decoded evaluated/generation/dead-end. `fdbf24d3f` fixes the producer and adds
+an encoder-order assertion. A repr-level decode of the actual Haskell M3
+artifact is being added; test-only byte normalization was rejected and must
+not be retained. The fourth failure asserted zero **collections**, not zero
+returned values; `run_prepared_once` explicitly requests a collection. The
+checkpoint handoff misdescribed that assertion.
+
+Remaining review parcels: internal namespace/generation protection and allocator
+rename; IEEE float alternative equality and precise rejection locations; one
+shared Enter slow inspection path, preserving the inline nonzero-tag fast path.
+These changes require focused regressions before being counted complete.
+
+#### Post-review integration evidence (in progress)
+
+Checkpoint requested before final reruns. The complete measured Suite rows are
+in `plans/stg-wave4-corpus-checkpoint.json`: 347 programs, 245 project, 206
+validate, 64 admit and compile, 57 execute, 53 match, and one executed result
+has no expectation. This report predates the final Char comparator correction.
+The 217 recovered expectations match the historical test names and values by
+source inspection, including composite shapes and the five float tolerances.
+
+Outstanding findings for review:
+
+- All 39 validation failures name duplicate internal `sat` globals. Source
+  inspection identifies a genuine projection defect: target reachability maps
+  `ExactName` (unit/module/occurrence) to the disambiguated symbol, collapsing
+  distinct same-occurrence internal binders. A filtered-out home top falls
+  through to `internGlobal`. Keep binder identity through reachability; the
+  namespace fix alone does not repair this path. No fix is included yet.
+- Three Char comparisons failed because the legacy comparator did not recognize
+  canonical `C#` with a Word payload. The comparator now checks that exact
+  constructor shape with checked character conversion; the final addition has
+  not been rerun. No expected character values changed.
+- Seven helpers (`down`, `fromLeft`, `fromRight`, `punField`, `rwField1`,
+  `rwField2`, `swap`) require arguments; the corpus runner supplies none.
+  Their execution rejection is not evidence of an incorrect returned value.
+- The nested-owner regression omitted its recursive self-capture. Only the
+  fixture was corrected; the intended rejection-location assertion remains.
+  Its rerun is pending. Abnormal-child reporting also received an additional
+  post-test regression so a cleanup crash cannot retain an all-passed row.
+- Project.Work initially failed import discovery because fixture storage did
+  not match module paths. Corrected staging successfully projected the target;
+  the ad-hoc follow-up used malformed expectations JSON, so its validation
+  failure is harness evidence only. Full recipe rerun is pending.
+- The actor cohort lacks its generated production `Tidepool.Effects.Core`
+  environment. Its observed `WorktreeReceipt` export error is setup evidence,
+  not a prepared runtime result. Do not substitute the tiny prepared-probe
+  `Effects.Core` stub; its include directory was removed from the recipe.
+
+Haskell `execution-schema-projection` passed 1/1. The corpus command completed
+and persisted every Suite row; command success means reporting succeeded, not
+that the corpus passed. Current workspace compile, fixture freshness, and final
+focused reruns remain unverified. This is a WIP review checkpoint, not Wave 4
+completion or resident cutover.
+
+- Repr's `execution_schema_contract` integration target: 2 passed, including
+  decoding the unmodified regenerated Haskell M3 global record.
+- Runtime `session::prepared`: 3 passed; runtime `prepared_execution`: 3 passed.
+  These supersede the four runtime failures above without normalizing wire bytes.
+- `cargo test -p tidepool-testing --lib prepared_corpus -- --nocapture` through
+  `scripts/dev-shell.sh`: 7 passed. The comparator rejects Word64-to-Char
+  truncation and surrogate values rather than manufacturing a match.
+- `cargo test -p tidepool-testing --bin prepared-corpus -- --nocapture` through
+  the same shell: 6 passed. Each corpus row runs in a separate child; stage
+  reports are persisted before native execution. Abnormal exits retain the row.
+- `cargo test -p tidepool-codegen --lib prepared_program:: -- --nocapture`:
+  26 passed, 1 failed. The nested rejection-location test fails schema validation
+  with `InvalidScope("value ValueId(1) is out of scope")`; fixture review is
+  assigned. An earlier duplicate test-module compile blocker was repaired by
+  renaming the inline slow-entry test module, preserving both suites.
+- Corpus recipe now orders Project.Work.candidate, actor-used
+  Tidepool.Agent.Watch.awaitSettled, then all generated Suite targets. The first
+  two have no historical value oracle. Historical Suite expectations are data
+  recovered from `e1a4b9145^`, not the interpreter or asks sidecars. Actual corpus
+  execution and final freshness/workspace compilation remain pending.
+
+Follow-up coordination record: one runner acceptance review corrected OUTPUT
+from a directory to a JSON file and required preservation of projection evidence
+on pre-driver failures; one comparator review corrected unchecked character
+narrowing; one mechanical test-module repair; one nested-fixture repair assigned.
+These are observed correction events, not reconstructed full-wave round counts.
+
+### Trial closing assessment so far
+
+- Clean Luna shapes: recovering caller/ownership inventories and bounded docs
+  updates after the contract was fixed. They produced usable artifacts without
+  changing shared semantics.
+- Needed correction: handwritten schema fixtures and generated-control-flow
+  tests. Canonical field order, boolean encoding, postorder indices, and budget
+  accounting required explicit review or failing integrated checks.
+- Should not have been delegated as a routine fixture repair: an unexplained
+  cross-language decoding failure. Normalizing generated bytes in tests hid a
+  producer defect; the lead rejected that handback and fixed the owning encoder.
+- Terra repaired the emitter and malformed static fixtures after Luna attempts;
+  full connected and allocation evidence then passed. Source freezing matters
+  independently of build serialization: several builds saw partial edits.
+- Missing lead-round totals remain missing; token usage is not exposed here.
+  This assessment records observed outcomes, not an invented cost comparison.
 
 Prelude: duplicate and suffix-colliding internal names; stable full/target
 identities; dead-end saturation/prefix checks; character constructor/case reps.
@@ -240,5 +343,5 @@ Constructor records append the existing host DataConId minted by
 observation uses the descriptor-to-declaration mapping. This avoids a second
 hash implementation or treating family-relative constructor tags as identities.
 
-Closing summary pending: shapes handled cleanly, corrected, unsuitable for
-delegation, with one-line reasons. No reconstructed token or cost estimates.
+The trial closing assessment above records the observed delegation outcomes.
+No reconstructed token or cost estimates are available.

@@ -2,8 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::shapes::unbox_char;
 use tidepool_bridge::{FromCore, Value};
+use tidepool_codegen::prepared_program::{admit_prepared, CompiledProgram, RunOptions};
+use tidepool_repr::execution_schema::{
+    link_program, parse_program, DecodeLimits, MachineImports, ProgramRequirements,
+};
 use tidepool_repr::DataConTable;
 use tidepool_repr::Literal;
 
@@ -55,8 +60,13 @@ pub struct ProjectionRecord {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ProjectionOutcome {
-    Projected { artifact: String, identity: SourceIdentity },
-    Rejected { reason: String },
+    Projected {
+        artifact: String,
+        identity: SourceIdentity,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -81,6 +91,7 @@ pub enum Stage {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
+    Running,
     Passed,
     Failed { reason: String },
     MissingExpectation,
@@ -97,6 +108,176 @@ pub struct StageRecord {
 pub struct ProgramRecord {
     pub name: String,
     pub stages: Vec<StageRecord>,
+}
+
+/// Run one already-produced prepared artifact through the consumer boundary.
+/// The caller supplies the production requirements and constructor metadata;
+/// native execution is intentionally kept behind this per-artifact function so
+/// a runner can invoke it in a subprocess. `persist` observes every stage only
+/// after its outcome is known, including the compilation success immediately
+/// before `run_entry` enters native code.
+pub fn run_prepared_artifact<F>(
+    name: impl Into<String>,
+    bytes: &[u8],
+    requirements: &ProgramRequirements,
+    expected: Option<&Expectation>,
+    constructors: &DataConTable,
+    mut persist: F,
+) -> ProgramRecord
+where
+    F: FnMut(&ProgramRecord),
+{
+    let mut record = ProgramRecord::new(name.into());
+    record_stage(
+        &mut record,
+        Stage::Projection,
+        Outcome::Passed,
+        &mut persist,
+    );
+    record_stage(
+        &mut record,
+        Stage::Validation,
+        Outcome::Running,
+        &mut persist,
+    );
+    let prepared = match parse_program(bytes, requirements, DecodeLimits::default()) {
+        Ok(prepared) => {
+            record_stage(
+                &mut record,
+                Stage::Validation,
+                Outcome::Passed,
+                &mut persist,
+            );
+            prepared
+        }
+        Err(error) => {
+            record_stage(
+                &mut record,
+                Stage::Validation,
+                Outcome::Failed {
+                    reason: error.to_string(),
+                },
+                &mut persist,
+            );
+            return record;
+        }
+    };
+
+    record_stage(
+        &mut record,
+        Stage::Admission,
+        Outcome::Running,
+        &mut persist,
+    );
+    if let Err(error) = admit_prepared(&prepared) {
+        record_stage(
+            &mut record,
+            Stage::Admission,
+            Outcome::Failed {
+                reason: error.to_string(),
+            },
+            &mut persist,
+        );
+        return record;
+    }
+    record_stage(&mut record, Stage::Admission, Outcome::Passed, &mut persist);
+
+    record_stage(
+        &mut record,
+        Stage::Compilation,
+        Outcome::Running,
+        &mut persist,
+    );
+    let linked = match link_program(prepared, &MachineImports::default()) {
+        Ok(linked) => linked,
+        Err(error) => {
+            record_stage(
+                &mut record,
+                Stage::Compilation,
+                Outcome::Failed {
+                    reason: error.to_string(),
+                },
+                &mut persist,
+            );
+            return record;
+        }
+    };
+    let entry = linked.prepared().entry();
+    let program = match CompiledProgram::compile(&linked) {
+        Ok(program) => program,
+        Err(error) => {
+            record_stage(
+                &mut record,
+                Stage::Compilation,
+                Outcome::Failed {
+                    reason: error.to_string(),
+                },
+                &mut persist,
+            );
+            return record;
+        }
+    };
+    record_stage(
+        &mut record,
+        Stage::Compilation,
+        Outcome::Passed,
+        &mut persist,
+    );
+
+    record_stage(
+        &mut record,
+        Stage::Execution,
+        Outcome::Running,
+        &mut persist,
+    );
+    let run = match program.run_entry(
+        entry,
+        &[],
+        &RunOptions {
+            nursery_bytes: 4096,
+            observation_budget: 100_000,
+            collect_before_observation: false,
+        },
+        Arc::new(AtomicBool::new(false)),
+    ) {
+        Ok(run) => run,
+        Err(error) => {
+            record_stage(
+                &mut record,
+                Stage::Execution,
+                Outcome::Failed {
+                    reason: error.to_string(),
+                },
+                &mut persist,
+            );
+            return record;
+        }
+    };
+    record_stage(&mut record, Stage::Execution, Outcome::Passed, &mut persist);
+
+    record_stage(
+        &mut record,
+        Stage::Comparison,
+        Outcome::Running,
+        &mut persist,
+    );
+    let outcome = match expected {
+        None => Outcome::MissingExpectation,
+        Some(expected) => match compare_values(&run.values, expected, constructors) {
+            Ok(()) => Outcome::Passed,
+            Err(reason) => Outcome::Failed { reason },
+        },
+    };
+    record_stage(&mut record, Stage::Comparison, outcome, &mut persist);
+    record
+}
+
+fn record_stage<F>(record: &mut ProgramRecord, stage: Stage, outcome: Outcome, persist: &mut F)
+where
+    F: FnMut(&ProgramRecord),
+{
+    record.record(stage, outcome);
+    persist(record);
 }
 
 impl ProgramRecord {
@@ -176,13 +357,7 @@ pub fn compare_values(
                     }
                 }
                 Expectation::Char(want) => {
-                    let got = unbox_char(value, constructors)
-                        .or_else(|| match value {
-                            Value::Lit(Literal::LitWord(code_point)) => {
-                                char::from_u32(*code_point as u32)
-                            }
-                            _ => None,
-                        })
+                    let got = canonical_char(value, constructors)
                         .ok_or_else(|| "expected Char or canonical Word64 Char".to_string())?;
                     if got != *want {
                         return Err(format!("expected Char {:?}, received Char {:?}", want, got));
@@ -211,7 +386,7 @@ pub fn compare_values(
                 Expectation::Tuple(elements) => {
                     let name = tuple_name(elements.len())
                         .ok_or_else(|| "one-element tuples are not a Haskell shape".to_string())?;
-                    let fields = constructor(value, name, constructors)?;
+                    let fields = constructor(value, &name, constructors)?;
                     if fields.len() != elements.len() {
                         return Err(format!(
                             "expected tuple {name} with {} fields, received {}",
@@ -317,6 +492,23 @@ pub fn compare_values(
     Ok(())
 }
 
+fn canonical_char(value: &Value, constructors: &DataConTable) -> Option<char> {
+    unbox_char(value, constructors).or_else(|| match value {
+        Value::Lit(Literal::LitWord(code_point)) => checked_char(*code_point),
+        Value::Con(id, fields) if constructors.name_of(*id) == Some("C#") && fields.len() == 1 => {
+            match &fields[0] {
+                Value::Lit(Literal::LitWord(code_point)) => checked_char(*code_point),
+                _ => None,
+            }
+        }
+        _ => None,
+    })
+}
+
+fn checked_char(code_point: u64) -> Option<char> {
+    u32::try_from(code_point).ok().and_then(char::from_u32)
+}
+
 fn constructor<'a>(
     value: &'a Value,
     expected_name: &str,
@@ -361,6 +553,7 @@ mod tests {
             (7, "(,)", 2),
             (8, "True", 0),
             (9, "False", 0),
+            (10, "C#", 1),
         ] {
             table.insert(DataCon {
                 id: DataConId(id),
@@ -465,6 +658,60 @@ mod tests {
         )
         .is_ok());
         assert!(compare_values(
+            &[Value::Lit(tidepool_repr::Literal::LitWord(0x1_00000061))],
+            &Expectation::Char('a'),
+            &table
+        )
+        .is_err());
+        assert!(compare_values(
+            &[Value::Lit(tidepool_repr::Literal::LitWord(0xd800))],
+            &Expectation::Char('a'),
+            &table
+        )
+        .is_err());
+        assert!(compare_values(
+            &[Value::Con(
+                DataConId(10),
+                vec![Value::Lit(tidepool_repr::Literal::LitWord('A' as u64))],
+            )],
+            &Expectation::Char('A'),
+            &table
+        )
+        .is_ok());
+        assert!(compare_values(
+            &[Value::Con(
+                DataConId(10),
+                vec![Value::Lit(tidepool_repr::Literal::LitInt('A' as i64))],
+            )],
+            &Expectation::Char('A'),
+            &table
+        )
+        .is_err());
+        assert!(compare_values(
+            &[Value::Con(DataConId(10), vec![])],
+            &Expectation::Char('A'),
+            &table
+        )
+        .is_err());
+        assert!(compare_values(
+            &[Value::Con(
+                DataConId(10),
+                vec![Value::Lit(tidepool_repr::Literal::LitWord(0x1_00000041))],
+            )],
+            &Expectation::Char('A'),
+            &table
+        )
+        .is_err());
+        assert!(compare_values(
+            &[Value::Con(
+                DataConId(4),
+                vec![Value::Lit(tidepool_repr::Literal::LitWord('A' as u64))],
+            )],
+            &Expectation::Char('A'),
+            &table
+        )
+        .is_err());
+        assert!(compare_values(
             &[Value::Lit(tidepool_repr::Literal::LitDouble(
                 1.0f64.to_bits()
             ))],
@@ -497,5 +744,50 @@ mod tests {
             &table
         )
         .is_err());
+    }
+
+    #[test]
+    fn malformed_artifact_fails_validation_after_projection_without_running_jit() {
+        let requirements = ProgramRequirements {
+            schema_version: tidepool_repr::execution_schema::SCHEMA_VERSION,
+            projection_profile: "ghc-9.12-prepared-stg".into(),
+            toolchain: "ghc-9.12.2".into(),
+            execution_abi_version: tidepool_repr::execution_schema::EXECUTION_ABI_VERSION,
+            target: tidepool_repr::execution_schema::TargetDescriptor {
+                architecture: tidepool_repr::execution_schema::Architecture::X86_64,
+                endianness: tidepool_repr::execution_schema::Endianness::Little,
+                pointer_width: 64,
+                word_width: 64,
+                abi: "sysv64".into(),
+                features: vec![],
+            },
+        };
+        let mut snapshots = Vec::new();
+        let record = run_prepared_artifact(
+            "malformed",
+            &[0xff],
+            &requirements,
+            None,
+            &DataConTable::default(),
+            |record| {
+                snapshots.push(
+                    record
+                        .stages
+                        .iter()
+                        .map(|stage| (stage.stage, matches!(stage.outcome, Outcome::Running)))
+                        .collect::<Vec<_>>(),
+                );
+            },
+        );
+        assert!(matches!(record.stages[0].outcome, Outcome::Passed));
+        assert!(matches!(record.stages[1].outcome, Outcome::Failed { .. }));
+        assert!(record.stages[2..]
+            .iter()
+            .all(|stage| matches!(stage.outcome, Outcome::NotReached)));
+        assert!(snapshots.iter().any(|snapshot| {
+            snapshot
+                .iter()
+                .any(|(stage, running)| *stage == Stage::Validation && *running)
+        }));
     }
 }

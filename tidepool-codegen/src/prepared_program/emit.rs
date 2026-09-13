@@ -58,7 +58,7 @@ pub(super) fn emit_function(
     id: ValueId,
     functions: &BTreeMap<ValueId, FuncId>,
     prepared_gc: FuncId,
-    bad_thunk_state: FuncId,
+    prepared_enter_slow: FuncId,
     case_trap: FuncId,
     pipeline: &mut CodegenPipeline,
 ) -> Result<(), CompileError> {
@@ -96,9 +96,17 @@ pub(super) fn emit_function(
             &function.signature.arguments,
             physical_arguments,
             id,
+            function.body,
         )?;
         let environment = builder.ins().band_imm(tagged_environment, !7_i64);
-        bind_captures(&mut builder, &mut values, function, environment)?;
+        bind_captures(
+            &mut builder,
+            &mut values,
+            function,
+            environment,
+            id,
+            function.body,
+        )?;
     } else {
         // A top constructor or byte literal is already materialized by the
         // invocation-owned top table; its environment is the returned value.
@@ -237,6 +245,8 @@ pub(super) fn emit_function(
                             &target.signature.arguments,
                             vmctx,
                             plan,
+                            id,
+                            node,
                         )?;
                         jump_to(&mut builder, &target.block, arguments);
                     }
@@ -251,6 +261,8 @@ pub(super) fn emit_function(
                             plan,
                             values,
                             bindings,
+                            id,
+                            node,
                         )?;
                         let body_block = builder
                             .current_block()
@@ -273,6 +285,8 @@ pub(super) fn emit_function(
                             &destination.reps,
                             vmctx,
                             plan,
+                            id,
+                            node,
                         )?;
                         jump_to(&mut builder, &destination.block, output);
                     }
@@ -291,6 +305,8 @@ pub(super) fn emit_function(
                             *call_signature,
                             arguments,
                             plan,
+                            id,
+                            node,
                         )?;
                         jump_to(&mut builder, &destination.block, output);
                     }
@@ -304,9 +320,11 @@ pub(super) fn emit_function(
                             callee,
                             *call_signature,
                             vmctx,
-                            bad_thunk_state,
+                            prepared_enter_slow,
                             pipeline,
                             plan,
+                            id,
+                            node,
                         )?;
                         jump_to(&mut builder, &destination.block, output);
                     }
@@ -323,6 +341,8 @@ pub(super) fn emit_function(
                             *constructor,
                             fields,
                             plan,
+                            id,
+                            node,
                         )?;
                         jump_to(&mut builder, &destination.block, output);
                     }
@@ -464,6 +484,8 @@ fn emit_let_group(
     plan: &ProgramPlan<'_>,
     mut values: Values,
     bindings: &Group<tidepool_repr::execution_schema::HeapBinding>,
+    owner: ValueId,
+    node: usize,
 ) -> Result<Values, CompileError> {
     let bindings = group_items(bindings);
     if bindings.is_empty() {
@@ -483,16 +505,16 @@ fn emit_let_group(
             HeapRhs::Thunk { .. } => {
                 return Err(CompileError::Unsupported(Unsupported::Thunk(binding.id)))
             }
-            HeapRhs::Bytes(_) => return Err(unsupported(binding.id, 0)),
+            HeapRhs::Bytes(_) => return Err(unsupported(owner, node)),
         }
-        .ok_or_else(|| unsupported(binding.id, 0))?;
+        .ok_or_else(|| unsupported(owner, node))?;
         total = total
             .checked_add(u64::from(descriptor.allocation_extent()))
-            .ok_or_else(|| unsupported(binding.id, 0))?;
+            .ok_or_else(|| unsupported(owner, node))?;
         descriptors.push(descriptor);
     }
     if total < 16 || total % 8 != 0 {
-        return Err(unsupported(bindings[0].id, 0));
+        return Err(unsupported(owner, node));
     }
     let gc = pipeline
         .module
@@ -537,7 +559,7 @@ fn emit_let_group(
                         continue;
                     }
                     let field = &descriptor.payload().fields()[stored as usize];
-                    let value = atom_value(builder, vmctx, &values, plan, atom, *rep)?;
+                    let value = atom_value(builder, vmctx, &values, plan, atom, *rep, owner, node)?;
                     builder.ins().store(
                         flags,
                         value,
@@ -553,7 +575,16 @@ fn emit_let_group(
                     };
                     let field = &descriptor.payload().fields()[stored as usize];
                     let atom = Atom::Ref(capture.clone());
-                    let value = atom_value(builder, vmctx, &values, plan, &atom, field.rep())?;
+                    let value = atom_value(
+                        builder,
+                        vmctx,
+                        &values,
+                        plan,
+                        &atom,
+                        field.rep(),
+                        owner,
+                        node,
+                    )?;
                     builder.ins().store(
                         flags,
                         value,
@@ -656,38 +687,18 @@ fn emit_case_dispatch(
                 match &alternative.pattern {
                     AlternativePattern::Default => unreachable!("handled before literal dispatch"),
                     AlternativePattern::Literal(literal) => {
-                        let expected = scalar_value(builder, literal, *rep, plan)?;
-                        let equal = match rep {
-                            RuntimeRep::Float(32) => {
-                                let actual = builder.ins().bitcast(
-                                    types::I32,
-                                    MemFlags::new(),
-                                    scrutinee[0],
-                                );
-                                let expected =
-                                    builder.ins().bitcast(types::I32, MemFlags::new(), expected);
-                                builder
+                        let expected = scalar_value(builder, literal, *rep, plan, owner, node)?;
+                        let equal =
+                            match rep {
+                                RuntimeRep::Float(32) | RuntimeRep::Float(64) => builder
                                     .ins()
-                                    .icmp(ir::condcodes::IntCC::Equal, actual, expected)
-                            }
-                            RuntimeRep::Float(64) => {
-                                let actual = builder.ins().bitcast(
-                                    types::I64,
-                                    MemFlags::new(),
+                                    .fcmp(ir::condcodes::FloatCC::Equal, scrutinee[0], expected),
+                                _ => builder.ins().icmp(
+                                    ir::condcodes::IntCC::Equal,
                                     scrutinee[0],
-                                );
-                                let expected =
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), expected);
-                                builder
-                                    .ins()
-                                    .icmp(ir::condcodes::IntCC::Equal, actual, expected)
-                            }
-                            _ => builder.ins().icmp(
-                                ir::condcodes::IntCC::Equal,
-                                scrutinee[0],
-                                expected,
-                            ),
-                        };
+                                    expected,
+                                ),
+                            };
                         let otherwise = builder.create_block();
                         builder
                             .ins()
@@ -803,15 +814,16 @@ fn bind_parameters(
     reps: &[RuntimeRep],
     physical: &[Value],
     binding: ValueId,
+    node: usize,
 ) -> Result<(), CompileError> {
     if logical.len() != reps.len() {
-        return Err(unsupported(binding, 0));
+        return Err(unsupported(binding, node));
     }
     let mut next = 0;
     for (&id, &rep) in logical.iter().zip(reps) {
         if rep != RuntimeRep::Void {
             let Some(&value) = physical.get(next) else {
-                return Err(unsupported(binding, 0));
+                return Err(unsupported(binding, node));
             };
             if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
                 builder.declare_value_needs_stack_map(value);
@@ -821,7 +833,7 @@ fn bind_parameters(
         }
     }
     if next != physical.len() {
-        return Err(unsupported(binding, 0));
+        return Err(unsupported(binding, node));
     }
     Ok(())
 }
@@ -831,10 +843,12 @@ fn bind_captures(
     values: &mut BTreeMap<ValueId, Value>,
     function: &super::plan::FunctionPlan<'_>,
     environment: Value,
+    owner: ValueId,
+    node: usize,
 ) -> Result<(), CompileError> {
     for (logical, capture) in function.captures.iter().enumerate() {
         let ValueRef::Local(id) = capture else {
-            return Err(unsupported(ValueId(0), function.body));
+            return Err(unsupported(owner, node));
         };
         let Some(stored) = function
             .descriptor
@@ -866,15 +880,17 @@ fn emit_enter(
     callee: &Atom,
     signature_id: SignatureId,
     vmctx: Value,
-    bad_thunk_state: FuncId,
+    prepared_enter_slow: FuncId,
     pipeline: &mut CodegenPipeline,
     plan: &ProgramPlan<'_>,
+    owner: ValueId,
+    node: usize,
 ) -> Result<Vec<Value>, CompileError> {
     let signature = plan
         .program
         .signatures()
         .get(signature_id.0 as usize)
-        .ok_or_else(|| unsupported(plan.program.entry(), 0))?;
+        .ok_or_else(|| unsupported(owner, node))?;
     if !signature.arguments.is_empty()
         || signature.results.len() != 1
         || !matches!(
@@ -882,19 +898,28 @@ fn emit_enter(
             RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
         )
     {
-        return Err(unsupported(plan.program.entry(), 0));
+        return Err(unsupported(owner, node));
     }
     // Request the value before inspecting its tag: top-table loads remain the
     // sole source of top-level values, and a nonzero tag is already evaluated
     // provenance that must not take a host-call path.
-    let callee = atom_value(builder, vmctx, values, plan, callee, RuntimeRep::LiftedRef)?;
+    let callee = atom_value(
+        builder,
+        vmctx,
+        values,
+        plan,
+        callee,
+        RuntimeRep::LiftedRef,
+        owner,
+        node,
+    )?;
     let direct = builder.create_block();
     let inspect = builder.create_block();
     let complete = builder.create_block();
     builder.append_block_param(complete, physical_type(signature.results[0])?);
-    let bad_state_trap = pipeline
+    let enter_slow = pipeline
         .module
-        .declare_func_in_func(bad_thunk_state, builder.func);
+        .declare_func_in_func(prepared_enter_slow, builder.func);
     let tag = builder.ins().band_imm(callee, 7);
     let tagged = builder
         .ins()
@@ -907,66 +932,24 @@ fn emit_enter(
 
     builder.switch_to_block(inspect);
     builder.seal_block(inspect);
-    let invalid_null = builder.create_block();
-    let invalid_header = builder.create_block();
-    let nonnull = builder.create_block();
-    let object = builder.ins().band_imm(callee, !7_i64);
-    let null = builder
-        .ins()
-        .icmp_imm(ir::condcodes::IntCC::Equal, object, 0);
-    builder.ins().brif(null, invalid_null, &[], nonnull, &[]);
-
-    builder.switch_to_block(nonnull);
-    builder.seal_block(nonnull);
-    let header = builder
-        .ins()
-        .load(types::I64, MemFlags::trusted(), object, 0);
-    let mut live_descriptor = None;
-    for descriptor in plan
-        .constructors
-        .iter()
-        .chain(plan.functions.values().map(|function| &function.descriptor))
-    {
-        let matches = builder.ins().icmp_imm(
-            ir::condcodes::IntCC::Equal,
-            header,
-            descriptor.initial_header_word() as i64,
-        );
-        live_descriptor = Some(match live_descriptor {
-            Some(valid) => builder.ins().bor(valid, matches),
-            None => matches,
-        });
-    }
-    let live_descriptor = live_descriptor.ok_or_else(|| unsupported(plan.program.entry(), 0))?;
     let valid = builder.create_block();
-    builder
-        .ins()
-        .brif(live_descriptor, valid, &[], invalid_header, &[]);
+    let invalid = builder.create_block();
+    let call = builder.ins().call(enter_slow, &[vmctx, callee]);
+    let status = builder.inst_results(call)[0];
+    let success = builder.ins().icmp_imm(
+        ir::condcodes::IntCC::Equal,
+        status,
+        crate::prepared_control::CallStatus::Success as i64,
+    );
+    builder.ins().brif(success, valid, &[], invalid, &[]);
 
     builder.switch_to_block(valid);
     builder.seal_block(valid);
     builder.ins().jump(complete, &[callee.into()]);
 
-    builder.switch_to_block(invalid_null);
-    builder.seal_block(invalid_null);
-    let state = builder.ins().iconst(types::I8, 0);
-    builder.ins().call(bad_state_trap, &[vmctx, state]);
-    let failure = builder.ins().iconst(
-        types::I32,
-        crate::prepared_control::CallStatus::IntegrityFailure as i64,
-    );
-    crate::alloc::emit_prepared_failure_return(builder, failure);
-
-    builder.switch_to_block(invalid_header);
-    builder.seal_block(invalid_header);
-    let state = builder.ins().band_imm(header, 7);
-    let state = builder.ins().ireduce(types::I8, state);
-    builder.ins().call(bad_state_trap, &[vmctx, state]);
-    let failure = builder.ins().iconst(
-        types::I32,
-        crate::prepared_control::CallStatus::IntegrityFailure as i64,
-    );
-    crate::alloc::emit_prepared_failure_return(builder, failure);
+    builder.switch_to_block(invalid);
+    builder.seal_block(invalid);
+    crate::alloc::emit_prepared_failure_return(builder, status);
 
     builder.switch_to_block(complete);
     builder.seal_block(complete);
@@ -989,19 +972,21 @@ fn emit_construct(
     constructor: tidepool_repr::execution_schema::ConstructorId,
     fields: &[Atom],
     plan: &ProgramPlan<'_>,
+    owner: ValueId,
+    node: usize,
 ) -> Result<Vec<Value>, CompileError> {
     let declaration = plan
         .program
         .constructors()
         .get(constructor.0 as usize)
-        .ok_or_else(|| unsupported(plan.program.entry(), 0))?;
+        .ok_or_else(|| unsupported(owner, node))?;
     if fields.len() != declaration.field_reps.len() {
-        return Err(unsupported(plan.program.entry(), 0));
+        return Err(unsupported(owner, node));
     }
     let descriptor = plan
         .constructors
         .get(constructor.0 as usize)
-        .ok_or_else(|| unsupported(plan.program.entry(), 0))?;
+        .ok_or_else(|| unsupported(owner, node))?;
     let gc = pipeline
         .module
         .declare_func_in_func(prepared_gc, builder.func);
@@ -1024,7 +1009,7 @@ fn emit_construct(
             continue;
         }
         let field = &descriptor.payload().fields()[stored as usize];
-        let value = atom_value(builder, vmctx, values, plan, atom, *rep)?;
+        let value = atom_value(builder, vmctx, values, plan, atom, *rep, owner, node)?;
         builder.ins().store(
             flags,
             value,
@@ -1048,14 +1033,25 @@ fn emit_exact_call(
     signature: SignatureId,
     arguments: &[Atom],
     plan: &ProgramPlan<'_>,
+    owner: ValueId,
+    node: usize,
 ) -> Result<Vec<Value>, CompileError> {
-    let ValueRef::Local(target) = atom_ref(callee)? else {
-        return Err(unsupported(plan.program.entry(), 0));
+    let ValueRef::Local(target) = atom_ref(callee, owner, node)? else {
+        return Err(unsupported(owner, node));
     };
-    let environment = atom_value(builder, vmctx, values, plan, callee, RuntimeRep::LiftedRef)?;
+    let environment = atom_value(
+        builder,
+        vmctx,
+        values,
+        plan,
+        callee,
+        RuntimeRep::LiftedRef,
+        owner,
+        node,
+    )?;
     let callee_id = *functions
         .get(&target)
-        .ok_or_else(|| unsupported(*target, 0))?;
+        .ok_or_else(|| unsupported(owner, node))?;
     let callee_ref = pipeline
         .module
         .declare_func_in_func(callee_id, builder.func);
@@ -1063,14 +1059,16 @@ fn emit_exact_call(
         .program
         .signatures()
         .get(signature.0 as usize)
-        .ok_or_else(|| unsupported(*target, 0))?;
+        .ok_or_else(|| unsupported(owner, node))?;
     if arguments.len() != signature.arguments.len() {
-        return Err(unsupported(*target, 0));
+        return Err(unsupported(owner, node));
     }
     let mut call_arguments = vec![vmctx, environment];
     for (argument, rep) in arguments.iter().zip(signature.arguments.iter()) {
         if *rep != RuntimeRep::Void {
-            call_arguments.push(atom_value(builder, vmctx, values, plan, argument, *rep)?);
+            call_arguments.push(atom_value(
+                builder, vmctx, values, plan, argument, *rep, owner, node,
+            )?);
         }
     }
     Ok(super::emit_direct_call(
@@ -1081,10 +1079,10 @@ fn emit_exact_call(
     ))
 }
 
-fn atom_ref(atom: &Atom) -> Result<&ValueRef, CompileError> {
+fn atom_ref(atom: &Atom, owner: ValueId, node: usize) -> Result<&ValueRef, CompileError> {
     match atom {
         Atom::Ref(reference) => Ok(reference),
-        _ => Err(unsupported(ValueId(0), 0)),
+        _ => Err(unsupported(owner, node)),
     }
 }
 
@@ -1095,6 +1093,8 @@ fn atom_value(
     plan: &ProgramPlan<'_>,
     atom: &Atom,
     expected: RuntimeRep,
+    owner: ValueId,
+    node: usize,
 ) -> Result<Value, CompileError> {
     match atom {
         Atom::Ref(ValueRef::Local(id)) => {
@@ -1102,7 +1102,7 @@ fn atom_value(
                 return Ok(value);
             }
             let Some(slot) = plan.top_slots.get(id).copied() else {
-                return Err(unsupported(*id, 0));
+                return Err(unsupported(owner, node));
             };
             let tops = builder.ins().load(
                 types::I64,
@@ -1121,9 +1121,9 @@ fn atom_value(
             }
             Ok(value)
         }
-        Atom::Ref(ValueRef::Global(_)) => Err(unsupported(ValueId(0), 0)),
-        Atom::Scalar(scalar) => scalar_value(builder, scalar, expected, plan),
-        Atom::Void | Atom::Rubbish(_) => Err(unsupported(ValueId(0), 0)),
+        Atom::Ref(ValueRef::Global(_)) => Err(unsupported(owner, node)),
+        Atom::Scalar(scalar) => scalar_value(builder, scalar, expected, plan, owner, node),
+        Atom::Void | Atom::Rubbish(_) => Err(unsupported(owner, node)),
     }
 }
 
@@ -1134,15 +1134,17 @@ fn emit_atoms(
     reps: &[RuntimeRep],
     vmctx: Value,
     plan: &ProgramPlan<'_>,
+    owner: ValueId,
+    node: usize,
 ) -> Result<Vec<Value>, CompileError> {
     if atoms.len() != reps.len() {
-        return Err(unsupported(ValueId(0), 0));
+        return Err(unsupported(owner, node));
     }
     atoms
         .iter()
         .zip(reps)
         .filter_map(|(atom, rep)| (*rep != RuntimeRep::Void).then_some((atom, *rep)))
-        .map(|(atom, rep)| atom_value(builder, vmctx, values, plan, atom, rep))
+        .map(|(atom, rep)| atom_value(builder, vmctx, values, plan, atom, rep, owner, node))
         .collect()
 }
 
@@ -1188,12 +1190,14 @@ fn scalar_value(
     scalar: &tidepool_repr::execution_schema::ScalarLiteral,
     expected: RuntimeRep,
     plan: &ProgramPlan<'_>,
+    owner: ValueId,
+    node: usize,
 ) -> Result<Value, CompileError> {
     match scalar {
         tidepool_repr::execution_schema::ScalarLiteral::Int { bytes, .. }
         | tidepool_repr::execution_schema::ScalarLiteral::Word { bytes, .. } => {
             if !matches!(expected, RuntimeRep::Int(_) | RuntimeRep::Word(_)) || bytes.len() > 8 {
-                return Err(unsupported(ValueId(0), 0));
+                return Err(unsupported(owner, node));
             }
             let mut word = [0_u8; 8];
             let start = word.len().saturating_sub(bytes.len());
@@ -1204,7 +1208,7 @@ fn scalar_value(
         }
         tidepool_repr::execution_schema::ScalarLiteral::Float { bits, bytes } => {
             if bytes.len() != usize::from(*bits / 8) {
-                return Err(unsupported(ValueId(0), 0));
+                return Err(unsupported(owner, node));
             }
             let mut word = [0_u8; 8];
             word[8 - bytes.len()..].copy_from_slice(bytes);
@@ -1215,21 +1219,21 @@ fn scalar_value(
                 RuntimeRep::Float(64) => Ok(builder
                     .ins()
                     .f64const(f64::from_bits(u64::from_be_bytes(word)))),
-                _ => Err(unsupported(ValueId(0), 0)),
+                _ => Err(unsupported(owner, node)),
             }
         }
         tidepool_repr::execution_schema::ScalarLiteral::NullAddress => (expected
             == RuntimeRep::Address)
             .then(|| builder.ins().iconst(types::I64, 0))
-            .ok_or_else(|| unsupported(ValueId(0), 0)),
+            .ok_or_else(|| unsupported(owner, node)),
         tidepool_repr::execution_schema::ScalarLiteral::Bytes(bytes) => {
             if expected != RuntimeRep::Address {
-                return Err(unsupported(ValueId(0), 0));
+                return Err(unsupported(owner, node));
             }
             let address = plan
                 .bytes
                 .get(bytes)
-                .ok_or_else(|| unsupported(ValueId(0), 0))?
+                .ok_or_else(|| unsupported(owner, node))?
                 .as_ptr() as usize;
             Ok(builder.ins().iconst(types::I64, address as i64))
         }

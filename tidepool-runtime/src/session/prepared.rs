@@ -221,9 +221,116 @@ mod tests {
         SCHEMA_VERSION,
     };
 
+    fn head(major: u8, length: usize) -> Vec<u8> {
+        assert!(length < 24);
+        vec![(major << 5) | length as u8]
+    }
+
+    fn array(values: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+        let values: Vec<_> = values.into_iter().collect();
+        let mut result = head(4, values.len());
+        for value in values {
+            result.extend(value);
+        }
+        result
+    }
+
+    fn uint(value: u64) -> Vec<u8> {
+        if value <= 23 {
+            vec![value as u8]
+        } else if value <= u8::MAX as u64 {
+            vec![0x18, value as u8]
+        } else if value <= u16::MAX as u64 {
+            let mut result = vec![0x19];
+            result.extend((value as u16).to_be_bytes());
+            result
+        } else if value <= u32::MAX as u64 {
+            let mut result = vec![0x1a];
+            result.extend((value as u32).to_be_bytes());
+            result
+        } else {
+            let mut result = vec![0x1b];
+            result.extend(value.to_be_bytes());
+            result
+        }
+    }
+
+    fn text(value: &str) -> Vec<u8> {
+        let mut result = head(3, value.len());
+        result.extend(value.as_bytes());
+        result
+    }
+
+    fn boolean(value: bool) -> Vec<u8> {
+        vec![if value { 0xf5 } else { 0xf4 }]
+    }
+
+    fn rep_lifted() -> Vec<u8> {
+        array([uint(1)])
+    }
+
+    fn symbol(namespace: &str, module: &str, occurrence: &str) -> Vec<u8> {
+        array([
+            text("fixture"),
+            text(module),
+            text(namespace),
+            text(occurrence),
+        ])
+    }
+
+    fn terminal_fixture() -> Vec<u8> {
+        let constructor = array([
+            symbol("value", "PreparedStrict", "Box"),
+            symbol("type", "PreparedStrict", "BoxFamily"),
+            array([]),
+            array([]),
+            array([array([]), uint(1), uint(0), array([])]),
+            rep_lifted(),
+            uint(1),
+            uint(1),
+            uint(100),
+        ]);
+        let imported = array([
+            symbol("value", "PreparedStrict", "imported"),
+            rep_lifted(),
+            array([uint(0)]),
+            boolean(false),
+            array([uint(1), uint(7)]),
+            boolean(false),
+        ]);
+        let expression = array([uint(4), uint(0), array([])]);
+        let function = array([uint(0), uint(0), array([]), array([]), uint(0)]);
+        let top = array([
+            symbol("value", "PreparedStrict", "entry"),
+            array([uint(0), function]),
+        ]);
+        let binding_group = array([uint(0), top]);
+        array([
+            text("TPSTG"),
+            uint(SCHEMA_VERSION),
+            text("ghc-9.12-prepared-stg"),
+            text("ghc-9.12.2"),
+            uint(EXECUTION_ABI_VERSION),
+            array([
+                uint(0),
+                uint(0),
+                uint(64),
+                uint(64),
+                text("sysv64"),
+                array([]),
+            ]),
+            array([array([array([]), array([rep_lifted()])])]),
+            array([imported]),
+            array([constructor]),
+            array([]),
+            array([expression]),
+            array([binding_group]),
+            uint(0),
+        ])
+    }
+
     fn m3_runtime() -> PreparedRuntime {
-        const ARTIFACT: &[u8] =
-            include_bytes!("../../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
+        let artifact = terminal_fixture();
         let requirements = ProgramRequirements {
             schema_version: SCHEMA_VERSION,
             projection_profile: "ghc-9.12-prepared-stg".into(),
@@ -238,7 +345,7 @@ mod tests {
                 features: vec![],
             },
         };
-        let prepared = parse_program(ARTIFACT, &requirements, DecodeLimits::default()).unwrap();
+        let prepared = parse_program(&artifact, &requirements, DecodeLimits::default()).unwrap();
         let imports = MachineImports {
             values: prepared
                 .globals()
@@ -258,7 +365,7 @@ mod tests {
                 })
                 .collect(),
         };
-        PreparedRuntime::from_artifact(ARTIFACT, &requirements, DecodeLimits::default(), imports)
+        PreparedRuntime::from_artifact(&artifact, &requirements, DecodeLimits::default(), imports)
             .unwrap()
     }
 

@@ -1,10 +1,14 @@
+use tidepool_repr::execution_schema::parse_program;
 use tidepool_repr::execution_schema::{
-    Architecture, Atom, CheckedLayout, ConstructorDecl, ConstructorId, Endianness, ExprFrame,
-    FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, OperationDecl, ProgramEnvelope,
-    ProgramRequirements, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
-    TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef, WireProgram,
+    Architecture, Atom, CheckedLayout, ConstructorDecl, ConstructorId, DecodeLimits, Endianness,
+    ExprFrame, FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, OperationDecl,
+    ProgramEnvelope, ProgramRequirements, RuntimeRep, ScalarLiteral, Signature, SignatureId,
+    SymbolIdentity, TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef, WireProgram,
     EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
+
+const M3_ARTIFACT: &[u8] =
+    include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
 
 fn symbol(module: &str, occurrence: &str) -> SymbolIdentity {
     SymbolIdentity {
@@ -24,6 +28,27 @@ fn target() -> TargetDescriptor {
         abi: "sysv64".into(),
         features: vec![],
     }
+}
+
+#[test]
+fn haskell_m3_fixture_decodes_global_contract() {
+    let requirements = ProgramRequirements {
+        schema_version: SCHEMA_VERSION,
+        projection_profile: "ghc-9.12-prepared-stg".into(),
+        toolchain: "ghc-9.12.2".into(),
+        execution_abi_version: EXECUTION_ABI_VERSION,
+        target: target(),
+    };
+    let program = parse_program(M3_ARTIFACT, &requirements, DecodeLimits::default())
+        .expect("Haskell M3 fixture should decode under the Rust schema");
+    let reverse = program
+        .globals()
+        .iter()
+        .find(|global| global.identity.occurrence == "reverse")
+        .expect("M3 fixture should retain Data.List.reverse as an imported global");
+    assert!(reverse.required_evaluated);
+    assert_eq!(reverse.required_generation, None);
+    assert!(!reverse.dead_end);
 }
 
 #[test]

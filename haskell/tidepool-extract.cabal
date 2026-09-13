@@ -176,6 +176,22 @@ test-suite execution-schema-projection
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
+test-suite execution-corpus-projection
+  type:             exitcode-stdio-1.0
+  main-is:          ExecutionCorpusProbe.hs
+  hs-source-dirs:   test-execution-corpus
+  build-depends:
+    base >= 4.20 && < 5,
+    bytestring,
+    directory,
+    filepath,
+    ghc >= 9.12 && < 9.13,
+    text,
+    tidepool-extract-internal
+  default-language: GHC2024
+  default-extensions: OverloadedStrings
+  ghc-options:      -Wall
+
 -- Not built by default: `cabal build` only builds tidepool-extract-bin.
 -- Run: cabal test spike-extract  (needs the nix with-packages GHC on PATH;
 -- `cabal build --enable-tests` builds it without running).

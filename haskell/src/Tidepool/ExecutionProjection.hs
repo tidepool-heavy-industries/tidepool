@@ -5,7 +5,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedTarget
   , preparedTopIdentities
   , projectLiteralAtomForTest
-  , assignTopIdentitySpellingForTest
+  , assignTopIdentitySpellings
   ) where
 
 import Control.Monad (foldM, forM)
@@ -196,7 +196,7 @@ projectPreparedTarget context modules =
             (Map.lookup symbol dependencies))
 
     mappedTopIdentity binder = lookupVarEnv topIdentityMap binder
-      `orElse` idSymbol "value" binder
+      `orElse` idSymbol (topIdentityNamespace binder) binder
 
     orElse (Just value) _ = value
     orElse Nothing fallback = fallback
@@ -231,18 +231,18 @@ buildTopIdentityMap modules = foldl insert emptyVarEnv (zip binders assigned)
       , (binding, _) <- pmBindings prepared
       , binder <- topBinders binding
       ]
-    raw (fallback, binder) = idSymbolFor fallback "value" binder
+    raw (fallback, binder) = idSymbolFor fallback (topIdentityNamespace binder) binder
     symbols = map raw binders
-    assigned = assignTopIdentitySpellingForTest
+    assigned = assignTopIdentitySpellings
       (zip symbols (map (isExternalName . varName . snd) binders))
     insert mappings ((_, binder), symbol) = extendVarEnv mappings binder symbol
 
 -- | Deterministic identity allocation shared by projection and collision
 -- regressions. The Bool marks an externally named top, whose spelling is
 -- retained exactly; all original spellings reserve suffixes for internal tops.
-assignTopIdentitySpellingForTest
+assignTopIdentitySpellings
   :: [(SymbolIdentity, Bool)] -> [SymbolIdentity]
-assignTopIdentitySpellingForTest entries = snd (foldl allocateOne
+assignTopIdentitySpellings entries = snd (foldl allocateOne
   (externalClaims, []) entries)
   where
     reserved :: Map (Text, Text, Text) (Set Text)
@@ -456,7 +456,7 @@ requireTopValue binder = do
 
 topIdentity :: Id -> P SymbolIdentity
 topIdentity binder = gets (\st -> lookupVarEnv (topSymbols st) binder) >>= maybe
-  (pure (idSymbol "value" binder)) pure
+  (pure (idSymbol (topIdentityNamespace binder) binder)) pure
 
 -- GHC uniques can be reused by binders in disjoint RHS scopes. Each lexical
 -- binder gets a fresh wire ID, while the VarEnv tracks only the current scope.
@@ -509,8 +509,11 @@ internGlobal binder = do
       generations <- gets retainedGenerations
       let identity = GlobalId (fromIntegral (length existing))
           symbol = idSymbol "value" binder
+          retainedGeneration = if isExternalName (varName binder)
+            then Map.lookup symbol generations
+            else Nothing
           declaration = GlobalDecl symbol rep signature deadEnd evaluated
-            (Map.lookup symbol generations)
+            retainedGeneration
       modify' (\current -> current
         { globals = extendVarEnv (globals current) binder identity
         , globalDecls = globalDecls current <> [declaration] })
@@ -779,6 +782,11 @@ idSymbol namespace = nameSymbol namespace . varName
 
 idSymbolFor :: Module -> Text -> Id -> SymbolIdentity
 idSymbolFor fallback namespace binder = nameSymbolFor fallback namespace (varName binder)
+
+topIdentityNamespace :: Id -> Text
+topIdentityNamespace binder
+  | isExternalName (varName binder) = "value"
+  | otherwise = "local"
 
 nameSymbol :: Text -> Name -> SymbolIdentity
 nameSymbol namespace = nameSymbolWithFallback Nothing namespace

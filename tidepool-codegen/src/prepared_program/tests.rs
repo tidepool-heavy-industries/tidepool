@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
-use super::{CompiledProgram, ExecutionError, ObservationFailure, RunOptions};
+use super::{
+    CompileError, CompiledProgram, ExecutionError, ObservationFailure, RunOptions, Unsupported,
+};
 use cranelift_codegen::ir::{self, InstructionData, Opcode, ValueDef};
 use tidepool_bridge::Value;
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, Architecture, DecodeLimits, Endianness, MachineImports,
-    ProgramRequirements, RuntimeRep, TargetDescriptor, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    Architecture, DecodeLimits, EXECUTION_ABI_VERSION, Endianness, MachineImports,
+    ProgramRequirements, RuntimeRep, SCHEMA_VERSION, TargetDescriptor, link_program, parse_program,
 };
 use tidepool_repr::{DataConId, Literal};
 
@@ -80,6 +82,7 @@ fn rep(rep: RuntimeRep) -> Vec<u8> {
         RuntimeRep::LiftedRef => array([uint(1)]),
         RuntimeRep::Int(bits) => array([uint(4), uint(u64::from(bits))]),
         RuntimeRep::Word(bits) => array([uint(5), uint(u64::from(bits))]),
+        RuntimeRep::Float(bits) => array([uint(6), uint(u64::from(bits))]),
         other => panic!("fixture does not encode {other:?}"),
     }
 }
@@ -110,6 +113,10 @@ fn scalar_int(value: u64) -> Vec<u8> {
 
 fn scalar_word(value: u64) -> Vec<u8> {
     array([uint(1), uint(64), bytes(&value.to_be_bytes())])
+}
+
+fn scalar_float64(bits: u64) -> Vec<u8> {
+    array([uint(2), uint(64), bytes(&bits.to_be_bytes())])
 }
 
 fn atom_ref(id: u8) -> Vec<u8> {
@@ -163,6 +170,10 @@ fn call_frame(callee: u8, signature: u8) -> Vec<u8> {
         uint(u64::from(signature)),
         array([]),
     ])
+}
+
+fn enter_frame(callee: u8, signature: u8) -> Vec<u8> {
+    array([uint(1), atom_ref(callee), uint(u64::from(signature))])
 }
 
 fn case_kind(kind: u8) -> Vec<u8> {
@@ -411,6 +422,65 @@ fn primitive_default_first_wire(scrutinee: u64) -> Vec<u8> {
             ),
         ],
         3,
+    )
+}
+
+fn primitive_float_default_first_wire(scrutinee: u64) -> Vec<u8> {
+    let float = RuntimeRep::Float(64);
+    wire_program(
+        vec![signature(&[float])],
+        vec![],
+        vec![
+            return_frame(vec![atom_scalar(scalar_float64(2.0_f64.to_bits()))]),
+            return_frame(vec![atom_scalar(scalar_float64(1.0_f64.to_bits()))]),
+            return_frame(vec![atom_scalar(scalar_float64(scrutinee))]),
+            array([
+                uint(5),
+                uint(2),
+                uint(1),
+                array([rep(float)]),
+                array([uint(1), rep(float)]),
+                array([
+                    alternative(default_pattern(), vec![], 0),
+                    alternative(
+                        literal_pattern(scalar_float64(0.0_f64.to_bits())),
+                        vec![],
+                        1,
+                    ),
+                ]),
+            ]),
+        ],
+        3,
+    )
+}
+
+fn nested_invalid_enter_wire() -> Vec<u8> {
+    wire_program_with_bindings(
+        vec![signature(&[RuntimeRep::Int(64)])],
+        vec![],
+        vec![
+            enter_frame(1, 0),
+            return_frame(vec![atom_scalar(scalar_int(7))]),
+            let_recursive_frame(
+                vec![heap_binding(1, function_rhs(0, vec![atom_ref(1)], 0))],
+                1,
+            ),
+        ],
+        vec![group_nonrecursive(top_binding(function_rhs(0, vec![], 2)))],
+        0,
+    )
+}
+
+fn static_constructor_enter_wire() -> Vec<u8> {
+    wire_program_with_bindings(
+        vec![signature(&[RuntimeRep::LiftedRef])],
+        vec![constructor_decl()],
+        vec![enter_frame(1, 0)],
+        vec![
+            group_nonrecursive(top_binding(function_rhs(0, vec![], 0))),
+            group_nonrecursive(top_binding_named(1, "value", constructor_rhs())),
+        ],
+        0,
     )
 }
 
@@ -768,6 +838,41 @@ fn primitive_case_checks_literals_after_a_default_in_source_order() {
 }
 
 #[test]
+fn primitive_float_case_uses_native_equality_after_a_default_in_source_order() {
+    for (scrutinee, expected) in [
+        ((-0.0_f64).to_bits(), 1.0_f64.to_bits()),
+        (f64::NAN.to_bits(), 2.0_f64.to_bits()),
+    ] {
+        let program =
+            CompiledProgram::compile(&linked_wire(primitive_float_default_first_wire(scrutinee)))
+                .unwrap();
+        let result = program
+            .run_entry(
+                tidepool_repr::execution_schema::ValueId(0),
+                &[],
+                &RunOptions::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(matches!(
+            &result.values[..],
+            [Value::Lit(Literal::LitDouble(value))] if *value == expected
+        ));
+    }
+}
+
+#[test]
+fn nested_function_rejection_reports_the_nested_expression_owner() {
+    assert!(matches!(
+        CompiledProgram::compile(&linked_wire(nested_invalid_enter_wire())),
+        Err(CompileError::Unsupported(Unsupported::Expression {
+            binding: tidepool_repr::execution_schema::ValueId(1),
+            node: 0,
+        }))
+    ));
+}
+
+#[test]
 fn connected_join_jump_returns_zero_effect_result() {
     let program = CompiledProgram::compile(&linked_wire(join_wire())).unwrap();
     let result = program
@@ -945,4 +1050,33 @@ fn recursive_group_reserves_once_before_sibling_initialization() {
         headers, 2,
         "recursive group initializes both sibling headers"
     );
+}
+
+#[test]
+fn enter_zero_tag_uses_one_slow_inspection_call_without_an_inline_header_chain() {
+    let program = CompiledProgram::compile(&linked_wire(static_constructor_enter_wire())).unwrap();
+    let ir = program
+        .pipeline
+        .emitted_ir
+        .as_ref()
+        .expect("prepared compilation captures pre-compile IR");
+    let function_id = program.entries[&tidepool_repr::execution_schema::ValueId(0)].function;
+    let function = ir.get(&function_id).expect("top entry IR is captured");
+    let two_argument_calls = function
+        .layout
+        .blocks()
+        .flat_map(|block| function.layout.block_insts(block))
+        .filter(|inst| direct_call_arity(function, *inst) == Some(2))
+        .count();
+    assert_eq!(
+        two_argument_calls, 1,
+        "Enter emits one slow inspection call"
+    );
+    let loads = function
+        .layout
+        .blocks()
+        .flat_map(|block| function.layout.block_insts(block))
+        .filter(|inst| function.dfg.insts[*inst].opcode() == Opcode::Load)
+        .count();
+    assert_eq!(loads, 2, "Enter performs only the top-table loads inline");
 }

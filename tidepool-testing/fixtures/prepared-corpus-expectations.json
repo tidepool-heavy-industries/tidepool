@@ -1,0 +1,1188 @@
+{
+  "source_revision": "e1a4b9145^",
+  "expectations": {
+    "lit_42": {
+      "kind": "int",
+      "value": 42
+    },
+    "lit_zero": {
+      "kind": "int",
+      "value": 0
+    },
+    "lit_neg7": {
+      "kind": "int",
+      "value": -7
+    },
+    "lit_large": {
+      "kind": "int",
+      "value": 1000000
+    },
+    "lit_neg_large": {
+      "kind": "int",
+      "value": -999999
+    },
+    "lit_char_a": {
+      "kind": "char",
+      "value": "a"
+    },
+    "lit_char_z": {
+      "kind": "char",
+      "value": "z"
+    },
+    "lit_char_newline": {
+      "kind": "char",
+      "value": "\n"
+    },
+    "lit_double_pi": {
+      "kind": "float64_approx",
+      "value": {
+        "expected": 3.14159,
+        "absolute_tolerance": 1e-10
+      }
+    },
+    "lit_double_neg": {
+      "kind": "float64_approx",
+      "value": {
+        "expected": -2.5,
+        "absolute_tolerance": 1e-10
+      }
+    },
+    "add_simple": {
+      "kind": "int",
+      "value": 3
+    },
+    "sub_simple": {
+      "kind": "int",
+      "value": 7
+    },
+    "mul_simple": {
+      "kind": "int",
+      "value": 42
+    },
+    "nested_arith": {
+      "kind": "int",
+      "value": 21
+    },
+    "arith_precedence": {
+      "kind": "int",
+      "value": 14
+    },
+    "arith_left_assoc": {
+      "kind": "int",
+      "value": 5
+    },
+    "arith_neg_result": {
+      "kind": "int",
+      "value": -7
+    },
+    "arith_mul_zero": {
+      "kind": "int",
+      "value": 0
+    },
+    "arith_mul_one": {
+      "kind": "int",
+      "value": 42
+    },
+    "arith_double_add": {
+      "kind": "float64_approx",
+      "value": {
+        "expected": 4,
+        "absolute_tolerance": 1e-10
+      }
+    },
+    "arith_double_mul": {
+      "kind": "float64_approx",
+      "value": {
+        "expected": 6,
+        "absolute_tolerance": 1e-10
+      }
+    },
+    "arith_double_sub": {
+      "kind": "float64_approx",
+      "value": {
+        "expected": 6.5,
+        "absolute_tolerance": 1e-10
+      }
+    },
+    "prim_quot_rem_int": {
+      "kind": "int",
+      "value": 31
+    },
+    "prim_quot_rem_word": {
+      "kind": "int",
+      "value": 31
+    },
+    "cmp_eq_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_eq_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "cmp_ne_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_lt_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_lt_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "cmp_gt_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_le_eq": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_ge_eq": {
+      "kind": "bool",
+      "value": true
+    },
+    "let_simple": {
+      "kind": "int",
+      "value": 10
+    },
+    "let_two": {
+      "kind": "int",
+      "value": 30
+    },
+    "let_nested": {
+      "kind": "int",
+      "value": 12
+    },
+    "let_shadow": {
+      "kind": "int",
+      "value": 20
+    },
+    "let_unused": {
+      "kind": "int",
+      "value": 99
+    },
+    "let_chain": {
+      "kind": "int",
+      "value": 3
+    },
+    "let_complex": {
+      "kind": "int",
+      "value": 26
+    },
+    "let_body_only": {
+      "kind": "int",
+      "value": 42
+    },
+    "letrec_fact5": {
+      "kind": "int",
+      "value": 120
+    },
+    "letrec_fib10": {
+      "kind": "int",
+      "value": 55
+    },
+    "letrec_countdown": {
+      "kind": "int",
+      "value": 0
+    },
+    "letrec_sum_to": {
+      "kind": "int",
+      "value": 55
+    },
+    "letrec_pow": {
+      "kind": "int",
+      "value": 1024
+    },
+    "letrec_gcd": {
+      "kind": "int",
+      "value": 6
+    },
+    "letrec_even_odd": {
+      "kind": "bool",
+      "value": true
+    },
+    "letrec_ackermann": {
+      "kind": "int",
+      "value": 9
+    },
+    "case_just": {
+      "kind": "int",
+      "value": 42
+    },
+    "case_nothing": {
+      "kind": "int",
+      "value": 0
+    },
+    "case_true": {
+      "kind": "int",
+      "value": 1
+    },
+    "case_false": {
+      "kind": "int",
+      "value": 0
+    },
+    "case_left": {
+      "kind": "int",
+      "value": 10
+    },
+    "case_right": {
+      "kind": "int",
+      "value": 20
+    },
+    "case_nested_just": {
+      "kind": "int",
+      "value": 99
+    },
+    "case_pair": {
+      "kind": "int",
+      "value": 30
+    },
+    "case_triple": {
+      "kind": "int",
+      "value": 6
+    },
+    "case_default": {
+      "kind": "int",
+      "value": 99
+    },
+    "case_bool_and": {
+      "kind": "bool",
+      "value": true
+    },
+    "case_bool_or": {
+      "kind": "bool",
+      "value": true
+    },
+    "case_nested_case": {
+      "kind": "int",
+      "value": 1
+    },
+    "case_either_nested": {
+      "kind": "int",
+      "value": 7
+    },
+    "case_wildcard_pair": {
+      "kind": "int",
+      "value": 20
+    },
+    "con_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "con_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "app_identity": {
+      "kind": "int",
+      "value": 42
+    },
+    "app_const": {
+      "kind": "int",
+      "value": 10
+    },
+    "app_compose": {
+      "kind": "int",
+      "value": 11
+    },
+    "app_nested_lam": {
+      "kind": "int",
+      "value": 7
+    },
+    "app_thrice": {
+      "kind": "int",
+      "value": 3
+    },
+    "app_twice": {
+      "kind": "int",
+      "value": 16
+    },
+    "app_church_zero": {
+      "kind": "int",
+      "value": 0
+    },
+    "app_church_two": {
+      "kind": "int",
+      "value": 2
+    },
+    "ho_myfoldr": {
+      "kind": "int",
+      "value": 15
+    },
+    "ho_myfoldl": {
+      "kind": "int",
+      "value": 15
+    },
+    "ho_mymap_len": {
+      "kind": "int",
+      "value": 3
+    },
+    "ho_myfilter_len": {
+      "kind": "int",
+      "value": 3
+    },
+    "ho_myany": {
+      "kind": "bool",
+      "value": true
+    },
+    "ho_myall": {
+      "kind": "bool",
+      "value": false
+    },
+    "ho_myzipwith": {
+      "kind": "int",
+      "value": 11
+    },
+    "ho_myconcatmap": {
+      "kind": "int",
+      "value": 6
+    },
+    "ite_simple": {
+      "kind": "int",
+      "value": 1
+    },
+    "ite_false": {
+      "kind": "int",
+      "value": 0
+    },
+    "ite_nested": {
+      "kind": "int",
+      "value": 2
+    },
+    "ite_abs": {
+      "kind": "int",
+      "value": 5
+    },
+    "ite_signum": {
+      "kind": "int",
+      "value": -1
+    },
+    "edge_deep_let": {
+      "kind": "int",
+      "value": 10
+    },
+    "edge_large_tuple": {
+      "kind": "int",
+      "value": 15
+    },
+    "edge_nullary_con": {
+      "kind": "bool",
+      "value": true
+    },
+    "edge_id_chain": {
+      "kind": "int",
+      "value": 42
+    },
+    "edge_const_chain": {
+      "kind": "int",
+      "value": 42
+    },
+    "edge_case_of_case": {
+      "kind": "int",
+      "value": 1
+    },
+    "edge_deep_nesting": {
+      "kind": "int",
+      "value": 6
+    },
+    "edge_mutual_data": {
+      "kind": "int",
+      "value": 42
+    },
+    "prelude_null_empty": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_null_nonempty": {
+      "kind": "bool",
+      "value": false
+    },
+    "prelude_length": {
+      "kind": "int",
+      "value": 5
+    },
+    "prelude_take": {
+      "kind": "int",
+      "value": 3
+    },
+    "prelude_map": {
+      "kind": "int",
+      "value": 3
+    },
+    "prelude_filter": {
+      "kind": "int",
+      "value": 3
+    },
+    "prelude_or": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_and": {
+      "kind": "bool",
+      "value": false
+    },
+    "prelude_eq_int": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_string_append": {
+      "kind": "int",
+      "value": 11
+    },
+    "prelude_take_cons": {
+      "kind": "int",
+      "value": 3
+    },
+    "prelude_eq_string_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_eq_string_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "round_banker_half": {
+      "kind": "int",
+      "value": 2
+    },
+    "round_banker_threehalf": {
+      "kind": "int",
+      "value": 4
+    },
+    "round_simple_up": {
+      "kind": "int",
+      "value": 4
+    },
+    "round_negative_half": {
+      "kind": "int",
+      "value": -2
+    },
+    "lazy_filter_infinite": {
+      "kind": "int",
+      "value": 20
+    },
+    "lazy_nubby_infinite": {
+      "kind": "int",
+      "value": 5
+    },
+    "nubby_dedup_finite": {
+      "kind": "int",
+      "value": 4
+    },
+    "filter_order_preserved": {
+      "kind": "int",
+      "value": 135
+    },
+    "lazy_concatmap_infinite": {
+      "kind": "int",
+      "value": 6
+    },
+    "concatmap_finite": {
+      "kind": "int",
+      "value": 12
+    },
+    "concatmap_empty_segments": {
+      "kind": "int",
+      "value": 5
+    },
+    "thunk_repeat": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        }
+      ]
+    },
+    "thunk_iterate": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 0
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        },
+        {
+          "kind": "int",
+          "value": 4
+        }
+      ]
+    },
+    "thunk_cycle": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        },
+        {
+          "kind": "int",
+          "value": 1
+        }
+      ]
+    },
+    "thunk_zipwith": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 10
+        },
+        {
+          "kind": "int",
+          "value": 21
+        },
+        {
+          "kind": "int",
+          "value": 32
+        }
+      ]
+    },
+    "thunk_zipwith_inf": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 100
+        },
+        {
+          "kind": "int",
+          "value": 102
+        },
+        {
+          "kind": "int",
+          "value": 104
+        },
+        {
+          "kind": "int",
+          "value": 106
+        }
+      ]
+    },
+    "thunk_map_inf": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 0
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 4
+        },
+        {
+          "kind": "int",
+          "value": 6
+        },
+        {
+          "kind": "int",
+          "value": 8
+        }
+      ]
+    },
+    "thunk_letrec_knot": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        }
+      ]
+    },
+    "t_bangPatterns": {
+      "kind": "int",
+      "value": 55
+    },
+    "t_typeApplications": {
+      "kind": "int",
+      "value": 5
+    },
+    "t_blockArguments": {
+      "kind": "int",
+      "value": 3
+    },
+    "t_numericUnderscores": {
+      "kind": "int",
+      "value": 1000000
+    },
+    "t_deriveFunctor": {
+      "kind": "int",
+      "value": 42
+    },
+    "t_deriveFoldable": {
+      "kind": "int",
+      "value": 42
+    },
+    "qq_fmt_spec_fixed2": {
+      "kind": "text",
+      "value": "3.14"
+    },
+    "qq_fmt_spec_fixed_half": {
+      "kind": "text",
+      "value": "2.50"
+    },
+    "qq_fmt_spec_fixed_neg": {
+      "kind": "text",
+      "value": "-1.20"
+    },
+    "qq_fmt_spec_fixed_small": {
+      "kind": "text",
+      "value": "0.07"
+    },
+    "qq_fmt_spec_zero_pad": {
+      "kind": "text",
+      "value": "0042"
+    },
+    "qq_fmt_spec_hex": {
+      "kind": "text",
+      "value": "ff"
+    },
+    "qq_fmt_spec_oct": {
+      "kind": "text",
+      "value": "100"
+    },
+    "qq_fmt_spec_bin": {
+      "kind": "text",
+      "value": "101010"
+    },
+    "qq_fmt_spec_align_right": {
+      "kind": "text",
+      "value": "        hi"
+    },
+    "qq_fmt_spec_align_left": {
+      "kind": "text",
+      "value": "hi        "
+    },
+    "qq_fmt_spec_align_center": {
+      "kind": "text",
+      "value": "    hi    "
+    },
+    "qq_fmt_spec_sign": {
+      "kind": "text",
+      "value": "+42"
+    },
+    "qq_fmt_spec_percent": {
+      "kind": "text",
+      "value": "50.000000%"
+    },
+    "qq_fmt_spec_percent1": {
+      "kind": "text",
+      "value": "50.0%"
+    },
+    "qq_fmt_spec_brace": {
+      "kind": "text",
+      "value": "a}b"
+    },
+    "qq_fmt_spec_colon": {
+      "kind": "text",
+      "value": "a:b"
+    },
+    "qq_fmt_spec_escapes": {
+      "kind": "text",
+      "value": "{x} and {y} done"
+    },
+    "qq_fmt_usek": {
+      "kind": "text",
+      "value": "1.5"
+    },
+    "qq_uri_accept": {
+      "kind": "text",
+      "value": "https://example.com/a/b?q=1"
+    },
+    "qq_patch_literal": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_render_roundtrip": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_invert_involution": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_apply_clean": {
+      "kind": "text",
+      "value": "alpha\nBETA\ngamma"
+    },
+    "qq_patch_apply_drift": {
+      "kind": "int",
+      "value": 3
+    },
+    "qq_patch_conflict_nomatch": {
+      "kind": "text",
+      "value": "needle|/|two"
+    },
+    "qq_patch_conflict_ambiguous": {
+      "kind": "int",
+      "value": 4
+    },
+    "qq_patch_already_applied": {
+      "kind": "int",
+      "value": 2
+    },
+    "qq_patch_creation": {
+      "kind": "text",
+      "value": "hello\nworld\n"
+    },
+    "qq_patch_parse_runtime": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_pat_match": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_pat_bind": {
+      "kind": "text",
+      "value": "config.txt:DEBUG"
+    },
+    "qq_patch_pat_fallthrough": {
+      "kind": "bool",
+      "value": true
+    },
+    "gen_patch_roundtrip": {
+      "kind": "bool",
+      "value": true
+    },
+    "gen_patch_drift": {
+      "kind": "int",
+      "value": 3
+    },
+    "gen_patch_start": {
+      "kind": "text",
+      "value": "X\nb\nc\nd"
+    },
+    "gen_patch_eof": {
+      "kind": "text",
+      "value": "a\nb\nc\nZ"
+    },
+    "gen_patch_trailnl": {
+      "kind": "text",
+      "value": "a\nb\n"
+    },
+    "gen_patch_coalesce": {
+      "kind": "int",
+      "value": 1
+    },
+    "gen_patch_nochange": {
+      "kind": "bool",
+      "value": true
+    },
+    "gen_patch_creation": {
+      "kind": "text",
+      "value": "hello\nworld\n"
+    },
+    "con_just": {
+      "kind": "maybe",
+      "value": {
+        "kind": "int",
+        "value": 42
+      }
+    },
+    "con_nothing": {
+      "kind": "maybe",
+      "value": null
+    },
+    "con_pair": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 10
+        },
+        {
+          "kind": "int",
+          "value": 20
+        }
+      ]
+    },
+    "con_triple": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        }
+      ]
+    },
+    "con_left": {
+      "kind": "either_left",
+      "value": {
+        "kind": "int",
+        "value": 10
+      }
+    },
+    "con_right": {
+      "kind": "either_right",
+      "value": {
+        "kind": "int",
+        "value": 20
+      }
+    },
+    "con_nested_just": {
+      "kind": "maybe",
+      "value": {
+        "kind": "maybe",
+        "value": {
+          "kind": "int",
+          "value": 99
+        }
+      }
+    },
+    "con_nested_nothing": {
+      "kind": "maybe",
+      "value": {
+        "kind": "maybe",
+        "value": null
+      }
+    },
+    "showInt": {
+      "kind": "text",
+      "value": "42"
+    },
+    "showIntNeg": {
+      "kind": "text",
+      "value": "-7"
+    },
+    "showCharA": {
+      "kind": "text",
+      "value": "'a'"
+    },
+    "showHello": {
+      "kind": "text",
+      "value": "\"hello\""
+    },
+    "showMaybeInt": {
+      "kind": "text",
+      "value": "Just 42"
+    },
+    "showMaybeNothing": {
+      "kind": "text",
+      "value": "Nothing"
+    },
+    "showBool": {
+      "kind": "text",
+      "value": "True"
+    },
+    "showDouble": {
+      "kind": "text",
+      "value": "3.14"
+    },
+    "showDoubleInt": {
+      "kind": "text",
+      "value": "42.0"
+    },
+    "showDoubleText": {
+      "kind": "text",
+      "value": "3.14"
+    },
+    "showDoublePrelude": {
+      "kind": "text",
+      "value": "(-2.5)"
+    },
+    "showDoublePreludeText": {
+      "kind": "text",
+      "value": "-2.5"
+    },
+    "thunk_blackhole": {
+      "kind": "error",
+      "value": "blackhole"
+    },
+    "text_takeWhileT_direct": {
+      "kind": "text",
+      "value": "hello"
+    },
+    "text_takeWhileT_map": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "hello"
+        },
+        {
+          "kind": "text",
+          "value": "foo"
+        },
+        {
+          "kind": "text",
+          "value": "noSlash"
+        }
+      ]
+    },
+    "text_takeWhileT_eta": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "hello"
+        },
+        {
+          "kind": "text",
+          "value": "foo"
+        },
+        {
+          "kind": "text",
+          "value": "noSlash"
+        }
+      ]
+    },
+    "text_dropWhileT_direct": {
+      "kind": "text",
+      "value": "/world"
+    },
+    "text_dropWhileT_map": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "/world"
+        },
+        {
+          "kind": "text",
+          "value": "/bar"
+        },
+        {
+          "kind": "text",
+          "value": ""
+        }
+      ]
+    },
+    "text_dropWhileT_eta": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "/world"
+        },
+        {
+          "kind": "text",
+          "value": "/bar"
+        },
+        {
+          "kind": "text",
+          "value": ""
+        }
+      ]
+    },
+    "t_lambdaCase": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "n"
+        },
+        {
+          "kind": "text",
+          "value": "z"
+        },
+        {
+          "kind": "text",
+          "value": "p"
+        }
+      ]
+    },
+    "t_tupleSections": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "int",
+              "value": 1
+            },
+            {
+              "kind": "bool",
+              "value": true
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "int",
+              "value": 2
+            },
+            {
+              "kind": "bool",
+              "value": true
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "int",
+              "value": 3
+            },
+            {
+              "kind": "bool",
+              "value": true
+            }
+          ]
+        }
+      ]
+    },
+    "t_multiWayIf": {
+      "kind": "text",
+      "value": "pos"
+    },
+    "t_recordWildCards": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 42
+        },
+        {
+          "kind": "text",
+          "value": "hello"
+        }
+      ]
+    },
+    "t_namedFieldPuns": {
+      "kind": "int",
+      "value": 10
+    },
+    "t_viewPatterns": {
+      "kind": "text",
+      "value": "HELLO"
+    },
+    "t_multilineStrings": {
+      "kind": "int",
+      "value": 10
+    },
+    "t_deriveTraversable": {
+      "kind": "maybe",
+      "value": {
+        "kind": "int",
+        "value": 42
+      }
+    },
+    "qq_fmt_int": {
+      "kind": "text",
+      "value": "count: 3"
+    },
+    "qq_fmt_op": {
+      "kind": "text",
+      "value": "next: 42"
+    },
+    "qq_fmt_applied": {
+      "kind": "text",
+      "value": "shout: HI!"
+    },
+    "qq_fmt_double": {
+      "kind": "text",
+      "value": "val: 3.5"
+    },
+    "qq_fmt_bool": {
+      "kind": "text",
+      "value": "flag: True"
+    },
+    "qq_fmt_char": {
+      "kind": "text",
+      "value": "ch: 'x'"
+    },
+    "qq_fmt_comprehension": {
+      "kind": "text",
+      "value": "evens: [2,4,6]"
+    },
+    "qq_fmt_basic": {
+      "kind": "text",
+      "value": "user: alice"
+    },
+    "qq_fmt_escape": {
+      "kind": "text",
+      "value": "use {braces} for holes and } is literal"
+    },
+    "gen_patch_render_parse": {
+      "kind": "bool",
+      "value": true
+    },
+    "gen_patch_two_hunks": {
+      "kind": "int",
+      "value": 2
+    }
+  }
+}
