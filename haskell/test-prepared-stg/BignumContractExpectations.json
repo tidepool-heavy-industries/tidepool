@@ -1,0 +1,14 @@
+{
+  "source_revision": "BignumContract.hs native GHC 9.12.2",
+  "expectations": {
+    "pow2ToHundredText": { "kind": "text", "value": "1267650600228229401496703205376" },
+    "factorial30Text": { "kind": "text", "value": "265252859812191058636308480000000" },
+    "primeProductMod": { "kind": "int", "value": 346552966 },
+    "gcdLargeText": { "kind": "text", "value": "3541774862152233910272" },
+    "negativeQuotRem": {
+      "kind": "tuple",
+      "value": [ { "kind": "int", "value": 150371989 }, { "kind": "int", "value": 412840 } ]
+    },
+    "largeVersusSmall": { "kind": "bool", "value": true }
+  }
+}
