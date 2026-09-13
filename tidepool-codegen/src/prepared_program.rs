@@ -16,6 +16,7 @@ use crate::entry_abi::EntryAbi;
 use crate::pipeline::{CodegenPipeline, PipelineError};
 
 mod admission;
+mod plan;
 pub use admission::admit_program;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -40,6 +41,12 @@ pub enum CompileError {
     Static(#[from] StaticImageError),
     #[error(transparent)]
     Abi(#[from] crate::entry_abi::AbiError),
+    #[error(transparent)]
+    Layout(#[from] tidepool_repr::execution_schema::LayoutError),
+    #[error(transparent)]
+    Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
+    #[error("checked program lacks representation for {0:?}")]
+    MissingRepresentation(ValueId),
 }
 
 pub(crate) struct CompiledEntry {
