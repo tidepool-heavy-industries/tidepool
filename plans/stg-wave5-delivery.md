@@ -1,5 +1,15 @@
 # Wave 5 delivery
 
+Latest behavioral result: 216/217 fixture keys match, zero mismatches; all 812
+tops admit and compile. See “Finite-corpus acceptance reached” below for exact
+denominators, omissions, executable provenance, and the separate broad-gate
+status. This delivery record replaces the retired chronological
+`plans/stg-wave5.md` trial log, which remains recoverable in Git.
+
+Final source check at `b217095e5`: 837/837 focused nextest library tests pass;
+workspace test targets compile. **Workspace green is not established:** the
+broad changed gate stops in Clippy before running its tests.
+
 Finish recovered-body and lazy execution delivery before Wave 6 effect-interpreter
 integration. Delivery takes precedence over delegation experiments and unused
 primitive-family completeness. The prior verified checkpoint is `800ab0d06`;
@@ -237,6 +247,62 @@ The broad rerun advanced past heap but stopped on one worktree and 55 codegen
 Clippy diagnostics; nextest still did not run. Its retained log is under
 `target/tidepool-test-runs/20260913T190141Z-1270764-changed/`.
 Focused green checks are not workspace green.
+
+### Finite-corpus acceptance reached
+
+The aligned-allocation/raiseIO runner snapshot
+`target/prepared-corpus/run.aligned.YVZugd` replayed the unchanged canonical
+`suite.mmH9Ox` artifacts. Results are retained in
+`target/prepared-corpus/replay.aligned-suite.3xLZfU/`.
+All 812 tops project, validate, admit and compile. Execution succeeds for 628;
+the other 184 rows are 95 unsupported managed-host-argument invocations,
+74 Address materializations, nine missing scalar-argument invocations,
+three function observations, two observation-budget failures, and the one
+explicitly omitted non-finite blackhole. These are not 184 semantic mismatches.
+
+Comparison: **216 matching fixture keys, zero mismatches**, 595 rows without
+an expectation, and one not reached. The fixture-key denominator remains 217;
+the top-level-program denominator remains 812. The all-operation audit decodes
+812 artifacts with zero omissions and accepts all 128 observed exact pairs.
+This is a native-runner replay, not a second Haskell projection run. Snapshot
+SHA256 is `7ed102b6bad9de2c0504fe1afa17a1d33482555b0ba83f9be050b1a82ccf658b`;
+its provenance records `c5362e09b` plus dirty source subsequently committed in
+`05037fbf7` and the cleanup changes. All 435 codegen library tests passed at
+that source boundary. Remaining broad-gate cleanup is reported independently.
+The same runner also passes every stage of the priority constructor (1), actor
+dependency probe (1), recovered-body (1), formatting (5), shadow-identity (1),
+and compiled-GHC fingerprint (3) cohorts. Reports are retained under
+`target/prepared-corpus/replay.aligned-cohorts.hWHVFe`.
+
+### Final verification and handoff
+
+At `b217095e5`, the following completed:
+
+- `nix develop --command cargo nextest run -p tidepool-codegen -p tidepool-heap -p tidepool-repr -p tidepool-toolchain --lib`: 837/837 passed across four binaries.
+- `nix develop --command cargo test --workspace --no-run --quiet`: exit 0;
+  all workspace test targets compiled, no tests executed by this command.
+- `git diff --check`: exit 0; changed Rust files formatted.
+
+Two lint commands remain red, with no source repairs made beyond the bounded
+engine/toolchain cleanup:
+
+- `nix develop --command cargo clippy -p tidepool-codegen --all-targets -- -D warnings`
+  gets through codegen/toolchain and fails in the runtime dev dependency on
+  12 diagnostics: `inspection.rs` (large enum and three unwraps),
+  `persistent.rs` (two large errors and two expects), and `prepared.rs`
+  (three large errors and one expect). Session reconciliation remains Wave 6.
+- `just changed 800ab0d06` stops earlier in the workspace ordering at
+  `tidepool-agent/src/backend/codex/rollout_usage.rs:189` (redundant guard)
+  and two cloned-reference-to-slice diagnostics in
+  `rollout_usage_bounded_tests.rs:61,168`. Its exact reproduction and log are
+  in `target/tidepool-test-runs/20260913T192232Z-1348080-changed/`.
+  This command did not execute nextest; the separate focused invocation above did.
+
+The vendored MD5 C signedness warning and unrelated test warnings remain
+nonfatal. No performance claim or full-workspace test pass is inferred.
+The next planning boundary is Wave 6: retained session integration and effect
+suspension/resumption, including the deferred resident-workbench reconciliation.
+No Core fallback was added to satisfy this corpus acceptance.
 
 ## Acceptance
 

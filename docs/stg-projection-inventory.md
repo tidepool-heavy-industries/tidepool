@@ -283,6 +283,19 @@ foreign pointer access or arbitrary foreign calls.
 
 ### Remaining forms
 
+`raiseIO#` retains its state-threaded successful wire signature but native
+execution is terminal: the existing raised-operand root and failure settlement
+owner handles it exactly as `raise#`. It does not publish a result or implement
+catch/masking. A failure restores reusable thunks for retry without replacing
+the first cause. The recovered fingerprint allocation helper references this
+operation on its invalid-alignment branch, independently of IPE capabilities.
+
+`newAlignedPinnedByteArray#` uses the existing external-storage owner with a
+recorded published offset. Padding precedes the capacity/length prefixes;
+the actual allocation base and Layout remain the reclamation authority. Valid
+power-of-two alignment is honored by the contents address and preserved through
+resize. Invalid size/alignment fails without publishing a wrapper payload.
+
 The pinned `GHC.Internal.Stack.CloneStack.$wgo` is the recursive
 `getDecodedStackArray` worker: `[UnliftedRef, Int64, Void] -> Returns[LiftedRef]`.
 It owns IPE lookup and InfoProv string decoding, including UTF8 cleanup through

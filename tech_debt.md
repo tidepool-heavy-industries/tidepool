@@ -106,3 +106,19 @@ their GC root before consuming the first cause, and continue unwinding host
 cancellation and integrity failures. Masking needs scoped observable state and
 restoration, and must not suppress host cancellation. The current exact IPE
 function boundary avoids claiming these semantics in Wave 5.
+
+## Prepared emitter borrowed context
+
+Several emission operations pass the same code, descriptor, ABI and root-state
+borrows explicitly. Local argument-count lint expectations document these
+boundaries; they do not establish that the API is minimal. Consolidate a shared
+borrowed context only when its lifetime and mutation ownership are settled with
+the session integration, not by bundling unrelated parameters to satisfy a lint.
+
+## Observation-order exhaustion
+
+The outgoing session binding table refuses to wrap its monotonically increasing
+observation order with a checked invariant failure. A local lint allowance
+preserves that behavior; resource exhaustion is not a proof that the counter
+cannot overflow, because observations can be reclaimed. If this owner survives
+session cutover, propagate typed exhaustion through observation completion.
