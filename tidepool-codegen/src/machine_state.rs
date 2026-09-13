@@ -155,6 +155,7 @@ struct ExternalStorage {
     reason = "consumed by the independently integrated major collector"
 )]
 pub(crate) struct ExternalPayloadView {
+    pub(crate) logical_len: usize,
     pub(crate) pointer_slots: tidepool_heap::external_storage::ExternalPointerSlots,
 }
 
@@ -1590,7 +1591,7 @@ impl MachineState {
                 )
             }
         };
-        Ok(ExternalPayloadView { pointer_slots })
+        Ok(ExternalPayloadView { pointer_slots, logical_len: record.logical_len })
     }
 
     /// Mutator and observation view. A revoked payload stays in the structural

@@ -21,6 +21,9 @@ pub(super) enum ArrayOperation {
     ReadBoxed,
     WriteBoxed,
     SizeofBoxed,
+    UnsafeFreezeBoxed,
+    ShrinkSmallBoxed,
+    CasBoxed,
 }
 
 pub(super) fn recognize(
@@ -64,6 +67,24 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![Int(64)]) =>
         {
             Some(ArrayOperation::SizeofBoxed)
+        }
+        "unsafeFreezeSmallArray#" | "unsafeFreezeArray#"
+            if signature.arguments == [UnliftedRef, Void]
+                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+        {
+            Some(ArrayOperation::UnsafeFreezeBoxed)
+        }
+        "shrinkSmallMutableArray#"
+            if signature.arguments == [UnliftedRef, Int(64), Void]
+                && signature.results == ResultContract::Returns(vec![]) =>
+        {
+            Some(ArrayOperation::ShrinkSmallBoxed)
+        }
+        "casSmallArray#" | "casArray#"
+            if signature.arguments == [UnliftedRef, Int(64), LiftedRef, LiftedRef, Void]
+                && signature.results == ResultContract::Returns(vec![Int(64), LiftedRef]) =>
+        {
+            Some(ArrayOperation::CasBoxed)
         }
         _ => None,
     }
@@ -123,6 +144,9 @@ fn storage_error(
         ExternalStorageValidationError::IndexOutOfBounds { len, .. } => {
             RuntimeError::ArrayIndexOutOfBounds { index, len }
         }
+        ExternalStorageValidationError::LengthIncrease { old, .. } => {
+            RuntimeError::ArrayIndexOutOfBounds { index, len: old }
+        }
         ExternalStorageValidationError::BookkeepingAllocation => RuntimeError::HeapOverflow,
         _ => RuntimeError::BadPointer,
     }
@@ -138,13 +162,26 @@ unsafe fn active_boxed_payload(
     reference: *mut u8,
     descriptor: *const ObjectDescriptor,
 ) -> Result<(*mut u8, usize), crate::host_fns::RuntimeError> {
+    unsafe { active_payload(machine, vmctx, reference, descriptor, ExternalStorageKind::BoxedArray) }
+}
+
+/// Shared noncollecting wrapper admission for boxed and byte-array primitives.
+/// Length comes from the authenticated ledger, never an unchecked prefix read.
+/// The caller supplies the program-pinned descriptor and generated provenance.
+pub(super) unsafe fn active_payload(
+    machine: &crate::machine_state::MachineState,
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+    kind: ExternalStorageKind,
+) -> Result<(*mut u8, usize), crate::host_fns::RuntimeError> {
     use crate::host_fns::RuntimeError;
     if vmctx.is_null() || descriptor.is_null() || reference.is_null() {
         return Err(RuntimeError::BadPointer);
     }
     // SAFETY: the generated code embeds a pointer to its program-owned Arc.
     let descriptor = unsafe { &*descriptor };
-    if descriptor.external_kind() != Some(ExternalStorageKind::BoxedArray)
+    if descriptor.external_kind() != Some(kind)
         || (reference as usize & 7) != usize::from(descriptor.tag())
     {
         return Err(RuntimeError::BadPointer);
@@ -184,9 +221,9 @@ unsafe fn active_boxed_payload(
         .map_err(|_| RuntimeError::BadPointer)?;
     let published = unsafe { handle.read() };
     let view = machine
-        .external_active_view(published, ExternalStorageKind::BoxedArray)
+        .external_active_view(published, kind)
         .map_err(|error| storage_error(error, 0))?;
-    Ok((published, view.pointer_slots.len()))
+    Ok((published, view.logical_len))
 }
 
 /// Read/index share the same authenticated, bounds-checked owner path. The
@@ -273,6 +310,91 @@ pub(super) unsafe extern "C" fn prepared_sizeof_boxed(
         let (_, len) = unsafe { active_boxed_payload(machine, vmctx, reference, descriptor) }?;
         let len = i64::try_from(len).map_err(|_| RuntimeError::BadPointer)?;
         unsafe { output.write(len) };
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => array_error(machine, error),
+    }
+}
+
+pub(super) unsafe extern "C" fn prepared_freeze_boxed(
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+) -> i32 {
+    use crate::prepared_control::CallStatus;
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    match unsafe { active_boxed_payload(machine, vmctx, reference, descriptor) } {
+        Ok(_) => CallStatus::Success as i32,
+        Err(error) => array_error(machine, error),
+    }
+}
+
+pub(super) unsafe extern "C" fn prepared_shrink_boxed(
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+    new_len: i64,
+) -> i32 {
+    use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        let (published, len) =
+            unsafe { active_boxed_payload(machine, vmctx, reference, descriptor) }?;
+        let new_len = usize::try_from(new_len)
+            .ok()
+            .filter(|&candidate| candidate <= len)
+            .ok_or(RuntimeError::ArrayIndexOutOfBounds { index: new_len, len })?;
+        machine
+            .shrink_external_payload(published, ExternalStorageKind::BoxedArray, new_len)
+            .map_err(|error| storage_error(error, new_len as i64))
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => array_error(machine, error),
+    }
+}
+
+pub(super) unsafe extern "C" fn prepared_cas_boxed(
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+    index: i64,
+    expected: *mut u8,
+    value: *mut u8,
+    flag_output: *mut i64,
+    value_output: *mut *mut u8,
+) -> i32 {
+    use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        if flag_output.is_null() || value_output.is_null() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let (published, len) =
+            unsafe { active_boxed_payload(machine, vmctx, reference, descriptor) }?;
+        let checked_index = usize::try_from(index)
+            .ok()
+            .filter(|&candidate| candidate < len)
+            .ok_or(RuntimeError::ArrayIndexOutOfBounds { index, len })?;
+        let old = machine
+            .compare_exchange_external_element(published, checked_index, expected, value)
+            .map_err(|error| storage_error(error, index))?;
+        let (flag, observed) = if old == expected { (0, value) } else { (1, old) };
+        unsafe {
+            flag_output.write(flag);
+            value_output.write(observed);
+        }
         Ok(())
     })();
     match result {
@@ -437,6 +559,83 @@ pub(super) fn emit_sizeof_boxed(
     )])
 }
 
+pub(super) fn emit_freeze_boxed(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let host = declare_host(builder, pipeline, "prepared_freeze_boxed", 3)?;
+    let owner = builder
+        .ins()
+        .iconst(types::I64, descriptor.initial_header_word() as i64);
+    let call = builder.ins().call(host, &[vmctx, arguments[0], owner]);
+    let status = builder.inst_results(call)[0];
+    finish_checked_call(builder, status);
+    builder.declare_value_needs_stack_map(arguments[0]);
+    Ok(vec![arguments[0]])
+}
+
+pub(super) fn emit_shrink_boxed(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let host = declare_host(builder, pipeline, "prepared_shrink_boxed", 4)?;
+    let owner = builder
+        .ins()
+        .iconst(types::I64, descriptor.initial_header_word() as i64);
+    let call = builder
+        .ins()
+        .call(host, &[vmctx, arguments[0], owner, arguments[1]]);
+    let status = builder.inst_results(call)[0];
+    finish_checked_call(builder, status);
+    Ok(Vec::new())
+}
+
+pub(super) fn emit_cas_boxed(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    builder.declare_value_needs_stack_map(arguments[2]);
+    builder.declare_value_needs_stack_map(arguments[3]);
+    let host = declare_host(builder, pipeline, "prepared_cas_boxed", 8)?;
+    let owner = builder
+        .ins()
+        .iconst(types::I64, descriptor.initial_header_word() as i64);
+    let flag_output = output_slot(builder);
+    let value_output = output_slot(builder);
+    let call = builder.ins().call(
+        host,
+        &[
+            vmctx,
+            arguments[0],
+            owner,
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            flag_output,
+            value_output,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    finish_checked_call(builder, status);
+    let flag = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), flag_output, 0);
+    let value = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), value_output, 0);
+    builder.declare_value_needs_stack_map(value);
+    Ok(vec![flag, value])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +667,46 @@ mod tests {
             ),
         )
         .is_none());
+        for name in ["unsafeFreezeSmallArray#", "unsafeFreezeArray#"] {
+            assert!(matches!(
+                recognize(
+                    &primop(name),
+                    &signature(
+                        vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+                        vec![RuntimeRep::UnliftedRef]
+                    )
+                ),
+                Some(ArrayOperation::UnsafeFreezeBoxed)
+            ));
+        }
+        assert!(matches!(
+            recognize(
+                &primop("shrinkSmallMutableArray#"),
+                &signature(
+                    vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64), RuntimeRep::Void],
+                    vec![]
+                )
+            ),
+            Some(ArrayOperation::ShrinkSmallBoxed)
+        ));
+        for name in ["casSmallArray#", "casArray#"] {
+            assert!(matches!(
+                recognize(
+                    &primop(name),
+                    &signature(
+                        vec![
+                            RuntimeRep::UnliftedRef,
+                            RuntimeRep::Int(64),
+                            RuntimeRep::LiftedRef,
+                            RuntimeRep::LiftedRef,
+                            RuntimeRep::Void
+                        ],
+                        vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef]
+                    )
+                ),
+                Some(ArrayOperation::CasBoxed)
+            ));
+        }
         assert!(matches!(
             recognize(
                 &primop("writeArray#"),
