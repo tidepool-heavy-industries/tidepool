@@ -19,7 +19,6 @@ cranelift-native = "=0.129.1"
 tidepool-repr.workspace = true
 tidepool-bignum.workspace = true
 tidepool-heap.workspace = true
-tidepool-eval.workspace = true
 tidepool-bridge.workspace = true
 tidepool-effect.workspace = true
 frunk.workspace = true

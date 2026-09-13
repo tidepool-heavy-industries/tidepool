@@ -1,8 +1,4 @@
-//! MCP (Model Context Protocol) server library for Tidepool.
-//!
-//! Wraps `tidepool-runtime` in an MCP server exposing `run_haskell`,
-//! `compile_haskell`, and `eval` tools. Generic over effect handler stacks
-//! via `TidepoolMcpServer<H>`.
+//! Shared Haskell effect declarations, generated preambles, and output capture.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod validate;
@@ -33,180 +29,12 @@ pub use preamble::*;
 mod describe;
 pub use describe::*;
 
-mod dynamic;
-pub use dynamic::*;
-
 mod lib_isolate;
 pub use lib_isolate::*;
 
-pub mod resources;
-
-mod server;
-pub use server::*;
-
-pub mod server_common;
-
-mod transport;
-pub use transport::*;
-
 use parking_lot::Mutex;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-pub(crate) const EVAL_TIMEOUT_SECS: u64 = 600;
-
-/// Hard ceiling for the per-eval `timeout_secs` knob (seconds). The default is
-/// `EVAL_TIMEOUT_SECS`; a caller may raise the window up to this cap for
-/// deliberately heavy dev evals. Beyond it a runaway is likelier than an
-/// intentional compute, so the request is clamped here.
-const MAX_EVAL_TIMEOUT_SECS: u64 = 1800;
-
-/// Resolve the effective eval window (seconds) from an optional per-request
-/// override: `None` → the server default (`EVAL_TIMEOUT_SECS`); `Some(t)` → `t`
-/// clamped to `[1, MAX_EVAL_TIMEOUT_SECS]`.
-pub(crate) fn resolve_eval_timeout_secs(requested: Option<u64>) -> u64 {
-    if let Some(t) = requested {
-        return t.clamp(1, MAX_EVAL_TIMEOUT_SECS);
-    }
-    // Server default: `TIDEPOOL_EVAL_TIMEOUT_SECS` (set directly or bridged from
-    // config.toml) else the built-in `EVAL_TIMEOUT_SECS`.
-    std::env::var("TIDEPOOL_EVAL_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|t| t.clamp(1, MAX_EVAL_TIMEOUT_SECS))
-        .unwrap_or(EVAL_TIMEOUT_SECS)
-}
-pub(crate) const MAX_CONCURRENT_EVALS: usize = 4;
-pub(crate) const MAX_ORPHANED_EVALS: usize = 10;
-
-// ---------------------------------------------------------------------------
-// Request types
-// ---------------------------------------------------------------------------
-
-/// Request parameters for the `eval` tool.
-///
-/// Provide a single Haskell expression of type `M a`. The server wraps it in
-/// a full module with the effect stack type, LANGUAGE pragmas, and imports.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct EvalRequest {
-    /// A single Haskell EXPRESSION of type `M a` — its value is the eval's
-    /// result. Compose with `>>=`, `<&>`, `>=>`, point-free pipelines;
-    /// attach a trailing `where` for local bindings. For step-by-step
-    /// sequencing write an explicit `do` block (bare statement lines do
-    /// NOT parse). `pure x` only to wrap a pure value — never
-    /// `r <- f` followed by `pure r`.
-    pub code: String,
-    /// Additional Haskell imports, one per line — any canonical Haskell
-    /// import spelling minus the (optional) leading `import` keyword, e.g.
-    /// "Data.List (sort)", "qualified Data.Map.Strict as Map",
-    /// "Data.Map.Strict qualified as Map", "Data.Text as T",
-    /// "Prelude hiding (head)".
-    #[serde(default)]
-    pub imports: String,
-    /// Top-level definitions (functions, operators, type signatures) —
-    /// where your program's real structure lives; `code` is often one
-    /// call into these. Inline data declarations in `helpers` are fully
-    /// supported and right for eval-local types; promote types to a
-    /// `.tidepool/lib/<Mod>.hs` module (scaffold with `Explore.defMod`)
-    /// when they need to be REUSED across evals.
-    #[serde(default)]
-    pub helpers: String,
-    /// Optional JSON input injected as `input :: Aeson.Value` binding.
-    /// Also the PAYLOAD LANE: large or quote-heavy content (file bodies,
-    /// generated source) rides here as a real JSON value — no Haskell
-    /// string escaping — while `code` stays a short verb that consumes
-    /// `input` (e.g. `writeFile path src where src = case input of { String s -> s; _ -> "" }`).
-    #[serde(default)]
-    pub input: Option<serde_json::Value>,
-    /// Optional maximum character budget for paginated output.
-    /// Controls both `say` output and return value truncation.
-    /// Default: 4096.
-    #[serde(default)]
-    pub max_len: Option<u32>,
-    /// Optional eval window in SECONDS before the timeout-yield fires.
-    /// {{TIMEOUT_SECS_DOC}} Raise it for deliberately heavy
-    /// evals — e.g. a `cargo check`/`cargo build` driven through the `run`
-    /// effect — so they aren't cut off mid-compile. The runaway backstop is
-    /// unchanged: at the window an eval at an effect boundary parks as a
-    /// continuation, and a pure infinite loop is still detached.
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-}
-
-/// Sentinel spliced into the generated `EvalRequest` JSON schema's
-/// `timeout_secs` description (see the doc comment above) and replaced by
-/// [`eval_request_input_schema`] with the live `EVAL_TIMEOUT_SECS`/
-/// `MAX_EVAL_TIMEOUT_SECS` constants — a doc comment is a compile-time
-/// literal, so this is the one place the numbers can be interpolated instead
-/// of hand-copied (the drift that made the doc claim "600" while the real
-/// cap is 1800).
-const TIMEOUT_SECS_DOC_SENTINEL: &str = "{{TIMEOUT_SECS_DOC}}";
-
-/// The `eval` tool's JSON input schema, with the `timeout_secs` sentinel
-/// resolved to the actual timeout constants (formatted exactly once, here).
-pub fn eval_request_input_schema() -> Result<Arc<serde_json::Map<String, serde_json::Value>>, String>
-{
-    let schema = schemars::schema_for!(EvalRequest);
-    let json = serde_json::to_string(&schema)
-        .map_err(|e| format!("failed to serialize EvalRequest schema: {e}"))?;
-    let doc = format!("Default {EVAL_TIMEOUT_SECS}; clamped to [1, {MAX_EVAL_TIMEOUT_SECS}].");
-    let json = json.replace(TIMEOUT_SECS_DOC_SENTINEL, &doc);
-    match serde_json::from_str(&json)
-        .map_err(|e| format!("failed to reparse EvalRequest schema: {e}"))?
-    {
-        serde_json::Value::Object(o) => Ok(Arc::new(o)),
-        _ => Ok(Arc::new(serde_json::Map::new())),
-    }
-}
-
-/// Request parameters for the `resume` tool.
-///
-/// Used to continue a suspended evaluation that hit an `Ask` effect.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ResumeRequest {
-    /// The continuation ID returned by a suspended eval call.
-    pub continuation_id: String,
-    /// The response to feed back to the suspended Haskell program. May be
-    /// any JSON value; plain text is fine for schema-less asks. If the
-    /// suspension carried a `schema`, the response is validated against it
-    /// server-side BEFORE the continuation is consumed — pass the JSON
-    /// directly (not stringified). A failed validation returns the
-    /// violations and leaves the continuation alive for a corrected retry.
-    /// For PAUSED continuations (`"paused": true` suspensions) the
-    /// response is ignored and may be omitted — resuming just runs
-    /// another window.
-    #[serde(default)]
-    pub response: serde_json::Value,
-}
-
-/// Request parameters for the `abort` tool.
-///
-/// Terminates a suspended evaluation without answering it.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AbortRequest {
-    /// The continuation ID returned by a suspended eval call.
-    pub continuation_id: String,
-    /// Optional reason, surfaced to the computation as the error message
-    /// ("ask aborted by caller: <reason>").
-    #[serde(default)]
-    pub reason: Option<String>,
-}
-
-/// Request parameters for the `help` tool.
-///
-/// Returns reference content (the same text behind the `tidepool://…` resources)
-/// via a plain tool call, so any MCP client can reach it — not just ones that
-/// implement `resources/read`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct HelpRequest {
-    /// The topic to fetch. One of `guide`, `schema`, `edits`, `vocab`,
-    /// `patterns`, `effect <Name>` (e.g. `effect FsRead`), or `stdlib <Module>`
-    /// (e.g. `stdlib Tidepool.Prelude`). Omit (or pass empty) to list topics.
-    #[serde(default)]
-    pub topic: Option<String>,
-}
 
 // ---------------------------------------------------------------------------
 // Templating
@@ -532,22 +360,6 @@ impl tidepool_runtime::session::OutputSink for CapturedOutput {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_eval_request_string_code() {
-        let json = serde_json::json!({"code": "let x = 1\npure x"});
-        let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.code, "let x = 1\npure x");
-        assert!(req.imports.is_empty());
-        assert!(req.helpers.is_empty());
-    }
-
-    #[test]
-    fn test_eval_request_string_imports() {
-        let json = serde_json::json!({"code": "pure 42", "imports": "Data.List (sort)\nData.Char"});
-        let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.imports, "Data.List (sort)\nData.Char");
-    }
-
     /// Core module + shim module + orchestrate module + preamble concatenated:
     /// content assertions that predate the importable-module split (and the
     /// later Core/shim split) check against the union of all generated
@@ -757,97 +569,6 @@ mod tests {
         assert!(r.contains("__user = let {\n __b =\nsizeRank 9 <$> sized\n  where\n    sized ="));
     }
 
-    #[test]
-    fn test_eval_tool_description_includes_effects() {
-        let effects = vec![EffectDecl {
-            type_name: "Console",
-            description: "Print to console",
-            constructors: &["Print :: Text -> Console ()"],
-            type_defs: &[],
-            extra_imports: &[],
-            helpers: &["putStrLn :: Text -> M ()\nputStrLn = send . Print"],
-            type_params: &[],
-            default_row_args: &[],
-            prompt_card: None,
-            helpers_row_polymorphic: false,
-        }];
-        let desc = build_eval_tool_description(&effects);
-        // The slim floor lists each effect name + one-liner …
-        assert!(desc.contains("Console: Print to console"));
-        // … and points at the resources that carry the depth (per-effect
-        // constructors/helpers now live in `tidepool://effect/{name}`, not inline).
-        assert!(desc.contains("tidepool://effect/{name}"));
-        assert!(!desc.contains("Built-in helpers"));
-    }
-
-    /// The assembled eval description attests to the idealized surface: no
-    /// severity-halo vocabulary, no "JIT-safe" unsafe-zone implication, no
-    /// closed-world "prefer the unqualified" framing. A regression that
-    /// reintroduces a caution reads here as a failed assertion, not a review nit.
-    #[test]
-    fn eval_description_carries_no_caution_vocabulary() {
-        let desc = build_eval_tool_description(&standard_decls());
-        let lower = desc.to_lowercase();
-        for banned in [
-            "jit-safe",
-            "prefer the unqualified",
-            "do not",
-            "with care",
-            "use with caution",
-            "footgun",
-            "unsafe",
-        ] {
-            assert!(
-                !lower.contains(banned),
-                "assembled eval description must not contain caution vocabulary {banned:?}:\n{desc}"
-            );
-        }
-    }
-
-    /// The examples ARE the style guide: the primary `input` example is a typed
-    /// decode, and the effect-failure example binds the `Right`. If the modelled
-    /// idiom moves, these break — that is the point.
-    #[test]
-    fn eval_description_models_the_idealized_idiom() {
-        let desc = build_eval_tool_description(&standard_decls());
-        assert!(
-            desc.contains("deriving (Generic, FromJSON)"),
-            "primary input example must be a typed decode:\n{desc}"
-        );
-        assert!(
-            desc.contains("Right p <- run"),
-            "must model Either-returning effects:\n{desc}"
-        );
-        assert!(
-            desc.contains("Left (FsNotFound _)"),
-            "must model matching a specific Left:\n{desc}"
-        );
-        assert!(
-            desc.contains("recommended surface"),
-            "Prelude shadows get a positive attestation, not a JIT-safety hedge:\n{desc}"
-        );
-        assert!(
-            desc.contains("tidepool://capabilities"),
-            "the qualified-namespace list points at the live capabilities index:\n{desc}"
-        );
-        // #335: every verb in a modelled snippet returns `Either <Err> a`, so
-        // every snippet that USES a verb's result must unwrap it first. These
-        // two examples applied `<&> take limit` / `<&> (^? …)` straight to the
-        // `Either` and could not typecheck; pin the unwrapped spellings.
-        assert!(
-            desc.contains("Right hits <- grepGlob target \"**/*.rs\""),
-            "the input-lane example must bind grepGlob's Right, not map over the Either:\n{desc}"
-        );
-        assert!(
-            desc.contains("Right v <- llm (SObj"),
-            "the llm extraction example must bind the Right before applying optics:\n{desc}"
-        );
-        assert!(
-            !desc.contains("<&> take limit") && !desc.contains("p <&> (^? key"),
-            "no snippet may apply a pure function to an unwrapped Either result:\n{desc}"
-        );
-    }
-
     /// The per-effect descriptions are served verbatim as
     /// `tidepool://effect/{name}`, so their snippets are style guide too. Two
     /// things they must model, because following them otherwise does not
@@ -1039,17 +760,6 @@ data Console a where
         // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
         // harness Agent turn's roster adds Fork on top of this one.
         assert_eq!(decls[11].type_name, "RunLLMTurn");
-    }
-
-    #[test]
-    fn test_resume_request_parse() {
-        let json = serde_json::json!({
-            "continuation_id": "cont_1",
-            "response": "hello"
-        });
-        let req: ResumeRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.continuation_id, "cont_1");
-        assert_eq!(req.response, "hello");
     }
 
     #[test]
@@ -1387,28 +1097,6 @@ data Console a where
         assert!(http.constructors.iter().any(|c| c.contains("HttpGet")));
     }
 
-    #[test]
-    fn test_eval_request_helpers() {
-        let json = serde_json::json!({
-            "code": "pure 42",
-            "helpers": "foo :: Int -> Int\nfoo x = x + 1"
-        });
-        let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.helpers, "foo :: Int -> Int\nfoo x = x + 1");
-    }
-
-    #[test]
-    fn test_eval_request_input() {
-        let json = serde_json::json!({
-            "code": "pure 42",
-            "input": {"key": "value", "num": 123}
-        });
-        let req: EvalRequest = serde_json::from_value(json).unwrap();
-        assert!(req.input.is_some());
-        let input = req.input.unwrap();
-        assert_eq!(input["key"], "value");
-        assert_eq!(input["num"], 123);
-    }
     /// Snapshot test: blake3 of a fixed pair of strings must produce the same
     /// hash in every process. If DefaultHasher (randomly seeded) were
     /// accidentally reintroduced, this assertion fails because the computed

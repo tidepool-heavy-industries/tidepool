@@ -1,5 +1,5 @@
+use tidepool_bridge::Value;
 use tidepool_bridge::{get_resilient, BridgeError, FromCore, ToCore};
-use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 
 use crate::generated::actor::ActorReq;

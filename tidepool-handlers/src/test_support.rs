@@ -1,5 +1,5 @@
 use crate::*;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 

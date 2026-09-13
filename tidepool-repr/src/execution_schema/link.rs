@@ -14,8 +14,13 @@ pub fn link_program(
             .values
             .get(&declaration.identity)
             .ok_or_else(|| LinkError::MissingImport(declaration.identity.clone()))?;
-        let declared_signature = &prepared.signatures()[declaration.signature.0 as usize];
-        if &imported.signature != declared_signature
+        let wrong_entry = declaration.entry_signature.is_some_and(|signature| {
+            imported.entry_signature.as_ref() != Some(&prepared.signatures()[signature.0 as usize])
+        });
+        if imported.identity != declaration.identity
+            || imported.rep != declaration.rep
+            || wrong_entry
+            || (imported.rep != super::RuntimeRep::LiftedRef && imported.entry_signature.is_some())
             || (declaration.required_evaluated && !imported.evaluated)
             || declaration
                 .required_generation
@@ -68,7 +73,8 @@ mod tests {
             }],
             globals: vec![GlobalDecl {
                 identity: identity(),
-                signature: SignatureId(0),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: Some(SignatureId(0)),
                 required_evaluated: true,
                 required_generation,
             }],
@@ -96,10 +102,11 @@ mod tests {
     fn imports(generation: u64) -> MachineImports {
         let value = ImportedValue {
             identity: identity(),
-            signature: Signature {
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(Signature {
                 arguments: vec![],
                 results: vec![RuntimeRep::LiftedRef],
-            },
+            }),
             evaluated: true,
             generation,
         };
@@ -123,6 +130,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_import_identity_disagreeing_with_snapshot_key() {
+        let mut snapshot = imports(7);
+        snapshot
+            .values
+            .get_mut(&identity())
+            .unwrap()
+            .identity
+            .occurrence = "different".into();
+        assert!(matches!(
+            link_program(prepared(Some(7)), &snapshot),
+            Err(LinkError::ImportContract(_))
+        ));
+    }
+
+    #[test]
     fn static_import_accepts_current_snapshot_generation() {
         assert!(link_program(prepared(None), &imports(99)).is_ok());
     }
@@ -134,7 +156,9 @@ mod tests {
             .values
             .get_mut(&identity())
             .unwrap()
-            .signature
+            .entry_signature
+            .as_mut()
+            .unwrap()
             .results = vec![RuntimeRep::Int(64)];
         assert!(matches!(
             link_program(prepared(Some(7)), &wrong_signature),
@@ -156,7 +180,9 @@ mod tests {
             .values
             .get_mut(&identity())
             .unwrap()
-            .signature
+            .entry_signature
+            .as_mut()
+            .unwrap()
             .results = vec![RuntimeRep::Int(64)];
         assert!(matches!(
             link_program(prepared(Some(7)), &equal_id_different_shape),
@@ -168,8 +194,48 @@ mod tests {
             arguments: vec![],
             results: vec![RuntimeRep::LiftedRef],
         });
-        different_id_equal_shape.wire.globals[0].signature = SignatureId(1);
+        different_id_equal_shape.wire.globals[0].entry_signature = Some(SignatureId(1));
         assert!(link_program(different_id_equal_shape, &imports(7)).is_ok());
+    }
+
+    #[test]
+    fn raw_address_import_has_no_invented_callable_contract() {
+        let mut prepared = prepared(None);
+        prepared.wire.globals[0].rep = RuntimeRep::Address;
+        prepared.wire.globals[0].entry_signature = None;
+        let mut imports = imports(7);
+        let imported = imports.values.get_mut(&identity()).unwrap();
+        imported.rep = RuntimeRep::Address;
+        imported.entry_signature = None;
+        assert!(link_program(prepared, &imports).is_ok());
+    }
+
+    #[test]
+    fn unknown_lifted_entry_accepts_known_import_entry() {
+        let mut prepared = prepared(None);
+        prepared.wire.globals[0].entry_signature = None;
+        assert!(link_program(prepared, &imports(7)).is_ok());
+    }
+
+    #[test]
+    fn rejects_representation_mismatch_and_missing_required_entry() {
+        let mut wrong_rep = imports(7);
+        wrong_rep.values.get_mut(&identity()).unwrap().rep = RuntimeRep::Address;
+        assert!(matches!(
+            link_program(prepared(None), &wrong_rep),
+            Err(LinkError::ImportContract(_))
+        ));
+
+        let mut missing_entry = imports(7);
+        missing_entry
+            .values
+            .get_mut(&identity())
+            .unwrap()
+            .entry_signature = None;
+        assert!(matches!(
+            link_program(prepared(None), &missing_entry),
+            Err(LinkError::ImportContract(_))
+        ));
     }
 
     #[test]

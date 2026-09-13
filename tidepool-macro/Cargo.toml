@@ -20,6 +20,3 @@ tidepool-extract-cmd.workspace = true
 tidepool-extract-report.workspace = true
 tidepool-repr.workspace = true
 blake3.workspace = true
-
-[dev-dependencies]
-tidepool-eval.workspace = true

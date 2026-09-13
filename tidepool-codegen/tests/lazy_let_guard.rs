@@ -10,7 +10,7 @@
 //! These hand-built IR cases pin both halves independent of the Haskell
 //! extractor's fixtures, so extractor/fixture churn cannot silently erode
 //! this coverage.
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, Literal, PrimOpKind, TreeBuilder, VarId};
 use tidepool_testing::proptest::{
     build_table_for_expr, check_jit_vs_eval_captured, CapturedOutcome,

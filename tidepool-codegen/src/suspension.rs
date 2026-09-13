@@ -4,8 +4,8 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cranelift_module::FuncId;
+use tidepool_bridge::Value;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_eval::value::Value;
 use tidepool_repr::{DataConTable, PrincipalId};
 
 /// Identity of a continuation parked in one machine. Ids are never reused.

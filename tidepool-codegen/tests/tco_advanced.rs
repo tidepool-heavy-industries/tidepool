@@ -1,5 +1,5 @@
 use tidepool_codegen::jit_machine::JitEffectMachine;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;

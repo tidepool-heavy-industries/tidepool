@@ -2,19 +2,21 @@
 
 use tidepool_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
+    ResidentToolEndpoint,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
-use tidepool_eval::Value;
+use tidepool_bridge::Value;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
     ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
+use tidepool_tool::{ToolArguments, ToolInvocation};
 
 mod support;
 
@@ -143,33 +145,24 @@ async fn resident_eff_structured_introspection_is_reentrant_and_read_only() {
     else {
         panic!("actor retired before installing policy")
     };
-    let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(installation.policy)
-        .expect("MCP projection");
+    let policy = installation.policy;
 
-    let first_response = server
-        .dispatch_tool("inspect_api", serde_json::Map::new())
+    let first = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "inspect_api".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
         .await
         .expect("inspect through resident Eff");
-    assert!(
-        !first_response.is_error.unwrap_or(false),
-        "{first_response:?}"
-    );
-    let first = first_response
-        .structured_content
-        .clone()
-        .unwrap_or_else(|| panic!("missing structured output: {first_response:?}"));
-    let second_response = server
-        .dispatch_tool("inspect_api", serde_json::Map::new())
+    let second = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "inspect_api".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
         .await
         .expect("repeat inspection");
-    assert!(
-        !second_response.is_error.unwrap_or(false),
-        "{second_response:?}"
-    );
-    let second = second_response
-        .structured_content
-        .clone()
-        .unwrap_or_else(|| panic!("missing structured output: {second_response:?}"));
     assert_eq!(first, second, "inspection must not advance the scope");
     assert_eq!(first["localName"], "InspectOutput");
     assert_eq!(
@@ -201,8 +194,12 @@ async fn resident_eff_structured_introspection_is_reentrant_and_read_only() {
         Some(64)
     );
 
-    server
-        .dispatch_tool("finish_inspection", serde_json::Map::new())
+    policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "finish_inspection".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
         .await
         .expect("finish actor");
     task.await.expect("actor task");

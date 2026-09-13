@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Alternative, AlternativePattern, Atom, CheckedLayout, ConstructorId, DecodeLimits, Expr,
-    GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationId, ParseError,
+    Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorId, DecodeLimits,
+    Expr, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationId, ParseError,
     ProgramRequirements, RuntimeRep, ScalarLiteral, SignatureId, SymbolIdentity, ValueId, ValueRef,
     WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
@@ -15,6 +15,14 @@ struct ValueType {
 }
 
 type TypeEnv = BTreeMap<ValueId, ValueType>;
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum PatternKey {
+    Default,
+    Constructor(ConstructorId),
+    NullAddress,
+    Literal(RuntimeRep, Vec<u8>),
+}
 
 pub(super) fn validate_program(
     wire: &WireProgram,
@@ -101,6 +109,280 @@ mod tests {
     #[test]
     fn accepts_representative_valid_program() {
         validate_program(&valid_program(), &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn rubbish_preserves_representation_without_becoming_a_scalar() {
+        for rep in [
+            RuntimeRep::LiftedRef,
+            RuntimeRep::UnliftedRef,
+            RuntimeRep::Address,
+            RuntimeRep::Int(64),
+            RuntimeRep::Float(64),
+        ] {
+            let mut program = valid_program();
+            program.signatures[0].results = vec![rep];
+            let Group::NonRecursive(top) = &mut program.bindings[0] else {
+                unreachable!()
+            };
+            let HeapRhs::Thunk { body, .. } = &mut top.binding.rhs else {
+                unreachable!()
+            };
+            **body = Expr::Return(vec![Atom::Rubbish(rep)]);
+            validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        }
+    }
+
+    #[test]
+    fn rubbish_requires_one_valid_nonvoid_representation() {
+        for rep in [RuntimeRep::Void, RuntimeRep::Int(7)] {
+            let mut program = valid_program();
+            let Group::NonRecursive(top) = &mut program.bindings[0] else {
+                unreachable!()
+            };
+            let HeapRhs::Thunk { body, .. } = &mut top.binding.rhs else {
+                unreachable!()
+            };
+            **body = Expr::Return(vec![Atom::Rubbish(rep)]);
+            assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn null_address_is_not_a_managed_reference() {
+        let mut program = valid_program();
+        let Group::NonRecursive(top) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut top.binding.rhs else {
+            unreachable!()
+        };
+        **body = Expr::Return(vec![Atom::Scalar(ScalarLiteral::NullAddress)]);
+        program.signatures[0].results = vec![RuntimeRep::Address];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        program.signatures[0].results = vec![RuntimeRep::LiftedRef];
+        assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
+    }
+
+    #[test]
+    fn imported_atomic_values_keep_their_declared_representation() {
+        for rep in [
+            RuntimeRep::Address,
+            RuntimeRep::UnliftedRef,
+            RuntimeRep::Word(64),
+        ] {
+            let mut program = valid_program();
+            program.globals.push(crate::execution_schema::GlobalDecl {
+                identity: symbol("imported_value"),
+                rep,
+                entry_signature: None,
+                required_evaluated: true,
+                required_generation: None,
+            });
+            program.signatures[0].results = vec![rep];
+            let Group::NonRecursive(top) = &mut program.bindings[0] else {
+                unreachable!()
+            };
+            let HeapRhs::Thunk { body, .. } = &mut top.binding.rhs else {
+                unreachable!()
+            };
+            **body = Expr::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+            validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+            program.signatures[0].results = vec![RuntimeRep::LiftedRef];
+            assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_global_cannot_claim_a_callable_entry() {
+        let mut program = valid_program();
+        program.globals.push(crate::execution_schema::GlobalDecl {
+            identity: symbol("address"),
+            rep: RuntimeRep::Address,
+            entry_signature: Some(SignatureId(0)),
+            required_evaluated: true,
+            required_generation: None,
+        });
+        assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
+    }
+
+    fn integer(value: i64) -> Atom {
+        Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })
+    }
+
+    fn with_case(
+        kind: CaseKind,
+        reps: Vec<RuntimeRep>,
+        alternatives: Vec<Alternative>,
+    ) -> WireProgram {
+        let mut program = valid_program();
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        *body = Box::new(Expr::Case {
+            scrutinee: Box::new(Expr::Return(vec![integer(1)])),
+            binder: ValueId(1),
+            scrutinee_reps: reps,
+            kind,
+            alternatives,
+        });
+        program
+    }
+
+    fn default_alternative() -> Alternative {
+        Alternative {
+            pattern: AlternativePattern::Default,
+            binders: vec![],
+            body: Expr::Return(vec![integer(42)]),
+        }
+    }
+
+    #[test]
+    fn case_literals_must_match_authoritative_representation() {
+        let mut alternative = default_alternative();
+        alternative.pattern = AlternativePattern::Literal(ScalarLiteral::Word {
+            bits: 32,
+            bytes: 1_u32.to_be_bytes().to_vec(),
+        });
+        let program = with_case(
+            CaseKind::Primitive(RuntimeRep::Int(64)),
+            vec![RuntimeRep::Int(64)],
+            vec![alternative],
+        );
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidSignature(_))
+        ));
+    }
+
+    #[test]
+    fn refined_primitive_case_does_not_claim_exhaustiveness() {
+        let mut alternative = default_alternative();
+        alternative.pattern = AlternativePattern::Literal(ScalarLiteral::Int {
+            bits: 64,
+            bytes: 1_i64.to_be_bytes().to_vec(),
+        });
+        let program = with_case(
+            CaseKind::Primitive(RuntimeRep::Int(64)),
+            vec![RuntimeRep::Int(64)],
+            vec![alternative],
+        );
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn multivalue_case_binds_components_and_not_the_dead_case_binder() {
+        let mut alternative = default_alternative();
+        alternative.binders = vec![ValueId(2)];
+        alternative.body = Expr::Return(vec![Atom::Ref(ValueRef::Local(ValueId(2)))]);
+        let mut program = with_case(
+            CaseKind::MultiValue,
+            vec![RuntimeRep::Int(64)],
+            vec![alternative],
+        );
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        let Expr::Case { alternatives, .. } = body.as_mut() else {
+            unreachable!()
+        };
+        alternatives[0].body = Expr::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidScope(_))
+        ));
+    }
+
+    #[test]
+    fn polymorphic_case_requires_one_default() {
+        let valid = with_case(
+            CaseKind::Polymorphic,
+            vec![RuntimeRep::Int(64)],
+            vec![default_alternative()],
+        );
+        validate_program(&valid, &requirements(), DecodeLimits::default()).unwrap();
+        let invalid = with_case(
+            CaseKind::Polymorphic,
+            vec![RuntimeRep::Int(64)],
+            vec![default_alternative(), default_alternative()],
+        );
+        assert!(validate_program(&invalid, &requirements(), DecodeLimits::default()).is_err());
+    }
+
+    #[test]
+    fn algebraic_cases_reject_mixed_families_and_literal_patterns() {
+        let mut program = with_case(
+            CaseKind::Algebraic(symbol("T")),
+            vec![RuntimeRep::LiftedRef],
+            vec![Alternative {
+                pattern: AlternativePattern::Constructor(ConstructorId(0)),
+                binders: vec![],
+                body: Expr::Return(vec![integer(42)]),
+            }],
+        );
+        program.constructors.push(ConstructorDecl {
+            identity: symbol("C"),
+            family: symbol("Other"),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        let Expr::Case { scrutinee, .. } = body.as_mut() else {
+            unreachable!()
+        };
+        *scrutinee = Box::new(Expr::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        });
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+        program.constructors[0].family = symbol("T");
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        let Expr::Case { alternatives, .. } = body.as_mut() else {
+            unreachable!()
+        };
+        alternatives.push(Alternative {
+            pattern: AlternativePattern::Literal(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 0_i64.to_be_bytes().to_vec(),
+            }),
+            binders: vec![],
+            body: Expr::Return(vec![integer(42)]),
+        });
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidSignature(_))
+        ));
     }
 
     #[test]
@@ -343,6 +625,7 @@ mod tests {
         program.constructors.push(ConstructorDecl {
             identity: symbol("C"),
             family: symbol("T"),
+            result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![RuntimeRep::Int(8), RuntimeRep::LiftedRef],
             strict_fields: vec![true, false],
             layout: CheckedLayout {
@@ -412,7 +695,15 @@ impl<'a> Validator<'a> {
                     global.identity
                 )));
             }
-            self.check_signature(global.signature)?;
+            self.check_rep(global.rep)?;
+            if let Some(signature) = global.entry_signature {
+                self.check_signature(signature)?;
+                if global.rep != RuntimeRep::LiftedRef {
+                    return Err(ParseError::InvalidSignature(
+                        "only a lifted global can have a callable entry".into(),
+                    ));
+                }
+            }
         }
 
         let mut constructor_symbols = BTreeSet::new();
@@ -420,6 +711,14 @@ impl<'a> Validator<'a> {
             self.bump_work(constructor.field_reps.len() + 1)?;
             self.check_symbol(&constructor.identity)?;
             self.check_symbol(&constructor.family)?;
+            if !matches!(
+                constructor.result_rep,
+                RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
+            ) {
+                return Err(ParseError::InvalidSignature(
+                    "heap constructor requires a managed result representation".into(),
+                ));
+            }
             if !constructor_symbols.insert(constructor.identity.clone()) {
                 return Err(ParseError::DuplicateDefinition(format!(
                     "constructor {:?}",
@@ -527,21 +826,23 @@ impl<'a> Validator<'a> {
 
     fn binding_type(&self, binding: &HeapBinding) -> ValueType {
         match binding.rhs {
+            HeapRhs::Bytes(_) => ValueType {
+                rep: RuntimeRep::Address,
+                callable: None,
+                components: 1,
+            },
             HeapRhs::Function { signature, .. } => ValueType {
                 rep: RuntimeRep::LiftedRef,
                 callable: Some(signature),
                 components: 1,
             },
-            HeapRhs::Thunk { signature, .. } => {
-                let results = &self.wire.signatures[signature.0 as usize].results;
-                ValueType {
-                    rep: results.first().copied().unwrap_or(RuntimeRep::Void),
-                    callable: Some(signature),
-                    components: results.len(),
-                }
-            }
-            HeapRhs::Constructor { .. } => ValueType {
+            HeapRhs::Thunk { signature, .. } => ValueType {
                 rep: RuntimeRep::LiftedRef,
+                callable: Some(signature),
+                components: 1,
+            },
+            HeapRhs::Constructor { constructor, .. } => ValueType {
+                rep: self.wire.constructors[constructor.0 as usize].result_rep,
                 callable: None,
                 components: 1,
             },
@@ -555,6 +856,7 @@ impl<'a> Validator<'a> {
         depth: usize,
     ) -> Result<(), ParseError> {
         match &binding.rhs {
+            HeapRhs::Bytes(_) => {}
             HeapRhs::Function {
                 signature,
                 parameters,
@@ -633,7 +935,7 @@ impl<'a> Validator<'a> {
         let actual = match expression {
             Expr::Return(atoms) => self.typed_atom_reps(atoms, values)?,
             Expr::Enter { callee, signature } => self
-                .check_atom_callable(callee, *signature, values)?
+                .check_atom_callable(callee, *signature, values, true)?
                 .results
                 .clone(),
             Expr::Call {
@@ -642,7 +944,7 @@ impl<'a> Validator<'a> {
                 arguments,
             } => {
                 let signature = self
-                    .check_atom_callable(callee, *signature, values)?
+                    .check_atom_callable(callee, *signature, values, false)?
                     .clone();
                 self.check_typed_atoms(arguments, values, &signature.arguments, "call arguments")?;
                 signature.results
@@ -668,17 +970,18 @@ impl<'a> Validator<'a> {
             } => {
                 let reps = self.constructor(*constructor)?.field_reps.clone();
                 self.check_typed_atoms(fields, values, &reps, "constructor fields")?;
-                vec![RuntimeRep::LiftedRef]
+                vec![self.constructor(*constructor)?.result_rep]
             }
             Expr::Case {
                 scrutinee,
                 binder,
-                results,
+                scrutinee_reps,
+                kind,
                 alternatives,
             } => {
-                self.check_typed_expr(scrutinee, values, joins, Some(results), depth + 1)?;
+                self.check_typed_expr(scrutinee, values, joins, Some(scrutinee_reps), depth + 1)?;
                 let mut case_scope = values.clone();
-                if let [rep] = results.as_slice() {
+                if let ([rep], false) = (scrutinee_reps.as_slice(), *kind == CaseKind::MultiValue) {
                     case_scope.insert(
                         *binder,
                         ValueType {
@@ -691,21 +994,23 @@ impl<'a> Validator<'a> {
                 let mut result = None;
                 for alternative in alternatives {
                     let mut scope = case_scope.clone();
-                    if let AlternativePattern::Constructor(id) = alternative.pattern {
-                        for (binder, rep) in alternative
-                            .binders
-                            .iter()
-                            .zip(self.constructor(id)?.field_reps.iter().copied())
-                        {
-                            scope.insert(
-                                *binder,
-                                ValueType {
-                                    rep,
-                                    callable: None,
-                                    components: 1,
-                                },
-                            );
+                    let field_reps = match (&alternative.pattern, kind) {
+                        (_, CaseKind::MultiValue) => scrutinee_reps.as_slice(),
+                        (AlternativePattern::Constructor(id), _) => {
+                            &self.constructor(*id)?.field_reps
                         }
+                        _ => &[],
+                    };
+                    for (binder, rep) in alternative.binders.iter().zip(field_reps.iter().copied())
+                    {
+                        scope.insert(
+                            *binder,
+                            ValueType {
+                                rep,
+                                callable: None,
+                                components: 1,
+                            },
+                        );
                     }
                     let reps = self.check_typed_expr(
                         &alternative.body,
@@ -899,12 +1204,9 @@ impl<'a> Validator<'a> {
     fn atom_type(&mut self, atom: &Atom, values: &TypeEnv) -> Result<ValueType, ParseError> {
         let rep = match atom {
             Atom::Ref(reference) => return self.value_ref_type(reference, values),
-            Atom::Scalar(ScalarLiteral::Int { bits, .. }) => RuntimeRep::Int(*bits),
-            Atom::Scalar(ScalarLiteral::Word { bits, .. }) => RuntimeRep::Word(*bits),
-            Atom::Scalar(ScalarLiteral::Float { bits, .. }) => RuntimeRep::Float(*bits),
-            Atom::Scalar(ScalarLiteral::Char(_)) => RuntimeRep::Word(32),
-            Atom::Scalar(ScalarLiteral::Bytes(_)) => RuntimeRep::Address,
+            Atom::Scalar(literal) => literal.rep(),
             Atom::Void => RuntimeRep::Void,
+            Atom::Rubbish(rep) => *rep,
         };
         Ok(ValueType {
             rep,
@@ -934,11 +1236,14 @@ impl<'a> Validator<'a> {
                 }
                 Ok(value)
             }
-            ValueRef::Global(id) => Ok(ValueType {
-                rep: RuntimeRep::LiftedRef,
-                callable: Some(self.global(*id)?.signature),
-                components: 1,
-            }),
+            ValueRef::Global(id) => {
+                let global = self.global(*id)?;
+                Ok(ValueType {
+                    rep: global.rep,
+                    callable: global.entry_signature,
+                    components: 1,
+                })
+            }
         }
     }
 
@@ -947,14 +1252,40 @@ impl<'a> Validator<'a> {
         atom: &Atom,
         declared: SignatureId,
         values: &TypeEnv,
+        enter_only: bool,
     ) -> Result<&'b super::Signature, ParseError> {
         let declared_shape = self.signature(declared)?.clone();
         let ty = self.atom_type(atom, values)?;
+        if enter_only && !declared_shape.arguments.is_empty() {
+            return Err(ParseError::InvalidSignature(
+                "entry demand cannot supply function arguments".into(),
+            ));
+        }
         if let Some(actual) = ty.callable {
-            if self.signature(actual)? != &declared_shape {
+            let actual = self.signature(actual)?;
+            let common = actual.arguments.len().min(declared_shape.arguments.len());
+            if actual.arguments[..common] != declared_shape.arguments[..common] {
                 return Err(ParseError::InvalidSignature(
-                    "callee declaration does not match value signature".into(),
+                    "application prefix disagrees with entry signature".into(),
                 ));
+            }
+            match declared_shape.arguments.len().cmp(&actual.arguments.len()) {
+                std::cmp::Ordering::Less if declared_shape.results != [RuntimeRep::LiftedRef] => {
+                    return Err(ParseError::InvalidSignature(
+                        "partial application must return a function reference".into(),
+                    ));
+                }
+                std::cmp::Ordering::Equal if declared_shape.results != actual.results => {
+                    return Err(ParseError::InvalidSignature(
+                        "saturated application result disagrees with entry signature".into(),
+                    ));
+                }
+                std::cmp::Ordering::Greater if actual.results != [RuntimeRep::LiftedRef] => {
+                    return Err(ParseError::InvalidSignature(
+                        "oversaturation requires a returned function reference".into(),
+                    ));
+                }
+                _ => {}
             }
         } else if ty.rep != RuntimeRep::LiftedRef
             && (!declared_shape.arguments.is_empty()
@@ -997,6 +1328,7 @@ impl<'a> Validator<'a> {
     ) -> Result<(), ParseError> {
         self.bump_node(depth)?;
         match &binding.rhs {
+            HeapRhs::Bytes(bytes) => self.bump_work(bytes.len()),
             HeapRhs::Function {
                 signature,
                 parameters,
@@ -1081,21 +1413,29 @@ impl<'a> Validator<'a> {
             Expr::Case {
                 scrutinee,
                 binder,
-                results,
+                scrutinee_reps,
+                kind,
                 alternatives,
             } => {
                 self.check_expr(scrutinee, values, joins, depth + 1)?;
-                for rep in results {
+                for rep in scrutinee_reps {
                     self.check_rep(*rep)?;
                 }
                 let mut scope = values.clone();
-                if !scope.insert(*binder) {
+                if *kind != CaseKind::MultiValue && !scope.insert(*binder) {
                     return Err(ParseError::DuplicateDefinition(format!(
                         "case binder {:?}",
                         binder
                     )));
                 }
-                self.check_alternatives(alternatives, &scope, joins, depth + 1)
+                self.check_alternatives(
+                    kind,
+                    scrutinee_reps,
+                    alternatives,
+                    &scope,
+                    joins,
+                    depth + 1,
+                )
             }
             Expr::Let { bindings, body } => {
                 let scope = self.check_local_group(bindings, values, depth + 1)?;
@@ -1230,6 +1570,8 @@ impl<'a> Validator<'a> {
 
     fn check_alternatives(
         &mut self,
+        kind: &CaseKind,
+        scrutinee_reps: &[RuntimeRep],
         alternatives: &[Alternative],
         values: &BTreeSet<ValueId>,
         joins: &BTreeMap<JoinId, SignatureId>,
@@ -1237,6 +1579,44 @@ impl<'a> Validator<'a> {
     ) -> Result<(), ParseError> {
         if alternatives.is_empty() {
             return Err(ParseError::Malformed("case has no alternatives".into()));
+        }
+        match kind {
+            CaseKind::Algebraic(family) => {
+                self.check_symbol(family)?;
+                if !matches!(
+                    scrutinee_reps,
+                    [RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef]
+                ) {
+                    return Err(ParseError::InvalidSignature(
+                        "algebraic case requires a managed reference".into(),
+                    ));
+                }
+            }
+            CaseKind::Primitive(rep) => {
+                self.check_rep(*rep)?;
+                if matches!(
+                    rep,
+                    RuntimeRep::Void | RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
+                ) || scrutinee_reps != [*rep]
+                {
+                    return Err(ParseError::InvalidSignature(
+                        "primitive case scrutinee representation mismatch".into(),
+                    ));
+                }
+            }
+            CaseKind::MultiValue | CaseKind::Polymorphic => {
+                if alternatives.len() != 1 || alternatives[0].pattern != AlternativePattern::Default
+                {
+                    return Err(ParseError::Malformed(
+                        "multi-value and polymorphic cases require one DEFAULT alternative".into(),
+                    ));
+                }
+                if *kind == CaseKind::MultiValue && scrutinee_reps.contains(&RuntimeRep::Void) {
+                    return Err(ParseError::InvalidSignature(
+                        "multi-value case contains a nonphysical Void component".into(),
+                    ));
+                }
+            }
         }
         self.check_table_len(alternatives.len())?;
         let mut patterns = BTreeSet::new();
@@ -1251,15 +1631,38 @@ impl<'a> Validator<'a> {
                         ));
                     }
                     has_default = true;
-                    "default".to_owned()
+                    PatternKey::Default
                 }
                 AlternativePattern::Constructor(id) => {
-                    self.constructor(*id)?;
-                    format!("constructor:{:?}", id)
+                    let constructor = self.constructor(*id)?;
+                    if !matches!(kind, CaseKind::Algebraic(family) if *family == constructor.family)
+                    {
+                        return Err(ParseError::InvalidLayout(
+                            "constructor alternative disagrees with case family or kind".into(),
+                        ));
+                    }
+                    PatternKey::Constructor(*id)
                 }
                 AlternativePattern::Literal(literal) => {
                     self.check_scalar(literal)?;
-                    format!("literal:{literal:?}")
+                    if !matches!(kind, CaseKind::Primitive(rep) if *rep == literal.rep()) {
+                        return Err(ParseError::InvalidSignature(
+                            "literal alternative disagrees with case representation or kind".into(),
+                        ));
+                    }
+                    let bytes = match literal {
+                        ScalarLiteral::Int { bytes, .. }
+                        | ScalarLiteral::Word { bytes, .. }
+                        | ScalarLiteral::Float { bytes, .. }
+                        | ScalarLiteral::Bytes(bytes) => bytes.clone(),
+                        ScalarLiteral::Char(value) => value.to_be_bytes().to_vec(),
+                        ScalarLiteral::NullAddress => vec![],
+                    };
+                    if matches!(literal, ScalarLiteral::NullAddress) {
+                        PatternKey::NullAddress
+                    } else {
+                        PatternKey::Literal(literal.rep(), bytes)
+                    }
                 }
             };
             if !patterns.insert(key) {
@@ -1267,8 +1670,9 @@ impl<'a> Validator<'a> {
                     "case alternative pattern".into(),
                 ));
             }
-            let expected = match alternative.pattern {
-                AlternativePattern::Constructor(id) => self.constructor(id)?.field_reps.len(),
+            let expected = match (&alternative.pattern, kind) {
+                (_, CaseKind::MultiValue) => scrutinee_reps.len(),
+                (AlternativePattern::Constructor(id), _) => self.constructor(*id)?.field_reps.len(),
                 _ => 0,
             };
             if alternative.binders.len() != expected {
@@ -1370,12 +1774,17 @@ impl<'a> Validator<'a> {
                 Ok(())
             }
             Atom::Scalar(literal) => self.check_scalar(literal),
+            Atom::Rubbish(RuntimeRep::Void) => Err(ParseError::Malformed(
+                "rubbish must have one non-void representation after unarisation".into(),
+            )),
+            Atom::Rubbish(rep) => self.check_rep(*rep),
             Atom::Ref(ValueRef::Local(_)) | Atom::Void => Ok(()),
         }
     }
 
     fn check_scalar(&mut self, literal: &ScalarLiteral) -> Result<(), ParseError> {
         match literal {
+            ScalarLiteral::NullAddress => Ok(()),
             ScalarLiteral::Int { bits, bytes } | ScalarLiteral::Word { bits, bytes } => {
                 self.check_integer_width(*bits, bytes)
             }

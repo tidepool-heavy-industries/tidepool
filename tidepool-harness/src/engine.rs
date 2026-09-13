@@ -51,7 +51,7 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::{CoreExpr, DataConTable};

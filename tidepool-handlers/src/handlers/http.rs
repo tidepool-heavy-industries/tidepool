@@ -303,7 +303,7 @@ impl HttpHandler {
         // Count the BRIDGED node size (what the machine's cap measures), not the
         // serde tree — a JSON object bridges several-fold larger, so a serde-side
         // count under-reports and lets object-heavy responses abort.
-        let nodes = tidepool_eval::json::bridged_node_count(&v);
+        let nodes = tidepool_bridge::json_builder::bridged_node_count(&v);
         if nodes > MAX_RESPONSE_NODES {
             return Err(HttpError::HttpTooLarge(nodes as i64));
         }

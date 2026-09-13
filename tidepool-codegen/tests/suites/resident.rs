@@ -18,8 +18,6 @@ mod binding_table_realm_isolation;
 mod binding_tip_lazy_sharing;
 #[path = "../converge_proof.rs"]
 mod converge_proof;
-#[path = "../error_binding_guard.rs"]
-mod error_binding_guard;
 #[path = "../m5_lifetime_stress.rs"]
 mod m5_lifetime_stress;
 #[path = "../populated_session_second_fragment.rs"]

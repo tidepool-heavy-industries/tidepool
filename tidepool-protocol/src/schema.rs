@@ -915,7 +915,7 @@ pub enum RustBinding {
     /// Derived mechanically from the Haskell type: `Text`→`String`,
     /// `Int`→`i64`, `Bool`→`bool`, `[Text]`→`Vec<String>`.
     Derived,
-    /// `tidepool_eval::value::Value` — a raw core value, interpreted by the
+    /// `tidepool_bridge::Value` — a materialized core value, interpreted by the
     /// method using `cx`'s table.
     CoreValue,
     /// `crate::effect_glue::JsonArg` — pre-converted to `serde_json::Value` at
@@ -939,7 +939,7 @@ impl RustBinding {
     #[must_use]
     pub fn rust_type(self, ty: &HsType, whose: &str) -> String {
         match self {
-            RustBinding::CoreValue => "tidepool_eval::value::Value".to_string(),
+            RustBinding::CoreValue => "tidepool_bridge::Value".to_string(),
             RustBinding::JsonValue => "crate::effect_glue::JsonArg".to_string(),
             RustBinding::Bridged(n) => format!("tidepool_bridge_effects::{n}"),
             RustBinding::Path(p) => (*p).to_string(),

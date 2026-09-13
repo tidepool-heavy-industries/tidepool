@@ -1,18 +1,16 @@
 //! Derive human-facing effect documentation from [`EffectDecl`] — the single
-//! source consumed by three tool-description surfaces:
+//! source consumed by resident interaction surfaces:
 //!
-//! 1. the `eval` tool description ([`crate::build_eval_tool_description`]),
-//! 2. the repl `session_run` tool description (`tidepool-repl`'s
+//! 1. the repl `session_run` tool description (`tidepool-repl`'s
 //!    `build_tool_description`), and
-//! 3. the repl `:browse` meta-command (`tidepool-repl`'s `browse_effects`).
+//! 2. the repl `:browse` meta-command (`tidepool-repl`'s `browse_effects`).
 //!
 //! HAZARD: do not hand-roll a fourth per-effect enumeration or sig parser in
-//! a new surface — the three consumers above previously each maintained (or
+//! a new surface — these consumers previously each maintained (or
 //! reimplemented) their own and drifted from each other. The per-effect
 //! enumerations DERIVE from the decls, and the sig/first-sentence parsers
 //! live here once. Only the framing prose around the enumeration stays
-//! hand-written per surface (it differs: eval points at
-//! `tidepool://effect/{name}`, the repl points at `:browse`).
+//! hand-written per surface (for example, the repl points at `:browse`).
 
 use crate::effect_decls::EffectDecl;
 use crate::effect_defs::substrate_marker;

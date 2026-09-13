@@ -95,11 +95,8 @@ if [ "$NO_SERVERS" -eq 0 ]; then
   # a fresh resolution can fail on yanked-but-locked deps (seen live:
   # arrayref 0.3.x) and would silently deploy different dep versions than the
   # tree that passed the test suite.
-  step "Step 3: cargo install tidepool (eval server + Shoal + embedded Haskell)"
+  step "Step 3: cargo install tidepool (Shoal + embedded Haskell)"
   run cargo install --locked --path tidepool
-
-  step "Step 4: cargo install tidepool-repl"
-  run cargo install --locked --path tidepool-repl
 else
   echo; echo "(skipped: --no-servers)"
 fi

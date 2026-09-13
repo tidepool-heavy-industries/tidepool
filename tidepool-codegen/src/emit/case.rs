@@ -474,7 +474,7 @@ fn emit_lit_dispatch(
                         .brif(eq, alt_block, &[], next_check_block, &[]);
                 }
                 Literal::LitString(_) | Literal::LitByteArray(_) => {
-                    return Err(EmitError::NotYetImplemented("LitString in Case".into()))
+                    return Err(EmitError::NotYetImplemented("LitString in Case".into()));
                 }
             }
         }
@@ -576,7 +576,7 @@ mod tests {
         let mut machine = JitEffectMachine::compile(&b.build(), &table, 65536).unwrap();
         assert!(matches!(
             machine.run_pure().unwrap(),
-            tidepool_eval::Value::Lit(Literal::LitInt(42))
+            tidepool_bridge::Value::Lit(Literal::LitInt(42))
         ));
     }
 
@@ -654,7 +654,7 @@ mod tests {
                 JitEffectMachine::compile(&b.build(), &DataConTable::new(), 65536).unwrap();
             assert!(matches!(
                 machine.run_pure().unwrap(),
-                tidepool_eval::Value::Lit(Literal::LitInt(42))
+                tidepool_bridge::Value::Lit(Literal::LitInt(42))
             ));
         }
     }

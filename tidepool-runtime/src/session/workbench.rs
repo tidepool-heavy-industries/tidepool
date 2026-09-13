@@ -74,7 +74,7 @@ pub fn workbench_json_to_haskell(value: &serde_json::Value) -> String {
         }
         serde_json::Value::Number(value) => {
             let (coefficient, exponent) =
-                tidepool_eval::shapes::parse_decimal_token(&value.to_string());
+                tidepool_bridge::shapes::parse_decimal_token(&value.to_string());
             format!("Aeson.Number (Aeson.scientific ({coefficient}) ({exponent}))")
         }
         serde_json::Value::String(value) => {

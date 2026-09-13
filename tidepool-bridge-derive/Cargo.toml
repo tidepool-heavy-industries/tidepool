@@ -20,5 +20,4 @@ proc-macro2.workspace = true
 [dev-dependencies]
 tidepool-bridge.workspace = true
 tidepool-repr.workspace = true
-tidepool-eval.workspace = true
 tidepool-testing.workspace = true

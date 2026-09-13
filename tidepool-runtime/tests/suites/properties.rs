@@ -7,7 +7,5 @@ mod proptest_gc_pressure;
 mod proptest_haskell_pipeline;
 #[path = "../proptest_jit_vs_eval.rs"]
 mod proptest_jit_vs_eval;
-#[path = "../proptest_letrec.rs"]
-mod proptest_letrec;
 #[path = "../proptest_render_json.rs"]
 mod proptest_render_json;

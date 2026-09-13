@@ -228,7 +228,7 @@ fn no_cancel_means_normal_completion() {
         .run_pure()
         .expect("terminating program must succeed");
     match result {
-        tidepool_eval::value::Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 99),
+        tidepool_bridge::Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 99),
         other => panic!("expected Lit(Int(99)), got {:?}", other),
     }
 
@@ -512,7 +512,7 @@ fn reset_enables_reuse_after_cancellation() {
     handle2.reset();
     let result = machine2.run_pure().expect("second run must succeed");
     match result {
-        tidepool_eval::value::Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 7),
+        tidepool_bridge::Value::Lit(Literal::LitInt(n)) => assert_eq!(n, 7),
         other => panic!("expected Lit(Int(7)), got {:?}", other),
     }
 }

@@ -17,6 +17,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+pub use tidepool_bridge::Value;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 use tidepool_codegen::jit_machine::JitEffectMachine;
 pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
@@ -24,7 +25,6 @@ pub use tidepool_codegen::suspension::ResumeInput;
 use tidepool_codegen::suspension::{ContinuationId, ParkedOutcome, RealmId, SuspensionRun};
 pub use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::{CoreExpr, DataConTable};
 
@@ -267,7 +267,7 @@ pub enum SuspendableRun {
         /// Registry identity of the parked continuation.
         continuation: ContinuationId,
         /// The bridged `Ask` request value.
-        request: tidepool_eval::value::Value,
+        request: tidepool_bridge::Value,
     },
 }
 
@@ -283,7 +283,7 @@ pub enum ResumedRun {
     /// another [`resume_suspended_turn`].
     Suspended {
         continuation: ContinuationId,
-        request: tidepool_eval::value::Value,
+        request: tidepool_bridge::Value,
     },
 }
 

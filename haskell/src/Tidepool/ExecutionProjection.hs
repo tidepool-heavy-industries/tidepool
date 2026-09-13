@@ -3,6 +3,7 @@ module Tidepool.ExecutionProjection
   , ProjectionError(..)
   , projectPrepared
   , projectPreparedTarget
+  , projectLiteralAtomForTest
   ) where
 
 import Control.Monad (foldM, forM)
@@ -18,18 +19,20 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (primOpOcc)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
-  ( DataCon, dataConName, dataConRepArgTys, dataConRepStrictness
-  , dataConTyCon, isMarkedStrict )
-import GHC.Core.TyCo.Rep (Scaled(..), Type)
+  ( DataCon, dataConName, dataConRepArgTys
+  , dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
+import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCon qualified as GHC
-import GHC.Core.Type (splitFunTys)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
+import GHC.StgToCmm.Closure (importedIdLFInfo)
+import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.RepType (typePrimRep_maybe)
+import GHC.Types.RepType
+  (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Var (Id, varName, varType)
 import GHC.Types.Var.Set (dVarSetElems)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
@@ -67,6 +70,11 @@ data PState = PState
   }
 
 type P a = StateT PState (Either ProjectionError) a
+
+-- | Narrow test seam for GHC literals which cannot be written in source Haskell.
+projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
+projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
+  (PState 0 0 [] [] [] [] [] [] [] [] [] machine Map.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -145,9 +153,8 @@ projectModule = mapM (projectTop . fst) . pmBindings
 projectTop :: CgStgTopBinding -> P (Group TopBinding)
 projectTop (StgTopStringLit binder bytes) = do
   identity <- requireValue binder
-  signature <- internSignature =<< signatureForType (varType binder)
   pure (NonRecursive (TopBinding (idSymbol "value" binder)
-    (HeapBinding identity (Thunk signature Memoize [] (Return [Scalar (BytesLiteral bytes)])))))
+    (HeapBinding identity (Bytes bytes))))
 projectTop (StgTopLifted (StgNonRec binder rhs)) = NonRecursive <$> projectTopPair binder rhs
 projectTop (StgTopLifted (StgRec pairs)) = Recursive <$> mapM (uncurry projectTopPair) pairs
 
@@ -180,15 +187,18 @@ projectExpr (StgApp function args) = do
     Just join -> pure (Jump join projectedArgs)
     Nothing -> do
       callee <- Ref <$> projectReference function
-      signature <- internSignature =<< signatureForType (varType function)
+      signature <- internSignature =<< signatureForApplication function args
       pure (if null args then Enter callee signature else Call callee signature projectedArgs)
-projectExpr (StgLit literal) = Return . pure . Scalar <$> projectLiteral literal
-projectExpr (StgConApp con _ args _) = Construct <$> internConstructor con <*> mapM projectArg args
+projectExpr (StgLit literal) = Return . pure <$> projectLiteralAtom literal
+projectExpr (StgConApp con _ args _)
+  | isUnboxedTupleDataCon con = Return <$> mapM projectArg args
+  | otherwise = Construct <$> internConstructor con <*> mapM projectArg args
 projectExpr (StgOpApp op args resultType) = do
   signature <- internSignature =<< signatureForArgs args resultType
   Operation <$> internOperation op signature <*> mapM projectArg args
-projectExpr (StgCase scrutinee binder _ alts) = Case <$> projectExpr scrutinee
-  <*> ensureValue binder <*> repsForType (varType binder) <*> mapM projectAlt alts
+projectExpr (StgCase scrutinee binder altType alts) = Case <$> projectExpr scrutinee
+  <*> ensureValue binder <*> repsForType (varType binder)
+  <*> projectCaseKind altType <*> mapM (projectAlt altType) alts
 projectExpr (StgLet _ binding body) = do
   mapM_ ensureValue (bindingBinders binding)
   Let <$> projectLocalGroup binding <*> projectExpr body
@@ -197,8 +207,17 @@ projectExpr (StgLetNoEscape _ binding body) = do
   LetJoins <$> projectJoinGroup binding <*> projectExpr body
 projectExpr (StgTick _ body) = projectExpr body
 
-projectAlt :: CgStgAlt -> P Alternative
-projectAlt (GenStgAlt con binders body) = Alternative <$> projectPattern con
+projectCaseKind :: AltType -> P CaseKind
+projectCaseKind (AlgAlt tycon) = pure (AlgebraicCase (nameSymbol "type" (GHC.tyConName tycon)))
+projectCaseKind (PrimAlt rep) = PrimitiveCase <$> projectRep rep
+projectCaseKind (MultiValAlt _) = pure MultiValueCase
+projectCaseKind PolyAlt = pure PolymorphicCase
+
+projectAlt :: AltType -> CgStgAlt -> P Alternative
+projectAlt (MultiValAlt _) (GenStgAlt (DataAlt con) binders body)
+  | isUnboxedTupleDataCon con = Alternative DefaultPattern
+      <$> mapM ensureValue binders <*> projectExpr body
+projectAlt _ (GenStgAlt con binders body) = Alternative <$> projectPattern con
   <*> mapM ensureValue binders <*> projectExpr body
 
 projectPattern :: AltCon -> P AlternativePattern
@@ -226,8 +245,10 @@ projectJoin binder _ = failShape
   ("let-no-escape binding lacks JumpedTo form: " <> symbolText (idSymbol "join" binder))
 
 projectArg :: StgArg -> P Atom
-projectArg (StgVarArg binder) = Ref <$> projectReference binder
-projectArg (StgLitArg literal) = Scalar <$> projectLiteral literal
+projectArg (StgVarArg binder) = do
+  reps <- repsForType (varType binder)
+  if null reps then pure Void else Ref <$> projectReference binder
+projectArg (StgLitArg literal) = projectLiteralAtom literal
 
 projectReference :: Id -> P ValueRef
 projectReference binder = do
@@ -272,12 +293,18 @@ internGlobal binder = do
   case lookup binder known of
     Just identity -> pure identity
     Nothing -> do
-      signature <- internSignature =<< signatureForType (varType binder)
+      reps <- repsForType (varType binder)
+      rep <- case reps of
+        [] -> pure VoidRep
+        [single] -> pure single
+        _ -> failRepresentation "global value has more than one representation component"
+      (entry, evaluated) <- importedEntry binder
+      signature <- traverse internSignature entry
       existing <- gets globalDecls
       generations <- gets retainedGenerations
       let identity = GlobalId (fromIntegral (length existing))
           symbol = idSymbol "value" binder
-          declaration = GlobalDecl symbol signature False (Map.lookup symbol generations)
+          declaration = GlobalDecl symbol rep signature evaluated (Map.lookup symbol generations)
       modify' (\current -> current
         { globals = globals current <> [(binder, identity)]
         , globalDecls = globalDecls current <> [declaration] })
@@ -300,15 +327,26 @@ internConstructor con = do
     Just identity -> pure identity
     Nothing -> do
       reps <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys con)
+      -- GHC expands strictness along with representation arguments: a strict
+      -- unboxed tuple does not make its lifted components strict. Resolve all
+      -- representations first, before calling the fixed-representation helper.
+      let marks = map isMarkedStrict (dataConRuntimeRepStrictness con)
+      if length marks /= length reps
+        then failRepresentation "constructor runtime strictness/representation arity mismatch"
+        else pure ()
+      let fieldStrictness = zipWith (\strict rep -> strict || isUnboxed rep) marks reps
+      resultReps <- repsForType (dataConOrigResTy con)
+      resultRep <- case resultReps of
+        [rep@LiftedRefRep] -> pure rep
+        [rep@UnliftedRefRep] -> pure rep
+        _ -> failRepresentation "heap constructor lacks a managed result representation"
       layout <- layoutFor reps
       prior <- gets constructorDecls
       let identity = ConstructorId (fromIntegral (length prior))
-          sourceStrictness = map isMarkedStrict (dataConRepStrictness con) <> repeat False
-          fieldStrictness = zipWith (\rep marked -> marked || isUnboxed rep) reps sourceStrictness
           declaration = ConstructorDecl
             (nameSymbol "constructor" (dataConName con))
             (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
-            reps fieldStrictness layout
+            resultRep reps fieldStrictness layout
       modify' (\current -> current
         { constructors = constructors current <> [(con, identity)]
         , constructorDecls = constructorDecls current <> [declaration] })
@@ -337,19 +375,61 @@ internOperation op signature = case op of
   _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
 
 signatureFor :: [Id] -> Type -> P Signature
-signatureFor args result = Signature <$> (concat <$> mapM (repsForType . varType) args) <*> repsForType result
+signatureFor args result = Signature <$> (concat <$> mapM (argumentRepsForType . varType) args) <*> repsForType result
 
-signatureForType :: Type -> P Signature
-signatureForType ty = do
-  let (arguments, result) = splitFunTys ty
-  Signature <$> (concat <$> mapM (repsForType . scaledThing) arguments) <*> repsForType result
-  where scaledThing (Scaled _ argument) = argument
+-- Imported LF information is authoritative. In its absence GHC uses positive
+-- representation arity as function evidence, but never guesses a thunk from
+-- zero arity. A CAF returning a function has a zero-argument entry, not all the
+-- arrows in the returned function's type.
+importedEntry :: Id -> P (Maybe Signature, Bool)
+importedEntry binder = case importedIdLFInfo binder of
+  LFReEntrant _ arity _ _ -> do
+    (arguments, result) <- splitRepArguments arity (varType binder)
+    signature <- Signature arguments <$> repsForType result
+    pure (Just signature, True)
+  LFThunk{} -> do
+    signature <- Signature [] <$> repsForType (varType binder)
+    pure (Just signature, False)
+  LFCon{} -> pure (Nothing, True)
+  LFUnlifted -> pure (Nothing, True)
+  LFUnknown{} -> pure (Nothing, False)
+  LFLetNoEscape -> failShape "imported join has no heap/global entry"
 
 signatureForArgs :: [StgArg] -> Type -> P Signature
 signatureForArgs args result = Signature <$> (concat <$> mapM argReps args) <*> repsForType result
   where
-    argReps (StgVarArg binder) = repsForType (varType binder)
-    argReps (StgLitArg literal) = repsForType (literalType literal)
+    argReps (StgVarArg binder) = argumentRepsForType (varType binder)
+    argReps (StgLitArg literal) = argumentRepsForType (literalType literal)
+
+-- Call-site saturation is separate from an entry's arity. In particular,
+-- demanding a function with no arguments returns the function, and a PAP
+-- returns a lifted reference rather than its eventual saturated result.
+signatureForApplication :: Id -> [StgArg] -> P Signature
+signatureForApplication function args = do
+  (_, result) <- splitRepArguments (length args) (varType function)
+  signatureForArgs args result
+
+-- Follow GHC's countFunRepArgs callable view, including foralls, casts and
+-- newtypes, while retaining the residual type. Each source argument expands
+-- to a complete representation group, with one position for a void argument.
+splitRepArguments :: Int -> Type -> P ([RuntimeRep], Type)
+splitRepArguments 0 ty = pure ([], ty)
+splitRepArguments supplied ty = case unwrapType ty of
+  FunTy _ _ argument result -> do
+    reps <- argumentRepsForType argument
+    if supplied < length reps
+      then failRepresentation "application splits an unarised source argument"
+      else do
+        (remaining, finalResult) <- splitRepArguments (supplied - length reps) result
+        pure (reps <> remaining, finalResult)
+  _ -> failRepresentation "application exceeds its GHC function type"
+
+-- Void positions count toward semantic saturation even though they have no
+-- register or payload component after unarisation.
+argumentRepsForType :: Type -> P [RuntimeRep]
+argumentRepsForType ty = do
+  reps <- repsForType ty
+  pure (if null reps then [VoidRep] else reps)
 
 repsForType :: Type -> P [RuntimeRep]
 repsForType ty = maybe (failRepresentation "runtime-polymorphic representation")
@@ -409,6 +489,17 @@ repBytes machine rep = width $ case rep of
 alignUp :: Word32 -> Word32 -> Word32
 alignUp value alignment = ((value + alignment - 1) `div` alignment) * alignment
 
+-- | Unarise splits multi-representation rubbish and removes zero-width rubbish.
+-- Both TYPE and CONSTRAINT use the same resolved physical representation; no
+-- GHC kind/type needs to cross the execution boundary.
+projectLiteralAtom :: Literal -> P Atom
+projectLiteralAtom (LitRubbish _ runtimeRep) =
+  case runtimeRepPrimRep_maybe runtimeRep of
+    Just [rep] -> Rubbish <$> projectRep rep
+    Just _ -> failRepresentation "rubbish literal was not unarised to one component"
+    Nothing -> failRepresentation "runtime-polymorphic rubbish literal"
+projectLiteralAtom literal = Scalar <$> projectLiteral literal
+
 projectLiteral :: Literal -> P ScalarLiteral
 projectLiteral literal = case literal of
   LitChar character -> pure (CharLiteral (fromIntegral (fromEnum character)))
@@ -416,8 +507,8 @@ projectLiteral literal = case literal of
   LitNumber kind value -> numeric kind value
   LitFloat value -> pure (FloatLiteral 32 (wordBytes 4 (fromIntegral (castFloatToWord32 (fromRational value)))))
   LitDouble value -> pure (FloatLiteral 64 (wordBytes 8 (castDoubleToWord64 (fromRational value))))
-  LitNullAddr -> failShape "null address literal has no scalar address encoding"
-  LitRubbish{} -> failShape "rubbish literal"
+  LitNullAddr -> pure NullAddressLiteral
+  LitRubbish{} -> failShape "rubbish literal cannot be an alternative pattern"
   LitLabel{} -> failShape "relocatable label literal"
   where
     numeric LitNumBigNat _ = failShape "BigNat literal"

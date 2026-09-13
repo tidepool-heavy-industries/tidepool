@@ -3,7 +3,7 @@ use crate::traits::{
     sealed::{FromCoreSealed, ToCoreSealed},
     FromCore, ToCore,
 };
-use tidepool_eval::{shapes, Value};
+use crate::{shapes, Value};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// Lookup for hand-written bridge impls (shared by `ToCore`/`FromCore` impls
@@ -55,10 +55,6 @@ fn value_shape(value: &Value) -> String {
     match value {
         Value::Lit(l) => format!("Lit({:?})", l),
         Value::Con(id, _) => format!("Con({:?})", id),
-        Value::Closure { .. } => "Closure".to_string(),
-        Value::ThunkRef(id) => format!("ThunkRef({:?})", id),
-        Value::JoinCont { .. } => "JoinCont".to_string(),
-        Value::ConFun(id, arity, args) => format!("ConFun({:?}, {}/{})", id, args.len(), arity),
         Value::ByteArray(bs) => match bs.lock() {
             Ok(b) => format!("ByteArray(len={})", b.len()),
             Err(_) => "ByteArray(poisoned)".to_string(),

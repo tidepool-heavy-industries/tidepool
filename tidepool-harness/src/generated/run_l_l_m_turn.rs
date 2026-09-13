@@ -13,5 +13,5 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum RunLLMTurnReq {
-    RunLLMTurnWith(String, tidepool_eval::value::Value),
+    RunLLMTurnWith(String, tidepool_bridge::Value),
 }

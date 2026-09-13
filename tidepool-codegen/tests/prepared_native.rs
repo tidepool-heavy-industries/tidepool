@@ -26,7 +26,7 @@ fn requirements() -> ProgramRequirements {
 
 fn linked_fixture() -> LinkedProgram {
     let prepared = parse_program(
-        include_bytes!("../../tidepool-eval/tests/fixtures/m3-vertical.cbor"),
+        include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor"),
         &requirements(),
         DecodeLimits::default(),
     )
@@ -37,7 +37,10 @@ fn linked_fixture() -> LinkedProgram {
         .map(|global| {
             let value = ImportedValue {
                 identity: global.identity.clone(),
-                signature: prepared.signatures()[global.signature.0 as usize].clone(),
+                rep: global.rep.clone(),
+                entry_signature: global
+                    .entry_signature
+                    .map(|id| prepared.signatures()[id.0 as usize].clone()),
                 evaluated: global.required_evaluated,
                 generation: global.required_generation.unwrap_or(0),
             };

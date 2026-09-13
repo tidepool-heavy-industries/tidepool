@@ -34,7 +34,9 @@ pub enum DescriptorMarshalError {
 /// # Safety
 ///
 /// `object` must name `available` writable bytes and must not become reachable
-/// or be collected until this function returns successfully.
+/// or be collected until this function returns successfully. `descriptor` must
+/// remain pinned and owned for the full lifetime of this object and every
+/// relocated copy: the initialized header stores its address.
 pub unsafe fn marshal_descriptor_object(
     object: *mut u8,
     available: usize,
@@ -141,9 +143,10 @@ fn validate_value(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectKind};
+    use tidepool_heap::execution_descriptor::{
+        DescriptorState, EntryMetadata, ObjectKind, FORWARDING_POINTER_OFFSET,
+    };
     use tidepool_heap::gc::raw::{cheney_copy_registered, DescriptorRegistry};
-    use tidepool_heap::layout::{read_size, read_tag, TAG_FORWARDED};
     use tidepool_repr::execution_schema::{
         Architecture, Endianness, Signature, StorageLayout, TargetDescriptor,
     };
@@ -196,19 +199,44 @@ mod tests {
             DescriptorValue::Address(0xfeedusize as *const u8),
         ];
         let mut bytes = vec![0u8; descriptor.allocation_extent() as usize];
+        let extent = descriptor.allocation_extent();
         unsafe {
             marshal_descriptor_object(bytes.as_mut_ptr(), bytes.len(), &descriptor, &values)
                 .unwrap();
-            assert_eq!(read_size(bytes.as_ptr()), descriptor.allocation_extent());
+            assert_eq!(
+                descriptor.state(bytes.as_ptr(), bytes.len()).unwrap(),
+                DescriptorState::Live
+            );
+            assert_eq!(
+                ptr::read_unaligned(bytes.as_ptr().cast::<usize>()),
+                descriptor.initial_header_word()
+            );
+            assert_eq!(descriptor.allocation_extent(), extent);
             assert_eq!(descriptor.trace_offsets(), &[16, 32]);
             assert_eq!(bytes[descriptor.payload_base() as usize], 7);
 
-            // Forwarding overwrites only the tag/pointer; the size field keeps
-            // the descriptor's original extent for evacuation bookkeeping.
-            *bytes.as_mut_ptr() = TAG_FORWARDED;
-            ptr::write_unaligned(bytes.as_mut_ptr().add(8) as *mut usize, 0x1234);
-            assert_eq!(read_tag(bytes.as_ptr()), TAG_FORWARDED);
-            assert_eq!(read_size(bytes.as_ptr()), descriptor.allocation_extent());
+            let mut relocated = bytes.clone();
+            descriptor.install_forwarding(bytes.as_mut_ptr(), relocated.as_mut_ptr());
+            assert_eq!(
+                descriptor.state(bytes.as_ptr(), bytes.len()).unwrap(),
+                DescriptorState::Forwarded
+            );
+            assert_eq!(
+                descriptor
+                    .state(relocated.as_ptr(), relocated.len())
+                    .unwrap(),
+                DescriptorState::Live
+            );
+            assert_eq!(
+                ptr::read_unaligned(
+                    bytes
+                        .as_ptr()
+                        .add(FORWARDING_POINTER_OFFSET)
+                        .cast::<*mut u8>()
+                ),
+                relocated.as_mut_ptr()
+            );
+            assert_eq!(descriptor.allocation_extent(), extent);
         }
 
         let mut rejected = vec![0u8; descriptor.allocation_extent() as usize];
@@ -242,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_kinds_select_existing_collector_header_states() {
+    fn descriptor_kinds_publish_owned_header_identity_and_live_state() {
         let empty = StorageLayout::for_reps(&target(), &[]).unwrap();
         let entry = || {
             Some(EntryMetadata::new(
@@ -254,31 +282,27 @@ mod tests {
             ))
         };
         let cases = [
-            (
-                ObjectKind::Function,
-                entry(),
-                tidepool_heap::layout::TAG_CLOSURE,
-            ),
-            (ObjectKind::Pap, entry(), tidepool_heap::layout::TAG_CLOSURE),
-            (ObjectKind::Thunk, entry(), tidepool_heap::layout::TAG_THUNK),
-            (
-                ObjectKind::Continuation,
-                entry(),
-                tidepool_heap::layout::TAG_CLOSURE,
-            ),
-            (
-                ObjectKind::Constructor,
-                None,
-                tidepool_heap::layout::TAG_CON,
-            ),
+            (ObjectKind::Function, entry()),
+            (ObjectKind::Pap, entry()),
+            (ObjectKind::Thunk, entry()),
+            (ObjectKind::Continuation, entry()),
+            (ObjectKind::Constructor, None),
         ];
-        for (kind, metadata, expected_tag) in cases {
+        for (kind, metadata) in cases {
             let descriptor = ObjectDescriptor::new(kind, empty.clone(), metadata).unwrap();
             let mut bytes = vec![0u8; descriptor.allocation_extent() as usize];
+            let extent = descriptor.allocation_extent();
             unsafe {
                 descriptor.initialize_header(bytes.as_mut_ptr());
-                assert_eq!(read_tag(bytes.as_ptr()), expected_tag);
-                assert_eq!(read_size(bytes.as_ptr()), descriptor.allocation_extent());
+                assert_eq!(
+                    ptr::read_unaligned(bytes.as_ptr().cast::<usize>()),
+                    descriptor.initial_header_word()
+                );
+                assert_eq!(
+                    descriptor.state(bytes.as_ptr(), bytes.len()).unwrap(),
+                    DescriptorState::Live
+                );
+                assert_eq!(descriptor.allocation_extent(), extent);
             }
         }
     }
@@ -301,20 +325,25 @@ mod tests {
             )
             .unwrap(),
         );
+        let scalar_descriptor = Arc::new(
+            ObjectDescriptor::new(
+                ObjectKind::Constructor,
+                StorageLayout::for_reps(&target(), &[RuntimeRep::Word(64)]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
         let owner_size = descriptor.allocation_extent() as usize;
         let child_offset = owner_size;
-        let from_len = owner_size + tidepool_heap::layout::LIT_SIZE;
+        let child_size = scalar_descriptor.allocation_extent() as usize;
+        let from_len = owner_size + child_size;
         let mut from = vec![0u64; from_len.div_ceil(size_of::<u64>())];
         let mut to = vec![0u8; from.len() * size_of::<u64>()];
         let from_ptr = from.as_mut_ptr().cast::<u8>();
         let actual_from_len = from.len() * size_of::<u64>();
         let child = unsafe { from_ptr.add(child_offset) };
         unsafe {
-            tidepool_heap::layout::write_header(
-                child,
-                tidepool_heap::layout::TAG_LIT,
-                tidepool_heap::layout::LIT_SIZE as u32,
-            );
+            marshal_descriptor_object(child, child_size, &scalar_descriptor, &[bits(41)]).unwrap();
         }
         let values = [
             DescriptorValue::Managed(child),
@@ -330,6 +359,9 @@ mod tests {
             registry
                 .register(from_ptr, owner_size, Arc::clone(&descriptor))
                 .unwrap();
+            registry
+                .register(child, child_size, Arc::clone(&scalar_descriptor))
+                .unwrap();
         }
         let mut root = from_ptr;
         let roots = [&mut root as *mut *mut u8];
@@ -344,10 +376,7 @@ mod tests {
             .unwrap()
         };
 
-        assert_eq!(
-            copied.bytes_copied,
-            owner_size + tidepool_heap::layout::LIT_SIZE
-        );
+        assert_eq!(copied.bytes_copied, owner_size + child_size);
         assert_eq!(root, to.as_mut_ptr());
         assert!(registry.descriptor(root).is_some());
         assert!(registry.descriptor(from_ptr).is_none());
@@ -359,6 +388,8 @@ mod tests {
             assert_eq!(*first, moved_child);
             assert_eq!(*second, moved_child);
             assert_eq!(*address, child, "Address values are not GC roots");
+            assert!(registry.descriptor(moved_child).is_some());
+            assert!(registry.descriptor(child).is_none());
         }
     }
 
@@ -411,7 +442,10 @@ mod tests {
             tidepool_heap::execution_descriptor::DescriptorTraceError::Truncated { .. }
         ));
         assert_eq!(root, from_ptr);
-        assert_ne!(unsafe { read_tag(from_ptr) }, TAG_FORWARDED);
+        assert_eq!(
+            unsafe { descriptor.state(from_ptr, extent) }.unwrap(),
+            DescriptorState::Live
+        );
         assert!(registry.descriptor(from_ptr).is_some());
     }
 

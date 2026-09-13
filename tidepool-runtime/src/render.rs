@@ -1,8 +1,7 @@
 //! Rendering logic for evaluated results.
 
 use serde_json::json;
-use tidepool_eval::shapes;
-use tidepool_eval::value::Value;
+use tidepool_bridge::{shapes, Value};
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::types::{DataConId, Literal};
 
@@ -288,14 +287,6 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
             }
         }
 
-        // Closures / thunks — opaque
-        Value::Closure { .. } => json!("<closure>"),
-        Value::ThunkRef(_) => json!("<thunk>"),
-        Value::JoinCont { .. } => json!("<join>"),
-        Value::ConFun(id, _, _) => {
-            let name = con_name(*id, table);
-            json!(format!("<partially-applied {}>", name))
-        }
         Value::ByteArray(bs) => {
             let borrowed = bs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             match std::str::from_utf8(&borrowed) {

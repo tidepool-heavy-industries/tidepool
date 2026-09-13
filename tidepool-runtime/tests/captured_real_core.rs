@@ -21,7 +21,7 @@
 //! These fixtures pin two DISTINCT, currently-unfixed bugs. The asserts encode
 //! the present (buggy) behaviour; when a fix lands, the relevant assert flips and
 //! this test fails loudly — that is the signal to update it.
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable, Literal};
 use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};

@@ -13,6 +13,6 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum IntrospectionReq {
-    IntrospectionInfoWith(tidepool_eval::value::Value),
-    IntrospectionTypeOfWith(tidepool_eval::value::Value),
+    IntrospectionInfoWith(tidepool_bridge::Value),
+    IntrospectionTypeOfWith(tidepool_bridge::Value),
 }

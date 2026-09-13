@@ -16,7 +16,7 @@ pub enum ForksReq {
     ForksBeginWith(bool, String, Vec<String>),
     ForksStartWith(
         String,
-        tidepool_eval::value::Value,
+        tidepool_bridge::Value,
         i64,
         crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,

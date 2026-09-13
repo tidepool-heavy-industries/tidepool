@@ -11,7 +11,6 @@ readme = "../README.md"
 
 [dependencies]
 tidepool-repr.workspace = true
-tidepool-eval.workspace = true
 tidepool-bridge.workspace = true
 frunk.workspace = true
 thiserror.workspace = true

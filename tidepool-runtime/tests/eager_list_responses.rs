@@ -7,7 +7,7 @@
 //! eager path and that class of failure.
 
 use tidepool_effect::DispatchEffect;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_testing::eval_harness::user_lib_dir;
 use tidepool_testing::eval_harness::EvalHarness;
 

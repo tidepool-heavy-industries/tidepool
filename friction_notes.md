@@ -1,8 +1,27 @@
 # Development friction notes
 
-Concrete check and iteration costs observed during the corpus and notebook
-integration pass. These are follow-up candidates, not evidence that the tests
+Concrete check and iteration costs observed during corpus, notebook, and STG
+integration work. These are follow-up candidates, not evidence that the tests
 are nondeterministic.
+
+- **Prepared allocation API was a disconnected sketch.** The descriptor-named
+  emitter delegated to the Core allocator (including its poison-pointer return
+  convention), and prepared entry parameter zero was used as an output buffer
+  despite the ABI declaring VMContext. The existing moving-collection test ran
+  only after native return. Following the production call graph exposed this;
+  helper names and isolated tests did not. Integration evidence should name
+  where collection occurs and which root/heap owner it exercises.
+- **Heap-format assumptions were spread through the collector.** Reusing the
+  checked frame walk is correct, but the Core body also performs legacy shape
+  discovery, external-payload scanning, growth recopy, and verification. Compact
+  descriptor objects must dispatch before all four. The active GC state now
+  identifies the physical format; shared root capture remains with MachineState.
+- **A focused codegen lib test still builds runtime consumers.** Adding a typed
+  native runtime error made `cargo test -p tidepool-codegen --lib prepared_`
+  stop in `tidepool-runtime`'s exhaustive failure classifier before any tests
+  ran. This caught a useful boundary obligation, but the dev-dependency fanout
+  makes the cost unlike an isolated backend check. Keep the integration check;
+  make the dependency/build scope visible in the focused-check tooling.
 
 - **Flaky gate to revisit: `Project.RoutingChecks.routing`.** The full recipe
   pass failed late on an exact-output assertion; the corrected isolated case
@@ -35,3 +54,86 @@ are nondeterministic.
 - A published-example assertion expected `Low` while the shipped example
   explicitly selected `Medium`. Keep expected launch policy adjacent to the
   fixture that sets it, or assert the policy from the recipe value.
+
+## STG cutover — 2026-09-12
+
+- **A schema-only test selection compiles the runtime.**
+  `bash scripts/dev-shell.sh cargo test -p tidepool-repr --lib execution_schema::validation::tests -- --nocapture`
+  compiled bridge, heap, effect, codegen, toolchain, and runtime before any
+  selected test ran. It stopped on four stale interpreter `Value` variants in
+  `tidepool-runtime/src/render.rs`. The repr crate's `tidepool-testing`
+  dev-dependency brings the larger stack into this otherwise local check.
+  Follow-up: isolate pure schema tests from execution-harness dependencies;
+  keep cross-layer contracts in their own target. This is dependency fan-out,
+  not a failing schema test.
+- **Shared build admission is manual.** The same focused command first waited
+  for Cargo's artifact-directory lock while an agent's build finished. A
+  serialized build policy still needs explicit start/finish coordination;
+  Cargo's message does not identify the owning agent or command. Follow-up:
+  expose the active build owner/command through the existing command runner,
+  without duplicating caches or introducing another process supervisor.
+- **Projection omissions are discovered too late without a field inventory.**
+  The systematic pinned-GHC audit found explicit rejection of `LitRubbish`
+  and `LitNullAddr`, and missing tag/capture facts, after consumer work had
+  begun. It also corrected apparent gaps that unarisation already resolves.
+  `docs/stg-projection-inventory.md` now records the producer field, wire
+  mapping, and remaining consumer obligation together. Keep that inventory
+  current when either side of the process boundary changes; wire acceptance
+  alone is not evidence of native support.
+- **Endpoint retirement reaches low-level test compilation.** After the render
+  migration was fixed, the focused repr command still selected/executed no
+  tests: `tidepool-mcp/src/eval_prep.rs:1093` referenced the removed
+  `resources::exclusion_reason`. Deleting an endpoint needs a whole-workspace
+  symbol inventory, including test-only callers, before calling the batch
+  complete. Retrying the same blocked target before its owner confirms the
+  source repair adds no evidence; coordinate that handoff explicitly.
+- **Pinned GHC API lookup needs to precede authoring.** The first projection
+  compile failed on a guessed `mkVisFunTys` import; GHC 9.12.2 exposes
+  `mkScaledFunTys` for that input shape. This was an authoring error, not
+  toolchain instability. A discoverable pinned compiler-source location and
+  lightweight GHC API inspection recipe would shorten this lookup and avoid
+  learning exported names through a larger Cabal compile.
+- **Generated fixture ownership was tied to an interpreter being removed.**
+  Three prepared tests in toolchain/codegen/runtime included a CBOR file from
+  `tidepool-eval/tests/fixtures`. Removing that crate broke unrelated prepared
+  consumers. The generator now writes the shared fixture under
+  `haskell/test-prepared-stg/fixtures`; the existing broad `*.cbor` ignore rule
+  required explicitly force-adding it. Follow-up: make the canonical generator
+  outputs and tracked-fixture exceptions discoverable together, and regenerate
+  once a coordinated schema/ABI edit is complete rather than mid-batch.
+- **Freshness and execution were coupled in `fixtures-check`.** Retirement
+  exposed two unrelated blockers after successful regeneration: stale Nextest
+  filters, then a hardcoded invocation of the deleted evaluator's semantic
+  suite. The command now verifies fingerprint and freshly regenerated bytes;
+  it no longer claims semantic verification. The compiled-GHC oracle remains
+  pending. The output's `meta.cbor (153 entries)` counts metadata entries,
+  not fixtures. Measured inventory is 348 CBOR files, 347 asks JSON files and
+  one fingerprint (696 files). Neither number is the older brief's 217
+  semantic-test figure. Label counters at the producer to avoid this reporting
+  ambiguity; an earlier agent report incorrectly called 153 the corpus count.
+- **Generator freshness errors need an actionable rebuild path.** An inherited
+  `TIDEPOOL_EXTRACT` pointed at an older Rust wrapper, so `fixtures-update`
+  stopped before generation. Rebuilding the wrapper and Haskell worker through
+  the dev shell resolved it without `TIDEPOOL_ALLOW_STALE_EXTRACT`. The next
+  regeneration changed only the fingerprint, no CBOR/asks bytes. Follow-up:
+  have the freshness diagnostic name the owning rebuild command and both
+  selected executables, not merely offer a stale-binary override.
+- **Prepared tests depend on generated table numbering.** The native fixture
+  tests hardcode `ValueId(17)` and signature index 6. After intentional fixture
+  regeneration, two native cases compiled but failed with
+  `Unsupported("non-parameter local constructor field")`. Their cause has not
+  been investigated here, and assertions were not adjusted. Symbol-based
+  selection would make these tests readable and less dependent on unrelated
+  projection traversal changes.
+- **A shared fixture no longer exercises a specific import contract.** The
+  toolchain mismatch test requires a known callable import, but the regenerated
+  M3 fixture has none: unknown imported entry evidence now remains unknown.
+  The test fails at its explicit fixture prerequisite. Use scenario-specific
+  producer fixtures for required ABI evidence rather than assuming arbitrary
+  package imports carry it. Linker unit tests separately cover the contract;
+  that does not make the toolchain test pass.
+- **Requested and executed check scope can diverge in delegation.** The final
+  toolchain request named `prepared_artifact::tests`, but the agent ran all 89
+  lib tests. This was not a workspace battery, but it exceeded the requested
+  selection. Handbacks must report the actual command and counts; passing a
+  filter as a structured task field would reduce this coordination error.

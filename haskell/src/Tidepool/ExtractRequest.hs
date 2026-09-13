@@ -49,6 +49,8 @@ data RequestField
   | InspectBrowse String
   | InspectBrowseExpanded String
   | InspectSearch String
+  | InspectStructuredInfo StructuredInspection
+  | InspectStructuredType StructuredInspection
   | InspectOut FilePath
   deriving (Eq, Show)
 
@@ -117,6 +119,34 @@ data InspectionRequest
   | InspectNameInfo String
   | InspectModule String Bool
   | InspectTypeSearch String
+  | InspectStructuredInfoOf StructuredInspection
+  | InspectStructuredTypeOf StructuredInspection
+  deriving (Eq, Show)
+
+data StructuredNameScope
+  = StructuredCurrentScope
+  | StructuredPublicModule String
+  deriving (Eq, Show)
+
+data StructuredNameNamespace
+  = StructuredAnyName
+  | StructuredValueName
+  | StructuredTypeName
+  | StructuredConstructorName
+  deriving (Eq, Show)
+
+data InspectionProvenance = InspectionProvenance
+  { inspectionGeneration :: Word64,
+    inspectionFingerprint :: String
+  }
+  deriving (Eq, Show)
+
+data StructuredInspection = StructuredInspection
+  { structuredScope :: StructuredNameScope,
+    structuredNamespace :: StructuredNameNamespace,
+    structuredName :: String,
+    structuredProvenance :: InspectionProvenance
+  }
   deriving (Eq, Show)
 
 requestFromFields :: [RequestField] -> WorkerRequest
@@ -157,6 +187,10 @@ requestFromFields = foldl apply emptyWorkerRequest
         { requestInspections = requestInspections request ++ [InspectModule name True] }
       InspectSearch query -> request
         { requestInspections = requestInspections request ++ [InspectTypeSearch query] }
+      InspectStructuredInfo query -> request
+        { requestInspections = requestInspections request ++ [InspectStructuredInfoOf query] }
+      InspectStructuredType query -> request
+        { requestInspections = requestInspections request ++ [InspectStructuredTypeOf query] }
       InspectOut path -> request { requestInspectOut = Just path }
 
 workerRequestFlag :: String
@@ -222,6 +256,24 @@ encodeField field = case field of
   CellOut value -> taggedText 33 value
   TurnPin value -> taggedText 34 value
   InspectSearch value -> taggedText 35 value
+  InspectStructuredInfo query -> BS.singleton 36 <> encodeStructuredInspection query
+  InspectStructuredType query -> BS.singleton 37 <> encodeStructuredInspection query
+
+encodeStructuredInspection :: StructuredInspection -> BS.ByteString
+encodeStructuredInspection query =
+  encodeScope (structuredScope query)
+    <> BS.singleton (case structuredNamespace query of
+      StructuredAnyName -> 0
+      StructuredValueName -> 1
+      StructuredTypeName -> 2
+      StructuredConstructorName -> 3)
+    <> textFrame (structuredName query)
+    <> putU64 (inspectionGeneration (structuredProvenance query))
+    <> textFrame (inspectionFingerprint (structuredProvenance query))
+  where
+    encodeScope scope = case scope of
+      StructuredCurrentScope -> BS.singleton 0
+      StructuredPublicModule moduleName -> BS.singleton 1 <> textFrame moduleName
 
 taggedText :: Word8 -> String -> BS.ByteString
 taggedText tag value = BS.singleton tag <> textFrame value
@@ -287,6 +339,8 @@ pField bytes = do
     33 -> mapParser CellOut pText rest
     34 -> mapParser TurnPin pText rest
     35 -> mapParser InspectSearch pText rest
+    36 -> mapParser InspectStructuredInfo pStructuredInspection rest
+    37 -> mapParser InspectStructuredType pStructuredInspection rest
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

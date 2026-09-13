@@ -945,7 +945,7 @@ fn build_suspended_message<O, H>(
     table: tidepool_repr::DataConTable,
     continuation: tidepool_codegen::suspension::ContinuationId,
     wrapped: GateDispatcher<H>,
-    request: tidepool_eval::value::Value,
+    request: tidepool_bridge::Value,
     permit: OwnedSemaphorePermit,
 ) -> EngineMessage<O>
 where
@@ -1150,7 +1150,7 @@ impl<H> GateDispatcher<H> {
 impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
     fn dispatch(
         &mut self,
-        request: &tidepool_eval::value::Value,
+        request: &tidepool_bridge::Value,
         cx: &tidepool_effect::dispatch::EffectContext<'_, O>,
     ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
         // Yield point: park here while paused; error out on abort. A gate abort
@@ -1190,12 +1190,12 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
 /// `Value` was bridged from the heap through it, so its `DataConId` is only
 /// meaningful there.
 pub fn extract_ask_request(
-    request: &tidepool_eval::value::Value,
+    request: &tidepool_bridge::Value,
     table: &tidepool_repr::DataConTable,
 ) -> Result<(String, Option<serde_json::Value>), String> {
     use crate::generated::ask::AskReq;
     use tidepool_bridge::BridgeError;
-    use tidepool_eval::value::Value;
+    use tidepool_bridge::Value;
 
     match AskReq::from_value(request, table) {
         Ok(AskReq::AskWith(prompt, payload)) => {

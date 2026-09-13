@@ -15,7 +15,7 @@ use tidepool_bridge_derive::FromCore;
 pub enum AgentLaunchReq {
     AgentLaunchWith(
         String,
-        tidepool_eval::value::Value,
+        tidepool_bridge::Value,
         crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,
         Vec<String>,

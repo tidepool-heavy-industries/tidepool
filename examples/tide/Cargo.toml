@@ -12,7 +12,6 @@ pest_derive = "2.7"
 tidepool-repr.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
-tidepool-eval.workspace = true
 tidepool-effect.workspace = true
 tidepool-macro.workspace = true
 tidepool-codegen.workspace = true

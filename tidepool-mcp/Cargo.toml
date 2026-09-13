@@ -12,7 +12,6 @@ readme = "../README.md"
 [dependencies]
 tidepool-codegen.workspace = true
 tidepool-runtime.workspace = true
-tidepool-eval.workspace = true
 tidepool-repr.workspace = true
 tidepool-effect.workspace = true
 tidepool-actor.workspace = true

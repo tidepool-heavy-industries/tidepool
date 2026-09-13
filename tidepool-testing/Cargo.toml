@@ -11,9 +11,7 @@ publish = false
 
 [dependencies]
 tidepool-repr.workspace = true
-tidepool-eval.workspace = true
 tidepool-heap.workspace = true
-tidepool-optimize.workspace = true
 tidepool-codegen.workspace = true
 proptest = "1.10.0"
 serde_json.workspace = true
@@ -29,10 +27,6 @@ libc.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-
-[[bench]]
-name = "eval"
-harness = false
 
 [[bench]]
 name = "optimize"

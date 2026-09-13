@@ -59,6 +59,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use tidepool_bridge::Value;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine};
@@ -68,7 +69,6 @@ use tidepool_codegen::suspension::{
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_eval::value::Value;
 use tidepool_repr::{
     BindingName, CoreExpr, DataConTable, Generation, MonotonicIdIssuer, SessionModule, SessionVarId,
 };

@@ -533,7 +533,9 @@ impl OldSpace {
                         insert_external_storage(
                             &mut reachable_external_storage,
                             payload as usize,
-                            external_storage_kind(lit_tag).expect("pointer-carrying Lit tag"),
+                            external_storage_kind(lit_tag).ok_or_else(|| {
+                                format!("old-space Lit at {pointer:p} lacks an external-storage kind")
+                            })?,
                         )?;
                     }
                 }

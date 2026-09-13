@@ -68,7 +68,7 @@ use tidepool_codegen::suspension::{ParkedOutcome, RealmId, SuspensionRun};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, Response};
-use tidepool_eval::value::Value as JitValue;
+use tidepool_bridge::Value as JitValue;
 use tidepool_handlers::{ConsoleHandler, SubagentHandler};
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
 use tidepool_worktree::testing::TestRepo;

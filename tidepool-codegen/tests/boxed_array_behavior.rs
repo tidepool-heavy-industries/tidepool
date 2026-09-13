@@ -1,6 +1,6 @@
 //! Behavioral coverage for the boxed `SmallArray#`/`Array#` primop family
 //! (`emit/primop.rs:2179` onward). The JIT implements the whole family, but
-//! `tidepool-eval`'s tree-walker has no boxed-array `Value` variant, so these
+//! Shared material values intentionally have no boxed-array variant, so these
 //! primops sit entirely outside the eval-vs-JIT differential oracle. Every
 //! case here therefore asserts an explicit expected value against the real
 //! JIT — never against an eval oracle — driven through the real CoreExpr ->
@@ -12,7 +12,7 @@
 
 use tidepool_codegen::host_fns::{heap_verify_run_count, set_gc_poison, set_heap_verify};
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 use tidepool_testing::proptest::build_table_for_expr;

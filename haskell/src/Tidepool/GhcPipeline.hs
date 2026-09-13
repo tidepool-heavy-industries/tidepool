@@ -2,7 +2,9 @@
 {-# LANGUAGE RankNTypes #-}
 
 module Tidepool.GhcPipeline
-  ( runPipeline, runPipelineSession, runPipelineSessionFor
+  ( PipelineSelection(..), PreparedPipelineResult(..)
+  , runPipeline, runPipelineSession, runPipelineSessionFor
+  , runPipelineSelected, runPipelineSessionSelected
   , CompilePurpose(..), PipelineResult(..), dumpCore
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
@@ -87,10 +89,10 @@ import GHC.Types.Var (mkTyVarBinder, setVarName, tyVarKind, varName)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
-import Control.Exception (try, throwIO)
+import Control.Exception (finally, try, throwIO)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.List (isPrefixOf, nub, sortOn, intercalate)
-import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
 import System.IO (hPutStrLn, stderr)
@@ -126,6 +128,17 @@ data PreparedPipelineResult = PreparedPipelineResult
   { pprPipelineResult :: PipelineResult
   , pprModules :: [PreparedModule]
   }
+
+data CompileResult = CompileResult PipelineResult [PreparedModule]
+
+selectionKind :: PipelineSelection result -> PreparationKind
+selectionKind LegacyCore = KeepCore
+selectionKind PreparedStg = PrepareStg
+
+selectCompileResult :: PipelineSelection result -> CompileResult -> result
+selectCompileResult LegacyCore (CompileResult result _) = result
+selectCompileResult PreparedStg (CompileResult result modules) =
+  PreparedPipelineResult result modules
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -303,7 +316,7 @@ runPipeline = runPipelineSelected LegacyCore
 
 runPipelineSelected :: PipelineSelection result -> FilePath -> [FilePath] -> IO result
 runPipelineSelected selection path includes =
-  runPipelineSessionSelected selection Nothing path includes Nothing
+  runPipelineSessionSelected selection GeneralCompile Nothing path includes Nothing
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
@@ -446,10 +459,16 @@ runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> Maybe File
 runPipelineSession = runPipelineSessionFor GeneralCompile
 
 runPipelineSessionFor :: CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
-runPipelineSessionFor purpose mscope path includes buildProductsDir
-  | Just scope <- mscope, isSessionScopeActive scope =
-      runCompile (sessionVariant purpose scope path) path includes buildProductsDir
-  | otherwise = runCompile (normalVariant purpose path) path includes buildProductsDir
+runPipelineSessionFor purpose = runPipelineSessionSelected LegacyCore purpose
+
+runPipelineSessionSelected
+  :: PipelineSelection result -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath]
+  -> Maybe FilePath -> IO result
+runPipelineSessionSelected selection purpose mscope path includes buildProductsDir =
+  selectCompileResult selection <$> case mscope of
+    Just scope | isSessionScopeActive scope ->
+      runCompile (selectionKind selection) (sessionVariant purpose scope path) path includes buildProductsDir
+    _ -> runCompile (selectionKind selection) (normalVariant purpose path) path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -474,6 +493,7 @@ data GutsMemoEntry = GutsMemoEntry
   , gmeResult     ::
       (ModGuts, Map.Map String String, [CheckedBinderPin], Maybe Type)
     -- ^ Post-externalize result, exactly the shape 'results' carries.
+  , gmePrepared :: Maybe PreparedModule
   }
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
@@ -661,6 +681,24 @@ runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
               , mfResultType mf
               )
             )
+        prepareSelected mf simplified = case preparation of
+          KeepCore -> pure Nothing
+          PrepareStg -> do
+            (cgGuts, _details) <- liftIO $ hscTidy (mfHscEnv mf) simplified
+            siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
+              let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
+              in (known', known')
+            let (elaboratedBindings, yieldSites) =
+                  elaboratePreparedSites siblings (cg_binds cgGuts)
+                elaboration = PreparedElaboration
+                  { peGuts = cgGuts
+                  , peBindings = elaboratedBindings
+                  , peSitedSiblings = siblings
+                  , peYieldSites = yieldSites
+                  }
+            Just <$> liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration)
+        rememberPreparedSiblings prepared = liftIO $
+          modifyIORef' preparedSiblingsRef (Map.union (pmSitedSiblings prepared))
     -- Module names do not identify generated content across independent
     -- requests. A memo hit therefore requires both the current source hash
     -- and valid direct home-module imports. Summaries are visited in
@@ -903,18 +941,19 @@ runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
         ++ "' was typechecked without a retained reader environment"
     hscFinal <- getSession
     warnings <- liftIO (nub . reverse <$> readIORef warnRef)
-    return PipelineResult
-      { prBinds  = allBinds
-      , prTyCons = allTyCons
-      , prHscEnv = cpFinalEnv plan hscFinal
-      , prCapturedType = Map.lookup evalUserBinder capturedTypes
-      , prCapturedTypes = capturedTypes
-      , prCheckedBinderPins = checkedBinderPins
-      , prResultType   = resultTy
-      , prWarnings     = warnings
-      , prTargetRdrEnv = tcg_rdr_env targetEnvironment
-      , prTargetTcGblEnv = targetEnvironment
-      }
+    let legacyResult = PipelineResult
+          { prBinds  = allBinds
+          , prTyCons = allTyCons
+          , prHscEnv = cpFinalEnv plan hscFinal
+          , prCapturedType = Map.lookup evalUserBinder capturedTypes
+          , prCapturedTypes = capturedTypes
+          , prCheckedBinderPins = checkedBinderPins
+          , prResultType   = resultTy
+          , prWarnings     = warnings
+          , prTargetRdrEnv = tcg_rdr_env targetEnvironment
+          , prTargetTcGblEnv = targetEnvironment
+          }
+    pure (CompileResult legacyResult preparedModules)
 
 
 -- ---------------------------------------------------------------------------
@@ -943,7 +982,7 @@ withResidentPipeline baseIncludes useCompiler = do
 -- the optimized guts from which they were produced.
 withResidentPipelineSelected
   :: [FilePath]
-  -> ((forall result. PipelineSelection result -> Maybe SessionScope
+  -> ((forall result. PipelineSelection result -> CompilePurpose -> Maybe SessionScope
        -> FilePath -> [FilePath] -> Maybe FilePath -> IO result) -> IO a)
   -> IO a
 withResidentPipelineSelected baseIncludes useCompiler = do
@@ -958,10 +997,12 @@ withResidentPipelineSelected baseIncludes useCompiler = do
     memoRef <- liftIO (newIORef Map.empty)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      useCompiler $ \purpose mscope path extraIncludes buildProductsDir ->
-        reflectGhc
-          (residentCompileOne cache memoRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
-          session
+      useCompiler $ \selection purpose mscope path extraIncludes buildProductsDir -> do
+        let targetModName' = mkModuleName (capitalize (takeBaseName path))
+        compiled <- reflectGhc
+          (residentCompileOne (selectionKind selection) cache memoRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
+          session `finally` sanitizeMemo targetModName' memoRef
+        pure (selectCompileResult selection compiled)
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
 -- 'withResidentPipeline' booted. Patches @importPaths@ for THIS cycle only
@@ -974,10 +1015,10 @@ withResidentPipelineSelected baseIncludes useCompiler = do
 -- output contract: optimization tier affects validation-only dependency Core
 -- and therefore can affect merged metadata.
 residentCompileOne
-  :: ModIfaceCache -> IORef GutsMemo -> DynFlags -> [FilePath]
+  :: PreparationKind -> ModIfaceCache -> IORef GutsMemo -> DynFlags -> [FilePath]
   -> Bool -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
-  -> Ghc PipelineResult
-residentCompileOne cache memoRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
+  -> Ghc CompileResult
+residentCompileOne preparation cache memoRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   hsc0 <- getSession
   setSession (hscUpdateFlags
@@ -987,10 +1028,7 @@ residentCompileOne cache memoRef baseDFlags baseImportPaths timing purpose mscop
   let variant = case mscope of
         Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
         _                                        -> normalVariant purpose path
-      targetModName' = mkModuleName (capitalize (takeBaseName path))
-  result <- runCompileCycle (Just cache) (Just memoRef) timing sessionT0 variant path
-  liftIO (sanitizeMemo targetModName' memoRef)
-  pure result
+  runCompileCycle preparation (Just cache) (Just memoRef) timing sessionT0 variant path
 
 -- | Strip every request-scoped entry from the shared 'GutsMemo' after a
 -- resident cycle: the cycle's own target module (@targetModName@) and any

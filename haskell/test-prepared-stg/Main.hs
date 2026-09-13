@@ -10,7 +10,7 @@ import System.Directory
   ( createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly )
 import System.FilePath ((</>))
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..)
+  ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , runPipeline, runPipelineSelected, withResidentPipelineSelected )
 import Tidepool.PreparedStg (PreparedModule(..))
 import Tidepool.EffectSchema (SiteType(..), YieldSite(..), sitedVerbs, vsName)
@@ -170,15 +170,15 @@ main = do
         "list-answer site did not preserve shared legacy answer identity"
 
       withResidentPipelineSelected [dir] $ \compileSite -> do
-        siteCold <- compileSite PreparedStg Nothing siteTarget [] Nothing
-        siteWarm <- compileSite PreparedStg Nothing siteTarget [] Nothing
+        siteCold <- compileSite PreparedStg GeneralCompile Nothing siteTarget [] Nothing
+        siteWarm <- compileSite PreparedStg GeneralCompile Nothing siteTarget [] Nothing
         assert (preparedEvidence "SiteExpr" siteCold == (siteInventory, directSites))
           "resident cold typed-site evidence differs from direct"
         assert (preparedEvidence "SiteExpr" siteWarm == (siteInventory, directSites))
           "resident warm typed-site evidence differs from direct"
         expectFailureContaining "resident malformed recognized site" "is not fully applied" $
-          compileSite PreparedStg Nothing malformedSiteTarget [] Nothing
-        siteRecovered <- compileSite PreparedStg Nothing siteTarget [] Nothing
+          compileSite PreparedStg GeneralCompile Nothing malformedSiteTarget [] Nothing
+        siteRecovered <- compileSite PreparedStg GeneralCompile Nothing siteTarget [] Nothing
         assert (preparedEvidence "SiteExpr" siteRecovered == (siteInventory, directSites))
           "resident compiler did not recover after malformed recognized site"
 
@@ -188,10 +188,10 @@ main = do
       writeFile target validTarget
 
       withResidentPipelineSelected [dir] $ \compile -> do
-        _coldLegacy <- compile LegacyCore Nothing target [] Nothing
+        _coldLegacy <- compile LegacyCore GeneralCompile Nothing target [] Nothing
 
-        cold <- compile PreparedStg Nothing target [] Nothing
-        warm <- compile PreparedStg Nothing target [] Nothing
+        cold <- compile PreparedStg GeneralCompile Nothing target [] Nothing
+        warm <- compile PreparedStg GeneralCompile Nothing target [] Nothing
         assert (preparedShape cold == directShape)
           "resident cold prepared output differs from direct output"
         assert (preparedShape warm == directShape)
@@ -202,12 +202,12 @@ main = do
         assert (allPreparedEvidence warm == allPreparedEvidence direct)
           "resident warm prepared facts differ from direct output"
 
-        _warmLegacy <- compile LegacyCore Nothing target [] Nothing
+        _warmLegacy <- compile LegacyCore GeneralCompile Nothing target [] Nothing
 
         writeFile target "module Expr where\nresult =\n"
         expectFailure "resident prepared" $
-          compile PreparedStg Nothing target [] Nothing
+          compile PreparedStg GeneralCompile Nothing target [] Nothing
         writeFile target validTarget
-        recovered <- compile PreparedStg Nothing target [] Nothing
+        recovered <- compile PreparedStg GeneralCompile Nothing target [] Nothing
         assert (preparedShape recovered == directShape)
           "resident compiler did not recover after a request-local failure"

@@ -71,7 +71,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 
 use crate::engine::{self, TurnOutcome};
 use crate::harness::{Harness, HarnessError};

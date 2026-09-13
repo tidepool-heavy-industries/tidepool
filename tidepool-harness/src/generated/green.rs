@@ -13,7 +13,7 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum GreenReq {
-    AsyncSpawnWith(i64, tidepool_eval::value::Value),
+    AsyncSpawnWith(i64, tidepool_bridge::Value),
     AsyncDoneWith(i64),
     AsyncJoinAnyWith(Vec<i64>),
     AsyncStatusWith(i64),

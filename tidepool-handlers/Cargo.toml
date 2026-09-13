@@ -12,7 +12,6 @@ description = "Concrete effect handlers for Tidepool (Console/KV/Fs/SG/Http/Exec
 tidepool-mcp.workspace = true
 tidepool-effect.workspace = true
 tidepool-runtime.workspace = true
-tidepool-eval.workspace = true
 tidepool-repr.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true

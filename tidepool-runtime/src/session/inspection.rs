@@ -490,7 +490,7 @@ fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileErro
         return Err(invalid("trailing CBOR data"));
     }
     let root = array_len(&value, 2, "receipt")?;
-    if text(&root[0], "version")? != "TPINSP004" {
+    if text(&root[0], "version")? != "TPINSP005" {
         return Err(invalid("unsupported receipt version"));
     }
     array(&root[1], "results")?
@@ -577,7 +577,272 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
                 matches,
             })
         }
+        "StructuredInfoOk" => {
+            let body = array_len(value, 2, "StructuredInfoOk result")?;
+            Ok(InspectionResult::StructuredInfo(Ok(
+                decode_identifier_info(&body[1])?,
+            )))
+        }
+        "StructuredTypeOk" => {
+            let body = array_len(value, 2, "StructuredTypeOk result")?;
+            Ok(InspectionResult::StructuredType(Ok(decode_type_info(
+                &body[1],
+            )?)))
+        }
+        "StructuredError" => {
+            let body = array_len(value, 2, "StructuredError result")?;
+            Ok(InspectionResult::StructuredInfo(Err(decode_query_error(
+                &body[1],
+            )?)))
+        }
         other => Err(invalid(format!("unknown result tag {other:?}"))),
+    }
+}
+
+fn decode_identifier_info(value: &CborValue) -> Result<IdentifierInfo, CompileError> {
+    let fields = array_len(value, 4, "IdentifierInfo")?;
+    Ok(IdentifierInfo {
+        identifier: decode_identifier_ref(&fields[0])?,
+        declaration: decode_declaration(&fields[1])?,
+        parent: match &fields[2] {
+            CborValue::Null => None,
+            value => Some(decode_identifier_ref(value)?),
+        },
+        provenance: decode_provenance(&fields[3])?,
+    })
+}
+
+fn decode_type_info(value: &CborValue) -> Result<TypeInfo, CompileError> {
+    let fields = array_len(value, 3, "TypeInfo")?;
+    Ok(TypeInfo {
+        identifier: decode_identifier_ref(&fields[0])?,
+        expression: decode_type_expression(&fields[1])?,
+        provenance: decode_provenance(&fields[2])?,
+    })
+}
+
+fn decode_identifier_ref(value: &CborValue) -> Result<IdentifierRef, CompileError> {
+    let fields = array_len(value, 3, "IdentifierRef")?;
+    let namespace = match text(&fields[2], "IdentifierRef namespace")? {
+        "Value" => IdentifierNamespace::Value,
+        "Type" => IdentifierNamespace::Type,
+        "Constructor" => IdentifierNamespace::Constructor,
+        "Field" => IdentifierNamespace::Field,
+        other => {
+            return Err(invalid(format!(
+                "unknown IdentifierRef namespace {other:?}"
+            )));
+        }
+    };
+    Ok(IdentifierRef {
+        module: text(&fields[0], "IdentifierRef module")?.into(),
+        name: text(&fields[1], "IdentifierRef name")?.into(),
+        namespace,
+    })
+}
+
+fn decode_type_expression(value: &CborValue) -> Result<TypeExpression, CompileError> {
+    let fields = array_len(value, 3, "TypeExpression")?;
+    Ok(TypeExpression {
+        canonical: text(&fields[0], "TypeExpression canonical")?.into(),
+        variables: decode_texts(&fields[1], "TypeExpression variables")?,
+        constraints: decode_texts(&fields[2], "TypeExpression constraints")?,
+    })
+}
+
+fn decode_provenance(value: &CborValue) -> Result<ScopeProvenance, CompileError> {
+    let fields = array_len(value, 3, "ScopeProvenance")?;
+    Ok(ScopeProvenance {
+        scope: decode_scope(&fields[0])?,
+        generation: unsigned(&fields[1], "ScopeProvenance generation")?,
+        fingerprint: text(&fields[2], "ScopeProvenance fingerprint")?.into(),
+    })
+}
+
+fn decode_query_error(value: &CborValue) -> Result<QueryError, CompileError> {
+    let fields = array(value, "StructuredError")?;
+    let tag = fields
+        .first()
+        .ok_or_else(|| invalid("empty StructuredError"))
+        .and_then(|value| text(value, "StructuredError tag"))?;
+    match tag {
+        "Unknown" => Ok(QueryError::Unknown(decode_query(
+            array_len(value, 2, "Unknown error")?.get(1).unwrap(),
+        )?)),
+        "Ambiguous" => {
+            let fields = array_len(value, 3, "Ambiguous error")?;
+            Ok(QueryError::Ambiguous(
+                decode_query(&fields[1])?,
+                array(&fields[2], "Ambiguous candidates")?
+                    .iter()
+                    .map(decode_identifier_ref)
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        "UnknownModule" => Ok(QueryError::UnknownModule(
+            text(
+                array_len(value, 2, "UnknownModule error")?.get(1).unwrap(),
+                "UnknownModule module",
+            )?
+            .into(),
+        )),
+        "Unsupported" => Ok(QueryError::Unsupported(
+            text(
+                array_len(value, 2, "Unsupported error")?.get(1).unwrap(),
+                "Unsupported detail",
+            )?
+            .into(),
+        )),
+        other => Err(invalid(format!("unknown StructuredError tag {other:?}"))),
+    }
+}
+
+fn decode_query(value: &CborValue) -> Result<NameQuery, CompileError> {
+    let fields = array_len(value, 3, "Structured query")?;
+    let namespace = match text(&fields[1], "Structured query namespace")? {
+        "Any" => NameNamespace::Any,
+        "Value" => NameNamespace::Value,
+        "Type" => NameNamespace::Type,
+        "Constructor" => NameNamespace::Constructor,
+        other => {
+            return Err(invalid(format!(
+                "unknown structured query namespace {other:?}"
+            )));
+        }
+    };
+    Ok(NameQuery {
+        scope: decode_scope(&fields[0])?,
+        namespace,
+        name: text(&fields[2], "Structured query name")?.into(),
+    })
+}
+
+fn decode_scope(value: &CborValue) -> Result<NameScope, CompileError> {
+    let fields = array(value, "scope")?;
+    match fields
+        .first()
+        .and_then(|value| text(value, "scope tag").ok())
+    {
+        Some("Current") if fields.len() == 1 => Ok(NameScope::Current),
+        Some("PublicModule") if fields.len() == 2 => Ok(NameScope::PublicModule(
+            text(&fields[1], "PublicModule name")?.into(),
+        )),
+        Some(tag) => Err(invalid(format!("invalid scope {tag:?}"))),
+        None => Err(invalid("scope tag must be text")),
+    }
+}
+
+fn decode_declaration(value: &CborValue) -> Result<DeclarationInfo, CompileError> {
+    let fields = array(value, "DeclarationInfo")?;
+    let tag = fields
+        .first()
+        .ok_or_else(|| invalid("empty DeclarationInfo"))
+        .and_then(|value| text(value, "DeclarationInfo tag"))?;
+    match tag {
+        "Value" => Ok(DeclarationInfo::Value(decode_type_expression(
+            &array_len(value, 2, "Value declaration")?[1],
+        )?)),
+        "Data" => {
+            let f = array_len(value, 3, "Data declaration")?;
+            Ok(DeclarationInfo::Data {
+                parameters: decode_texts(&f[1], "Data parameters")?,
+                constructors: array(&f[2], "Data constructors")?
+                    .iter()
+                    .map(decode_constructor)
+                    .collect::<Result<_, _>>()?,
+            })
+        }
+        "Newtype" => {
+            let f = array_len(value, 3, "Newtype declaration")?;
+            Ok(DeclarationInfo::Newtype {
+                parameters: decode_texts(&f[1], "Newtype parameters")?,
+                constructor: decode_constructor(&f[2])?,
+            })
+        }
+        "TypeSynonym" => {
+            let f = array_len(value, 3, "TypeSynonym declaration")?;
+            Ok(DeclarationInfo::TypeSynonym {
+                parameters: decode_texts(&f[1], "TypeSynonym parameters")?,
+                body: decode_type_expression(&f[2])?,
+            })
+        }
+        "Class" => {
+            let f = array_len(value, 4, "Class declaration")?;
+            Ok(DeclarationInfo::Class {
+                parameters: decode_texts(&f[1], "Class parameters")?,
+                superclasses: array(&f[2], "Class superclasses")?
+                    .iter()
+                    .map(decode_type_expression)
+                    .collect::<Result<_, _>>()?,
+                methods: array(&f[3], "Class methods")?
+                    .iter()
+                    .map(decode_class_method)
+                    .collect::<Result<_, _>>()?,
+            })
+        }
+        "Constructor" => {
+            let f = array_len(value, 3, "Constructor declaration")?;
+            Ok(DeclarationInfo::Constructor {
+                parent: decode_identifier_ref(&f[1])?,
+                constructor: decode_constructor(&f[2])?,
+            })
+        }
+        "RecordSelector" => {
+            let f = array_len(value, 3, "RecordSelector declaration")?;
+            Ok(DeclarationInfo::RecordSelector {
+                parent: decode_identifier_ref(&f[1])?,
+                ty: decode_type_expression(&f[2])?,
+            })
+        }
+        other => Err(invalid(format!("unknown DeclarationInfo tag {other:?}"))),
+    }
+}
+
+fn decode_constructor(value: &CborValue) -> Result<ConstructorInfo, CompileError> {
+    let fields = array_len(value, 4, "ConstructorInfo")?;
+    Ok(ConstructorInfo {
+        identifier: decode_identifier_ref(&fields[0])?,
+        ty: decode_type_expression(&fields[1])?,
+        arguments: array(&fields[2], "ConstructorInfo arguments")?
+            .iter()
+            .map(decode_type_expression)
+            .collect::<Result<_, _>>()?,
+        fields: array(&fields[3], "ConstructorInfo fields")?
+            .iter()
+            .map(decode_field)
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+fn decode_field(value: &CborValue) -> Result<FieldInfo, CompileError> {
+    let fields = array_len(value, 2, "FieldInfo")?;
+    Ok(FieldInfo {
+        name: text(&fields[0], "FieldInfo name")?.into(),
+        ty: decode_type_expression(&fields[1])?,
+    })
+}
+
+fn decode_class_method(value: &CborValue) -> Result<ClassMethodInfo, CompileError> {
+    let fields = array_len(value, 2, "ClassMethodInfo")?;
+    Ok(ClassMethodInfo {
+        identifier: decode_identifier_ref(&fields[0])?,
+        ty: decode_type_expression(&fields[1])?,
+    })
+}
+
+fn decode_texts(value: &CborValue, what: &str) -> Result<Vec<String>, CompileError> {
+    array(value, what)?
+        .iter()
+        .map(|value| Ok(text(value, what)?.into()))
+        .collect()
+}
+
+fn unsigned(value: &CborValue, what: &str) -> Result<u64, CompileError> {
+    match value {
+        CborValue::Integer(value) => {
+            u64::try_from(*value).map_err(|_| invalid(format!("{what} must be u64")))
+        }
+        _ => Err(invalid(format!("{what} must be u64"))),
     }
 }
 
@@ -670,7 +935,7 @@ mod tests {
     #[test]
     fn decodes_every_result_shape() {
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP004".into()),
+            CborValue::Text("TPINSP005".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("Type".into()),
@@ -763,7 +1028,7 @@ mod tests {
             CborValue::Text("scope-abc".into()),
         ]);
         let receipt = CborValue::Array(vec![
-            CborValue::Text("TPINSP003".into()),
+            CborValue::Text("TPINSP005".into()),
             CborValue::Array(vec![
                 CborValue::Array(vec![
                     CborValue::Text("StructuredTypeOk".into()),
@@ -811,7 +1076,7 @@ mod tests {
         }
 
         let mut trailing = encoded(CborValue::Array(vec![
-            CborValue::Text("TPINSP004".into()),
+            CborValue::Text("TPINSP005".into()),
             CborValue::Array(vec![CborValue::Array(vec![
                 CborValue::Text("NotFound".into()),
                 CborValue::Text("x".into()),
@@ -825,7 +1090,7 @@ mod tests {
     fn decodes_row_availability_and_rejects_unknown_values() {
         let receipt = |availability: &str| {
             CborValue::Array(vec![
-                CborValue::Text("TPINSP004".into()),
+                CborValue::Text("TPINSP005".into()),
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Text("TypeMatches".into()),
                     CborValue::Text("Eff effects ()".into()),

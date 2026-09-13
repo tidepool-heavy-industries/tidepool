@@ -32,6 +32,7 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
+use tidepool_bridge::Value;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{CancelHandle, FuncId, JitEffectMachine, MachineDisposition};
@@ -43,7 +44,6 @@ use tidepool_codegen::suspension::{
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_eval::value::Value;
 use tidepool_repr::execution_schema::{
     DecodeLimits, MachineImports, ProgramRequirements, ValueId as PreparedValueId,
 };

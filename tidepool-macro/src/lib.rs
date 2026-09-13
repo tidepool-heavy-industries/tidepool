@@ -4,64 +4,6 @@ use proc_macro::TokenStream;
 
 mod expand;
 
-/// Embeds and evaluates a Haskell Core expression at runtime.
-///
-/// Accepts either a `.cbor` path (pre-compiled CBOR) or a `.hs` path (Haskell
-/// source compiled on-demand).
-///
-/// For `.cbor` paths, the file is embedded directly via `include_bytes!`. For
-/// `.hs` paths, the macro invokes `tidepool-extract`, producing CBOR in
-/// `target/tidepool-cbor/`, then embeds the result. The `.hs` source file is
-/// tracked by cargo for automatic recompilation.
-///
-/// # Haskell Source Support
-///
-/// When given a `.hs` path, the macro runs `$TIDEPOOL_EXTRACT`/`tidepool-extract`
-/// on `PATH` if available, falling back to `nix run .#tidepool-extract`
-/// (requires `nix` on `PATH`) only when no binary is found directly.
-///
-/// **Path resolution:** `.hs` paths resolve relative to `CARGO_MANIFEST_DIR`
-/// (the crate root). `.cbor` paths resolve relative to the calling file (standard
-/// `include_bytes!` behavior).
-///
-/// For modules with multiple top-level bindings, specify which binding to
-/// evaluate using the `::binding` syntax. If only one binding exists (excluding
-/// metadata), it is selected automatically.
-///
-/// # Panics
-///
-/// The generated code will panic during CBOR deserialization if the embedded data
-/// is malformed or incompatible with the expected format.
-///
-/// # Dependencies
-///
-/// The expansion of this macro expects the following crates to be available in the
-/// caller's scope:
-///
-/// - `tidepool_repr`
-/// - `tidepool_eval`
-///
-/// # Returns
-///
-/// Returns a `Result<tidepool_eval::Value, tidepool_eval::error::EvalError>`.
-///
-/// # Examples
-///
-/// ```no_run
-/// use tidepool_macro::haskell_eval;
-///
-/// // Pre-compiled CBOR path (resolved relative to the calling source file)
-/// let val = haskell_eval!("../../haskell/test/suite_cbor/lit_42.cbor").unwrap();
-/// ```
-///
-/// `.hs` paths are also accepted (compiled on-demand via
-/// `nix run .#tidepool-extract`), with optional `::binding` selector — see the
-/// crate README for examples.
-#[proc_macro]
-pub fn haskell_eval(input: TokenStream) -> TokenStream {
-    expand::expand(input.into()).into()
-}
-
 /// Embeds inline Haskell source as a Core expression with its DataConTable.
 ///
 /// Writes the Haskell source to a temporary file, compiles it via

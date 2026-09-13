@@ -848,10 +848,8 @@ fn emit_subtree_with_tail(args: EmitArgs, idx: usize) -> Result<SsaVal, EmitErro
 /// Returns true if the expression at `idx` is trivial (safe to evaluate eagerly).
 /// Trivial expressions are already in WHNF or produce values with no computation.
 ///
-/// Shared with the oracle (`tidepool-eval`) via `tidepool_repr::trivial_field`
-/// — both backends MUST agree on this predicate (see that module's doc for
-/// why: a diverged copy is a real oracle/JIT semantic disagreement, not just
-/// duplicated code).
+/// Defined by `tidepool_repr::trivial_field`, so all native compilation paths
+/// use the same predicate.
 use tidepool_repr::trivial_field::is_trivial_field;
 
 /// Topologically sort deferred simple LetRec bindings so each appears AFTER the

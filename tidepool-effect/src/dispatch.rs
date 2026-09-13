@@ -3,8 +3,8 @@
 use crate::error::EffectError;
 use frunk::{HCons, HNil};
 use tidepool_bridge::error::BridgeError;
+use tidepool_bridge::Value;
 use tidepool_bridge::{FromCore, ToCore};
-use tidepool_eval::value::Value;
 use tidepool_repr::{DataConId, DataConTable, PrincipalId};
 /// A handler's answer to an effect request.
 #[derive(Debug)]

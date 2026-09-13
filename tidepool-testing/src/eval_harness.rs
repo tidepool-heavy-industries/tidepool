@@ -616,7 +616,7 @@ pub mod mock {
     use tidepool_bridge_derive::FromCore;
     use tidepool_bridge_effects::{FileMeta, Proc};
     use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
-    use tidepool_eval::value::Value;
+    use tidepool_bridge::Value;
 
     /// The base MCP effect names, in stack order — derived directly from
     /// `tidepool_mcp::standard_decls()`, not hand-copied, so this list cannot

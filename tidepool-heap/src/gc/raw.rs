@@ -43,6 +43,9 @@ impl DescriptorRegistry {
                 available,
             });
         }
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
         self.objects.insert(object as usize, descriptor);
         Ok(())
     }
@@ -602,29 +605,22 @@ pub unsafe fn cheney_copy(
     from_end: *const u8,
     tospace: &mut [u8],
 ) -> CopyResult {
-    let mut descriptors = DescriptorRegistry::new();
-    match cheney_copy_impl(
-        root_ptrs,
-        from_start,
-        from_end,
-        tospace,
-        &mut descriptors,
-        false,
-    ) {
-        Ok(result) => result,
-        Err(_) => unreachable!("empty descriptor registry cannot fail validation"),
-    }
+    cheney_copy_impl(root_ptrs, from_start, from_end, tospace)
 }
 
-/// Perform a copying collection while using registered descriptors for new
-/// execution-schema objects and the existing tag scanner for legacy objects.
-/// Descriptor identities move with evacuated objects; dead from-space entries
-/// are retired after the scan.
+/// Copy prepared objects using only their registered physical descriptors.
+/// Every in-range managed pointer must name an exact registered object start;
+/// this boundary does not mix Core-engine objects into the prepared heap.
+/// Stage reachability, alignment, capacity and slot rewrites before changing
+/// any object, root or registration. Dead from-space entries are retired only
+/// after staging succeeds.
 ///
 /// # Safety
 ///
-/// The safety requirements of [`cheney_copy`] apply. Every registry entry in
-/// from-space must describe the object at that exact address.
+/// Root slots and source objects must be valid and exclusively accessible for
+/// the call. Registry extents must describe initialized readable allocations.
+/// Source and destination are disjoint. Unlike [`cheney_copy`], insufficient
+/// destination capacity is a typed error, not a caller safety requirement.
 pub unsafe fn cheney_copy_registered(
     root_ptrs: &[*mut *mut u8],
     from_start: *const u8,
@@ -632,7 +628,220 @@ pub unsafe fn cheney_copy_registered(
     tospace: &mut [u8],
     descriptors: &mut DescriptorRegistry,
 ) -> Result<CopyResult, DescriptorTraceError> {
-    cheney_copy_impl(root_ptrs, from_start, from_end, tospace, descriptors, true)
+    let from_start = from_start as usize;
+    let from_end = from_end as usize;
+    let to_base = tospace.as_mut_ptr() as usize;
+    let to_end = to_base
+        .checked_add(tospace.len())
+        .ok_or(DescriptorTraceError::InvalidRange)?;
+    if from_end < from_start || (from_start < to_end && to_base < from_end) {
+        return Err(DescriptorTraceError::InvalidRange);
+    }
+    for &slot in root_ptrs {
+        let address = slot as usize;
+        let end = address
+            .checked_add(std::mem::size_of::<*mut u8>())
+            .ok_or(DescriptorTraceError::InvalidRange)?;
+        if (address < from_end && from_start < end) || (address < to_end && to_base < end) {
+            return Err(DescriptorTraceError::InvalidRange);
+        }
+    }
+    for (&address, descriptor) in &descriptors.objects {
+        let end = address
+            .checked_add(descriptor.allocation_extent() as usize)
+            .ok_or(DescriptorTraceError::InvalidRange)?;
+        if (address < to_end && to_base < end) || (address < from_start && from_start < end) {
+            return Err(DescriptorTraceError::InvalidRange);
+        }
+    }
+
+    // Validate the allocation inventory independently of roots. This catches
+    // overlapping registrations before any interior pointer could be accepted
+    // as a second object start.
+    let mut extents = Vec::new();
+    extents
+        .try_reserve(descriptors.objects.len())
+        .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+    extents.extend(
+        descriptors
+            .objects
+            .iter()
+            .filter(|(address, _)| **address >= from_start && **address < from_end)
+            .map(|(&address, descriptor)| (address, descriptor)),
+    );
+    extents.sort_unstable_by_key(|(address, _)| *address);
+    let mut previous_end = from_start;
+    for (address, descriptor) in extents {
+        if address < previous_end {
+            return Err(DescriptorTraceError::OverlappingObjects { address });
+        }
+        let available = from_end - address;
+        descriptor.for_each_trace_slot(address as *mut u8, available, |_| {})?;
+        if address % descriptor.allocation_alignment() as usize != 0 {
+            return Err(DescriptorTraceError::Misaligned {
+                address,
+                alignment: descriptor.allocation_alignment(),
+            });
+        }
+        previous_end = address + descriptor.allocation_extent() as usize;
+    }
+
+    let mut plan = DescriptorCopyPlan {
+        descriptors,
+        from_start,
+        from_end,
+        to_base,
+        capacity: tospace.len(),
+        used: 0,
+        objects: Vec::new(),
+        by_source: HashMap::new(),
+    };
+    for &slot in root_ptrs {
+        plan.enqueue(std::ptr::read(slot))?;
+    }
+    let mut scan = 0;
+    while scan < plan.objects.len() {
+        let source = plan.objects[scan].source;
+        let descriptor = Arc::clone(&plan.objects[scan].descriptor);
+        let mut fields = Vec::new();
+        fields
+            .try_reserve_exact(descriptor.trace_offsets().len())
+            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+        descriptor.for_each_trace_slot(
+            source as *mut u8,
+            descriptor.allocation_extent() as usize,
+            |slot| {
+                fields.push((slot as usize - source, std::ptr::read(slot)));
+            },
+        )?;
+        for &(_, value) in &fields {
+            plan.enqueue(value)?;
+        }
+        plan.objects[scan].fields = fields;
+        scan += 1;
+    }
+
+    // Construct replacement ownership before committing heap mutations.
+    let mut next_objects = HashMap::new();
+    // Every surviving source object replaces one registration; retained
+    // external objects keep theirs. This bound prevents allocation at commit.
+    next_objects
+        .try_reserve(plan.descriptors.objects.len())
+        .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+    next_objects.extend(
+        plan.descriptors
+            .objects
+            .iter()
+            .filter(|(address, _)| !(**address >= from_start && **address < from_end))
+            .map(|(&address, descriptor)| (address, Arc::clone(descriptor))),
+    );
+    for object in &plan.objects {
+        next_objects.insert(to_base + object.offset, Arc::clone(&object.descriptor));
+    }
+
+    // Commit has no fallible validation or scanning. All reads and writes are
+    // bounded by the staged descriptors, never a mutable legacy size header.
+    for object in &plan.objects {
+        std::ptr::copy_nonoverlapping(
+            object.source as *const u8,
+            (to_base + object.offset) as *mut u8,
+            object.descriptor.allocation_extent() as usize,
+        );
+    }
+    for object in &plan.objects {
+        for &(offset, value) in &object.fields {
+            std::ptr::write(
+                (to_base + object.offset + offset) as *mut *mut u8,
+                plan.relocated(value),
+            );
+        }
+    }
+    for object in &plan.objects {
+        let source = object.source as *mut u8;
+        object
+            .descriptor
+            .install_forwarding(source, (to_base + object.offset) as *mut u8);
+    }
+    for &slot in root_ptrs {
+        std::ptr::write(slot, plan.relocated(std::ptr::read(slot)));
+    }
+    let bytes_copied = plan.used;
+    descriptors.objects = next_objects;
+    Ok(CopyResult { bytes_copied })
+}
+
+struct DescriptorRelocation {
+    source: usize,
+    offset: usize,
+    descriptor: Arc<ObjectDescriptor>,
+    fields: Vec<(usize, *mut u8)>,
+}
+
+struct DescriptorCopyPlan<'a> {
+    descriptors: &'a DescriptorRegistry,
+    from_start: usize,
+    from_end: usize,
+    to_base: usize,
+    capacity: usize,
+    used: usize,
+    objects: Vec<DescriptorRelocation>,
+    by_source: HashMap<usize, usize>,
+}
+
+impl DescriptorCopyPlan<'_> {
+    fn enqueue(&mut self, pointer: *mut u8) -> Result<(), DescriptorTraceError> {
+        let source = pointer as usize;
+        if source < self.from_start
+            || source >= self.from_end
+            || self.by_source.contains_key(&source)
+        {
+            return Ok(());
+        }
+        let descriptor = self
+            .descriptors
+            .objects
+            .get(&source)
+            .ok_or(DescriptorTraceError::UnregisteredPointer { address: source })?;
+        let mask = descriptor.allocation_alignment() as usize - 1;
+        let address = self
+            .to_base
+            .checked_add(self.used)
+            .and_then(|n| n.checked_add(mask))
+            .ok_or(DescriptorTraceError::InvalidRange)?
+            & !mask;
+        let offset = address - self.to_base;
+        let required = offset
+            .checked_add(descriptor.allocation_extent() as usize)
+            .ok_or(DescriptorTraceError::InvalidRange)?;
+        if required > self.capacity {
+            return Err(DescriptorTraceError::InsufficientSpace {
+                required,
+                available: self.capacity,
+            });
+        }
+        self.by_source
+            .try_reserve(1)
+            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+        self.by_source.insert(source, self.objects.len());
+        self.objects.push(DescriptorRelocation {
+            source,
+            offset,
+            descriptor: Arc::clone(descriptor),
+            fields: Vec::new(),
+        });
+        self.used = required;
+        Ok(())
+    }
+
+    fn relocated(&self, pointer: *mut u8) -> *mut u8 {
+        self.by_source
+            .get(&(pointer as usize))
+            .map(|&index| (self.to_base + self.objects[index].offset) as *mut u8)
+            .unwrap_or(pointer)
+    }
 }
 
 unsafe fn cheney_copy_impl(
@@ -640,37 +849,16 @@ unsafe fn cheney_copy_impl(
     from_start: *const u8,
     from_end: *const u8,
     tospace: &mut [u8],
-    descriptors: &mut DescriptorRegistry,
-    descriptor_scanning: bool,
-) -> Result<CopyResult, DescriptorTraceError> {
+) -> CopyResult {
     let to_base = tospace.as_mut_ptr();
     let to_len = tospace.len();
     let mut free = 0usize;
-
-    // Validate every described from-space extent before installing a single
-    // forwarding pointer. A bad registration therefore cannot leave a
-    // half-relocated heap or registry behind.
-    if descriptor_scanning {
-        for (&address, descriptor) in &descriptors.objects {
-            let object = address as *mut u8;
-            if is_in_range(object, from_start, from_end) {
-                let available = from_end as usize - address;
-                descriptor.for_each_trace_slot(object, available, |_| {})?;
-            }
-        }
-    }
 
     for &root_slot in root_ptrs {
         let old_ptr = *root_slot;
         if !old_ptr.is_null() && is_in_range(old_ptr, from_start, from_end) {
             let available = from_end as usize - old_ptr as usize;
-            let descriptor = descriptor_scanning
-                .then(|| descriptors.objects.get(&(old_ptr as usize)).cloned())
-                .flatten();
             let new_ptr = evacuate(old_ptr, to_base, &mut free, available);
-            if let Some(descriptor) = descriptor {
-                descriptors.objects.insert(new_ptr as usize, descriptor);
-            }
             *root_slot = new_ptr;
         }
     }
@@ -695,39 +883,19 @@ unsafe fn cheney_copy_impl(
         };
         let aligned = object_size.checked_add(7).unwrap_or(object_size) & !7;
 
-        let descriptor = descriptor_scanning
-            .then(|| descriptors.objects.get(&(object as usize)).cloned())
-            .flatten();
         let mut visit = |field_slot: *mut *mut u8| {
             let field_value = *field_slot;
             if !field_value.is_null() && is_in_range(field_value, from_start, from_end) {
                 let field_available = from_end as usize - field_value as usize;
-                let field_descriptor = descriptor_scanning
-                    .then(|| descriptors.objects.get(&(field_value as usize)).cloned())
-                    .flatten();
                 let new_ptr = evacuate(field_value, to_base, &mut free, field_available);
-                if let Some(field_descriptor) = field_descriptor {
-                    descriptors
-                        .objects
-                        .insert(new_ptr as usize, field_descriptor);
-                }
                 *field_slot = new_ptr;
             }
         };
-        if let Some(descriptor) = descriptor {
-            descriptor.for_each_trace_slot(object, available, &mut visit)?;
-        } else {
-            for_each_pointer_field(object, available, &mut visit);
-        }
+        for_each_pointer_field(object, available, &mut visit);
         scan += aligned;
     }
 
-    if descriptor_scanning {
-        descriptors
-            .objects
-            .retain(|address, _| !is_in_range(*address as *const u8, from_start, from_end));
-    }
-    Ok(CopyResult { bytes_copied: free })
+    CopyResult { bytes_copied: free }
 }
 
 #[cfg(test)]

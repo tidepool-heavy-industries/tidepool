@@ -231,7 +231,7 @@ pub extern "C" fn runtime_resize_byte_array(ba: i64, new_size: i64) -> i64 {
             let old_layout = match std::alloc::Layout::from_size_align(old_total, 8) {
                 Ok(layout) => layout,
                 Err(_) => {
-                    return external_allocation_failure(ExternalStorageKind::Bytes, old_total)
+                    return external_allocation_failure(ExternalStorageKind::Bytes, old_total);
                 }
             };
             unsafe { std::alloc::dealloc(old_base, old_layout) };
@@ -714,7 +714,7 @@ unsafe fn render_double_text(vmctx: *mut VMContext, prec: Option<i64>, bits: i64
     } else {
         body
     };
-    let value = tidepool_eval::shapes::make_text(&rendered, text_id);
+    let value = tidepool_bridge::shapes::make_text(&rendered, text_id);
     let converted = crate::heap_bridge::gc_retry(
         vmctx,
         |r: &Result<*mut u8, crate::heap_bridge::BridgeError>| {
@@ -796,11 +796,10 @@ pub extern "C" fn runtime_double_power(bits_a: i64, bits_b: i64) -> i64 {
 ///
 /// Lifts the argument `Text` to a `Value` tree via `heap_bridge` (which owns
 /// the heap-byte layouts), slices its UTF-8 bytes via
-/// `tidepool_eval::shapes::text_bytes_clamped_with` (the same table-free
-/// Text decode the tree-walker's `JsonDecode` arm uses), parses with
+/// `tidepool_bridge::shapes::text_bytes_clamped_with`, parses with
 /// `serde_json`, and builds the aeson `Either Text Value` ADT on the nursery
-/// heap via `tidepool_eval::json` (the SAME builder the tree-walker uses, so JIT
-/// and eval agree by construction) + the stack-safe `value_to_heap`. Parse
+/// heap via `tidepool_bridge::json_builder` + the stack-safe `value_to_heap`.
+/// Parse
 /// failure yields `Left <serde error message>`.
 ///
 /// # Safety
@@ -833,11 +832,13 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
     // No `&DataConTable` reaches this host fn (only the cached `JsonConIds`),
     // so recognize `I#` by the concrete id already resolved into `ids`; a
     // lifted `ByteArray` wrapper con has no such id here and goes
-    // unrecognized — exactly as in eval's `JsonDecode` arm.
+    // unrecognized by the native JsonDecode path.
     let bytes = match &text_val {
-        tidepool_eval::Value::Con(_, fields) => {
-            tidepool_eval::shapes::text_bytes_clamped_with(fields, |_| false, |id| id == ids.i_hash)
-        }
+        tidepool_bridge::Value::Con(_, fields) => tidepool_bridge::shapes::text_bytes_clamped_with(
+            fields,
+            |_| false,
+            |id| id == ids.i_hash,
+        ),
         _ => None,
     };
     let s = match bytes {
@@ -848,10 +849,10 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
         }
     };
 
-    // Build the eval Value (GC-inert Rust data), then materialize on the heap
+    // Build the shared material Value (GC-inert Rust data), then materialize on the heap
     // with one GC-and-retry (the deep spine converts stack-safely via the hylo
     // in value_to_heap).
-    let value = match tidepool_eval::json::decode_json_str(&s, &ids) {
+    let value = match tidepool_bridge::json_builder::decode_json_str(&s, &ids) {
         Some(v) => v,
         None => {
             let msg = b"eitherDecode: Either (Left/Right) constructors not in scope";
@@ -879,8 +880,7 @@ pub unsafe extern "C" fn runtime_json_decode(vmctx: *mut VMContext, text_ptr: *m
 /// (`parseISO8601 :: Text -> Either Text UTCTime`). Forces the `Text` argument,
 /// extracts its UTF-8 bytes, parses via `chrono`, and builds the
 /// `Either Text UTCTime` ADT on the nursery heap via
-/// `tidepool_eval::json::parse_iso8601_str` (the SAME builder the tree-walker
-/// uses, so JIT and eval agree by construction) + the stack-safe
+/// `tidepool_bridge::time::parse_iso8601_str` + the stack-safe
 /// `value_to_heap`. A parse failure yields `Left <message>`.
 ///
 /// # Safety
@@ -912,9 +912,11 @@ pub unsafe extern "C" fn runtime_parse_iso8601(
         }
     };
     let bytes = match &text_val {
-        tidepool_eval::Value::Con(_, fields) => {
-            tidepool_eval::shapes::text_bytes_clamped_with(fields, |_| false, |id| id == ids.i_hash)
-        }
+        tidepool_bridge::Value::Con(_, fields) => tidepool_bridge::shapes::text_bytes_clamped_with(
+            fields,
+            |_| false,
+            |id| id == ids.i_hash,
+        ),
         _ => None,
     };
     let s = match bytes {
@@ -925,7 +927,7 @@ pub unsafe extern "C" fn runtime_parse_iso8601(
         }
     };
 
-    let value = tidepool_eval::time::parse_iso8601_str(&s, &ids);
+    let value = tidepool_bridge::time::parse_iso8601_str(&s, &ids);
     let converted = crate::heap_bridge::gc_retry(
         vmctx,
         |r: &Result<*mut u8, crate::heap_bridge::BridgeError>| {

@@ -3,7 +3,7 @@
 //! Each type here derives `CoreRecord` (its Haskell `data` decl is generated
 //! from the Rust struct — see `tidepool_bridge::CoreRecord`) plus `ToCore`,
 //! so it can be handed straight to `EffectContext::respond`. Living in a LOW
-//! crate (depends only on `tidepool-bridge`/`tidepool-eval`/`tidepool-repr`)
+//! crate (depends only on `tidepool-bridge` and `tidepool-repr`)
 //! means both the real handlers (`tidepool-handlers`, a TOP crate) and test
 //! mocks (`tidepool-testing`, `tidepool-runtime/tests`, both LOW crates) can
 //! import the same struct without a dependency cycle — so a mock can no

@@ -30,7 +30,6 @@ path = "src/bin/tidepool-compile-report.rs"
 [dependencies]
 tempfile.workspace = true
 tidepool-repr.workspace = true
-tidepool-eval.workspace = true
 tidepool-heap.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
@@ -58,7 +57,6 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 clap.workspace = true
 axum.workspace = true
-rmcp.workspace = true
 glob.workspace = true
 frunk.workspace = true
 futures-util.workspace = true
@@ -72,5 +70,4 @@ parking_lot.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
-rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 tidepool-testing.workspace = true

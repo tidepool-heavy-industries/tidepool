@@ -80,7 +80,7 @@ fn unambiguous_i_hash_resolves_cleanly() {
     let result = 42i64
         .to_value(&t)
         .expect("unambiguous I# must encode cleanly");
-    if let tidepool_eval::Value::Con(id, _) = result {
+    if let tidepool_bridge::Value::Con(id, _) = result {
         assert_eq!(id, DataConId(100));
     } else {
         panic!("expected Value::Con");

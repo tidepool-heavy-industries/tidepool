@@ -14,6 +14,6 @@ use tidepool_bridge_derive::FromCore;
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum ActorLocalReq {
     ActorLocalContextWith,
-    ActorReceiveWith(i64, tidepool_eval::value::Value),
-    ActorCheckpointWith(i64, tidepool_eval::value::Value),
+    ActorReceiveWith(i64, tidepool_bridge::Value),
+    ActorCheckpointWith(i64, tidepool_bridge::Value),
 }

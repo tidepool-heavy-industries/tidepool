@@ -27,7 +27,7 @@ use url::Url;
 use tidepool_bridge::ToCore;
 use tidepool_bridge_derive::FromCore;
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 
 /// Structured errors for Tide effect handlers.
 #[derive(Error, Debug)]

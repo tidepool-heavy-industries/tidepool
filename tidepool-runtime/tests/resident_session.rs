@@ -22,10 +22,10 @@
 //! this suite deliberately does not exercise it (see the segment-20 SPEC's L7
 //! anti-pattern).
 
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
-use tidepool_eval::value::Value;
 use tidepool_repr::Literal;
 use tidepool_runtime::session::{ResidentError, ResidentOutcome, ResidentSession};
 use tidepool_runtime::{value_to_json, DEFAULT_NURSERY_SIZE};
@@ -415,86 +415,6 @@ fn run_child_on_idle_session_is_not_suspended() {
     ) {
         Err(ResidentError::NotSuspended) => {}
         other => panic!("run_child on an idle session must be NotSuspended; got {other:?}"),
-    }
-}
-
-/// Codex review item 9 (HIGH, `codex-review-2026-08-08.md`): a resume answer
-/// that fails the JIT's A5 NF-force (a bottom/unforced-thunk answer,
-/// `jit_machine.rs`'s `resume_suspended_inner` around :1328) must NOT wedge
-/// the session. The machine deliberately leaves the continuation stowed on
-/// that rejection so the caller can retry with a corrected answer —
-/// `ResidentSession` must track that, not blindly clear `pending` before the
-/// machine is even called. Before the fix this wedged: `pending` cleared
-/// unconditionally in `reenter`, `is_idle()` lied `true`, a corrected resume
-/// was rejected as `WrongContinuation` (pending already gone), and a
-/// subsequent top-level turn would panic on the machine's stowed-
-/// continuation `assert!` (caught by `catch_unwind` and surfaced as a run
-/// error here, not a raw panic — see `on_eval_thread`).
-#[test]
-fn retryable_resume_failure_does_not_wedge_the_session() {
-    let harness = setup();
-    let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
-
-    let (t1_expr, t1_table) = compile_turn(
-        &harness,
-        "result :: M Value\nresult = do\n  \
-           n <- send (Ask \"pick a number\")\n  \
-           pure n",
-    );
-    let hole = match session.run("t1", &t1_expr, &t1_table).expect("turn 1 runs") {
-        ResidentOutcome::Suspended { hole, .. } => hole,
-        ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at `ask`"),
-        ResidentOutcome::BindingsCommitted { .. } => {
-            panic!("turn 1 should suspend at `ask`, not bind names")
-        }
-    };
-
-    // A bottom-bearing answer (an unforced thunk reference): the JIT's A5
-    // NF-force rejects it WITHOUT consuming the stowed continuation.
-    let bottom = Value::ThunkRef(tidepool_eval::value::ThunkId(999));
-    match session.resume(hole.clone(), bottom) {
-        Err(_) => {}
-        Ok(outcome) => panic!("a bottom-bearing answer must be rejected; got {outcome:?}"),
-    }
-
-    // (a) The session must still report suspended, not idle — the machine
-    // did not consume the continuation on a retryable rejection.
-    assert!(
-        !session.is_idle(),
-        "a retryable resume failure must leave the session suspended, not idle"
-    );
-    assert_eq!(
-        session.pending_continuation(),
-        Some(hole.cont_id()),
-        "the same hole stays pending after a retryable rejection"
-    );
-
-    // (b) A corrected resume on the SAME hole must succeed.
-    match session
-        .resume(hole, int(42))
-        .expect("corrected resume on the same hole succeeds")
-    {
-        ResidentOutcome::Completed { result, .. } => {
-            assert_eq!(result.to_json(), serde_json::json!(42));
-        }
-        ResidentOutcome::Suspended { .. } => panic!("corrected resume should complete"),
-        ResidentOutcome::BindingsCommitted { .. } => {
-            panic!("a value-returning resume must not report a projected binding")
-        }
-    }
-    assert!(
-        session.is_idle(),
-        "the session is idle after the corrected resume completes"
-    );
-
-    // (c) A subsequent top-level turn must run cleanly to completion — no
-    // stowed-continuation assertion failure from the earlier rejection.
-    let (t2_expr, t2_table) = compile_turn(&harness, "result :: M Int\nresult = pure (7 :: Int)");
-    match session.run("t2", &t2_expr, &t2_table) {
-        Ok(ResidentOutcome::Completed { result, .. }) => {
-            assert_eq!(result.to_json(), serde_json::json!(7));
-        }
-        other => panic!("post-recovery turn must complete cleanly; got {other:?}"),
     }
 }
 

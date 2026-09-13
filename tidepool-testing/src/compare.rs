@@ -3,7 +3,7 @@
 //! Provides structural equality for interpreter `Value`s after deep-forcing,
 //! and cross-backend comparison between interpreter `Value` and JIT heap objects.
 
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::Literal;
 
 /// Compare two interpreter Values for structural equality.
@@ -26,19 +26,6 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
                     return false;
                 }
                 for pair in fields_a.iter().zip(fields_b.iter()) {
-                    stack.push(pair);
-                }
-            }
-            // Closures: can't structurally compare, so treat as equal if both are closures
-            (Value::Closure { .. }, Value::Closure { .. }) => {}
-            // JoinConts: similarly not comparable
-            (Value::JoinCont { .. }, Value::JoinCont { .. }) => {}
-            // ConFun: compare tag and accumulated args
-            (Value::ConFun(tag_a, arity_a, args_a), Value::ConFun(tag_b, arity_b, args_b)) => {
-                if tag_a != tag_b || arity_a != arity_b || args_a.len() != args_b.len() {
-                    return false;
-                }
-                for pair in args_a.iter().zip(args_b.iter()) {
                     stack.push(pair);
                 }
             }
@@ -99,9 +86,7 @@ pub fn assert_values_eq(a: &Value, b: &Value) {
 /// `TAG_CLOSURE` object becomes `heap_bridge::CLOSURE_SENTINEL` rather than an
 /// error, since a differential comparison needs "opaque but present", not a
 /// hard failure). This crate used to carry its own full copy of the decoder;
-/// the only real difference was cosmetic (a synthetic `Value::Closure`
-/// placeholder instead of the sentinel `Con`), so [`contains_closure`]
-/// recognizes both.
+/// the bridge's closure sentinel is the sole materialized representation.
 ///
 /// # Safety
 ///
@@ -117,21 +102,18 @@ pub unsafe fn heap_to_value(
 }
 
 /// Check if a value contains any closures (which can't be structurally compared
-/// across backends). Recognizes both the oracle's native `Value::Closure` and
-/// the bridge's `CLOSURE_SENTINEL` placeholder Con (what a JIT-heap-decoded
-/// closure looks like after [`heap_to_value`]).
+/// across backends). Recognizes the bridge's `CLOSURE_SENTINEL` placeholder
+/// constructor emitted for a JIT-heap closure.
 pub fn contains_closure(val: &Value) -> bool {
     let mut stack: Vec<&Value> = vec![val];
     while let Some(v) = stack.pop() {
         match v {
-            Value::Closure { .. } => return true,
             Value::Con(tag, fields) => {
                 if *tag == tidepool_codegen::heap_bridge::CLOSURE_SENTINEL {
                     return true;
                 }
                 stack.extend(fields.iter());
             }
-            Value::ConFun(_, _, args) => stack.extend(args.iter()),
             _ => {}
         }
     }
@@ -171,26 +153,6 @@ mod tests {
         let nan_a = Value::Lit(Literal::LitDouble(f64::NAN.to_bits()));
         let nan_b = Value::Lit(Literal::LitDouble(f64::NAN.to_bits()));
         assert!(values_equal(&nan_a, &nan_b));
-    }
-
-    #[test]
-    fn test_closure_equality() {
-        // Two closures are considered equal (not structurally comparable)
-        let env = tidepool_eval::env::Env::new();
-        let expr = tidepool_repr::RecursiveTree {
-            nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
-        };
-        let a = Value::Closure {
-            env: env.clone(),
-            binder: tidepool_repr::VarId(0),
-            body: expr.clone(),
-        };
-        let b = Value::Closure {
-            env,
-            binder: tidepool_repr::VarId(1),
-            body: expr,
-        };
-        assert!(values_equal(&a, &b));
     }
 
     // Regression (#334): the compare heap reader must return the REAL backing
@@ -257,20 +219,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_contains_closure() {
-        assert!(!contains_closure(&Value::Lit(Literal::LitInt(42))));
-        let env = tidepool_eval::env::Env::new();
-        let expr = tidepool_repr::RecursiveTree {
-            nodes: vec![tidepool_repr::CoreFrame::Var(tidepool_repr::VarId(0))],
-        };
-        let closure = Value::Closure {
-            env,
-            binder: tidepool_repr::VarId(0),
-            body: expr,
-        };
-        assert!(contains_closure(&closure));
-        let nested = Value::Con(DataConId(1), vec![closure]);
-        assert!(contains_closure(&nested));
-    }
 }

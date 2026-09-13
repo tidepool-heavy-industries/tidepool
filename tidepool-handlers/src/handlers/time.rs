@@ -32,7 +32,7 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
-    use tidepool_eval::value::Value;
+    use tidepool_bridge::Value;
 
     #[test]
     fn test_time_dispatch_now() {

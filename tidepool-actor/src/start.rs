@@ -6,10 +6,10 @@
 //! primitive used by green threads.
 
 use std::collections::BTreeSet;
+use tidepool_bridge::Value;
 use tidepool_bridge::{BridgeError, FromCore};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_eval::Value;
 use tidepool_repr::{DataConTable, Generation, SessionModule};
 use tidepool_runtime::session::{
     MaterializedFacade, OutputSink, ResidentHole, ResidentSession, RootCustody,

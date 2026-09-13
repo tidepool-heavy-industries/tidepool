@@ -1,5 +1,5 @@
+use tidepool_bridge::Value;
 use tidepool_bridge::{BridgeError, ToCore};
-use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, RootCustody};
 
@@ -73,8 +73,8 @@ pub(crate) enum WatchesReq {
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, Vec<AwaitDependency>),
     RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
-    RegisterRouteWith(String, tidepool_eval::Value, Vec<AwaitDependency>),
-    RegisterRouteGroupsWith(String, tidepool_eval::Value, Vec<Vec<AwaitDependency>>),
+    RegisterRouteWith(String, tidepool_bridge::Value, Vec<AwaitDependency>),
+    RegisterRouteGroupsWith(String, tidepool_bridge::Value, Vec<Vec<AwaitDependency>>),
     ObserveRouteWith(i64),
     ListRoutesWith,
     #[core(module = "Tidepool.Agent.Watch.Internal")]

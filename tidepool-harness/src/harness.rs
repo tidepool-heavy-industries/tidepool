@@ -38,9 +38,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
+use tidepool_bridge::Value;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::PrincipalId;
 use tidepool_repr::{DataConTable, Generation, SessionId};

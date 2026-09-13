@@ -22,7 +22,7 @@
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
 use std::sync::{Arc, Mutex};
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::datacon::{DataCon, SrcBang};
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::types::{DataConId, Literal};

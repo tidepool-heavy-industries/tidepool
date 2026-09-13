@@ -17,6 +17,7 @@
 use crate::support;
 use support::{LinearMachine, SuspensionTestExt};
 
+use tidepool_bridge::Value;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
@@ -28,7 +29,6 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, Response};
-use tidepool_eval::value::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -1026,59 +1026,6 @@ fn f4_eight_parks_gc_between_each_shuffled_resume() {
             remaining -= 1;
             assert_rooting_receipt(&machine, remaining);
         }
-        assert_rooting_receipt(&machine, 0);
-
-        disarm_gc_hazards();
-        drop(machine);
-    });
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-// A5 on the parked path: a bottom-bearing answer must leave the frame PARKED
-// and ROOTED so the caller can retry — the registry's version of
-// nested_child_gc_rooting's (d).
-// ───────────────────────────────────────────────────────────────────────────
-
-#[test]
-#[serial]
-fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
-    in_test_thread(|| {
-        arm_gc_hazards();
-        let table = adversarial_table();
-        // 2 KiB nursery, same as the F-cases: the post-rejection filler below
-        // must force a REAL collection with the rejected frame still parked.
-        let mut machine =
-            JitEffectMachine::compile_session(&build_suspending_parent(555, 3), &table, 2048)
-                .expect("compile_session");
-
-        let a = park_entry(&mut machine, &table, RealmId(0), 3);
-        assert_rooting_receipt(&machine, 1);
-
-        let bottom = Value::Con(
-            PAIR_ID,
-            vec![
-                Value::Lit(Literal::LitInt(1)),
-                Value::ThunkRef(tidepool_eval::value::ThunkId(0)),
-            ],
-        );
-        let err =
-            match machine.resume_continuation(a, &mut NoDispatch, &(), ResumeInput::Answer(bottom))
-            {
-                Ok(_) => panic!("a bottom answer must be rejected, not accepted"),
-                Err(e) => e,
-            };
-        assert!(
-            format!("{err}").contains("normal form") || format!("{err}").contains("bottom"),
-            "rejection must name the NF/bottom cause, got: {err}"
-        );
-
-        // The frame is still parked AND still rooted — the retry is safe even
-        // if a collection happens in between.
-        assert_rooting_receipt(&machine, 1);
-        force_gc_on(&mut machine, &table, "after_reject", 120);
-        assert_rooting_receipt(&machine, 1);
-
-        resume_and_verify(&mut machine, a, 3, 555);
         assert_rooting_receipt(&machine, 0);
 
         disarm_gc_hazards();

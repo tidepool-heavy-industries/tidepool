@@ -224,10 +224,9 @@ conversation does not restore its old live Haskell heap or resource handles.
 
 ## The compiler and other interfaces
 
-Shoal is one consumer of Tidepool. The repository also includes the one-shot
-`tidepool` MCP server, the resident `tidepool-repl` MCP server, and Rust libraries
-for embedding Haskell effect programs. These interfaces have different effect
-handlers; an effect's type existing does not mean every host services it.
+Shoal is Tidepool's user-facing host. Rust libraries remain available for
+embedding Haskell effect programs; an effect's type existing does not mean every
+host services it.
 
 The current compilation path is:
 

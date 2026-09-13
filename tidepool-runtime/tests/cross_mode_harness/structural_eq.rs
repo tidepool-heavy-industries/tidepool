@@ -1,6 +1,6 @@
 use super::CrossModeArtifacts;
 use std::collections::HashMap;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::{AltCon, DataConId, JoinId, VarId};
 use tidepool_repr::DataConTable;
@@ -558,30 +558,6 @@ fn compare_values(
                 compare_values(new_path, sv, s_table, pv, p_table);
             }
         }
-        (Value::Closure { .. }, Value::Closure { .. }) => {} // Closures are opaque
-        (Value::ThunkRef(_), Value::ThunkRef(_)) => {}       // Thunks are opaque
-        (Value::JoinCont { .. }, Value::JoinCont { .. }) => {} // Join points are opaque
-        (Value::ConFun(si, sa, sf), Value::ConFun(pi, pa, pf)) => {
-            let s_dc = s_table.get(*si).expect("single_table missing ConFun ID");
-            let p_dc = p_table.get(*pi).expect("split_table missing ConFun ID");
-            if s_dc.name != p_dc.name || *sa != *pa {
-                panic!("value divergence at {}: ConFun mismatch (single={} arity {}, split={} arity {})",
-                    format_path(&path), s_dc.name, sa, p_dc.name, pa);
-            }
-            if sf.len() != pf.len() {
-                panic!(
-                    "value divergence at {}: ConFun arg count mismatch (single={}, split={})",
-                    format_path(&path),
-                    sf.len(),
-                    pf.len()
-                );
-            }
-            for (i, (sv, pv)) in sf.iter().zip(pf.iter()).enumerate() {
-                let mut new_path = path.clone();
-                new_path.push(format!("{}.partial_args[{}]", s_dc.name, i));
-                compare_values(new_path, sv, s_table, pv, p_table);
-            }
-        }
         (Value::ByteArray(sb), Value::ByteArray(pb)) => {
             let s_bytes = sb.lock().expect("single ByteArray poisoned");
             let p_bytes = pb.lock().expect("split ByteArray poisoned");
@@ -615,10 +591,6 @@ fn val_kind(v: &Value) -> &'static str {
     match v {
         Value::Lit(_) => "Lit",
         Value::Con(..) => "Con",
-        Value::Closure { .. } => "Closure",
-        Value::ThunkRef(_) => "ThunkRef",
-        Value::JoinCont { .. } => "JoinCont",
-        Value::ConFun(..) => "ConFun",
         Value::ByteArray(_) => "ByteArray",
     }
 }

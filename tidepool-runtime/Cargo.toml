@@ -15,7 +15,6 @@ tidepool-atomic-write.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 tidepool-repr.workspace = true
-tidepool-eval.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-toolchain.workspace = true
 tidepool-effect.workspace = true
@@ -42,7 +41,6 @@ frunk.workspace = true
 tidepool-bridge-effects.workspace = true
 tidepool-bridge.workspace = true
 tidepool-effect.workspace = true
-tidepool-eval.workspace = true
 tidepool-mcp.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "test-util"] }
 serial_test.workspace = true

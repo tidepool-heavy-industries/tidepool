@@ -3,7 +3,7 @@ use crate::layout::{
     self, LIT_TAG_ADDR, LIT_TAG_ARRAY, LIT_TAG_BYTEARRAY, LIT_TAG_CHAR, LIT_TAG_DOUBLE,
     LIT_TAG_FLOAT, LIT_TAG_INT, LIT_TAG_SMALLARRAY, LIT_TAG_STRING, LIT_TAG_WORD,
 };
-use tidepool_eval::value::{Value, ValueFrame};
+use tidepool_bridge::{value::ValueFrame, Value};
 use tidepool_heap::layout as heap_layout;
 use tidepool_repr::{DataConId, Literal};
 
@@ -282,7 +282,10 @@ unsafe fn heap_to_value_inner(
                     let c = char::from_u32(raw_value as u32);
                     #[cfg(debug_assertions)]
                     if c.is_none() {
-                        eprintln!("[heap_bridge] diagnostic: invalid Unicode codepoint {:#x} in Char lit; falling back to \\0", raw_value);
+                        eprintln!(
+                            "[heap_bridge] diagnostic: invalid Unicode codepoint {:#x} in Char lit; falling back to \\0",
+                            raw_value
+                        );
                     }
                     Ok(Value::Lit(Literal::LitChar(c.unwrap_or('\0'))))
                 }
@@ -488,13 +491,11 @@ pub unsafe fn value_to_heap(val: &Value, vmctx: &mut VMContext) -> Result<*mut u
         val,
         |v: &Value| match v {
             Value::Con(..) | Value::Lit(_) | Value::ByteArray(_) => Ok(v.as_frame()),
-            _ => Err(BridgeError::NonConvertibleValue),
         },
         |frame: ValueFrame<'_, *mut u8>| match frame {
             // SAFETY: expansion admits only convertible leaves; vmctx is the
             // caller's exclusive borrow with sufficient nursery space.
             ValueFrame::Leaf(value) => unsafe { leaf_to_heap(value, vmctx) },
-            ValueFrame::ConFun(..) => Err(BridgeError::NonConvertibleValue),
             ValueFrame::Con(id, field_ptrs) => unsafe {
                 // The header stores num_fields as u16; silently truncating
                 // (`len as u16`) made a 65536-field Con roundtrip to ZERO

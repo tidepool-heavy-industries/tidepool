@@ -37,7 +37,7 @@ use crate::support;
 
 use std::sync::Arc;
 
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::harness::AnswerContract;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};

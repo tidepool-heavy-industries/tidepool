@@ -13,5 +13,5 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum FinalizeReq {
-    FinalizeWith(i64, tidepool_eval::value::Value),
+    FinalizeWith(i64, tidepool_bridge::Value),
 }

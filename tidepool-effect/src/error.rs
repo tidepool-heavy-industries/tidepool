@@ -1,14 +1,10 @@
 //! Error types for effect handling.
 
 use tidepool_bridge::BridgeError;
-use tidepool_eval::error::EvalError;
 
 /// Errors that can occur during effect handling.
 #[derive(Debug, thiserror::Error)]
 pub enum EffectError {
-    /// Evaluation error from the core-eval machine.
-    #[error("Eval error: {0}")]
-    Eval(#[from] EvalError),
     /// Bridge error during value conversion.
     #[error("Bridge error: {0}")]
     Bridge(#[from] BridgeError),

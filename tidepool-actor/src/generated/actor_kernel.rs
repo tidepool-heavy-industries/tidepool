@@ -13,13 +13,13 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum ActorKernelReq {
-    ActorInstallShutdownWith(i64, tidepool_eval::value::Value),
+    ActorInstallShutdownWith(i64, tidepool_bridge::Value),
     ActorReadyWith,
-    ActorReplyWith(i64, tidepool_eval::value::Value),
-    ActorContinueWith(i64, tidepool_eval::value::Value),
-    ActorInstallProgressSourceWith(i64, tidepool_eval::value::Value),
-    ActorInstallSettlementSourceWith(i64, tidepool_eval::value::Value),
-    ActorInstallCommandSourceWith(String, tidepool_eval::value::Value),
-    ActorInstallLifecycleSourceWith((i64, i64), tidepool_eval::value::Value),
+    ActorReplyWith(i64, tidepool_bridge::Value),
+    ActorContinueWith(i64, tidepool_bridge::Value),
+    ActorInstallProgressSourceWith(i64, tidepool_bridge::Value),
+    ActorInstallSettlementSourceWith(i64, tidepool_bridge::Value),
+    ActorInstallCommandSourceWith(String, tidepool_bridge::Value),
+    ActorInstallLifecycleSourceWith((i64, i64), tidepool_bridge::Value),
     ActorSourceInputWith,
 }

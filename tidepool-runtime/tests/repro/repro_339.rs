@@ -39,10 +39,10 @@ fn repro_339_eval_jit_parity_on_fused_round_trip() {
         .expect("compile failed");
 
     match check_jit_vs_eval_captured(&compiled.expr, &compiled.table, 64 * 1024) {
-        CapturedOutcome::Agree(tidepool_eval::value::Value::Con(_, ref fields))
+        CapturedOutcome::Agree(tidepool_bridge::Value::Con(_, ref fields))
             if matches!(
                 fields.as_slice(),
-                [tidepool_eval::value::Value::Lit(
+                [tidepool_bridge::Value::Lit(
                     tidepool_repr::Literal::LitInt(7)
                 )]
             ) => {}

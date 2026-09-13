@@ -36,7 +36,7 @@
 //! this is the property they exist to pin, and the quick tier no longer
 //! exercises it for you.
 
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 use tidepool_testing::proptest::build_table_for_expr;

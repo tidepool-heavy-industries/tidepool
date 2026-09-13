@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_mcp::CapturedOutput;
 
 // ============================================================================
@@ -281,7 +281,7 @@ mod tests {
     use crate::test_support::*;
     use tidepool_bridge::ToCore;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
-    use tidepool_eval::value::Value;
+    use tidepool_bridge::Value;
     use tidepool_repr::DataConTable;
 
     #[test]
@@ -369,8 +369,8 @@ mod tests {
         let prefix = "ns1/".to_string().to_value(&table).unwrap();
         let clear_req = Value::Con(clear_id, vec![prefix]);
         let clear_result = response_value(expect_handled(h.dispatch(&clear_req, &cx)), &table);
-        let deleted_count =
-            tidepool_eval::shapes::unbox_int(&clear_result, &table).unwrap_or_else(|| {
+        let deleted_count = tidepool_bridge::shapes::unbox_int(&clear_result, &table)
+            .unwrap_or_else(|| {
                 panic!(
                     "expected I#(LitInt) count from kvClear, got {:?}",
                     clear_result

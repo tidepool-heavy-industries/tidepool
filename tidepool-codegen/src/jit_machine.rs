@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 pub use cranelift_module::FuncId;
 use frunk::HNil;
+use tidepool_bridge::Value;
 use tidepool_effect::{
     request_constructor, DispatchEffect, EffectContext, EffectError, EffectRunPolicy,
     LivePayloadPolicy,
 };
-use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataConTable, PrincipalId};
 
 use crate::context::VMContext;
@@ -159,7 +159,7 @@ impl ParkTarget {
 enum ParkedRaw {
     Completed(ParkedOutcome),
     Suspended {
-        request: tidepool_eval::value::Value,
+        request: Value,
         has_live_payload: bool,
         id: ContinuationId,
     },
@@ -374,11 +374,11 @@ pub struct JitEffectMachine {
     /// aeson-`Value` constructor ids for the `JsonDecode` primop, resolved once
     /// at compile from the `DataConTable` and installed into a host-fn
     /// thread-local at each run entry. `None` if the closure isn't in scope.
-    json_con_ids: Option<tidepool_eval::json::JsonConIds>,
+    json_con_ids: Option<tidepool_bridge::json_builder::JsonConIds>,
     /// `Either`/`I#`/`Text` constructor ids for the `ParseISO8601` primop's host
     /// fn — resolved at compile and installed into the machine state at each run
     /// entry. `None` if those constructors aren't in scope.
-    time_con_ids: Option<tidepool_eval::time::TimeConIds>,
+    time_con_ids: Option<tidepool_bridge::time::TimeConIds>,
     /// External cancellation flag. The JIT installs a thread-local clone of this
     /// `Arc` via `set_cancel_flag` before entering compiled code; the next
     /// GC safepoint observes the flag and aborts execution with
@@ -592,8 +592,8 @@ type CompiledParts = (
     Result<ConTags, &'static str>,
     FuncId,
     Option<tidepool_repr::DataConId>,
-    Option<tidepool_eval::json::JsonConIds>,
-    Option<tidepool_eval::time::TimeConIds>,
+    Option<tidepool_bridge::json_builder::JsonConIds>,
+    Option<tidepool_bridge::time::TimeConIds>,
 );
 
 impl JitEffectMachine {
@@ -637,8 +637,8 @@ impl JitEffectMachine {
         // host fn, and the `Either`/`I#`/`Text` ids for `ParseISO8601` (both
         // installed into the machine state before each run).
         let text_con_id = table.get_by_name_arity("Text", 3);
-        let json_con_ids = tidepool_eval::json::JsonConIds::from_table(table);
-        let time_con_ids = tidepool_eval::time::TimeConIds::from_table(table);
+        let json_con_ids = tidepool_bridge::json_builder::JsonConIds::from_table(table);
+        let time_con_ids = tidepool_bridge::time::TimeConIds::from_table(table);
         Ok((
             pipeline,
             nursery,
@@ -1875,10 +1875,10 @@ impl JitEffectMachine {
         if let Some(id) = table.get_by_name_arity("Text", 3) {
             self.text_con_id = Some(id);
         }
-        if let Some(ids) = tidepool_eval::json::JsonConIds::from_table(table) {
+        if let Some(ids) = tidepool_bridge::json_builder::JsonConIds::from_table(table) {
             self.json_con_ids = Some(ids);
         }
-        if let Some(ids) = tidepool_eval::time::TimeConIds::from_table(table) {
+        if let Some(ids) = tidepool_bridge::time::TimeConIds::from_table(table) {
             self.time_con_ids = Some(ids);
         }
         // Refresh `tags` too — re-resolve ConTags against THIS fragment's table
@@ -2780,7 +2780,7 @@ impl JitEffectMachine {
     }
 
     /// OBSERVE a handle's payload: bridge its GC-current heap value through
-    /// the TOLERANT bridge into an owned [`tidepool_eval::value::Value`] —
+    /// the TOLERANT bridge into an owned [`tidepool_bridge::Value`] —
     /// data bridges fully (forcing thunks as needed), a closure field renders
     /// as the `CLOSURE_SENTINEL` stub. This is the ONE place a handle's
     /// payload is ever serialized (the handle-delivery rule's observation-by-serialization half),
@@ -2796,10 +2796,7 @@ impl JitEffectMachine {
     /// # Panics
     /// Panics on a non-session machine (same constraint as every parked
     /// entry — heap retention requires [`Self::compile_session`]).
-    pub fn observe_handle(
-        &mut self,
-        handle: ValueHandle,
-    ) -> Result<tidepool_eval::value::Value, JitError> {
+    pub fn observe_handle(&mut self, handle: ValueHandle) -> Result<Value, JitError> {
         self.pipeline.ensure_usable()?;
         let entry = match self.resources.handle(handle) {
             Some(e) => e,
@@ -3029,7 +3026,7 @@ unsafe fn resolve_tail_calls_protected(
 /// or an already-materialized heap pointer (the iterative list path).
 /// Shared by the one effect-drive loop below.
 enum ResponsePlan {
-    Eager(tidepool_eval::value::Value),
+    Eager(Value),
     Ready(*mut u8),
 }
 
@@ -3042,7 +3039,7 @@ enum ResponsePlan {
 enum DriveOutcome {
     Done(*mut u8),
     Suspended {
-        request: tidepool_eval::value::Value,
+        request: Value,
         /// The raw heap pointer to the request `Con` (rooted for the arm). A
         /// `finalize`'s value field crosses by reference, so `finish_suspendable`
         /// reaches back into this Con to tenure the finalized value when the
@@ -3056,12 +3053,9 @@ enum DriveOutcome {
 /// Whether one ABI-declared request field contains the tolerant bridge's
 /// closure sentinel. Nested closure-bearing products count: the entire field
 /// must cross by reference or its nested live values would be lost.
-fn request_field_carries_closure_sentinel(
-    request: &tidepool_eval::value::Value,
-    field: usize,
-) -> bool {
+fn request_field_carries_closure_sentinel(request: &Value, field: usize) -> bool {
     match request {
-        tidepool_eval::value::Value::Con(_, fields) => fields
+        Value::Con(_, fields) => fields
             .get(field)
             .is_some_and(heap_bridge::contains_closure_sentinel),
         _ => false,
@@ -3072,8 +3066,8 @@ fn request_field_carries_closure_sentinel(
 /// Payload-free requests are ordinary in a mixed nominal effect row; they do
 /// not need fake padding merely because another constructor carries a live
 /// value at that position.
-fn request_has_field(request: &tidepool_eval::value::Value, field: usize) -> bool {
-    matches!(request, tidepool_eval::value::Value::Con(_, fields) if field < fields.len())
+fn request_has_field(request: &Value, field: usize) -> bool {
+    matches!(request, Value::Con(_, fields) if field < fields.len())
 }
 
 /// Drive the freer-simple effect step loop to `Yield::Done`: step the machine,
@@ -3521,8 +3515,7 @@ fn runtime_error_or_signal(sig: i32) -> crate::yield_type::YieldError {
 /// DataConId, terminated by a 0-field Con. Returns (cons_tag, nil_tag, len).
 /// Tags are read from the spine itself — no DataConTable lookup needed.
 /// Iterative, walks the full spine to validate the terminator.
-fn probe_list_spine(val: &tidepool_eval::value::Value) -> Option<(u64, u64, usize)> {
-    use tidepool_eval::value::Value;
+fn probe_list_spine(val: &Value) -> Option<(u64, u64, usize)> {
     let mut len = 0usize;
     let mut cons_tag: Option<u64> = None;
     let mut cur = val;
@@ -3551,11 +3544,7 @@ fn probe_list_spine(val: &tidepool_eval::value::Value) -> Option<(u64, u64, usiz
 /// stack frames per cons cell, which overflows the eval thread's stack on
 /// responses past a few thousand elements (a fatal stack overflow outside
 /// signal protection).
-fn dismantle_list_spine(
-    val: tidepool_eval::value::Value,
-    len: usize,
-) -> Vec<tidepool_eval::value::Value> {
-    use tidepool_eval::value::Value;
+fn dismantle_list_spine(val: Value, len: usize) -> Vec<Value> {
     let mut items = Vec::with_capacity(len);
     let mut cur = val;
     loop {
@@ -3600,8 +3589,7 @@ fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
 /// `Closure`/`JoinCont`/`ConFun` cannot occur in a data-kinded answer
 /// (function-bearing types are rejected at extract) but are treated
 /// as a reject too, since they are not first-order NF data.
-fn answer_force_nf(root: &tidepool_eval::value::Value) -> Result<(), String> {
-    use tidepool_eval::value::Value;
+fn answer_force_nf(root: &Value) -> Result<(), String> {
     let mut work: Vec<&Value> = vec![root];
     let mut visited: std::collections::HashSet<*const Vec<Value>> =
         std::collections::HashSet::new();
@@ -3615,23 +3603,6 @@ fn answer_force_nf(root: &tidepool_eval::value::Value) -> Result<(), String> {
                         work.push(f);
                     }
                 }
-            }
-            Value::ThunkRef(id) => {
-                return Err(format!("unforced thunk {id} in answer"));
-            }
-            Value::Closure { .. } => {
-                return Err("function-bearing value (closure) in answer".to_string());
-            }
-            Value::JoinCont { .. } => {
-                return Err("join-point value in answer".to_string());
-            }
-            Value::ConFun(id, arity, args) => {
-                return Err(format!(
-                    "partially-applied constructor (Con#{} {}/{}) in answer",
-                    id.0,
-                    args.len(),
-                    arity
-                ));
             }
         }
     }

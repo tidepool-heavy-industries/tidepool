@@ -1,5 +1,5 @@
 use crate::error::BridgeError;
-use tidepool_eval::Value;
+use crate::Value;
 use tidepool_repr::DataConTable;
 
 /// Implementation detail for sealing traits.

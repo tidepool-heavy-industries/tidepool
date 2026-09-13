@@ -1,4 +1,4 @@
-//! Preamble, tool-description, and library-vocab assembly for the MCP server.
+//! Preamble and library-vocab assembly for the MCP server.
 //!
 //! [`build_preamble`] emits the eval expr module's header (pragmas + imports,
 //! including `import Tidepool.Orchestrate`) plus the mode-selected
@@ -6,10 +6,8 @@
 //! the generated [`orchestrate_module_source`] module (a pure function of the
 //! effect set), imported rather than spliced into the expr module's scope — the
 //! fix for the namespace-poison bug class where a session bind (`let glob = 5`)
-//! captured a helper body's bare verb. [`build_eval_tool_description`] renders
-//! the `eval` tool's human-facing description from the live effect set, and
-//! [`library_vocab`] digests a user-library directory into a per-module
-//! signature index.
+//! captured a helper body's bare verb. [`library_vocab`] digests a
+//! user-library directory into a per-module signature index.
 //!
 //! `build_preamble` is decomposed into named section builders
 //! (`pragmas_and_imports`, `paginate_alias`) so the emitted-source seams are
@@ -825,125 +823,6 @@ pub fn aeson_imports() -> String {
     .into()
 }
 
-pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
-    let mut desc = String::from(concat!(
-        "`code` is a single Haskell EXPRESSION of type `M a`; its value is the ",
-        "eval's result. The server wraps it in a module with the effect stack, ",
-        "pragmas, and imports. Compose with `>>=`, `<&>`, `>=>`, and point-free ",
-        "pipelines; attach a trailing `where` for local bindings. For step-by-step ",
-        "sequencing write an explicit `do` block. Invoke effects with the helper ",
-        "verbs. First call compiles from scratch (several seconds, uncached); ",
-        "subsequent calls reuse the compiled artifact and are fast.\n",
-        "Batch CORRELATED reads (the files + status + log that answer one ",
-        "question) into a single eval \u{2014} one correlated program has less ",
-        "inter-call drift than separate round-trips, NOT a filesystem snapshot: ",
-        "a concurrent writer can still interleave mid-eval. Reads split across ",
-        "separate evals drift further apart, and a join over them can silently ",
-        "drop keys.\n",
-        "The unqualified `Tidepool.Prelude` is the recommended surface: a Text-first, ",
-        "effect-aware standard library that resolves cleanly on the JIT. `FilePath` is ",
-        "`Text` here \u{2014} path/extension work is `T.` functions (`T.dropWhile`, ",
-        "`T.stripPrefix`), never `String` idioms like `dropWhile (== '.')`. Qualified ",
-        "namespaces reach the wider ecosystem \u{2014} among them T. (Data.Text), ",
-        "L. (Data.List), Map. (Data.Map.Strict), MM. (Data.Map.Merge.Strict), ",
-        "Set. (Data.Set), KM. (Tidepool.Aeson.KeyMap), TF. (Tidepool.TextFormat), ",
-        "Tab. (Tidepool.Table), and P. (the full base Prelude). tidepool://capabilities ",
-        "is the live index of the Prelude shadow surface and the names that live ",
-        "under a qualifier.\n",
-        "The final value of `code` renders to JSON for the caller \u{2014} Int → ",
-        "number, [Char] → string, Bool → true/false, lists → arrays, and a ",
-        "`Value` → that JSON directly. In the REPL (`session_run`), results render ",
-        "via `Show` by default — `Text` is bare, custom ADTs work without `ToJSON`. ",
-        "For structured output return a `Value` (via ",
-        "`object`/`toJSON`/`eitherDecode`/`llm`/`httpGet`, …), e.g. ",
-        "`Right v <- httpGet \"https://api.github.com/repos/o/r\"`; reserve `putStrLn`/`say` for ",
-        "human-readable debug traces, and return `pure x` in place of ",
-        "`send (Print (show x))`. Extract from a ",
-        "`Value` with optics: `v ^? key \"f\" . _String` (also `_Int`, `_Double`, ",
-        "`_Bool`, `_Array`); `renderJson :: Value -> Text` renders one to compact JSON.\n",
-        "Pass large or quote-heavy content (file bodies, generated source, config) ",
-        "as a real JSON value in the `input` param \u{2014} ",
-        "the eval reads it via the `input` binding, so `code` stays a short verb. ",
-        "Decode it into a typed record and the payload is available by field:\n",
-        "  data Cfg = Cfg { target :: Text, limit :: Int } deriving (Generic, FromJSON)\n",
-        "  do { Cfg{..} <- liftEither (resultToEither (fromJSON input)); Right hits <- grepGlob target \"**/*.rs\"; pure (take limit hits) }\n",
-        "For a single field, optics read straight off the `Value`: ",
-        "`input ^? key \"target\" . _String`; for a whole-file write, put the body on ",
-        "`input`: `writeFile \".tidepool/lib/Mod.hs\" (input ^. _String)`.",
-    ));
-
-    if !effects.is_empty() {
-        desc.push_str(concat!(
-            "\nTyped effects cover the common operations directly: `glob`/`grepGlob` (FsRead) ",
-            "for filesystem and structured text search; `run \"...\"` runs any shell command for the rest.\n",
-            "For a JSON FILE, `readGlob` + `eitherDecode` + optics (`key`/`_String`/`values`/`cosmos`) is ",
-            "the canonical query pattern \u{2014} decode each file to a `Value` and walk it with lenses; ",
-            "`grepGlob`'s per-LINE `Hit` model is a poor fit for single-line/minified JSON, where the ",
-            "whole file is one \"line\" (and now truncates as one oversized hit):\n",
-            "  do { rs <- readGlob \"data/*.json\"; pure [ v ^? key \"status\" . _String ",
-            "| r <- rs, Right t <- [r.contents], Right v <- [eitherDecode t] ] }\n",
-            "Failure shape follows the verb's own signature, not one universal rule: most external ",
-            "effects return `Either <EffectError> a` (bind the `Right`, match a specific `Left` to ",
-            "recover); an absence query like `kvGet`/`fsMeta` returns `Maybe a` instead (no `Either` at ",
-            "all); state/clock/form verbs (`kvSet`, `getCurrentTime`, `ask`) are total. Check ",
-            "`tidepool://effect/{name}` when unsure:\n",
-            "  do { Right p <- run \"git status --short\"; pure (T.lines p.stdout) }\n",
-            "  readFile \"notes.md\" >>= \\case { Right body -> pure (T.length body); Left (FsNotFound _) -> pure 0 }\n",
-            "`liftEither` unwraps a `Right` or aborts the eval on the `Left` (only meaningful for the ",
-            "`Either` shape). In a fold ",
-            "over many items, keep per-item failures as DATA and return both sides ",
-            "(`partitionEithers`) \u{2014} an abort mid-batch discards the completed work.\n",
-            "`sh \"cmd\"` is the happy-path form of `run`: stripped stdout on success, ",
-            "throws with the exit code + stderr on nonzero \u{2014} reach for `run` directly when a ",
-            "nonzero exit is itself data worth inspecting; qualified `Shell.`/`Git.`/`Cargo.` ",
-            "cover the wider argv-typed shell/git/cargo surface when Exec is in the stack.\n",
-            "Commit/log dates (e.g. from `gitShow`/`gitLog`) arrive strict ISO-8601 \u{2014} ",
-            "`parseISO8601 c.date` then `formatDay` to bucket by day, `Map.fromListWith` to group.\n",
-            "Effects (invoke via the helper verbs; read tidepool://effect/{name} for each one\u{2019}s constructors + helpers):\n",
-        ));
-        // DERIVED from the decls (crate::describe): one entry per effect —
-        // name + first-sentence description + helper verb names. The
-        // hand-written per-effect enumeration this replaced drifted from the
-        // decls (the #25/#31/#41 class); now `:browse`, this description, and
-        // the repl session_run description all render from the SAME derivation.
-        desc.push_str(&crate::describe_effects_index(effects));
-
-        let names: std::collections::HashSet<&str> = effects.iter().map(|e| e.type_name).collect();
-        let has_llm = names.contains("Llm");
-        let has_ask = names.contains("Ask");
-        if has_llm && has_ask {
-            desc.push_str(concat!(
-                "\nStructured LLM / Ask (one Schema vocabulary; full detail in tidepool://schema):\n",
-                "  Schema = SObj [(Text,Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema\n",
-                "  ask schema prompt  -- SUSPEND to the caller; reply validated vs schema, no token burn\n",
-                "  llm schema prompt  -- AUTONOMOUS server-side call (costs tokens); structured Value, no fences\n",
-                "  bind the Right, then extract with optics:\n",
-                "    do { Right v <- llm (SObj [(\"k\", SEnum [\"a\",\"b\"])]) p; pure (v ^? key \"k\" . _String) }\n",
-            ));
-        }
-
-        desc.push_str(concat!(
-            "\nEdit files: `update path old new` replaces the one exact occurrence of `old` ",
-            "(include enough surrounding context to name it uniquely); `planUpdate` returns the ",
-            "diff as data. The full editing surface (Edit DSL, diffs) is in tidepool://edits.\n",
-        ));
-
-        desc.push_str(concat!(
-            "\nResources — this description is a FLOOR; pull the depth on demand via resources/read:\n",
-            "  tidepool://guide           full guide: returning JSON, the `input` parameter, pagination, examples, failure isolation\n",
-            "  tidepool://effect/{name}   per-effect constructors, types, and helper signatures\n",
-            "  tidepool://schema          the Schema grammar + ask/llm in full\n",
-            "  tidepool://edits           the declarative Edit verb JSON schema\n",
-            "  tidepool://vocab           live project-library verb signatures (.tidepool/lib)\n",
-            "  tidepool://capabilities    the Prelude shadow surface, names under a qualifier, and partial-function safe forms\n",
-            "  tidepool://patterns        worked examples\n",
-            "  tidepool://stdlib/{module} vendored stdlib module source (e.g. Tidepool.Prelude)\n",
-        ));
-    }
-
-    desc
-}
-
 /// Extract the narrow source vocabulary shown by MCP help. This is indexing
 /// metadata, not semantic Haskell introspection; `:type` and `:info` are GHC
 /// operations owned by `tidepool-runtime`.
@@ -1070,10 +949,8 @@ fn parse_library_exports(src: &str) -> std::collections::HashSet<String> {
 
 /// Scan a user-library directory for top-level type signatures (plus
 /// `data`/`type` heads) and render a per-module vocabulary digest for
-/// the eval tool description. This is the affordance that keeps eval
-/// code shape-first: the combinators a user would otherwise re-invent
-/// are visible at every call site instead of requiring a read of the
-/// lib sources. Snapshot at server start; restart to refresh.
+/// consumer help. This lets callers discover reusable combinators without
+/// rereading library sources. Snapshot at server start; restart to refresh.
 ///
 /// Only modules actually re-exported by the `Library` facade (hence in scope
 /// bare) are listed — otherwise the digest would advertise verbs that fail with

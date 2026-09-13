@@ -14,7 +14,7 @@
 //! the exact `serde_json::Value::to_value` bridge path the MCP server uses.
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_testing::eval_harness::EvalHarness;
 
 /// Answers every effect with a JSON `Number`, materialized via the same bridge

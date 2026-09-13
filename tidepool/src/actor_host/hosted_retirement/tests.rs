@@ -930,7 +930,7 @@ struct NoFixtureHandlers;
 impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput> for NoFixtureHandlers {
     fn dispatch(
         &mut self,
-        _: &tidepool_eval::Value,
+        _: &tidepool_bridge::Value,
         _: &tidepool_effect::dispatch::EffectContext<'_, CapturedOutput>,
     ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
         Ok(None)

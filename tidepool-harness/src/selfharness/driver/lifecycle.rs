@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use serde_json::Value as Json;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 

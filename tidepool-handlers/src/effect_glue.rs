@@ -157,7 +157,7 @@ impl tidepool_bridge::sealed::FromCoreSealed for JsonArg {}
 
 impl tidepool_bridge::FromCore for JsonArg {
     fn from_value(
-        value: &tidepool_eval::Value,
+        value: &tidepool_bridge::Value,
         table: &tidepool_repr::DataConTable,
     ) -> Result<Self, tidepool_bridge::BridgeError> {
         Ok(JsonArg(tidepool_runtime::value_to_json(value, table, 0)))

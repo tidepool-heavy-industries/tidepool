@@ -24,7 +24,7 @@ use std::process::Command;
 
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::Literal;
 use tidepool_testing::eval_harness::{extract_env, prelude_path, EvalHarness};
 

@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 tidepool-repr.workspace = true
-tidepool-eval.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true

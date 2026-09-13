@@ -33,7 +33,7 @@ mod tests {
     use crate::test_support::*;
     use tidepool_bridge::ToCore;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
-    use tidepool_eval::value::Value;
+    use tidepool_bridge::Value;
 
     #[test]
     fn test_console_dispatch_roundtrip() {

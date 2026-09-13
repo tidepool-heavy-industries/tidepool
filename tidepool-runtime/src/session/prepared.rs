@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tidepool_codegen::jit_machine::MachineDisposition;
+use tidepool_codegen::prepared_control::{CallStatus, ControlError};
 use tidepool_codegen::prepared_native::{
     CollectionEvidence, NativeConstructor, PreparedNativeError, PreparedNativeProgram,
 };
@@ -36,6 +37,7 @@ impl PreparedCancelHandle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedFailureKind {
     Rejected,
+    Language,
     Cancelled,
     Integrity,
 }
@@ -70,6 +72,24 @@ impl PreparedRuntimeError {
                 | PreparedNativeError::Constructor(_)
                 | PreparedNativeError::Arguments { .. } => PreparedFailureKind::Rejected,
                 PreparedNativeError::Pipeline(_) => PreparedFailureKind::Rejected,
+                PreparedNativeError::Runtime(failure) => {
+                    if failure.disposition == MachineDisposition::Unavailable {
+                        PreparedFailureKind::Integrity
+                    } else if matches!(
+                        failure.cause,
+                        tidepool_codegen::host_fns::RuntimeError::Cancelled
+                    ) {
+                        PreparedFailureKind::Cancelled
+                    } else {
+                        PreparedFailureKind::Language
+                    }
+                }
+                PreparedNativeError::Control(ControlError::CallFailed(
+                    CallStatus::LanguageFailure,
+                )) => PreparedFailureKind::Language,
+                PreparedNativeError::Control(ControlError::CallFailed(CallStatus::Cancelled)) => {
+                    PreparedFailureKind::Cancelled
+                }
                 PreparedNativeError::ResultArea
                 | PreparedNativeError::Descriptor(_)
                 | PreparedNativeError::Control(_) => PreparedFailureKind::Integrity,
@@ -179,4 +199,36 @@ pub fn run_prepared_once(
     }
     let mut runtime = PreparedRuntime::from_artifact(artifact, requirements, limits, imports)?;
     runtime.run_entry(None, &[], true, cancel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_codegen::host_fns::RuntimeError;
+    use tidepool_codegen::machine_state::MachineFailure;
+
+    #[test]
+    fn native_failure_retains_disposition_separately_from_first_cause() {
+        let error = PreparedRuntimeError::NativeRun(PreparedNativeError::Runtime(MachineFailure {
+            cause: RuntimeError::Cancelled,
+            disposition: MachineDisposition::Unavailable,
+        }));
+        assert_eq!(error.kind(), PreparedFailureKind::Integrity);
+    }
+
+    #[test]
+    fn native_language_and_cancellation_are_not_integrity_failures() {
+        for (cause, expected) in [
+            (RuntimeError::Cancelled, PreparedFailureKind::Cancelled),
+            (RuntimeError::HeapOverflow, PreparedFailureKind::Language),
+            (RuntimeError::DivisionByZero, PreparedFailureKind::Language),
+        ] {
+            let error =
+                PreparedRuntimeError::NativeRun(PreparedNativeError::Runtime(MachineFailure {
+                    cause,
+                    disposition: MachineDisposition::Reusable,
+                }));
+            assert_eq!(error.kind(), expected);
+        }
+    }
 }

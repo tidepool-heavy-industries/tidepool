@@ -73,7 +73,7 @@ use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_handlers::{
     ConsoleHandler, EventConfig, EventError, ObservationSource, RepoEventHandler, WorktreeReq,
 };

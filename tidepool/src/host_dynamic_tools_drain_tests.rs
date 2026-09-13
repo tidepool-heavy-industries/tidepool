@@ -453,7 +453,7 @@ mod actual_seal {
     impl tidepool_effect::dispatch::DispatchEffect<TestSink> for NoHandlers {
         fn dispatch(
             &mut self,
-            _: &tidepool_eval::Value,
+            _: &tidepool_bridge::Value,
             _: &tidepool_effect::dispatch::EffectContext<'_, TestSink>,
         ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError>
         {

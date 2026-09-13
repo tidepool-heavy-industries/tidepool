@@ -33,7 +33,10 @@ pub use gc::{
     rust_roots_mark, set_gc_poison, set_heap_verify, set_write_barrier_disabled_for_test,
     truncate_rust_roots, write_barrier, GcFaultPoint,
 };
-pub(crate) use gc::{run_minor_collection_for_tenure_fixup, GcState};
+pub(crate) use gc::{
+    prepared_gc_trigger, prepared_publish_object, run_minor_collection_for_tenure_fixup, GcState,
+    PreparedHeap,
+};
 
 use errors::unresolved_var_trap;
 pub use errors::{

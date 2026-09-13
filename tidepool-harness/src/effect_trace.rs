@@ -13,9 +13,9 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
 use tidepool_effect::EffectError;
-use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 
 /// How deep [`tidepool_runtime::value_to_json`] renders a traced value before

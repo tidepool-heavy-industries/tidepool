@@ -7,7 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use tidepool_bridge::ToCore;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 

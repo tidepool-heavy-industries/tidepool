@@ -4,8 +4,8 @@
 //! are local to sub-dispatches, not a global fallback — an unhandled
 //! top-level variant is a compile error). `TagToEnum`/`SeqOp` deliberately
 //! return `NotYetImplemented`; every other variant is implemented. This must
-//! stay in lockstep with the eval oracle in `tidepool-eval/src/eval.rs` and
-//! the `define_primops!` table in `tidepool-repr/src/types.rs`.
+//! stay in lockstep with the `define_primops!` table in
+//! `tidepool-repr/src/types.rs`.
 
 use super::*;
 use crate::alloc::emit_alloc_fast_path;
@@ -523,7 +523,7 @@ pub fn emit_primop(
             check_arity(op, 1, args.len())?;
             let v = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
 
-            // Codepoint range must match the interpreter (tidepool-eval/src/eval.rs)
+            // Codepoint range is defined by the shared primitive contract.
             // or JIT and eval diverge on which chr calls error.
             let zero = builder.ins().iconst(types::I64, 0);
             let max_valid = builder.ins().iconst(types::I64, 0x10FFFF);
@@ -732,7 +732,7 @@ pub fn emit_primop(
         PrimOpKind::JsonDecode => {
             // eitherDecodeValue :: Text -> Either Text Value. The host fn builds
             // the result using the same builder as the tree-walker in
-            // `tidepool-eval::json`, so JIT and eval output match by construction.
+            // the shared JSON builder, so native output uses one shape policy.
             check_arity(op, 1, args.len())?;
             let text_ptr = crate::emit::expr::ensure_heap_ptr(
                 builder,
@@ -758,7 +758,7 @@ pub fn emit_primop(
         PrimOpKind::ParseISO8601 => {
             // parseISO8601 :: Text -> Either Text UTCTime. The host fn builds
             // the result using the same builder as the tree-walker in
-            // `tidepool-eval::json`, so JIT and eval output match by construction.
+            // the shared JSON builder, so native output uses one shape policy.
             check_arity(op, 1, args.len())?;
             let text_ptr = crate::emit::expr::ensure_heap_ptr(
                 builder,

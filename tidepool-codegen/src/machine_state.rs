@@ -209,8 +209,8 @@ pub(crate) struct ExternalSweepPlan {
 pub struct MachineState {
     cancel_flag: RefCell<Option<Arc<AtomicBool>>>,
     text_con_id: Cell<Option<tidepool_repr::DataConId>>,
-    json_con_ids: Cell<Option<tidepool_eval::json::JsonConIds>>,
-    time_con_ids: Cell<Option<tidepool_eval::time::TimeConIds>>,
+    json_con_ids: Cell<Option<tidepool_bridge::json_builder::JsonConIds>>,
+    time_con_ids: Cell<Option<tidepool_bridge::time::TimeConIds>>,
     stack_map_registry: RefCell<Option<*const StackMapRegistry>>,
     call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
@@ -382,19 +382,19 @@ impl MachineState {
         self.text_con_id.get()
     }
 
-    pub(crate) fn set_json_con_ids(&self, ids: Option<tidepool_eval::json::JsonConIds>) {
+    pub(crate) fn set_json_con_ids(&self, ids: Option<tidepool_bridge::json_builder::JsonConIds>) {
         self.json_con_ids.set(ids);
     }
 
-    pub(crate) fn json_con_ids(&self) -> Option<tidepool_eval::json::JsonConIds> {
+    pub(crate) fn json_con_ids(&self) -> Option<tidepool_bridge::json_builder::JsonConIds> {
         self.json_con_ids.get()
     }
 
-    pub(crate) fn set_time_con_ids(&self, ids: Option<tidepool_eval::time::TimeConIds>) {
+    pub(crate) fn set_time_con_ids(&self, ids: Option<tidepool_bridge::time::TimeConIds>) {
         self.time_con_ids.set(ids);
     }
 
-    pub(crate) fn time_con_ids(&self) -> Option<tidepool_eval::time::TimeConIds> {
+    pub(crate) fn time_con_ids(&self) -> Option<tidepool_bridge::time::TimeConIds> {
         self.time_con_ids.get()
     }
 
@@ -473,6 +473,25 @@ impl MachineState {
             .unwrap_or(true)
     }
 
+    /// Inspect the first cause without consuming it at an emitted ABI boundary.
+    pub(crate) fn prepared_call_status(&self) -> crate::prepared_control::CallStatus {
+        use crate::prepared_control::CallStatus;
+        if self.disposition() == MachineDisposition::Unavailable {
+            return CallStatus::IntegrityFailure;
+        }
+        match self.runtime_error.try_borrow() {
+            Ok(cause) => match cause.as_ref() {
+                None => CallStatus::Success,
+                Some(RuntimeError::Cancelled) => CallStatus::Cancelled,
+                Some(error) if error.machine_disposition() == MachineDisposition::Unavailable => {
+                    CallStatus::IntegrityFailure
+                }
+                Some(_) => CallStatus::LanguageFailure,
+            },
+            Err(_) => CallStatus::IntegrityFailure,
+        }
+    }
+
     // --- diagnostics ---------------------------------------------------------
 
     pub(crate) fn push_diagnostic(&self, msg: String) {
@@ -512,6 +531,7 @@ impl MachineState {
             active_start: start,
             active_size: size,
             active_buffer: None,
+            prepared: None,
         });
     }
 
@@ -523,7 +543,34 @@ impl MachineState {
             active_start: start,
             active_size: size,
             active_buffer: Some(buffer),
+            prepared: None,
         });
+    }
+
+    /// Install one prepared heap with its pinned compiled-layout owners.
+    /// A live heap must be retired by its owning run before another is installed.
+    pub(crate) fn install_prepared_buffer(
+        &self,
+        mut buffer: Vec<u64>,
+        layouts: Vec<std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>>,
+    ) -> Result<(), RuntimeError> {
+        let mut active = self
+            .gc_state
+            .try_borrow_mut()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        if active.is_some() {
+            return Err(RuntimeError::BadPointer);
+        }
+        *active = Some(GcState {
+            active_start: buffer.as_mut_ptr().cast(),
+            active_size: std::mem::size_of_val(buffer.as_slice()),
+            active_buffer: Some(buffer),
+            prepared: Some(crate::host_fns::PreparedHeap {
+                objects: tidepool_heap::gc::raw::DescriptorRegistry::new(),
+                layouts,
+            }),
+        });
+        Ok(())
     }
 
     /// Reclaim the live heap buffer + high-water cursor from this machine's

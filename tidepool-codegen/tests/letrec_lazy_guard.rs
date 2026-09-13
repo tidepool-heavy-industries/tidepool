@@ -11,7 +11,7 @@
 //!      Con — reading an unfilled Con field if the binding were bound eagerly
 //!      — is safe under lazy-default (the binding is a thunk forced after all
 //!      Con fields are filled).
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, Literal, PrimOpKind, TreeBuilder, VarId};
 use tidepool_testing::proptest::{
     build_table_for_expr, check_jit_vs_eval_captured, CapturedOutcome,

@@ -13,7 +13,7 @@
 //! This guards the whole class: QQ × effect dispatch × table integrity.
 use std::path::Path;
 use tidepool_effect::DispatchEffect;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_testing::eval_harness::EvalHarness;
 
 /// Answers every effect with a JSON `Number` (the same bridge path the live

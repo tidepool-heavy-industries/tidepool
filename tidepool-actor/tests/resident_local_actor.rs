@@ -2,19 +2,21 @@
 
 use tidepool_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
+    ResidentToolEndpoint,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
-use tidepool_eval::Value;
+use tidepool_bridge::Value;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
     ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
+use tidepool_tool::{ToolArguments, ToolInvocation};
 
 mod support;
 
@@ -220,8 +222,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         panic!("root retired before installing policy");
     };
     assert_eq!(installation.actor.identity(), actor.identity());
-    let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(installation.policy)
-        .expect("MCP projection");
+    let policy = installation.policy;
     let (sibling, sibling_task) = forest
         .admit_root(sibling_descriptor, sibling_outcome)
         .await
@@ -236,63 +237,51 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(sibling_installation.actor.identity(), sibling.identity());
     assert_eq!(sibling_installation.supervisor_parent, None);
     assert_eq!(sibling_installation.context_parent, None);
-    let sibling_server =
-        tidepool_mcp::DynamicMcpServer::from_resident_policy(sibling_installation.policy)
-            .expect("sibling MCP projection");
-    let changed = sibling_server
-        .dispatch_tool(
-            "set_value",
-            serde_json::json!({"next": 73}).as_object().unwrap().clone(),
-        )
+    let changed = sibling_installation
+        .policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "set_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({"next": 73})),
+        })
         .await
         .expect("change sibling state");
-    assert_eq!(
-        changed.structured_content,
-        Some(serde_json::json!({"current": 73}))
-    );
+    assert_eq!(changed, serde_json::json!({"current": 73}));
 
-    let arguments = serde_json::json!({"value": 6})
-        .as_object()
-        .expect("arguments")
-        .clone();
-    let doubled = server
-        .dispatch_tool("double_value", arguments)
+    let doubled = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "double_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({"value": 6})),
+        })
         .await
         .expect("double value");
-    assert_eq!(
-        doubled.structured_content,
-        Some(serde_json::json!({"doubled": 12}))
-    );
+    assert_eq!(doubled, serde_json::json!({"doubled": 12}));
 
-    let spawned = server
-        .dispatch_tool(
-            "spawn_child",
-            serde_json::json!({"seed": 19})
-                .as_object()
-                .expect("arguments")
-                .clone(),
-        )
+    let spawned = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "spawn_child".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({"seed": 19})),
+        })
         .await
         .expect("spawn and await child");
-    assert!(!spawned.is_error.unwrap_or(false), "{spawned:?}");
-    assert_eq!(
-        spawned.structured_content,
-        Some(serde_json::json!({"started": !fail_hook}))
-    );
+    assert_eq!(spawned, serde_json::json!({"started": !fail_hook}));
     let child_retired = deployments.recv().await.expect("child retirement");
     assert!(matches!(
         child_retired,
         LocalResidentDeployment::Retired { ref terminal, .. }
             if terminal.kind == if fail_hook { tidepool_actor::ActorExitKind::Failed } else { tidepool_actor::ActorExitKind::Completed }
     ));
-    let finished = server
-        .dispatch_tool("finish_value", serde_json::Map::new())
+    let finished = policy
+        .dispatch_boxed(ToolInvocation {
+            context: None,
+            name: "finish_value".into(),
+            arguments: ToolArguments::Structured(serde_json::json!({})),
+        })
         .await
         .expect("finish value");
-    assert_eq!(
-        finished.structured_content,
-        Some(serde_json::json!({"current": 0}))
-    );
+    assert_eq!(finished, serde_json::json!({"current": 0}));
     task.await.expect("root actor task");
     let cleanup = actor.terminal().cleanup().expect("retained cleanup");
     assert_eq!(cleanup.actor(), actor.identity());

@@ -3,7 +3,7 @@ use std::io::Cursor;
 use ciborium::value::Value;
 
 use super::{
-    Alternative, AlternativePattern, Architecture, Atom, CheckedLayout, ConstructorDecl,
+    Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
     ConstructorId, DecodeLimits, Endianness, Expr, FieldLayout, GlobalDecl, GlobalId, Group,
     HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId, ParseError,
     ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
@@ -321,7 +321,7 @@ impl Decoder {
     }
 
     fn constructor(&mut self, value: &Value) -> Result<ConstructorDecl, ParseError> {
-        let fields = array(value, 5, "constructor declaration")?;
+        let fields = array(value, 6, "constructor declaration")?;
         Ok(ConstructorDecl {
             identity: self.symbol(&fields[0])?,
             family: self.symbol(&fields[1])?,
@@ -330,17 +330,37 @@ impl Decoder {
                 bool_value(value, "strict field")
             })?,
             layout: self.layout(&fields[4])?,
+            result_rep: self.rep(&fields[5])?,
         })
     }
 
     fn global(&mut self, value: &Value) -> Result<GlobalDecl, ParseError> {
-        let fields = array(value, 4, "global declaration")?;
+        let fields = array(value, 5, "global declaration")?;
         Ok(GlobalDecl {
             identity: self.symbol(&fields[0])?,
-            signature: SignatureId(u32_value(&fields[1], "global signature ID")?),
-            required_evaluated: bool_value(&fields[2], "required evaluated")?,
-            required_generation: self.optional_generation(&fields[3])?,
+            rep: self.rep(&fields[1])?,
+            entry_signature: self.optional_signature(&fields[2])?,
+            required_evaluated: bool_value(&fields[3], "required evaluated")?,
+            required_generation: self.optional_generation(&fields[4])?,
         })
+    }
+
+    fn optional_signature(&mut self, value: &Value) -> Result<Option<SignatureId>, ParseError> {
+        let fields = tagged(value, "known entry signature")?;
+        match (
+            unsigned(&fields[0], "known entry signature tag")?,
+            fields.len(),
+        ) {
+            (0, 1) => Ok(None),
+            (1, 2) => Ok(Some(SignatureId(u32_value(
+                &fields[1],
+                "entry signature ID",
+            )?))),
+            (0..=1, _) => Err(ParseError::Malformed(
+                "wrong known entry signature field count".into(),
+            )),
+            (tag, _) => Err(ParseError::InvalidTag(tag)),
+        }
     }
 
     fn optional_generation(&mut self, value: &Value) -> Result<Option<u64>, ParseError> {
@@ -409,7 +429,8 @@ impl Decoder {
             (4, 2) => Ok(ScalarLiteral::Bytes(
                 self.bytes(&fields[1], "byte literal")?,
             )),
-            (0..=4, _) => Err(ParseError::Malformed("wrong scalar field count".into())),
+            (5, 1) => Ok(ScalarLiteral::NullAddress),
+            (0..=5, _) => Err(ParseError::Malformed("wrong scalar field count".into())),
             _ => Err(ParseError::InvalidTag(tag)),
         }
     }
@@ -421,7 +442,8 @@ impl Decoder {
             (0, 2) => Ok(Atom::Ref(self.value_ref(&fields[1])?)),
             (1, 2) => Ok(Atom::Scalar(self.scalar(&fields[1])?)),
             (2, 1) => Ok(Atom::Void),
-            (0..=2, _) => Err(ParseError::Malformed("wrong atom field count".into())),
+            (3, 2) => Ok(Atom::Rubbish(self.rep(&fields[1])?)),
+            (0..=3, _) => Err(ParseError::Malformed("wrong atom field count".into())),
             _ => Err(ParseError::InvalidTag(tag)),
         }
     }
@@ -462,7 +484,8 @@ impl Decoder {
                 constructor: ConstructorId(u32_value(&fields[1], "constructor ID")?),
                 fields: self.list(&fields[2], false, |this, value| this.atom(value))?,
             }),
-            (0..=2, _) => Err(ParseError::Malformed("wrong heap RHS field count".into())),
+            (3, 2) => Ok(HeapRhs::Bytes(self.bytes(&fields[1], "static bytes")?)),
+            (0..=3, _) => Err(ParseError::Malformed("wrong heap RHS field count".into())),
             _ => Err(ParseError::InvalidTag(tag)),
         }
     }
@@ -507,6 +530,19 @@ impl Decoder {
         })
     }
 
+    fn case_kind(&mut self, value: &Value) -> Result<CaseKind, ParseError> {
+        let fields = tagged(value, "case kind")?;
+        let tag = unsigned(&fields[0], "case kind tag")?;
+        match (tag, fields.len()) {
+            (0, 2) => Ok(CaseKind::Algebraic(self.symbol(&fields[1])?)),
+            (1, 2) => Ok(CaseKind::Primitive(self.rep(&fields[1])?)),
+            (2, 1) => Ok(CaseKind::MultiValue),
+            (3, 1) => Ok(CaseKind::Polymorphic),
+            (0..=3, _) => Err(ParseError::Malformed("wrong case kind field count".into())),
+            _ => Err(ParseError::InvalidTag(tag)),
+        }
+    }
+
     fn expr(&mut self, value: &Value, depth: usize) -> Result<Expr, ParseError> {
         self.depth(depth)?;
         self.node()?;
@@ -535,11 +571,12 @@ impl Decoder {
                 constructor: ConstructorId(u32_value(&fields[1], "constructor ID")?),
                 fields: self.list(&fields[2], false, |this, value| this.atom(value))?,
             }),
-            (5, 5) => Ok(Expr::Case {
+            (5, 6) => Ok(Expr::Case {
                 scrutinee: Box::new(self.expr(&fields[1], depth + 1)?),
                 binder: ValueId(u32_value(&fields[2], "case binder ID")?),
-                results: self.list(&fields[3], false, |this, value| this.rep(value))?,
-                alternatives: self.list(&fields[4], false, |this, value| {
+                scrutinee_reps: self.list(&fields[3], false, |this, value| this.rep(value))?,
+                kind: self.case_kind(&fields[4])?,
+                alternatives: self.list(&fields[5], false, |this, value| {
                     this.alternative(value, depth + 1)
                 })?,
             }),
@@ -671,4 +708,48 @@ fn text_raw<'a>(value: &'a Value, what: &str) -> Result<&'a str, ParseError> {
 
 fn malformed(what: &str, expected: &str) -> ParseError {
     ParseError::Malformed(format!("{what} must be {expected}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn number(value: u8) -> Value {
+        Value::Integer(value.into())
+    }
+
+    #[test]
+    fn null_address_and_managed_rubbish_have_distinct_wire_forms() {
+        let mut decoder = Decoder::new(DecodeLimits::default());
+        let null = Value::Array(vec![number(1), Value::Array(vec![number(5)])]);
+        let rubbish = Value::Array(vec![number(3), Value::Array(vec![number(1)])]);
+        assert_eq!(
+            decoder.atom(&null).unwrap(),
+            Atom::Scalar(ScalarLiteral::NullAddress)
+        );
+        assert_eq!(
+            decoder.atom(&rubbish).unwrap(),
+            Atom::Rubbish(RuntimeRep::LiftedRef)
+        );
+        // A literal pattern cannot smuggle an atom through the scalar grammar.
+        assert!(decoder.scalar(&rubbish).is_err());
+    }
+
+    #[test]
+    fn rubbish_wire_representation_is_explicit_and_required() {
+        let mut decoder = Decoder::new(DecodeLimits::default());
+        for (wire_rep, rep) in [
+            (vec![number(2)], RuntimeRep::UnliftedRef),
+            (vec![number(3)], RuntimeRep::Address),
+            (vec![number(4), number(64)], RuntimeRep::Int(64)),
+            (vec![number(6), number(32)], RuntimeRep::Float(32)),
+        ] {
+            let atom = Value::Array(vec![number(3), Value::Array(wire_rep)]);
+            assert_eq!(decoder.atom(&atom).unwrap(), Atom::Rubbish(rep));
+        }
+        assert!(decoder.atom(&Value::Array(vec![number(3)])).is_err());
+        assert!(decoder
+            .atom(&Value::Array(vec![number(3), number(1)]))
+            .is_err());
+    }
 }

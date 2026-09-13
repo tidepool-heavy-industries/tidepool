@@ -22,6 +22,7 @@
 use crate::support;
 use support::LinearMachine;
 
+use tidepool_bridge::Value;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::suspension::{ResumeInput, SuspendableOutcome};
@@ -29,7 +30,6 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_eval::value::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -448,65 +448,6 @@ fn child_decl_accretion_is_inert_for_parent() {
 // ───────────────────────────────────────────────────────────────────────────
 // (d) A bottom answer does NOT consume the continuation (A5 NF-force).
 // ───────────────────────────────────────────────────────────────────────────
-
-#[test]
-#[serial]
-fn bottom_answer_does_not_consume_the_continuation() {
-    std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            let table = adversarial_table();
-            let mut machine = suspend_parent(&table, 1 << 14, 555, 3);
-            assert!(machine.is_suspended());
-
-            // A "bottom" answer: a Value carrying an unforced thunk reference
-            // (the shape a not-fully-forced ⊥ would take). The NF-force must
-            // REJECT it WITHOUT consuming the continuation.
-            let bottom = Value::Con(
-                PAIR_ID,
-                vec![
-                    Value::Lit(Literal::LitInt(1)),
-                    Value::ThunkRef(tidepool_eval::value::ThunkId(0)),
-                ],
-            );
-            let err = match machine.resume_suspended(
-                &table,
-                &mut NoDispatch,
-                &(),
-                ResumeInput::Answer(bottom),
-            ) {
-                Ok(_) => panic!("a bottom answer must be rejected, not accepted"),
-                Err(e) => e,
-            };
-            assert!(
-                format!("{err}").contains("normal form") || format!("{err}").contains("bottom"),
-                "rejection must name the NF/bottom cause, got: {err}"
-            );
-
-            // CRUCIAL: the continuation was NOT consumed — the machine is still
-            // suspended and a VALID answer now resumes correctly.
-            assert!(
-                machine.is_suspended(),
-                "a rejected bottom answer must leave the continuation stowed"
-            );
-            let out = machine
-                .resume_suspended(
-                    &table,
-                    &mut NoDispatch,
-                    &(),
-                    ResumeInput::Answer(Value::Lit(Literal::LitInt(3))),
-                )
-                .expect("a valid answer resumes after a rejected bottom");
-            match out {
-                SuspendableOutcome::Completed(v) => assert_pair_result(&v, 555, 3),
-                SuspendableOutcome::Suspended { .. } => panic!("resume should complete"),
-            }
-            drop(machine);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
 
 // ───────────────────────────────────────────────────────────────────────────
 // (e) Ordinary fragments can run while the parent stays registry-rooted.

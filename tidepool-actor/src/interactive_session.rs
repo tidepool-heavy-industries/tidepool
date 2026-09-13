@@ -1,8 +1,8 @@
 //! Captured typed boundary for one supervised external-agent session.
 
 use tidepool_bridge::FromCore;
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{OutputSink, ResidentHole, ResidentSession, RootCustody};
 
@@ -69,9 +69,16 @@ impl ActivationContract {
             .map_or_else(|| "\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply.".to_owned(), |ty| {
                 format!("\nProgress updates for this request: `reportProgress` accepts {ty}.")
             });
-        format!("Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}\n\nReturn with `respond` (reply type {}):\n{}{}",
-            request.0, guidance.map(|text| format!(": {text}")).unwrap_or_default(),
-            self.input_type, self.input_preview, self.response.expected_type(), self.reply_preview, progress)
+        format!(
+            "Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}\n\nReturn with `respond` (reply type {}):\n{}{}",
+            request.0,
+            guidance.map(|text| format!(": {text}")).unwrap_or_default(),
+            self.input_type,
+            self.input_preview,
+            self.response.expected_type(),
+            self.reply_preview,
+            progress
+        )
     }
 }
 

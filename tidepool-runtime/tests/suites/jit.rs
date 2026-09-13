@@ -9,8 +9,6 @@ mod multi_module_datacon;
 mod nested_mapm_tag255;
 #[path = "../nullary_sum_generic_deriving.rs"]
 mod nullary_sum_generic_deriving;
-#[path = "../patch_crosscheck_differential.rs"]
-mod patch_crosscheck_differential;
 #[path = "../realm_varid_pinning.rs"]
 mod realm_varid_pinning;
 #[path = "../resident_session.rs"]

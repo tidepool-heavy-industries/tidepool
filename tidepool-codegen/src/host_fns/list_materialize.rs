@@ -39,7 +39,7 @@ unsafe fn alloc_nullary_con(vmctx: *mut VMContext, con_tag: u64) -> *mut u8 {
 unsafe fn build_cons_cells(
     vmctx: *mut VMContext,
     cons_tag: u64,
-    items: &[tidepool_eval::value::Value],
+    items: &[tidepool_bridge::Value],
     terminator: *mut u8,
 ) -> *mut u8 {
     let mark = rust_roots_mark(vmctx);
@@ -97,7 +97,7 @@ pub(crate) unsafe fn materialize_cons_list(
     vmctx: *mut VMContext,
     cons_tag: u64,
     nil_tag: u64,
-    items: &[tidepool_eval::value::Value],
+    items: &[tidepool_bridge::Value],
 ) -> *mut u8 {
     let nil = alloc_nullary_con(vmctx, nil_tag);
     if nil.is_null() {

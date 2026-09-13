@@ -6,7 +6,7 @@
 
 use tidepool_bridge::{BridgeError, FromCore, ToCore};
 use tidepool_bridge_derive::{FromCore, ToCore};
-use tidepool_eval::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 use tidepool_testing::gen::datacon_table::standard_datacon_table;
 

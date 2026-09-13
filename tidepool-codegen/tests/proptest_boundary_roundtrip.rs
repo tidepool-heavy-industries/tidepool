@@ -31,7 +31,7 @@ use tidepool_codegen::heap_bridge::{
     bump_alloc_from_vmctx, heap_to_value_forcing, value_to_heap, BridgeError,
 };
 use tidepool_codegen::nursery::Nursery;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
 // ---------------------------------------------------------------------------
@@ -983,7 +983,7 @@ fn reach_counters_capstraddle_coverage() {
 //              caught panic; no memory unsafety — the slice start always
 //              exceeds the end, so it is a guaranteed panic in both profiles,
 //              never an out-of-bounds read).
-//   component: tidepool-eval/src/shapes.rs — `text_bytes_checked` (called
+//   component: tidepool-bridge/src/shapes.rs — `text_bytes_checked` (called
 //              from tidepool-bridge's `String::from_value` Text arm; the
 //              bounds check has since moved into this shared function).
 //   seed:      minimal failing input off=-1, len=1 (ba = "hi"); proptest

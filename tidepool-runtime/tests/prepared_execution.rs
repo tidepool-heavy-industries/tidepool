@@ -8,7 +8,7 @@ use tidepool_runtime::prepared_execution::{
 };
 use tidepool_runtime::session::persistent::PreparedPersistentSession;
 
-const ARTIFACT: &[u8] = include_bytes!("../../tidepool-eval/tests/fixtures/m3-vertical.cbor");
+const ARTIFACT: &[u8] = include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
 
 fn requirements() -> ProgramRequirements {
     ProgramRequirements {
@@ -36,7 +36,10 @@ fn imports() -> MachineImports {
             .map(|global| {
                 let value = ImportedValue {
                     identity: global.identity.clone(),
-                    signature: prepared.signatures()[global.signature.0 as usize].clone(),
+                    rep: global.rep.clone(),
+                    entry_signature: global
+                        .entry_signature
+                        .map(|id| prepared.signatures()[id.0 as usize].clone()),
                     evaluated: global.required_evaluated,
                     generation: global.required_generation.unwrap_or(0),
                 };

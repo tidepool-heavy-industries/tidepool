@@ -518,7 +518,7 @@ mod resident_delegation {
     impl DispatchEffect<Sink> for NoDispatch {
         fn dispatch(
             &mut self,
-            _request: &tidepool_eval::value::Value,
+            _request: &tidepool_bridge::Value,
             _cx: &EffectContext<'_, Sink>,
         ) -> Result<Option<Response>, EffectError> {
             Ok(None)

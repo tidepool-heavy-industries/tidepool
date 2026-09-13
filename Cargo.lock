@@ -319,15 +319,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "bitmaps"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "031043d04099746d8db04daf1fa424b2bc8bd69d92b25962dcde24da39ab64a2"
-dependencies = [
- "typenum",
-]
-
-[[package]]
 name = "blake3"
 version = "1.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1908,20 +1899,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "im"
-version = "15.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0acd33ff0285af998aaf9b57342af478078f53492322fafc47450e09397e0e9"
-dependencies = [
- "bitmaps",
- "rand_core 0.6.4",
- "rand_xoshiro",
- "sized-chunks",
- "typenum",
- "version_check",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2923,15 +2900,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand_xoshiro"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
-dependencies = [
- "rand_core 0.6.4",
-]
-
-[[package]]
 name = "rayon"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3666,16 +3634,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sized-chunks"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16d69225bde7a69b235da73377861095455d298f2b970996eec25ddbb42b3d1e"
-dependencies = [
- "bitmaps",
- "typenum",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3947,7 +3905,6 @@ dependencies = [
  "glob",
  "parking_lot",
  "reqwest 0.13.4",
- "rmcp",
  "rustix",
  "serde",
  "serde_json",
@@ -3961,7 +3918,6 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-extract-cmd",
  "tidepool-handlers",
  "tidepool-harness",
@@ -4001,7 +3957,6 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-handlers",
  "tidepool-mcp",
  "tidepool-model",
@@ -4060,12 +4015,14 @@ version = "0.1.0"
 name = "tidepool-bridge"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "inventory",
  "proptest",
+ "recursion",
  "serde_json",
  "thiserror",
+ "tidepool-bignum",
  "tidepool-bridge-derive",
- "tidepool-eval",
  "tidepool-repr",
  "tidepool-testing",
 ]
@@ -4078,7 +4035,6 @@ dependencies = [
  "quote",
  "syn 3.0.3",
  "tidepool-bridge",
- "tidepool-eval",
  "tidepool-repr",
  "tidepool-testing",
 ]
@@ -4092,7 +4048,6 @@ dependencies = [
  "serde_json",
  "tidepool-bridge",
  "tidepool-bridge-derive",
- "tidepool-eval",
  "tidepool-repr",
 ]
 
@@ -4122,7 +4077,6 @@ dependencies = [
  "tidepool-bignum",
  "tidepool-bridge",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-heap",
  "tidepool-repr",
  "tidepool-testing",
@@ -4139,21 +4093,6 @@ dependencies = [
  "proptest",
  "thiserror",
  "tidepool-bridge",
- "tidepool-eval",
- "tidepool-repr",
- "tidepool-testing",
-]
-
-[[package]]
-name = "tidepool-eval"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "im",
- "recursion",
- "serde_json",
- "thiserror",
- "tidepool-bignum",
  "tidepool-repr",
  "tidepool-testing",
 ]
@@ -4187,7 +4126,6 @@ dependencies = [
  "tidepool-bridge-derive",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-macro",
  "tidepool-repr",
 ]
@@ -4215,7 +4153,6 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-mcp",
  "tidepool-repr",
  "tidepool-runtime",
@@ -4251,7 +4188,6 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-extract-cmd",
  "tidepool-handlers",
  "tidepool-mcp",
@@ -4285,7 +4221,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
- "tidepool-eval",
  "tidepool-extract-cmd",
  "tidepool-extract-report",
  "tidepool-repr",
@@ -4312,7 +4247,6 @@ dependencies = [
  "tidepool-bridge-derive",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
@@ -4362,7 +4296,6 @@ dependencies = [
  "rustc-hash",
  "serial_test",
  "thiserror",
- "tidepool-eval",
  "tidepool-repr",
  "tidepool-testing",
 ]
@@ -4372,37 +4305,6 @@ name = "tidepool-protocol"
 version = "0.1.0"
 dependencies = [
  "insta",
-]
-
-[[package]]
-name = "tidepool-repl"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "frunk",
- "parking_lot",
- "rmcp",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "static_assertions",
- "tempfile",
- "thiserror",
- "tidepool-bridge",
- "tidepool-codegen",
- "tidepool-effect",
- "tidepool-eval",
- "tidepool-extract-cmd",
- "tidepool-handlers",
- "tidepool-mcp",
- "tidepool-repr",
- "tidepool-runtime",
- "tidepool-testing",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4444,7 +4346,6 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-extract-cmd",
  "tidepool-mcp",
  "tidepool-optimize",
@@ -4470,10 +4371,8 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-heap",
  "tidepool-mcp",
- "tidepool-optimize",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-toolchain",
@@ -4495,7 +4394,6 @@ dependencies = [
  "tidepool-bridge-derive",
  "tidepool-codegen",
  "tidepool-effect",
- "tidepool-eval",
  "tidepool-macro",
  "tidepool-repr",
  "tracing",

@@ -2,7 +2,7 @@ use tidepool_codegen::heap_bridge::{heap_to_value, BridgeError};
 use tidepool_codegen::host_fns;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::layout::{LIT_TAG_ARRAY, LIT_TAG_SMALLARRAY};
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_heap::layout;
 use tidepool_repr::*;
 

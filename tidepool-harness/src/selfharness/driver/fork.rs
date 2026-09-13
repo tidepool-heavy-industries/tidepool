@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 
 use super::corrective::fork_child_failure_corrective;

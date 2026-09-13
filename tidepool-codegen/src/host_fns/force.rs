@@ -217,7 +217,7 @@ const CANCEL_CHECK_INTERVAL: u32 = 4096;
 /// `Lit` leaves are already NF.
 ///
 /// Iterative with an explicit work stack (no host recursion) — mirrors
-/// `tidepool-eval`'s `deep_force` and the GC's `cheney_copy`, so an arbitrarily
+/// the shared material-value traversal and the GC's `cheney_copy`, so an arbitrarily
 /// deep structure (long list, deep tree) cannot overflow the host stack.
 ///
 /// GC-safety: forcing a thunk runs JIT code that can allocate and trigger a

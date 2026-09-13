@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 1;
-pub const EXECUTION_ABI_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
+pub const EXECUTION_ABI_VERSION: u64 = 2;
 
 macro_rules! dense_id {
     ($name:ident) => {
@@ -62,7 +62,7 @@ pub struct SymbolIdentity {
     pub occurrence: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum RuntimeRep {
     Void,
     LiftedRef,
@@ -244,6 +244,7 @@ pub struct CheckedLayout {
 pub struct ConstructorDecl {
     pub identity: SymbolIdentity,
     pub family: SymbolIdentity,
+    pub result_rep: RuntimeRep,
     pub field_reps: Vec<RuntimeRep>,
     pub strict_fields: Vec<bool>,
     pub layout: CheckedLayout,
@@ -252,7 +253,10 @@ pub struct ConstructorDecl {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GlobalDecl {
     pub identity: SymbolIdentity,
-    pub signature: SignatureId,
+    pub rep: RuntimeRep,
+    /// Required entry evidence when GHC knows the closure's entry arity.
+    /// Unknown lifted values must not acquire an entry from their full type.
+    pub entry_signature: Option<SignatureId>,
     pub required_evaluated: bool,
     pub required_generation: Option<u64>,
 }
@@ -265,11 +269,34 @@ pub enum ValueRef {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScalarLiteral {
-    Int { bits: u8, bytes: Vec<u8> },
-    Word { bits: u8, bytes: Vec<u8> },
-    Float { bits: u8, bytes: Vec<u8> },
+    Int {
+        bits: u8,
+        bytes: Vec<u8>,
+    },
+    Word {
+        bits: u8,
+        bytes: Vec<u8>,
+    },
+    Float {
+        bits: u8,
+        bytes: Vec<u8>,
+    },
     Char(u32),
     Bytes(Vec<u8>),
+    /// The raw `Addr#` null value, never a managed reference.
+    NullAddress,
+}
+
+impl ScalarLiteral {
+    pub fn rep(&self) -> RuntimeRep {
+        match self {
+            Self::Int { bits, .. } => RuntimeRep::Int(*bits),
+            Self::Word { bits, .. } => RuntimeRep::Word(*bits),
+            Self::Float { bits, .. } => RuntimeRep::Float(*bits),
+            Self::Char(_) => RuntimeRep::Word(32),
+            Self::Bytes(_) | Self::NullAddress => RuntimeRep::Address,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,6 +304,11 @@ pub enum Atom {
     Ref(ValueRef),
     Scalar(ScalarLiteral),
     Void,
+    /// An absent value with GHC's post-unarisation representation. It may be
+    /// transported in an unused slot, but is not an ordinary zero/null value.
+    /// Managed rubbish must remain distinguishable when transported or traced:
+    /// entering it produces typed integrity failure, never a memory access.
+    Rubbish(RuntimeRep),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -286,6 +318,8 @@ pub enum Group<T> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Thunk entry policy only. GHC's `ReEntrant` is represented by
+/// `HeapRhs::Function`, not a third thunk policy; `JumpedTo` belongs to joins.
 pub enum UpdatePolicy {
     Memoize,
     SingleEntry,
@@ -299,6 +333,8 @@ pub struct HeapBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeapRhs {
+    /// Immutable module-owned bytes (GHC StgTopStringLit), not a thunk.
+    Bytes(Vec<u8>),
     Function {
         signature: SignatureId,
         parameters: Vec<ValueId>,
@@ -339,6 +375,21 @@ pub struct Alternative {
     pub body: Expr,
 }
 
+/// GHC's post-unarisation alternative classification, without GHC types.
+///
+/// Family identity proves agreement, not exhaustiveness: declarations contain
+/// only encountered constructors. If no alternative matches, execution reports
+/// an integrity failure, including when an upstream refinement was violated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CaseKind {
+    Algebraic(SymbolIdentity),
+    Primitive(RuntimeRep),
+    /// One tuple alternative binds the returned physical components directly.
+    MultiValue,
+    /// A single DEFAULT demands the scrutinee without inspecting its shape.
+    Polymorphic,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
     Return(Vec<Atom>),
@@ -362,7 +413,8 @@ pub enum Expr {
     Case {
         scrutinee: Box<Expr>,
         binder: ValueId,
-        results: Vec<RuntimeRep>,
+        scrutinee_reps: Vec<RuntimeRep>,
+        kind: CaseKind,
         alternatives: Vec<Alternative>,
     },
     Let {
@@ -436,9 +488,10 @@ impl PreparedProgram {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedValue {
     pub identity: SymbolIdentity,
+    pub rep: RuntimeRep,
     /// Semantic signature supplied by the binding owner. Signature IDs are
     /// module-local table indices and therefore cannot cross the link boundary.
-    pub signature: Signature,
+    pub entry_signature: Option<Signature>,
     pub evaluated: bool,
     pub generation: u64,
 }

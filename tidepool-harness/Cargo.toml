@@ -19,7 +19,6 @@ tidepool-model-output.workspace = true
 tidepool-model.workspace = true
 tidepool-node.workspace = true
 tidepool-handlers.workspace = true
-tidepool-eval.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true

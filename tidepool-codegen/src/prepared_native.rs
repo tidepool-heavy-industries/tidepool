@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, MemFlags, Value};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -18,7 +18,10 @@ use tidepool_repr::execution_schema::{
     ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
 };
 
+use crate::alloc::emit_prepared_alloc_fast_path;
+use crate::context::VMContext;
 use crate::entry_abi::{EntryAbi, EnvironmentMode, NativeAbiProfile};
+use crate::machine_state::{MachineFailure, MachineState};
 use crate::pipeline::{CodegenPipeline, PipelineError};
 use crate::prepared_calls::{plan_application, ApplicationKind, FlatPap};
 use crate::prepared_control::{CallStatus, ControlError};
@@ -40,6 +43,8 @@ pub enum PreparedNativeError {
     Pipeline(#[from] PipelineError),
     #[error("descriptor/collection failure: {0}")]
     Descriptor(String),
+    #[error("{cause}", cause = .0.cause)]
+    Runtime(MachineFailure),
     #[error(transparent)]
     Control(#[from] ControlError),
 }
@@ -85,9 +90,8 @@ impl PreparedNativeProgram {
     ) -> Result<Self, PreparedNativeError> {
         let prepared = linked.prepared();
         let target = &prepared.envelope().target;
-        let host_matches = (cfg!(target_arch = "x86_64")
-            && target.architecture == Architecture::X86_64)
-            || (cfg!(target_arch = "aarch64") && target.architecture == Architecture::Aarch64);
+        let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            && target.architecture == Architecture::X86_64;
         if !host_matches
             || target.endianness != Endianness::Little
             || target.pointer_width != 64
@@ -195,15 +199,14 @@ impl PreparedNativeProgram {
             ObjectDescriptor::new(ObjectKind::Constructor, layout, None)
                 .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?,
         );
-        if descriptor.allocation_alignment() > align_of::<u64>() as u32
-            || descriptor
-                .payload()
-                .fields()
-                .iter()
-                .any(|field| field.size() > 8)
+        if descriptor
+            .payload()
+            .fields()
+            .iter()
+            .any(|field| field.size() > 8)
         {
             return Err(PreparedNativeError::Unsupported(
-                "generated object needs a wider allocation or field component",
+                "generated object needs a wider field component",
             ));
         }
         let sources = fields
@@ -212,7 +215,43 @@ impl PreparedNativeProgram {
             .map(|(atom, rep)| field_source(atom, *rep, parameters))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut pipeline = CodegenPipeline::new(&[])?;
+        let mut pipeline = CodegenPipeline::new(&[
+            (
+                "prepared_gc_trigger",
+                crate::host_fns::prepared_gc_trigger as *const u8,
+            ),
+            (
+                "prepared_publish_object",
+                crate::host_fns::prepared_publish_object as *const u8,
+            ),
+        ])?;
+        let mut prepared_gc_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_gc_signature.params.push(AbiParam::new(types::I64));
+        prepared_gc_signature.params.push(AbiParam::new(types::I64));
+        prepared_gc_signature
+            .returns
+            .push(AbiParam::new(types::I32));
+        let prepared_gc = pipeline
+            .module
+            .declare_function(
+                "prepared_gc_trigger",
+                Linkage::Import,
+                &prepared_gc_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut publish_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        publish_signature.params.push(AbiParam::new(types::I64));
+        publish_signature.params.push(AbiParam::new(types::I64));
+        publish_signature.params.push(AbiParam::new(types::I64));
+        publish_signature.returns.push(AbiParam::new(types::I32));
+        let publish = pipeline
+            .module
+            .declare_function(
+                "prepared_publish_object",
+                Linkage::Import,
+                &publish_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let tail_signature = abi
             .cranelift_signature(&profile, CallConv::Tail)
             .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?;
@@ -224,6 +263,9 @@ impl PreparedNativeProgram {
         tail_context.func.signature = tail_signature;
         emit_tail(
             &mut tail_context,
+            &mut pipeline,
+            prepared_gc,
+            publish,
             &descriptor,
             &declaration.field_reps,
             &sources,
@@ -384,40 +426,95 @@ impl PreparedNativeProgram {
             .filter_map(|(value, rep)| (*rep != RuntimeRep::Void).then_some(*value))
             .collect::<Vec<_>>();
         let extent = self.descriptor.allocation_extent() as usize;
-        let mut object = vec![0_u64; extent.div_ceil(8)];
-        let object_ptr = object.as_mut_ptr().cast::<u8>();
+        let machine_state = MachineState::new();
+        machine_state.set_stack_map_registry(&self.pipeline.stack_maps);
+        if let Err(error) = machine_state.install_prepared_buffer(
+            vec![0_u64; extent.div_ceil(8)],
+            vec![Arc::clone(&self.descriptor)],
+        ) {
+            machine_state.clear_stack_map_registry();
+            let disposition = error.machine_disposition();
+            return Err(PreparedNativeError::Runtime(MachineFailure {
+                cause: error,
+                disposition,
+            }));
+        }
+        let Some((start, size)) = machine_state.gc_active_range() else {
+            machine_state.clear_gc_state();
+            machine_state.clear_stack_map_registry();
+            return Err(PreparedNativeError::ResultArea);
+        };
+        let mut vmctx =
+            unsafe { VMContext::new(start, start.add(size), crate::host_fns::gc_trigger) };
+        vmctx.machine_state = (&machine_state as *const MachineState).cast_mut();
         let mut result_area = [0_u64; 2];
         let pointer = self.pipeline.get_function_ptr(self.adapter);
-        let status = unsafe {
-            match physical_arguments.as_slice() {
-                [] => {
-                    let entry: extern "C" fn(*mut u8, *mut u64) -> i32 =
-                        std::mem::transmute(pointer);
-                    entry(object_ptr, result_area.as_mut_ptr())
+        let result = (|| {
+            let status = unsafe {
+                match physical_arguments.as_slice() {
+                    [] => {
+                        let entry: extern "C" fn(*mut VMContext, *mut u64) -> i32 =
+                            std::mem::transmute(pointer);
+                        entry(&mut vmctx, result_area.as_mut_ptr())
+                    }
+                    [argument] => {
+                        let entry: extern "C" fn(*mut VMContext, *mut u64, u64) -> i32 =
+                            std::mem::transmute(pointer);
+                        entry(&mut vmctx, result_area.as_mut_ptr(), *argument)
+                    }
+                    _ => {
+                        return Err(PreparedNativeError::Unsupported(
+                            "more than one physical argument",
+                        ))
+                    }
                 }
-                [argument] => {
-                    let entry: extern "C" fn(*mut u8, *mut u64, u64) -> i32 =
-                        std::mem::transmute(pointer);
-                    entry(object_ptr, result_area.as_mut_ptr(), *argument)
-                }
-                _ => {
-                    return Err(PreparedNativeError::Unsupported(
-                        "more than one physical argument",
-                    ))
-                }
+            };
+            let status = CallStatus::from_raw(i64::from(status))?;
+            if status == CallStatus::IntegrityFailure {
+                machine_state.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
             }
-        };
-        if CallStatus::from_raw(i64::from(status))? != CallStatus::Success
-            || result_area[0] != object_ptr as u64
-        {
-            return Err(PreparedNativeError::ResultArea);
-        }
-        Ok((object, 0))
+            let machine_status = machine_state.prepared_call_status();
+            if status != CallStatus::Success || machine_status != CallStatus::Success {
+                if let Some(failure) = machine_state.last_failure() {
+                    let _ = machine_state.take_runtime_error();
+                    return Err(PreparedNativeError::Runtime(failure));
+                }
+                return Err(PreparedNativeError::Control(ControlError::CallFailed(
+                    if status != CallStatus::Success {
+                        status
+                    } else {
+                        machine_status
+                    },
+                )));
+            }
+            let (active_start, active_size) = machine_state
+                .gc_active_range()
+                .ok_or(PreparedNativeError::ResultArea)?;
+            let object = result_area[0] as *mut u8;
+            let offset = (object as usize)
+                .checked_sub(active_start as usize)
+                .filter(|offset| {
+                    offset
+                        .checked_add(extent)
+                        .is_some_and(|end| end <= active_size)
+                })
+                .ok_or(PreparedNativeError::ResultArea)?;
+            Ok(offset)
+        })();
+        let (buffer, _) = machine_state.reclaim_session_heap(vmctx.alloc_ptr);
+        machine_state.clear_gc_state();
+        machine_state.clear_stack_map_registry();
+        let object_offset = result?;
+        let buffer = buffer.ok_or(PreparedNativeError::ResultArea)?;
+        Ok((buffer, object_offset))
     }
 }
 
 fn emit_tail(
     context: &mut Context,
+    pipeline: &mut CodegenPipeline,
+    prepared_gc: FuncId,
+    publish: FuncId,
     descriptor: &ObjectDescriptor,
     field_reps: &[RuntimeRep],
     sources: &[FieldSource],
@@ -429,23 +526,30 @@ fn emit_tail(
     builder.append_block_params_for_function_params(block);
     builder.switch_to_block(block);
     builder.seal_block(block);
+    let prepared_gc = pipeline
+        .module
+        .declare_func_in_func(prepared_gc, builder.func);
+    let publish = pipeline.module.declare_func_in_func(publish, builder.func);
     let params = builder.block_params(block).to_vec();
-    let object = params[0];
+    let vmctx = params[0];
     let result_area = params[1];
     let argument_values = &params[2..];
-    let flags = MemFlags::trusted();
-    let tag = builder
-        .ins()
-        .iconst(types::I8, i64::from(descriptor.heap_tag().as_byte()));
-    builder.ins().store(flags, tag, object, 0);
-    let extent = builder
-        .ins()
-        .iconst(types::I32, i64::from(descriptor.allocation_extent()));
-    builder.ins().store(flags, extent, object, 1);
-    for padding in 5..8 {
-        let zero = builder.ins().iconst(types::I8, 0);
-        builder.ins().store(flags, zero, object, padding);
+    for (value, rep) in argument_values.iter().zip(
+        argument_reps
+            .iter()
+            .copied()
+            .filter(|rep| *rep != RuntimeRep::Void),
+    ) {
+        if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+            builder.declare_value_needs_stack_map(*value);
+        }
     }
+    let object = emit_prepared_alloc_fast_path(&mut builder, vmctx, descriptor, prepared_gc);
+    let flags = MemFlags::trusted();
+    let header = builder
+        .ins()
+        .iconst(types::I64, descriptor.initial_header_word() as i64);
+    builder.ins().store(flags, header, object, 0);
     for ((source, rep), logical) in sources.iter().zip(field_reps).zip(0..) {
         let Some(stored) = descriptor.payload().logical_to_stored()[logical] else {
             continue;
@@ -468,8 +572,26 @@ fn emit_tail(
             (descriptor.payload_base() + field.offset()) as i32,
         );
     }
-    builder.ins().store(flags, object, result_area, 0);
+    let descriptor_index = builder.ins().iconst(types::I64, 0);
+    let publish_call = builder
+        .ins()
+        .call(publish, &[vmctx, object, descriptor_index]);
+    let status = builder.inst_results(publish_call)[0];
     let success = builder.ins().iconst(types::I32, CallStatus::Success as i64);
+    let published = builder
+        .ins()
+        .icmp(ir::condcodes::IntCC::Equal, status, success);
+    let publish_ok = builder.create_block();
+    let publish_failed = builder.create_block();
+    builder
+        .ins()
+        .brif(published, publish_ok, &[], publish_failed, &[]);
+    builder.switch_to_block(publish_failed);
+    builder.seal_block(publish_failed);
+    builder.ins().return_(&[status]);
+    builder.switch_to_block(publish_ok);
+    builder.seal_block(publish_ok);
+    builder.ins().store(flags, object, result_area, 0);
     builder.ins().return_(&[success]);
     builder.finalize();
 }
@@ -571,5 +693,189 @@ fn scalar_word(atom: &Atom, expected: RuntimeRep) -> Result<u64, PreparedNativeE
         _ => Err(PreparedNativeError::Unsupported(
             "non-immediate constructor field",
         )),
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use tidepool_repr::execution_schema::TargetDescriptor;
+
+    fn target() -> TargetDescriptor {
+        TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn managed_argument_survives_generated_allocation_collection() {
+        let target = target();
+        let parent = Arc::new(
+            ObjectDescriptor::new(
+                ObjectKind::Constructor,
+                StorageLayout::for_reps(&target, &[RuntimeRep::LiftedRef, RuntimeRep::Address])
+                    .unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let child = Arc::new(
+            ObjectDescriptor::new(
+                ObjectKind::Constructor,
+                StorageLayout::for_reps(&target, &[]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let mut pipeline = CodegenPipeline::new(&[
+            (
+                "prepared_gc_trigger",
+                crate::host_fns::prepared_gc_trigger as *const u8,
+            ),
+            (
+                "prepared_publish_object",
+                crate::host_fns::prepared_publish_object as *const u8,
+            ),
+        ])
+        .unwrap();
+        let mut gc_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        gc_signature.params.push(AbiParam::new(types::I64));
+        gc_signature.params.push(AbiParam::new(types::I64));
+        gc_signature.returns.push(AbiParam::new(types::I32));
+        let gc = pipeline
+            .module
+            .declare_function("prepared_gc_trigger", Linkage::Import, &gc_signature)
+            .unwrap();
+        let mut publish_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        publish_signature.params.push(AbiParam::new(types::I64));
+        publish_signature.params.push(AbiParam::new(types::I64));
+        publish_signature.params.push(AbiParam::new(types::I64));
+        publish_signature.returns.push(AbiParam::new(types::I32));
+        let publish = pipeline
+            .module
+            .declare_function(
+                "prepared_publish_object",
+                Linkage::Import,
+                &publish_signature,
+            )
+            .unwrap();
+        let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        signature.params.push(AbiParam::new(types::I64));
+        signature.params.push(AbiParam::new(types::I64));
+        signature.params.push(AbiParam::new(types::I64));
+        signature.params.push(AbiParam::new(types::I64));
+        signature.returns.push(AbiParam::new(types::I32));
+        let mut tail_signature = signature.clone();
+        tail_signature.call_conv = CallConv::Tail;
+        let tail = pipeline
+            .module
+            .declare_function(
+                "prepared_managed_argument_gc_tail",
+                Linkage::Local,
+                &tail_signature,
+            )
+            .unwrap();
+        let mut context = Context::new();
+        context.func.signature = tail_signature;
+        emit_tail(
+            &mut context,
+            &mut pipeline,
+            gc,
+            publish,
+            &parent,
+            &[RuntimeRep::LiftedRef, RuntimeRep::Address],
+            &[FieldSource::Parameter(0), FieldSource::Parameter(1)],
+            &[RuntimeRep::LiftedRef, RuntimeRep::Address],
+        );
+        pipeline.define_function(tail, &mut context).unwrap();
+        let adapter = pipeline
+            .module
+            .declare_function("prepared_managed_argument_gc", Linkage::Export, &signature)
+            .unwrap();
+        let mut adapter_context = Context::new();
+        adapter_context.func.signature = signature;
+        emit_adapter(&mut adapter_context, &mut pipeline, tail);
+        pipeline
+            .define_function(adapter, &mut adapter_context)
+            .unwrap();
+        pipeline.finalize().unwrap();
+        assert!(!pipeline.stack_maps.is_empty());
+
+        let machine_state = MachineState::new();
+        machine_state.set_stack_map_registry(&pipeline.stack_maps);
+        let child_extent = child.allocation_extent() as usize;
+        machine_state
+            .install_prepared_buffer(
+                vec![0_u64; child_extent.div_ceil(size_of::<u64>())],
+                vec![Arc::clone(&parent), Arc::clone(&child)],
+            )
+            .unwrap();
+        let (start, size) = machine_state.gc_active_range().unwrap();
+        let mut vmctx =
+            unsafe { VMContext::new(start, start.add(size), crate::host_fns::gc_trigger) };
+        vmctx.machine_state = (&machine_state as *const MachineState).cast_mut();
+        unsafe {
+            child.initialize_header(start);
+            vmctx.alloc_ptr = start.add(child_extent);
+            assert_eq!(
+                crate::host_fns::prepared_publish_object(&mut vmctx, start, 1),
+                CallStatus::Success as i32
+            );
+        }
+
+        let mut result_area = [0_u64; 1];
+        let raw_address = start as u64;
+        let raw_address_before_collection = raw_address;
+        let code = pipeline.get_function_ptr(adapter);
+        let status = unsafe {
+            let run: extern "C" fn(*mut VMContext, *mut u64, u64, u64) -> i32 =
+                std::mem::transmute(code);
+            run(
+                &mut vmctx,
+                result_area.as_mut_ptr(),
+                start as u64,
+                raw_address,
+            )
+        };
+        assert_eq!(status, CallStatus::Success as i32);
+        assert_eq!(machine_state.prepared_call_status(), CallStatus::Success);
+        let (active_start, active_size) = machine_state.gc_active_range().unwrap();
+        let parent_ptr = result_area[0] as *mut u8;
+        let managed_field = parent.payload().logical_to_stored()[0].unwrap() as usize;
+        let address_field = parent.payload().logical_to_stored()[1].unwrap() as usize;
+        let child_ptr = unsafe {
+            std::ptr::read_unaligned(
+                parent_ptr
+                    .add(
+                        parent.payload_base() as usize
+                            + parent.payload().fields()[managed_field].offset() as usize,
+                    )
+                    .cast::<u64>(),
+            ) as *mut u8
+        };
+        let retained_address = unsafe {
+            std::ptr::read_unaligned(
+                parent_ptr
+                    .add(
+                        parent.payload_base() as usize
+                            + parent.payload().fields()[address_field].offset() as usize,
+                    )
+                    .cast::<u64>(),
+            )
+        };
+        assert_ne!(child_ptr, start);
+        assert!(child_ptr as usize >= active_start as usize);
+        assert!((child_ptr as usize) < active_start as usize + active_size);
+        assert_eq!(retained_address, raw_address_before_collection);
+
+        let (buffer, _) = machine_state.reclaim_session_heap(vmctx.alloc_ptr);
+        machine_state.clear_gc_state();
+        machine_state.clear_stack_map_registry();
+        drop(buffer);
     }
 }

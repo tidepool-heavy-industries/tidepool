@@ -86,12 +86,16 @@ encodeConstructor constructor = array
   , list encodeRep (constructorFieldReps constructor)
   , list encodeBool (constructorStrictFields constructor)
   , encodeLayout (constructorLayout constructor)
+  , encodeRep (constructorResultRep constructor)
   ]
 
 encodeGlobal :: GlobalDecl -> Encoding
 encodeGlobal global = array
   [ encodeSymbol (globalIdentity global)
-  , encodeSignatureId (globalSignature global)
+  , encodeRep (globalRep global)
+  , case globalEntrySignature global of
+      Nothing -> tag 0
+      Just signature -> tagged 1 [encodeSignatureId signature]
   , encodeBool (globalRequiredEvaluated global)
   , case globalRequiredGeneration global of
       Nothing -> tag 0
@@ -116,12 +120,14 @@ encodeScalar scalar = case scalar of
   FloatLiteral bits bytes -> tagged 2 [encodeWord8 bits, encodeBytes bytes]
   CharLiteral codepoint -> tagged 3 [encodeWord32 codepoint]
   BytesLiteral bytes -> tagged 4 [encodeBytes bytes]
+  NullAddressLiteral -> tag 5
 
 encodeAtom :: Atom -> Encoding
 encodeAtom atom = case atom of
   Ref ref -> tagged 0 [encodeValueRef ref]
   Scalar scalar -> tagged 1 [encodeScalar scalar]
   Void -> tag 2
+  Rubbish rep -> tagged 3 [encodeRep rep]
 
 encodeGroup :: (a -> Encoding) -> Group a -> Encoding
 encodeGroup encode group = case group of
@@ -134,6 +140,7 @@ encodeHeapBinding binding = array
 
 encodeHeapRhs :: HeapRhs -> Encoding
 encodeHeapRhs rhs = case rhs of
+  Bytes bytes -> tagged 3 [encodeBytes bytes]
   Function signature parameters captures body -> tagged 0
     [ encodeSignatureId signature
     , list encodeValueId parameters
@@ -177,15 +184,23 @@ encodeExpr expr = case expr of
     [encodeOperationId operation, list encodeAtom arguments]
   Construct constructor fields -> tagged 4
     [encodeConstructorId constructor, list encodeAtom fields]
-  Case scrutinee binder results alternatives -> tagged 5
+  Case scrutinee binder results kind alternatives -> tagged 5
     [ encodeExpr scrutinee
     , encodeValueId binder
     , list encodeRep results
+    , encodeCaseKind kind
     , list encodeAlternative alternatives
     ]
   Let bindings body -> tagged 6 [encodeGroup encodeHeapBinding bindings, encodeExpr body]
   LetJoins bindings body -> tagged 7 [encodeGroup encodeJoinBinding bindings, encodeExpr body]
   Jump join arguments -> tagged 8 [encodeJoinId join, list encodeAtom arguments]
+
+encodeCaseKind :: CaseKind -> Encoding
+encodeCaseKind kind = case kind of
+  AlgebraicCase family -> tagged 0 [encodeSymbol family]
+  PrimitiveCase rep -> tagged 1 [encodeRep rep]
+  MultiValueCase -> tag 2
+  PolymorphicCase -> tag 3
 
 encodeTopBinding :: TopBinding -> Encoding
 encodeTopBinding (TopBinding identity binding) = array

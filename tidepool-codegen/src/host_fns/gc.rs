@@ -229,6 +229,13 @@ pub(crate) struct GcState {
     /// `Vec<u64>`, not `Vec<u8>` — see `SessionState::heap`'s doc
     /// (jit_machine.rs) for why.
     pub active_buffer: Option<Vec<u64>>,
+    pub prepared: Option<PreparedHeap>,
+}
+
+/// Physical metadata for the active prepared nursery, not a reachability set.
+pub(crate) struct PreparedHeap {
+    pub objects: tidepool_heap::gc::raw::DescriptorRegistry,
+    pub layouts: Vec<std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>>,
 }
 
 /// A zeroed byte buffer at least `size` bytes, 8-byte aligned by
@@ -907,7 +914,173 @@ unsafe fn verify_heap_post_gc(
 }
 
 /// Shared GC body: walk frames, run Cheney copy, call hooks.
+/// Stage a descriptor collection with enough unoccupied space for the pending
+/// allocation. Capacity retries precede all pointer mutation; a successful copy
+/// is never followed by a fallible growth copy.
+fn collect_prepared(
+    state: &mut GcState,
+    roots: &[*mut *mut u8],
+    reserve: usize,
+) -> Result<usize, crate::host_fns::RuntimeError> {
+    use crate::host_fns::RuntimeError;
+    use tidepool_heap::execution_descriptor::DescriptorTraceError;
+    let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
+    let ceiling = max_heap_bytes() & !7;
+    if reserve > ceiling || ceiling < 8 {
+        return Err(RuntimeError::HeapOverflow);
+    }
+    let mut size = state.active_size.max(reserve).max(8).min(ceiling);
+    loop {
+        let words = size.checked_add(7).ok_or(RuntimeError::HeapOverflow)? / 8;
+        size = words.checked_mul(8).ok_or(RuntimeError::HeapOverflow)?;
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(words)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        buffer.resize(words, 0_u64);
+        let copy_capacity = size
+            .checked_sub(reserve)
+            .ok_or(RuntimeError::HeapOverflow)?;
+        // SAFETY: the owning heap and checked snapshot keep source objects and
+        // root slots live; the new buffer is disjoint and fully initialized.
+        let copied = unsafe {
+            tidepool_heap::gc::raw::cheney_copy_registered(
+                roots,
+                state.active_start,
+                state.active_start.add(state.active_size),
+                &mut as_bytes_mut(&mut buffer)[..copy_capacity],
+                &mut prepared.objects,
+            )
+        };
+        match copied {
+            Ok(result) => {
+                state.active_start = buffer.as_mut_ptr().cast();
+                state.active_size = size;
+                state.active_buffer = Some(buffer);
+                return Ok(result.bytes_copied);
+            }
+            Err(DescriptorTraceError::InsufficientSpace { required, .. }) => {
+                let needed = required
+                    .checked_add(reserve)
+                    .ok_or(RuntimeError::HeapOverflow)?;
+                if needed > ceiling || size == ceiling {
+                    return Err(RuntimeError::HeapOverflow);
+                }
+                size = size.saturating_mul(2).max(needed).min(ceiling);
+            }
+            Err(DescriptorTraceError::MetadataAllocation) => {
+                return Err(RuntimeError::HeapOverflow)
+            }
+            Err(_) => return Err(RuntimeError::BadPointer),
+        }
+    }
+}
+
+/// Prepared allocation safepoint. Failure is an explicit ABI status, never an
+/// allocation-shaped poison pointer. The recorded first cause remains owned by
+/// the machine for the run boundary to report.
+#[inline(never)]
+pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reserve: usize) -> i32 {
+    let mut frame_anchor = [0_u64; 2];
+    std::hint::black_box(&mut frame_anchor);
+    let ms = unsafe { machine_state(vmctx) };
+    if !check_cancel_and_set_error(vmctx)
+        && ms.prepared_call_status() == crate::prepared_control::CallStatus::Success
+    {
+        let state = ms.take_gc_state();
+        let is_prepared = state.as_ref().is_some_and(|state| state.prepared.is_some());
+        if let Some(state) = state {
+            ms.put_gc_state(state);
+        }
+        if !is_prepared {
+            ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+            return ms.prepared_call_status() as i32;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let fp: usize;
+            unsafe {
+                std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
+            }
+            perform_gc_request(fp, vmctx, reserve);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+    }
+    ms.prepared_call_status() as i32
+}
+
+/// Noncollecting publication, called only after the generated object is fully
+/// initialized. Descriptor indices refer to pinned owners installed with this
+/// machine's active heap, not arbitrary metadata pointers supplied by code.
+pub(crate) unsafe extern "C" fn prepared_publish_object(
+    vmctx: *mut VMContext,
+    object: *mut u8,
+    descriptor_index: usize,
+) -> i32 {
+    use crate::host_fns::RuntimeError;
+    use tidepool_heap::execution_descriptor::DescriptorState;
+    let ms = unsafe { machine_state(vmctx) };
+    if ms.prepared_call_status() != crate::prepared_control::CallStatus::Success {
+        return ms.prepared_call_status() as i32;
+    }
+    let Some(mut state) = ms.take_gc_state() else {
+        ms.set_first_cause(RuntimeError::BadPointer);
+        return ms.prepared_call_status() as i32;
+    };
+    let result = (|| {
+        let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
+        let descriptor = prepared
+            .layouts
+            .get(descriptor_index)
+            .ok_or(RuntimeError::BadPointer)?;
+        let offset = (object as usize)
+            .checked_sub(state.active_start as usize)
+            .ok_or(RuntimeError::BadPointer)?;
+        let end = offset
+            .checked_add(descriptor.allocation_extent() as usize)
+            .filter(|end| *end <= state.active_size)
+            .ok_or(RuntimeError::BadPointer)?;
+        let used = unsafe { (*vmctx).alloc_ptr as usize }
+            .checked_sub(state.active_start as usize)
+            .filter(|used| *used <= state.active_size)
+            .ok_or(RuntimeError::BadPointer)?;
+        if end > used || (object as usize) % descriptor.allocation_alignment() as usize != 0 {
+            return Err(RuntimeError::BadPointer);
+        }
+        let available = end - offset;
+        if unsafe { descriptor.state(object, available) }.map_err(|_| RuntimeError::BadPointer)?
+            != DescriptorState::Live
+        {
+            return Err(RuntimeError::BadPointer);
+        }
+        if prepared.objects.descriptor(object).is_some() {
+            return Err(RuntimeError::BadPointer);
+        }
+        unsafe {
+            prepared
+                .objects
+                .register(object, available, std::sync::Arc::clone(descriptor))
+        }
+        .map_err(|error| match error {
+            tidepool_heap::execution_descriptor::DescriptorTraceError::MetadataAllocation => {
+                RuntimeError::HeapOverflow
+            }
+            _ => RuntimeError::BadPointer,
+        })
+    })();
+    ms.put_gc_state(state);
+    if let Err(error) = result {
+        ms.set_first_cause(error);
+    }
+    ms.prepared_call_status() as i32
+}
+
 fn perform_gc(fp: usize, vmctx: *mut VMContext) {
+    perform_gc_request(fp, vmctx, 0);
+}
+
+fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     // SAFETY: vmctx is valid; machine_state was installed before entering JIT code.
     let ms = unsafe { machine_state(vmctx) };
     let Some(registry_ptr) = ms.stack_map_registry() else {
@@ -976,6 +1149,35 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
             ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
             return;
         };
+
+        // Compact descriptor headers are not readable by the Core collector.
+        // Both formats acquire exactly the same checked root snapshot.
+        if state.prepared.is_some() {
+            let stack_slots: Vec<*mut *mut u8> = roots
+                .iter()
+                .map(|root| root.stack_slot_addr as *mut *mut u8)
+                .collect();
+            let snapshot = unsafe {
+                ms.complete_root_snapshot(
+                    &stack_slots,
+                    &mut (*vmctx).tail_callee,
+                    &mut (*vmctx).tail_arg,
+                )
+            };
+            let result = collect_prepared(&mut state, &snapshot.into_slots(), reserve);
+            match result {
+                Ok(used) => {
+                    ms.bump_gc_generation();
+                    unsafe {
+                        (*vmctx).alloc_ptr = state.active_start.add(used);
+                        (*vmctx).alloc_limit = state.active_start.add(state.active_size);
+                    }
+                }
+                Err(error) => ms.set_first_cause(error),
+            }
+            ms.put_gc_state(state);
+            return;
+        }
 
         // A real collection is about to run — bump the generation
         // counter so callers holding an address-keyed cache across this
@@ -1291,6 +1493,107 @@ pub(crate) unsafe fn host_alloc_gc(vmctx: *mut VMContext, size: usize) -> *mut u
 mod tests {
     use super::*;
     use crate::layout;
+
+    #[test]
+    fn prepared_collection_reserves_capacity_and_rewrites_only_managed_fields() {
+        use std::sync::Arc;
+        use tidepool_heap::execution_descriptor::{ObjectDescriptor, ObjectKind};
+        use tidepool_repr::execution_schema::{
+            Architecture, Endianness, RuntimeRep, StorageLayout, TargetDescriptor,
+        };
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let descriptor = Arc::new(
+            ObjectDescriptor::new(
+                ObjectKind::Constructor,
+                StorageLayout::for_reps(&target, &[RuntimeRep::LiftedRef, RuntimeRep::Address])
+                    .unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let extent = descriptor.allocation_extent() as usize;
+        let ms = crate::machine_state::MachineState::new();
+        ms.install_prepared_buffer(vec![0_u64; extent / 8], vec![Arc::clone(&descriptor)])
+            .unwrap();
+        let (start, size) = ms.gc_active_range().unwrap();
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
+        vmctx.machine_state = &ms as *const _ as *mut _;
+        vmctx.alloc_ptr = unsafe { start.add(extent) };
+        let managed_offset = descriptor.trace_offsets()[0] as usize;
+        let address_offset =
+            (descriptor.payload_base() + descriptor.payload().fields()[1].offset()) as usize;
+        unsafe {
+            descriptor.initialize_header(start);
+            *start.add(managed_offset).cast::<*mut u8>() = start;
+            *start.add(address_offset).cast::<usize>() = start as usize;
+            assert_eq!(prepared_publish_object(&mut vmctx, start, 0), 0);
+        }
+        let mut root = start;
+        ms.register_rust_root(&mut root);
+        let maps = crate::stack_map::StackMapRegistry::new();
+        ms.set_stack_map_registry(&maps);
+        perform_gc_request(0, &mut vmctx, extent * 4);
+        assert_eq!(
+            ms.prepared_call_status(),
+            crate::prepared_control::CallStatus::Success
+        );
+        assert_ne!(root, start);
+        assert!(vmctx.alloc_limit as usize - vmctx.alloc_ptr as usize >= extent * 4);
+        unsafe {
+            assert_eq!(*root.add(managed_offset).cast::<*mut u8>(), root);
+            assert_eq!(*root.add(address_offset).cast::<usize>(), start as usize);
+        }
+        assert_eq!(ms.gc_generation(), 1);
+        ms.clear_gc_state();
+        ms.clear_stack_map_registry();
+    }
+
+    #[test]
+    fn prepared_capacity_overflow_preserves_heap_and_first_cause() {
+        let ms = crate::machine_state::MachineState::new();
+        ms.install_prepared_buffer(vec![0_u64; 8], Vec::new())
+            .unwrap();
+        let (start, size) = ms.gc_active_range().unwrap();
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
+        vmctx.machine_state = &ms as *const _ as *mut _;
+        let maps = crate::stack_map::StackMapRegistry::new();
+        ms.set_stack_map_registry(&maps);
+        perform_gc_request(0, &mut vmctx, usize::MAX);
+        assert_eq!(ms.gc_active_range(), Some((start, size)));
+        assert_eq!(vmctx.alloc_ptr, start);
+        assert_eq!(ms.gc_generation(), 0);
+        assert_eq!(
+            ms.prepared_call_status(),
+            crate::prepared_control::CallStatus::LanguageFailure
+        );
+        // Observing ABI status must not consume or replace the machine cause.
+        assert_eq!(
+            ms.take_runtime_error(),
+            Some(crate::host_fns::RuntimeError::HeapOverflow)
+        );
+        ms.clear_gc_state();
+        ms.clear_stack_map_registry();
+    }
+
+    #[test]
+    fn prepared_status_keeps_integrity_failure_after_cause_is_reported() {
+        use crate::host_fns::RuntimeError;
+        use crate::prepared_control::CallStatus;
+        let ms = crate::machine_state::MachineState::new();
+        ms.set_first_cause(RuntimeError::Cancelled);
+        assert_eq!(ms.prepared_call_status(), CallStatus::Cancelled);
+        ms.set_first_cause(RuntimeError::BadPointer);
+        assert_eq!(ms.prepared_call_status(), CallStatus::IntegrityFailure);
+        assert_eq!(ms.take_runtime_error(), Some(RuntimeError::Cancelled));
+        assert_eq!(ms.prepared_call_status(), CallStatus::IntegrityFailure);
+    }
 
     #[test]
     fn missing_root_registry_aborts_before_collection_and_marks_unavailable() {

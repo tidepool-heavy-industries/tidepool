@@ -14,35 +14,24 @@ pub const TOOLCHAIN_VERSION: &str = "ghc-9.12.2";
 /// Exact host contract accepted by production artifact readers. Unsupported
 /// targets fail before an artifact can be parsed or cached.
 pub fn production_requirements() -> Result<ProgramRequirements, ParseError> {
-    let architecture = match std::env::consts::ARCH {
-        "x86_64" => Architecture::X86_64,
-        "aarch64" => Architecture::Aarch64,
-        other => {
-            return Err(ParseError::UnsupportedTarget(format!(
-                "prepared execution is not configured for {other}"
-            )))
-        }
-    };
-    let pointer_width = usize::BITS as u8;
-    let abi = match &architecture {
-        Architecture::X86_64 => "sysv64",
-        Architecture::Aarch64 => "aapcs64",
-    };
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return Err(ParseError::UnsupportedTarget(format!(
+            "prepared execution requires Linux x86_64; host is {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )));
+    }
     Ok(ProgramRequirements {
         schema_version: SCHEMA_VERSION,
         projection_profile: PROJECTION_PROFILE.into(),
         toolchain: TOOLCHAIN_VERSION.into(),
         execution_abi_version: EXECUTION_ABI_VERSION,
         target: TargetDescriptor {
-            architecture,
-            endianness: if cfg!(target_endian = "little") {
-                Endianness::Little
-            } else {
-                Endianness::Big
-            },
-            pointer_width,
-            word_width: pointer_width,
-            abi: abi.into(),
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
             features: vec![],
         },
     })
@@ -94,7 +83,7 @@ mod tests {
     use tidepool_repr::execution_schema::{ImportedValue, RuntimeRep};
 
     fn fixture() -> Vec<u8> {
-        include_bytes!("../../tidepool-eval/tests/fixtures/m3-vertical.cbor").to_vec()
+        include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor").to_vec()
     }
 
     fn imports(prepared: &PreparedProgram) -> MachineImports {
@@ -104,7 +93,10 @@ mod tests {
             .map(|global| {
                 let value = ImportedValue {
                     identity: global.identity.clone(),
-                    signature: prepared.signatures()[global.signature.0 as usize].clone(),
+                    rep: global.rep.clone(),
+                    entry_signature: global
+                        .entry_signature
+                        .map(|id| prepared.signatures()[id.0 as usize].clone()),
                     evaluated: global.required_evaluated,
                     generation: global.required_generation.unwrap_or(0),
                 };
@@ -139,8 +131,17 @@ mod tests {
     fn mismatched_import_contract_is_rejected() {
         let artifact = PreparedArtifact::parse(fixture(), DecodeLimits::default()).unwrap();
         let mut machine_imports = imports(artifact.prepared());
-        let import = machine_imports.values.values_mut().next().unwrap();
-        import.signature.arguments.push(RuntimeRep::Int(64));
+        let import = machine_imports
+            .values
+            .values_mut()
+            .find(|import| import.entry_signature.is_some())
+            .expect("fixture must declare a callable import");
+        import
+            .entry_signature
+            .as_mut()
+            .unwrap()
+            .arguments
+            .push(RuntimeRep::Int(64));
         assert!(artifact.link(&machine_imports).is_err());
     }
 }

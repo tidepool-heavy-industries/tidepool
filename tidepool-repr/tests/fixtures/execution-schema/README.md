@@ -2,7 +2,10 @@
 
 The exact encoding is
 `plans/parallel-dogfood/next-wave/m3-wire-contract-r7.md`.
-`haskell/test-prepared-stg/M3Vertical.hs` is the producer fixture. It retains an
+`haskell/test-prepared-stg/M3Vertical.hs` is the producer fixture; its checked
+schema-v2 output is `haskell/test-prepared-stg/fixtures/m3-vertical.cbor`, generated
+with `cd haskell && cabal run execution-schema-projection -- test-prepared-stg/fixtures/m3-vertical.cbor`.
+It retains an
 imported value, a recursive local control path and a strict constructor field.
 The projection test must inspect the prepared form before claiming those shapes.
 

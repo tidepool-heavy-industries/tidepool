@@ -15,7 +15,6 @@ rustc-hash.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-tidepool-eval.workspace = true
 tidepool-testing.workspace = true
 proptest.workspace = true
 serial_test.workspace = true

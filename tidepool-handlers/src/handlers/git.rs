@@ -321,7 +321,7 @@ mod tests {
     use crate::test_support::*;
     use tidepool_bridge::{FromCore, ToCore};
     use tidepool_effect::dispatch::{EffectContext, EffectHandler};
-    use tidepool_eval::value::Value;
+    use tidepool_bridge::Value;
     use tidepool_mcp::CapturedOutput;
 
     /// Peel one `Right`/`Left` Con layer off a #335 errors-tagged response,

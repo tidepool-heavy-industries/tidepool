@@ -10,7 +10,7 @@ use tidepool_codegen::host_fns;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::types::*;
 use tidepool_repr::CoreExpr;

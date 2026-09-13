@@ -7,11 +7,9 @@
 pub mod dispatch;
 pub mod error;
 pub mod freer_names;
-pub mod machine;
 pub mod pause;
 pub mod policy;
 
 pub use dispatch::*;
 pub use error::*;
-pub use machine::*;
 pub use policy::*;

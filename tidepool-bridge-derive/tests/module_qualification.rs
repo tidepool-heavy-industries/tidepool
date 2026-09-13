@@ -8,7 +8,7 @@
 
 use tidepool_bridge::{BridgeError, FromCore, ToCore};
 use tidepool_bridge_derive::{FromCore, ToCore};
-use tidepool_eval::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
 // Nullary variants keep the test focused on DataCon lookup — avoids pulling

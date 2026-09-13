@@ -43,11 +43,13 @@ fn representative_recursive_import_contract_compiles() {
         }],
         globals: vec![GlobalDecl {
             identity: symbol("Fixture.Dependency", "imported"),
-            signature: SignatureId(0),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
             required_evaluated: false,
             required_generation: Some(7),
         }],
         constructors: vec![ConstructorDecl {
+            result_rep: RuntimeRep::LiftedRef,
             identity: symbol("Fixture.Vertical", "Box"),
             family: symbol("Fixture.Vertical", "Box"),
             field_reps: vec![RuntimeRep::Int(64)],

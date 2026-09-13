@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use tidepool_bridge::ToCore;
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 
 use super::rendered_result_snippet;

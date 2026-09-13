@@ -13,19 +13,14 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum SubagentReq {
-    SubagentSpawn(tidepool_eval::value::Value, tidepool_eval::value::Value),
+    SubagentSpawn(tidepool_bridge::Value, tidepool_bridge::Value),
     SubagentBegin(
-        tidepool_eval::value::Value,
-        tidepool_eval::value::Value,
-        tidepool_eval::value::Value,
+        tidepool_bridge::Value,
+        tidepool_bridge::Value,
+        tidepool_bridge::Value,
     ),
-    SubagentResume(
-        tidepool_eval::value::Value,
-        String,
-        bool,
-        tidepool_eval::value::Value,
-    ),
-    SubagentSpawnAsync(tidepool_eval::value::Value, tidepool_eval::value::Value),
-    SubagentAwait(tidepool_eval::value::Value),
-    SubagentCancel(tidepool_eval::value::Value),
+    SubagentResume(tidepool_bridge::Value, String, bool, tidepool_bridge::Value),
+    SubagentSpawnAsync(tidepool_bridge::Value, tidepool_bridge::Value),
+    SubagentAwait(tidepool_bridge::Value),
+    SubagentCancel(tidepool_bridge::Value),
 }

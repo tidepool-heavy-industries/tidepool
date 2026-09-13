@@ -1,5 +1,5 @@
 //! Value-level Haskell data-shape facts — the ONE home for how common GHC
-//! runtime shapes look as `tidepool_eval::Value` trees, independent of any
+//! runtime shapes look as `tidepool_bridge::Value` trees, independent of any
 //! heap layout.
 //!
 //! A "shape fact" is the Value-tree encoding of a Haskell data type as GHC
@@ -22,8 +22,8 @@
 //!
 //! Encode and decode of the same shape live here, side by side —
 //! `tidepool-runtime`'s renderer, `tidepool-bridge`'s FromCore/ToCore impls,
-//! and `tidepool-eval`'s `JsonDecode` primop read/write these shapes through
-//! this module so they agree by construction.
+//! and the native `JsonDecode` primop read/write these shapes through this
+//! module so they agree by construction.
 //!
 //! What does NOT live here:
 //!   - heap BYTE layouts — `tidepool-codegen/src/heap_bridge.rs` owns the
@@ -209,7 +209,7 @@ fn text_backing_with(
         match cur {
             Value::ByteArray(bs) => return Some(bs.clone()),
             Value::Lit(Literal::LitString(bytes)) => {
-                return Some(Arc::new(Mutex::new(bytes.clone())))
+                return Some(Arc::new(Mutex::new(bytes.clone())));
             }
             Value::Con(id, fields) if fields.len() == 1 && is_bytearray_con(*id) => {
                 cur = &fields[0];

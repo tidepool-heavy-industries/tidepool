@@ -13,8 +13,6 @@ mod session_decl_scope_tree;
 mod session_scope_retirement;
 #[path = "../session_table_qualified_identity.rs"]
 mod session_table_qualified_identity;
-#[path = "../show_double_lens_sigill.rs"]
-mod show_double_lens_sigill;
 #[path = "../sweep_repoint_smoke.rs"]
 mod sweep_repoint_smoke;
 #[path = "../user_library.rs"]

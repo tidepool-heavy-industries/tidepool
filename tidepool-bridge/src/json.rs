@@ -1,12 +1,11 @@
 //! Bridge between `serde_json::Value` and Tidepool Core values.
 //!
-//! Delegates entirely to `tidepool_eval::json` — the single shared builder used
-//! by both the `JsonDecode` primop (eval + JIT) and bridge effect results. See
-//! `tidepool-eval/src/json.rs` for the canonical representation docs.
+//! Delegates to the bridge-owned shared JSON builder used by native host
+//! functions and effect results.
 
 use crate::error::BridgeError;
 use crate::traits::{sealed::ToCoreSealed, ToCore};
-use tidepool_eval::Value;
+use crate::Value;
 use tidepool_repr::DataConTable;
 
 impl ToCoreSealed for serde_json::Value {}
@@ -14,17 +13,15 @@ impl ToCoreSealed for serde_json::Value {}
 /// Convert a `serde_json::Value` to a Tidepool Core `Value` matching the
 /// vendored `Tidepool.Aeson.Value` Haskell type.
 ///
-/// Delegates to `tidepool_eval::json::json_to_value` — the same builder the
-/// `JsonDecode` primop uses, so JIT, eval, and bridge effect results all agree
-/// by construction.
+/// Uses the bridge-owned JSON materialization builder.
 impl ToCore for serde_json::Value {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        let ids = tidepool_eval::json::JsonConIds::from_table(table).ok_or_else(|| {
+        let ids = crate::json_builder::JsonConIds::from_table(table).ok_or_else(|| {
             BridgeError::UnknownDataConName(
                 "aeson Value constructors (Object/Array/String/…) not in scope".into(),
             )
         })?;
-        Ok(tidepool_eval::json::json_to_value(self, &ids))
+        Ok(crate::json_builder::json_to_value(self, &ids))
     }
 }
 
@@ -79,14 +76,10 @@ mod tests {
         t
     }
 
-    /// Smoke test for the shim itself: delegation to `tidepool_eval::json`
-    /// actually happens and produces a `Value`. Shape coverage (Object/Array/
-    /// String/Number/Bool/Null, Map Bin/Tip, the Scientific coefficient
-    /// encoding) lives in `tidepool_eval::json`'s own tests and
-    /// `codegen/tests/json_decode_differential.rs`, which pin the shape
-    /// through the real `JsonDecode` primop path on both eval and the JIT.
+    /// Smoke test for the public JSON conversion path. Detailed shape coverage
+    /// lives beside the shared JSON builder and in the native JsonDecode tests.
     #[test]
-    fn to_value_delegates_to_eval_json() {
+    fn to_value_uses_the_shared_json_builder() {
         let table = json_test_table();
         let val = serde_json::Value::Null.to_value(&table).unwrap();
         match &val {

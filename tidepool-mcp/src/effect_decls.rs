@@ -19,7 +19,7 @@ pub struct EffectDecl {
     /// Haskell GADT type name, e.g. `"Console"`.
     pub type_name: &'static str,
     /// Human-readable description of what this effect does — the long-form
-    /// text the eval tool description is assembled from.
+    /// text consumer help is assembled from.
     pub description: &'static str,
     /// A COMPACT per-turn variant of `description` — signatures plus one or
     /// two examples, not the full eval-tool essay — for callers that fold

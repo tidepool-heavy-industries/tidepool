@@ -7,7 +7,7 @@ use tidepool_codegen::suspension::{
     SuspensionRun,
 };
 use tidepool_effect::{DispatchEffect, EffectRunPolicy, LivePayloadPolicy};
-use tidepool_eval::value::Value;
+use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 
 /// Concise adapters for integration tests that exercise many suspension
