@@ -1,19 +1,17 @@
 module Main (main) where
 
-import Control.Exception (bracket, finally)
+import Control.Exception (finally)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
 import GHC
 import GHC.Core (Bind(..))
+import GHC.Driver.Session (gopt_set, updOptLevel)
 import GHC.Tc.Types (tcg_rdr_env)
-import GHC.Types.Name (Name, mkExternalName, mkSystemName, nameModule_maybe, nameOccName)
+import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
-import GHC.Types.SrcLoc (noSrcSpan)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName)
-import GHC.Unit.Types (moduleName)
-import GHC.Unit.Module (moduleNameString)
 import System.Directory
   ( createDirectoryIfMissing
   , getTemporaryDirectory
@@ -45,13 +43,17 @@ main = do
     mapM_ (copyFixture fixtures work)
       ["FatFixture.hs", "ThinFixture.hs", "MissingFixture.hs", "FatIfaceUse.hs"]
     let ghc = "ghc"
-    compileFixture ghc work ["-fwrite-if-simplified-core", "-O"] fatSource
+    compileFixture ghc work ["-fwrite-if-simplified-core"] fatSource
     compileFixture ghc work [] thinSource
-    compileFixture ghc work ["-fwrite-if-simplified-core", "-O"] missingSource
+    compileFixture ghc work ["-fwrite-if-simplified-core"] missingSource
     libdir <- trim <$> readProcess ghc ["--print-libdir"] ""
     runGhc (Just libdir) $ do
       flags <- getSessionDynFlags
-      _ <- setSessionDynFlags flags
+      let fatFlags =
+            (`gopt_set` Opt_WriteInterface)
+            $ (`gopt_set` Opt_WriteIfSimplifiedCore)
+            $ updOptLevel 0 flags
+      _ <- setSessionDynFlags fatFlags
         { importPaths = work : importPaths flags
         , hiDir = Just work
         , objectDir = Just work
@@ -84,6 +86,10 @@ main = do
       absentResult <- liftIO (lookupFatIfaceExact hsc cache (missingNameIn fatIdentityName))
       liftIO (assert (isBindingAbsent absentResult)
         "loaded fat interface did not distinguish an absent binding")
+      -- Loading the use site under fat flags can rebuild every source
+      -- dependency. Restore this deliberately thin fixture before testing the
+      -- raw-reader outcome; the fat cache has already observed its artifact.
+      liftIO (compileFixture ghc work [] thinSource)
       thinResult <- liftIO (lookupFatIfaceExact hsc cache thinIdentityName)
       liftIO (assert (isNoExtra thinResult)
         "thin interface was not distinguished from an absent binding")
@@ -163,7 +169,10 @@ assertLoadFailure wanted result = case result of
   other -> ioError (userError ("expected typed load failure, got " ++ showLookup other))
 
 showLookup :: FatIfaceLookup -> String
-showLookup FatIfaceFound{} = "found"
+showLookup (FatIfaceFound (NonRec binder _)) =
+  "non-rec " ++ occNameString (nameOccName (varName binder))
+showLookup (FatIfaceFound (Rec pairs)) =
+  "recursive " ++ show (map (occNameString . nameOccName . varName . fst) pairs)
 showLookup (FatIfaceMissing missing) = show missing
 showLookup (FatIfaceLoadFailure modl reason) =
   moduleNameString (moduleName modl) ++ ": " ++ reason
