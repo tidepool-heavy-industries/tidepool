@@ -1,0 +1,172 @@
+//! Invocation-local descriptor retention uses OldSpace's lifetime, not the
+//! legacy Core scanner. Prepared arenas are isolated from Core compaction;
+//! ordinary prepared GC and observation borrow their exact-start admission
+//! owner. The invocation boxes this owner, clears the MachineState borrow at
+//! teardown, and remains !Send so compiled-code custody is never widened into
+//! OldSpace's legacy unsafe-Send boundary.
+
+use crate::{context::VMContext, host_fns::RuntimeError, machine_state::MachineState};
+use std::sync::Arc;
+use tidepool_heap::{
+    descriptor_region::{DescriptorArena, DescriptorOldSpace},
+    execution_descriptor::{DescriptorTraceError, ObjectDescriptor},
+    gc::promotion::{promote_and_fixup, PromotionFailure},
+};
+
+struct Previous<'a>(&'a [DescriptorArena]);
+
+// SAFETY: promotion exclusively borrows the owning OldSpace while this view is
+// used; it excludes the unfinished destination. Arenas never move their bytes.
+unsafe impl DescriptorOldSpace for Previous<'_> {
+    fn admit(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
+        for arena in self.0 {
+            if let Some(reference) = arena.admit(encoded)? {
+                return Ok(Some(reference));
+            }
+        }
+        Ok(None)
+    }
+}
+
+// SAFETY: prepared arenas are owned by this OldSpace and remain allocated for
+// the invocation lifetime. Ordinary prepared collection and observation only
+// borrow this owner while no promotion mutates the arena vector.
+unsafe impl DescriptorOldSpace for super::OldSpace {
+    fn admit(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
+        for arena in &self.prepared_arenas {
+            if let Some(reference) = arena.admit(encoded)? {
+                return Ok(Some(reference));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl super::OldSpace {
+    /// # Safety
+    /// No generated frames are live. Selected slots belong to the complete
+    /// invocation root registry; vmctx/machine/OldSpace belong to that same
+    /// invocation. Every owner remains installed through both copying phases.
+    pub(crate) unsafe fn promote_prepared(
+        &mut self,
+        machine: &MachineState,
+        vmctx: &mut VMContext,
+        selected: &[*mut *mut u8],
+        descriptors: &[Arc<ObjectDescriptor>],
+    ) -> Result<(), RuntimeError> {
+        if machine.prepared_call_status() != crate::prepared_control::CallStatus::Success {
+            return Err(machine
+                .last_failure()
+                .map_or(RuntimeError::BadPointer, |failure| failure.cause));
+        }
+        let (active_start, active_size) =
+            machine.gc_active_range().ok_or(RuntimeError::BadPointer)?;
+        let active_end = (active_start as usize)
+            .checked_add(active_size)
+            .ok_or(RuntimeError::BadPointer)?;
+        // Static and previously retained results already have stable owners;
+        // retention promotion is a no-op for them and must not manufacture an
+        // empty descriptor arena.
+        let mut already_stable = true;
+        for &slot in selected {
+            let encoded = *slot as usize;
+            if encoded == 0 {
+                return Err(RuntimeError::BadPointer);
+            }
+            let address = tidepool_heap::managed_reference::untag(encoded);
+            if address >= active_start as usize && address < active_end {
+                already_stable = false;
+                continue;
+            }
+            if self.admit(encoded).map_err(preparation_error)?.is_some()
+                || machine
+                    .prepared_static_reference(encoded)
+                    .map_err(preparation_error)?
+                    .is_some()
+            {
+                continue;
+            }
+            return Err(RuntimeError::BadPointer);
+        }
+        if already_stable {
+            return Ok(());
+        }
+        let roots = machine
+            .complete_root_snapshot(&[], &mut vmctx.tail_callee, &mut vmctx.tail_arg)
+            .into_slots();
+        let mut state = machine.take_gc_state().ok_or(RuntimeError::BadPointer)?;
+        // Always restore the owning GcState, including terminal failure. Its
+        // semispaces may both contain live pointers after partial forwarding.
+        let outcome: Result<(), RuntimeError> = (|| {
+            let used = (vmctx.alloc_ptr as usize)
+                .checked_sub(state.active_start as usize)
+                .filter(|used| *used <= state.active_size && used % 8 == 0)
+                .ok_or(RuntimeError::BadPointer)?;
+            let active = state
+                .active_buffer
+                .as_mut()
+                .ok_or(RuntimeError::BadPointer)?;
+            let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
+            if prepared.spare.len() < active.len() {
+                prepared
+                    .spare
+                    .try_reserve_exact(active.len() - prepared.spare.len())
+                    .map_err(|_| RuntimeError::HeapOverflow)?;
+                prepared.spare.resize(active.len(), 0);
+            }
+            let arena = DescriptorArena::reserve(used, descriptors.iter().cloned())
+                .map_err(preparation_error)?;
+            self.prepared_arenas
+                .try_reserve(1)
+                .map_err(|_| RuntimeError::HeapOverflow)?;
+            // Ownership/range publication precede mutation; a failed destination
+            // remains owned but is never observed by a terminal invocation.
+            let range = arena.allocation_range();
+            machine.register_old_space_arena(range.start as *const u8, range.end as *const u8);
+            machine.arm_write_barrier();
+            self.prepared_arenas.push(arena);
+            let last = self.prepared_arenas.len() - 1;
+            let (previous, destination) = self.prepared_arenas.split_at_mut(last);
+            let spare = std::slice::from_raw_parts_mut(
+                prepared.spare.as_mut_ptr().cast::<u8>(),
+                prepared.spare.len() * 8,
+            );
+            let copied = promote_and_fixup(
+                selected,
+                &roots,
+                state.active_start,
+                used,
+                spare,
+                &mut destination[0],
+                &mut prepared.space,
+                Some(&Previous(previous)),
+            )
+            .map_err(|error| match error {
+                PromotionFailure::Preparation(error) => preparation_error(error),
+                PromotionFailure::Incomplete(error) => RuntimeError::IncompletePromotion(error),
+            })?;
+            // Mandatory fixup succeeded. No allocation/callback/failure between
+            // this publication and returning control to the invocation.
+            std::mem::swap(active, &mut prepared.spare);
+            state.active_start = active.as_mut_ptr().cast();
+            state.active_size = active.len() * 8;
+            prepared.used = copied.nursery_bytes;
+            vmctx.alloc_ptr = state.active_start.add(copied.nursery_bytes);
+            vmctx.alloc_limit = state.active_start.add(state.active_size);
+            machine.bump_gc_generation();
+            Ok(())
+        })();
+        machine.put_gc_state(state);
+        if let Err(cause) = &outcome {
+            machine.set_first_cause(cause.clone());
+        }
+        outcome
+    }
+}
+
+fn preparation_error(error: DescriptorTraceError) -> RuntimeError {
+    match error {
+        DescriptorTraceError::MetadataAllocation => RuntimeError::HeapOverflow,
+        _ => RuntimeError::BadPointer,
+    }
+}

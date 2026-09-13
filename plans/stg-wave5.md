@@ -4,6 +4,64 @@ Baseline: `3b657cd08`. Full-wave implementation, with production sessions,
 effects, retained-generation linking and resident cutover reserved for Wave 6.
 Broad Core deletion is Wave 7. No Core fallback is added.
 
+## Latest verification checkpoint
+
+`3ab9ec613` is pushed. The focused prepared-program library selection passed
+73 tests, including six real-adapter PAP cases and five settlement cases.
+This is not a current workspace-compile or full-fixture claim.
+
+The subsequent retention integration passed 79 prepared-program and 64 heap
+library tests through `bash scripts/dev-shell.sh cargo test -p CRATE --lib`
+(the codegen run selected `prepared_program`). Five new `w5_a5` tests cover
+promotion/observation, old thunk updates and later minor GC, terminal partial
+promotion, stable no-ops, and invalid static/external references. Parent review
+found a missing Updated-to-old admission, a needless trait-object transmute,
+and an outside-nursery no-op lacking ownership authentication; all were fixed.
+The initial 73-pass runtime report lacked retention-specific tests and required
+one consolidated test/repair follow-up. A fresh Luna review accepted the pointer
+lifetime, but parent/Astra review overturned that conclusion: Box address
+stability does not permit a shared-derived pointer to survive later exclusive
+borrows. Old-space admission is now scoped around native execution/observation,
+with automatic cleanup before promotion. The machine has Rc ownership and
+registered root words use a private fixed Vec of UnsafeCells, so moving the
+invocation does not carry Box-derived pointers across moves. An unwind test
+checks admission cleanup. This was a lead scaffold correction as well as a
+review disagreement, not an unqualified first-attempt acceptance.
+
+`bash scripts/dev-shell.sh cargo build --workspace --tests` passed after that
+ownership correction, with warnings (including the private retention entry
+whose session consumer belongs to Wave 6). `just fixtures-check` first stopped
+on a stale fingerprint. After unsetting inherited TIDEPOOL_EXTRACT and
+TIDEPOOL_EXTRACT_WORKER, `just fixtures-update` and `just fixtures-check` passed.
+Only the generated fingerprint changed; 695 fixture files were byte-identical.
+That command also runs the corpus but does not fail on semantic result rows:
+the new Suite report has 109 matches, 67 missing expectations, 11 projection
+failures, 501 admission failures and 124 execution failures. There are no
+comparison mismatches. The optimized divergent thunk_blackhole row still hit
+the 120-second watchdog. This is not a semantic-green workspace claim.
+
+Latest corpus evidence: `target/prepared-corpus/suite.GqnnQi/results.json`,
+SHA-256 `03babe1a68f9dff4c61917746d64bf118d8faa63b4898409638d1a9f128a6a24`.
+All 812 original tops are accounted for, with only three uniquely matched
+record-parent spelling changes. Original thunk cohort: 53/80 now match;
+original closed-global cohort: 0/516 match (488 admission failures, 17 execution
+failures, 11 projection failures). The body-recovery majority is therefore
+still unfinished despite the separate successful recovered-fst milestone.
+
+The real Haskell `rintDouble` regression passes with its logical State#
+position retained as Void. Native recognition accepts the two exact observed
+signatures, not arbitrary insertion/removal of Void. Recovered `error` bodies
+still expose a local-entry representation-polymorphism gap; no result rep is
+fabricated to hide it. A fresh semantic consultation owns that decision.
+
+The actor corpus source imports the production-generated Effects.Core types.
+Its previous missing-module result was harness configuration, not engine
+admission. The runner now obtains that include directory from the existing
+MCP generator; its focused command-parser test passes. Reprojection moved to
+a separate filename/declared-module mismatch in the source pipeline; a scoped
+corpus input alias repair is in progress, not an engine pass.
+The prepared-STG test stub is deliberately not used for this production probe.
+
 ## Contracts
 
 Track B has scheduling priority. Recover exact unfolding/fat-interface bodies
@@ -61,6 +119,9 @@ hide the pipeline's Rc debug-registry aliases from the type checker. The
 invocation privately owns OldSpace; use this owner in run_entry rather than
 building a second test-only invocation path. Cross-thread/multi-generation
 prepared sessions remain Wave 6, not an inferred unsafe Send implementation.
+Borrow its admission view only within execution/observation scopes. Clear the
+raw pointer before promotion obtains an exclusive borrow, and reinstall from
+a fresh borrow for the next scope; allocation stability is not alias permission.
 
 Selective retention promotion validates the complete initialized nursery before
 its first forwarding write and rejects preexisting Forwarded headers. Through
@@ -80,6 +141,37 @@ intermediate partially forwarded nursery. The old-space mutation barrier stays
 the existing owner; descriptor arenas stay out of Core-layout compaction.
 
 ## Sequence and delegation
+
+### Recovered bottoming bodies and external arrays
+
+The recovered `GHC.Internal.Err.error` body is present and ends in GHC's
+`raise#`; its representation-polymorphic result is not a missing-body failure.
+Eight external failing targets reproduce that exact path; three internal sat
+rows have not been independently confirmed. Extend the shared signature result
+contract to `Returns(reps) | NoSuccess`, preserving the distinction from a
+successful zero-result computation. GHC's `isDeadEndId` supplies entry evidence;
+the actual RaiseOp supplies operation evidence. Remove the separate global
+boolean when migrating the wire. Projection, validation, linking, entry/PAP
+ABI and primitive lowering move together in one schema/ABI migration. Partial
+application still returns a function; saturation of NoSuccess never applies
+an excess suffix. Its native ABI returns status only, with unexpected Success
+reported as integrity failure. A normal Return cannot establish NoSuccess.
+Divergence remains cancellable, not a fabricated language exception. Raising
+retains the exact exception reference in invocation-owned root storage until
+settlement; any presentation uses bounded descriptor observation, not Core
+error-string decoding.
+
+Array handles use fixed descriptors and a typed external edge, not variable
+per-allocation descriptors or Core Lit objects. The existing MachineState
+external-storage owner authenticates payload identity/kind/length/capacity and
+owns reclamation. Boxed payload slots must participate in nursery copying,
+selective promotion/fixup, retained-graph liveness and observation; aliases and
+external cycles need deduplicated traversal. All pointer mutations and clone
+initialization use the existing barrier. Remembered edges are not strong roots
+for a full sweep. No sweep follows incomplete tracing. Resize cannot free a
+payload still named by an alias; settle the prepared handle/resize contract
+before reusing the legacy helper. These are required array-enabling contracts,
+not permission to admit arrays ahead of their collector integration.
 
 Lead commits semantic types/signatures, hardest path and a red contract before
 implementation delegation. Searchable wave5 task markers identify scaffolds;

@@ -139,6 +139,17 @@ impl DescriptorSpace {
             .map_or(Ok(None), |region| region.admit(encoded))
     }
 
+    /// Validate a reference against the immutable static region without
+    /// admitting nursery or retained-owner addresses. Runtime promotion uses
+    /// this before treating an outside-nursery result as an already-stable
+    /// value.
+    pub fn admit_static_reference(
+        &self,
+        encoded: usize,
+    ) -> Result<Option<usize>, DescriptorTraceError> {
+        self.static_reference(encoded)
+    }
+
     fn root_slot_overlaps_static(&self, address: usize) -> bool {
         self.static_region.as_ref().is_some_and(|region| {
             let range = region.address_range();
@@ -157,41 +168,21 @@ fn bitmap_words(bytes: usize) -> Result<usize, DescriptorTraceError> {
         .ok_or(DescriptorTraceError::InvalidRange)
 }
 
-/// Return the raw pinned descriptor address named by an object header. The
-/// complete source walk proves every source header identity before collection
-/// mutates anything; copied destination headers retain that identity, and only
-/// this collector writes their Forwarded state. Callers dereference the raw
-/// pointer only while the collector's descriptor owners remain alive.
+/// Authenticate the complete initialized source region and reserve the
+/// scratch needed by a subsequent descriptor copy.  This is deliberately a
+/// separate phase from [`copy_prevalidated_descriptor_graph`]: promotion runs
+/// it for every destination before the first source header is forwarded.
 ///
-/// # Safety
-/// `object` must be an exact source start proven by the pre-copy walk or a
-/// collector-established destination start.
-unsafe fn descriptor_at(object: *const u8) -> *const ObjectDescriptor {
-    let identity = std::ptr::read(object.cast::<usize>()) & !7;
-    identity as *const ObjectDescriptor
-}
-
-/// Copy the reachable prepared graph from an exact initialized bump region.
-/// This performs no reachable-graph preflight: a corrupt edge discovered after
-/// relocation returns an error with source, destination and roots potentially
-/// changed. On any such error, the caller must permanently retire the machine
-/// and retain both semispaces and descriptor/code owners through native unwind.
-/// Null managed slots are allowed; non-null slots outside the source region
-/// are rejected until an external-space descriptor owner exists.
-///
-/// # Safety
-///
-/// `from_start..from_start+from_used` must be a readable and writable, fully
-/// initialized bump region of prepared objects; each root slot must be a valid
-/// writable pointer slot. There may be no concurrent access to either region
-/// or the roots. Descriptor owners must remain alive through native unwind.
-pub unsafe fn cheney_copy_descriptors(
+/// The source-start bitmap and all-root slot scratch remain valid after this
+/// function returns.  A later selective copy may replace the active root set
+/// without allocating, while retaining the authenticated source bitmap.
+pub(crate) unsafe fn prepare_descriptor_copy(
     root_ptrs: &[*mut *mut u8],
     from_start: *const u8,
     from_used: usize,
     tospace: &mut [u8],
     descriptors: &mut DescriptorSpace,
-) -> Result<CopyResult, DescriptorTraceError> {
+) -> Result<(), DescriptorTraceError> {
     let from_base = from_start as usize;
     let from_end = from_base
         .checked_add(from_used)
@@ -213,8 +204,10 @@ pub unsafe fn cheney_copy_descriptors(
             available: tospace.len(),
         });
     }
+
     descriptors.prepare_roots(root_ptrs)?;
-    for &address in &descriptors.root_slots {
+    for index in 0..descriptors.root_slots.len() {
+        let address = descriptors.root_slots[index];
         let end = address
             .checked_add(std::mem::size_of::<*mut u8>())
             .ok_or(DescriptorTraceError::InvalidRange)?;
@@ -263,6 +256,60 @@ pub unsafe fn cheney_copy_descriptors(
         descriptors.mark_start(offset);
         offset += extent;
     }
+    Ok(())
+}
+
+/// Select a previously prepared root subset without reserving or allocating.
+unsafe fn select_prepared_roots(
+    root_ptrs: &[*mut *mut u8],
+    descriptors: &mut DescriptorSpace,
+) -> Result<(), DescriptorTraceError> {
+    if root_ptrs.len() > descriptors.root_slots.capacity() {
+        return Err(DescriptorTraceError::MetadataAllocation);
+    }
+    descriptors.root_slots.clear();
+    descriptors
+        .root_slots
+        .extend(root_ptrs.iter().map(|&slot| slot as usize));
+    descriptors.root_slots.sort_unstable();
+    descriptors.root_slots.dedup();
+    Ok(())
+}
+
+/// Copy a graph after [`prepare_descriptor_copy`] has authenticated the source
+/// generation.  `admitted` is consulted for already-forwarded source objects
+/// and for external old/static targets; ordinary Cheney collection passes
+/// `None`, preserving its rejection of preexisting forwarding headers.
+pub(crate) unsafe fn copy_prevalidated_descriptor_graph(
+    root_ptrs: &[*mut *mut u8],
+    from_start: *const u8,
+    from_used: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
+) -> Result<CopyResult, DescriptorTraceError> {
+    let from_base = from_start as usize;
+    let from_end = from_base
+        .checked_add(from_used)
+        .ok_or(DescriptorTraceError::InvalidRange)?;
+    let to_base = tospace.as_mut_ptr() as usize;
+    let to_end = to_base
+        .checked_add(tospace.len())
+        .ok_or(DescriptorTraceError::InvalidRange)?;
+    if from_base % 8 != 0
+        || to_base % 8 != 0
+        || from_used % 8 != 0
+        || (from_base < to_end && to_base < from_end)
+    {
+        return Err(DescriptorTraceError::InvalidRange);
+    }
+    if tospace.len() < from_used {
+        return Err(DescriptorTraceError::InsufficientSpace {
+            required: from_used,
+            available: tospace.len(),
+        });
+    }
+    select_prepared_roots(root_ptrs, descriptors)?;
 
     let mut free = 0;
     for index in 0..descriptors.root_slots.len() {
@@ -277,6 +324,7 @@ pub unsafe fn cheney_copy_descriptors(
             tospace.len(),
             &mut free,
             descriptors,
+            admitted,
         )?;
         std::ptr::write(slot, relocated as *mut u8);
     }
@@ -305,6 +353,7 @@ pub unsafe fn cheney_copy_descriptors(
                 tospace.len(),
                 &mut free,
                 descriptors,
+                admitted,
             ) {
                 Ok(relocated) => std::ptr::write(slot, relocated as *mut u8),
                 Err(error) => edge_error = Some(error),
@@ -318,6 +367,73 @@ pub unsafe fn cheney_copy_descriptors(
     Ok(CopyResult { bytes_copied: free })
 }
 
+/// Return the raw pinned descriptor address named by an object header. The
+/// complete source walk proves every source header identity before collection
+/// mutates anything; copied destination headers retain that identity, and only
+/// this collector writes their Forwarded state. Callers dereference the raw
+/// pointer only while the collector's descriptor owners remain alive.
+///
+/// # Safety
+/// `object` must be an exact source start proven by the pre-copy walk or a
+/// collector-established destination start.
+unsafe fn descriptor_at(object: *const u8) -> *const ObjectDescriptor {
+    let identity = std::ptr::read(object.cast::<usize>()) & !7;
+    identity as *const ObjectDescriptor
+}
+
+/// Copy the reachable prepared graph from an exact initialized bump region.
+/// This performs no reachable-graph preflight: a corrupt edge discovered after
+/// relocation returns an error with source, destination and roots potentially
+/// changed. On any such error, the caller must permanently retire the machine
+/// and retain both semispaces and descriptor/code owners through native unwind.
+/// Null managed slots are allowed; non-null slots outside the source region
+/// are rejected until an external-space descriptor owner exists.
+///
+/// # Safety
+///
+/// `from_start..from_start+from_used` must be a readable and writable, fully
+/// initialized bump region of prepared objects; each root slot must be a valid
+/// writable pointer slot. There may be no concurrent access to either region
+/// or the roots. Descriptor owners must remain alive through native unwind.
+pub unsafe fn cheney_copy_descriptors(
+    root_ptrs: &[*mut *mut u8],
+    from_start: *const u8,
+    from_used: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+) -> Result<CopyResult, DescriptorTraceError> {
+    prepare_descriptor_copy(root_ptrs, from_start, from_used, tospace, descriptors)?;
+    copy_prevalidated_descriptor_graph(root_ptrs, from_start, from_used, tospace, descriptors, None)
+}
+
+/// Descriptor collection with an invocation-owned exact-start old-space
+/// admission view. Ordinary nursery collection uses this entry point so an
+/// old/retained target is accepted as a stable edge while arbitrary interior
+/// or forwarded pointers remain rejected.
+///
+/// # Safety
+/// Same ownership and aliasing contract as [`cheney_copy_descriptors`]. The
+/// admission owner must remain alive and immutable for the duration of the
+/// copy.
+pub unsafe fn cheney_copy_descriptors_with_admission(
+    root_ptrs: &[*mut *mut u8],
+    from_start: *const u8,
+    from_used: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    admitted: &dyn crate::descriptor_region::DescriptorOldSpace,
+) -> Result<CopyResult, DescriptorTraceError> {
+    prepare_descriptor_copy(root_ptrs, from_start, from_used, tospace, descriptors)?;
+    copy_prevalidated_descriptor_graph(
+        root_ptrs,
+        from_start,
+        from_used,
+        tospace,
+        descriptors,
+        Some(admitted),
+    )
+}
+
 unsafe fn evacuate_descriptor(
     encoded: usize,
     from_base: usize,
@@ -326,6 +442,7 @@ unsafe fn evacuate_descriptor(
     to_capacity: usize,
     free: &mut usize,
     descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
 ) -> Result<usize, DescriptorTraceError> {
     if encoded == 0 {
         return Ok(0);
@@ -337,6 +454,11 @@ unsafe fn evacuate_descriptor(
     }
     if let Some(reference) = descriptors.static_reference(encoded)? {
         return Ok(reference);
+    }
+    if let Some(owner) = admitted {
+        if let Some(reference) = owner.admit(encoded)? {
+            return Ok(reference);
+        }
     }
     if address < from_base || address >= from_end || (address - from_base) % 8 != 0 {
         return Err(DescriptorTraceError::InvalidManagedPointer { address });
@@ -362,8 +484,18 @@ unsafe fn evacuate_descriptor(
             return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
         }
         let stored_target = std::ptr::read(pointer.add(8).cast::<usize>());
-        if let Some(reference) = descriptors.static_reference(stored_target)? {
+        let probe = if descriptor.kind() == ObjectKind::Thunk {
+            stored_target
+        } else {
+            (stored_target & !7) | usize::from(tag)
+        };
+        if let Some(reference) = descriptors.static_reference(probe)? {
             return Ok(reference);
+        }
+        if let Some(owner) = admitted {
+            if let Some(reference) = owner.admit(probe)? {
+                return Ok(reference);
+            }
         }
         let target = forwarded_target(pointer, to_base, *free)?;
         let target_address = untag(target);
@@ -404,6 +536,7 @@ unsafe fn evacuate_descriptor(
             to_capacity,
             free,
             descriptors,
+            admitted,
         );
     }
     copy_descriptor(pointer, tag, descriptor, to_base, to_capacity, free)
@@ -473,6 +606,7 @@ unsafe fn resolve_updated(
     to_capacity: usize,
     free: &mut usize,
     descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
 ) -> Result<usize, DescriptorTraceError> {
     descriptors.updated_path.clear();
     let mut current = first;
@@ -496,6 +630,15 @@ unsafe fn resolve_updated(
                         address,
                         tag: current_tag,
                     });
+                }
+                let stored_target = std::ptr::read(current.add(8).cast::<usize>());
+                if let Some(owner) = admitted {
+                    if let Some(reference) =
+                        owner.admit((stored_target & !7) | usize::from(current_tag))?
+                    {
+                        forward_updated_path(descriptors, from_base, reference);
+                        return Ok(reference);
+                    }
                 }
                 let target = forwarded_target(current, to_base, *free)?;
                 let target_address = untag(target);
@@ -534,6 +677,12 @@ unsafe fn resolve_updated(
             if let Some(reference) = descriptors.static_reference(stored_target)? {
                 forward_updated_path(descriptors, from_base, reference);
                 return Ok(reference);
+            }
+            if let Some(owner) = admitted {
+                if let Some(reference) = owner.admit(stored_target)? {
+                    forward_updated_path(descriptors, from_base, reference);
+                    return Ok(reference);
+                }
             }
             let target = forwarded_target(current, to_base, *free)?;
             let target_address = untag(target);
@@ -605,6 +754,15 @@ unsafe fn resolve_updated(
         if let Some(reference) = descriptors.static_reference(target)? {
             forward_updated_path(descriptors, from_base, reference);
             return Ok(reference);
+        }
+        if let Some(owner) = admitted {
+            if let Some(reference) = owner.admit(target)? {
+                // Preserve the evaluated target's evidence exactly as stored
+                // by the update commit; the old owner has validated it at its
+                // exact allocation start.
+                forward_updated_path(descriptors, from_base, reference);
+                return Ok(reference);
+            }
         }
         if target_address == 0
             || target_address < from_base
@@ -1610,6 +1768,7 @@ mod tests {
 #[cfg(test)]
 mod descriptor_copy_tests {
     use super::*;
+    use crate::descriptor_region::DescriptorArena;
     use crate::execution_descriptor::{DescriptorState, ObjectKind};
     use crate::static_region::{StaticImage, StaticRelocation};
     use std::collections::BTreeMap;
@@ -2319,6 +2478,55 @@ mod descriptor_copy_tests {
             );
             assert_eq!(
                 thunk.state(second, extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_forwards_updated_thunk_to_admitted_old_value() {
+        let thunk = descriptor(ObjectKind::Thunk, &[]);
+        let result = constructor_descriptor(1, &[]);
+        let thunk_extent = thunk.allocation_extent() as usize;
+        let result_extent = result.allocation_extent() as usize;
+        let mut from = vec![0_u64; thunk_extent / 8];
+        let mut to = vec![0_u64; thunk_extent / 8];
+        let mut old = DescriptorArena::reserve(result_extent, [Arc::clone(&result)]).unwrap();
+        let old_value = unsafe {
+            let object = old.destination().as_mut_ptr();
+            result.initialize_header(object);
+            std::ptr::write(
+                object.cast::<usize>(),
+                result.initial_header_word() | DescriptorState::Live as usize,
+            );
+            object
+        };
+        old.seal(result_extent).unwrap();
+        let mut space = DescriptorSpace::new([Arc::clone(&thunk), Arc::clone(&result)]).unwrap();
+        unsafe {
+            let updated = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &thunk,
+                DescriptorState::Updated,
+            );
+            let stored = old_value as usize | usize::from(result.tag());
+            std::ptr::write(updated.add(8).cast::<usize>(), stored);
+            let mut root = updated;
+            let copied = cheney_copy_descriptors_with_admission(
+                &[&mut root],
+                from.as_ptr().cast(),
+                thunk_extent,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+                &old,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, 0);
+            assert_eq!(root as usize, stored);
+            assert_eq!(std::ptr::read(updated.add(8).cast::<usize>()), stored);
+            assert_eq!(
+                thunk.state(updated, thunk_extent).unwrap(),
                 DescriptorState::Forwarded
             );
         }

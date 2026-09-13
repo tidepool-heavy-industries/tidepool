@@ -20,6 +20,7 @@ use super::{CompiledProgram, ExecutionError, ObservationFailure};
 use crate::context::VMContext;
 use crate::host_fns::RuntimeError;
 use crate::machine_state::MachineState;
+use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
@@ -145,6 +146,7 @@ pub(super) fn observe_results(
     vmctx: &mut VMContext,
     statics: &StaticRegion,
     registry: &BTreeMap<usize, super::DescriptorMetadata>,
+    old_space: &OldSpace,
     seeds: &[super::observe::ObservationSeed],
     budget: usize,
 ) -> Result<Vec<Value>, ExecutionError> {
@@ -183,6 +185,7 @@ pub(super) fn observe_results(
                         vmctx,
                         statics,
                         registry,
+                        old_space,
                         &mut starts,
                         &mut scanned_words,
                         &mut indexed_generation,
@@ -204,6 +207,7 @@ pub(super) fn observe_results(
                     vmctx,
                     statics,
                     registry,
+                    old_space,
                     &mut starts,
                     &mut scanned_words,
                     &mut indexed_generation,
@@ -252,6 +256,7 @@ fn current_heap<'a>(
     vmctx: &VMContext,
     statics: &'a StaticRegion,
     registry: &'a BTreeMap<usize, super::DescriptorMetadata>,
+    old_space: &'a OldSpace,
     starts: &mut Vec<u64>,
     scanned_words: &mut usize,
     indexed_generation: &mut u64,
@@ -277,7 +282,11 @@ fn current_heap<'a>(
     super::observe::append_exact_starts(nursery, registry, starts, scanned_words)
         .map_err(ExecutionError::from)?;
     super::observe::ObservationHeap::new_with_registry_and_starts(
-        nursery, statics, registry, starts,
+        nursery,
+        statics,
+        registry,
+        starts,
+        Some(old_space),
     )
     .map_err(ExecutionError::from)
 }

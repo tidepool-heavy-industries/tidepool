@@ -317,3 +317,11 @@ are nondeterministic.
   the source race; a fold still needs explicit dependency-ready handshakes.
   Typed coordinator messages should carry producer parcel/revision and required
   consumer edits, rather than asking the lead to relay import/signature fixes.
+- A fresh worker review accepted a cached Box-derived admission pointer across
+  later exclusive borrows. Focused tests also passed. Rust's Box alias contract
+  still forbids that use; a scoped owner borrow and automatic pointer cleanup
+  make the invariant explicit. Unsafe ownership/provenance needs lead review,
+  not just a quick worker spot check or a claim of stable allocation.
+- A corpus probe omitted the real generated Effects.Core include and therefore
+  reported a missing-module failure before reaching engine admission. Reuse
+  the production generator's directory, never the similarly named fixture stub.

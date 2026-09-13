@@ -62,6 +62,8 @@
 
 #![allow(dead_code)]
 
+mod prepared;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use tidepool_heap::gc::raw::{cheney_copy, for_each_pointer_field};
 use tidepool_heap::layout::{
@@ -252,6 +254,11 @@ pub struct OldSpace {
     /// already-registered `RootSlot`. The Box pins each cell's address for life.
     #[allow(clippy::vec_box)]
     slots: Vec<Box<*mut u8>>,
+    /// Prepared descriptor arenas retained by invocation-local promotion.
+    /// These are deliberately separate from the legacy Core-layout arenas:
+    /// descriptor objects are admitted by exact starts and are never passed
+    /// through the Core compactor.
+    pub(crate) prepared_arenas: Vec<tidepool_heap::descriptor_region::DescriptorArena>,
 }
 
 // SAFETY: OldSpace is used exclusively from the session-resident JIT thread
@@ -272,6 +279,7 @@ impl OldSpace {
             cursor: 0,
             used: 0,
             slots: Vec::new(),
+            prepared_arenas: Vec::new(),
         }
     }
 
@@ -534,7 +542,9 @@ impl OldSpace {
                             &mut reachable_external_storage,
                             payload as usize,
                             external_storage_kind(lit_tag).ok_or_else(|| {
-                                format!("old-space Lit at {pointer:p} lacks an external-storage kind")
+                                format!(
+                                    "old-space Lit at {pointer:p} lacks an external-storage kind"
+                                )
                             })?,
                         )?;
                     }

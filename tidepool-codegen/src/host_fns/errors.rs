@@ -71,6 +71,11 @@ pub enum RuntimeError {
     Cancelled,
     #[error("incomplete GC root snapshot: {0}")]
     IncompleteRootSnapshot(FrameWalkError),
+    /// Selective retention forwarded part of a prepared nursery but could not
+    /// complete sibling fixup. Both semispaces and descriptor owners must be
+    /// retained through unwind; the invocation is permanently unavailable.
+    #[error("incomplete retention promotion: {0}")]
+    IncompletePromotion(tidepool_heap::execution_descriptor::DescriptorTraceError),
 }
 
 impl RuntimeError {
@@ -88,7 +93,8 @@ impl RuntimeError {
             | Self::NullFunPtr
             | Self::BadFunPtrTag(_)
             | Self::BadThunkState(_)
-            | Self::IncompleteRootSnapshot(_) => MachineDisposition::Unavailable,
+            | Self::IncompleteRootSnapshot(_)
+            | Self::IncompletePromotion(_) => MachineDisposition::Unavailable,
             Self::DivisionByZero
             | Self::Overflow
             | Self::UserError

@@ -275,6 +275,10 @@ pub struct MachineState {
     /// each arena's range here as it is allocated gives a diagnostic pass
     /// old-space bounds without threading `OldSpace` itself through vmctx.
     old_space_arenas: RefCell<Vec<(*const u8, *const u8)>>,
+    /// Borrowed admission owner for prepared old-space arenas. The concrete
+    /// pointer is installed only during a shared execution/observation borrow
+    /// and cleared before promotion or owner movement; it is never a Send handle.
+    prepared_old_space: RefCell<Option<*const crate::old_space::OldSpace>>,
     /// Payloads allocated outside the moving heap. The map key is the pointer
     /// published in a Lit's value word; `base` may differ for byte arrays,
     /// whose ABI pointer follows a hidden allocation-size word.
@@ -321,6 +325,7 @@ impl MachineState {
             write_barrier_armed: Cell::new(false),
             remembered_slots: RefCell::new(HashSet::new()),
             old_space_arenas: RefCell::new(Vec::new()),
+            prepared_old_space: RefCell::new(None),
             external_storage: RefCell::new(HashMap::new()),
             external_allocated_bytes: Cell::new(0),
             external_allocated_objects: Cell::new(0),
@@ -396,8 +401,12 @@ impl MachineState {
                 if failure.point == _point {
                     failure.remaining = failure.remaining.saturating_sub(1);
                     failure.remaining == 0
-                } else { false }
-            } else { false };
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
             if fire {
                 if let Some(failure) = pending.take() {
                     self.set_first_cause(failure.cause);
@@ -421,7 +430,9 @@ impl MachineState {
         cause: RuntimeError,
     ) {
         *self.prepared_test_failure.borrow_mut() = Some(PreparedTestFailure {
-            point, remaining: occurrence, cause,
+            point,
+            remaining: occurrence,
+            cause,
         });
     }
 
@@ -989,6 +1000,51 @@ impl MachineState {
     /// reach `MachineState` (via vmctx), not `OldSpace` itself.
     pub(crate) fn old_space_arena_ranges(&self) -> Vec<(*const u8, *const u8)> {
         self.old_space_arenas.borrow().iter().copied().collect()
+    }
+
+    /// Install the invocation-owned prepared old-space admission view.
+    ///
+    /// # Safety
+    /// `owner` must remain allocated and immutable for every collection or
+    /// observation that can reach this machine until
+    /// [`Self::clear_prepared_old_space`] is called.
+    pub(crate) unsafe fn install_prepared_old_space(&self, owner: &crate::old_space::OldSpace) {
+        *self.prepared_old_space.borrow_mut() = Some(owner as *const _);
+    }
+
+    /// Clear the borrowed prepared admission pointer before its owner drops.
+    pub(crate) fn clear_prepared_old_space(&self) {
+        *self.prepared_old_space.borrow_mut() = None;
+    }
+
+    /// Borrow the exact-start admission owner for one collector/observer call.
+    ///
+    /// # Safety
+    /// The caller must uphold the owner lifetime established by
+    /// [`Self::install_prepared_old_space`].
+    pub(crate) unsafe fn prepared_old_space(&self) -> Option<&crate::old_space::OldSpace> {
+        self.prepared_old_space
+            .borrow()
+            .as_ref()
+            .map(|&pointer| &*pointer)
+    }
+
+    /// Check the immutable static owner of the active prepared descriptor
+    /// space. This is used by retention promotion's owner gate before it
+    /// treats an outside-nursery result as already stable.
+    pub(crate) fn prepared_static_reference(
+        &self,
+        encoded: usize,
+    ) -> Result<Option<usize>, tidepool_heap::execution_descriptor::DescriptorTraceError> {
+        let state = self
+            .gc_state
+            .try_borrow()
+            .map_err(|_| tidepool_heap::execution_descriptor::DescriptorTraceError::InvalidRange)?;
+        let prepared = state
+            .as_ref()
+            .and_then(|state| state.prepared.as_ref())
+            .ok_or(tidepool_heap::execution_descriptor::DescriptorTraceError::InvalidRange)?;
+        prepared.space.admit_static_reference(encoded)
     }
 
     // --- GC-external byte/reference storage -------------------------------

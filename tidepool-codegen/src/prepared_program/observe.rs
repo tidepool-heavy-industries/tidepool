@@ -58,6 +58,7 @@ impl recursion::MappableFrame for ObservationFrame<recursion::PartiallyApplied> 
 pub(super) struct ObservationHeap<'a> {
     nursery: &'a [u64],
     statics: &'a StaticRegion,
+    old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
     descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
     starts: Vec<u64>,
     constructors: Option<&'a BTreeMap<usize, ConstructorObservation>>,
@@ -147,6 +148,7 @@ impl<'a> ObservationHeap<'a> {
         statics: &'a StaticRegion,
         registry: &'a BTreeMap<usize, DescriptorMetadata>,
         starts: &[u64],
+        old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
     ) -> Result<Self, ObservationFailure> {
         let descriptors: BTreeMap<_, _> = registry
             .values()
@@ -160,6 +162,7 @@ impl<'a> ObservationHeap<'a> {
         Ok(Self {
             nursery,
             statics,
+            old_space,
             descriptors,
             starts: starts.to_vec(),
             constructors: None,
@@ -216,6 +219,7 @@ impl<'a> ObservationHeap<'a> {
         Ok(Self {
             nursery,
             statics,
+            old_space: None,
             descriptors,
             starts,
             constructors,
@@ -229,12 +233,29 @@ impl<'a> ObservationHeap<'a> {
     ) -> Result<(&ObjectDescriptor, *const u8, DescriptorState), ObservationFailure> {
         let address = untag(encoded);
         let static_pointer = self.statics.admit(encoded)?.is_some();
+        let old_pointer = if static_pointer {
+            None
+        } else if let Some(owner) = self.old_space {
+            owner.admit(encoded)?
+        } else {
+            None
+        };
         let available = if static_pointer {
             self.statics
                 .address_range()
                 .end
                 .checked_sub(address)
                 .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?
+        } else if old_pointer.is_some() {
+            // `admit` proved an exact initialized start and the arena keeps
+            // its bytes stable for this borrow; read the header only now.
+            let header = unsafe { std::ptr::read(address as *const usize) };
+            let descriptor = self.descriptors.get(&(header & !7)).ok_or(
+                DescriptorTraceError::UnknownDescriptor {
+                    address: header & !7,
+                },
+            )?;
+            descriptor.allocation_extent() as usize
         } else {
             let base = self.nursery.as_ptr() as usize;
             let offset = address
@@ -252,14 +273,15 @@ impl<'a> ObservationHeap<'a> {
                 .and_then(|bytes| bytes.checked_sub(offset))
                 .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?
         };
-        // Exact-start membership was proved by a validated immutable region or
-        // the nursery walk; both allocations remain borrowed through observation.
         let header = unsafe { std::ptr::read(address as *const usize) };
         let descriptor = self.descriptors.get(&(header & !7)).ok_or(
             DescriptorTraceError::UnknownDescriptor {
                 address: header & !7,
             },
         )?;
+        // Exact-start membership was proved by a validated immutable region,
+        // retained arena, or nursery walk; all owners remain borrowed through
+        // this observation.
         let state = unsafe { descriptor.state(address as *const u8, available)? };
         if !tag_valid(
             tag_of(encoded),

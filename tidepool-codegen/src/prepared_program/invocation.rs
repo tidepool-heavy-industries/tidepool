@@ -1,18 +1,15 @@
 //! One invocation owns every mutable address reached by its generated code.
 //!
-//! Wave5:A5_INVOCATION. Implement `enter(program, entry, arguments, options,
-//! cancel) -> Result<Self, ExecutionError>` and `observe(&mut self, budget) ->
-//! Result<RunResult, ExecutionError>` by moving the existing run_entry path,
-//! not by maintaining a second execution wrapper. `run_entry` uses both.
-//! Enter admits arguments, installs roots, executes and checks status before
-//! publishing rooted results. Observe may collect and must re-read root slots.
-//! The subsequent retention parcel adds promote_result(logical_index) here;
+//! `run_entry` uses this owner's entry and observation paths. Entry admits
+//! arguments, installs roots, executes and checks status before publishing
+//! rooted results. Observation may collect and must re-read root slots.
+//! Retention promotes registered result slots within this same lifetime;
 //! no independent RootSlot or native pointer may escape this owner.
 //!
 //! Keep the compiled borrow and private OldSpace together: OldSpace's legacy
 //! unsafe Send must not be used to transfer !Send code custody. This owner is
-//! intentionally !Send via its compiled-program borrow. A stable Box holds
-//! MachineState because VMContext embeds its address. There is no self-borrowed
+//! intentionally !Send via its compiled-program borrow. Rc holds MachineState
+//! through shared access even when this owner moves. There is no self-borrowed
 //! cleanup guard: Drop removes registries before releasing their allocations.
 
 use super::run::{
@@ -26,6 +23,7 @@ use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
 use crate::prepared_control::{CallStatus, PreparedSafepoint};
 use crate::{context::VMContext, machine_state::MachineState, old_space::OldSpace};
 use std::cell::UnsafeCell;
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tidepool_heap::static_region::StaticRegion;
@@ -33,7 +31,9 @@ use tidepool_repr::execution_schema::{RuntimeRep, StorageLayout, ValueId};
 
 pub(super) struct PreparedInvocation<'code> {
     pub(super) program: &'code CompiledProgram,
-    pub(super) machine: Box<MachineState>,
+    // Never unwrap, replace, or acquire mutable Rc access while VMContext
+    // contains its pointer. MachineState mutates through its existing cells.
+    pub(super) machine: Rc<MachineState>,
     pub(super) vmctx: VMContext,
     pub(super) statics: Arc<StaticRegion>,
     pub(super) top_table: RootWords,
@@ -41,13 +41,46 @@ pub(super) struct PreparedInvocation<'code> {
     pub(super) result_reps: Vec<RuntimeRep>,
     pub(super) result_layout: StorageLayout,
     pub(super) collections_before: u64,
-    old_space: OldSpace,
+    /// Boxed so the machine's borrowed admission pointer remains stable even
+    /// while this invocation value is moved out of `enter`.
+    old_space: Box<OldSpace>,
+}
+
+/// Admission is borrowed only while native code may collect or observe.
+/// Clear the shared-derived raw pointer before any mutable OldSpace borrow or
+/// invocation move; a stable Box address alone does not preserve provenance.
+struct OldSpaceScope<'a> {
+    machine: &'a MachineState,
+    _owner: &'a OldSpace,
+}
+
+impl<'a> OldSpaceScope<'a> {
+    fn new(machine: &'a MachineState, owner: &'a OldSpace) -> Result<Self, ExecutionError> {
+        // Every installed pointer is owned by another live scope. Nested
+        // installation would lose its cleanup obligation, so fail closed.
+        if unsafe { machine.prepared_old_space() }.is_some() {
+            return Err(runtime_error(machine, RuntimeError::BadPointer));
+        }
+        unsafe { machine.install_prepared_old_space(owner) };
+        Ok(Self {
+            machine,
+            _owner: owner,
+        })
+    }
+}
+
+impl Drop for OldSpaceScope<'_> {
+    fn drop(&mut self) {
+        self.machine.clear_prepared_old_space();
+    }
 }
 
 /// Initialized, fixed-address storage with explicit collector interior writes.
 /// Never expose a shared slice into it across a generated call. Scalar snapshots
 /// are owned values; registered raw slots live until invocation teardown.
-pub(super) struct RootWords(Box<[UnsafeCell<u64>]>);
+/// Length and capacity never change after construction; no mutable element or
+/// slice borrows are created. Moving the Vec owner preserves registered pointers.
+pub(super) struct RootWords(Vec<UnsafeCell<u64>>);
 
 impl RootWords {
     pub(super) fn new(length: usize) -> Result<Self, ExecutionError> {
@@ -56,11 +89,11 @@ impl RootWords {
             super::run::runtime_error_without_machine(crate::host_fns::RuntimeError::HeapOverflow)
         })?;
         words.resize_with(length, || UnsafeCell::new(0));
-        Ok(Self(words.into_boxed_slice()))
+        Ok(Self(words))
     }
 
     pub(super) fn as_mut_ptr(&self) -> *mut u64 {
-        self.0.as_ptr().cast::<u64>().cast_mut()
+        UnsafeCell::raw_get(self.0.as_ptr())
     }
 
     pub(super) fn write(&self, index: usize, value: u64) -> Result<(), ExecutionError> {
@@ -168,7 +201,7 @@ impl<'code> PreparedInvocation<'code> {
             .div_ceil(std::mem::size_of::<u64>());
         let results = super::run::try_root_words(result_words.max(1))?;
 
-        let machine = Box::new(MachineState::new());
+        let machine = Rc::new(MachineState::new());
         machine.set_cancel_flag(Arc::clone(&cancel));
         machine.set_stack_map_registry(&program.pipeline.stack_maps);
         if let Err(error) = machine.install_prepared_buffer_with_static_region(
@@ -209,7 +242,7 @@ impl<'code> PreparedInvocation<'code> {
         };
         let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
         vmctx.alloc_ptr = unsafe { start.add(heap_used) };
-        vmctx.machine_state = (&*machine as *const MachineState).cast_mut();
+        vmctx.machine_state = Rc::as_ptr(&machine).cast_mut();
         vmctx.prepared_tops = top_table.as_mut_ptr().cast::<usize>().cast_const();
         vmctx.prepared_stack_limit = prepared_stack_limit;
 
@@ -223,7 +256,7 @@ impl<'code> PreparedInvocation<'code> {
             result_reps: compiled.abi.semantic_results().to_vec(),
             result_layout: compiled.abi.result_layout().clone(),
             collections_before: 0,
-            old_space: OldSpace::new(),
+            old_space: Box::new(OldSpace::new()),
         };
         for spec in &invocation.program.heap_top_specs {
             if let Some(&slot) = invocation.program.top_slots.get(&spec.id) {
@@ -251,14 +284,17 @@ impl<'code> PreparedInvocation<'code> {
             .program
             .pipeline
             .get_function_ptr(compiled.adapter);
-        let raw_status = unsafe {
-            let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
-                std::mem::transmute(pointer);
-            adapter(
-                &mut invocation.vmctx,
-                invocation.results.as_mut_ptr(),
-                argument_area.as_ptr(),
-            )
+        let raw_status = {
+            let _scope = OldSpaceScope::new(&invocation.machine, &invocation.old_space)?;
+            unsafe {
+                let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
+                    std::mem::transmute(pointer);
+                adapter(
+                    &mut invocation.vmctx,
+                    invocation.results.as_mut_ptr(),
+                    argument_area.as_ptr(),
+                )
+            }
         };
         let status = match CallStatus::from_raw(i64::from(raw_status)) {
             Ok(status) => status,
@@ -282,19 +318,7 @@ impl<'code> PreparedInvocation<'code> {
             &invocation.result_layout,
         );
         if options.collect_before_observation {
-            let raw_status = unsafe { prepared_gc_trigger(&mut invocation.vmctx, 0) };
-            let status = match CallStatus::from_raw(i64::from(raw_status)) {
-                Ok(status) => status,
-                Err(_) => {
-                    invocation.machine.set_first_cause(RuntimeError::BadPointer);
-                    CallStatus::IntegrityFailure
-                }
-            };
-            if status != CallStatus::Success
-                || invocation.machine.prepared_call_status() != CallStatus::Success
-            {
-                return Err(runtime_error_for_status(&invocation.machine, status));
-            }
+            invocation.collect(0)?;
         }
         Ok(invocation)
     }
@@ -306,6 +330,7 @@ impl<'code> PreparedInvocation<'code> {
         if self.machine.prepared_call_status() != CallStatus::Success {
             return Err(runtime_error_from_machine(&self.machine));
         }
+        let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
         let result_words = self.results.snapshot();
         let result_seeds = match super::observe::snapshot_results(
             &result_words,
@@ -328,6 +353,7 @@ impl<'code> PreparedInvocation<'code> {
             &mut self.vmctx,
             &self.statics,
             &self.program.descriptor_registry,
+            &self.old_space,
             &result_seeds,
             budget,
         ) {
@@ -349,17 +375,105 @@ impl<'code> PreparedInvocation<'code> {
                 .saturating_sub(self.collections_before),
         })
     }
+
+    /// Collect through the same scoped owner used by entry and forcing.
+    pub(super) fn collect(&mut self, reserve: usize) -> Result<(), ExecutionError> {
+        if self.machine.prepared_call_status() != CallStatus::Success {
+            return Err(runtime_error_from_machine(&self.machine));
+        }
+        let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
+        let raw = unsafe { prepared_gc_trigger(&mut self.vmctx, reserve) };
+        let status = CallStatus::from_raw(i64::from(raw))
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+        if status != CallStatus::Success
+            || self.machine.prepared_call_status() != CallStatus::Success
+        {
+            return Err(runtime_error_for_status(&self.machine, status));
+        }
+        Ok(())
+    }
+
+    /// Promote the managed result at a logical (Void-inclusive) result index
+    /// into invocation-owned descriptor old space. The result slot itself is
+    /// the registered root storage; no `RootSlot` or raw pointer escapes.
+    pub(super) fn promote_result(&mut self, logical_index: usize) -> Result<(), ExecutionError> {
+        if self.machine.prepared_call_status() != CallStatus::Success {
+            return Err(runtime_error_from_machine(&self.machine));
+        }
+        let Some(rep) = self.result_reps.get(logical_index).copied() else {
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        };
+        if !matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        }
+        let Some(stored) = self
+            .result_layout
+            .logical_to_stored()
+            .get(logical_index)
+            .copied()
+            .flatten()
+        else {
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        };
+        let Some(field) = self.result_layout.fields().get(stored as usize) else {
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        };
+        let slot = unsafe {
+            self.results
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(field.offset() as usize)
+                .cast::<*mut u8>()
+        };
+        let result = unsafe {
+            self.old_space.promote_prepared(
+                &self.machine,
+                &mut self.vmctx,
+                &[slot],
+                &self.program.descriptors,
+            )
+        };
+        result.map_err(|cause| runtime_error(&self.machine, cause))
+    }
 }
 
 impl Drop for PreparedInvocation<'_> {
     fn drop(&mut self) {
         // Native execution has returned before this owner can be dropped.
         // Teardown consults ownership tables only, even after terminal failure.
+        self.machine.clear_prepared_old_space();
         self.machine.clear_rust_roots();
         self.machine.free_session_heap();
         self.machine.clear_stack_map_registry();
         self.machine.clear_cancel_flag();
         self.vmctx.machine_state = std::ptr::null_mut();
         self.vmctx.prepared_tops = std::ptr::null();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_space_scope_clears_on_error_and_unwind() {
+        let machine = MachineState::new();
+        let owner = OldSpace::new();
+
+        let error = (|| -> Result<(), ExecutionError> {
+            let _scope = OldSpaceScope::new(&machine, &owner)?;
+            assert!(unsafe { machine.prepared_old_space() }.is_some());
+            Err(runtime_error(&machine, RuntimeError::BadPointer))
+        })();
+        assert!(error.is_err());
+        assert!(unsafe { machine.prepared_old_space() }.is_none());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _scope = OldSpaceScope::new(&machine, &owner).unwrap();
+            assert!(unsafe { machine.prepared_old_space() }.is_some());
+            panic!("scope cleanup");
+        }));
+        assert!(panic.is_err());
+        assert!(unsafe { machine.prepared_old_space() }.is_none());
     }
 }

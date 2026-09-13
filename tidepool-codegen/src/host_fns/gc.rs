@@ -925,6 +925,7 @@ fn collect_prepared(
     from_used: usize,
     reserve: usize,
     completed_copy: &mut bool,
+    admitted: Option<&dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
 ) -> Result<usize, crate::host_fns::RuntimeError> {
     use crate::host_fns::RuntimeError;
     use tidepool_heap::execution_descriptor::DescriptorTraceError;
@@ -950,13 +951,23 @@ fn collect_prepared(
         // SAFETY: the owning heap and checked snapshot keep source objects and
         // root slots live; the new buffer is disjoint and fully initialized.
         let copied = unsafe {
-            tidepool_heap::gc::raw::cheney_copy_descriptors(
-                roots,
-                state.active_start,
-                prepared.used,
-                as_bytes_mut(&mut prepared.spare),
-                &mut prepared.space,
-            )
+            match admitted {
+                Some(owner) => tidepool_heap::gc::raw::cheney_copy_descriptors_with_admission(
+                    roots,
+                    state.active_start,
+                    prepared.used,
+                    as_bytes_mut(&mut prepared.spare),
+                    &mut prepared.space,
+                    owner,
+                ),
+                None => tidepool_heap::gc::raw::cheney_copy_descriptors(
+                    roots,
+                    state.active_start,
+                    prepared.used,
+                    as_bytes_mut(&mut prepared.spare),
+                    &mut prepared.space,
+                ),
+            }
         };
         match copied {
             Ok(result) => {
@@ -1001,7 +1012,8 @@ pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reser
     std::hint::black_box(&mut frame_anchor);
     let ms = unsafe { machine_state(vmctx) };
     if ms.poll_prepared(crate::prepared_control::PreparedSafepoint::Allocation)
-        == crate::prepared_control::CallStatus::Success {
+        == crate::prepared_control::CallStatus::Success
+    {
         let state = ms.take_gc_state();
         let is_prepared = state.as_ref().is_some_and(|state| state.prepared.is_some());
         if let Some(state) = state {
@@ -1114,12 +1126,20 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
                 )
             };
             let mut completed_copy = false;
+            // The invocation-owned OldSpace is boxed and remains stable while
+            // this collection runs. Its exact-start admission rejects stale
+            // interiors and preexisting forwarded headers.
+            let admitted = unsafe {
+                ms.prepared_old_space()
+                    .map(|owner| owner as &dyn tidepool_heap::descriptor_region::DescriptorOldSpace)
+            };
             let result = collect_prepared(
                 &mut state,
                 &snapshot.into_slots(),
                 from_used,
                 reserve,
                 &mut completed_copy,
+                admitted,
             );
             // Even a later growth failure leaves the first completed copy
             // published. Never restore a cursor into the retired semispace.

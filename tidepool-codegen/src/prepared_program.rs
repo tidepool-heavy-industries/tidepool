@@ -39,6 +39,8 @@ mod primitives;
 mod safepoint;
 #[cfg(test)]
 mod settlement_tests;
+#[cfg(test)]
+mod retention_tests;
 pub use admission::{admit_prepared, admit_program};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -175,6 +177,7 @@ impl CompiledProgram {
                 "prepared_gc_trigger",
                 crate::host_fns::prepared_gc_trigger as *const u8,
             ),
+            ("write_barrier", crate::host_fns::write_barrier as *const u8),
             ("prepared_poll", safepoint::prepared_poll_at as *const u8),
             (
                 "prepared_stack_overflow",
@@ -250,6 +253,17 @@ impl CompiledProgram {
                 Linkage::Import,
                 &prepared_status_signature,
             )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut write_barrier_signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        write_barrier_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        write_barrier_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        let write_barrier = pipeline
+            .module
+            .declare_function("write_barrier", Linkage::Import, &write_barrier_signature)
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut signatures = BTreeMap::new();
         for (&id, function) in &plan.functions {
@@ -380,6 +394,7 @@ impl CompiledProgram {
             prepared_stack_overflow,
             prepared_bad_state,
             prepared_blackhole,
+            write_barrier,
         )?;
         let force_adapter =
             adapter::emit_force_adapter(&mut pipeline, "prepared_force_adapter", prepared_enter)?;

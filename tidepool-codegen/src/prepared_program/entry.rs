@@ -43,6 +43,7 @@ pub(super) fn emit_prepared_enter(
     stack_overflow: FuncId,
     bad_state: FuncId,
     blackhole: FuncId,
+    write_barrier: FuncId,
 ) -> Result<(), super::CompileError> {
     use crate::prepared_control::CallStatus;
     let mut context = Context::new();
@@ -68,6 +69,9 @@ pub(super) fn emit_prepared_enter(
     let blackhole_ref = pipeline
         .module
         .declare_func_in_func(blackhole, builder.func);
+    let write_barrier_ref = pipeline
+        .module
+        .declare_func_in_func(write_barrier, builder.func);
     let self_ref = pipeline.module.declare_func_in_func(function, builder.func);
     let preflight = super::emit::emit_preflight(&mut builder, vmctx, stack_overflow, pipeline);
     let early_abort = builder.create_block();
@@ -246,11 +250,13 @@ pub(super) fn emit_prepared_enter(
         let result = builder.block_params(settle)[1];
         emit_thunk_completion(
             &mut builder,
+            vmctx,
             reference,
             live_header,
             status,
             result,
             thunk.policy,
+            write_barrier_ref,
         );
         builder.switch_to_block(next);
         builder.seal_block(next);
@@ -272,7 +278,7 @@ pub(super) fn emit_prepared_enter(
     Ok(())
 }
 
-/// Finish a nursery thunk obligation after the body and final cancellation
+/// Finish a prepared thunk obligation after the body and final cancellation
 /// sample. `thunk` is a declared managed SSA root reloaded by the stack-map
 /// integration after every collecting call; `live_header` is its pinned
 /// descriptor identity. The successful result is admitted evaluated evidence.
@@ -282,11 +288,13 @@ pub(super) fn emit_prepared_enter(
 /// before old thunks become admissible, not at individual Enter call sites.
 pub(super) fn emit_thunk_completion(
     builder: &mut FunctionBuilder<'_>,
+    vmctx: Value,
     thunk: Value,
     live_header: Value,
     status: Value,
     result: Value,
     policy: UpdatePolicy,
+    write_barrier_ref: cranelift_codegen::ir::FuncRef,
 ) {
     use crate::prepared_control::CallStatus;
     let success = builder.create_block();
@@ -307,6 +315,13 @@ pub(super) fn emit_thunk_completion(
             thunk,
             FORWARDING_POINTER_OFFSET as i32,
         );
+        // The barrier is a non-collecting owner operation. Keep it between
+        // result publication and the Updated header, with no safepoint in
+        // this commit window.
+        let slot = builder
+            .ins()
+            .iadd_imm(thunk, FORWARDING_POINTER_OFFSET as i64);
+        builder.ins().call(write_barrier_ref, &[vmctx, slot]);
         let updated = builder
             .ins()
             .bor_imm(live_header, DescriptorState::Updated as i64);
