@@ -4,6 +4,7 @@ module Main (main) where
 
 import Control.Monad (unless)
 import Control.Monad.IO.Class (liftIO)
+import Control.Exception (evaluate)
 import Data.List (intercalate)
 import Data.Text qualified as Text
 import GHC
@@ -20,12 +21,16 @@ import System.FilePath ((</>))
 import System.Exit (ExitCode(..))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), preparedTargetReferences, preparedTopIdentities
-  , projectPreparedTarget )
+  ( ProjectionContext(..), ProjectionError(..), preparedTargetReferences
+  , preparedTopIdentities, projectPreparedTarget )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), SymbolIdentity(..)
   , TargetDescriptor(..), TopBinding(..), WireProgram(..) )
 import Tidepool.FatIface (newFatIfaceCache)
+import Tidepool.GhcPipeline
+  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
+  , PipelineResult(prHscEnv), runPipelineSelected )
+import Tidepool.PreparedRecovery (RecoveredClosure(closureModules), recoverPreparedClosure)
 import Tidepool.PreparedStg
   ( PreparedModule(..), RecoveredModuleFailure(..), prepareModule, prepareRecoveredBodies
   , unelaboratedModule )
@@ -96,6 +101,7 @@ main = do
         ("real package fst had no exact body (actual Id "
           ++ showSDocUnsafe (ppr (idName fstId)) ++ "): " ++ showLookup other))
   assertSemigroupSubset root libdir
+  assertRecoveredKindRep root
   where
     callerEntry prepared = case
       [ identity
@@ -251,3 +257,47 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
     showLookup' (UnsupportedBodyCapability name) = "unsupported body " ++ renderName' name
     renderModule' = showSDocUnsafe . ppr
     renderName' = showSDocUnsafe . ppr
+
+-- GHC.Types:krep$* is an ordinary boxed strict-field constructor body whose
+-- STG representation leaves the final PrimRep annotation undefined.  The
+-- prepared facts walk must derive its layout from the actual constructor
+-- arguments while recovering the real dependency closure for showDouble.
+assertRecoveredKindRep :: FilePath -> IO ()
+assertRecoveredKindRep root = do
+  prepared <- runPipelineSelected PreparedStg
+    (root </> "test" </> "Suite.hs") [root </> "lib"]
+  let pipeline = pprPipelineResult prepared
+      home = pprModules prepared
+      entry = SymbolIdentity (Text.pack "main") (Text.pack "Suite")
+        (Text.pack "value") (Text.pack "showDouble") Nothing
+      context = ProjectionContext
+        { projectionProfile = Text.pack "w5-recovered-krep"
+        , projectionToolchain = Text.pack "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
+            (Text.pack "sysv64") []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = entry
+        }
+  closure <- recoverPreparedClosure (prHscEnv pipeline) context home
+  let modules = closureModules closure
+      references = preparedTargetReferences context modules
+  identities <- case preparedTopIdentities modules of
+    Left failure -> ioError (userError
+      ("recovered showDouble identities failed: " ++ show failure))
+    Right values -> pure values
+  _ <- evaluate (length references)
+  assert (any isKrepTop identities)
+    "recovered showDouble closure lost GHC.Types:krep$*"
+  projected <- evaluate (projectPreparedTarget context modules)
+  case projected of
+    Left (InvalidPreparedRepresentation reason) -> assert
+      (reason == Text.pack "runtime-polymorphic representation")
+      ("unexpected prepared showDouble representation failure: " ++ Text.unpack reason)
+    Left failure -> ioError (userError
+      ("recovered showDouble projection failed with unrelated error: " ++ show failure))
+    Right program -> do
+      _ <- evaluate (length (programBindings program))
+      pure ()
+  where
+    isKrepTop symbol = symbolModule symbol == Text.pack "GHC.Types"
+      && symbolOccurrence symbol == Text.pack "krep$*"

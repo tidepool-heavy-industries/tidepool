@@ -268,10 +268,12 @@ walkExpr :: Scope -> CgStgExpr -> Acc
 walkExpr scope = \case
   StgApp function args -> form ApplicationExpr <> walkId scope function <> foldMap (walkArg scope) args
   StgLit literal -> form LiteralExpr <> literalAcc literal
-  StgConApp con _ args reps -> form ConstructorExpr <> nameDependency scope (dataConName con)
+  -- Tag rewriting may leave the unboxed-sum-only rep annotation undefined
+  -- for boxed constructors. Field facts come from the actual arguments.
+  StgConApp con _ args _ -> form ConstructorExpr <> nameDependency scope (dataConName con)
     <> fact (ConstructorLayout (idIdentity (scopeModule scope) (dataConWorkId con))
-      (map show (concat reps)))
-    <> foldMap (walkArg scope) args <> foldMap (foldMap repForm) reps
+      (concatMap argReps args))
+    <> foldMap (walkArg scope) args
   StgOpApp op args ty -> form PrimitiveExpr <> foldMap (walkArg scope) args <> typeForms ty
     <> fact (OperationSignature (operationName op) (concatMap argReps args)
       (renderTypeReps ty))
