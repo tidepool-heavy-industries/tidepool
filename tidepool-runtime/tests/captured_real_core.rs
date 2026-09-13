@@ -1,14 +1,13 @@
-//! Captured-real-Core differential: closing the meta-hole that the synthetic
-//! JIT-vs-eval proptest net could never reach.
+//! Captured-real-Core JIT regressions: closing the meta-hole that the synthetic
+//! generator could never reach.
 //!
 //! The widened synthetic generator (generic N-way dispatch, mixed unboxed/boxed
-//! sums, closure-in-field-then-apply) found ZERO divergence — because the bugs
-//! live in the SPECIFIC `-O2`-optimized base-library Core that only the real
-//! extractor emits (the synthetic `standard_datacon_table` can't even mint the
-//! `Integer` `IS`/`IP`/`IN` repr). So we capture that real Core as CBOR fixtures
-//! (extracted once via the native-bignum `tidepool-extract-bin --all-closed`,
-//! checked in) and run it through the SAME `check_jit_vs_eval` oracle with the
-//! REAL `meta.cbor` `DataConTable`.
+//! sums, closure-in-field-then-apply) could not exercise the specific
+//! `-O2`-optimized base-library Core that only the real extractor emits (the
+//! synthetic table cannot mint the `Integer` `IS`/`IP`/`IN` representation).
+//! These real Core programs remain checked in as CBOR fixtures (extracted once
+//! via the native-bignum `tidepool-extract-bin --all-closed`) and run directly
+//! on the JIT with the real `meta.cbor` `DataConTable`.
 //!
 //! Source (`haskell/.../Repro.hs`, native-bignum GHC):
 //! ```haskell
@@ -18,13 +17,12 @@
 //! reproReadInt :: Int    ; reproReadInt = read "42"           -- #2
 //! ```
 //!
-//! These fixtures pin two DISTINCT, currently-unfixed bugs. The asserts encode
-//! the present (buggy) behaviour; when a fix lands, the relevant assert flips and
-//! this test fails loudly — that is the signal to update it.
+//! These fixtures pin two DISTINCT historical bugs. The explicit JIT asserts
+//! keep their fixed behavior from regressing.
 use tidepool_bridge::Value;
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
 use tidepool_repr::{CoreExpr, DataConTable, Literal};
-use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};
 
 static META: &[u8] = include_bytes!("captured_core/meta.cbor");
 static ROUND_IN: &[u8] = include_bytes!("captured_core/reproRoundIN.cbor");
@@ -93,7 +91,7 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 // the expr fixtures' node refs stay consistent with the regenerated table.
 // (Fields the old shape never carried, like parent-type-name, migrate to
 // their empty-default rather than a real value — this fixture pins two
-// specific JIT-vs-eval divergences and doesn't exercise type-name lookup.)
+// specific JIT regressions and doesn't exercise type-name lookup.)
 //
 // It is `#[ignore]`d (mutates checked-in fixtures) and is the documented
 // migration path for any future captured-fixture schema drift. Re-run with:
@@ -262,8 +260,8 @@ mod regen {
     }
 }
 
-// #1 — FIXED. `fromIntegral (1025 :: Integer) :: Double` now AGREES at 1025.0 in
-// both engines. The bug was NOT a constructor-tag misread (the dispatch reads IS
+// #1 — FIXED. `fromIntegral (1025 :: Integer) :: Double` now returns 1025.0 on
+// the JIT. The bug was NOT a constructor-tag misread (the dispatch reads IS
 // correctly): GHC lowers roundingMode#'s `IN -> error` to a bottoming unlifted
 // CAF shaped `case error "roundingMode#: IN" of {}`, and the JIT's error-deferral
 // check only saw `error ...` directly — not through the forced case scrutinee — so
@@ -273,22 +271,22 @@ mod regen {
 fn captured_round_in_agrees_1025() {
     on_big_stack(|| {
         let (expr, table) = load(ROUND_IN);
-        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::Agree(v) => assert_eq!(
-                boxed_double(&v),
-                Some(1025.0),
-                "fromIntegral 1025 :: Double must be 1025.0 in both engines; got {v:?}"
-            ),
-            other => panic!("expected #1 to be FIXED (Agree 1025.0), got {other:?}"),
-        }
+        let mut machine = JitEffectMachine::compile(&expr, &table, NURSERY)
+            .expect("#1 captured Core must compile");
+        let value = machine.run_pure().expect("#1 captured Core must run");
+        assert_eq!(
+            boxed_double(&value),
+            Some(1025.0),
+            "fromIntegral 1025 :: Double must be 1025.0 on the JIT; got {value:?}"
+        );
     });
 }
 
 // #1 MINIMIZED — the 84-node delta-debugged fixture (the precise fix target).
 // Confirms the fix on the minimal failing subtree: the surviving live path is the
 // inlined integerToBinaryFloat'/roundingMode# dispatch plus the bottoming error
-// CAF (`case error … of {}`) as a LetRec binding — the eager-eval of which was the
-// real bug. Now Agree at 1025.0.
+// CAF (`case error … of {}`) as a LetRec binding — the eager evaluation of which
+// was the real bug. The JIT now returns 1025.0.
 #[test]
 fn captured_round_in_minimized_agrees_1025() {
     on_big_stack(|| {
@@ -298,17 +296,17 @@ fn captured_round_in_minimized_agrees_1025() {
             "minimized fixture should be ~84 nodes, got {}",
             expr.nodes.len()
         );
-        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::Agree(v) => {
-                assert_eq!(boxed_double(&v), Some(1025.0), "got {v:?}")
-            }
-            other => panic!("minimized #1 must now Agree at 1025.0 (FIXED), got {other:?}"),
-        }
+        let mut machine = JitEffectMachine::compile(&expr, &table, NURSERY)
+            .expect("minimized #1 captured Core must compile");
+        let value = machine
+            .run_pure()
+            .expect("minimized #1 captured Core must run");
+        assert_eq!(boxed_double(&value), Some(1025.0), "got {value:?}");
     });
 }
 
-// #2 — `read "42" :: Int` is now FIXED in BOTH engines (was a `BothFail`: the
-// tree-walker yielded `NotAFunction`, the JIT `BadFunPtrTag`). The diagnosis was
+// #2 — `read "42" :: Int` is now FIXED on the JIT (historically both engines
+// failed: the tree-walker yielded `NotAFunction`, the JIT `BadFunPtrTag`). The diagnosis was
 // NOT a ReadP `~R#` newtype coercion; it was two distinct root causes, both
 // landed:
 //   1. The unboxed-1-tuple build asymmetry (Translate.hs): GHC wraps the ReadP
@@ -320,20 +318,18 @@ fn captured_round_in_minimized_agrees_1025() {
 //      corecursion `F = \k -> let x = F k in <Get parser using x>`; the strict
 //      LetNonRec spine force-evaluated `let x = F k` into infinite recursion.
 //      Non-trivial LetNonRec RHS is now thunkified (GHC Core `let` is non-strict).
-// The golden below is the live eval-vs-expected guard.
+// The golden below is the live JIT-vs-expected guard.
 #[test]
 fn captured_read_int_golden_expects_42() {
     on_big_stack(|| {
         let (expr, table) = load(READ_INT);
-        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::Agree(v) => assert_eq!(
-                boxed_int(&v),
-                Some(READ_INT_EXPECTED),
-                "read \"42\" must evaluate to 42 in both engines; got {v:?}"
-            ),
-            other => panic!(
-                "golden: read \"42\" must be {READ_INT_EXPECTED} in BOTH engines, got {other:?}"
-            ),
-        }
+        let mut machine = JitEffectMachine::compile(&expr, &table, NURSERY)
+            .expect("#2 captured Core must compile");
+        let value = machine.run_pure().expect("#2 captured Core must run");
+        assert_eq!(
+            boxed_int(&value),
+            Some(READ_INT_EXPECTED),
+            "read \"42\" must evaluate to 42 on the JIT; got {value:?}"
+        );
     });
 }

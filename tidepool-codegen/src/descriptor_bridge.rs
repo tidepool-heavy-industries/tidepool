@@ -1,6 +1,7 @@
 use std::ptr;
 
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
+use tidepool_heap::managed_reference::word_valid;
 use tidepool_repr::execution_schema::RuntimeRep;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +23,8 @@ pub enum DescriptorMarshalError {
     Representation { index: usize, rep: RuntimeRep },
     #[error("descriptor pointer field width {0} is not native pointer width")]
     PointerWidth(u32),
+    #[error("managed value {index} has invalid tag evidence")]
+    ManagedReference { index: usize },
 }
 
 /// Initialize and marshal one descriptor-owned object.
@@ -62,6 +65,11 @@ pub unsafe fn marshal_descriptor_object(
         let rep = stored
             .and_then(|stored| descriptor.payload().fields().get(stored as usize))
             .map_or(RuntimeRep::Void, |field| field.rep());
+        if let DescriptorValue::Managed(pointer) = value {
+            if !word_valid(*pointer as usize) {
+                return Err(DescriptorMarshalError::ManagedReference { index });
+            }
+        }
         validate_value(index, rep, *value, descriptor)?;
     }
 
@@ -214,6 +222,19 @@ mod tests {
             assert_eq!(descriptor.allocation_extent(), extent);
             assert_eq!(descriptor.trace_offsets(), &[16, 32]);
             assert_eq!(bytes[descriptor.payload_base() as usize], 7);
+            let address_field = descriptor
+                .payload()
+                .fields()
+                .iter()
+                .find(|field| field.rep() == RuntimeRep::Address)
+                .unwrap();
+            let address = ptr::read_unaligned(
+                bytes
+                    .as_ptr()
+                    .add((descriptor.payload_base() + address_field.offset()) as usize)
+                    .cast::<usize>(),
+            );
+            assert_eq!(address, 0xfeed);
 
             let mut relocated = bytes.clone();
             descriptor.install_forwarding(bytes.as_mut_ptr(), relocated.as_mut_ptr());
@@ -268,6 +289,31 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_marshalling_rejects_tagged_null_managed_values() {
+        let descriptor = ObjectDescriptor::constructor(
+            1,
+            StorageLayout::for_reps(&target(), &[RuntimeRep::LiftedRef]).unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut bytes = vec![0_u8; descriptor.allocation_extent() as usize];
+        let error = unsafe {
+            marshal_descriptor_object(
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                &descriptor,
+                &[DescriptorValue::Managed(1usize as *mut u8)],
+            )
+        }
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            DescriptorMarshalError::ManagedReference { index: 0 }
+        ));
+        assert_eq!(bytes[0], 0);
+    }
+
+    #[test]
     fn descriptor_kinds_publish_owned_header_identity_and_live_state() {
         let empty = StorageLayout::for_reps(&target(), &[]).unwrap();
         let entry = || {
@@ -287,7 +333,13 @@ mod tests {
             (ObjectKind::Constructor, None),
         ];
         for (kind, metadata) in cases {
-            let descriptor = ObjectDescriptor::new(kind, empty.clone(), metadata).unwrap();
+            let descriptor = match kind {
+                ObjectKind::Constructor => {
+                    ObjectDescriptor::constructor(1, empty.clone(), metadata)
+                }
+                _ => ObjectDescriptor::new(kind, empty.clone(), metadata),
+            }
+            .unwrap();
             let mut bytes = vec![0u8; descriptor.allocation_extent() as usize];
             let extent = descriptor.allocation_extent();
             unsafe {
@@ -308,8 +360,8 @@ mod tests {
     #[test]
     fn descriptor_object_survives_copy_and_traces_only_managed_slots() {
         let descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(
                     &target(),
                     &[
@@ -324,8 +376,8 @@ mod tests {
             .unwrap(),
         );
         let scalar_descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[RuntimeRep::Word(64)]).unwrap(),
                 None,
             )
@@ -384,8 +436,8 @@ mod tests {
     #[test]
     fn descriptor_collection_refuses_truncated_initialized_region_before_forwarding() {
         let descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[RuntimeRep::LiftedRef]).unwrap(),
                 None,
             )
@@ -429,8 +481,8 @@ mod tests {
     #[test]
     fn descriptor_collection_leaves_unreachable_source_objects_unforwarded() {
         let descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[]).unwrap(),
                 None,
             )

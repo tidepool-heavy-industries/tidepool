@@ -36,7 +36,6 @@ tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
 tidepool-effect.workspace = true
 tidepool-codegen.workspace = true
-tidepool-macro.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
 tidepool-handlers.workspace = true

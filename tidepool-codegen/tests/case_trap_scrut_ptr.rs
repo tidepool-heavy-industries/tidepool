@@ -15,7 +15,7 @@ use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::yield_type::YieldError;
 use tidepool_repr::types::{Alt, AltCon, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
-use tidepool_testing::proptest::build_table_for_expr;
+use tidepool_testing::gen::build_table_for_expr;
 
 /// `case (40# +# 2#) of { 0# -> 0# }` — no alt matches 42, and there's no
 /// `DEFAULT`, so this must hit the Lit-dispatch case-miss trap. The

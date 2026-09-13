@@ -153,8 +153,10 @@ are nondeterministic.
   dependency fanout while retaining the scenarios in `tidepool-testing`.
   `cargo test -p tidepool-testing --test proptest_cbor` exposed a red
   `literal_round_trip`: minimal `LitFloat(4294967296)` is rejected as exceeding
-  u32 bits. No baseline was checked and no assertion was weakened. The moved
-  VarId tests pass (6/6); restored bridge-value effect routing passes (3/3).
+  u32 bits. Source inspection identifies this as pre-existing; no main baseline
+  run was used and it is distinct from the separate historical float tests. No
+  assertion was weakened. The moved VarId tests pass (6/6); restored
+  bridge-value effect routing passes (3/3).
 - Compile-only integration found a remaining `EffectRoster` caller after MCP
   endpoint deletion. Shared handler declaration composition now remains in
   the shared owner, without restoring the removed server.
@@ -192,11 +194,32 @@ are nondeterministic.
   that intra-module dependency. The exploratory assertion was not added to
   the passing suite. Connected execution must repair the dependency source
   before treating target-only projection as a complete program.
-- The workspace compile-only warm-up is blocked before the prepared targets by
-  unchanged `tidepool-macro/src/expand.rs:32`: it calls
-  `syn::parse2::<InlineInput>` but this file defines no `InlineInput` type.
-  `nix develop --command cargo build --workspace --tests` reproduces E0425;
-  `git show HEAD:tidepool-macro/src/expand.rs` confirms the missing type is
-  already in committed HEAD. A HEAD-only build was not run. Focused
-  changed-target tests compile and run, but this is not a completed workspace
-  build.
+- The historical workspace warm-up report blamed unchanged
+  `tidepool-macro/src/expand.rs:32`; source inspection instead attributes that
+  missing `InlineInput` code to `e1a4b9145`, not unchanged `main`. In the final
+  fold, the workspace compile reached all crates and failed in
+  `tidepool-actor/tests/resident_local_actor.rs` because `sibling_server` is
+  undefined at lines 321 and 329. This is outside F's repair scope.
+
+## Wave 3 fold evidence — 2026-09-12
+
+- F regeneration and the owning prepared checks are complete at working-tree
+  revision `204604dc19ce526dde3d717f3c8e0078714a5002`; the tree remains dirty.
+- A reports 49 final schema tests passed; B's corrected target-closure
+  projection regression is 1/1; C's lock repair leaves 2 additions and 339
+  deletions with no retained upgrades, and the `tidepool` library check passes.
+- D reports 4 tag, 10 descriptor, 7 descriptor-bridge, 1 prepared-native,
+  and 1 ABI-rejection test passed; the regenerated-fixture fold is recorded
+  below.
+- E's correction passed 49 heap and 3 prepared-GC tests; the forwarded
+  incoming-tag regression passes after the root-order fixture fix,
+  `descriptor_at` uses raw pointer/local dereference, and capacity growth
+  passes. G's residual helper migration is complete; regenerated reruns are
+  generics 0/11 and repro-339 0/1, with concrete prepared representation,
+  duplicate-`sat`, and Word(32)/Word(64) signature failures.
+- Retirement dropped the differential/proptest scenarios while preserving
+  explicit JIT assertions. Trial rounds are A 4, B 3, C 2 plus Terra 1, D 1,
+  E 3 plus Terra repair, and G 3. These counts distinguish worker/tool turns
+  from lead assignment/review/correction interventions; complete lead totals
+  and token usage are unavailable. Brief-size insufficiency remains part of
+  the record; E's sub-item escalation is resolved.

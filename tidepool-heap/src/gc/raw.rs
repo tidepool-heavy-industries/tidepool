@@ -1,7 +1,10 @@
 //! Cheney's semi-space copying GC for raw HeapObjects.
 
-use crate::execution_descriptor::{DescriptorState, DescriptorTraceError, ObjectDescriptor};
+use crate::execution_descriptor::{
+    DescriptorState, DescriptorTraceError, ObjectDescriptor, ObjectKind,
+};
 use crate::layout::*;
+use crate::managed_reference::{tag_of, tag_valid, untag};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -18,6 +21,8 @@ pub struct DescriptorSpace {
     descriptors: HashMap<usize, Arc<ObjectDescriptor>>,
     object_starts: Vec<u64>,
     root_slots: Vec<usize>,
+    updated_visited: Vec<u64>,
+    updated_path: Vec<usize>,
 }
 
 impl DescriptorSpace {
@@ -37,6 +42,8 @@ impl DescriptorSpace {
             descriptors: owners,
             object_starts: Vec::new(),
             root_slots: Vec::new(),
+            updated_visited: Vec::new(),
+            updated_path: Vec::new(),
         })
     }
 
@@ -61,6 +68,21 @@ impl DescriptorSpace {
             self.object_starts.resize(words, 0);
         }
         self.object_starts[..words].fill(0);
+        let visited_words = words;
+        if visited_words > self.updated_visited.len() {
+            self.updated_visited
+                .try_reserve_exact(visited_words - self.updated_visited.len())
+                .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+            self.updated_visited.resize(visited_words, 0);
+        }
+        self.updated_visited[..visited_words].fill(0);
+        let max_objects = used / 16 + usize::from(used % 16 != 0);
+        self.updated_path.clear();
+        if max_objects > self.updated_path.capacity() {
+            self.updated_path
+                .try_reserve_exact(max_objects - self.updated_path.len())
+                .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+        }
         Ok(())
     }
 
@@ -73,6 +95,28 @@ impl DescriptorSpace {
         let index = offset / 8;
         self.object_starts[index / 64] & (1_u64 << (index % 64)) != 0
     }
+
+    fn mark_updated(&mut self, offset: usize) -> bool {
+        let index = offset / 8;
+        let word = index / 64;
+        let bit = 1_u64 << (index % 64);
+        let was_set = self.updated_visited[word] & bit != 0;
+        self.updated_visited[word] |= bit;
+        was_set
+    }
+
+    fn clear_updated(&mut self, offset: usize) {
+        let index = offset / 8;
+        self.updated_visited[index / 64] &= !(1_u64 << (index % 64));
+    }
+
+    fn clear_updated_path(&mut self) {
+        for index in 0..self.updated_path.len() {
+            let address = self.updated_path[index];
+            self.clear_updated(address);
+        }
+        self.updated_path.clear();
+    }
 }
 
 fn bitmap_words(bytes: usize) -> Result<usize, DescriptorTraceError> {
@@ -80,6 +124,20 @@ fn bitmap_words(bytes: usize) -> Result<usize, DescriptorTraceError> {
         .checked_add(511)
         .map(|rounded| rounded / 512)
         .ok_or(DescriptorTraceError::InvalidRange)
+}
+
+/// Return the raw pinned descriptor address named by an object header. The
+/// complete source walk proves every source header identity before collection
+/// mutates anything; copied destination headers retain that identity, and only
+/// this collector writes their Forwarded state. Callers dereference the raw
+/// pointer only while the collector's descriptor owners remain alive.
+///
+/// # Safety
+/// `object` must be an exact source start proven by the pre-copy walk or a
+/// collector-established destination start.
+unsafe fn descriptor_at(object: *const u8) -> *const ObjectDescriptor {
+    let identity = std::ptr::read(object.cast::<usize>()) & !7;
+    identity as *const ObjectDescriptor
 }
 
 /// Copy the reachable prepared graph from an exact initialized bump region.
@@ -143,38 +201,42 @@ pub unsafe fn cheney_copy_descriptors(
         let address = from_base + offset;
         let header = std::ptr::read(address as *const usize);
         let identity = header & !7;
-        let descriptor = descriptors
-            .descriptors
-            .get(&identity)
-            .ok_or(DescriptorTraceError::UnknownDescriptor { address: identity })?;
-        let extent = descriptor.allocation_extent() as usize;
-        if extent < 16 || extent % 8 != 0 {
-            return Err(DescriptorTraceError::InvalidRange);
-        }
-        if address % descriptor.allocation_alignment() as usize != 0 {
-            return Err(DescriptorTraceError::Misaligned {
-                address,
-                alignment: descriptor.allocation_alignment(),
-            });
-        }
-        if extent > from_used - offset {
-            return Err(DescriptorTraceError::Truncated {
-                declared: descriptor.allocation_extent(),
-                available: from_used - offset,
-            });
-        }
-        match descriptor.state(address as *const u8, extent)? {
-            DescriptorState::Forwarded => return Err(DescriptorTraceError::ForwardedObject),
-            DescriptorState::Live | DescriptorState::Evaluating | DescriptorState::Updated => {}
-        }
+        let extent = {
+            let descriptor = descriptors
+                .descriptors
+                .get(&identity)
+                .ok_or(DescriptorTraceError::UnknownDescriptor { address: identity })?;
+            let extent = descriptor.allocation_extent() as usize;
+            if extent < 16 || extent % 8 != 0 {
+                return Err(DescriptorTraceError::InvalidRange);
+            }
+            if address % descriptor.allocation_alignment() as usize != 0 {
+                return Err(DescriptorTraceError::Misaligned {
+                    address,
+                    alignment: descriptor.allocation_alignment(),
+                });
+            }
+            if extent > from_used - offset {
+                return Err(DescriptorTraceError::Truncated {
+                    declared: descriptor.allocation_extent(),
+                    available: from_used - offset,
+                });
+            }
+            match descriptor.state(address as *const u8, extent)? {
+                DescriptorState::Forwarded => return Err(DescriptorTraceError::ForwardedObject),
+                DescriptorState::Live | DescriptorState::Evaluating | DescriptorState::Updated => {}
+            }
+            extent
+        };
         descriptors.mark_start(offset);
         offset += extent;
     }
 
     let mut free = 0;
-    for &address in &descriptors.root_slots {
+    for index in 0..descriptors.root_slots.len() {
+        let address = descriptors.root_slots[index];
         let slot = address as *mut *mut u8;
-        let value = std::ptr::read(slot);
+        let value = std::ptr::read(slot).cast::<u8>() as usize;
         let relocated = evacuate_descriptor(
             value,
             from_base,
@@ -184,17 +246,12 @@ pub unsafe fn cheney_copy_descriptors(
             &mut free,
             descriptors,
         )?;
-        std::ptr::write(slot, relocated);
+        std::ptr::write(slot, relocated as *mut u8);
     }
     let mut scan = 0;
     while scan < free {
         let object = (to_base + scan) as *mut u8;
-        let header = std::ptr::read(object.cast::<usize>());
-        let descriptor = descriptors.descriptors.get(&(header & !7)).ok_or(
-            DescriptorTraceError::UnknownDescriptor {
-                address: header & !7,
-            },
-        )?;
+        let descriptor = &*descriptor_at(object);
         let extent = descriptor.allocation_extent() as usize;
         if extent > free - scan {
             return Err(DescriptorTraceError::Truncated {
@@ -207,7 +264,7 @@ pub unsafe fn cheney_copy_descriptors(
             if edge_error.is_some() {
                 return;
             }
-            let value = std::ptr::read(slot);
+            let value = std::ptr::read(slot).cast::<u8>() as usize;
             match evacuate_descriptor(
                 value,
                 from_base,
@@ -217,7 +274,7 @@ pub unsafe fn cheney_copy_descriptors(
                 &mut free,
                 descriptors,
             ) {
-                Ok(relocated) => std::ptr::write(slot, relocated),
+                Ok(relocated) => std::ptr::write(slot, relocated as *mut u8),
                 Err(error) => edge_error = Some(error),
             }
         })?;
@@ -230,17 +287,21 @@ pub unsafe fn cheney_copy_descriptors(
 }
 
 unsafe fn evacuate_descriptor(
-    pointer: *mut u8,
+    encoded: usize,
     from_base: usize,
     from_end: usize,
     to_base: usize,
     to_capacity: usize,
     free: &mut usize,
-    descriptors: &DescriptorSpace,
-) -> Result<*mut u8, DescriptorTraceError> {
-    let address = pointer as usize;
+    descriptors: &mut DescriptorSpace,
+) -> Result<usize, DescriptorTraceError> {
+    if encoded == 0 {
+        return Ok(0);
+    }
+    let tag = tag_of(encoded);
+    let address = untag(encoded);
     if address == 0 {
-        return Ok(pointer);
+        return Err(DescriptorTraceError::TaggedNull { value: encoded });
     }
     if address < from_base || address >= from_end || (address - from_base) % 8 != 0 {
         return Err(DescriptorTraceError::InvalidManagedPointer { address });
@@ -249,25 +310,75 @@ unsafe fn evacuate_descriptor(
     if !descriptors.is_start(offset) {
         return Err(DescriptorTraceError::InvalidManagedPointer { address });
     }
-    let header = std::ptr::read(pointer.cast::<usize>());
-    let identity = header & !7;
-    let descriptor = descriptors
-        .descriptors
-        .get(&identity)
-        .ok_or(DescriptorTraceError::UnknownDescriptor { address: identity })?;
-    let extent = descriptor.allocation_extent() as usize;
+    let pointer = address as *mut u8;
+    let descriptor = &*descriptor_at(pointer);
     let state = descriptor.state(pointer, from_end - address)?;
     if state == DescriptorState::Forwarded {
-        let target = std::ptr::read(pointer.add(8).cast::<usize>());
-        let target_end = target
-            .checked_add(extent)
-            .ok_or(DescriptorTraceError::InvalidRange)?;
-        if target < to_base || target % 8 != 0 || target_end > to_base + *free {
-            return Err(DescriptorTraceError::InvalidRange);
+        if descriptor.kind() == ObjectKind::Thunk {
+            if tag != 0 {
+                return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
+            }
+        } else if !tag_valid(
+            tag,
+            descriptor.kind(),
+            DescriptorState::Live,
+            descriptor.constructor_tag(),
+        ) {
+            return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
         }
-        descriptor.state(target as *const u8, extent)?;
-        return Ok(target as *mut u8);
+        let target = forwarded_target(pointer, to_base, *free)?;
+        let target_address = untag(target);
+        if descriptor.kind() == ObjectKind::Thunk {
+            let destination = &*descriptor_at(target_address as *const u8);
+            let destination_state = destination.state(
+                target_address as *const u8,
+                to_base + *free - target_address,
+            )?;
+            if is_evaluated_kind(destination.kind()) && destination_state == DescriptorState::Live {
+                let target_tag = tag_of(target);
+                if !tag_valid(
+                    target_tag,
+                    destination.kind(),
+                    destination_state,
+                    destination.constructor_tag(),
+                ) {
+                    return Err(DescriptorTraceError::InvalidManagedTag {
+                        address: target_address,
+                        tag: target_tag,
+                    });
+                }
+                return Ok(target);
+            }
+        }
+        return Ok(target_address | usize::from(tag));
     }
+    if !tag_valid(tag, descriptor.kind(), state, descriptor.constructor_tag()) {
+        return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
+    }
+    if state == DescriptorState::Updated {
+        return resolve_updated(
+            pointer,
+            tag,
+            from_base,
+            from_end,
+            to_base,
+            to_capacity,
+            free,
+            descriptors,
+        );
+    }
+    copy_descriptor(pointer, tag, descriptor, to_base, to_capacity, free)
+}
+
+unsafe fn copy_descriptor(
+    pointer: *mut u8,
+    tag: u8,
+    descriptor: &ObjectDescriptor,
+    to_base: usize,
+    to_capacity: usize,
+    free: &mut usize,
+) -> Result<usize, DescriptorTraceError> {
+    let extent = descriptor.allocation_extent() as usize;
     let required = free
         .checked_add(extent)
         .ok_or(DescriptorTraceError::InvalidRange)?;
@@ -288,7 +399,192 @@ unsafe fn evacuate_descriptor(
     std::ptr::copy_nonoverlapping(pointer, (to_base + *free) as *mut u8, extent);
     descriptor.install_forwarding(pointer, (to_base + *free) as *mut u8);
     *free = required;
-    Ok((to_base + required - extent) as *mut u8)
+    Ok((to_base + required - extent) | usize::from(tag))
+}
+
+fn is_evaluated_kind(kind: ObjectKind) -> bool {
+    matches!(
+        kind,
+        ObjectKind::Constructor | ObjectKind::Function | ObjectKind::Pap
+    )
+}
+
+unsafe fn forwarded_target(
+    object: *const u8,
+    to_base: usize,
+    free: usize,
+) -> Result<usize, DescriptorTraceError> {
+    let target = std::ptr::read(object.add(8).cast::<usize>());
+    let target_address = untag(target);
+    let target_end = target_address
+        .checked_add(8)
+        .ok_or(DescriptorTraceError::InvalidRange)?;
+    if target_address < to_base || target_address % 8 != 0 || target_end > to_base + free {
+        return Err(DescriptorTraceError::InvalidRange);
+    }
+    Ok(target)
+}
+
+unsafe fn resolve_updated(
+    first: *mut u8,
+    first_tag: u8,
+    from_base: usize,
+    from_end: usize,
+    to_base: usize,
+    to_capacity: usize,
+    free: &mut usize,
+    descriptors: &mut DescriptorSpace,
+) -> Result<usize, DescriptorTraceError> {
+    descriptors.updated_path.clear();
+    let mut current = first;
+    let mut current_tag = first_tag;
+    loop {
+        let address = current as usize;
+        let offset = address
+            .checked_sub(from_base)
+            .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?;
+        let descriptor = &*descriptor_at(current);
+        let actual_state = descriptor.state(current, from_end - address)?;
+        if actual_state == DescriptorState::Forwarded {
+            if descriptor.kind() != ObjectKind::Thunk {
+                if !tag_valid(
+                    current_tag,
+                    descriptor.kind(),
+                    DescriptorState::Live,
+                    descriptor.constructor_tag(),
+                ) {
+                    return Err(DescriptorTraceError::InvalidManagedTag {
+                        address,
+                        tag: current_tag,
+                    });
+                }
+                let target = forwarded_target(current, to_base, *free)?;
+                let target_address = untag(target);
+                let destination = &*descriptor_at(target_address as *const u8);
+                let destination_state = destination.state(
+                    target_address as *const u8,
+                    to_base + *free - target_address,
+                )?;
+                if !is_evaluated_kind(destination.kind())
+                    || destination_state != DescriptorState::Live
+                {
+                    return Err(DescriptorTraceError::InvalidUpdatedTarget);
+                }
+                if !tag_valid(
+                    current_tag,
+                    destination.kind(),
+                    destination_state,
+                    destination.constructor_tag(),
+                ) {
+                    return Err(DescriptorTraceError::InvalidManagedTag {
+                        address: target_address,
+                        tag: current_tag,
+                    });
+                }
+                let relocated = target_address | usize::from(current_tag);
+                forward_updated_path(descriptors, from_base, relocated);
+                return Ok(relocated);
+            }
+            if current_tag != 0 {
+                return Err(DescriptorTraceError::InvalidManagedTag {
+                    address,
+                    tag: current_tag,
+                });
+            }
+            let target = forwarded_target(current, to_base, *free)?;
+            let target_address = untag(target);
+            let destination = &*descriptor_at(target_address as *const u8);
+            let destination_state = destination.state(
+                target_address as *const u8,
+                to_base + *free - target_address,
+            )?;
+            if !is_evaluated_kind(destination.kind()) || destination_state != DescriptorState::Live
+            {
+                return Err(DescriptorTraceError::InvalidUpdatedTarget);
+            }
+            let target_tag = tag_of(target);
+            if !tag_valid(
+                target_tag,
+                destination.kind(),
+                destination_state,
+                destination.constructor_tag(),
+            ) {
+                return Err(DescriptorTraceError::InvalidManagedTag {
+                    address: target_address,
+                    tag: target_tag,
+                });
+            }
+            forward_updated_path(descriptors, from_base, target);
+            return Ok(target);
+        }
+        if actual_state != DescriptorState::Updated {
+            if actual_state != DescriptorState::Live || !is_evaluated_kind(descriptor.kind()) {
+                return Err(DescriptorTraceError::InvalidUpdatedTarget);
+            }
+            if !tag_valid(
+                current_tag,
+                descriptor.kind(),
+                actual_state,
+                descriptor.constructor_tag(),
+            ) {
+                return Err(DescriptorTraceError::InvalidManagedTag {
+                    address,
+                    tag: current_tag,
+                });
+            }
+            let result =
+                copy_descriptor(current, current_tag, descriptor, to_base, to_capacity, free)? & !7;
+            let relocated = result | usize::from(current_tag);
+            forward_updated_path(descriptors, from_base, relocated);
+            return Ok(relocated);
+        }
+        if !tag_valid(
+            current_tag,
+            descriptor.kind(),
+            actual_state,
+            descriptor.constructor_tag(),
+        ) {
+            return Err(DescriptorTraceError::InvalidManagedTag {
+                address,
+                tag: current_tag,
+            });
+        }
+        if descriptors.mark_updated(offset) {
+            return Err(DescriptorTraceError::UpdatedCycle { address });
+        }
+        descriptors.updated_path.push(offset);
+        let target = std::ptr::read(current.add(8).cast::<usize>());
+        if target == 0 {
+            return Err(DescriptorTraceError::InvalidUpdatedTarget);
+        }
+        let target_address = untag(target);
+        if target_address == 0
+            || target_address < from_base
+            || target_address >= from_end
+            || (target_address - from_base) % 8 != 0
+            || !descriptors.is_start(target_address - from_base)
+        {
+            return Err(DescriptorTraceError::InvalidManagedPointer {
+                address: target_address,
+            });
+        }
+        current = target_address as *mut u8;
+        current_tag = tag_of(target);
+    }
+}
+
+unsafe fn forward_updated_path(
+    descriptors: &mut DescriptorSpace,
+    from_base: usize,
+    relocated: usize,
+) {
+    for index in 0..descriptors.updated_path.len() {
+        let offset = descriptors.updated_path[index];
+        let thunk = from_base + offset;
+        let descriptor = &*descriptor_at(thunk as *const u8);
+        descriptor.install_forwarding_tagged(thunk as *mut u8, relocated);
+    }
+    descriptors.clear_updated_path();
 }
 
 fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {
@@ -1280,9 +1576,32 @@ mod descriptor_copy_tests {
             abi: "system-v".into(),
             features: Vec::new(),
         };
+        let layout = StorageLayout::for_reps(&target, reps).unwrap();
         Arc::new(
-            ObjectDescriptor::new(kind, StorageLayout::for_reps(&target, reps).unwrap(), None)
-                .unwrap(),
+            match kind {
+                ObjectKind::Constructor => ObjectDescriptor::constructor(1, layout, None),
+                _ => ObjectDescriptor::new(kind, layout, None),
+            }
+            .unwrap(),
+        )
+    }
+
+    fn constructor_descriptor(tag: u32, reps: &[RuntimeRep]) -> Arc<ObjectDescriptor> {
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "system-v".into(),
+            features: Vec::new(),
+        };
+        Arc::new(
+            ObjectDescriptor::constructor(
+                tag,
+                StorageLayout::for_reps(&target, reps).unwrap(),
+                None,
+            )
+            .unwrap(),
         )
     }
 
@@ -1364,6 +1683,381 @@ mod descriptor_copy_tests {
             .unwrap();
             assert_eq!(copied.bytes_copied, extent);
             assert_eq!(root, to.as_mut_ptr().cast());
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_preserves_managed_evidence_on_roots_and_fields() {
+        let owner = constructor_descriptor(3, &[RuntimeRep::LiftedRef]);
+        let child = constructor_descriptor(1, &[]);
+        let owner_extent = owner.allocation_extent() as usize;
+        let child_extent = child.allocation_extent() as usize;
+        let mut from = [0_u64; 8];
+        let mut to = [0_u64; 8];
+        let mut space = DescriptorSpace::new([Arc::clone(&owner), Arc::clone(&child)]).unwrap();
+        unsafe {
+            let owner_ptr =
+                write_object(from.as_mut_ptr().cast(), 0, &owner, DescriptorState::Live);
+            let child_ptr = write_object(
+                from.as_mut_ptr().cast(),
+                owner_extent,
+                &child,
+                DescriptorState::Live,
+            );
+            std::ptr::write(
+                owner_ptr
+                    .add(owner.trace_offsets()[0] as usize)
+                    .cast::<usize>(),
+                child_ptr as usize | 1,
+            );
+            let mut root = (owner_ptr as usize | 3) as *mut u8;
+            cheney_copy_descriptors(
+                &[&mut root],
+                from.as_ptr().cast(),
+                owner_extent + child_extent,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .unwrap();
+            assert_eq!(root as usize & 7, 3);
+            assert_eq!(untag(root as usize), to.as_mut_ptr() as usize);
+            let moved_child = std::ptr::read(
+                (untag(root as usize) as *mut u8)
+                    .add(owner.trace_offsets()[0] as usize)
+                    .cast::<usize>(),
+            );
+            assert_eq!(moved_child & 7, 1);
+            assert_eq!(untag(moved_child), to.as_mut_ptr() as usize + owner_extent);
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_rejects_updated_cycles_before_mutation() {
+        let thunk = descriptor(ObjectKind::Thunk, &[RuntimeRep::LiftedRef]);
+        let extent = thunk.allocation_extent() as usize;
+        let mut from = [0_u64; 8];
+        let mut to = [0_u64; 8];
+        let mut space = DescriptorSpace::new([Arc::clone(&thunk)]).unwrap();
+        unsafe {
+            let first = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &thunk,
+                DescriptorState::Updated,
+            );
+            let second = write_object(
+                from.as_mut_ptr().cast(),
+                extent,
+                &thunk,
+                DescriptorState::Updated,
+            );
+            std::ptr::write(first.add(8).cast::<*mut u8>(), second);
+            std::ptr::write(second.add(8).cast::<*mut u8>(), first);
+            let mut root = first;
+            let error = cheney_copy_descriptors(
+                &[&mut root],
+                from.as_ptr().cast(),
+                extent * 2,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), extent * 2),
+                &mut space,
+            )
+            .err()
+            .unwrap();
+            assert!(matches!(error, DescriptorTraceError::UpdatedCycle { .. }));
+            assert_eq!(root, first);
+            assert_eq!(to, [0_u64; 8]);
+            assert_eq!(
+                thunk.state(first, extent).unwrap(),
+                DescriptorState::Updated
+            );
+            assert_eq!(
+                thunk.state(second, extent).unwrap(),
+                DescriptorState::Updated
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_short_circuits_updated_thunks_with_different_extents() {
+        let narrow_thunk = descriptor(ObjectKind::Thunk, &[]);
+        let wide_thunk = descriptor(
+            ObjectKind::Thunk,
+            &[RuntimeRep::Address, RuntimeRep::Address],
+        );
+        let result = constructor_descriptor(1, &[]);
+        let narrow_extent = narrow_thunk.allocation_extent() as usize;
+        let wide_extent = wide_thunk.allocation_extent() as usize;
+        let result_extent = result.allocation_extent() as usize;
+        let mut from = [0_u64; 16];
+        let mut to = [0_u64; 16];
+        let mut space = DescriptorSpace::new([
+            Arc::clone(&narrow_thunk),
+            Arc::clone(&wide_thunk),
+            Arc::clone(&result),
+        ])
+        .unwrap();
+        unsafe {
+            let first = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &narrow_thunk,
+                DescriptorState::Updated,
+            );
+            let second = write_object(
+                from.as_mut_ptr().cast(),
+                narrow_extent,
+                &wide_thunk,
+                DescriptorState::Updated,
+            );
+            let final_value = write_object(
+                from.as_mut_ptr().cast(),
+                narrow_extent + wide_extent,
+                &result,
+                DescriptorState::Live,
+            );
+            std::ptr::write(first.add(8).cast::<*mut u8>(), second);
+            std::ptr::write(second.add(8).cast::<usize>(), final_value as usize | 1);
+            let mut root = first;
+            let copied = cheney_copy_descriptors(
+                &[&mut root],
+                from.as_ptr().cast(),
+                narrow_extent + wide_extent + result_extent,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, result_extent);
+            assert_eq!(root as usize & 7, 1);
+            assert_eq!(untag(root as usize), to.as_mut_ptr() as usize);
+            assert_eq!(
+                narrow_thunk.state(first, narrow_extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+            assert_eq!(
+                wide_thunk.state(second, wide_extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_rejects_updated_targeting_forwarded_thunk() {
+        let thunk = descriptor(ObjectKind::Thunk, &[]);
+        let updated = descriptor(ObjectKind::Thunk, &[RuntimeRep::LiftedRef]);
+        let thunk_extent = thunk.allocation_extent() as usize;
+        let updated_extent = updated.allocation_extent() as usize;
+        let mut from = [0_u64; 8];
+        let mut to = [0_u64; 8];
+        let mut space = DescriptorSpace::new([Arc::clone(&thunk), Arc::clone(&updated)]).unwrap();
+        unsafe {
+            let live_thunk =
+                write_object(from.as_mut_ptr().cast(), 0, &thunk, DescriptorState::Live);
+            let updated_thunk = write_object(
+                from.as_mut_ptr().cast(),
+                thunk_extent,
+                &updated,
+                DescriptorState::Updated,
+            );
+            std::ptr::write(updated_thunk.add(8).cast::<*mut u8>(), live_thunk);
+            let mut live_root = live_thunk;
+            let mut updated_root = updated_thunk;
+            let error = cheney_copy_descriptors(
+                &[
+                    &mut live_root as *mut *mut u8,
+                    &mut updated_root as *mut *mut u8,
+                ],
+                from.as_ptr().cast(),
+                thunk_extent + updated_extent,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error, DescriptorTraceError::InvalidUpdatedTarget);
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_rejects_tagged_indirectee_after_updated_target_forwards() {
+        let thunk = descriptor(ObjectKind::Thunk, &[]);
+        let result = constructor_descriptor(3, &[]);
+        let thunk_extent = thunk.allocation_extent() as usize;
+        let result_extent = result.allocation_extent() as usize;
+        let mut from = [0_u64; 8];
+        let mut to = [0_u64; 8];
+        let mut space = DescriptorSpace::new([Arc::clone(&thunk), Arc::clone(&result)]).unwrap();
+        unsafe {
+            let updated_a = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &thunk,
+                DescriptorState::Updated,
+            );
+            let updated_b = write_object(
+                from.as_mut_ptr().cast(),
+                thunk_extent,
+                &thunk,
+                DescriptorState::Updated,
+            );
+            let final_value = write_object(
+                from.as_mut_ptr().cast(),
+                thunk_extent * 2,
+                &result,
+                DescriptorState::Live,
+            );
+            std::ptr::write(updated_b.add(8).cast::<usize>(), final_value as usize | 3);
+            std::ptr::write(updated_a.add(8).cast::<usize>(), updated_b as usize | 3);
+            let mut roots = [updated_b, updated_a];
+            let error = cheney_copy_descriptors(
+                &[roots.as_mut_ptr(), roots.as_mut_ptr().add(1)],
+                from.as_ptr().cast(),
+                thunk_extent * 2 + result_extent,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), to.len() * 8),
+                &mut space,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                error,
+                DescriptorTraceError::InvalidManagedTag {
+                    address: updated_b as usize,
+                    tag: 3,
+                }
+            );
+            assert_eq!(roots[0] as usize & 7, 3);
+            assert_eq!(untag(roots[0] as usize), to.as_mut_ptr() as usize);
+            assert_eq!(
+                thunk.state(updated_b, thunk_extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+            assert_eq!(
+                thunk.state(updated_a, thunk_extent).unwrap(),
+                DescriptorState::Updated
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_resolves_long_updated_chain_with_reusable_path() {
+        let thunk = descriptor(ObjectKind::Thunk, &[RuntimeRep::LiftedRef]);
+        let result = constructor_descriptor(1, &[]);
+        let thunk_extent = thunk.allocation_extent() as usize;
+        let result_extent = result.allocation_extent() as usize;
+        let chain_len = 24;
+        let source_bytes = thunk_extent * chain_len + result_extent;
+        let mut from = vec![0_u64; source_bytes / 8];
+        let mut to = vec![0_u64; source_bytes / 8];
+        let mut space = DescriptorSpace::new([Arc::clone(&thunk), Arc::clone(&result)]).unwrap();
+        unsafe {
+            let mut nodes = Vec::with_capacity(chain_len);
+            for index in 0..chain_len {
+                nodes.push(write_object(
+                    from.as_mut_ptr().cast(),
+                    thunk_extent * index,
+                    &thunk,
+                    DescriptorState::Updated,
+                ));
+            }
+            let final_value = write_object(
+                from.as_mut_ptr().cast(),
+                thunk_extent * chain_len,
+                &result,
+                DescriptorState::Live,
+            );
+            for pair in nodes.windows(2) {
+                std::ptr::write(pair[0].add(8).cast::<*mut u8>(), pair[1]);
+            }
+            std::ptr::write(
+                nodes[chain_len - 1].add(8).cast::<usize>(),
+                final_value as usize | 1,
+            );
+            let mut root = nodes[0];
+            let copied = cheney_copy_descriptors(
+                &[&mut root],
+                from.as_ptr().cast(),
+                source_bytes,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), source_bytes),
+                &mut space,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, result_extent);
+            assert_eq!(root as usize & 7, 1);
+            assert_eq!(untag(root as usize), to.as_mut_ptr() as usize);
+            for node in nodes {
+                assert_eq!(
+                    thunk.state(node, thunk_extent).unwrap(),
+                    DescriptorState::Forwarded
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_cheney_grows_updated_path_before_larger_collection() {
+        let thunk = descriptor(ObjectKind::Thunk, &[RuntimeRep::LiftedRef]);
+        let result = constructor_descriptor(1, &[]);
+        let thunk_extent = thunk.allocation_extent() as usize;
+        let result_extent = result.allocation_extent() as usize;
+        let mut space = DescriptorSpace::new([Arc::clone(&thunk), Arc::clone(&result)]).unwrap();
+
+        unsafe fn collect_updated_chain(
+            space: &mut DescriptorSpace,
+            thunk: &ObjectDescriptor,
+            result: &ObjectDescriptor,
+            chain_len: usize,
+        ) {
+            let thunk_extent = thunk.allocation_extent() as usize;
+            let result_extent = result.allocation_extent() as usize;
+            let source_bytes = thunk_extent * chain_len + result_extent;
+            let mut from = vec![0_u64; source_bytes / 8];
+            let mut to = vec![0_u64; source_bytes / 8];
+            let mut nodes = Vec::with_capacity(chain_len);
+            for index in 0..chain_len {
+                nodes.push(write_object(
+                    from.as_mut_ptr().cast(),
+                    thunk_extent * index,
+                    thunk,
+                    DescriptorState::Updated,
+                ));
+            }
+            let final_value = write_object(
+                from.as_mut_ptr().cast(),
+                thunk_extent * chain_len,
+                result,
+                DescriptorState::Live,
+            );
+            for pair in nodes.windows(2) {
+                std::ptr::write(pair[0].add(8).cast::<*mut u8>(), pair[1]);
+            }
+            std::ptr::write(
+                nodes[chain_len - 1].add(8).cast::<usize>(),
+                final_value as usize | 1,
+            );
+            let mut root = nodes[0];
+            let copied = cheney_copy_descriptors(
+                &[&mut root],
+                from.as_ptr().cast(),
+                source_bytes,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), source_bytes),
+                space,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, result_extent);
+            assert_eq!(root as usize & 7, 1);
+        }
+
+        unsafe {
+            collect_updated_chain(&mut space, &thunk, &result, 1);
+        }
+        let larger_chain_len = 24;
+        let larger_source_bytes = thunk_extent * larger_chain_len + result_extent;
+        space.prepare_starts(larger_source_bytes).unwrap();
+        assert!(
+            space.updated_path.capacity() >= larger_source_bytes.div_ceil(16),
+            "updated path scratch must be ready before the larger collection mutates heap objects"
+        );
+        unsafe {
+            collect_updated_chain(&mut space, &thunk, &result, larger_chain_len);
         }
     }
 
@@ -1499,11 +2193,11 @@ mod descriptor_copy_tests {
                 &thunk_layout,
                 DescriptorState::Updated,
             );
-            std::ptr::write(live.add(8).cast::<*mut u8>(), evaluating);
-            std::ptr::write(live.add(16).cast::<*mut u8>(), std::ptr::null_mut());
+            std::ptr::write(live.add(8).cast::<usize>(), 0x1234_5678);
+            std::ptr::write(live.add(16).cast::<*mut u8>(), evaluating);
             std::ptr::write(evaluating.add(8).cast::<usize>(), 0x1234_5678);
             std::ptr::write(evaluating.add(16).cast::<*mut u8>(), live);
-            std::ptr::write(updated.add(8).cast::<*mut u8>(), evaluating);
+            std::ptr::write(updated.add(8).cast::<*mut u8>(), live);
             std::ptr::write(updated.add(16).cast::<usize>(), usize::MAX);
             let mut live_root = live;
             let mut updated_root = updated;
@@ -1516,31 +2210,24 @@ mod descriptor_copy_tests {
                 &mut space,
             )
             .unwrap();
-            assert_eq!(copied.bytes_copied, extent * 3);
-            let copied_eval = std::ptr::read(updated_root.add(8).cast::<*mut u8>());
+            assert_eq!(copied.bytes_copied, extent * 2);
+            assert_eq!(updated_root, live_root);
+            let copied_eval = std::ptr::read(live_root.add(16).cast::<*mut u8>());
             assert_eq!(
                 live_layout.state(live_root, extent).unwrap(),
                 DescriptorState::Live
-            );
-            assert_eq!(
-                thunk_layout.state(updated_root, extent).unwrap(),
-                DescriptorState::Updated
             );
             assert_eq!(
                 thunk_layout.state(copied_eval, extent).unwrap(),
                 DescriptorState::Evaluating
             );
             assert_eq!(
-                std::ptr::read(live_root.add(8).cast::<*mut u8>()),
-                evaluating
-            );
-            assert_eq!(
                 std::ptr::read(copied_eval.add(16).cast::<*mut u8>()),
                 live_root
             );
             assert_eq!(
-                std::ptr::read(updated_root.add(16).cast::<usize>()),
-                usize::MAX
+                std::ptr::read(copied_eval.add(8).cast::<usize>()),
+                0x1234_5678
             );
             assert_eq!(
                 live_layout.state(live, extent).unwrap(),

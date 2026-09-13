@@ -64,6 +64,17 @@ polymorphicIdentity value = value
 polymorphicIdentityResult :: Int
 polymorphicIdentityResult = I# (polymorphicIdentity demandedCallee 41#)
 
+-- The qualified top reference must remain visible even though a local binder
+-- has the same unit/module/occurrence rendering.
+sameOccurrenceTop :: Int# -> Int#
+sameOccurrenceTop value = value +# 1#
+{-# NOINLINE sameOccurrenceTop #-}
+
+sameOccurrenceResult :: Int
+sameOccurrenceResult =
+  let sameOccurrenceTop = 41#
+  in I# (M3Vertical.sameOccurrenceTop sameOccurrenceTop)
+
 entry :: Int -> Box
 entry count = go count (foldl' (+) 0 [1, 2, 3])
   where

@@ -1462,7 +1462,7 @@ mod tests {
     #[test]
     fn prepared_collection_reserves_capacity_and_rewrites_only_managed_fields() {
         use std::sync::Arc;
-        use tidepool_heap::execution_descriptor::{ObjectDescriptor, ObjectKind};
+        use tidepool_heap::execution_descriptor::ObjectDescriptor;
         use tidepool_repr::execution_schema::{
             Architecture, Endianness, RuntimeRep, StorageLayout, TargetDescriptor,
         };
@@ -1475,8 +1475,8 @@ mod tests {
             features: Vec::new(),
         };
         let descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target, &[RuntimeRep::LiftedRef, RuntimeRep::Address])
                     .unwrap(),
                 None,

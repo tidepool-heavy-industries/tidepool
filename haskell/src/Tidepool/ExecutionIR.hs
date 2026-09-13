@@ -14,6 +14,7 @@ module Tidepool.ExecutionIR
   , PreparedSupport(..)
   , PreparedInventory(..)
   , inventoryPreparedModule
+  , topBindingReferences
   , renderPreparedInventory
   ) where
 
@@ -31,12 +32,16 @@ import GHC.Data.FastString (unpackFS)
 import GHC.Stg.Syntax
 import GHC.Builtin.PrimOps (primOpOcc)
 import GHC.Types.Literal (LitNumType(..), Literal(..))
-import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
+import GHC.Types.Name (Name, nameModule_maybe, nameOccName, nameUnique)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Env (nonDetNameEnvElts)
 import GHC.Types.RepType (typePrimRep_maybe)
+import GHC.Types.Unique (Unique)
+import GHC.Types.Unique.Set
+  ( UniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet
+  , mkUniqSet, unionUniqSets )
 import GHC.Types.Var.Set (dVarSetElems)
-import GHC.Types.Var (Id, varName, varType)
+import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
 import Tidepool.PreparedStg (PreparedModule(..))
@@ -118,24 +123,29 @@ data PreparedInventory = PreparedInventory
 
 data Scope = Scope
   { scopeModule :: Module
-  , scopeTopLevel :: Set ExactName
-  , scopeLocals :: Set ExactName
-  , scopeRecursive :: Set ExactName
+  , scopeTopLevel :: UniqSet Unique
+  , scopeLocals :: UniqSet Unique
+  , scopeRecursive :: UniqSet Unique
   }
 
 data Acc = Acc (Set Dependency) (Set LiteralInventory) (Set RuntimeForm)
-  (Set PreparedFact)
+  (Set PreparedFact) [(Unique, ExactName)]
 
 instance Semigroup Acc where
-  Acc a b c d <> Acc w x y z = Acc (a <> w) (b <> x) (c <> y) (d <> z)
+  Acc a b c d e <> Acc w x y z q =
+    Acc (a <> w) (b <> x) (c <> y) (d <> z) (e <> q)
 instance Monoid Acc where
-  mempty = Acc mempty mempty mempty mempty
+  mempty = Acc mempty mempty mempty mempty mempty
 
 inventoryPreparedModule :: PreparedModule -> PreparedInventory
 inventoryPreparedModule prepared =
-  let tops = Set.fromList (concatMap (topBinders (pmModule prepared)) (pmBindings prepared))
-      scope = Scope (pmModule prepared) tops mempty mempty
-      Acc dependencies _walkedLiterals forms _walkedFacts =
+  let tops = mkUniqSet
+        [ varUnique binder
+        | (binding, _) <- pmBindings prepared
+        , binder <- topIds binding
+        ]
+      scope = Scope (pmModule prepared) tops emptyUniqSet emptyUniqSet
+      Acc dependencies _walkedLiterals forms _walkedFacts _references =
         foldMap (walkTop scope . fst) (pmBindings prepared)
       literals = Set.fromList (map literalInventory (preparedLiterals (pmFacts prepared)))
       imported = Set.fromList
@@ -146,6 +156,21 @@ inventoryPreparedModule prepared =
       facts = inventoryExactFacts (pmModule prepared) (pmFacts prepared)
   in PreparedInventory (moduleIdentity (pmModule prepared)) dependencies literals forms
        (facts <> imported <> tags)
+
+-- | Return top-level references from one binding using the same structured STG
+-- walk as the inventory.  The supplied universe is the complete set of
+-- candidate top binders across all projected modules; references outside it
+-- remain package/import globals and are deliberately omitted.
+topBindingReferences :: Module -> UniqSet Unique -> CgStgTopBinding -> Set ExactName
+topBindingReferences modul topLevel binding =
+  let Acc _dependencies _ _ _ references = walkTop scope binding
+  in Set.fromList
+    [ name
+    | (unique, name) <- references
+    , elementOfUniqSet unique topLevel
+    ]
+ where
+  scope = Scope modul topLevel emptyUniqSet emptyUniqSet
 
 inventoryExactFacts :: Module -> PreparedFacts -> Set PreparedFact
 inventoryExactFacts modul facts = Set.fromList
@@ -202,9 +227,9 @@ idIdentity fallback binder = case exactName (varName binder) of
   Nothing -> ExactName (unitString (moduleUnit fallback))
     (moduleNameString (moduleName fallback)) (occNameString (nameOccName (varName binder)))
 
-topBinders :: Module -> (CgStgTopBinding, a) -> [ExactName]
-topBinders modul (StgTopStringLit binder _, _) = [idIdentity modul binder]
-topBinders modul (StgTopLifted binding, _) = map (idIdentity modul) (bindingBinders binding)
+topIds :: CgStgTopBinding -> [Id]
+topIds (StgTopStringLit binder _) = [binder]
+topIds (StgTopLifted binding) = bindingBinders binding
 
 bindingBinders :: CgStgBinding -> [Id]
 bindingBinders (StgNonRec binder _) = [binder]
@@ -218,10 +243,10 @@ walkTop scope (StgTopLifted binding) = walkBinding scope binding
 walkBinding :: Scope -> CgStgBinding -> Acc
 walkBinding scope (StgNonRec binder rhs) =
   form NonRecursiveBinding <> binderForms binder <>
-  walkRhs (scope { scopeLocals = addId (scopeModule scope) binder (scopeLocals scope) }) rhs
+  walkRhs (scope { scopeLocals = addId binder (scopeLocals scope) }) rhs
 walkBinding scope (StgRec pairs) =
-  let recursive = Set.fromList (map (idIdentity (scopeModule scope)) (map fst pairs))
-      inner = scope { scopeLocals = scopeLocals scope <> recursive
+  let recursive = mkUniqSet (map (varUnique . fst) pairs)
+      inner = scope { scopeLocals = scopeLocals scope `unionUniqSets` recursive
                     , scopeRecursive = recursive }
   in form RecursiveBinding <> foldMap (\(binder, rhs) -> binderForms binder <> walkRhs inner rhs) pairs
 
@@ -231,7 +256,8 @@ walkRhs scope (StgRhsClosure captures _ update binders body ty) =
   fact (ClosureCaptures (ExactName "" "" "<unowned>") (map (idIdentity (scopeModule scope))
     (dVarSetElems captures))) <>
   foldMap binderForms binders <>
-  walkExpr (scope { scopeLocals = scopeLocals scope <> Set.fromList (map (idIdentity (scopeModule scope)) binders) }) body
+  walkExpr (scope { scopeLocals = scopeLocals scope `unionUniqSets`
+      mkUniqSet (map varUnique binders) }) body
 walkRhs scope (StgRhsCon _ con _ _ args ty) =
   form ConstructorRhs <> nameDependency scope (dataConName con) <>
   fact (ConstructorLayout (idIdentity (scopeModule scope) (dataConWorkId con))
@@ -251,14 +277,15 @@ walkExpr scope = \case
       (renderTypeReps ty))
   StgCase scrutinee binder altType alts -> form CaseExpr <> walkExpr scope scrutinee
     <> binderForms binder <> altTypeForms altType
-    <> foldMap (walkAlt (scope { scopeLocals = addId (scopeModule scope) binder (scopeLocals scope) })) alts
+    <> foldMap (walkAlt (scope { scopeLocals = addId binder (scopeLocals scope) })) alts
   StgLet _ binding body -> form LetExpr <> walkBinding scope binding <> walkExpr (extendBinding scope binding) body
   StgLetNoEscape _ binding body -> form JoinBinding <> walkBinding scope binding <> walkExpr (extendBinding scope binding) body
   StgTick _ body -> form TickExpr <> walkExpr scope body
 
 walkAlt :: Scope -> CgStgAlt -> Acc
 walkAlt scope (GenStgAlt con binders rhs) = altConAcc scope con <> foldMap binderForms binders
-  <> walkExpr (scope { scopeLocals = scopeLocals scope <> Set.fromList (map (idIdentity (scopeModule scope)) binders) }) rhs
+  <> walkExpr (scope { scopeLocals = scopeLocals scope `unionUniqSets`
+      mkUniqSet (map varUnique binders) }) rhs
 
 altConAcc :: Scope -> AltCon -> Acc
 altConAcc scope (DataAlt con) = nameDependency scope (dataConName con)
@@ -274,31 +301,37 @@ altTypeForms _ = mempty
 
 extendBinding :: Scope -> CgStgBinding -> Scope
 extendBinding scope binding = scope
-  { scopeLocals = scopeLocals scope <> Set.fromList (map (idIdentity (scopeModule scope)) (bindingBinders binding)) }
+  { scopeLocals = scopeLocals scope `unionUniqSets`
+      mkUniqSet (map varUnique (bindingBinders binding)) }
 
-addId :: Module -> Id -> Set ExactName -> Set ExactName
-addId modul binder = Set.insert (idIdentity modul binder)
+addId :: Id -> UniqSet Unique -> UniqSet Unique
+addId binder scope = addOneToUniqSet scope (varUnique binder)
 
 walkArg :: Scope -> StgArg -> Acc
 walkArg scope (StgVarArg binder) = walkId scope binder <> binderForms binder
 walkArg _ (StgLitArg literal) = literalAcc literal
 
 walkId :: Scope -> Id -> Acc
-walkId scope binder = dependencyAcc scope (idIdentity (scopeModule scope) binder)
+walkId scope binder = dependencyAcc scope (varUnique binder)
+  (idIdentity (scopeModule scope) binder) <>
+  Acc mempty mempty mempty mempty
+    [(varUnique binder, idIdentity (scopeModule scope) binder)]
 
-dependencyAcc :: Scope -> ExactName -> Acc
-dependencyAcc scope name = Acc (Set.singleton (Dependency kind name)) mempty mempty mempty
+dependencyAcc :: Scope -> Unique -> ExactName -> Acc
+dependencyAcc scope unique name = Acc
+  (Set.singleton (Dependency kind name)) mempty mempty mempty mempty
  where
   here = moduleIdentity (scopeModule scope)
   kind
-    | name `Set.member` scopeRecursive scope = RecursiveDependency
-    | name `Set.member` scopeLocals scope = LocalDependency
-    | name `Set.member` scopeTopLevel scope = GlobalDependency
+    | elementOfUniqSet unique (scopeRecursive scope) = RecursiveDependency
+    | elementOfUniqSet unique (scopeLocals scope) = LocalDependency
+    | elementOfUniqSet unique (scopeTopLevel scope) = GlobalDependency
     | exactUnit name == exactUnit here = GlobalDependency
     | otherwise = LibraryDependency
 
 nameDependency :: Scope -> Name -> Acc
-nameDependency scope = maybe mempty (dependencyAcc scope) . exactName
+nameDependency scope name = maybe mempty
+  (dependencyAcc scope (nameUnique name)) (exactName name)
 
 binderForms :: Id -> Acc
 binderForms = typeForms . varType
@@ -318,7 +351,7 @@ repForm :: PrimRep -> Acc
 repForm = form . RuntimeRepresentation . show
 
 literalAcc :: Literal -> Acc
-literalAcc literal = Acc mempty (Set.singleton (literalInventory literal)) mempty mempty
+literalAcc literal = Acc mempty (Set.singleton (literalInventory literal)) mempty mempty mempty
 
 literalInventory :: Literal -> LiteralInventory
 literalInventory literal = case literal of
@@ -338,10 +371,10 @@ containsModifiedNul (_ : rest) = containsModifiedNul rest
 containsModifiedNul [] = False
 
 form :: RuntimeForm -> Acc
-form value = Acc mempty mempty (Set.singleton value) mempty
+form value = Acc mempty mempty (Set.singleton value) mempty mempty
 
 fact :: PreparedFact -> Acc
-fact value = Acc mempty mempty mempty (Set.singleton value)
+fact value = Acc mempty mempty mempty (Set.singleton value) mempty
 
 argReps :: StgArg -> [String]
 argReps (StgVarArg binder) = renderTypeReps (varType binder)

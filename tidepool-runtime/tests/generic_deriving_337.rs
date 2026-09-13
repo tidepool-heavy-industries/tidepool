@@ -14,8 +14,8 @@
 //! loudly (see `require_extract`) when the extractor is unreachable.
 
 use serde_json::json;
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_testing::eval_harness::{require_extract, EvalHarness};
-use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};
 
 /// Compile + run a full module PURE on the JIT, returning the target binding's
 /// JSON. Panics loudly when the extractor is unavailable.
@@ -191,15 +191,9 @@ fn positional_sum_tojson_encodes_the_contents_field() {
     );
 }
 
-/// Differential parity on the #337 decode path: the generic-deriving Core
-/// (M1/K1/:*:/selector metadata dictionaries, `eitherDecode` → generic
-/// `parseJSON` → field arithmetic) produces the SAME result on the tree-walking
-/// eval oracle and the JIT. This is the guarantee that generics-heavy Core is
-/// executed consistently by both engines, not just that the JIT returns 7.
-///
-/// (A narrower shape — `fromJSON . toJSON` FUSED with `+` in one expression —
-/// trips an eval-oracle Int# boxing bug where the JIT is correct; that is
-/// tracked separately as an engine issue and is not the taught idiom.)
+/// The generic-deriving Core (M1/K1/:*:/selector metadata dictionaries,
+/// `eitherDecode` → generic `parseJSON` → field arithmetic) must run to 7 on
+/// the JIT.
 #[test]
 fn eval_jit_parity_on_generic_core() {
     require_extract();
@@ -217,9 +211,21 @@ fn eval_jit_parity_on_generic_core() {
         .with_stdlib()
         .compile(&src, "result")
         .expect("compile failed");
-    match check_jit_vs_eval_captured(&compiled.expr, &compiled.table, 64 * 1024) {
-        CapturedOutcome::Agree(_) => {}
-        other => panic!("eval/JIT disagreed on generic-deriving decode Core: {other:?}"),
+    let mut machine = JitEffectMachine::compile(&compiled.expr, &compiled.table, 64 * 1024)
+        .expect("generic-deriving decode Core must compile");
+    let value = machine
+        .run_pure()
+        .expect("generic-deriving decode Core must run");
+    match &value {
+        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(n)) if *n == 7 => {}
+        tidepool_bridge::Value::Con(_, fields)
+            if matches!(
+                fields.as_slice(),
+                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                    7
+                ))]
+            ) => {}
+        other => panic!("generic-deriving decode Core must produce 7, got {other:?}"),
     }
 }
 

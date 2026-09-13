@@ -5,10 +5,6 @@
 //! The codegen must pre-allocate both Con and Lam objects, bind them in env,
 //! then fill fields/code-ptrs in a second pass.
 
-use tidepool_codegen::emit::expr::compile_expr;
-use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::host_fns;
-use tidepool_codegen::pipeline::CodegenPipeline;
 use tidepool_heap::layout;
 use tidepool_repr::*;
 use tidepool_testing::jit_run::compile_and_run;
@@ -375,52 +371,4 @@ fn test_letrec_continuation_chain_structure() {
         let g_closure = read_con_field(l2, 0);
         assert_eq!(layout::read_tag(g_closure), layout::TAG_CLOSURE);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Test 7: Compile the actual tide repl CBOR — just check it compiles
-// ---------------------------------------------------------------------------
-#[test]
-fn test_compile_repl_cbor() {
-    // The repl Core is 1885 nodes deep — emit_node recurses and overflows
-    // the default 8MB stack. Run with a larger stack.
-    let result = std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024) // 32 MB
-        .spawn(compile_repl_cbor_inner)
-        .unwrap()
-        .join();
-    match result {
-        Ok(()) => {}
-        Err(e) => std::panic::resume_unwind(e),
-    }
-}
-
-fn compile_repl_cbor_inner() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../examples/tide/target/tidepool-cbor/Repl/repl.cbor"
-    );
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("Skipping: repl.cbor not found (run cargo build -p tidepool-tide first)");
-            return;
-        }
-    };
-    let expr = tidepool_repr::serial::read::read_cbor(&data).unwrap();
-
-    // Load meta for DataConTable
-    let meta_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../examples/tide/target/tidepool-cbor/Repl/meta.cbor"
-    );
-    let meta_data = std::fs::read(meta_path).unwrap();
-    let (table, _) = tidepool_repr::serial::read::read_metadata(&meta_data).unwrap();
-
-    let expr = tidepool_codegen::datacon_env::wrap_with_datacon_env(expr, &table);
-
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let result = compile_expr(&mut pipeline, &expr, "repl", &ExternalEnv::new());
-    assert!(result.is_ok(), "compile_expr failed: {:?}", result.err());
-    pipeline.finalize().expect("failed to finalize");
 }

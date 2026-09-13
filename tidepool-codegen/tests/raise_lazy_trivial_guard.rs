@@ -16,11 +16,11 @@
 //! once `CURRENT_MACHINE` is installed, which happens inside
 //! `run_pure`/`RegistryGuard`, not in the bare harness.
 
-use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_bridge::Value;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_repr::types::{Alt, AltCon, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
-use tidepool_testing::proptest::build_table_for_expr;
+use tidepool_testing::gen::build_table_for_expr;
 
 /// `let x = raise# in case 0# of { 0# -> 0#; DEFAULT -> x }`
 ///

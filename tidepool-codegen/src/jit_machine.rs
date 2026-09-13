@@ -3741,7 +3741,7 @@ mod tests {
 
     #[test]
     fn late_prepared_collection_failure_fences_readers_and_retains_both_spaces() {
-        use tidepool_heap::execution_descriptor::{DescriptorState, ObjectDescriptor, ObjectKind};
+        use tidepool_heap::execution_descriptor::{DescriptorState, ObjectDescriptor};
         use tidepool_repr::execution_schema::{
             Architecture, Endianness, RuntimeRep, StorageLayout, TargetDescriptor,
         };
@@ -3760,8 +3760,8 @@ mod tests {
             features: vec![],
         };
         let descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target, &[RuntimeRep::LiftedRef, RuntimeRep::LiftedRef])
                     .unwrap(),
                 None,

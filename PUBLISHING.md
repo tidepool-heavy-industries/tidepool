@@ -18,24 +18,23 @@ Crates must be published in dependency order. Wait for each crate to appear on c
  8.  tidepool-codegen
  9.  tidepool-extract-cmd
 10.  tidepool-extract-report
-11.  tidepool-macro
-12.  tidepool-atomic-write
-13.  tidepool-worktree
-14.  tidepool-agent
-15.  tidepool-bridge-effects
-16.  tidepool-toolchain
-17.  tidepool-runtime
-18.  tidepool-mcp
-19.  tidepool-handlers
-20.  tidepool-model
-21.  tidepool-model-output
-22.  tidepool-actor
-23.  tidepool-harness
-24.  tidepool-web (binary)
-25.  tidepool (binary)
-26.  tidepool-optimize
-27.  tidepool-protocol
-28.  tidepool-repl (binary)
+11.  tidepool-atomic-write
+12.  tidepool-worktree
+13.  tidepool-agent
+14.  tidepool-bridge-effects
+15.  tidepool-toolchain
+16.  tidepool-runtime
+17.  tidepool-mcp
+18.  tidepool-handlers
+19.  tidepool-model
+20.  tidepool-model-output
+21.  tidepool-actor
+22.  tidepool-harness
+23.  tidepool-web (binary)
+24.  tidepool (binary)
+25.  tidepool-optimize
+26.  tidepool-protocol
+27.  tidepool-repl (binary)
 ```
 
 This order is topologically sorted from the workspace dependency graph
@@ -44,8 +43,7 @@ This order is topologically sorted from the workspace dependency graph
 each crate after all its own workspace dependencies is valid; this is one
 such order, not the only one.
 
-`tidepool-testing` and the two example crates (`tidepool-guess`,
-`tidepool-tide`) have `publish = false` — crates.io ignores them. Everything
+`tidepool-testing` has `publish = false` — crates.io ignores it. Everything
 else in the workspace publishes, including the binary packages in the list
 above (each depends on library crates that publish earlier).
 

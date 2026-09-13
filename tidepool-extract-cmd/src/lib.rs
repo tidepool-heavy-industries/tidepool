@@ -2,8 +2,7 @@
 //!
 //! What lives here:
 //!
-//! - [`resolve_bin`] — binary resolution, with `tidepool-macro`'s STRICT
-//!   policy as the default for everyone: a SET-but-unreadable
+//! - [`resolve_bin`] — strict binary resolution: a SET-but-unreadable
 //!   `$TIDEPOOL_EXTRACT` is a hard error, never a silent fall-through to
 //!   `PATH`; an UNSET one falls back to the bare `tidepool-extract` name.
 //! - [`ExtractCmd`] — construction and encoding of typed compiler requests.
@@ -234,8 +233,7 @@ impl From<BinError> for std::io::Error {
 /// `PATH` — a repo with a freshly built extract must never be trumped by a
 /// stale installed one. A SET-but-unreadable `$TIDEPOOL_EXTRACT` is a hard
 /// error, not a silent fall-through to `PATH`: falling through would run a
-/// DIFFERENT binary than the caller believes it is running (in
-/// `tidepool-macro`'s case, a different endpoint than the content key names).
+/// DIFFERENT binary than the caller believes it is running.
 /// An UNSET env falls back to the bare [`DEFAULT_BIN`] name.
 pub fn resolve_bin() -> Result<ResolvedBin, BinError> {
     match std::env::var_os("TIDEPOOL_EXTRACT") {
@@ -276,8 +274,7 @@ enum Settlement {
 }
 
 impl SpawnError {
-    /// The binary genuinely wasn't there. `tidepool-macro`'s nix fallback
-    /// keys on this (and only when the bin came from [`BinSource::PathLookup`]).
+    /// The binary genuinely wasn't there.
     pub fn is_not_found(&self) -> bool {
         self.source.kind() == std::io::ErrorKind::NotFound
     }

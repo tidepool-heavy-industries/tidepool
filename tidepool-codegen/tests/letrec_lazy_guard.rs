@@ -12,10 +12,9 @@
 //!      — is safe under lazy-default (the binding is a thunk forced after all
 //!      Con fields are filled).
 use tidepool_bridge::Value;
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, Literal, PrimOpKind, TreeBuilder, VarId};
-use tidepool_testing::proptest::{
-    build_table_for_expr, check_jit_vs_eval_captured, CapturedOutcome,
-};
+use tidepool_testing::gen::build_table_for_expr;
 
 const NURSERY: usize = 1 << 20;
 const CONS: u64 = 0x00C0_FFEE; // 2 fields
@@ -44,14 +43,16 @@ fn lit_int(v: &Value) -> Option<i64> {
 fn assert_agrees(name: &'static str, expr: tidepool_repr::CoreExpr, expected: i64) {
     on_big_stack(move || {
         let table = build_table_for_expr(&expr);
-        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::Agree(v) => assert_eq!(
-                lit_int(&v),
-                Some(expected),
-                "{name}: both engines must agree on {expected}, got {v:?}"
-            ),
-            other => panic!("{name}: must Agree({expected}) in both engines, got {other:?}"),
-        }
+        let mut machine = JitEffectMachine::compile(&expr, &table, NURSERY)
+            .unwrap_or_else(|err| panic!("{name}: fixture must compile: {err}"));
+        let value = machine
+            .run_pure()
+            .unwrap_or_else(|err| panic!("{name}: fixture must run: {err}"));
+        assert_eq!(
+            lit_int(&value),
+            Some(expected),
+            "{name}: JIT must produce {expected}, got {value:?}"
+        );
     });
 }
 

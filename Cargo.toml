@@ -13,7 +13,6 @@ members = [
     "tidepool-bridge",
     "tidepool-bridge-derive",
     "tidepool-bridge-effects",
-    "tidepool-macro",
     "tidepool-effect",
     "tidepool-extract-cmd",
     "tidepool-extract-report",
@@ -29,8 +28,6 @@ members = [
     "tidepool-agent",
     "tidepool-web",
     "tidepool",
-    "examples/guess",
-    "examples/tide",
 ]
 resolver = "2"
 
@@ -59,7 +56,6 @@ tidepool-extract-report = { version = "0.1.0", path = "tidepool-extract-report" 
 tidepool-handlers = { version = "0.1.0", path = "tidepool-handlers" }
 tidepool-harness = { version = "0.1.0", path = "tidepool-harness" }
 tidepool-heap = { version = "0.1.0", path = "tidepool-heap" }
-tidepool-macro = { version = "0.1.0", path = "tidepool-macro" }
 tidepool-mcp = { version = "0.1.0", path = "tidepool-mcp" }
 tidepool-model-output = { version = "0.1.0", path = "tidepool-model-output" }
 tidepool-model = { version = "0.1.0", path = "tidepool-model" }

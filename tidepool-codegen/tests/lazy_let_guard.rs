@@ -11,10 +11,9 @@
 //! extractor's fixtures, so extractor/fixture churn cannot silently erode
 //! this coverage.
 use tidepool_bridge::Value;
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::{Alt, AltCon, CoreFrame, DataConId, Literal, PrimOpKind, TreeBuilder, VarId};
-use tidepool_testing::proptest::{
-    build_table_for_expr, check_jit_vs_eval_captured, CapturedOutcome,
-};
+use tidepool_testing::gen::build_table_for_expr;
 
 const NURSERY: usize = 1 << 20;
 
@@ -109,17 +108,16 @@ fn corecursive_let_consumed_boundedly_terminates() {
 
     on_big_stack(move || {
         let table = build_table_for_expr(&expr);
-        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::Agree(v) => assert_eq!(
-                boxed_or_lit_int(&v),
-                Some(7),
-                "corecursive `let x = go n` consumed boundedly must be 7 in both engines, got {v:?}"
-            ),
-            other => panic!(
-                "lazy-let regression: a productive corecursion consumed boundedly must Agree(7) \
-                 (eager-let force-recurses the JIT into StackOverflow). got {other:?}"
-            ),
-        }
+        let mut machine = JitEffectMachine::compile(&expr, &table, NURSERY)
+            .expect("corecursive lazy-let fixture must compile");
+        let value = machine
+            .run_pure()
+            .expect("corecursive lazy-let fixture must run");
+        assert_eq!(
+            boxed_or_lit_int(&value),
+            Some(7),
+            "corecursive `let x = go n` consumed boundedly must be 7, got {value:?}"
+        );
     });
 }
 
@@ -146,13 +144,13 @@ fn trivial_let_fast_path_is_correct() {
 
     on_big_stack(move || {
         let table = build_table_for_expr(&expr);
-        match check_jit_vs_eval_captured(&expr, &table, NURSERY) {
-            CapturedOutcome::Agree(v) => assert_eq!(
-                boxed_or_lit_int(&v),
-                Some(15),
-                "trivial `let y = 5 in y +# 10` must be 15, got {v:?}"
-            ),
-            other => panic!("trivial let must Agree(15), got {other:?}"),
-        }
+        let mut machine = JitEffectMachine::compile(&expr, &table, NURSERY)
+            .expect("trivial let fixture must compile");
+        let value = machine.run_pure().expect("trivial let fixture must run");
+        assert_eq!(
+            boxed_or_lit_int(&value),
+            Some(15),
+            "trivial `let y = 5 in y +# 10` must be 15, got {value:?}"
+        );
     });
 }

@@ -35,12 +35,13 @@ import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
-import GHC.Types.Var (Id, varName, varType)
+import GHC.Types.Unique.Set (mkUniqSet)
+import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
-import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
+import Tidepool.ExecutionIR (ExactName(..), topBindingReferences)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedStg (PreparedModule(..))
@@ -108,10 +109,10 @@ projectPrepared context modules = do
     groupItems (Recursive tops) = tops
     topSymbol (TopBinding symbol _) = symbol
 
--- | Project only the home-module closure reachable from the selected entry.
--- Package imports remain explicit globals for atomic linking. This avoids
--- rejecting unrelated polymorphic bindings while retaining every local
--- dependency of the entry.
+-- | Project only the supplied top-level closure reachable from the selected
+-- entry. Package imports remain explicit globals for atomic linking. This
+-- avoids rejecting unrelated polymorphic bindings while retaining every
+-- supplied top-level dependency of the entry.
 projectPreparedTarget :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPreparedTarget context modules =
   projectPrepared context
@@ -120,18 +121,36 @@ projectPreparedTarget context modules =
     , any isReachable (pmBindings prepared)
     ]
   where
-    allBindings = concatMap pmBindings modules
+    allBindings =
+      [ (pmModule prepared, binding)
+      | prepared <- modules
+      , (binding, _) <- pmBindings prepared
+      ]
+    topLevel = mkUniqSet
+      [ varUnique binder
+      | (_, binding) <- allBindings
+      , binder <- topBinders binding
+      ]
+    topIdentities = Map.fromList
+      [ (exactNameOf modul binder, idSymbol "value" binder)
+      | (modul, binding) <- allBindings
+      , binder <- topBinders binding
+      ]
     entry = projectionEntry context
     seedSymbols =
       [ symbol
-      | (binding, _) <- allBindings
+      | (_, binding) <- allBindings
       , binder <- topBinders binding
       , let symbol = idSymbol "value" binder
       , symbol == entry
       ]
     dependencies = Map.fromListWith (<>)
-      [ (idSymbol "value" binder, map (idSymbol "value") (nonDetEltsUniqSet freeVars))
-      | (binding, freeVars) <- allBindings
+      [ (idSymbol "value" binder, Set.fromList
+          [ symbol
+          | name <- Set.toList (topBindingReferences modul topLevel binding)
+          , Just symbol <- [Map.lookup name topIdentities]
+          ])
+      | (modul, binding) <- allBindings
       , binder <- topBinders binding
       ]
     reachableSymbols = close Set.empty seedSymbols
@@ -143,7 +162,19 @@ projectPreparedTarget context modules =
     close visited (symbol : pending)
       | symbol `Set.member` visited = close visited pending
       | otherwise = close (Set.insert symbol visited)
-          (maybe pending (++ pending) (Map.lookup symbol dependencies))
+          (maybe pending (\next -> Set.toList next <> pending)
+            (Map.lookup symbol dependencies))
+
+    -- Top binders retain their defining module in the GHC Name. Keeping this
+    -- conversion local avoids making the provisional inventory depend on the
+    -- wire schema's symbol type.
+    exactNameOf fallback binder = case nameModule_maybe (varName binder) of
+      Just modul -> ExactName (unitString (moduleUnit modul))
+        (moduleNameString (moduleName modul))
+        (occNameString (nameOccName (varName binder)))
+      Nothing -> ExactName (unitString (moduleUnit fallback))
+        (moduleNameString (moduleName fallback))
+        (occNameString (nameOccName (varName binder)))
 
 topBinders :: CgStgTopBinding -> [Id]
 topBinders (StgTopStringLit binder _) = [binder]

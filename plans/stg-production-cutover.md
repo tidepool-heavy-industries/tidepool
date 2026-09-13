@@ -264,7 +264,7 @@ Completed focused checks in this tranche (all through the repository dev shell):
 | `env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER just fixtures-check` | Passed after the documented neutral-fixture probe; canonical corpus unchanged. |
 | `cargo test -p tidepool-effect --test proptest_effect` | 3 passed; restored value-only routing coverage uses the bridge owner. |
 | `cargo test -p tidepool-testing --test proptest_varid_defense` | 6 passed after moving these unchanged scenarios out of repr's dependency graph. |
-| `cargo test -p tidepool-testing --test proptest_cbor` | 8 passed, 1 red: `literal_round_trip`, minimal `LitFloat(4294967296)`, rejected as float bits exceeding u32. Main baseline not checked; assertion unchanged. |
+| `cargo test -p tidepool-testing --test proptest_cbor` | 8 passed, 1 red: `literal_round_trip`, minimal `LitFloat(4294967296)`, rejected as float bits exceeding u32. Source inspection identifies this as pre-existing; no main baseline run was used, and it is not conflated with the separate historical float tests. |
 | `cargo test -p tidepool-toolchain --lib prepared_artifact::` | 3 passed after adding a real known callable import to the GHC fixture. |
 | `cargo test -p tidepool-codegen --lib prepared_ -- --nocapture` | 7 passed after collector replacement, including generated live-root relocation, late corruption, semispace reuse and published growth failure. |
 | `cargo test -p tidepool-codegen --lib descriptor_bridge::` | Final descriptor collector consumers: 6 passed. |
@@ -276,10 +276,11 @@ Completed focused checks in this tranche (all through the repository dev shell):
 | `cargo test -p tidepool-actor --lib resident_reentry_state_tracks_unavailable_busy_and_stale_checkout` | Actor lib tests compiled; focused test passed (1). Earlier `--no-run` found a stale deleted-helper reference; the literal-only fixture now uses the existing standard constructor table. |
 | `just suite-check` | Passed: every integration file registered exactly once. |
 
-The regenerated neutral fixture SHA-256 is
+That earlier regenerated neutral fixture SHA-256 was
 `d2dc64aec2c7162aceb5620cd5e6bd8eb0e3b9516ed3cfbb4f4f128a5f79beb1`.
-The historical float failures remain unbaselined and unrerun. Full workspace
-compilation and production parity remain unclaimed.
+The historical float failures were pre-existing by source inspection and were
+not rerun or compared with main. Full workspace compilation and production
+parity remained unclaimed at that checkpoint.
 
 The first collector integration run had one failure: the old growth test
 required the final root's numeric address to differ from its original address.
@@ -352,9 +353,10 @@ Schema-v4 checkpoint verification: the full `tidepool-repr` suite, focused
 bridge deep-value tests, prepared-native, prepared-runtime, toolchain artifact,
 CBOR property, Haskell projection, canonical fixture freshness, and suite
 registration checks passed. Workspace `cargo build --workspace --tests` did
-not complete: unchanged `tidepool-macro/src/expand.rs:32` references undefined
-`InlineInput` (E0425). This is a separate compile blocker, not evidence that
-the workspace is green.
+not complete: at that checkpoint, the reported `InlineInput` failure was
+attributed by source inspection to the macro code introduced by `e1a4b9145`,
+not to unchanged `main`. This is a historical attribution, not evidence that
+the current workspace is green.
 
 1. `entry_abi.rs`, `descriptor_bridge.rs` and `MachineState`: choose one typed
    status/multi-result transport and root managed result slots across later
@@ -382,3 +384,71 @@ the workspace is green.
 This is the next high-value joint review boundary: result rooting, imported
 value custody, and retained compiled entries constrain one another. The
 collector checkpoint does not settle those choices by accident.
+
+## Wave 3 fold evidence — 2026-09-12
+
+The fold ran at working-tree revision `204604dc19ce526dde3d717f3c8e0078714a5002`
+(dirty, with the listed Wave 3 changes). Fixture regeneration and the owning
+prepared checks completed. This does not claim a production cutover: G's
+generic/repro cases remain red, the workspace compile-only gate and changed
+inner loop are blocked by unrelated formatting/source issues, and full
+production parity remains unclaimed.
+
+The implementation handbacks currently report:
+
+- A: 49 schema tests passed after the validator/projection-scope correction.
+- B: the corrected projection regression passed (1/1), including the target
+  closure case.
+- C: the retirement is correct after Terra's lock repair: 2 additions and
+  339 deletions, with no retained upgrades; `tidepool` library check passed.
+- D: tag tests 4, descriptor tests 10, descriptor-bridge tests 7, prepared
+  native tests 1, and ABI-rejection coverage 1 passed. Fixture regeneration
+  and the final prepared integration fold are recorded below.
+- E: Terra's correction passed 49 heap tests plus 3 prepared-GC tests, and the
+  forwarded incoming-tag regression passes after the root-order fixture fix.
+  `descriptor_at` now uses the raw pointer/local dereference contract, and the
+  capacity-growth test passes.
+- G: residual deleted-interpreter helper tests were migrated. The affected
+  runtime suites compiled; `jit_deterministic1` passed, and
+  `captured_real_core` had 3 passes and 1 ignored test. After fresh producer
+  regeneration, `generics generic_deriving_337` ran 11 tests with 0 passed and
+  11 failed; the repro-339 selection ran 1 test with 0 passed and 1 failed.
+  Failures were `InvalidPreparedRepresentation`, duplicate top-level `sat`, or
+  prepared `InvalidSignature("constructor fields [Word(32)] do not match
+  [Word(64)]")`, rather than the earlier generic `UnsupportedTarget` report.
+
+Regeneration used the documented probe
+`bash scripts/dev-shell.sh bash -lc 'cd haskell && cabal run execution-schema-projection -- test-prepared-stg/fixtures/m3-vertical.cbor'`,
+then `bash scripts/dev-shell.sh just fixtures-update` and
+`bash scripts/dev-shell.sh just fixtures-check`. The final neutral fixture
+SHA-256 is `36bf360c1f38a67dc736d97d9af782c7c495f2f75ef6206ca79d93f911c78b4e`.
+The canonical freshness check passed; the initial update required rebuilding
+`tidepool-extract-cmd` and `tidepool-extract-bin` because the resolved worker
+was stale.
+
+Owning fold checks passed: prepared native 4/4, runtime `session::prepared`
+2/2, and toolchain `prepared_artifact::` 3/3. Workspace
+`bash scripts/dev-shell.sh cargo build --workspace --tests` reached all crates
+but failed in `tidepool-actor/tests/resident_local_actor.rs` because
+`sibling_server` is undefined at lines 321 and 329 (with inferred-type errors
+and one unused-import warning). `bash scripts/dev-shell.sh just changed
+204604dc19ce526dde3d717f3c8e0078714a5002` stopped before tests on rustfmt
+diffs across the changed-file set; no changed tests executed. The final
+`bash scripts/dev-shell.sh just fixtures-check` passed.
+
+The differential/proptest scenarios removed during retirement are recorded as
+dropped coverage, while explicit JIT assertions remain. No new replacement
+coverage or planted-defect certification is claimed. Trial-round accounting
+is recorded below. Lead assignment/review/correction interventions are counted
+where supplied by those handbacks; complete lead totals and worker or planner
+token usage are unavailable from the harness. Brief-size insufficiency remains
+explicit, while E's sub-item escalation is now resolved.
+
+| Parcel | Worker/tool rounds | Outcome path |
+|---|---:|---|
+| A | 4 | Two verification continuations and one phase clarification; 49 schema tests passed. |
+| B | 3 | Correction plus verification; projection regression 1/1 passed. |
+| C | 2 + Terra 1 | Lock repair complete; 2 additions, 339 deletions, no retained upgrades. |
+| D | 1 | Lead correction messages; tag/descriptor/bridge/native/ABI selections passed. |
+| E | 3 + Terra repair | 49 heap + 3 prepared-GC tests and forwarded-tag regression passed. |
+| G | 3 | Residual helper migration complete; generic/repro reruns remain 0/11 and 0/1 after regeneration. |

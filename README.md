@@ -244,7 +244,6 @@ Haskell effect program → GHC Core → Tidepool IR → Cranelift effect machine
 | Processes, resources and managed checkouts | [`tidepool-node/`](tidepool-node/), [`tidepool-worktree/`](tidepool-worktree/) |
 | Provider integration and Shoal launch | [`tidepool-agent/`](tidepool-agent/), [`tidepool/`](tidepool/) |
 | Effect schemas and interpreters | [`tidepool-protocol/`](tidepool-protocol/), [`tidepool-handlers/`](tidepool-handlers/) |
-| Embedding examples | [`examples/guess/`](examples/guess/), [`examples/tide/`](examples/tide/) |
 
 Tidepool is not a full implementation of the GHC runtime. Supported Haskell
 behavior is bounded by the extractor, IR, and runtime; compiler/runtime work is

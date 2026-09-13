@@ -2,12 +2,12 @@
 //! Materialized fields must remain rooted until their constructor is allocated;
 //! preallocated recursive objects must zero every pointer slot before any GC.
 
+use tidepool_bridge::Value;
 use tidepool_codegen::host_fns::{heap_verify_run_count, set_heap_verify};
 use tidepool_codegen::jit_machine::JitEffectMachine;
-use tidepool_bridge::Value;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
-use tidepool_testing::proptest::build_table_for_expr;
+use tidepool_testing::gen::build_table_for_expr;
 
 const I_HASH: DataConId = DataConId(7); // I# single-field Int box wrapper
 const JUST: DataConId = DataConId(1); // Just single-field Con wrapper

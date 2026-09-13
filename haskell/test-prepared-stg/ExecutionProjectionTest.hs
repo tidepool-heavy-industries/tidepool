@@ -5,6 +5,7 @@ module ExecutionProjectionTest (projectProjectionContract) where
 import Control.Monad (unless)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import GHC.Builtin.Types
   ( doubleRepDataConTy, intRepDataConTy, liftedRepTy, tupleRepDataConTyCon
   , mkPromotedListTy, runtimeRepTy, unliftedRepTy, zeroBitRepTy )
@@ -50,6 +51,7 @@ projectProjectionContract modules = do
       verifyTupleArgumentCall program
       verifyDemandedApplicationResults program
       verifySpecificApplicationShapes program
+      verifyTargetClosure context modules
       verifyVoidParameters program
       verifyUnboxedReturn program
       case projectPrepared context [] of
@@ -255,6 +257,30 @@ verifySpecificApplicationShapes program = do
     heapBody (HeapBinding _ (Thunk _ _ _ body)) = body
     heapBody HeapBinding{} = Return []
     joinBody (JoinBinding _ _ _ body) = body
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+verifyTargetClosure :: ProjectionContext -> [PreparedModule] -> IO ()
+verifyTargetClosure context modules = do
+  verify "polymorphicIdentityResult"
+    (Set.fromList ["polymorphicIdentityResult", "polymorphicIdentity", "demandedCallee"])
+  verify "sameOccurrenceResult"
+    (Set.fromList ["sameOccurrenceResult", "sameOccurrenceTop"])
+  where
+    verify occurrence expected = case projectPreparedTarget targetContext modules of
+      Left failure -> ioError (userError ("M3 target projection failed: " <> show failure))
+      Right program -> unless (actual program == expected)
+        (ioError (userError
+          ("M3 target projection for " <> show occurrence
+            <> " retained the wrong top-level closure: " <> show (actual program))))
+      where
+        targetContext = context
+          { projectionEntry = SymbolIdentity "main" "M3Vertical" "value" occurrence }
+        actual program = Set.fromList
+          [ symbolOccurrence symbol
+          | group <- programBindings program
+          , TopBinding symbol _ <- groupItems group
+          ]
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items
 

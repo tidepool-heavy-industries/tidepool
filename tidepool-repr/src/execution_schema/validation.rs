@@ -273,9 +273,17 @@ impl<'w, 'p> Walker<'w, 'p> {
         let index = self.value_index(binding.id)?;
         self.ensure_value(index);
         self.values[index] = Some(ScopedValue {
-            ty: self.validator.binding_type(binding),
+            ty: self.validator.binding_type(binding)?,
             epoch: 0,
         });
+        Ok(())
+    }
+
+    fn hide_top(&mut self, binding: &HeapBinding) -> Result<(), ParseError> {
+        let index = self.value_index(binding.id)?;
+        self.ensure_value(index);
+        let old = self.values[index].take();
+        self.undo.push(Undo::Value(index, old));
         Ok(())
     }
 
@@ -820,7 +828,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 }
                 Ok(Rc::from(vec![Action::Value(
                     binding.id,
-                    self.validator.binding_type(binding),
+                    self.validator.binding_type(binding)?,
                 )]))
             }
             Group::Recursive(bindings) => {
@@ -842,7 +850,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                     self.register_value(binding.id)?;
                     actions.push(Action::Value(
                         binding.id,
-                        self.validator.binding_type(binding),
+                        self.validator.binding_type(binding)?,
                     ));
                 }
                 let actions: Rc<[Action]> = Rc::from(actions);
@@ -1575,6 +1583,140 @@ mod tests {
     }
 
     #[test]
+    fn reversed_top_level_dependencies_are_visible_before_rhs_walks() {
+        let mut program = valid_program();
+        program.expressions.nodes = vec![
+            ExprFrame::Return(vec![integer(42)]),
+            ExprFrame::Return(vec![integer(42)]),
+        ];
+        let top_a = TopBinding {
+            identity: SymbolIdentity {
+                module: "ModuleA".into(),
+                ..symbol("a")
+            },
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![ValueRef::Local(ValueId(1))],
+                    body: 0,
+                },
+            },
+        };
+        let top_b = TopBinding {
+            identity: SymbolIdentity {
+                module: "ModuleB".into(),
+                ..symbol("b")
+            },
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        };
+        program.bindings = vec![Group::NonRecursive(top_a), Group::NonRecursive(top_b)];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn nonrecursive_top_level_self_reference_is_hidden_during_rhs_validation() {
+        let mut program = valid_program();
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { captures, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        captures.push(ValueRef::Local(binding.binding.id));
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidScope(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_constructor_ids_are_reported_in_recursive_top_and_local_groups() {
+        let mut top = valid_program();
+        let Group::NonRecursive(binding) = top.bindings.pop().unwrap() else {
+            unreachable!()
+        };
+        let mut binding = binding;
+        binding.binding.rhs = HeapRhs::Constructor {
+            constructor: ConstructorId(99),
+            fields: vec![],
+        };
+        top.bindings.push(Group::Recursive(vec![binding]));
+        top.expressions.nodes.clear();
+        assert!(matches!(
+            validate_program(&top, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(_))
+        ));
+
+        let mut local = valid_program();
+        local.expressions.nodes = vec![
+            ExprFrame::Return(vec![integer(42)]),
+            ExprFrame::Let {
+                bindings: Group::Recursive(vec![HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(99),
+                        fields: vec![],
+                    },
+                }]),
+                body: 0,
+            },
+        ];
+        let Group::NonRecursive(binding) = &mut local.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        *body = 1;
+        assert!(matches!(
+            validate_program(&local, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(_))
+        ));
+    }
+
+    #[test]
+    fn top_metadata_errors_precede_earlier_rhs_errors() {
+        let mut program = valid_program();
+        let earlier = TopBinding {
+            identity: symbol("earlier"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![ValueRef::Local(ValueId(99))],
+                    body: 0,
+                },
+            },
+        };
+        let later = TopBinding {
+            identity: symbol("later"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(99),
+                    fields: vec![],
+                },
+            },
+        };
+        program.bindings = vec![Group::NonRecursive(earlier), Group::NonRecursive(later)];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(_))
+        ));
+    }
+
+    #[test]
     fn rejects_nested_closure_with_missing_capture() {
         let mut program = valid_program();
         program.signatures[0].arguments = vec![RuntimeRep::Int(64)];
@@ -1837,6 +1979,43 @@ mod tests {
                 alignment: 8,
                 payload_size: 16,
                 root_mask: vec![false, true],
+            },
+        });
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_noncanonical_padding_between_storage_fields() {
+        let mut program = valid_program();
+        program.constructors.push(ConstructorDecl {
+            identity: symbol("Padded"),
+            family: symbol("T"),
+            tag: 1,
+            family_size: 1,
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![RuntimeRep::Int(8), RuntimeRep::Int(64), RuntimeRep::Int(8)],
+            strict_fields: vec![true, true, true],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::Int(8),
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::Int(64),
+                        offset: 16,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::Int(8),
+                        offset: 24,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 32,
+                root_mask: vec![false, false, false],
             },
         });
         assert!(matches!(
@@ -2244,36 +2423,49 @@ impl<'a> Validator<'a> {
         Ok(())
     }
 
-    fn binding_type<B>(&self, binding: &HeapBinding<B>) -> ValueType {
-        match binding.rhs {
+    fn binding_type<B>(&self, binding: &HeapBinding<B>) -> Result<ValueType, ParseError> {
+        Ok(match &binding.rhs {
             HeapRhs::Bytes(_) => ValueType {
                 rep: RuntimeRep::Address,
                 callable: None,
             },
             HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => ValueType {
                 rep: RuntimeRep::LiftedRef,
-                callable: Some(signature),
+                callable: Some(*signature),
             },
             HeapRhs::Constructor { constructor, .. } => ValueType {
-                rep: self.wire.constructors[constructor.0 as usize].result_rep,
+                rep: self.constructor(*constructor)?.result_rep,
                 callable: None,
             },
-        }
+        })
     }
 
     fn walk_bindings(&mut self, typed: bool) -> Result<(), ParseError> {
         let wire = self.wire;
         let mut walker = Walker::new(self, &wire.expressions, typed)?;
+        // Top declaration metadata is published before any RHS walks. Errors
+        // in this phase intentionally precede RHS errors; source order applies
+        // to the subsequent walks.
         for group in &wire.bindings {
             match group {
-                Group::NonRecursive(binding) => {
-                    walker.walk_top_binding(&binding.binding)?;
-                    walker.publish_top(&binding.binding)?;
-                }
+                Group::NonRecursive(binding) => walker.publish_top(&binding.binding)?,
                 Group::Recursive(bindings) => {
                     for binding in bindings {
                         walker.publish_top(&binding.binding)?;
                     }
+                }
+            }
+        }
+        for group in &wire.bindings {
+            match group {
+                Group::NonRecursive(binding) => {
+                    let mark = walker.undo.len();
+                    walker.hide_top(&binding.binding)?;
+                    let result = walker.walk_top_binding(&binding.binding);
+                    walker.restore(mark);
+                    result?;
+                }
+                Group::Recursive(bindings) => {
                     for binding in bindings {
                         walker.walk_top_binding(&binding.binding)?;
                     }
@@ -2350,68 +2542,45 @@ impl<'a> Validator<'a> {
         reps: &[RuntimeRep],
         layout: &CheckedLayout,
     ) -> Result<(), ParseError> {
-        let stored: Vec<_> = reps
-            .iter()
-            .copied()
-            .filter(|rep| *rep != RuntimeRep::Void)
-            .collect();
-        if layout.fields.len() != stored.len() || layout.root_mask.len() != stored.len() {
+        for rep in reps {
+            self.check_rep(*rep)?;
+        }
+        let expected =
+            crate::execution_schema::StorageLayout::for_reps(&self.wire.envelope.target, reps)
+                .map_err(|error| ParseError::InvalidLayout(error.to_string()))?;
+        if layout.fields.len() != expected.fields().len()
+            || layout.root_mask.len() != expected.fields().len()
+        {
             return Err(ParseError::InvalidLayout(
                 "stored fields/layout/root mask length mismatch".into(),
             ));
         }
-        if layout.alignment == 0 || !layout.alignment.is_power_of_two() {
-            return Err(ParseError::InvalidLayout("invalid layout alignment".into()));
-        }
-        let mut end = 0_u32;
-        let mut natural_alignment = 1_u32;
-        for (index, (field, rep)) in layout.fields.iter().zip(stored).enumerate() {
-            if field.rep != rep {
+
+        for (field, expected_field) in layout.fields.iter().zip(expected.fields()) {
+            if field.rep != expected_field.rep() || field.offset != expected_field.offset() {
                 return Err(ParseError::InvalidLayout(
-                    "layout field representation mismatch".into(),
-                ));
-            }
-            let size = self.rep_size(rep)?;
-            natural_alignment = natural_alignment.max(size.max(1));
-            if field.offset < end
-                || field.offset % size.max(1) != 0
-                || field.offset.checked_add(size).is_none()
-            {
-                return Err(ParseError::InvalidLayout(
-                    "overlapping or overflowing layout field".into(),
-                ));
-            }
-            end = field.offset + size;
-            let expected_root = matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef);
-            if layout.root_mask[index] != expected_root {
-                return Err(ParseError::InvalidLayout(
-                    "incorrect layout root mask".into(),
+                    "layout field does not match canonical storage layout".into(),
                 ));
             }
         }
-        let expected_size = end
-            .checked_add(natural_alignment - 1)
-            .map(|value| value / natural_alignment * natural_alignment)
-            .ok_or_else(|| ParseError::InvalidLayout("layout payload size overflows".into()))?;
-        if layout.alignment != natural_alignment || layout.payload_size != expected_size {
+        let expected_root_mask: Vec<_> = expected
+            .fields()
+            .iter()
+            .map(|field| matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef))
+            .collect();
+        if layout.root_mask != expected_root_mask {
+            return Err(ParseError::InvalidLayout(
+                "incorrect canonical layout root mask".into(),
+            ));
+        }
+        if layout.alignment != expected.alignment()
+            || layout.payload_size != expected.payload_size()
+        {
             return Err(ParseError::InvalidLayout(
                 "layout payload size is inconsistent".into(),
             ));
         }
         Ok(())
-    }
-
-    fn rep_size(&self, rep: RuntimeRep) -> Result<u32, ParseError> {
-        match rep {
-            RuntimeRep::Void => Ok(0),
-            RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef | RuntimeRep::Address => {
-                Ok(u32::from(self.wire.envelope.target.pointer_width) / 8)
-            }
-            RuntimeRep::Int(bits) | RuntimeRep::Word(bits) | RuntimeRep::Float(bits) => {
-                self.check_rep(rep)?;
-                Ok(u32::from(bits) / 8)
-            }
-        }
     }
 
     fn check_rep(&self, rep: RuntimeRep) -> Result<(), ParseError> {

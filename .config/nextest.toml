@@ -10,14 +10,10 @@
 # file's git history (nextest-adoption branch) rather than inline here.
 #
 # `cargo check --workspace --all-targets` and a default `cargo nextest run`
-# still BUILD every GHC-heavy target: `haskell_eval!`/`haskell_inline!` run
-# tidepool-extract during macro EXPANSION, i.e. at build (rustc) time, not in
-# a test process. `default-filter` below is a RUN-time filter and the
+# still BUILD every GHC-heavy target. `default-filter` below is a RUN-time
+# filter and the
 # `ghc-heavy` test-group bounds test PROCESSES — neither touches rustc, so
-# neither command is unconditionally GHC-free. What bounds the build-time
-# cost is the macro's own content-addressed cache under each crate's
-# `target/` (gitignored, keyed on source bytes + toolchain), paid once per
-# worktree/`.hs` edit/toolchain bump.
+# neither command is unconditionally GHC-free.
 
 [profile.default]
 # Global test timeout: warn once a test has run past `period`, hard-kill it
@@ -49,7 +45,7 @@ max-threads = 4
 # Default-deny: everything is GHC-heavy unless it appears in the exemption
 # filter below. An entry is removed from the cap only after showing
 # its tests do no `extract` work (no tidepool-extract spawn, no
-# EvalHarness/Harness turn, no haskell_eval!/haskell_inline! expansion).
+# EvalHarness/Harness turn).
 [[profile.default.overrides]]
 filter = 'not (package(tidepool-repr) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery) & !(test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests))) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior)) | (package(tidepool-actor) & !kind(test))))'
 test-group = 'ghc-heavy'

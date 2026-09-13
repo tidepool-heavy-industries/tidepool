@@ -1,3 +1,5 @@
+use crate::managed_reference::{constructor_tag as canonical_constructor_tag, DESCRIPTOR_TAG};
+use std::num::NonZeroU32;
 use tidepool_repr::execution_schema::{LayoutError, Signature, StorageLayout};
 
 /// Prepared objects use a descriptor pointer plus low-bit state in one word.
@@ -59,12 +61,27 @@ impl EntryMetadata {
 #[repr(align(8))]
 pub struct ObjectDescriptor {
     kind: ObjectKind,
+    /// Evaluatedness evidence published with managed results.  Thunks and
+    /// continuations intentionally carry no evaluated tag.
+    tag: u8,
+    /// Original one-based constructor number, retained for evidence checks.
+    constructor_tag: Option<NonZeroU32>,
     payload: StorageLayout,
     entry: Option<EntryMetadata>,
     payload_base: u32,
     allocation_alignment: u32,
     allocation_extent: u32,
     trace_offsets: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum DescriptorConstructionError {
+    #[error(transparent)]
+    Layout(#[from] LayoutError),
+    #[error("constructor descriptor requires a nonzero authoritative tag")]
+    MissingConstructorTag,
+    #[error("constructor tag {0} is not a valid authoritative tag")]
+    InvalidConstructorTag(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -96,6 +113,14 @@ pub enum DescriptorTraceError {
     Truncated { declared: u32, available: usize },
     #[error("descriptor trace slot at offset {offset} exceeds object extent {extent}")]
     InvalidOffset { offset: u32, extent: u32 },
+    #[error("managed reference {address:#x} carries contradictory tag {tag}")]
+    InvalidManagedTag { address: usize, tag: u8 },
+    #[error("tagged null managed reference {value:#x}")]
+    TaggedNull { value: usize },
+    #[error("updated thunk chain contains a cycle at {address:#x}")]
+    UpdatedCycle { address: usize },
+    #[error("updated thunk does not terminate at an evaluated value")]
+    InvalidUpdatedTarget,
 }
 
 impl ObjectDescriptor {
@@ -103,7 +128,45 @@ impl ObjectDescriptor {
         kind: ObjectKind,
         payload: StorageLayout,
         entry: Option<EntryMetadata>,
-    ) -> Result<Self, LayoutError> {
+    ) -> Result<Self, DescriptorConstructionError> {
+        let tag = match kind {
+            ObjectKind::Function | ObjectKind::Pap => DESCRIPTOR_TAG,
+            ObjectKind::Thunk | ObjectKind::Continuation => 0,
+            ObjectKind::Constructor => {
+                return Err(DescriptorConstructionError::MissingConstructorTag)
+            }
+        };
+        Self::with_tag(kind, tag, None, payload, entry)
+    }
+
+    /// Construct an algebraic-constructor descriptor from its authoritative
+    /// one-based family tag.  The descriptor owns the canonical managed tag;
+    /// callers cannot accidentally publish an untagged constructor result.
+    pub fn constructor(
+        tag: u32,
+        payload: StorageLayout,
+        entry: Option<EntryMetadata>,
+    ) -> Result<Self, DescriptorConstructionError> {
+        let authoritative =
+            NonZeroU32::new(tag).ok_or(DescriptorConstructionError::InvalidConstructorTag(tag))?;
+        let tag = canonical_constructor_tag(tag)
+            .ok_or(DescriptorConstructionError::InvalidConstructorTag(tag))?;
+        Self::with_tag(
+            ObjectKind::Constructor,
+            tag,
+            Some(authoritative),
+            payload,
+            entry,
+        )
+    }
+
+    fn with_tag(
+        kind: ObjectKind,
+        tag: u8,
+        constructor_tag: Option<NonZeroU32>,
+        payload: StorageLayout,
+        entry: Option<EntryMetadata>,
+    ) -> Result<Self, DescriptorConstructionError> {
         let header_size = DESCRIPTOR_HEADER_SIZE;
         let allocation_alignment = payload.alignment().max(header_size.next_power_of_two());
         let payload_base = descriptor_align_up(header_size, payload.alignment())?;
@@ -123,6 +186,8 @@ impl ObjectDescriptor {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             kind,
+            tag,
+            constructor_tag,
             payload,
             entry,
             payload_base,
@@ -134,6 +199,14 @@ impl ObjectDescriptor {
 
     pub fn kind(&self) -> ObjectKind {
         self.kind
+    }
+
+    pub fn tag(&self) -> u8 {
+        self.tag
+    }
+
+    pub fn constructor_tag(&self) -> Option<NonZeroU32> {
+        self.constructor_tag
     }
 
     pub fn payload(&self) -> &StorageLayout {
@@ -239,6 +312,23 @@ impl ObjectDescriptor {
         );
     }
 
+    /// Install a forwarding pointer that also carries the managed evidence
+    /// produced by resolving an updated thunk.  The forwarding header itself
+    /// remains untagged state metadata; only its relocation target is encoded.
+    ///
+    /// # Safety
+    /// Same requirements as [`Self::install_forwarding`].
+    pub unsafe fn install_forwarding_tagged(&self, source: *mut u8, destination: usize) {
+        std::ptr::write_unaligned(
+            source.add(FORWARDING_POINTER_OFFSET).cast::<usize>(),
+            destination,
+        );
+        std::ptr::write_unaligned(
+            source.cast::<usize>(),
+            self.initial_header_word() | DescriptorState::Forwarded as usize,
+        );
+    }
+
     /// Visit the current state's managed slots. Live/evaluating payloads use
     /// `StorageLayout`; updated thunks trace only their word-8 target.
     /// Address and numeric fields are never reclassified by inspecting their
@@ -320,6 +410,54 @@ mod tests {
     }
 
     #[test]
+    fn descriptors_own_canonical_evaluatedness_tags() {
+        let empty = StorageLayout::for_reps(&target(), &[]).unwrap();
+        assert_eq!(
+            ObjectDescriptor::new(ObjectKind::Function, empty.clone(), None)
+                .unwrap()
+                .tag(),
+            7
+        );
+        assert_eq!(
+            ObjectDescriptor::new(ObjectKind::Pap, empty.clone(), None)
+                .unwrap()
+                .tag(),
+            7
+        );
+        assert_eq!(
+            ObjectDescriptor::new(ObjectKind::Thunk, empty.clone(), None)
+                .unwrap()
+                .tag(),
+            0
+        );
+        assert_eq!(
+            ObjectDescriptor::new(ObjectKind::Continuation, empty.clone(), None)
+                .unwrap()
+                .tag(),
+            0
+        );
+        assert_eq!(
+            ObjectDescriptor::constructor(1, empty.clone(), None)
+                .unwrap()
+                .tag(),
+            1
+        );
+        let wide = ObjectDescriptor::constructor(700, empty.clone(), None).unwrap();
+        assert_eq!(wide.tag(), 7);
+        assert_eq!(wide.constructor_tag().map(NonZeroU32::get), Some(700));
+        assert_eq!(
+            ObjectDescriptor::constructor(7, empty.clone(), None)
+                .unwrap()
+                .tag(),
+            7
+        );
+        assert!(matches!(
+            ObjectDescriptor::constructor(0, empty, None),
+            Err(DescriptorConstructionError::InvalidConstructorTag(0))
+        ));
+    }
+
+    #[test]
     fn thunk_state_changes_trace_shape_without_changing_extent() {
         let descriptor = ObjectDescriptor::new(
             ObjectKind::Thunk,
@@ -361,8 +499,8 @@ mod tests {
 
     #[test]
     fn only_thunks_may_have_update_states() {
-        let descriptor = ObjectDescriptor::new(
-            ObjectKind::Constructor,
+        let descriptor = ObjectDescriptor::constructor(
+            1,
             StorageLayout::for_reps(&target(), &[]).unwrap(),
             None,
         )
@@ -387,8 +525,8 @@ mod tests {
             RuntimeRep::UnliftedRef,
             RuntimeRep::Address,
         ];
-        let descriptor = ObjectDescriptor::new(
-            ObjectKind::Constructor,
+        let descriptor = ObjectDescriptor::constructor(
+            1,
             StorageLayout::for_reps(&target(), &reps).unwrap(),
             None,
         )
@@ -432,8 +570,8 @@ mod tests {
 
     #[test]
     fn descriptor_trace_refuses_truncated_object_before_visiting_slots() {
-        let descriptor = ObjectDescriptor::new(
-            ObjectKind::Constructor,
+        let descriptor = ObjectDescriptor::constructor(
+            1,
             StorageLayout::for_reps(&target(), &[RuntimeRep::LiftedRef]).unwrap(),
             None,
         )
@@ -509,8 +647,8 @@ mod tests {
     #[test]
     fn descriptor_copy_rejects_partial_initialized_region_before_copying() {
         let descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[]).unwrap(),
                 None,
             )
@@ -543,8 +681,8 @@ mod tests {
     #[test]
     fn descriptor_copy_capacity_failure_preserves_source_roots_and_destination() {
         let descriptor = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[RuntimeRep::Int(64), RuntimeRep::Int(64)])
                     .unwrap(),
                 None,
@@ -585,8 +723,8 @@ mod tests {
     #[test]
     fn descriptor_copy_rejects_late_interior_child_after_terminal_partial_mutation() {
         let owner = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[RuntimeRep::LiftedRef, RuntimeRep::LiftedRef])
                     .unwrap(),
                 None,
@@ -594,8 +732,8 @@ mod tests {
             .unwrap(),
         );
         let child = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[]).unwrap(),
                 None,
             )
@@ -661,8 +799,8 @@ mod tests {
     #[test]
     fn descriptor_copy_packs_mixed_layouts_on_eight_byte_boundaries() {
         let narrow = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[RuntimeRep::Word(64), RuntimeRep::Word(64)])
                     .unwrap(),
                 None,
@@ -670,8 +808,8 @@ mod tests {
             .unwrap(),
         );
         let wide = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target(), &[RuntimeRep::Int(64)]).unwrap(),
                 None,
             )

@@ -51,13 +51,12 @@ The `tidepool` library crate re-exports the crates a Rust consumer needs to comp
 - **`tidepool-bignum`**: Native `ghc-bignum` shims — `Integer` arithmetic without GMP.
 - **`tidepool-optimize`**: Optimization passes (beta reduction, DCE, inlining, case reduction). Test/research crate ONLY — see "Compile Pipeline" above; the production compile path never calls it, and the public facade does not depend on or re-export it.
 - **`tidepool-codegen`**: The Cranelift-based compiler that generates native code and manages the `JitEffectMachine` lifecycle.
-- **`tidepool-extract-cmd`**: The public extractor boundary: CLI parsing, typed requests, process resolution, and resident-daemon transport/lifecycle. It sends a versioned request to the internal Haskell compiler worker, so Haskell owns GHC and Core translation rather than application infrastructure. `std`-only, zero deps, so `tidepool-macro` can depend on it without pulling in the runtime graph.
+- **`tidepool-extract-cmd`**: The public extractor boundary: CLI parsing, typed requests, process resolution, and resident-daemon transport/lifecycle. It sends a versioned request to the internal Haskell compiler worker, so Haskell owns GHC and Core translation rather than application infrastructure. It is `std`-only, with no runtime-graph dependencies.
 - **`tidepool-atomic-write`**: The one atomic write-then-rename helper, shared by every durable on-disk store in the workspace (worktree registry, agent binding table, checkpoints, compile cache, toolchain stamp).
 - **`tidepool-toolchain`**: Toolchain discovery, fingerprints, paths, and the compiled-artifact cache.
 - **`tidepool-runtime`**: The high-level orchestration layer for compiling and running programs. Also owns the `SessionEngine`/`PersistentSession` machinery shared by the one-shot and REPL surfaces (see "Surfaces" above).
 - **`tidepool-effect`**: Core traits and logic for effect dispatch and handling (`EffectHandler`, `DispatchEffect`).
 - **`tidepool-protocol`**: The effect contract as data — one schema (verbs, records, errors, field types) that generates the macro DSL strings, wire mirrors, extractor verb tables, and harness classification lists. A `std`-only leaf with no runtime component; effects migrate here one at a time from `tidepool-mcp/src/effect_defs.rs`.
-- **`tidepool-macro`**: Procedural macros embedding Haskell source as CBOR at build time (`haskell_eval!` for whole programs, `haskell_inline!` for inline snippets).
 - **`tidepool-bridge`**: Provides `FromCore` and `ToCore` traits for seamless data conversion between Rust types and Tidepool `Value`s.
 - **`tidepool-bridge-derive`**: Procedural macro crate providing `#[derive(FromCore)]` and `#[derive(ToCore)]`.
 - **`tidepool-bridge-effects`**: Single-source bridged-record types (e.g. `Proc`, `Hit`, `Commit`) shared by handlers and test mocks.

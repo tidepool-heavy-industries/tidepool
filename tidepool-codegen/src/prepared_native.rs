@@ -11,8 +11,9 @@ use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
-use tidepool_heap::execution_descriptor::{ObjectDescriptor, ObjectKind};
+use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::gc::raw::{cheney_copy_descriptors, DescriptorSpace};
+use tidepool_heap::managed_reference::untag;
 use tidepool_repr::execution_schema::{
     Architecture, Atom, ConstructorId, Endianness, ExprFrame, Group, HeapRhs, LinkedProgram,
     RuntimeRep, ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
@@ -196,7 +197,7 @@ impl PreparedNativeProgram {
         let layout = StorageLayout::for_reps(target, &declaration.field_reps)
             .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?;
         let descriptor = Arc::new(
-            ObjectDescriptor::new(ObjectKind::Constructor, layout, None)
+            ObjectDescriptor::constructor(declaration.tag, layout, None)
                 .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?,
         );
         if descriptor.allocation_alignment() != 8
@@ -471,7 +472,7 @@ impl PreparedNativeProgram {
             let (active_start, active_size) = machine_state
                 .gc_active_range()
                 .ok_or(PreparedNativeError::ResultArea)?;
-            let object = result_area[0] as *mut u8;
+            let object = untag(result_area[0] as usize) as *mut u8;
             let offset = (object as usize)
                 .checked_sub(active_start as usize)
                 .filter(|offset| {
@@ -555,7 +556,11 @@ fn emit_tail(
         );
     }
     let success = builder.ins().iconst(types::I32, CallStatus::Success as i64);
-    builder.ins().store(flags, object, result_area, 0);
+    let result_tag = builder
+        .ins()
+        .iconst(types::I64, i64::from(descriptor.tag()));
+    let tagged_object = builder.ins().bor(object, result_tag);
+    builder.ins().store(flags, tagged_object, result_area, 0);
     builder.ins().return_(&[success]);
     builder.finalize();
 }
@@ -615,6 +620,7 @@ fn decode_object_from_ptr(
     descriptor: &ObjectDescriptor,
     object: *const u8,
 ) -> Result<NativeConstructor, PreparedNativeError> {
+    let object = untag(object as usize) as *const u8;
     let fields = descriptor
         .payload()
         .fields()
@@ -680,8 +686,8 @@ mod tests {
     fn managed_argument_survives_generated_allocation_collection() {
         let target = target();
         let parent = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
+            ObjectDescriptor::constructor(
+                1,
                 StorageLayout::for_reps(&target, &[RuntimeRep::LiftedRef, RuntimeRep::Address])
                     .unwrap(),
                 None,
@@ -689,12 +695,8 @@ mod tests {
             .unwrap(),
         );
         let child = Arc::new(
-            ObjectDescriptor::new(
-                ObjectKind::Constructor,
-                StorageLayout::for_reps(&target, &[]).unwrap(),
-                None,
-            )
-            .unwrap(),
+            ObjectDescriptor::constructor(1, StorageLayout::for_reps(&target, &[]).unwrap(), None)
+                .unwrap(),
         );
         let mut pipeline = CodegenPipeline::new(&[(
             "prepared_gc_trigger",
@@ -807,7 +809,7 @@ mod tests {
         assert_eq!(status, CallStatus::Success as i32);
         assert_eq!(machine_state.prepared_call_status(), CallStatus::Success);
         let (active_start, active_size) = machine_state.gc_active_range().unwrap();
-        let parent_ptr = result_area[0] as *mut u8;
+        let parent_ptr = untag(result_area[0] as usize) as *mut u8;
         let managed_field = parent.payload().logical_to_stored()[0].unwrap() as usize;
         let address_field = parent.payload().logical_to_stored()[1].unwrap() as usize;
         let child_ptr = unsafe {

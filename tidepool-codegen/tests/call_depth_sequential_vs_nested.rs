@@ -39,7 +39,7 @@
 use tidepool_bridge::Value;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
-use tidepool_testing::proptest::build_table_for_expr;
+use tidepool_testing::gen::build_table_for_expr;
 
 const NIL: DataConId = DataConId(5);
 const CONS: DataConId = DataConId(6);

@@ -12,5 +12,3 @@ mod proptest_heap_layout;
 mod proptest_host_arrays;
 #[path = "../proptest_host_fns.rs"]
 mod proptest_host_fns;
-#[path = "../proptest_numeric_conversions.rs"]
-mod proptest_numeric_conversions;

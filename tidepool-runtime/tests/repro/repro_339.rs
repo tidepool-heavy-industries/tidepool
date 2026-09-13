@@ -1,7 +1,6 @@
-//! #339: the tree-walking eval oracle diverged from the JIT on
-//! `fromJSON . toJSON` FUSED with arithmetic in one expression — the eval
-//! oracle raised `TypeMismatch { expected: "Int#", .. }` on a boxed `I#`
-//! while the JIT correctly returned 7.
+//! #339: the JIT must return 7 for `fromJSON . toJSON` FUSED with arithmetic
+//! in one expression. The historical tree-walking eval mismatch is retained
+//! here as context for the JIT regression shape.
 //!
 //! Root cause: GHC's strict-field unboxing (`-funbox-small-strict-fields`,
 //! implied at -O1+) leaves a strict scalar field (e.g. a boxed `I#`/`D#` inside
@@ -12,8 +11,8 @@
 //! primop extractors only stripped exactly one `Con` layer; the fix (in
 //! `tidepool-eval/src/eval.rs`) makes them peel repeated single-field boxed
 //! layers, matching the JIT's tolerance for the same shape.
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_testing::eval_harness::{require_extract, EvalHarness};
-use tidepool_testing::proptest::{check_jit_vs_eval_captured, CapturedOutcome};
 
 const HEADER: &str =
     "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass #-}\n\
@@ -21,7 +20,7 @@ const HEADER: &str =
                       import Tidepool.Prelude hiding (error)\n";
 
 /// The exact #339 minimal repro: `fromJSON (toJSON (Rec 3 4))` fused with `+`
-/// in one expression. Both engines must return 7.
+/// in one expression. The JIT must return boxed 7.
 #[test]
 fn repro_339_eval_jit_parity_on_fused_round_trip() {
     require_extract();
@@ -38,16 +37,19 @@ fn repro_339_eval_jit_parity_on_fused_round_trip() {
         .compile(&src, "result")
         .expect("compile failed");
 
-    match check_jit_vs_eval_captured(&compiled.expr, &compiled.table, 64 * 1024) {
-        CapturedOutcome::Agree(tidepool_bridge::Value::Con(_, ref fields))
+    let mut machine = JitEffectMachine::compile(&compiled.expr, &compiled.table, 64 * 1024)
+        .expect("#339 fused round-trip Core must compile");
+    let value = machine
+        .run_pure()
+        .expect("#339 fused round-trip Core must run");
+    match &value {
+        tidepool_bridge::Value::Con(_, fields)
             if matches!(
                 fields.as_slice(),
-                [tidepool_bridge::Value::Lit(
-                    tidepool_repr::Literal::LitInt(7)
-                )]
+                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                    7
+                ))]
             ) => {}
-        other => {
-            panic!("eval/JIT disagreed on #339 fused round-trip Core (expected boxed 7): {other:?}")
-        }
+        other => panic!("#339 fused round-trip Core must produce boxed 7: {other:?}"),
     }
 }

@@ -8,6 +8,25 @@ and [unarisation invariants](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/
 `PreparedStg` owns that handoff; `ExecutionProjection` and `ExecutionSchema`
 are the current wire boundary.
 
+## Wave 3 ABI and collector evidence (provisional)
+
+The schema remains v4 while the managed-reference ABI is v3 in both Rust and
+Haskell. Managed-reference tag 0 carries no evaluatedness evidence; tags 1–6
+are authoritative constructor tags, and tag 7 means evaluated with descriptor
+inspection. Constructors numbered 7 or higher and functions/PAPs therefore
+use canonical tag 7; raw address and scalar bits are never masked or retagged.
+Allocation publishes an untagged address and the existing constructor emitter
+adds its constant descriptor tag only after initialization. Tagged nulls and
+contradictory evidence reject.
+
+The collector's proven linear walk, pinned descriptor identity, exact object
+starts, iterative updated-chain handling, and semispace ownership are the
+intended contract. Old-space/external payload ownership and broader retained
+heap integration remain deferred. Terra's correction now passes the forwarded
+incoming-tag regression after the root-order fixture fix; `descriptor_at` uses
+the raw pointer/local dereference contract and capacity growth passes. This
+does not claim old-space integration or broader native execution.
+
 Schema v4 encodes one program-wide postorder expression arena. Every top,
 closure, join, and alternative body is an index into that arena, rather than a
 nested expression. Wire `ValueId`s identify semantic binder occurrences;
