@@ -41,6 +41,7 @@ projectProjectionContract modules = do
   verifyTagToEnumProjection
   topIdentityAllocationContract
   literalProjectionContract
+  verifyWiredInErrorProjection
   case projectPrepared context modules of
     Left failure -> ioError (userError ("M3 projection failed: " <> show failure))
     Right program -> do
@@ -125,6 +126,94 @@ projectProjectionContract modules = do
     exprIsRecursive (Case scrutinee _ _ _ alternatives) = exprIsRecursive scrutinee
       || any (\(Alternative _ _ body) -> exprIsRecursive body) alternatives
     exprIsRecursive _ = False
+
+verifyWiredInErrorProjection :: IO ()
+verifyWiredInErrorProjection = do
+  root <- getCurrentDirectory
+  prepared <- runPipelineSelected PreparedStg
+    (root </> "test-prepared-stg" </> "WiredInErrorProjection.hs")
+    [root </> "test-prepared-stg"]
+  mapM_ (verifyFailureProjection (pprModules prepared))
+    ["patternPartial", "bareWired", "papWired", "transitiveWired"]
+  mapM_ (verifyShadowProjection (pprModules prepared))
+    [ ("shadowedDefinition", entry "shadowedDefinition" Nothing)
+    , ("record selector", entry "patError" (Just "Shadow"))
+    ]
+  where
+    entry occurrence parent =
+      SymbolIdentity "main" "WiredInErrorProjection" "value" occurrence parent
+
+    projectEntry modules label identity = case projectPreparedTarget
+      (ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty
+        identity Nothing)
+      modules of
+        Left failure -> ioError (userError
+          ("wired-in error projection failed for " <> Text.unpack label
+            <> ": " <> show failure))
+        Right program -> pure program
+
+    verifyFailureProjection modules occurrence = do
+      program <- projectEntry modules occurrence (entry occurrence Nothing)
+      let wired =
+            [ (OperationId (fromIntegral index), declaration,
+                signatureAt program (operationSignature declaration))
+            | (index, declaration@OperationDecl
+                {operationIdentity = WiredInErrorIdentity kind})
+                <- zip [0 :: Int ..] (programOperations program)
+            , kind == WiredPatternMatch
+            ]
+          synthetic =
+            [ (symbol, binding, signatureAt program signature)
+            | group <- programBindings program
+            , TopBinding symbol binding@(HeapBinding _ (Function signature _ _ _))
+                <- groupItems group
+            , symbolOccurrence symbol == "patError"
+            , symbolModule symbol == "GHC.Internal.Control.Exception.Base"
+            ]
+          patErrorGlobals =
+            [ globalIdentity global
+            | global <- programGlobals program
+            , symbolOccurrence (globalIdentity global) == "patError"
+            ]
+      unless ([signature | (_, _, signature) <- wired]
+          == [Signature [AddressRep] NoSuccess])
+        (ioError (userError
+          ("wired-in patError operation lost its saturated contract for "
+            <> Text.unpack occurrence <> ": " <> show wired)))
+      case (wired, synthetic) of
+        ([(operation, declaration, _)],
+          [(_, HeapBinding _ (Function signature [parameter] [] body), entrySignature)]) -> do
+          unless (entrySignature == Signature [AddressRep] NoSuccess)
+            (ioError (userError "synthesized patError top lost its entry contract"))
+          unless (body == Operation operation [Ref (Local parameter)])
+            (ioError (userError
+              ("synthesized patError top did not call its wired operation: " <> show body)))
+          unless (signatureResults entrySignature == NoSuccess
+              && signature == operationSignature declaration)
+            (ioError (userError "synthesized patError top and operation signatures diverged"))
+        found -> ioError (userError
+          ("expected one wired operation and synthesized patError function top, got "
+            <> show found))
+      unless (null patErrorGlobals)
+        (ioError (userError
+          ("wired-in patError leaked into globals: " <> show patErrorGlobals)))
+
+    verifyShadowProjection modules (label, selectedIdentity) = do
+      program <- projectEntry modules label selectedIdentity
+      unless (null
+          [ operationIdentity
+          | OperationDecl operationIdentity _ <- programOperations program
+          , WiredInErrorIdentity{} <- [operationIdentity]
+          ])
+        (ioError (userError
+          ("shadowed patError spelling was classified as wired-in for "
+            <> Text.unpack label)))
+
+    signatureAt program (SignatureId index) =
+      programSignatures program !! fromIntegral index
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
 
 topIdentityAllocationContract :: IO ()
 topIdentityAllocationContract = do
@@ -678,14 +767,24 @@ verifyBottomingSentinelContracts = do
             , symbolOccurrence symbol == entryName
             ]
       case topRhs of
-        [Thunk entrySignature _ _ (Operation operation [Void])] ->
-          verifyContracts program signatureAt operationAt entrySignature operation
-        [Function entrySignature [] _ (Operation operation [Void])] ->
-          verifyContracts program signatureAt operationAt entrySignature operation
+        [Thunk entrySignature _ _ body] ->
+          verifyBody program signatureAt operationAt entrySignature body
+        [Function entrySignature [] _ body] ->
+          verifyBody program signatureAt operationAt entrySignature body
         found -> ioError (userError
-          ("bottoming sentinel did not project to one direct Void operation: "
+          ("bottoming sentinel did not project to one executable top: "
             <> show (entryName, found)))
       where
+        verifyBody program signatureAt operationAt entrySignature body =
+          case body of
+            Operation operation [Void] ->
+              verifyContracts program signatureAt operationAt entrySignature operation
+            Case (Operation operation [Void]) _ (Returns _) MultiValueCase [] ->
+              verifyContracts program signatureAt operationAt entrySignature operation
+            _ -> ioError (userError
+              ("bottoming sentinel body was neither a direct operation nor its exact "
+                <> "checked empty-case discharge: " <> show (entryName, body)))
+
         verifyContracts program signatureAt operationAt entrySignature operation = do
           unless (signatureResults (signatureAt entrySignature) == NoSuccess)
             (ioError (userError
