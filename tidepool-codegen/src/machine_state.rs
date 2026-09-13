@@ -557,6 +557,42 @@ impl MachineState {
         self.install_prepared_buffer_with_static_region(buffer, layouts, None)
     }
 
+    /// Inspect an untagged generated reference without allocating or collecting.
+    ///
+    /// # Safety
+    /// A non-null reference must point to a readable initialized object header
+    /// whose storage remains owned by this invocation. This is not admission of
+    /// arbitrary host pointers; generated code establishes reference provenance.
+    pub(crate) unsafe fn inspect_prepared_entry(
+        &self,
+        reference: *const usize,
+    ) -> Result<(), RuntimeError> {
+        use tidepool_heap::execution_descriptor::ObjectKind;
+        if reference.is_null() || reference as usize % 8 != 0 {
+            return Err(RuntimeError::BadPointer);
+        }
+        let active = self
+            .gc_state
+            .try_borrow()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let prepared = active
+            .as_ref()
+            .and_then(|state| state.prepared.as_ref())
+            .ok_or(RuntimeError::BadPointer)?;
+        let header = unsafe { reference.read() };
+        if header & 7 != 0 {
+            return Err(RuntimeError::BadThunkState((header & 7) as u8));
+        }
+        let descriptor = prepared
+            .space
+            .live_descriptor(header)
+            .ok_or(RuntimeError::BadPointer)?;
+        match descriptor.kind() {
+            ObjectKind::Constructor | ObjectKind::Function => Ok(()),
+            _ => Err(RuntimeError::BadThunkState(0)),
+        }
+    }
+
     /// Install a prepared nursery whose descriptor space admits one immutable
     /// invocation-owned static region as an external managed space.
     pub(crate) fn install_prepared_buffer_with_static_region(

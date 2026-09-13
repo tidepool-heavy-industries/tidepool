@@ -81,6 +81,21 @@ unsafe extern "C" fn prepared_case_trap(vmctx: *mut crate::context::VMContext) {
     machine.set_first_cause(crate::host_fns::RuntimeError::CaseTrap);
 }
 
+/// Shared slow inspection for generated, provenance-checked references. It does
+/// not force, allocate, collect, or replace the reference in this strict phase.
+unsafe extern "C" fn prepared_enter_slow(
+    vmctx: *mut crate::context::VMContext,
+    reference: *const usize,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() == crate::prepared_control::CallStatus::Success {
+        if let Err(cause) = unsafe { machine.inspect_prepared_entry(reference) } {
+            machine.set_first_cause(cause);
+        }
+    }
+    machine.prepared_call_status() as i32
+}
+
 pub struct CompiledProgram {
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,

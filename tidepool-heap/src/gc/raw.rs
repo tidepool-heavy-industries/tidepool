@@ -27,6 +27,12 @@ pub struct DescriptorSpace {
 }
 
 impl DescriptorSpace {
+    /// Resolve a live header through this space's pinned descriptor owner.
+    /// This validates metadata identity, not the provenance of an object pointer.
+    pub fn live_descriptor(&self, header: usize) -> Option<&ObjectDescriptor> {
+        self.descriptors.get(&header).map(Arc::as_ref)
+    }
+
     /// Pin the layouts that may occur in a prepared heap. The reusable bitmap
     /// grows fallibly to the source region before any collection mutates it.
     pub fn new(
