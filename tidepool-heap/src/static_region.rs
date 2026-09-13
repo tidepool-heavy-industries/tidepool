@@ -84,7 +84,7 @@ impl StaticImage {
                 descriptor.kind(),
                 ObjectKind::Constructor | ObjectKind::Function
             ) || extent < 16
-                || extent % 8 != 0
+                || !extent.is_multiple_of(8)
                 || extent > bytes - offset
                 || descriptor.allocation_alignment() != 8
             {
@@ -93,7 +93,7 @@ impl StaticImage {
             starts[offset / 8 / 64] |= 1_u64 << (offset / 8 % 64);
             for field in descriptor.trace_offsets() {
                 let slot = offset + *field as usize;
-                if *field as usize % 8 != 0
+                if !(*field as usize).is_multiple_of(8)
                     || *field as usize + 8 > extent
                     || words[slot / 8] != 0
                     || !slots.insert(slot)
@@ -180,7 +180,9 @@ impl StaticImage {
 }
 
 fn is_start(bitmap: &[u64], bytes: usize, offset: usize) -> bool {
-    offset < bytes && offset % 8 == 0 && bitmap[offset / 8 / 64] & (1_u64 << (offset / 8 % 64)) != 0
+    offset < bytes
+        && offset.is_multiple_of(8)
+        && bitmap[offset / 8 / 64] & (1_u64 << (offset / 8 % 64)) != 0
 }
 
 impl StaticRegion {

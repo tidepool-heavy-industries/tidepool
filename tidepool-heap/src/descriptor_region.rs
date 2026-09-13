@@ -79,7 +79,7 @@ impl DescriptorArena {
     /// Validate headers and build exact starts without further allocation.
     /// Edges were checked by copying; this operation proves allocation shape.
     pub fn seal(&mut self, used: usize) -> Result<(), DescriptorTraceError> {
-        if used > self.words.len() * 8 || used % 8 != 0 {
+        if used > self.words.len() * 8 || !used.is_multiple_of(8) {
             return Err(DescriptorTraceError::InvalidRange);
         }
         self.starts.fill(0);
@@ -97,7 +97,7 @@ impl DescriptorArena {
             if state == DescriptorState::Forwarded {
                 return Err(DescriptorTraceError::ForwardedObject);
             }
-            if extent < 16 || extent % 8 != 0 || extent > used - offset {
+            if extent < 16 || !extent.is_multiple_of(8) || extent > used - offset {
                 return Err(DescriptorTraceError::InvalidRange);
             }
             self.starts[offset / 8 / 64] |= 1 << (offset / 8 % 64);
@@ -117,7 +117,7 @@ impl DescriptorArena {
         }
         let offset = address - range.start;
         if offset >= self.used
-            || offset % 8 != 0
+            || !offset.is_multiple_of(8)
             || self.starts[offset / 8 / 64] & (1 << (offset / 8 % 64)) == 0
         {
             return Err(DescriptorTraceError::InvalidManagedPointer { address });

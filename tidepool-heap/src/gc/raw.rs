@@ -144,7 +144,7 @@ impl DescriptorSpace {
             self.updated_visited.resize(visited_words, 0);
         }
         self.updated_visited[..visited_words].fill(0);
-        let max_objects = used / 16 + usize::from(used % 16 != 0);
+        let max_objects = used / 16 + usize::from(!used.is_multiple_of(16));
         self.updated_path.clear();
         if max_objects > self.updated_path.capacity() {
             self.updated_path
@@ -244,9 +244,9 @@ pub(crate) unsafe fn prepare_descriptor_copy(
     let to_end = to_base
         .checked_add(tospace.len())
         .ok_or(DescriptorTraceError::InvalidRange)?;
-    if from_base % 8 != 0
-        || to_base % 8 != 0
-        || from_used % 8 != 0
+    if !from_base.is_multiple_of(8)
+        || !to_base.is_multiple_of(8)
+        || !from_used.is_multiple_of(8)
         || (from_base < to_end && to_base < from_end)
     {
         return Err(DescriptorTraceError::InvalidRange);
@@ -286,10 +286,10 @@ pub(crate) unsafe fn prepare_descriptor_copy(
                 .get(&identity)
                 .ok_or(DescriptorTraceError::UnknownDescriptor { address: identity })?;
             let extent = descriptor.allocation_extent() as usize;
-            if extent < 16 || extent % 8 != 0 {
+            if extent < 16 || !extent.is_multiple_of(8) {
                 return Err(DescriptorTraceError::InvalidRange);
             }
-            if address % descriptor.allocation_alignment() as usize != 0 {
+            if !address.is_multiple_of(descriptor.allocation_alignment() as usize) {
                 return Err(DescriptorTraceError::Misaligned {
                     address,
                     alignment: descriptor.allocation_alignment(),
@@ -384,9 +384,9 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph_with_external(
     let to_end = to_base
         .checked_add(tospace.len())
         .ok_or(DescriptorTraceError::InvalidRange)?;
-    if from_base % 8 != 0
-        || to_base % 8 != 0
-        || from_used % 8 != 0
+    if !from_base.is_multiple_of(8)
+        || !to_base.is_multiple_of(8)
+        || !from_used.is_multiple_of(8)
         || (from_base < to_end && to_base < from_end)
     {
         return Err(DescriptorTraceError::InvalidRange);
@@ -585,6 +585,10 @@ pub unsafe fn cheney_copy_descriptors_with_external(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the unsafe copy boundary keeps independent source, destination, root, descriptor, and old-space authorities explicit"
+)]
 unsafe fn evacuate_descriptor(
     encoded: usize,
     from_base: usize,
@@ -611,7 +615,7 @@ unsafe fn evacuate_descriptor(
             return Ok(reference);
         }
     }
-    if address < from_base || address >= from_end || (address - from_base) % 8 != 0 {
+    if address < from_base || address >= from_end || !(address - from_base).is_multiple_of(8) {
         return Err(DescriptorTraceError::InvalidManagedPointer { address });
     }
     let offset = address - from_base;
@@ -713,7 +717,7 @@ unsafe fn copy_descriptor(
     }
     // Every source allocation and descriptor is eight-byte aligned, so a
     // sufficiently large destination needs no per-object padding.
-    if (to_base + *free) % descriptor.allocation_alignment() as usize != 0 {
+    if !(to_base + *free).is_multiple_of(descriptor.allocation_alignment() as usize) {
         return Err(DescriptorTraceError::Misaligned {
             address: to_base + *free,
             alignment: descriptor.allocation_alignment(),
@@ -742,12 +746,17 @@ unsafe fn forwarded_target(
     let target_end = target_address
         .checked_add(8)
         .ok_or(DescriptorTraceError::InvalidRange)?;
-    if target_address < to_base || target_address % 8 != 0 || target_end > to_base + free {
+    if target_address < to_base || !target_address.is_multiple_of(8) || target_end > to_base + free
+    {
         return Err(DescriptorTraceError::InvalidRange);
     }
     Ok(target)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the unsafe update boundary keeps independent source, destination, root, descriptor, and old-space authorities explicit"
+)]
 unsafe fn resolve_updated(
     first: *mut u8,
     first_tag: u8,
@@ -918,7 +927,7 @@ unsafe fn resolve_updated(
         if target_address == 0
             || target_address < from_base
             || target_address >= from_end
-            || (target_address - from_base) % 8 != 0
+            || !(target_address - from_base).is_multiple_of(8)
             || !descriptors.is_start(target_address - from_base)
         {
             return Err(DescriptorTraceError::InvalidManagedPointer {
@@ -2740,7 +2749,7 @@ mod descriptor_copy_tests {
     #[test]
     fn descriptor_cheney_accepts_cyclic_static_root_without_copying() {
         let static_region = static_cycle();
-        let mut from = [0_u64; 2];
+        let from = [0_u64; 2];
         let mut to = [0_u64; 2];
         let mut space = DescriptorSpace::new([])
             .unwrap()
@@ -2773,7 +2782,7 @@ mod descriptor_copy_tests {
         let entry = static_region
             .entry(tidepool_repr::execution_schema::ValueId(1))
             .unwrap();
-        let mut from = [0_u64; 2];
+        let from = [0_u64; 2];
         let mut to = [0_u64; 2];
         for (value, expected) in [
             (
@@ -2818,7 +2827,7 @@ mod descriptor_copy_tests {
             .unwrap();
         let slot = (untag(entry) + 8) as *mut *mut u8;
         let before = unsafe { std::ptr::read(slot) };
-        let mut from = [0_u64; 2];
+        let from = [0_u64; 2];
         let mut to = [0_u64; 2];
         let mut space = DescriptorSpace::new([])
             .unwrap()

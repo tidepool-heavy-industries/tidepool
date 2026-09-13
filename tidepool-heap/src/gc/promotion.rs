@@ -54,6 +54,10 @@ unsafe impl DescriptorOldSpace for PromotedAndOld<'_> {
 /// caller publishes the spare nursery immediately, without a fallible step.
 /// On Incomplete it must not execute, observe, or discard either live space.
 /// Cancellation is intentionally absent inside this operation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the unsafe promotion boundary keeps independent spaces, root sets, descriptors, and old-space ownership explicit"
+)]
 pub unsafe fn promote_and_fixup(
     selected: &[*mut *mut u8],
     all_roots: &[*mut *mut u8],
@@ -80,6 +84,16 @@ pub unsafe fn promote_and_fixup(
 /// Selectively promote with authenticated external payload edges. This keeps
 /// the existing promotion/fixup protocol and only extends each Cheney copy
 /// phase with the owner-provided bounded slots.
+///
+/// # Safety
+/// All requirements of [`promote_and_fixup`] apply. `external` must satisfy
+/// [`ExternalPayloadOwner`]'s authentication and exclusivity contract, and
+/// every returned slot must remain allocated, initialized, and exclusively
+/// available to the collector through both Cheney copies and native unwind.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the unsafe promotion boundary keeps independent spaces, root sets, descriptors, old-space, and external ownership explicit"
+)]
 pub unsafe fn promote_and_fixup_with_external(
     selected: &[*mut *mut u8],
     all_roots: &[*mut *mut u8],
@@ -104,6 +118,10 @@ pub unsafe fn promote_and_fixup_with_external(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the unsafe promotion boundary keeps independent spaces, root sets, descriptors, old-space, and optional external ownership explicit"
+)]
 unsafe fn promote_and_fixup_inner(
     selected: &[*mut *mut u8],
     all_roots: &[*mut *mut u8],
