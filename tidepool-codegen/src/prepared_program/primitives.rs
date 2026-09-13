@@ -1,4 +1,5 @@
-//! Representation-checked, non-allocating primitive operations.
+//! Representation-checked primitive operations. Scalar families are pure;
+//! descriptor-backed arrays and failure operations use their owning paths.
 //!
 //! Names are the authoritative spellings emitted by `Tidepool.PrimOps` from
 //! GHC's `PrimOp` table. An operation is admitted only after its complete wire
@@ -446,54 +447,67 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
     }
 }
 
-/// Recognize admitted scalar identities. Primops and typed C-call intrinsics
+/// Recognize admitted primitive identities. Primops and typed C-call intrinsics
 /// use separate recognition authorities even when their spellings resemble
 /// one another.
 pub(super) fn recognize_operation(
     declaration: &OperationDecl,
     signature: &Signature,
-) -> Option<ScalarOperation> {
+) -> Option<PrimitiveOperation> {
     if let Some(operation) = super::arrays::recognize(&declaration.identity, signature) {
-        return Some(ScalarOperation::Array(operation));
+        return Some(PrimitiveOperation::Array(operation));
     }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
         && signature.arguments == [RuntimeRep::Float(64)]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
     {
-        return Some(ScalarOperation::DoubleToInt);
+        return Some(PrimitiveOperation::DoubleToInt);
     }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "indexCharOffAddr#")
         && signature.arguments == [RuntimeRep::Address, RuntimeRep::Int(64)]
         && returns_exact(signature, &[RuntimeRep::Word(64)])
     {
-        return Some(ScalarOperation::IndexCharOffAddr);
+        return Some(PrimitiveOperation::IndexCharOffAddr);
     }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "raise#")
         && signature.arguments == [RuntimeRep::LiftedRef]
         && matches!(&signature.results, ResultContract::NoSuccess)
     {
-        return Some(ScalarOperation::Raise);
+        return Some(PrimitiveOperation::Raise);
+    }
+    if signature.arguments == [RuntimeRep::Void] && signature.results == ResultContract::NoSuccess {
+        if let OperationIdentity::PrimOp(name) = &declaration.identity {
+            let cause = match name.as_str() {
+                "raiseDivZero#" => Some(super::fallible::PrimitiveFailure::DivisionByZero),
+                "raiseUnderflow#" => Some(super::fallible::PrimitiveFailure::Underflow),
+                _ => None,
+            };
+            if let Some(cause) = cause {
+                return Some(PrimitiveOperation::PrimitiveFailure(cause));
+            }
+        }
     }
     IntegerFamily::recognize(&declaration.identity, signature)
-        .map(ScalarOperation::Integer)
+        .map(PrimitiveOperation::Integer)
         .or_else(|| {
             super::floating::FloatingFamily::recognize(&declaration.identity, signature)
-                .map(ScalarOperation::Floating)
+                .map(PrimitiveOperation::Floating)
         })
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum ScalarOperation {
+pub(super) enum PrimitiveOperation {
     Array(super::arrays::ArrayOperation),
     DoubleToInt,
     IndexCharOffAddr,
     Raise,
+    PrimitiveFailure(super::fallible::PrimitiveFailure),
     Integer(IntegerOperation),
     Floating(super::floating::FloatingOperation),
 }
 
 pub(super) fn emit_operation(
-    operation: ScalarOperation,
+    operation: PrimitiveOperation,
     builder: &mut FunctionBuilder<'_>,
     arguments: &[ir::Value],
     vmctx: ir::Value,
@@ -503,9 +517,27 @@ pub(super) fn emit_operation(
     boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
-        ScalarOperation::Array(super::arrays::ArrayOperation::NewBoxed) =>
-            super::arrays::emit_new_boxed(builder, pipeline, vmctx, gc, boxed_array, arguments).map(Some),
-        ScalarOperation::Raise => {
+        PrimitiveOperation::PrimitiveFailure(cause) => {
+            super::fallible::emit_terminal(builder, pipeline, vmctx, cause)?;
+            Ok(None)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::NewBoxed) => {
+            super::arrays::emit_new_boxed(builder, pipeline, vmctx, gc, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::ReadBoxed) => {
+            super::arrays::emit_read_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::WriteBoxed) => {
+            super::arrays::emit_write_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::SizeofBoxed) => {
+            super::arrays::emit_sizeof_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(
                 builder,
                 pipeline,
@@ -514,10 +546,10 @@ pub(super) fn emit_operation(
             )?;
             Ok(None)
         }
-        ScalarOperation::DoubleToInt => {
+        PrimitiveOperation::DoubleToInt => {
             super::fallible::emit_double_to_int(builder, vmctx, pipeline, arguments[0]).map(Some)
         }
-        ScalarOperation::IndexCharOffAddr => super::static_bytes::emit_index_char(
+        PrimitiveOperation::IndexCharOffAddr => super::static_bytes::emit_index_char(
             builder,
             pipeline,
             vmctx,
@@ -526,7 +558,7 @@ pub(super) fn emit_operation(
             arguments[1],
         )
         .map(Some),
-        ScalarOperation::Integer(operation)
+        PrimitiveOperation::Integer(operation)
             if matches!(
                 operation.kind,
                 IntegerKind::Quot | IntegerKind::Rem | IntegerKind::QuotRem
@@ -534,10 +566,10 @@ pub(super) fn emit_operation(
         {
             super::fallible::emit(operation, builder, vmctx, pipeline, arguments).map(Some)
         }
-        ScalarOperation::Integer(operation) => {
+        PrimitiveOperation::Integer(operation) => {
             Ok(Some(IntegerFamily::emit(operation, builder, arguments)))
         }
-        ScalarOperation::Floating(operation) => Ok(Some(super::floating::FloatingFamily::emit(
+        PrimitiveOperation::Floating(operation) => Ok(Some(super::floating::FloatingFamily::emit(
             operation, builder, arguments,
         ))),
     }
@@ -629,7 +661,7 @@ mod tests {
     use crate::host_fns::RuntimeError;
     use tidepool_repr::execution_schema::{Atom, ScalarLiteral};
 
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
 
     fn sig(arguments: Vec<RuntimeRep>, results: Vec<RuntimeRep>) -> Signature {
         Signature {
@@ -788,7 +820,7 @@ mod tests {
         };
         assert!(matches!(
             recognize_operation(&declaration, &signature),
-            Some(ScalarOperation::Raise)
+            Some(PrimitiveOperation::Raise)
         ));
 
         let returning = Signature {
@@ -1061,17 +1093,16 @@ mod tests {
     #[test]
     fn fixed_width_word64_primops_use_ghc_names_and_int_counts() {
         let word64_binary = sig(vec![RuntimeRep::Word(64); 2], vec![RuntimeRep::Word(64)]);
-        assert!(
-            IntegerFamily::recognize(&OperationIdentity::PrimOp("and64#".into()), &word64_binary,)
-                .is_some()
-        );
-        assert!(
-            IntegerFamily::recognize(
-                &OperationIdentity::PrimOp("andWord64#".into()),
-                &word64_binary,
-            )
-            .is_none()
-        );
+        assert!(IntegerFamily::recognize(
+            &OperationIdentity::PrimOp("and64#".into()),
+            &word64_binary,
+        )
+        .is_some());
+        assert!(IntegerFamily::recognize(
+            &OperationIdentity::PrimOp("andWord64#".into()),
+            &word64_binary,
+        )
+        .is_none());
 
         let signed_shift = sig(
             vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
@@ -1105,20 +1136,16 @@ mod tests {
     #[test]
     fn narrow_primops_are_target_width_in_and_out() {
         let identity = OperationIdentity::PrimOp("narrow8Int#".into());
-        assert!(
-            IntegerFamily::recognize(
-                &identity,
-                &sig(vec![RuntimeRep::Int(64)], vec![RuntimeRep::Int(64)])
-            )
-            .is_some()
-        );
-        assert!(
-            IntegerFamily::recognize(
-                &identity,
-                &sig(vec![RuntimeRep::Int(8)], vec![RuntimeRep::Int(8)])
-            )
-            .is_none()
-        );
+        assert!(IntegerFamily::recognize(
+            &identity,
+            &sig(vec![RuntimeRep::Int(64)], vec![RuntimeRep::Int(64)])
+        )
+        .is_some());
+        assert!(IntegerFamily::recognize(
+            &identity,
+            &sig(vec![RuntimeRep::Int(8)], vec![RuntimeRep::Int(8)])
+        )
+        .is_none());
     }
 
     #[test]
@@ -1231,7 +1258,7 @@ mod tests {
 
     #[test]
     fn w5_a3_integer_add_runs_through_real_adapter() {
-        use std::sync::{Arc, atomic::AtomicBool};
+        use std::sync::{atomic::AtomicBool, Arc};
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();

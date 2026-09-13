@@ -6,6 +6,38 @@ use tidepool_heap::execution_descriptor::DescriptorState;
 use tidepool_heap::managed_reference::untag;
 use tidepool_repr::execution_schema::{testing, *};
 
+#[test]
+fn raising_arithmetic_primops_return_typed_reusable_failure() {
+    for (name, cause) in [
+        ("raiseDivZero#", RuntimeError::DivisionByZero),
+        ("raiseUnderflow#", RuntimeError::Underflow),
+    ] {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::NoSuccess;
+        wire.signatures.push(Signature {
+            arguments: vec![RuntimeRep::Void],
+            results: ResultContract::NoSuccess,
+        });
+        wire.operations.push(OperationDecl {
+            identity: OperationIdentity::PrimOp(name.into()),
+            signature: SignatureId(1),
+        });
+        wire.expressions.nodes[0] = ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments: vec![Atom::Void],
+        };
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        let program = CompiledProgram::compile(&linked).unwrap();
+        assert!(matches!(
+            program.run_entry(ValueId(0), &[], &RunOptions::default(), Arc::new(AtomicBool::new(false))),
+            Err(ExecutionError::Runtime(MachineFailure {
+                cause: actual, disposition: MachineDisposition::Reusable,
+            })) if actual == cause
+        ));
+    }
+}
+
 /// A real raised CAF: its exception is an ordinary owned constructor, not a
 /// fake pointer or a diagnostic string manufactured by the runtime.
 fn raised_caf() -> WireProgram {

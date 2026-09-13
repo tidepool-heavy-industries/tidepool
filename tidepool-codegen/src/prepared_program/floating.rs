@@ -1,7 +1,7 @@
 //! Pure floating operations retain GHC identities and exact representations.
 
 use super::primitives::ScalarFamily;
-use cranelift_codegen::ir::{InstBuilder, Value, condcodes::FloatCC, types};
+use cranelift_codegen::ir::{condcodes::FloatCC, types, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 use tidepool_repr::execution_schema::{
     ForeignConvention, OperationIdentity, ResultContract, RuntimeRep, Signature,
@@ -176,7 +176,7 @@ impl ScalarFamily for FloatingFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::{testing, *};
 
     fn run(
@@ -313,25 +313,21 @@ mod tests {
 
     #[test]
     fn ghc_float_family_rejects_wrong_signatures() {
-        assert!(
-            FloatingFamily::recognize(
-                &OperationIdentity::PrimOp("plusFloat#".into()),
-                &Signature {
-                    arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
-                    results: ResultContract::Returns(vec![RuntimeRep::Float(64)])
-                }
-            )
-            .is_none()
-        );
-        assert!(
-            FloatingFamily::recognize(
-                &OperationIdentity::PrimOp("eqFloat#".into()),
-                &Signature {
-                    arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
-                    results: ResultContract::Returns(vec![RuntimeRep::Float(32)])
-                }
-            )
-            .is_none()
-        );
+        assert!(FloatingFamily::recognize(
+            &OperationIdentity::PrimOp("plusFloat#".into()),
+            &Signature {
+                arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Float(64)])
+            }
+        )
+        .is_none());
+        assert!(FloatingFamily::recognize(
+            &OperationIdentity::PrimOp("eqFloat#".into()),
+            &Signature {
+                arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
+                results: ResultContract::Returns(vec![RuntimeRep::Float(32)])
+            }
+        )
+        .is_none());
     }
 }

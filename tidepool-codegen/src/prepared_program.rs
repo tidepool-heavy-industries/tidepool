@@ -13,8 +13,8 @@ use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
-    Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature, TargetDescriptor,
-    ValueId,
+    Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature,
+    TargetDescriptor, ValueId,
 };
 use tidepool_repr::DataConId;
 
@@ -33,6 +33,7 @@ mod run;
 pub use run::{ExecutionError, RunOptions, RunResult};
 #[cfg(test)]
 mod apply_tests;
+mod arrays;
 #[cfg(test)]
 mod bytes_tests;
 #[cfg(test)]
@@ -43,7 +44,6 @@ mod floating;
 mod forcing;
 mod plan;
 mod primitives;
-mod arrays;
 #[cfg(test)]
 mod retention_tests;
 mod safepoint;
@@ -201,8 +201,26 @@ impl CompiledProgram {
             ("prepared_bad_state", prepared_bad_state as *const u8),
             ("prepared_blackhole", prepared_blackhole as *const u8),
             ("prepared_raise", no_success::raise as *const u8),
-            ("prepared_new_boxed", arrays::prepared_new_boxed as *const u8),
-            ("prepared_no_success_returned", no_success::unexpected_success as *const u8),
+            (
+                "prepared_new_boxed",
+                arrays::prepared_new_boxed as *const u8,
+            ),
+            (
+                "prepared_read_boxed",
+                arrays::prepared_read_boxed as *const u8,
+            ),
+            (
+                "prepared_write_boxed",
+                arrays::prepared_write_boxed as *const u8,
+            ),
+            (
+                "prepared_sizeof_boxed",
+                arrays::prepared_sizeof_boxed as *const u8,
+            ),
+            (
+                "prepared_no_success_returned",
+                no_success::unexpected_success as *const u8,
+            ),
             (
                 "prepared_primitive_failure",
                 fallible::prepared_primitive_failure as *const u8,
@@ -308,8 +326,10 @@ impl CompiledProgram {
         let mut thunk_bodies = BTreeMap::new();
         let thunk_native_signature = entry::signature();
         for (&id, thunk) in &plan.thunks {
-            let body_abi = EntryAbi::lower_internal(&profile, &thunk.signature, EnvironmentMode::Captured)?;
-            let body_signature = body_abi.cranelift_signature(&profile, cranelift_codegen::isa::CallConv::Tail)?;
+            let body_abi =
+                EntryAbi::lower_internal(&profile, &thunk.signature, EnvironmentMode::Captured)?;
+            let body_signature =
+                body_abi.cranelift_signature(&profile, cranelift_codegen::isa::CallConv::Tail)?;
             let body = pipeline.declare_function_with_signature(
                 &format!("prepared_thunk_body_{}", id.0),
                 Linkage::Local,
@@ -468,10 +488,13 @@ impl CompiledProgram {
                 .map(|pap| Arc::clone(&pap.descriptor)),
         );
         let mut descriptor_registry = BTreeMap::new();
-        descriptor_registry.insert(plan.boxed_array.initial_header_word(), DescriptorMetadata {
-            descriptor: Arc::clone(&plan.boxed_array),
-            meaning: DescriptorMeaning::External,
-        });
+        descriptor_registry.insert(
+            plan.boxed_array.initial_header_word(),
+            DescriptorMetadata {
+                descriptor: Arc::clone(&plan.boxed_array),
+                meaning: DescriptorMeaning::External,
+            },
+        );
         for (declaration, descriptor) in plan.program.constructors().iter().zip(&plan.constructors)
         {
             descriptor_registry.insert(
@@ -592,7 +615,12 @@ pub(crate) fn emit_direct_call(
     builder.switch_to_block(success);
     builder.seal_block(success);
     let ResultContract::Returns(results) = results else {
-        no_success::emit_terminal(builder, pipeline, vmctx, no_success::TerminalCause::UnexpectedSuccess)?;
+        no_success::emit_terminal(
+            builder,
+            pipeline,
+            vmctx,
+            no_success::TerminalCause::UnexpectedSuccess,
+        )?;
         return Ok(None);
     };
     let payload = returned[1..].to_vec();

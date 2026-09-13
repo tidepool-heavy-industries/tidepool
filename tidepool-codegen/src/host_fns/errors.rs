@@ -23,6 +23,8 @@ pub enum RuntimeError {
     DivisionByZero,
     #[error("arithmetic overflow")]
     Overflow,
+    #[error("arithmetic underflow")]
+    Underflow,
     #[error("Haskell error called")]
     UserError,
     #[error("Haskell exception raised")]
@@ -56,6 +58,8 @@ pub enum RuntimeError {
     BadFunPtrTag(u8),
     #[error("heap overflow (nursery exhausted after GC)")]
     HeapOverflow,
+    #[error("array index {index} out of bounds for length {len}")]
+    ArrayIndexOutOfBounds { index: i64, len: usize },
     #[error("external {kind:?} allocation failed ({bytes} bytes)")]
     ExternalAllocationFailed {
         kind: ExternalStorageKind,
@@ -102,11 +106,13 @@ impl RuntimeError {
             | Self::IncompletePromotion(_) => MachineDisposition::Unavailable,
             Self::DivisionByZero
             | Self::Overflow
+            | Self::Underflow
             | Self::UserError
             | Self::RaisedException
             | Self::PatternMatchFailure(_)
             | Self::Undefined
             | Self::HeapOverflow
+            | Self::ArrayIndexOutOfBounds { .. }
             | Self::ExternalAllocationFailed { .. }
             | Self::StackOverflow
             | Self::BlackHole

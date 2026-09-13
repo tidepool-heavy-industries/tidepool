@@ -17,6 +17,7 @@ use cranelift_module::{Linkage, Module};
 pub(super) enum PrimitiveFailure {
     DivisionByZero = 0,
     Overflow = 1,
+    Underflow = 2,
 }
 
 /// # Safety
@@ -30,6 +31,7 @@ pub(super) unsafe extern "C" fn prepared_primitive_failure(
     machine.set_first_cause(match kind {
         0 => RuntimeError::DivisionByZero,
         1 => RuntimeError::Overflow,
+        2 => RuntimeError::Underflow,
         _ => RuntimeError::BadPointer,
     });
     machine.prepared_call_status() as i32
@@ -44,6 +46,24 @@ pub(super) fn guard(
     failed: Value,
     cause: PrimitiveFailure,
 ) -> Result<(), super::CompileError> {
+    let failure = builder.create_block();
+    let success = builder.create_block();
+    builder.ins().brif(failed, failure, &[], success, &[]);
+    builder.switch_to_block(failure);
+    builder.seal_block(failure);
+    emit_terminal(builder, pipeline, vmctx, cause)?;
+    builder.switch_to_block(success);
+    builder.seal_block(success);
+    Ok(())
+}
+
+/// A raising primop has no continuation, even when its type is polymorphic.
+pub(super) fn emit_terminal(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    vmctx: Value,
+    cause: PrimitiveFailure,
+) -> Result<(), super::CompileError> {
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
     signature.params = vec![AbiParam::new(types::I64), AbiParam::new(types::I32)];
     signature.returns = vec![AbiParam::new(types::I32)];
@@ -52,17 +72,10 @@ pub(super) fn guard(
         .declare_function("prepared_primitive_failure", Linkage::Import, &signature)
         .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
     let host = pipeline.module.declare_func_in_func(host, builder.func);
-    let failure = builder.create_block();
-    let success = builder.create_block();
-    builder.ins().brif(failed, failure, &[], success, &[]);
-    builder.switch_to_block(failure);
-    builder.seal_block(failure);
     let cause = builder.ins().iconst(types::I32, cause as i64);
     let call = builder.ins().call(host, &[vmctx, cause]);
     let status = builder.inst_results(call)[0];
     crate::alloc::emit_prepared_failure_return(builder, status);
-    builder.switch_to_block(success);
-    builder.seal_block(success);
     Ok(())
 }
 
