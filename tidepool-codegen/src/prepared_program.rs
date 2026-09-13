@@ -21,6 +21,8 @@ mod emit;
 mod image;
 mod observe;
 pub use observe::ObservationFailure;
+mod run;
+pub use run::{ExecutionError, RunOptions, RunResult};
 mod plan;
 pub use admission::admit_program;
 
