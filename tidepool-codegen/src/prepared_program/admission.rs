@@ -78,9 +78,18 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
         return Err(Unsupported::Global(GlobalId(0)));
     }
     let mut functions = BTreeMap::new();
-    let mut admit_binding = |binding: &HeapBinding| -> Result<(), Unsupported> {
+    let mut admit_binding = |binding: &HeapBinding, _top: bool| -> Result<(), Unsupported> {
         match &binding.rhs {
-            HeapRhs::Thunk { .. } => return Err(Unsupported::Thunk(binding.id)),
+            HeapRhs::Thunk { signature, .. } => {
+                let checked = &program.signatures()[signature.0 as usize];
+                if !checked.arguments.is_empty()
+                    || checked.results.as_slice()
+                        != [tidepool_repr::execution_schema::RuntimeRep::LiftedRef]
+                {
+                    return Err(Unsupported::ThunkSignature(binding.id));
+                }
+                functions.insert(binding.id, *signature);
+            }
             HeapRhs::Function { signature, .. } => {
                 functions.insert(binding.id, *signature);
             }
@@ -90,13 +99,13 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
     };
     for group in program.bindings() {
         for top in items(group) {
-            admit_binding(&top.binding)?;
+            admit_binding(&top.binding, true)?;
         }
     }
     for frame in &program.expressions().nodes {
         if let ExprFrame::Let { bindings, .. } = frame {
             for binding in items(bindings) {
-                admit_binding(binding)?;
+                admit_binding(binding, false)?;
             }
         }
     }
@@ -104,7 +113,20 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
     let owners = expression_owners(program);
     for (node, frame) in program.expressions().nodes.iter().enumerate() {
         let rejected = match frame {
-            ExprFrame::Operation { .. } => true,
+            ExprFrame::Operation { operation, .. } => {
+                match program.operations().get(operation.0 as usize) {
+                    Some(declaration) => {
+                        match program.signatures().get(declaration.signature.0 as usize) {
+                            Some(signature) => {
+                                super::primitives::recognize_operation(declaration, signature)
+                                    .is_none()
+                            }
+                            None => true,
+                        }
+                    }
+                    None => true,
+                }
+            }
             ExprFrame::Call {
                 callee, signature, ..
             } => {
@@ -360,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_nested_thunks_before_execution() {
+    fn admission_rejects_non_lifted_thunks_before_execution() {
         let bytes = wire(
             vec![sig(&[], &[RuntimeRep::Int(64)])],
             vec![],
@@ -375,7 +397,7 @@ mod tests {
         );
         assert_eq!(
             admit_program(&linked(bytes)),
-            Err(Unsupported::Thunk(ValueId(1)))
+            Err(Unsupported::ThunkSignature(ValueId(1)))
         );
     }
 

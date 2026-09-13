@@ -115,6 +115,37 @@ alone. Review entry/update, remembered slots and recovered-body preparation.
 
 ## Trial record
 
+### Integrated recovery/lazy checkpoint
+
+The current focused fold passed `bash scripts/dev-shell.sh cargo test -p
+tidepool-codegen --lib prepared_program`: 58 passed, none failed. The repr
+cross-language boundary passed `bash scripts/dev-shell.sh cargo test -p
+tidepool-repr --test execution_schema_contract -- --nocapture`: three passed.
+These include generated-entry relocation/settlement, sibling-root survival
+while observation forces a collecting child, and the exact rintDouble seed.
+They are not a workspace or full-corpus result.
+
+The recovered `main:RecoveredBody:value:caller` package-fst example reached
+projection, validation, admission, compilation, execution and matching result
+1 through prepared-corpus. Artifact SHA256:
+`283752e749df7ea59f2332c7ae95ac3f640b96f054252febdd47be2957562d8d`.
+Disposable evidence is in `target/w5-recovered-fst/results.json`. Broad recovery,
+PAPs, remaining primitives and descriptor old space are not established by it.
+
+Closing shapes for this checkpoint (not full-wave closure): exact verification
+and callee-identity-based test repair were accepted in one worker round. Pure
+integer lowering needed correction and Terra escalation because names and
+signatures were inferred instead of checked against GHC. Forcing observation
+needed a semantic review/correction for FFI aliasing, pre-force admission and
+incremental indexing; it should not have been handed off without these owner
+contracts. Recovery review found bounded diagnostic/async/identity corrections,
+which passed its two Haskell suites and extractor build. Lead events since the
+preceding entry: three follow-up assignments, forcing semantic correction,
+recovery contract correction, IR-test correction, integration evidence review,
+and the rintDouble owner seed. Worker token totals remain unavailable; no cost
+estimate is inferred from these counts. The 20,000-node forcing-observation
+test is still in progress, not covered by the shallow alias-chain test.
+
 Initial lead rounds: one accepted plan; one source/ownership read; one B1 seed;
 one corpus inventory assignment. Update as work proceeds; no token totals are
 available unless the harness exposes them. Closing task-shape assessment is
@@ -166,3 +197,80 @@ B3 worklist semantic seed; A1 observation-state review and forcing-adapter
 assignment. The first B2 brief needed the wrapper/finder correction. No worker
 token totals are exposed. These events are recorded now, not reconstructed at
 the final handback.
+
+### Recovery and lazy-entry follow-up
+
+B2 Terra verification passed
+`bash scripts/dev-shell.sh bash -lc 'cd haskell && cabal test recovered-body-test fat-iface-exact-test'`
+(one case in each suite). Defining-module preparation uses the exact package
+finder and raw interface declarations rather than the stripped PIT view.
+This proves recovery/preparation/projection of package fst, not execution.
+A fresh Luna lookup review accepted the exact lookup owner without building.
+
+A1 follow-up reports 39 passes using
+`nix develop --command cargo test -p tidepool-codegen --lib prepared_program --no-default-features -- --skip w5_a3_integer_add_runs_through_real_adapter`.
+That run preceded the A4 forcing-observation seed. It does not cover the new
+seed or establish deterministic cancellation settlement. Parent corrections
+covered packed-field store widths, initial CAF reserve sizing, dead
+SingleEntry heap states, and omitted local-thunk admission. A fresh entry
+review is in progress. B3 closure, scalar operations and the forcing seam
+remain in progress, not green.
+
+ABI 4 names the VMContext layout with prepared stack bounds. Schema remains 6;
+the fixture regeneration must carry both versions together at the fold.
+
+Current trial data: B2 required two Luna build rounds then one Terra repair
+round; first brief insufficient on exact package lookup/wrapper preservation.
+A1 initial 37-pass handback needed one consolidated semantic correction batch
+and adapter follow-up; reported result 39 passes. Lead subsequently found
+updated-header lookup and recursive observation chasing still needed review,
+so that portion of the handback is not accepted. The integer seed needed a
+lead correction from little-endian to canonical big-endian literal bytes;
+that is a seed defect, not a worker failure.
+
+Source review also found prepared allocation cancellation still using the
+legacy TLS error recorder. It now samples and records on VMContext's machine;
+the new named-safepoint test seed covers cancellation without TLS. Typed
+FunctionEntry/Backedge/ThunkEntry/ThunkCommit wiring and generated settlement
+interleavings remain outstanding until their tests run.
+
+Recovered modules explicitly carry `ExactBodySubset` coverage, distinct from
+`CompleteSourceModule`. Missing source-home tops remain producer errors; a
+package body absent from a partial recovered module remains an explicit
+global with recovery diagnostics. Treating both as complete source modules
+would falsely turn an honest missing implementation into MissingPreparedTop.
+
+The first integer handback passed seven focused tests and six admission tests,
+but parent semantic review rejected width-polymorphic recognition for fixed
+GHC names and the Word-shift argument representation. One correction attempt
+is in progress; those tests were insufficient evidence for the recognition
+table. Fresh A1 review also found local Enter still routed to the status-only
+host guard despite the earlier handback. A1 moved to Terra for repair; the
+corrected function-entry/local-thunk check has passed, with broader tests
+still running. Test counts are evidence about those exact tests, not a proxy
+for contract completion.
+
+### First connected recovery milestone
+
+`main:RecoveredBody:value:caller` now passes projection, validation, admission,
+native compilation, execution and comparison against integer 1 through the
+ordinary prepared corpus runner. Evidence is generated at
+`target/w5-recovered-fst/results.json` (one program, six passed stages). The
+artifact is SHA-256
+`283752e749df7ea59f2332c7ae95ac3f640b96f054252febdd47be2957562d8d`.
+This proves one real base call, not the original 516-program global cohort.
+
+The root-authored `prepared_program::settlement_tests` passed 2/2 through the
+dev-shell toolchain: an update to the relocated thunk with its original source
+header Forwarded, plus named-poll cancellation and retry for Memoize and
+SingleEntry. Backedge/captured-payload and terminal-injection evidence still
+needs expansion. The allocation poll records through VMContext, not TLS.
+
+A4's first handback passed five focused tests but needed correction: it built
+the full heap index on each node despite the stated incremental index contract,
+forced before exact-start admission, and held a shared result-area slice across
+GC writes. Its 96-thunk test did not prove deep small-stack observation. These
+are integration/coverage findings, not evidence to label the wave complete.
+Scalar recognition required Terra after a fresh GHC audit found the remaining
+`and64#` spelling and fixed Word64 shift-count mistakes; 10 focused scalar
+tests passed after repair.

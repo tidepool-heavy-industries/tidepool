@@ -126,6 +126,9 @@ pub(super) fn build_static_image(plan: &ProgramPlan<'_>) -> Result<StaticImage, 
     let mut top_objects = BTreeMap::new();
     let mut total_bytes = 0usize;
     for (_, id) in ordered_tops {
+        if plan.heap_tops.contains(&id) {
+            continue;
+        }
         let binding = plan
             .top_bindings
             .get(&id)
@@ -330,7 +333,7 @@ fn initialize_atom(
 ) -> Result<(), CompileError> {
     match (rep, atom) {
         (RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef, Atom::Ref(value)) => {
-            add_relocation(top_objects, value, field_offset, relocations)
+            add_relocation(plan, top_objects, value, field_offset, relocations)
         }
         (RuntimeRep::Address, Atom::Ref(value)) => {
             let address = resolve_address(plan, top_objects, value)?;
@@ -368,7 +371,7 @@ fn initialize_capture(
 ) -> Result<(), CompileError> {
     match rep {
         RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef => {
-            add_relocation(top_objects, capture, field_offset, relocations)
+            add_relocation(plan, top_objects, capture, field_offset, relocations)
         }
         RuntimeRep::Address => {
             let address = resolve_address(plan, top_objects, capture)?;
@@ -382,6 +385,7 @@ fn initialize_capture(
 }
 
 fn add_relocation(
+    plan: &ProgramPlan<'_>,
     top_objects: &BTreeMap<ValueId, (usize, Arc<ObjectDescriptor>)>,
     value: &ValueRef,
     slot_offset: usize,
@@ -396,6 +400,9 @@ fn add_relocation(
         )));
     };
     let Some((target_offset, target_descriptor)) = top_objects.get(id) else {
+        if plan.heap_tops.contains(id) {
+            return Err(CompileError::Unsupported(Unsupported::StaticHeapEdge(*id)));
+        }
         return Err(CompileError::MissingRepresentation(*id));
     };
     relocations.push(StaticRelocation {

@@ -5,7 +5,9 @@ use super::{
     CompileError, CompiledProgram, ExecutionError, ObservationFailure, RunOptions, Unsupported,
 };
 use crate::host_fns::RuntimeError;
-use cranelift_codegen::ir::{self, InstructionData, Opcode, ValueDef};
+use cranelift_codegen::ir::{self, instructions::CallInfo, ExternalName, InstructionData, Opcode, ValueDef};
+use cranelift_jit::JITModule;
+use cranelift_module::{FuncId, FuncOrDataId, Module};
 use tidepool_bridge::Value;
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, MachineImports,
@@ -654,20 +656,39 @@ fn linked_mixed_result_fixture() -> tidepool_repr::execution_schema::LinkedProgr
     linked_wire(mixed_result_wire(40))
 }
 
-fn direct_call_arity(function: &ir::Function, inst: ir::Inst) -> Option<usize> {
-    match &function.dfg.insts[inst] {
-        InstructionData::Call { args, .. } => Some(args.len(&function.dfg.value_lists)),
-        _ => None,
-    }
+fn direct_call_func_id(function: &ir::Function, inst: ir::Inst) -> Option<FuncId> {
+    let CallInfo::Direct(func, _) = function.dfg.insts[inst]
+        .analyze_call(&function.dfg.value_lists, &function.dfg.exception_tables)
+    else {
+        return None;
+    };
+    let ExternalName::User(user_ref) = function.dfg.ext_funcs[func].name else {
+        return None;
+    };
+    let user_name = &function.params.user_named_funcs()[user_ref];
+    (user_name.namespace == 0).then(|| FuncId::from_u32(user_name.index))
 }
 
-fn first_reserve_call(function: &ir::Function) -> (ir::Inst, ir::Block) {
+fn direct_call_is_named(
+    function: &ir::Function,
+    module: &JITModule,
+    inst: ir::Inst,
+    name: &str,
+) -> bool {
+    let Some(FuncOrDataId::Func(expected)) = module.get_name(name) else {
+        panic!("declared function {name} is missing")
+    };
+    direct_call_func_id(function, inst) == Some(expected)
+}
+
+fn first_reserve_call(function: &ir::Function, module: &JITModule) -> (ir::Inst, ir::Block) {
     function
         .layout
         .blocks()
         .find_map(|block| {
             function.layout.block_insts(block).find_map(|inst| {
-                (direct_call_arity(function, inst) == Some(2)).then_some((inst, block))
+                direct_call_is_named(function, module, inst, "prepared_gc_trigger")
+                    .then_some((inst, block))
             })
         })
         .expect("prepared allocation reserve call is present")
@@ -1025,7 +1046,7 @@ fn recursive_group_reserves_once_before_sibling_initialization() {
         .expect("prepared compilation captures pre-compile IR");
     let function_id = program.entries[&tidepool_repr::execution_schema::ValueId(0)].function;
     let function = ir.get(&function_id).expect("top entry IR is captured");
-    let (reserve, slow) = first_reserve_call(function);
+    let (reserve, slow) = first_reserve_call(function, &*program.pipeline.module);
     assert_eq!(reserve_extent(function, reserve), {
         let constructor = program.descriptors.first().unwrap().allocation_extent();
         let recursive_function = program.descriptors.last().unwrap().allocation_extent();
@@ -1092,7 +1113,7 @@ fn recursive_group_reserves_once_before_sibling_initialization() {
 }
 
 #[test]
-fn enter_zero_tag_uses_one_slow_inspection_call_without_an_inline_header_chain() {
+fn enter_uses_one_generated_state_machine_call_without_an_inline_header_chain() {
     let program = CompiledProgram::compile(&linked_wire(static_constructor_enter_wire())).unwrap();
     let ir = program
         .pipeline
@@ -1101,15 +1122,17 @@ fn enter_zero_tag_uses_one_slow_inspection_call_without_an_inline_header_chain()
         .expect("prepared compilation captures pre-compile IR");
     let function_id = program.entries[&tidepool_repr::execution_schema::ValueId(0)].function;
     let function = ir.get(&function_id).expect("top entry IR is captured");
-    let two_argument_calls = function
+    let generated_enter_calls = function
         .layout
         .blocks()
         .flat_map(|block| function.layout.block_insts(block))
-        .filter(|inst| direct_call_arity(function, *inst) == Some(2))
+        .filter(|inst| {
+            direct_call_is_named(function, &*program.pipeline.module, *inst, "prepared_enter")
+        })
         .count();
     assert_eq!(
-        two_argument_calls, 1,
-        "Enter emits one slow inspection call"
+        generated_enter_calls, 1,
+        "Enter emits one generated state-machine call"
     );
     let loads = function
         .layout
@@ -1117,5 +1140,8 @@ fn enter_zero_tag_uses_one_slow_inspection_call_without_an_inline_header_chain()
         .flat_map(|block| function.layout.block_insts(block))
         .filter(|inst| function.dfg.insts[*inst].opcode() == Opcode::Load)
         .count();
-    assert_eq!(loads, 2, "Enter performs only the top-table loads inline");
+    assert_eq!(
+        loads, 3,
+        "Enter performs top-table loads plus stack preflight"
+    );
 }

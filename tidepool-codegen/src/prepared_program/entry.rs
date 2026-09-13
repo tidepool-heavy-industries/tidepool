@@ -1,10 +1,10 @@
 //! Generated thunk settlement shared by all prepared entry sites.
 
-use cranelift_codegen::ir::{InstBuilder, MemFlags, Value, condcodes::IntCC};
+use cranelift_codegen::ir::{condcodes::IntCC, InstBuilder, MemFlags, Value};
 use cranelift_codegen::{
-    Context,
-    ir::{self, AbiParam, types},
+    ir::{self, types, AbiParam},
     isa::CallConv,
+    Context,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_frontend::FunctionBuilderContext;
@@ -85,7 +85,9 @@ pub(super) fn emit_prepared_enter(
     builder.switch_to_block(loop_block);
     let reference = builder.block_params(loop_block)[0];
     builder.declare_value_needs_stack_map(reference);
-    let poll_call = builder.ins().call(poll_ref, &[vmctx]);
+    let point = builder.ins().iconst(types::I32,
+        crate::prepared_control::PreparedSafepoint::ThunkEntry as i64);
+    let poll_call = builder.ins().call(poll_ref, &[vmctx, point]);
     let status = builder.inst_results(poll_call)[0];
     let inspect = builder.create_block();
     let abort = builder.create_block();
@@ -227,7 +229,9 @@ pub(super) fn emit_prepared_enter(
         builder.switch_to_block(force_ok);
         builder.seal_block(force_ok);
         builder.declare_value_needs_stack_map(forced_results[1]);
-        let final_poll = builder.ins().call(poll_ref, &[vmctx]);
+        let point = builder.ins().iconst(types::I32,
+            crate::prepared_control::PreparedSafepoint::ThunkCommit as i64);
+        let final_poll = builder.ins().call(poll_ref, &[vmctx, point]);
         let final_status = builder.inst_results(final_poll)[0];
         builder
             .ins()

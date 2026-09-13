@@ -7,6 +7,32 @@ pub enum CallStatus {
     Cancelled = 3,
 }
 
+/// Prepared safepoint identities are shared by emission and deterministic
+/// settlement tests. They describe where cancellation is sampled, not its
+/// cause or the machine's reusable/terminal disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub(crate) enum PreparedSafepoint {
+    Allocation = 0,
+    FunctionEntry = 1,
+    Backedge = 2,
+    ThunkEntry = 3,
+    ThunkCommit = 4,
+}
+
+impl PreparedSafepoint {
+    pub(crate) fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Allocation),
+            1 => Some(Self::FunctionEntry),
+            2 => Some(Self::Backedge),
+            3 => Some(Self::ThunkEntry),
+            4 => Some(Self::ThunkCommit),
+            _ => None,
+        }
+    }
+}
+
 impl CallStatus {
     pub fn from_raw(raw: i64) -> Result<Self, ControlError> {
         match raw {

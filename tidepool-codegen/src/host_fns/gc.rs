@@ -1000,9 +1000,8 @@ pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reser
     let mut frame_anchor = [0_u64; 2];
     std::hint::black_box(&mut frame_anchor);
     let ms = unsafe { machine_state(vmctx) };
-    if !check_cancel_and_set_error(vmctx)
-        && ms.prepared_call_status() == crate::prepared_control::CallStatus::Success
-    {
+    if ms.poll_prepared(crate::prepared_control::PreparedSafepoint::Allocation)
+        == crate::prepared_control::CallStatus::Success {
         let state = ms.take_gc_state();
         let is_prepared = state.as_ref().is_some_and(|state| state.prepared.is_some());
         if let Some(state) = state {

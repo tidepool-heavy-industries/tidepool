@@ -4,6 +4,7 @@ module Tidepool.ExecutionProjection
   , projectPrepared
   , projectPreparedTarget
   , preparedTopIdentities
+  , preparedTargetReferences
   , projectLiteralAtomForTest
   , assignTopIdentitySpellings
   ) where
@@ -36,11 +37,12 @@ import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (isDeadEndId)
+import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
-import GHC.Types.Unique.Set (mkUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.Set (elementOfUniqSet, mkUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Unique (Unique)
 import GHC.Types.Unique.FM (UniqFM, listToUFM, lookupUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
@@ -51,8 +53,9 @@ import GHC.Unit.Types (Module, unitString)
 import Tidepool.ExecutionIR (topBindingReferences)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
+import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -122,7 +125,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         (projectionRetainedGenerations context) (Set.fromList
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
-          | prepared <- modules ])
+          | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
   (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     (pure . topValue) (findTop bindingGroups)
@@ -154,11 +157,31 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
 projectPreparedTarget :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPreparedTarget _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPreparedTarget context modules =
-  projectPreparedWithTopSymbols context
-    [ prepared { pmBindings = filter isReachable (pmBindings prepared) }
+  let (identities, selected) = selectPreparedTarget context modules
+  in projectPreparedWithTopSymbols context selected identities
+
+-- | Exact external value references of the selected top closure. The identity
+-- map is always computed before filtering. Recovery uses Ids, never occurrence
+-- strings or the imported-only annotations returned by stg2stg.
+preparedTargetReferences :: ProjectionContext -> [PreparedModule] -> [Id]
+preparedTargetReferences context modules =
+  let (_, selected) = selectPreparedTarget context modules
+      defined = mkUniqSet [varUnique binder | prepared <- modules
+        , (binding, _) <- pmBindings prepared, binder <- topBinders binding]
+      referenced = [ binder | prepared <- selected
+        , binder <- preparedReferencedIds (extractPreparedFacts
+            (pmModule prepared) (pmTagSigs prepared) (map fst (pmBindings prepared)))
+        , isExternalName (varName binder)
+        , not (elementOfUniqSet (varUnique binder) defined) ]
+  in Map.elems (Map.fromList [(idSymbol "value" binder, binder) | binder <- referenced])
+
+selectPreparedTarget :: ProjectionContext -> [PreparedModule]
+  -> (VarEnv SymbolIdentity, [PreparedModule])
+selectPreparedTarget context modules =
+  (topIdentityMap, [ prepared { pmBindings = filter isReachable (pmBindings prepared) }
     | prepared <- modules
     , any isReachable (pmBindings prepared)
-    ] topIdentityMap
+    ])
   where
     topIdentityMap = buildTopIdentityMap modules
     topUniqueIdentityMap = buildTopUniqueIdentityMap topIdentityMap modules
@@ -599,23 +622,31 @@ checkedWord32 label value
   | otherwise = pure (fromIntegral value)
 
 internOperation :: StgOp -> SignatureId -> P OperationId
-internOperation op signature = case op of
-  StgPrimOp primop -> do
-      let operationIdentity = Schema.PrimOpIdentity
-            (Text.pack (occNameString (primOpOcc primop)))
-      operationSignature <- signatureForId signature
-      known <- gets operations
-      case find (matches operationIdentity operationSignature) known of
-       Just (_, _, identity) -> pure identity
-       Nothing -> do
-        prior <- gets operationDecls
-        let identity = OperationId (fromIntegral (length prior))
-            declaration = OperationDecl operationIdentity signature
-        modify' (\current -> current
-          { operations = operations current <> [(operationIdentity, operationSignature, identity)]
-          , operationDecls = operationDecls current <> [declaration] })
-        pure identity
-  _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
+internOperation op signature = do
+  operationSignature <- signatureForId signature
+  operationIdentity <- case op of
+    StgPrimOp primop -> pure (Schema.PrimOpIdentity
+      (Text.pack (occNameString (primOpOcc primop))))
+    -- ghc-internal's rounding helper is an external C implementation, not an
+    -- interface body. Preserve its exact target and convention; native
+    -- admission independently checks the same signature before lowering it.
+    StgFCallOp (Foreign.CCall (Foreign.CCallSpec
+      (Foreign.StaticTarget _ label _ _) Foreign.CCallConv _)) _
+      | unpackFS label == "rintDouble"
+      , operationSignature == Signature [FloatRep 64] [FloatRep 64] ->
+          pure (Schema.IntrinsicIdentity "rintDouble" Schema.CCall)
+    _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
+  known <- gets operations
+  case find (matches operationIdentity operationSignature) known of
+    Just (_, _, identity) -> pure identity
+    Nothing -> do
+      prior <- gets operationDecls
+      let identity = OperationId (fromIntegral (length prior))
+          declaration = OperationDecl operationIdentity signature
+      modify' (\current -> current
+        { operations = operations current <> [(operationIdentity, operationSignature, identity)]
+        , operationDecls = operationDecls current <> [declaration] })
+      pure identity
   where
     matches operationIdentity operationSignature (knownIdentity, knownSignature, _) =
       operationIdentity == knownIdentity && operationSignature == knownSignature

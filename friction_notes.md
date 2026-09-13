@@ -278,3 +278,23 @@ are nondeterministic.
   the recipe resolve and rebuild a matched worker; update and check then
   succeeded. This should be automated at the recipe boundary so routine
   source changes do not require callers to diagnose stale shell state.
+
+## Wave 5 exact recovery and lazy entry
+
+- GHC's source loader can rebuild imported fixture modules with the session's
+  flags, replacing an explicitly generated fat interface with a thin one.
+  The exact-lookup fixture must preserve fat flags during loading, then rebuild
+  the deliberately thin case. The repaired focused test passes.
+- GHC's package-interface cache strips declarations needed by recovered-body
+  preparation. Reading the exact finder-selected interface before typechecking
+  it avoids the PIT's `No mi_decls` panic; module identity remains checked.
+- A passing source-only worker report hid a scope omission: local thunks were
+  still rejected to preserve an earlier admission test. Contract briefs need
+  both top and local examples, not just a CAF example and a broad mechanism name.
+- Shared-tree worker completion and a free harness thread are not always
+  simultaneous. Several fresh spawns reported `agent thread limit reached`
+  until the previous worker's completion event arrived. This is coordination
+  overhead for the proposed typed worker/build-state owner, not coding work.
+- Parent review caught host-side scalar initialization writing a machine word
+  for narrow packed fields. Shared typed artifact builders prevent wire drift
+  but do not replace mixed-width layout interaction tests.

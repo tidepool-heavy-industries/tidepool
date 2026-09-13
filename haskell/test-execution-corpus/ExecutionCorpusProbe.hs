@@ -20,11 +20,13 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
+  ( PipelineSelection(PreparedStg), PipelineResult(..), PreparedPipelineResult(..)
   , runPipelineSelected )
+import Tidepool.PreparedRecovery
+  ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
 import Tidepool.Json (jsonString)
 
-data Record = Record String (Maybe String) Outcome
+data Record = Record String (Maybe String) [RecoveryFailure] Outcome
 
 data Outcome
   = Projected FilePath SymbolIdentity
@@ -83,8 +85,9 @@ runProbe arguments = do
           rows <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
               projectOneIdentity prepared outputDir index identity
-            else forM (zip [0 :: Int ..] targets) $ \(index, occurrence) ->
-              projectOneTarget prepared selected moduleNameArg outputDir index occurrence
+            else forM (zip [0 :: Int ..] (zip targets legacy)) $ \(index, (occurrence, legacyTarget)) ->
+              projectOneTarget prepared moduleNameArg outputDir index occurrence
+                (legacyTargetIdentity legacyTarget)
           pure (rows, legacy)
   BS.writeFile (outputDir </> "manifest.json")
     (toBytes (renderManifest records legacyTargets))
@@ -105,9 +108,12 @@ trySync action = do
 
 rejectedRecord :: String -> String -> String -> Record
 rejectedRecord moduleNameArg reason occurrence =
-  Record (missingName moduleNameArg occurrence) Nothing (Rejected reason)
+  Record (missingName moduleNameArg occurrence) Nothing [] (Rejected reason)
 
 data LegacyTarget = LegacyTarget String (Maybe SymbolIdentity)
+
+legacyTargetIdentity :: LegacyTarget -> Maybe SymbolIdentity
+legacyTargetIdentity (LegacyTarget _ identity) = identity
 
 inModule :: String -> SymbolIdentity -> Bool
 inModule moduleNameArg identity = symbolModule identity == Text.pack moduleNameArg
@@ -145,22 +151,18 @@ matchesExternal moduleNameArg occurrence identity =
 
 projectOneTarget
   :: PreparedPipelineResult
-  -> [SymbolIdentity]
   -> String
   -> FilePath
   -> Int
   -> String
+  -> Maybe SymbolIdentity
   -> IO Record
-projectOneTarget prepared identities moduleNameArg outputDir index occurrence = do
-  let candidates = filter matches identities
-      matches identity = symbolOccurrence identity == Text.pack occurrence
-      reject reason = pure (Record (missingName moduleNameArg occurrence)
-        Nothing (Rejected reason))
-  case candidates of
-    [] -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
-    [selected] -> projectOneIdentity prepared outputDir index selected
-    _ -> reject ("target " <> show occurrence <> " is ambiguous in module "
-      <> moduleNameArg <> " (" <> show (length candidates) <> " matches)")
+projectOneTarget prepared moduleNameArg outputDir index occurrence mapped = do
+  let reject reason = pure (Record (missingName moduleNameArg occurrence)
+        Nothing [] (Rejected reason))
+  case mapped of
+    Nothing -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
+    Just selected -> projectOneIdentity prepared outputDir index selected
 
 projectOneIdentity
   :: PreparedPipelineResult
@@ -173,22 +175,30 @@ projectOneIdentity prepared outputDir index selected = do
       artifactName = numericArtifactName index
       name = identityName selected
       expectationKey = externalExpectationKey selected
-      reject reason = pure (Record name Nothing (Rejected reason))
-  projected <- trySync (evaluate
-    (projectPreparedTarget context (pprModules prepared)))
-  case projected of
-    Left failure -> reject ("target " <> show (symbolOccurrence selected)
-      <> " projection rejected: " <> show failure)
-    Right (Left failure) -> reject ("target " <> show (symbolOccurrence selected)
-      <> " rejected: " <> show failure)
-    Right (Right program) -> do
-      encoded <- trySync (evaluate (BS.copy (encodeWireProgram program)))
-      case encoded of
-        Left failure -> reject ("target " <> show (symbolOccurrence selected)
-          <> " encoding rejected: " <> show failure)
-        Right bytes -> do
-          BS.writeFile (outputDir </> artifactName) bytes
-          pure (Record name expectationKey (Projected artifactName selected))
+      reject residuals reason = pure (Record name Nothing residuals (Rejected reason))
+  recovered <- trySync (recoverPreparedClosure
+    (prHscEnv (pprPipelineResult prepared)) context (pprModules prepared))
+  case recovered of
+    Left failure -> reject [] ("target " <> show (symbolOccurrence selected)
+      <> " recovery failed: " <> show failure)
+    Right closure -> do
+      let residuals = closureFailures closure
+      projected <- trySync (evaluate
+        (projectPreparedTarget context (closureModules closure)))
+      case projected of
+        Left failure -> reject residuals ("target " <> show (symbolOccurrence selected)
+          <> " projection rejected: " <> show failure)
+        Right (Left failure) -> reject residuals ("target " <> show (symbolOccurrence selected)
+          <> " rejected: " <> show failure)
+        Right (Right program) -> do
+          encoded <- trySync (evaluate (BS.copy (encodeWireProgram program)))
+          case encoded of
+            Left failure -> reject residuals ("target " <> show (symbolOccurrence selected)
+              <> " encoding rejected: " <> show failure)
+            Right bytes -> do
+              BS.writeFile (outputDir </> artifactName) bytes
+              pure (Record name expectationKey residuals
+                (Projected artifactName selected))
 
 identityName :: SymbolIdentity -> String
 identityName identity = intercalate ":" $ case symbolRecordParent identity of
@@ -224,6 +234,10 @@ mappingSelfTest = do
         (ioError (userError ("mapping self-test failed: " <> label)))
   assert "exact external mapping" $
     exactExternalMapping "Suite" identities "answer" == Right (Just external)
+  assert "legacy projection keeps exact external identity" $
+    case mapLegacyTargetsPure "Suite" identities ["answer"] of
+      [Right target] -> legacyTargetIdentity target == Just external
+      _ -> False
   assert "internal same-occurrence does not replace external" $
     exactExternalMapping "Suite" [internal] "answer" == Right Nothing
   assert "suffixes are not stripped" $
@@ -277,13 +291,19 @@ renderManifest records legacyTargets = "{\"version\":2,\"legacy_targets\":["
   <> "]}"
 
 renderRecord :: Record -> String
-renderRecord (Record name expectationKey outcome) = "{\"name\":" <> jsonString name
+renderRecord (Record name expectationKey residuals outcome) = "{\"name\":" <> jsonString name
   <> ",\"expectation_key\":" <> renderMaybeString expectationKey <> ","
+  <> renderResiduals residuals
   <> case outcome of
     Projected artifact identity -> "\"status\":\"projected\",\"artifact\":"
       <> jsonString artifact <> ",\"identity\":" <> renderIdentity identity <> "}"
     Rejected reason -> "\"status\":\"rejected\",\"reason\":"
       <> jsonString reason <> "}"
+
+renderResiduals :: [RecoveryFailure] -> String
+renderResiduals [] = ""
+renderResiduals failures = "\"recovery_failures\":["
+  <> intercalate "," (map (jsonString . show) failures) <> "],"
 
 renderLegacyTarget :: LegacyTarget -> String
 renderLegacyTarget (LegacyTarget legacyName identity) =

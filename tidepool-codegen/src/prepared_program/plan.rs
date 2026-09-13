@@ -1,7 +1,7 @@
 //! Checked binder and closure layout facts used by every emitter consumer.
 
 use super::CompileError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
 use tidepool_repr::execution_schema::{
@@ -17,9 +17,31 @@ pub(super) struct FunctionPlan<'a> {
     pub descriptor: Arc<ObjectDescriptor>,
 }
 
+/// A thunk has the same captured environment layout as a function, but its
+/// generated body is entered by the lazy state machine and therefore has a
+/// closed `[] -> [LiftedRef]` semantic signature.
+pub(super) struct ThunkPlan<'a> {
+    pub signature: &'a Signature,
+    pub captures: &'a [ValueRef],
+    pub body: usize,
+    pub policy: tidepool_repr::execution_schema::UpdatePolicy,
+    pub descriptor: Arc<ObjectDescriptor>,
+}
+
+/// Invocation-owned top allocation recipe. The checked binding is cloned so
+/// run initialization can reserve the complete group after static addresses
+/// exist, without retaining the input artifact behind the compiled program.
+pub(crate) struct HeapTopSpec {
+    pub id: ValueId,
+    pub descriptor: Arc<ObjectDescriptor>,
+    pub binding: HeapBinding,
+    pub reps: Vec<RuntimeRep>,
+}
+
 pub(super) struct ProgramPlan<'a> {
     pub program: &'a PreparedProgram,
     pub functions: BTreeMap<ValueId, FunctionPlan<'a>>,
+    pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
     pub top_bindings: BTreeMap<ValueId, &'a HeapBinding>,
     /// Logical representations, including Void. ValueIds are globally unique
     /// after validation, so no lexical search or scope cloning is necessary.
@@ -29,6 +51,8 @@ pub(super) struct ProgramPlan<'a> {
     pub top_slots: BTreeMap<ValueId, usize>,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
     pub bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
+    pub heap_tops: BTreeSet<ValueId>,
+    pub heap_top_specs: Vec<HeapTopSpec>,
 }
 
 impl<'a> ProgramPlan<'a> {
@@ -148,50 +172,132 @@ impl<'a> ProgramPlan<'a> {
         }
 
         let mut functions = BTreeMap::new();
+        let mut thunks = BTreeMap::new();
         for binding in bindings {
-            let HeapRhs::Function {
-                signature: signature_id,
-                parameters,
-                captures,
-                body,
-            } = &binding.rhs
-            else {
-                continue;
-            };
-            let signature = signature(program, *signature_id);
-            let capture_reps = captures
-                .iter()
-                .map(|capture| value_ref_rep(&values, capture))
-                .collect::<Result<Vec<_>, _>>()?;
-            let layout = StorageLayout::for_reps(target, &capture_reps)?;
-            let descriptor = Arc::new(ObjectDescriptor::new(
-                ObjectKind::Function,
-                layout,
-                Some(EntryMetadata::new(
-                    signature.clone(),
-                    u64::from(binding.id.0),
-                )),
-            )?);
-            functions.insert(
-                binding.id,
-                FunctionPlan {
-                    signature,
+            match &binding.rhs {
+                HeapRhs::Function {
+                    signature: signature_id,
                     parameters,
                     captures,
-                    body: *body,
-                    descriptor,
-                },
-            );
+                    body,
+                } => {
+                    let signature = signature(program, *signature_id);
+                    let capture_reps = captures
+                        .iter()
+                        .map(|capture| value_ref_rep(&values, capture))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let layout = StorageLayout::for_reps(target, &capture_reps)?;
+                    let descriptor = Arc::new(ObjectDescriptor::new(
+                        ObjectKind::Function,
+                        layout,
+                        Some(EntryMetadata::new(
+                            signature.clone(),
+                            u64::from(binding.id.0),
+                        )),
+                    )?);
+                    functions.insert(
+                        binding.id,
+                        FunctionPlan {
+                            signature,
+                            parameters,
+                            captures,
+                            body: *body,
+                            descriptor,
+                        },
+                    );
+                }
+                HeapRhs::Thunk {
+                    signature: signature_id,
+                    update,
+                    captures,
+                    body,
+                } => {
+                    let signature = signature(program, *signature_id);
+                    if !signature.arguments.is_empty()
+                        || signature.results.as_slice() != [RuntimeRep::LiftedRef]
+                    {
+                        return Err(CompileError::Unsupported(
+                            super::Unsupported::ThunkSignature(binding.id),
+                        ));
+                    }
+                    let capture_reps = captures
+                        .iter()
+                        .map(|capture| value_ref_rep(&values, capture))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let layout = StorageLayout::for_reps(target, &capture_reps)?;
+                    let descriptor = Arc::new(ObjectDescriptor::new(
+                        ObjectKind::Thunk,
+                        layout,
+                        Some(EntryMetadata::new(
+                            Signature {
+                                arguments: Vec::new(),
+                                results: vec![RuntimeRep::LiftedRef],
+                            },
+                            u64::from(binding.id.0),
+                        )),
+                    )?);
+                    thunks.insert(
+                        binding.id,
+                        ThunkPlan {
+                            signature,
+                            captures,
+                            body: *body,
+                            policy: *update,
+                            descriptor,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let heap_tops = super::image::heap_top_partition(&top_bindings);
+        let mut heap_top_specs = Vec::new();
+        for (&id, binding) in &top_bindings {
+            if !heap_tops.contains(&id) {
+                continue;
+            }
+            let descriptor = match &binding.rhs {
+                HeapRhs::Function { .. } => functions
+                    .get(&id)
+                    .map(|function| Arc::clone(&function.descriptor)),
+                HeapRhs::Thunk { .. } => thunks.get(&id).map(|thunk| Arc::clone(&thunk.descriptor)),
+                HeapRhs::Constructor { constructor, .. } => {
+                    constructors.get(constructor.0 as usize).cloned()
+                }
+                HeapRhs::Bytes(_) => None,
+            }
+            .ok_or(CompileError::MissingRepresentation(id))?;
+            let reps = match &binding.rhs {
+                HeapRhs::Constructor { constructor, .. } => program.constructors()
+                    [constructor.0 as usize]
+                    .field_reps
+                    .clone(),
+                HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => captures
+                    .iter()
+                    .map(|capture| value_ref_rep(&values, capture))
+                    .collect::<Result<Vec<_>, _>>()?,
+                HeapRhs::Bytes(_) => Vec::new(),
+            };
+            heap_top_specs.push(HeapTopSpec {
+                id,
+                descriptor,
+                binding: (*binding).clone(),
+                reps,
+            });
         }
 
         Ok(Self {
             program,
             functions,
+            thunks,
             top_bindings,
             values,
             constructors,
             top_slots,
             bytes,
+            heap_tops,
+            heap_top_specs,
         })
     }
 }

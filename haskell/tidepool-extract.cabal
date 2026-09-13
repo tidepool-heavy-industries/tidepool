@@ -29,6 +29,7 @@ library tidepool-extract-internal
     Tidepool.Metadata
     Tidepool.PrimOps
     Tidepool.PreparedStg
+    Tidepool.PreparedRecovery
     Tidepool.PreparedFacts
     Tidepool.PreparedSites
     Tidepool.ExecutionIR
@@ -431,6 +432,38 @@ test-suite fat-iface-exact-test
     filepath,
     process,
     ghc          >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+
+-- Wave-5 B2: recover one real package body from an -O0 caller, prepare it in
+-- its defining interface context, and project it together with the caller.
+test-suite recovered-body-test
+  type:             exitcode-stdio-1.0
+  main-is:          RecoveredBodyTest.hs
+  hs-source-dirs:   test-prepared-stg
+  build-depends:
+    base >= 4.20 && < 5,
+    directory,
+    filepath,
+    process,
+    text,
+    ghc >= 9.12 && < 9.13,
+    tidepool-extract-internal
+  default-language: GHC2024
+  ghc-options:      -Wall
+
+test-suite prepared-recovery-test
+  type:             exitcode-stdio-1.0
+  main-is:          PreparedRecoveryTest.hs
+  hs-source-dirs:   test-prepared-stg
+  build-depends:
+    base >= 4.20 && < 5,
+    directory,
+    filepath,
+    process,
+    text,
+    ghc >= 9.12 && < 9.13,
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options:      -Wall

@@ -5,9 +5,14 @@ unarisation pipeline. The wire format is a finite prepared representation; it
 is not rendered STG, a Core compatibility format, or a production-execution
 parity claim.
 
-## Wire contract (schema 5, execution ABI 3)
+## Wire contract (schema 6, execution ABI 4)
 
-`ProgramEnvelope.schema_version` is 5 and `execution_abi_version` is 3.
+`ProgramEnvelope.schema_version` is 6 and `execution_abi_version` is 4.
+Schema 6 adds optional external record-parent identity and typed operation
+identity (`PrimOp` versus an intrinsic symbol with a calling convention).
+ABI 4 includes the invocation's prepared native-stack limit in VMContext.
+The Wave 5 integration fold must regenerate and verify cross-language fixtures;
+these version declarations alone are not freshness evidence.
 `RuntimeRep` is the physical representation boundary: `Void`, lifted/unlifted
 references, addresses, fixed-width `Int`/`Word`, and 32/64-bit floats. Layouts
 are canonical for the target pointer width, alignment, payload size, and root
@@ -42,7 +47,7 @@ Wire identities are internal deterministic handles. `ValueId` and `JoinId`
 are allocated by monotonic projection traversal and lexical environments are
 restored when scopes close. Signature, constructor, operation, and global IDs
 are interned deterministically by the producer. Symbol identities retain the
-unit/module/namespace/occurrence tuple; top-level occurrence spelling is
+unit/module/namespace/occurrence tuple and optional record parent; top-level occurrence spelling is
 reserved before target filtering and collision resolution is deterministic.
 Constructor host IDs retain GHC identity, rather than family tags or local
 table positions.
@@ -67,6 +72,15 @@ do not promise that every validated form is executable by the native connected
 compiler.
 
 ## Connected native execution boundary
+
+The following strict-subset description records the Wave 4 accepted boundary.
+Wave 5 currently adds exact defining-module body recovery and generated thunk
+entry/CAF allocation. Focused recovery and lazy-entry tests pass, but local
+Enter, settlement interleavings, forcing observation and broader closure
+execution are still under integration/review. Do not read this inventory as
+claiming full lazy, imported, primitive, or retained execution yet. The current
+parcel evidence and remaining acceptance obligations are in
+[`stg-wave5.md`](../plans/stg-wave5.md).
 
 `tidepool-codegen::prepared_program::CompiledProgram` is a closed, pinned
 execution path for the Linux x86-64 little-endian 64-bit SysV profile. Its

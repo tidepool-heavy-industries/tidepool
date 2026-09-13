@@ -1,4 +1,4 @@
-use super::{CompileError, CompiledEntry};
+use super::CompileError;
 use crate::{entry_abi::EntryAbi, pipeline::CodegenPipeline};
 use cranelift_codegen::{
     ir::{self, types, AbiParam, InstBuilder, MemFlags},
@@ -7,6 +7,62 @@ use cranelift_codegen::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
 use tidepool_repr::execution_schema::RuntimeRep;
+
+/// Emit the platform ABI bridge used by later observers to force one managed
+/// reference. The generated adapter owns the ABI transition: callers pass a
+/// VMContext, result slot, and managed reference; the Tail lazy entry remains
+/// an internal relocation and is never cast to a Rust function pointer.
+pub(super) fn emit_force_adapter(
+    pipeline: &mut CodegenPipeline,
+    name: &str,
+    prepared_enter: FuncId,
+) -> Result<FuncId, CompileError> {
+    let mut context = Context::new();
+    context.func.signature = ir::Signature::new(pipeline.isa.default_call_conv());
+    context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+    context.func.signature.returns = vec![AbiParam::new(types::I32)];
+    let adapter =
+        pipeline.declare_function_with_signature(name, Linkage::Local, &context.func.signature)?;
+    let mut frontend = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+    let block = builder.create_block();
+    builder.append_block_params_for_function_params(block);
+    builder.switch_to_block(block);
+    builder.seal_block(block);
+    let parameters = builder.block_params(block);
+    let vmctx = parameters[0];
+    let result_out = parameters[1];
+    let reference = parameters[2];
+    builder.declare_value_needs_stack_map(reference);
+    let callee = pipeline
+        .module
+        .declare_func_in_func(prepared_enter, builder.func);
+    let call = builder.ins().call(callee, &[vmctx, reference]);
+    let returned = builder.inst_results(call).to_vec();
+    let status = returned[0];
+    let success = builder.create_block();
+    let failure = builder.create_block();
+    let ok = builder.ins().icmp_imm(
+        ir::condcodes::IntCC::Equal,
+        status,
+        crate::prepared_control::CallStatus::Success as i64,
+    );
+    builder.ins().brif(ok, success, &[], failure, &[]);
+    builder.switch_to_block(failure);
+    builder.seal_block(failure);
+    builder.ins().return_(&[status]);
+    builder.switch_to_block(success);
+    builder.seal_block(success);
+    let value = returned[1];
+    builder.declare_value_needs_stack_map(value);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), value, result_out, 0);
+    builder.ins().return_(&[status]);
+    builder.finalize();
+    pipeline.define_function(adapter, &mut context)?;
+    Ok(adapter)
+}
 
 /// Rust calls one platform signature regardless of semantic arity. Scalars are
 /// transported as native-endian u64 slots; only generated code calls Tail ABI.

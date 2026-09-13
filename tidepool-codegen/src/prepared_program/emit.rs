@@ -1,6 +1,9 @@
 //! Explicit-worklist native emission over the checked flat arena.
 
-use super::{plan::ProgramPlan, CompileError, Unsupported};
+use super::{
+    plan::ProgramPlan,
+    CompileError, Unsupported,
+};
 use crate::entry_abi::{EntryAbi, EnvironmentMode, NativeAbiProfile};
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::isa::CallConv;
@@ -60,12 +63,69 @@ pub(super) fn emit_function(
     prepared_gc: FuncId,
     prepared_poll: FuncId,
     prepared_stack_overflow: FuncId,
-    prepared_enter_slow: FuncId,
+    prepared_enter: FuncId,
+    case_trap: FuncId,
+    pipeline: &mut CodegenPipeline,
+) -> Result<(), CompileError> {
+    let output = *functions.get(&id).ok_or_else(|| unsupported(id, 0))?;
+    emit_function_at(
+        plan,
+        id,
+        output,
+        functions,
+        prepared_gc,
+        prepared_poll,
+        prepared_stack_overflow,
+        prepared_enter,
+        case_trap,
+        pipeline,
+    )
+}
+
+pub(super) fn emit_thunk_body(
+    plan: &ProgramPlan<'_>,
+    id: ValueId,
+    output: FuncId,
+    functions: &BTreeMap<ValueId, FuncId>,
+    prepared_gc: FuncId,
+    prepared_poll: FuncId,
+    prepared_stack_overflow: FuncId,
+    prepared_enter: FuncId,
+    case_trap: FuncId,
+    pipeline: &mut CodegenPipeline,
+) -> Result<(), CompileError> {
+    emit_function_at(
+        plan,
+        id,
+        output,
+        functions,
+        prepared_gc,
+        prepared_poll,
+        prepared_stack_overflow,
+        prepared_enter,
+        case_trap,
+        pipeline,
+    )
+}
+
+fn emit_function_at(
+    plan: &ProgramPlan<'_>,
+    id: ValueId,
+    output: FuncId,
+    functions: &BTreeMap<ValueId, FuncId>,
+    prepared_gc: FuncId,
+    prepared_poll: FuncId,
+    prepared_stack_overflow: FuncId,
+    prepared_enter: FuncId,
     case_trap: FuncId,
     pipeline: &mut CodegenPipeline,
 ) -> Result<(), CompileError> {
     let (signature, body) = match plan.functions.get(&id) {
         Some(function) => (function.signature.clone(), Some(function.body)),
+        None if plan.thunks.contains_key(&id) => {
+            let thunk = &plan.thunks[&id];
+            (thunk.signature.clone(), Some(thunk.body))
+        }
         None => {
             let binding = plan
                 .top_bindings
@@ -105,7 +165,9 @@ pub(super) fn emit_function(
     let poll = pipeline
         .module
         .declare_func_in_func(prepared_poll, builder.func);
-    let entry_status = builder.ins().call(poll, &[vmctx]);
+    let point = builder.ins().iconst(types::I32,
+        crate::prepared_control::PreparedSafepoint::FunctionEntry as i64);
+    let entry_status = builder.ins().call(poll, &[vmctx, point]);
     let entry_status = builder.inst_results(entry_status)[0];
     let entry = emit_status_guard(&mut builder, entry_status);
     let mut values = BTreeMap::new();
@@ -123,20 +185,29 @@ pub(super) fn emit_function(
         bind_captures(
             &mut builder,
             &mut values,
-            function,
+            function.captures,
+            &function.descriptor,
             environment,
             id,
             function.body,
+        )?;
+    } else if let Some(thunk) = plan.thunks.get(&id) {
+        let environment = builder.ins().band_imm(tagged_environment, !7_i64);
+        bind_captures(
+            &mut builder,
+            &mut values,
+            thunk.captures,
+            &thunk.descriptor,
+            environment,
+            id,
+            thunk.body,
         )?;
     } else {
         // A top constructor or byte literal is already materialized by the
         // invocation-owned top table; its environment is the returned value.
         return_top(&mut builder, tagged_environment, &signature.results);
         builder.finalize();
-        pipeline.define_function(
-            *functions.get(&id).ok_or_else(|| unsupported(id, 0))?,
-            &mut context,
-        )?;
+        pipeline.define_function(output, &mut context)?;
         return Ok(());
     }
     let root = body.ok_or_else(|| unsupported(id, 0))?;
@@ -259,7 +330,9 @@ pub(super) fn emit_function(
                     }
                     ExprFrame::Jump { join, arguments } => {
                         let target = joins.get(join).ok_or_else(|| unsupported(id, node))?;
-                        let status = builder.ins().call(poll, &[vmctx]);
+                        let point = builder.ins().iconst(types::I32,
+                            crate::prepared_control::PreparedSafepoint::Backedge as i64);
+                        let status = builder.ins().call(poll, &[vmctx, point]);
                         let status = builder.inst_results(status)[0];
                         emit_status_guard(&mut builder, status);
                         let arguments = emit_atoms(
@@ -300,7 +373,46 @@ pub(super) fn emit_function(
                             destination,
                         });
                     }
-                    ExprFrame::Operation { .. } => return Err(unsupported(id, node)),
+                    ExprFrame::Operation {
+                        operation,
+                        arguments,
+                    } => {
+                        let declaration = plan
+                            .program
+                            .operations()
+                            .get(operation.0 as usize)
+                            .ok_or_else(|| unsupported(id, node))?;
+                        let signature = plan
+                            .program
+                            .signatures()
+                            .get(declaration.signature.0 as usize)
+                            .ok_or_else(|| unsupported(id, node))?;
+                        let operation =
+                            super::primitives::recognize_operation(declaration, signature)
+                                .ok_or_else(|| unsupported(id, node))?;
+                        let physical_arguments = emit_atoms(
+                            &mut builder,
+                            &values,
+                            arguments,
+                            &signature.arguments,
+                            vmctx,
+                            plan,
+                            id,
+                            node,
+                        )?;
+                        let output =
+                            super::primitives::emit_operation(operation, &mut builder, &physical_arguments);
+                        if output.len()
+                            != signature
+                                .results
+                                .iter()
+                                .filter(|rep| **rep != RuntimeRep::Void)
+                                .count()
+                        {
+                            return Err(unsupported(id, node));
+                        }
+                        jump_to(&mut builder, &destination.block, output);
+                    }
                     ExprFrame::Return(atoms) => {
                         let output = emit_atoms(
                             &mut builder,
@@ -344,7 +456,7 @@ pub(super) fn emit_function(
                             callee,
                             *call_signature,
                             vmctx,
-                            prepared_enter_slow,
+                            prepared_enter,
                             pipeline,
                             plan,
                             id,
@@ -403,8 +515,8 @@ pub(super) fn emit_function(
     }
     builder.seal_all_blocks();
     builder.switch_to_block(exit);
-    let output = block_values(&builder, exit, &signature.results)?;
-    for (&value, rep) in output.iter().zip(
+    let result_values = block_values(&builder, exit, &signature.results)?;
+    for (&value, rep) in result_values.iter().zip(
         signature
             .results
             .iter()
@@ -414,12 +526,9 @@ pub(super) fn emit_function(
             builder.declare_value_needs_stack_map(value);
         }
     }
-    return_values(&mut builder, output, &signature.results);
+    return_values(&mut builder, result_values, &signature.results);
     builder.finalize();
-    pipeline.define_function(
-        *functions.get(&id).ok_or_else(|| unsupported(id, root))?,
-        &mut context,
-    )?;
+    pipeline.define_function(output, &mut context)?;
     Ok(())
 }
 
@@ -602,9 +711,7 @@ fn emit_let_group(
                 .functions
                 .get(&binding.id)
                 .map(|function| &function.descriptor),
-            HeapRhs::Thunk { .. } => {
-                return Err(CompileError::Unsupported(Unsupported::Thunk(binding.id)))
-            }
+            HeapRhs::Thunk { .. } => plan.thunks.get(&binding.id).map(|thunk| &thunk.descriptor),
             HeapRhs::Bytes(_) => return Err(unsupported(owner, node)),
         }
         .ok_or_else(|| unsupported(owner, node))?;
@@ -693,7 +800,32 @@ fn emit_let_group(
                     );
                 }
             }
-            HeapRhs::Thunk { .. } | HeapRhs::Bytes(_) => unreachable!(),
+            HeapRhs::Thunk { captures, .. } => {
+                for (logical, capture) in captures.iter().enumerate() {
+                    let Some(stored) = descriptor.payload().logical_to_stored()[logical] else {
+                        continue;
+                    };
+                    let field = &descriptor.payload().fields()[stored as usize];
+                    let atom = Atom::Ref(capture.clone());
+                    let value = atom_value(
+                        builder,
+                        vmctx,
+                        &values,
+                        plan,
+                        &atom,
+                        field.rep(),
+                        owner,
+                        node,
+                    )?;
+                    builder.ins().store(
+                        flags,
+                        value,
+                        object,
+                        (descriptor.payload_base() + field.offset()) as i32,
+                    );
+                }
+            }
+            HeapRhs::Bytes(_) => unreachable!(),
         }
     }
     Ok(values)
@@ -941,17 +1073,17 @@ fn bind_parameters(
 fn bind_captures(
     builder: &mut FunctionBuilder<'_>,
     values: &mut BTreeMap<ValueId, Value>,
-    function: &super::plan::FunctionPlan<'_>,
+    captures: &[ValueRef],
+    descriptor: &ObjectDescriptor,
     environment: Value,
     owner: ValueId,
     node: usize,
 ) -> Result<(), CompileError> {
-    for (logical, capture) in function.captures.iter().enumerate() {
+    for (logical, capture) in captures.iter().enumerate() {
         let ValueRef::Local(id) = capture else {
             return Err(unsupported(owner, node));
         };
-        let Some(stored) = function
-            .descriptor
+        let Some(stored) = descriptor
             .payload()
             .logical_to_stored()
             .get(logical)
@@ -959,12 +1091,12 @@ fn bind_captures(
         else {
             continue;
         };
-        let field = &function.descriptor.payload().fields()[stored as usize];
+        let field = &descriptor.payload().fields()[stored as usize];
         let value = builder.ins().load(
             physical_type(field.rep())?,
             MemFlags::trusted(),
             environment,
-            (function.descriptor.payload_base() + field.offset()) as i32,
+            (descriptor.payload_base() + field.offset()) as i32,
         );
         if matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             builder.declare_value_needs_stack_map(value);
@@ -980,7 +1112,7 @@ fn emit_enter(
     callee: &Atom,
     signature_id: SignatureId,
     vmctx: Value,
-    prepared_enter_slow: FuncId,
+    prepared_enter: FuncId,
     pipeline: &mut CodegenPipeline,
     plan: &ProgramPlan<'_>,
     owner: ValueId,
@@ -1000,9 +1132,9 @@ fn emit_enter(
     {
         return Err(unsupported(owner, node));
     }
-    // Request the value before inspecting its tag: top-table loads remain the
-    // sole source of top-level values, and a nonzero tag is already evaluated
-    // provenance that must not take a host-call path.
+    // The program-level state machine owns evaluatedness, descriptor
+    // inspection, blackholes, and update settlement.  In particular, a local
+    // thunk must not be returned as though it were already the result.
     let callee = atom_value(
         builder,
         vmctx,
@@ -1013,29 +1145,16 @@ fn emit_enter(
         owner,
         node,
     )?;
-    let direct = builder.create_block();
-    let inspect = builder.create_block();
     let complete = builder.create_block();
     builder.append_block_param(complete, physical_type(signature.results[0])?);
-    let enter_slow = pipeline
+    let enter = pipeline
         .module
-        .declare_func_in_func(prepared_enter_slow, builder.func);
-    let tag = builder.ins().band_imm(callee, 7);
-    let tagged = builder
-        .ins()
-        .icmp_imm(ir::condcodes::IntCC::NotEqual, tag, 0);
-    builder.ins().brif(tagged, direct, &[], inspect, &[]);
-
-    builder.switch_to_block(direct);
-    builder.seal_block(direct);
-    builder.ins().jump(complete, &[callee.into()]);
-
-    builder.switch_to_block(inspect);
-    builder.seal_block(inspect);
+        .declare_func_in_func(prepared_enter, builder.func);
+    let call = builder.ins().call(enter, &[vmctx, callee]);
+    let returned = builder.inst_results(call).to_vec();
     let valid = builder.create_block();
     let invalid = builder.create_block();
-    let call = builder.ins().call(enter_slow, &[vmctx, callee]);
-    let status = builder.inst_results(call)[0];
+    let status = returned[0];
     let success = builder.ins().icmp_imm(
         ir::condcodes::IntCC::Equal,
         status,
@@ -1045,7 +1164,7 @@ fn emit_enter(
 
     builder.switch_to_block(valid);
     builder.seal_block(valid);
-    builder.ins().jump(complete, &[callee.into()]);
+    builder.ins().jump(complete, &[returned[1].into()]);
 
     builder.switch_to_block(invalid);
     builder.seal_block(invalid);

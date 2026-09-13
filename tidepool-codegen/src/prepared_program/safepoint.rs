@@ -108,12 +108,17 @@ impl NativeStackBounds {
 ///
 /// # Safety
 /// `vmctx` and its machine must remain valid throughout the call.
-pub(super) unsafe extern "C" fn prepared_poll(vmctx: *mut VMContext) -> i32 {
+/// Typed generated poll boundary. Unknown discriminants are integrity failures,
+/// never permission to skip cancellation. The emitter supplies constants.
+pub(super) unsafe extern "C" fn prepared_poll_at(vmctx: *mut VMContext, point: u32) -> i32 {
     let machine = unsafe { machine_state(vmctx) };
-    if machine.cancel_requested() {
-        machine.set_first_cause(RuntimeError::Cancelled);
+    match crate::prepared_control::PreparedSafepoint::from_raw(point) {
+        Some(point) => machine.poll_prepared(point) as i32,
+        None => {
+            machine.set_first_cause(RuntimeError::BadPointer);
+            machine.prepared_call_status() as i32
+        }
     }
-    machine.prepared_call_status() as i32
 }
 
 /// Record a native stack preflight failure against the invocation machine.
@@ -135,12 +140,44 @@ mod tests {
     unsafe extern "C" fn no_gc(_: *mut VMContext) {}
 
     #[test]
+    fn w5_a1_allocation_cancel_records_on_invocation_without_tls() {
+        let machine = MachineState::new();
+        machine.set_cancel_flag(Arc::new(AtomicBool::new(true)));
+        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
+        vmctx.machine_state = (&machine as *const MachineState).cast_mut();
+        let status = unsafe { crate::host_fns::prepared_gc_trigger(&mut vmctx, 8) };
+        assert_eq!(status, CallStatus::Cancelled as i32);
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
+    }
+
+    #[test]
+    fn w5_a1_injected_failure_is_scoped_to_named_poll() {
+        use crate::prepared_control::PreparedSafepoint;
+        let machine = MachineState::new();
+        machine.fail_prepared_at(PreparedSafepoint::ThunkCommit, 2, RuntimeError::Cancelled);
+        assert_eq!(
+            machine.poll_prepared(PreparedSafepoint::Backedge),
+            CallStatus::Success
+        );
+        assert_eq!(
+            machine.poll_prepared(PreparedSafepoint::ThunkCommit),
+            CallStatus::Success
+        );
+        assert_eq!(
+            machine.poll_prepared(PreparedSafepoint::ThunkCommit),
+            CallStatus::Cancelled
+        );
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
+    }
+
+    #[test]
     fn w5_a1_poll_records_on_invocation_without_tls() {
         let machine = MachineState::new();
         machine.set_cancel_flag(Arc::new(AtomicBool::new(true)));
         let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
-        let status = unsafe { prepared_poll(&mut vmctx) };
+        let status = unsafe { prepared_poll_at(&mut vmctx,
+            crate::prepared_control::PreparedSafepoint::FunctionEntry as u32) };
         assert_ne!(status, CallStatus::Success as i32);
         assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
     }
@@ -153,7 +190,8 @@ mod tests {
         let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         assert_eq!(
-            unsafe { prepared_poll(&mut vmctx) },
+            unsafe { prepared_poll_at(&mut vmctx,
+                crate::prepared_control::PreparedSafepoint::FunctionEntry as u32) },
             CallStatus::IntegrityFailure as i32
         );
         assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
@@ -191,7 +229,7 @@ mod tests {
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         assert_eq!(
             unsafe { prepared_stack_overflow(&mut vmctx) },
-            CallStatus::IntegrityFailure as i32
+            CallStatus::LanguageFailure as i32
         );
         assert_eq!(
             machine.take_runtime_error(),

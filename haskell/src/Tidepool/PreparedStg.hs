@@ -5,14 +5,20 @@
 -- internal compiler adapter, not the future serialized program model.
 module Tidepool.PreparedStg
   ( PreparedModule(..)
+  , PreparedCoverage(..)
   , PreparedElaboration(..)
   , PreparedPassProfile(..)
   , unelaboratedModule
   , prepareModule
   , RecoveredModuleInput(..)
+  , RecoveredModuleFailure(..)
   , prepareRecoveredModule
+  , prepareRecoveredBodies
   ) where
 
+import Control.Exception
+  ( SomeAsyncException, SomeException, displayException, fromException
+  , throwIO, try )
 import Data.Map.Strict (Map)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind)
@@ -29,15 +35,25 @@ import GHC.Driver.Config.Stg.Pipeline (initStgPipelineOpts)
 import GHC.Driver.Env (HscEnv(..))
 import GHC.Driver.Session
   (GeneralFlag(..), gopt_set, gopt_unset)
+import GHC.Iface.Errors.Types (ReadInterfaceError(..))
+import GHC.Iface.Load (readIface)
+import GHC.IfaceToCore (typecheckIface)
 import GHC.Stg.Pipeline (StgCgInfos, StgPipelineOpts(..), StgToDo(..), stg2stg)
 import GHC.Stg.Syntax (CgStgTopBinding)
+import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Var.Set (IdSet)
 import GHC.Types.Var (Id)
-import GHC.Unit.Types (Module)
-import GHC.Unit.Module.Location (ModLocation)
+import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Unit.Module (moduleName)
+import GHC.Unit.Types (Module, moduleUnit, toUnitId)
+import GHC.Unit.Module.Location (ModLocation(ml_hi_file))
+import GHC.Data.Maybe (MaybeErr(..))
+import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Module.ModSummary (ModSummary(..))
-import GHC.Utils.Outputable (text)
+import GHC.Types.PkgQual (PkgQual(OtherPkg))
+import GHC.Types.TypeEnv (typeEnvTyCons)
+import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
@@ -78,8 +94,15 @@ data PreparedPassProfile = PreparedPassProfile
 -- | Prepared output for one defining module.  Module identity and location
 -- remain attached while GHC performs dependency sorting, capture annotation,
 -- tag inference, and rewriting.
+-- | A missing top in a complete source module is a producer defect. A package
+-- body subset can still reference unavailable package bodies; those remain
+-- explicit globals with recovery diagnostics, not fabricated home definitions.
+data PreparedCoverage = CompleteSourceModule | ExactBodySubset
+  deriving (Eq, Show)
+
 data PreparedModule = PreparedModule
   { pmModule :: Module
+  , pmCoverage :: PreparedCoverage
   , pmLocation :: ModLocation
   , pmPassProfile :: PreparedPassProfile
   , pmBindings :: [(CgStgTopBinding, IdSet)]
@@ -109,10 +132,89 @@ data RecoveredModuleInput = RecoveredModuleInput
   , recoveredBindings :: [CoreBind]
   }
 
+-- | Failures while acquiring the defining-module context for an exact group.
+-- A failed interface load is distinct from a missing binding: callers may
+-- report or retry the former, but must never silently drop the group.
+data RecoveredModuleFailure
+  = RecoveredModuleFinderFailure Module String
+  | RecoveredModuleInterfaceFailure Module String
+  | RecoveredModulePreparationFailure Module String
+  deriving (Eq)
+
+instance Show RecoveredModuleFailure where
+  show failure = case failure of
+    RecoveredModuleFinderFailure owner reason ->
+      "finder failure for " ++ renderModule owner ++ ": " ++ reason
+    RecoveredModuleInterfaceFailure owner reason ->
+      "interface failure for " ++ renderModule owner ++ ": " ++ reason
+    RecoveredModulePreparationFailure owner reason ->
+      "preparation failure for " ++ renderModule owner ++ ": " ++ reason
+    where
+      renderModule = showSDocUnsafe . ppr
+
 prepareRecoveredModule :: HscEnv -> RecoveredModuleInput -> IO PreparedModule
-prepareRecoveredModule hscEnv input =
-  prepareBindings hscEnv (recoveredModule input) (recoveredLocation input)
+prepareRecoveredModule hscEnv input = do
+  prepared <- prepareBindings hscEnv (recoveredModule input) (recoveredLocation input)
     (recoveredTyCons input) (recoveredBindings input) mempty []
+  pure prepared { pmCoverage = ExactBodySubset }
+
+-- | Acquire the defining context for an exact recovered group and prepare it
+-- through the same owner as source modules.  In particular, this does not
+-- manufacture a 'ModSummary' for a package module (whose source path may be
+-- absent) or attach the group to the caller's module.
+prepareRecoveredBodies :: HscEnv -> Module -> [CoreBind]
+  -> IO (Either RecoveredModuleFailure PreparedModule)
+prepareRecoveredBodies hscEnv owner bindings = do
+  found <- trySynchronous (findImportedModule hscEnv (moduleName owner)
+    (OtherPkg (toUnitId (moduleUnit owner))))
+  case found of
+    Left reason -> pure (Left (RecoveredModuleFinderFailure owner reason))
+    Right (Found location foundOwner)
+      | foundOwner == owner -> do
+          details <- trySynchronous (loadDefiningDetails hscEnv owner location)
+          case details of
+            Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
+            Right tycons -> do
+              prepared <- trySynchronous (prepareRecoveredModule hscEnv
+                (RecoveredModuleInput owner location tycons bindings))
+              pure $ case prepared of
+                Left reason -> Left (RecoveredModulePreparationFailure owner reason)
+                Right value -> Right value
+      | otherwise -> pure (Left (RecoveredModuleFinderFailure owner
+          ("finder returned " ++ renderModule foundOwner)))
+    Right other -> pure (Left (RecoveredModuleFinderFailure owner
+      (renderFindResult other)))
+  where
+    loadDefiningDetails :: HscEnv -> Module -> ModLocation -> IO [TyCon]
+    loadDefiningDetails env modul location = do
+      let doc = text "Tidepool recovered defining interface"
+      readResult <- readIface (hsc_dflags env) (hsc_NC env) modul (ml_hi_file location)
+      iface <- case readResult of
+        Succeeded value -> pure value
+        Failed failure -> ioError (userError (renderReadInterfaceError failure))
+      details <- initIfaceCheck doc env (typecheckIface iface)
+      pure (typeEnvTyCons (md_types details))
+
+    trySynchronous :: IO a -> IO (Either String a)
+    trySynchronous action = do
+      outcome <- try action
+      case outcome of
+        Left exception -> case (fromException exception :: Maybe SomeAsyncException) of
+          Just async -> throwIO async
+          Nothing -> pure (Left (displayException (exception :: SomeException)))
+        Right value -> pure (Right value)
+
+    renderModule = showSDocUnsafe . ppr
+    renderReadInterfaceError failure = case failure of
+      ExceptionOccurred path exception -> path ++ ": " ++ displayException exception
+      HiModuleNameMismatchWarn path expected actual ->
+        path ++ ": expected " ++ renderModule expected
+          ++ ", found " ++ renderModule actual
+    renderFindResult result = case result of
+      Found _ foundOwner -> "found " ++ renderModule foundOwner
+      NoPackage _ -> "no package"
+      FoundMultiple _ -> "multiple matching modules"
+      NotFound{} -> "module not found"
 
 prepareBindings :: HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> Map String Id -> [YieldSite] -> IO PreparedModule
@@ -153,6 +255,7 @@ prepareBindings hscEnv thisModule location tycons optimizedCore siblings yieldSi
     stg2stg logger interactiveVars stgOptions thisModule initialStg
   pure PreparedModule
     { pmModule = thisModule
+    , pmCoverage = CompleteSourceModule
     , pmLocation = location
     , pmPassProfile = profile
     , pmBindings = preparedBindings

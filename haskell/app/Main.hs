@@ -8,7 +8,9 @@ import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
-import Control.Exception (evaluate, try, throwIO, SomeException, Exception, fromException, toException)
+import Control.Exception
+  ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
+  , fromException, toException )
 import Data.List (isPrefixOf, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Control.Monad (foldM, forM, forM_, void)
@@ -18,6 +20,7 @@ import qualified System.Info as SystemInfo
 
 import GHC.Types.SourceError (SourceError)
 import GHC (moduleName, moduleNameString, moduleUnit)
+import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..))
 import GHC.Types.Name (nameOccName, nameModule_maybe)
@@ -46,6 +49,8 @@ import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarge
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedRecovery
+  ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
@@ -154,7 +159,7 @@ dispatch compiler timing args =
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 runInspectionMode compiler args _path = do
-  res <- try $ do
+  res <- trySynchronous $ do
     let queries = requestInspections args
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
@@ -255,7 +260,7 @@ processFile compiler timing args path = do
   let mOutDir = requestOutDir args
       mTarget = requestTarget args
   hPutStrLn stderr $ "Processing: " ++ path
-  res <- try $ do
+  res <- trySynchronous $ do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
@@ -410,12 +415,21 @@ processFile compiler timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    writePreparedArtifacts outDir path (pprModules prepared) preparedTargets
+    writePreparedArtifacts outDir path hscEnv (pprModules prepared) preparedTargets
 
   reportDiags res
 
-writePreparedArtifacts :: FilePath -> FilePath -> [PreparedModule] -> [String] -> IO ()
-writePreparedArtifacts outDir input modules targets = do
+trySynchronous :: IO a -> IO (Either SomeException a)
+trySynchronous action = do
+  result <- try action
+  case result of
+    Left exception -> case fromException exception :: Maybe SomeAsyncException of
+      Just async -> throwIO async
+      Nothing -> pure (Left exception)
+    Right value -> pure (Right value)
+
+writePreparedArtifacts :: FilePath -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> IO ()
+writePreparedArtifacts outDir input hscEnv modules targets = do
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
       matching = [prepared | prepared <- modules,
@@ -433,11 +447,19 @@ writePreparedArtifacts outDir input modules targets = do
           (T.pack targetModule) "value" (T.pack target) Nothing
         context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
           (TargetDescriptor architecture LittleEndian 64 64 abi []) Map.empty entry
+    recovered <- recoverPreparedClosure hscEnv context modules
+    reportRecoveryResiduals target (closureFailures recovered)
     program <- either (ioError . userError . ("prepared projection failed: " <>) . show) pure
-      (projectPreparedTarget context modules)
+      (projectPreparedTarget context (closureModules recovered))
     let output = outDir </> target ++ ".prepared.cbor"
     BS.writeFile output (encodeWireProgram program)
     hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
+
+reportRecoveryResiduals :: String -> [RecoveryFailure] -> IO ()
+reportRecoveryResiduals _ [] = pure ()
+reportRecoveryResiduals target failures =
+  hPutStrLn stderr $ "  Prepared recovery residuals (" ++ target ++ "): "
+    ++ show failures
 
 -- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the

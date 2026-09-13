@@ -1,8 +1,96 @@
 use super::{CompiledProgram, RunOptions};
+use crate::host_fns::RuntimeError;
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_repr::execution_schema::{testing, *};
 
-fn caf_program(garbage_objects: u32) -> CompiledProgram {
+#[test]
+fn w5_a4_observation_forces_constructor_child() {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    for (index, fields) in [vec![RuntimeRep::LiftedRef], vec![]]
+        .into_iter()
+        .enumerate()
+    {
+        let layout = StorageLayout::for_reps(&wire.envelope.target, &fields).unwrap();
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("W5", &format!("C{index}")),
+            family: testing::identity("W5", &format!("T{index}")),
+            host_id: tidepool_repr::DataConId(920 + index as u64),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            strict_fields: vec![false; fields.len()],
+            field_reps: fields,
+            layout: CheckedLayout {
+                fields: layout
+                    .fields()
+                    .iter()
+                    .map(|field| FieldLayout {
+                        rep: field.rep(),
+                        offset: field.offset(),
+                    })
+                    .collect(),
+                alignment: layout.alignment(),
+                payload_size: layout.payload_size(),
+                root_mask: layout
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                    })
+                    .collect(),
+            },
+        });
+    }
+    wire.expressions.nodes[0] = ExprFrame::Construct {
+        constructor: ConstructorId(1),
+        fields: vec![],
+    };
+    wire.bindings = vec![
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "child"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![],
+                    body: 0,
+                },
+            },
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "parent"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![Atom::Ref(ValueRef::Local(ValueId(1)))],
+                },
+            },
+        }),
+    ];
+    let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+    let compiled = CompiledProgram::compile(&linked).unwrap();
+    let result = compiled
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(matches!(result.values.as_slice(),
+        [tidepool_bridge::Value::Con(tidepool_repr::DataConId(920), fields)]
+        if matches!(fields.as_slice(),
+            [tidepool_bridge::Value::Con(tidepool_repr::DataConId(921), children)] if children.is_empty())));
+}
+
+pub(super) fn caf_program(
+    garbage_objects: u32,
+    local_thunk: bool,
+    update: UpdatePolicy,
+) -> CompiledProgram {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
     wire.constructors.push(ConstructorDecl {
@@ -16,7 +104,7 @@ fn caf_program(garbage_objects: u32) -> CompiledProgram {
         strict_fields: vec![],
         layout: CheckedLayout {
             fields: vec![],
-            alignment: 8,
+            alignment: 1,
             payload_size: 0,
             root_mask: vec![],
         },
@@ -39,12 +127,33 @@ fn caf_program(garbage_objects: u32) -> CompiledProgram {
         });
         body = wire.expressions.nodes.len() - 1;
     }
+    if local_thunk {
+        let thunk_id = ValueId(10_000);
+        let enter = wire.expressions.nodes.len();
+        wire.expressions.nodes.push(ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Local(thunk_id)),
+            signature: SignatureId(0),
+        });
+        wire.expressions.nodes.push(ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: thunk_id,
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![],
+                    body: 0,
+                },
+            }),
+            body: enter,
+        });
+        body = wire.expressions.nodes.len() - 1;
+    }
     let Group::NonRecursive(top) = &mut wire.bindings[0] else {
         unreachable!()
     };
     top.binding.rhs = HeapRhs::Thunk {
         signature: SignatureId(0),
-        update: UpdatePolicy::Memoize,
+        update,
         captures: vec![],
         body,
     };
@@ -56,7 +165,7 @@ fn caf_program(garbage_objects: u32) -> CompiledProgram {
 /// The real adapter must enter a heap CAF, allocate its value and settle it.
 #[test]
 fn w5_a1_top_thunk_constructs_and_observes() {
-    let program = caf_program(0);
+    let program = caf_program(0, false, UpdatePolicy::Memoize);
     let result = program
         .run_entry(
             ValueId(0),
@@ -73,7 +182,7 @@ fn w5_a1_top_thunk_constructs_and_observes() {
 
 #[test]
 fn w5_a1_collection_during_thunk_body_keeps_update_root_live() {
-    let program = caf_program(32);
+    let program = caf_program(32, false, UpdatePolicy::Memoize);
     let options = RunOptions {
         nursery_bytes: 64,
         ..RunOptions::default()
@@ -89,4 +198,555 @@ fn w5_a1_collection_during_thunk_body_keeps_update_root_live() {
         matches!(&result.values[0], tidepool_bridge::Value::Con(id, fields)
         if *id == tidepool_repr::DataConId(900) && fields.is_empty())
     );
+}
+
+#[test]
+fn w5_a1_local_thunk_enter_routes_prepared_entry() {
+    let program = caf_program(0, true, UpdatePolicy::Memoize);
+    let result = program
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(matches!(
+        &result.values[0],
+        tidepool_bridge::Value::Con(id, fields)
+            if *id == tidepool_repr::DataConId(900) && fields.is_empty()
+    ));
+}
+
+#[test]
+fn w5_a1_single_entry_success_is_observable_after_heap_scan() {
+    let program = caf_program(0, false, UpdatePolicy::SingleEntry);
+    let result = program
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(matches!(
+        &result.values[0],
+        tidepool_bridge::Value::Con(id, fields)
+            if *id == tidepool_repr::DataConId(900) && fields.is_empty()
+    ));
+}
+
+#[test]
+fn w5_a1_function_case_enters_captured_local_thunk_across_collection() {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.constructors.push(ConstructorDecl {
+        identity: testing::identity("W5", "Unit"),
+        family: testing::identity("W5", "Unit"),
+        host_id: tidepool_repr::DataConId(901),
+        result_rep: RuntimeRep::LiftedRef,
+        tag: 1,
+        family_size: 1,
+        strict_fields: vec![],
+        field_reps: vec![],
+        layout: CheckedLayout {
+            fields: vec![],
+            alignment: 1,
+            payload_size: 0,
+            root_mask: vec![],
+        },
+    });
+    let captured = ValueId(1);
+    let thunk = ValueId(2);
+    let binder = ValueId(3);
+    wire.expressions.nodes = vec![
+        ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(captured))]),
+        ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Local(thunk)),
+            signature: SignatureId(0),
+        },
+        ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(binder))]),
+        ExprFrame::Case {
+            scrutinee: 1,
+            binder,
+            scrutinee_reps: vec![RuntimeRep::LiftedRef],
+            kind: CaseKind::Polymorphic,
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![],
+                body: 2,
+            }],
+        },
+        ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: thunk,
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![ValueRef::Local(captured)],
+                    body: 0,
+                },
+            }),
+            body: 3,
+        },
+        ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: captured,
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            }),
+            body: 4,
+        },
+    ];
+    let mut body = 5;
+    for id in 10..42 {
+        wire.expressions.nodes.push(ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: ValueId(id),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            }),
+            body,
+        });
+        body = wire.expressions.nodes.len() - 1;
+    }
+    let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+        unreachable!()
+    };
+    top.binding.rhs = HeapRhs::Function {
+        signature: SignatureId(0),
+        parameters: vec![],
+        captures: vec![],
+        body,
+    };
+    let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+    let program = CompiledProgram::compile(&linked).unwrap();
+    let result = program
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions {
+                nursery_bytes: 64,
+                ..RunOptions::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(result.collections > 0);
+    assert!(matches!(
+        result.values.as_slice(),
+        [tidepool_bridge::Value::Con(id, fields)]
+            if *id == tidepool_repr::DataConId(901) && fields.is_empty()
+    ));
+}
+
+fn compile_wire(wire: WireProgram) -> CompiledProgram {
+    let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+    CompiledProgram::compile(&linked).unwrap()
+}
+
+fn constructor_decl(index: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {
+    let layout = StorageLayout::for_reps(&testing::target(), &fields).unwrap();
+    ConstructorDecl {
+        identity: testing::identity("W5", &format!("C{index}")),
+        family: testing::identity("W5", &format!("T{index}")),
+        host_id: tidepool_repr::DataConId(940 + index),
+        result_rep: RuntimeRep::LiftedRef,
+        tag: 1,
+        family_size: 1,
+        strict_fields: vec![false; fields.len()],
+        field_reps: fields,
+        layout: CheckedLayout {
+            fields: layout
+                .fields()
+                .iter()
+                .map(|field| FieldLayout {
+                    rep: field.rep(),
+                    offset: field.offset(),
+                })
+                .collect(),
+            alignment: layout.alignment(),
+            payload_size: layout.payload_size(),
+            root_mask: layout
+                .fields()
+                .iter()
+                .map(|field| {
+                    matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                })
+                .collect(),
+        },
+    }
+}
+
+#[test]
+fn w5_a4_lazy_alias_chain_is_observable() {
+    let depth = 96_u64;
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.constructors.push(constructor_decl(0, vec![]));
+    wire.expressions.nodes.clear();
+    for index in 0..depth {
+        wire.expressions.nodes.push(ExprFrame::Return(vec![Atom::Ref(
+            ValueRef::Local(ValueId((index + 1) as u32)),
+        )]));
+    }
+    wire.bindings.clear();
+    wire.bindings.extend((0..=depth).map(|index| {
+        let rhs = if index == depth {
+            HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![],
+            }
+        } else {
+            HeapRhs::Thunk {
+                signature: SignatureId(0),
+                update: UpdatePolicy::Memoize,
+                captures: vec![],
+                body: index as usize,
+            }
+        };
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", &format!("chain{index}")),
+            binding: HeapBinding {
+                id: ValueId(index as u32),
+                rhs,
+            },
+        })
+    }));
+    let result = compile_wire(wire)
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions {
+                nursery_bytes: 64,
+                ..RunOptions::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(matches!(
+        result.values.as_slice(),
+        [tidepool_bridge::Value::Con(id, fields)]
+            if *id == tidepool_repr::DataConId(940) && fields.is_empty()
+    ));
+}
+
+#[test]
+fn w5_a4_function_result_is_typed_unobservable_failure() {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.constructors.push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(
+        ScalarLiteral::Int {
+            bits: 64,
+            bytes: 0_i64.to_be_bytes().to_vec(),
+        },
+    )]);
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(0)))]);
+    wire.bindings = vec![Group::Recursive(vec![
+        TopBinding {
+            identity: testing::identity("W5", "function"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(0),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 0,
+                },
+            },
+        },
+        TopBinding {
+            identity: testing::identity("W5", "function-parent"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![Atom::Ref(ValueRef::Local(ValueId(1)))],
+                },
+            },
+        },
+    ])];
+    let error = compile_wire(wire)
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        super::ExecutionError::Observation(
+            super::ObservationFailure::Unobservable(
+                tidepool_heap::execution_descriptor::ObjectKind::Function
+            )
+        )
+    ));
+}
+
+#[test]
+fn w5_a4_cycle_uses_one_bounded_observation_budget() {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.constructors.push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(0)))]);
+    wire.bindings = vec![Group::Recursive(vec![
+        TopBinding {
+            identity: testing::identity("W5", "cycle"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![Atom::Ref(ValueRef::Local(ValueId(0)))],
+                },
+            },
+        },
+        TopBinding {
+            identity: testing::identity("W5", "cycle-helper"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(0),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 0,
+                },
+            },
+        },
+    ])];
+    let error = compile_wire(wire)
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions {
+                observation_budget: 5,
+                ..RunOptions::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        super::ExecutionError::Observation(super::ObservationFailure::BudgetExceeded { limit: 5 })
+    ));
+}
+
+#[test]
+fn w5_a4_cancelled_run_cleans_observation_roots() {
+    let program = caf_program(0, false, UpdatePolicy::Memoize);
+    let cancelled = program.run_entry(
+        ValueId(0),
+        &[],
+        &RunOptions::default(),
+        Arc::new(AtomicBool::new(true)),
+    );
+    assert!(matches!(
+        cancelled,
+        Err(super::ExecutionError::Runtime(failure))
+            if failure.cause == RuntimeError::Cancelled
+    ));
+    let result = program
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(matches!(
+        result.values.as_slice(),
+        [tidepool_bridge::Value::Con(id, fields)]
+            if *id == tidepool_repr::DataConId(900) && fields.is_empty()
+    ));
+}
+
+#[test]
+fn w5_a4_child_force_moves_heap_without_losing_sibling_root() {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.constructors.push(constructor_decl(0, vec![]));
+    wire.constructors.push(constructor_decl(
+        1,
+        vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+    ));
+    wire.expressions.nodes = vec![ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(
+        ValueId(2),
+    ))])];
+    let mut child_body = 0;
+    for index in 0..32_u32 {
+        wire.expressions.nodes.push(ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: ValueId(100 + index),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            }),
+            body: child_body,
+        });
+        child_body = wire.expressions.nodes.len() - 1;
+    }
+    wire.bindings = vec![
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "child-moving"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![],
+                    body: child_body,
+                },
+            },
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "sibling"),
+            binding: HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "parent-moving"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(1),
+                    fields: vec![
+                        Atom::Ref(ValueRef::Local(ValueId(1))),
+                        Atom::Ref(ValueRef::Local(ValueId(2))),
+                    ],
+                },
+            },
+        }),
+    ];
+    let result = compile_wire(wire)
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions {
+                nursery_bytes: 64,
+                ..RunOptions::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(result.collections > 0, "child force must move nursery objects");
+    assert!(matches!(
+        result.values.as_slice(),
+        [tidepool_bridge::Value::Con(parent, fields)]
+            if *parent == tidepool_repr::DataConId(941)
+                && matches!(
+                    fields.as_slice(),
+                    [tidepool_bridge::Value::Con(left, left_fields),
+                     tidepool_bridge::Value::Con(right, right_fields)]
+                        if *left == tidepool_repr::DataConId(940)
+                            && left_fields.is_empty()
+                            && *right == tidepool_repr::DataConId(940)
+                            && right_fields.is_empty()
+                )
+    ));
+}
+
+fn deep_forcing_wire(depth: u32) -> WireProgram {
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.constructors.push(constructor_decl(0, vec![]));
+    wire.constructors.push(constructor_decl(1, vec![RuntimeRep::LiftedRef]));
+    wire.expressions.nodes = vec![ExprFrame::Return(vec![Atom::Ref(
+        ValueRef::Local(ValueId(depth)),
+    )])];
+    wire.bindings.clear();
+    wire.bindings.reserve_exact(depth as usize + 2);
+    wire.bindings.push(Group::NonRecursive(TopBinding {
+        identity: testing::identity("W5", "deep-leaf"),
+        binding: HeapBinding {
+            id: ValueId(0),
+            rhs: HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![],
+            },
+        },
+    }));
+    for index in 1..=depth {
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", &format!("deep-node{index}")),
+            binding: HeapBinding {
+                id: ValueId(index),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(1),
+                    fields: vec![Atom::Ref(ValueRef::Local(ValueId(index - 1)))],
+                },
+            },
+        }));
+    }
+    wire.bindings.push(Group::NonRecursive(TopBinding {
+        identity: testing::identity("W5", "deep-lazy-root"),
+        binding: HeapBinding {
+            id: ValueId(depth + 1),
+            rhs: HeapRhs::Thunk {
+                signature: SignatureId(0),
+                update: UpdatePolicy::Memoize,
+                captures: vec![],
+                body: 0,
+            },
+        },
+    }));
+    wire.entry = ValueId(depth + 1);
+    wire
+}
+
+/// The root is lazy, and observation forces it before iteratively expanding
+/// 20,000 constructor nodes. Compilation stays outside the restricted-stack
+/// worker; only generated entry plus forcing/materialization run there.
+#[test]
+#[ignore = "expensive prepared compilation; run explicitly for A4 evidence"]
+fn w5_a4_forcing_observation_20k_constructors_small_stack() {
+    if std::env::var_os("TIDEPOOL_A4_DEEP_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "prepared_program::entry_tests::w5_a4_forcing_observation_20k_constructors_small_stack",
+                "--nocapture",
+            ])
+            .env("TIDEPOOL_A4_DEEP_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "small-stack forcing child failed: {output:?}"
+        );
+        return;
+    }
+
+    let program = compile_wire(deep_forcing_wire(20_000));
+    let join = std::thread::Builder::new()
+        .name("prepared-a4-deep-observe".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let result = program
+                .run_entry(
+                    ValueId(20_001),
+                    &[],
+                    &RunOptions {
+                        observation_budget: 20_002,
+                        ..RunOptions::default()
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .expect("deep forcing observation should complete");
+            assert_eq!(result.values.len(), 1);
+            assert_eq!(result.values[0].node_count(), 20_001);
+        })
+        .expect("small-stack worker should start")
+        .join();
+    join.expect("deep forcing observation must not overflow the worker stack");
 }

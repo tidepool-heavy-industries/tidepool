@@ -12,7 +12,7 @@ use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{RuntimeRep, StorageLayout};
 use tidepool_repr::Literal;
 
-use super::ConstructorObservation;
+use super::{ConstructorObservation, DescriptorMeaning, DescriptorMetadata};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ObservationFailure {
@@ -27,17 +27,17 @@ pub enum ObservationFailure {
 }
 
 #[derive(Clone, Copy)]
-struct ObservationSeed {
-    word: usize,
-    rep: RuntimeRep,
+pub(super) struct ObservationSeed {
+    pub(super) word: usize,
+    pub(super) rep: RuntimeRep,
 }
 
-struct ObservationBudget {
-    remaining: usize,
-    limit: usize,
+pub(super) struct ObservationBudget {
+    pub(super) remaining: usize,
+    pub(super) limit: usize,
 }
 
-enum ObservationFrame<X> {
+pub(super) enum ObservationFrame<X> {
     Leaf(Value),
     Constructor(tidepool_repr::DataConId, Vec<X>),
 }
@@ -60,7 +60,54 @@ pub(super) struct ObservationHeap<'a> {
     statics: &'a StaticRegion,
     descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
     starts: Vec<u64>,
-    constructors: &'a BTreeMap<usize, ConstructorObservation>,
+    constructors: Option<&'a BTreeMap<usize, ConstructorObservation>>,
+    registry: Option<&'a BTreeMap<usize, DescriptorMetadata>>,
+}
+
+/// Extend exact-start metadata across newly initialized nursery words. The
+/// caller resets `starts` and `scanned_words` after a GC generation changes.
+pub(super) fn append_exact_starts(
+    nursery: &[u64],
+    registry: &BTreeMap<usize, DescriptorMetadata>,
+    starts: &mut Vec<u64>,
+    scanned_words: &mut usize,
+) -> Result<(), ObservationFailure> {
+    let descriptors: BTreeMap<_, _> = registry
+        .values()
+        .map(|metadata| (metadata.descriptor.initial_header_word(), &metadata.descriptor))
+        .collect();
+    starts.resize(nursery.len().div_ceil(64), 0);
+    let mut offset = *scanned_words;
+    while offset < nursery.len() {
+        let header = nursery[offset] as usize;
+        let descriptor = descriptors
+            .get(&(header & !7))
+            .ok_or(DescriptorTraceError::UnknownDescriptor {
+                address: header & !7,
+            })?;
+        let available = (nursery.len() - offset) * 8;
+        let state = unsafe { descriptor.state(nursery.as_ptr().add(offset).cast(), available)? };
+        if !matches!(
+            state,
+            DescriptorState::Live | DescriptorState::Evaluating | DescriptorState::Updated
+        ) {
+            return Err(DescriptorTraceError::StateForKind {
+                state,
+                kind: descriptor.kind(),
+            }
+            .into());
+        }
+        let extent = descriptor.allocation_extent() as usize;
+        if extent < 16 || extent % 8 != 0 {
+            return Err(DescriptorTraceError::InvalidRange.into());
+        }
+        starts[offset / 64] |= 1_u64 << (offset % 64);
+        offset = offset
+            .checked_add(extent / 8)
+            .ok_or(DescriptorTraceError::InvalidRange)?;
+    }
+    *scanned_words = nursery.len();
+    Ok(())
 }
 
 impl<'a> ObservationHeap<'a> {
@@ -69,6 +116,57 @@ impl<'a> ObservationHeap<'a> {
         statics: &'a StaticRegion,
         descriptors: impl IntoIterator<Item = Arc<ObjectDescriptor>>,
         constructors: &'a BTreeMap<usize, ConstructorObservation>,
+    ) -> Result<Self, ObservationFailure> {
+        Self::build(nursery, statics, descriptors, Some(constructors), None)
+    }
+
+    pub fn new_with_registry(
+        nursery: &'a [u64],
+        statics: &'a StaticRegion,
+        registry: &'a BTreeMap<usize, DescriptorMetadata>,
+    ) -> Result<Self, ObservationFailure> {
+        Self::build(
+            nursery,
+            statics,
+            registry
+                .values()
+                .map(|metadata| Arc::clone(&metadata.descriptor)),
+            None,
+            Some(registry),
+        )
+    }
+
+    pub(super) fn new_with_registry_and_starts(
+        nursery: &'a [u64],
+        statics: &'a StaticRegion,
+        registry: &'a BTreeMap<usize, DescriptorMetadata>,
+        starts: &[u64],
+    ) -> Result<Self, ObservationFailure> {
+        let descriptors: BTreeMap<_, _> = registry
+            .values()
+            .map(|metadata| {
+                (
+                    metadata.descriptor.initial_header_word(),
+                    Arc::clone(&metadata.descriptor),
+                )
+            })
+            .collect();
+        Ok(Self {
+            nursery,
+            statics,
+            descriptors,
+            starts: starts.to_vec(),
+            constructors: None,
+            registry: Some(registry),
+        })
+    }
+
+    fn build(
+        nursery: &'a [u64],
+        statics: &'a StaticRegion,
+        descriptors: impl IntoIterator<Item = Arc<ObjectDescriptor>>,
+        constructors: Option<&'a BTreeMap<usize, ConstructorObservation>>,
+        registry: Option<&'a BTreeMap<usize, DescriptorMetadata>>,
     ) -> Result<Self, ObservationFailure> {
         let descriptors: BTreeMap<_, _> = descriptors
             .into_iter()
@@ -92,7 +190,10 @@ impl<'a> ObservationHeap<'a> {
             // The borrowed slice proves allocation bounds before any object read.
             let state =
                 unsafe { descriptor.state(nursery.as_ptr().add(offset).cast(), available)? };
-            if state != DescriptorState::Live {
+            if !matches!(
+                state,
+                DescriptorState::Live | DescriptorState::Evaluating | DescriptorState::Updated
+            ) {
                 return Err(DescriptorTraceError::StateForKind {
                     state,
                     kind: descriptor.kind(),
@@ -112,13 +213,23 @@ impl<'a> ObservationHeap<'a> {
             descriptors,
             starts,
             constructors,
+            registry,
         })
     }
 
-    fn object(&self, encoded: usize) -> Result<(&ObjectDescriptor, *const u8), ObservationFailure> {
+    fn object(
+        &self,
+        encoded: usize,
+    ) -> Result<(&ObjectDescriptor, *const u8, DescriptorState), ObservationFailure> {
         let address = untag(encoded);
         let static_pointer = self.statics.admit(encoded)?.is_some();
-        if !static_pointer {
+        let available = if static_pointer {
+            self.statics
+                .address_range()
+                .end
+                .checked_sub(address)
+                .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?
+        } else {
             let base = self.nursery.as_ptr() as usize;
             let offset = address
                 .checked_sub(base)
@@ -129,18 +240,25 @@ impl<'a> ObservationHeap<'a> {
             {
                 return Err(DescriptorTraceError::InvalidManagedPointer { address }.into());
             }
-        }
+            self.nursery
+                .len()
+                .checked_mul(std::mem::size_of::<u64>())
+                .and_then(|bytes| bytes.checked_sub(offset))
+                .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?
+        };
         // Exact-start membership was proved by a validated immutable region or
         // the nursery walk; both allocations remain borrowed through observation.
         let header = unsafe { std::ptr::read(address as *const usize) };
-        let descriptor = self
-            .descriptors
-            .get(&header)
-            .ok_or(DescriptorTraceError::UnknownDescriptor { address: header })?;
+        let descriptor = self.descriptors.get(&(header & !7)).ok_or(
+            DescriptorTraceError::UnknownDescriptor {
+                address: header & !7,
+            },
+        )?;
+        let state = unsafe { descriptor.state(address as *const u8, available)? };
         if !tag_valid(
             tag_of(encoded),
             descriptor.kind(),
-            DescriptorState::Live,
+            state,
             descriptor.constructor_tag(),
         ) {
             return Err(DescriptorTraceError::InvalidManagedTag {
@@ -149,7 +267,11 @@ impl<'a> ObservationHeap<'a> {
             }
             .into());
         }
-        Ok((descriptor, address as *const u8))
+        Ok((descriptor, address as *const u8, state))
+    }
+
+    pub(super) fn validate_reference(&self, encoded: usize) -> Result<(), ObservationFailure> {
+        self.object(encoded).map(|_| ())
     }
 
     /// Result storage is already registered as roots by the invocation owner.
@@ -161,33 +283,12 @@ impl<'a> ObservationHeap<'a> {
         layout: &StorageLayout,
         budget: usize,
     ) -> Result<Vec<Value>, ObservationFailure> {
-        if reps.len() != layout.logical_to_stored().len() {
-            return Err(ObservationFailure::Integrity(
-                DescriptorTraceError::InvalidRange,
-            ));
-        }
-
         let mut budget = ObservationBudget {
             remaining: budget,
             limit: budget,
         };
         let mut results = Vec::new();
-        for (logical_index, rep) in reps.iter().copied().enumerate() {
-            let Some(stored_index) = layout.logical_to_stored()[logical_index] else {
-                continue;
-            };
-            let Some(field) = layout.fields().get(stored_index as usize) else {
-                return Err(ObservationFailure::Integrity(
-                    DescriptorTraceError::InvalidRange,
-                ));
-            };
-            if field.rep() != rep {
-                return Err(ObservationFailure::Integrity(
-                    DescriptorTraceError::InvalidRange,
-                ));
-            }
-            let word = read_words(words, field.offset() as usize, field.size() as usize)?;
-            let seed = ObservationSeed { word, rep };
+        for seed in snapshot_results(words, reps, layout)? {
             let value = recursion::try_expand_and_collapse::<
                 ObservationFrame<recursion::PartiallyApplied>,
                 _,
@@ -210,101 +311,175 @@ impl<'a> ObservationHeap<'a> {
         Ok(results)
     }
 
-    fn expand(
+    pub(super) fn expand(
         &self,
-        seed: ObservationSeed,
+        mut seed: ObservationSeed,
         budget: &mut ObservationBudget,
     ) -> Result<ObservationFrame<ObservationSeed>, ObservationFailure> {
-        if budget.remaining == 0 {
-            return Err(ObservationFailure::BudgetExceeded {
-                limit: budget.limit,
-            });
-        }
-        budget.remaining -= 1;
-
-        match seed.rep {
-            RuntimeRep::Void => unreachable!("void results are omitted before observation"),
-            RuntimeRep::Address => Err(ObservationFailure::Representation(seed.rep)),
-            RuntimeRep::Int(bits) => Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitInt(
-                signed_value(seed.word, bits)?,
-            )))),
-            RuntimeRep::Word(bits) => Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitWord(
-                unsigned_value(seed.word, bits)?,
-            )))),
-            RuntimeRep::Float(32) => Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitFloat(
-                (seed.word as u32).into(),
-            )))),
-            RuntimeRep::Float(64) => Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitDouble(
-                seed.word as u64,
-            )))),
-            RuntimeRep::Float(bits) => {
-                Err(ObservationFailure::Representation(RuntimeRep::Float(bits)))
+        loop {
+            if budget.remaining == 0 {
+                return Err(ObservationFailure::BudgetExceeded {
+                    limit: budget.limit,
+                });
             }
-            RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef => {
-                let (descriptor, object) = self.object(seed.word)?;
-                match descriptor.kind() {
-                    ObjectKind::Constructor => {
-                        let observation = self
-                            .constructors
-                            .get(&descriptor.initial_header_word())
-                            .ok_or(ObservationFailure::Integrity(
-                                DescriptorTraceError::InvalidRange,
-                            ))?;
-                        let logical = descriptor.payload().logical_to_stored();
-                        if logical.len() != observation.fields.len() {
-                            return Err(ObservationFailure::Integrity(
-                                DescriptorTraceError::InvalidRange,
-                            ));
-                        }
-                        let mut fields = Vec::new();
-                        fields.try_reserve(observation.fields.len()).map_err(|_| {
-                            ObservationFailure::Integrity(DescriptorTraceError::MetadataAllocation)
-                        })?;
-                        for (index, rep) in observation.fields.iter().copied().enumerate() {
-                            let Some(stored_index) = logical[index] else {
-                                if rep == RuntimeRep::Void {
-                                    continue;
-                                }
-                                return Err(ObservationFailure::Integrity(
+            budget.remaining -= 1;
+
+            match seed.rep {
+                RuntimeRep::Void => unreachable!("void results are omitted before observation"),
+                RuntimeRep::Address => return Err(ObservationFailure::Representation(seed.rep)),
+                RuntimeRep::Int(bits) => {
+                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitInt(
+                        signed_value(seed.word, bits)?,
+                    ))))
+                }
+                RuntimeRep::Word(bits) => {
+                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitWord(
+                        unsigned_value(seed.word, bits)?,
+                    ))))
+                }
+                RuntimeRep::Float(32) => {
+                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitFloat(
+                        (seed.word as u32).into(),
+                    ))))
+                }
+                RuntimeRep::Float(64) => {
+                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitDouble(
+                        seed.word as u64,
+                    ))))
+                }
+                RuntimeRep::Float(bits) => {
+                    return Err(ObservationFailure::Representation(RuntimeRep::Float(bits)))
+                }
+                RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef => {
+                    let (descriptor, object, state) = self.object(seed.word)?;
+                    if state == DescriptorState::Updated {
+                        seed.word = read_object(
+                            object,
+                            descriptor,
+                            tidepool_heap::execution_descriptor::FORWARDING_POINTER_OFFSET,
+                            std::mem::size_of::<usize>(),
+                        )?;
+                        continue;
+                    }
+                    match descriptor.kind() {
+                        ObjectKind::Constructor => {
+                            let observation = self
+                                .registry
+                                .and_then(|registry| {
+                                    registry.get(&descriptor.initial_header_word())
+                                })
+                                .and_then(|metadata| match &metadata.meaning {
+                                    DescriptorMeaning::Constructor(observation) => {
+                                        Some(observation)
+                                    }
+                                    DescriptorMeaning::Callable { .. } => None,
+                                })
+                                .or_else(|| {
+                                    self.constructors.and_then(|constructors| {
+                                        constructors.get(&descriptor.initial_header_word())
+                                    })
+                                })
+                                .ok_or(ObservationFailure::Integrity(
                                     DescriptorTraceError::InvalidRange,
-                                ));
-                            };
-                            let Some(field) =
-                                descriptor.payload().fields().get(stored_index as usize)
-                            else {
-                                return Err(ObservationFailure::Integrity(
-                                    DescriptorTraceError::InvalidRange,
-                                ));
-                            };
-                            if field.rep() != rep {
+                                ))?;
+                            let logical = descriptor.payload().logical_to_stored();
+                            if logical.len() != observation.fields.len() {
                                 return Err(ObservationFailure::Integrity(
                                     DescriptorTraceError::InvalidRange,
                                 ));
                             }
-                            let offset = descriptor
-                                .payload_base()
-                                .checked_add(field.offset())
-                                .ok_or(ObservationFailure::Integrity(
+                            let mut fields = Vec::new();
+                            fields.try_reserve(observation.fields.len()).map_err(|_| {
+                                ObservationFailure::Integrity(
+                                    DescriptorTraceError::MetadataAllocation,
+                                )
+                            })?;
+                            for (index, rep) in observation.fields.iter().copied().enumerate() {
+                                let Some(stored_index) = logical[index] else {
+                                    if rep == RuntimeRep::Void {
+                                        continue;
+                                    }
+                                    return Err(ObservationFailure::Integrity(
+                                        DescriptorTraceError::InvalidRange,
+                                    ));
+                                };
+                                let Some(field) =
+                                    descriptor.payload().fields().get(stored_index as usize)
+                                else {
+                                    return Err(ObservationFailure::Integrity(
+                                        DescriptorTraceError::InvalidRange,
+                                    ));
+                                };
+                                if field.rep() != rep {
+                                    return Err(ObservationFailure::Integrity(
+                                        DescriptorTraceError::InvalidRange,
+                                    ));
+                                }
+                                let offset = descriptor
+                                    .payload_base()
+                                    .checked_add(field.offset())
+                                    .ok_or(ObservationFailure::Integrity(
                                     DescriptorTraceError::InvalidRange,
                                 ))? as usize;
-                            let word =
-                                read_object(object, descriptor, offset, field.size() as usize)?;
-                            fields.push(ObservationSeed { word, rep });
+                                let word =
+                                    read_object(object, descriptor, offset, field.size() as usize)?;
+                                fields.push(ObservationSeed { word, rep });
+                            }
+                            // `recursion` visits frame children through a LIFO worklist.
+                            // Keep the logical source order in the final value while
+                            // presenting the first child to that worklist first.
+                            fields.reverse();
+                            return Ok(ObservationFrame::Constructor(observation.identity, fields));
                         }
-                        // `recursion` visits frame children through a LIFO worklist.
-                        // Keep the logical source order in the final value while
-                        // presenting the first child to that worklist first.
-                        fields.reverse();
-                        Ok(ObservationFrame::Constructor(observation.identity, fields))
+                        kind => return Err(ObservationFailure::Unobservable(kind)),
                     }
-                    kind => Err(ObservationFailure::Unobservable(kind)),
                 }
             }
         }
     }
 }
 
-fn read_words(words: &[u64], offset: usize, size: usize) -> Result<usize, ObservationFailure> {
+pub(super) fn snapshot_results(
+    words: &[u64],
+    reps: &[RuntimeRep],
+    layout: &StorageLayout,
+) -> Result<Vec<ObservationSeed>, ObservationFailure> {
+    if reps.len() != layout.logical_to_stored().len() {
+        return Err(ObservationFailure::Integrity(
+            DescriptorTraceError::InvalidRange,
+        ));
+    }
+    let mut seeds = Vec::new();
+    seeds
+        .try_reserve_exact(reps.len())
+        .map_err(|_| ObservationFailure::Integrity(DescriptorTraceError::MetadataAllocation))?;
+    for (logical_index, rep) in reps.iter().copied().enumerate() {
+        let Some(stored_index) = layout.logical_to_stored()[logical_index] else {
+            continue;
+        };
+        let Some(field) = layout.fields().get(stored_index as usize) else {
+            return Err(ObservationFailure::Integrity(
+                DescriptorTraceError::InvalidRange,
+            ));
+        };
+        if field.rep() != rep {
+            return Err(ObservationFailure::Integrity(
+                DescriptorTraceError::InvalidRange,
+            ));
+        }
+        seeds.push(ObservationSeed {
+            word: read_words(words, field.offset() as usize, field.size() as usize)?,
+            rep,
+        });
+    }
+    Ok(seeds)
+}
+
+pub(super) fn read_words(
+    words: &[u64],
+    offset: usize,
+    size: usize,
+) -> Result<usize, ObservationFailure> {
     let bytes = words.len().checked_mul(std::mem::size_of::<u64>()).ok_or(
         ObservationFailure::Integrity(DescriptorTraceError::InvalidRange),
     )?;
@@ -516,6 +691,42 @@ mod tests {
             limited,
             Err(ObservationFailure::BudgetExceeded { limit: 1 })
         ));
+    }
+
+    #[test]
+    fn updated_thunk_chase_masks_the_header_and_materializes_its_target() {
+        let statics = statics();
+        let thunk_layout = StorageLayout::for_reps(&target(), &[]).unwrap();
+        let thunk = Arc::new(ObjectDescriptor::new(ObjectKind::Thunk, thunk_layout, None).unwrap());
+        let leaf_layout = StorageLayout::for_reps(&target(), &[]).unwrap();
+        let leaf = Arc::new(ObjectDescriptor::constructor(1, leaf_layout, None).unwrap());
+        let mut nursery = vec![0_u64; 4];
+        nursery[0] = (thunk.initial_header_word() | DescriptorState::Updated as usize) as u64;
+        nursery[1] = (unsafe { nursery.as_ptr().add(2) } as usize | usize::from(leaf.tag())) as u64;
+        unsafe { leaf.initialize_header(nursery.as_mut_ptr().add(2).cast()) };
+        let constructors = BTreeMap::from([(
+            leaf.initial_header_word(),
+            ConstructorObservation {
+                identity: DataConId(40),
+                fields: vec![],
+            },
+        )]);
+        let heap = ObservationHeap::new(
+            &nursery,
+            &statics,
+            vec![Arc::clone(&thunk), Arc::clone(&leaf)],
+            &constructors,
+        )
+        .unwrap();
+        let root = nursery.as_ptr() as usize;
+        let reps = [RuntimeRep::LiftedRef];
+        let layout = StorageLayout::for_reps(&target(), &reps).unwrap();
+        assert!(matches!(
+            heap.observe_results(&[root as u64], &reps, &layout, 2),
+            Ok(values) if matches!(values.as_slice(), [Value::Con(DataConId(40), fields)] if fields.is_empty())
+        ));
+        let (_, _, state) = heap.object(root).unwrap();
+        assert_eq!(state, DescriptorState::Updated);
     }
 
     #[test]

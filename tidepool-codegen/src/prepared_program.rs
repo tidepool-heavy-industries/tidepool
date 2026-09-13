@@ -27,7 +27,12 @@ pub use observe::ObservationFailure;
 mod run;
 pub use run::{ExecutionError, RunOptions, RunResult};
 mod entry;
+mod forcing;
+mod floating;
+#[cfg(test)]
+mod settlement_tests;
 mod plan;
+mod primitives;
 mod safepoint;
 pub use admission::{admit_prepared, admit_program};
 
@@ -39,6 +44,10 @@ pub enum Unsupported {
     Global(GlobalId),
     #[error("thunk {0:?} is outside this execution checkpoint")]
     Thunk(ValueId),
+    #[error("thunk {0:?} requires a zero-argument lifted-reference result signature")]
+    ThunkSignature(ValueId),
+    #[error("static object contains a managed edge to heap top {0:?}")]
+    StaticHeapEdge(ValueId),
     #[error("unsupported expression at node {node} in binding {binding:?}")]
     Expression { binding: ValueId, node: usize },
     #[error("entry {0:?} cannot accept managed host arguments")]
@@ -102,132 +111,32 @@ unsafe extern "C" fn prepared_case_trap(vmctx: *mut crate::context::VMContext) {
     machine.set_first_cause(crate::host_fns::RuntimeError::CaseTrap);
 }
 
-/// Shared slow inspection for generated, provenance-checked references. It does
-/// not force, allocate, collect, or replace the reference in this strict phase.
-unsafe extern "C" fn prepared_enter_slow(
-    vmctx: *mut crate::context::VMContext,
-    reference: *const usize,
-) -> i32 {
+unsafe extern "C" fn prepared_bad_state(vmctx: *mut crate::context::VMContext) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
-    if machine.prepared_call_status() == crate::prepared_control::CallStatus::Success {
-        if let Err(cause) = unsafe { machine.inspect_prepared_entry(reference) } {
-            machine.set_first_cause(cause);
-        }
-    }
+    machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
     machine.prepared_call_status() as i32
 }
 
-#[cfg(test)]
-mod slow_entry_tests {
-    use super::*;
-    use crate::context::VMContext;
-    use crate::host_fns::RuntimeError;
-    use crate::machine_state::MachineState;
-    use crate::prepared_control::CallStatus;
-    use tidepool_heap::execution_descriptor::ObjectDescriptor;
-    use tidepool_repr::execution_schema::{StorageLayout, TargetDescriptor};
-
-    unsafe extern "C" fn no_gc(_: *mut VMContext) {}
-
-    fn target() -> TargetDescriptor {
-        TargetDescriptor {
-            architecture: Architecture::X86_64,
-            endianness: Endianness::Little,
-            pointer_width: 64,
-            word_width: 64,
-            abi: "sysv64".into(),
-            features: Vec::new(),
-        }
-    }
-
-    fn vmctx(machine: &MachineState) -> VMContext {
-        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
-        vmctx.machine_state = (machine as *const MachineState).cast_mut();
-        vmctx
-    }
-
-    #[test]
-    fn prepared_enter_slow_rejects_null_and_preserves_first_cause() {
-        let machine = MachineState::new();
-        let mut vmctx = vmctx(&machine);
-        assert_eq!(
-            unsafe { prepared_enter_slow(&mut vmctx, std::ptr::null()) },
-            CallStatus::IntegrityFailure as i32
-        );
-        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
-    }
-
-    #[test]
-    fn prepared_enter_slow_rejects_unknown_headers() {
-        let machine = MachineState::new();
-        let descriptor = Arc::new(
-            ObjectDescriptor::constructor(
-                1,
-                StorageLayout::for_reps(&target(), &[]).unwrap(),
-                None,
-            )
-            .unwrap(),
-        );
-        machine
-            .install_prepared_buffer_with_static_region(vec![0; 4], vec![descriptor], None)
-            .unwrap();
-        let (start, _) = machine.gc_active_range().unwrap();
-        unsafe { start.cast::<usize>().write(0x1000) };
-        let mut vmctx = vmctx(&machine);
-        assert_eq!(
-            unsafe { prepared_enter_slow(&mut vmctx, start.cast()) },
-            CallStatus::IntegrityFailure as i32
-        );
-        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
-    }
-
-    #[test]
-    fn prepared_enter_slow_accepts_live_constructor_headers() {
-        let machine = MachineState::new();
-        let descriptor = Arc::new(
-            ObjectDescriptor::constructor(
-                1,
-                StorageLayout::for_reps(&target(), &[]).unwrap(),
-                None,
-            )
-            .unwrap(),
-        );
-        let header = descriptor.initial_header_word();
-        machine
-            .install_prepared_buffer_with_static_region(vec![0; 4], vec![descriptor], None)
-            .unwrap();
-        let (start, _) = machine.gc_active_range().unwrap();
-        unsafe { start.cast::<usize>().write(header) };
-        let mut vmctx = vmctx(&machine);
-        assert_eq!(
-            unsafe { prepared_enter_slow(&mut vmctx, start.cast()) },
-            CallStatus::Success as i32
-        );
-        assert_eq!(machine.take_runtime_error(), None);
-    }
-
-    #[test]
-    fn prepared_enter_slow_does_not_overwrite_a_terminal_cause() {
-        let machine = MachineState::new();
-        machine.set_first_cause(RuntimeError::Cancelled);
-        let mut vmctx = vmctx(&machine);
-        assert_eq!(
-            unsafe { prepared_enter_slow(&mut vmctx, std::ptr::null()) },
-            CallStatus::Cancelled as i32
-        );
-        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
-    }
+unsafe extern "C" fn prepared_blackhole(vmctx: *mut crate::context::VMContext) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    machine.set_first_cause(crate::host_fns::RuntimeError::BlackHole);
+    machine.prepared_call_status() as i32
 }
 
+/// Pins generated entries, descriptors and immutable images together. Each run
+/// owns its mutable heap; materialization may force values before releasing it.
 pub struct CompiledProgram {
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
-    pub(crate) constructors: BTreeMap<usize, ConstructorObservation>,
+    pub(crate) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
     pub(crate) statics: StaticImage,
-    pub(crate) bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
     pub(crate) byte_tops: BTreeMap<ValueId, Arc<[u8]>>,
+    pub(crate) heap_top_specs: Vec<plan::HeapTopSpec>,
+    /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.
+    /// The target is generated code which calls Tail `prepared_enter`.
+    pub(crate) force_adapter: FuncId,
 }
 
 impl CompiledProgram {
@@ -256,13 +165,14 @@ impl CompiledProgram {
                 "prepared_gc_trigger",
                 crate::host_fns::prepared_gc_trigger as *const u8,
             ),
-            ("prepared_poll", safepoint::prepared_poll as *const u8),
+            ("prepared_poll", safepoint::prepared_poll_at as *const u8),
             (
                 "prepared_stack_overflow",
                 safepoint::prepared_stack_overflow as *const u8,
             ),
-            ("prepared_enter_slow", prepared_enter_slow as *const u8),
             ("prepared_case_trap", prepared_case_trap as *const u8),
+            ("prepared_bad_state", prepared_bad_state as *const u8),
+            ("prepared_blackhole", prepared_blackhole as *const u8),
         ])?;
         #[cfg(test)]
         {
@@ -289,9 +199,11 @@ impl CompiledProgram {
         prepared_status_signature
             .returns
             .push(AbiParam::new(types::I32));
+        let mut prepared_poll_signature = prepared_status_signature.clone();
+        prepared_poll_signature.params.push(AbiParam::new(types::I32));
         let prepared_poll = pipeline
             .module
-            .declare_function("prepared_poll", Linkage::Import, &prepared_status_signature)
+            .declare_function("prepared_poll", Linkage::Import, &prepared_poll_signature)
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let prepared_stack_overflow = pipeline
             .module
@@ -301,30 +213,27 @@ impl CompiledProgram {
                 &prepared_status_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
-        let mut prepared_enter_slow_signature =
-            ir::Signature::new(pipeline.isa.default_call_conv());
-        prepared_enter_slow_signature
-            .params
-            .push(AbiParam::new(types::I64));
-        prepared_enter_slow_signature
-            .params
-            .push(AbiParam::new(types::I64));
-        prepared_enter_slow_signature
-            .returns
-            .push(AbiParam::new(types::I32));
-        let prepared_enter_slow = pipeline
-            .module
-            .declare_function(
-                "prepared_enter_slow",
-                Linkage::Import,
-                &prepared_enter_slow_signature,
-            )
-            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut case_trap_signature = ir::Signature::new(pipeline.isa.default_call_conv());
         case_trap_signature.params.push(AbiParam::new(types::I64));
         let case_trap = pipeline
             .module
             .declare_function("prepared_case_trap", Linkage::Import, &case_trap_signature)
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let prepared_bad_state = pipeline
+            .module
+            .declare_function(
+                "prepared_bad_state",
+                Linkage::Import,
+                &prepared_status_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let prepared_blackhole = pipeline
+            .module
+            .declare_function(
+                "prepared_blackhole",
+                Linkage::Import,
+                &prepared_status_signature,
+            )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut signatures = BTreeMap::new();
         for (&id, function) in &plan.functions {
@@ -342,10 +251,32 @@ impl CompiledProgram {
                 }],
             });
         }
+        let mut thunk_bodies = BTreeMap::new();
+        let thunk_native_signature = entry::signature();
+        for &id in plan.thunks.keys() {
+            let body = pipeline.declare_function_with_signature(
+                &format!("prepared_thunk_body_{}", id.0),
+                Linkage::Local,
+                &thunk_native_signature,
+            )?;
+            thunk_bodies.insert(id, body);
+        }
+        let prepared_enter = pipeline.declare_function_with_signature(
+            "prepared_enter",
+            Linkage::Local,
+            &thunk_native_signature,
+        )?;
+        // The call map names the callable view of each binding. Thunk bodies
+        // are deliberately kept separate: Enter sites must route through the
+        // state machine, while its body call uses the private body ID.
         let mut functions = BTreeMap::new();
         let mut abis = BTreeMap::new();
         for (&id, signature) in &signatures {
             let abi = EntryAbi::lower_internal(&profile, signature, EnvironmentMode::Captured)?;
+            if plan.thunks.contains_key(&id) {
+                abis.insert(id, abi);
+                continue;
+            }
             let native = abi.cranelift_signature(&profile, CallConv::Tail)?;
             let function = pipeline.declare_function_with_signature(
                 &format!("prepared_entry_{}", id.0),
@@ -355,8 +286,14 @@ impl CompiledProgram {
             functions.insert(id, function);
             abis.insert(id, abi);
         }
+        for (&id, _) in &plan.thunks {
+            functions.insert(id, prepared_enter);
+        }
         // Every function address has been declared, including recursive peers.
         for &id in functions.keys() {
+            if plan.thunks.contains_key(&id) {
+                continue;
+            }
             emit::emit_function(
                 &plan,
                 id,
@@ -364,18 +301,57 @@ impl CompiledProgram {
                 prepared_gc,
                 prepared_poll,
                 prepared_stack_overflow,
-                prepared_enter_slow,
+                prepared_enter,
                 case_trap,
                 &mut pipeline,
             )?;
         }
+        for (&id, &body) in &thunk_bodies {
+            emit::emit_thunk_body(
+                &plan,
+                id,
+                body,
+                &functions,
+                prepared_gc,
+                prepared_poll,
+                prepared_stack_overflow,
+                prepared_enter,
+                case_trap,
+                &mut pipeline,
+            )?;
+        }
+        let thunk_entries = plan
+            .thunks
+            .iter()
+            .map(|(&id, thunk)| entry::ThunkEntry {
+                descriptor: Arc::clone(&thunk.descriptor),
+                body: thunk_bodies[&id],
+                policy: thunk.policy,
+            })
+            .collect::<Vec<_>>();
+        entry::emit_prepared_enter(
+            &mut pipeline,
+            prepared_enter,
+            &thunk_entries,
+            &plan.constructors,
+            prepared_poll,
+            prepared_stack_overflow,
+            prepared_bad_state,
+            prepared_blackhole,
+        )?;
+        let force_adapter =
+            adapter::emit_force_adapter(&mut pipeline, "prepared_force_adapter", prepared_enter)?;
         let mut entries = BTreeMap::new();
         for (&id, &slot) in &plan.top_slots {
             let abi = abis[&id].clone();
             let adapter = adapter::emit_adapter(
                 &mut pipeline,
                 &format!("prepared_adapter_{}", id.0),
-                functions[&id],
+                if plan.thunks.contains_key(&id) {
+                    prepared_enter
+                } else {
+                    functions[&id]
+                },
                 &abi,
                 slot,
             )?;
@@ -396,21 +372,53 @@ impl CompiledProgram {
                 .values()
                 .map(|function| function.descriptor.clone()),
         );
-        let constructors = plan
-            .program
-            .constructors()
-            .iter()
-            .zip(&plan.constructors)
-            .map(|(declaration, descriptor)| {
-                (
-                    descriptor.initial_header_word(),
-                    ConstructorObservation {
+        descriptors.extend(
+            plan.thunks
+                .values()
+                .map(|thunk| Arc::clone(&thunk.descriptor)),
+        );
+        let mut descriptor_registry = BTreeMap::new();
+        for (declaration, descriptor) in plan.program.constructors().iter().zip(&plan.constructors)
+        {
+            descriptor_registry.insert(
+                descriptor.initial_header_word(),
+                DescriptorMetadata {
+                    descriptor: Arc::clone(descriptor),
+                    meaning: DescriptorMeaning::Constructor(ConstructorObservation {
                         identity: declaration.host_id,
                         fields: declaration.field_reps.clone(),
+                    }),
+                },
+            );
+        }
+        for (&id, function) in &plan.functions {
+            descriptor_registry.insert(
+                function.descriptor.initial_header_word(),
+                DescriptorMetadata {
+                    descriptor: Arc::clone(&function.descriptor),
+                    meaning: DescriptorMeaning::Callable {
+                        binding: id,
+                        address: pipeline.get_function_ptr(functions[&id]),
+                        signature: function.signature.clone(),
+                        update: None,
                     },
-                )
-            })
-            .collect();
+                },
+            );
+        }
+        for (&id, thunk) in &plan.thunks {
+            descriptor_registry.insert(
+                thunk.descriptor.initial_header_word(),
+                DescriptorMetadata {
+                    descriptor: Arc::clone(&thunk.descriptor),
+                    meaning: DescriptorMeaning::Callable {
+                        binding: id,
+                        address: pipeline.get_function_ptr(prepared_enter),
+                        signature: thunk.signature.clone(),
+                        update: Some(thunk.policy),
+                    },
+                },
+            );
+        }
         let byte_tops = plan
             .top_bindings
             .iter()
@@ -423,12 +431,17 @@ impl CompiledProgram {
             pipeline,
             entries,
             descriptors,
-            constructors,
+            descriptor_registry,
             statics,
-            bytes: plan.bytes,
             top_slots: plan.top_slots,
             byte_tops,
+            heap_top_specs: plan.heap_top_specs,
+            force_adapter,
         })
+    }
+
+    pub(crate) fn prepared_force_adapter(&self) -> FuncId {
+        self.force_adapter
     }
 }
 

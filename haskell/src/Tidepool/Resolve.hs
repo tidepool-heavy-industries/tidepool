@@ -8,6 +8,7 @@ import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.Subst (substExpr, mkEmptySubst)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Types.Id (Id, idType, idUnfolding, realIdUnfolding, isGlobalId, isPrimOpId_maybe, isDataConWorkId_maybe, isDataConWrapId_maybe, isDeadEndId, mkSysLocalOrCoVar)
+import GHC.Types.RepType (typePrimRep_maybe)
 import GHC.Types.Var (Var, varName)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, unitVarSet, elemVarSet, extendVarSet)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
@@ -18,7 +19,7 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import Data.Word (Word64)
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, isInfixOf)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, isJust)
 
 -- For specialization fallback
 import GHC.Driver.Env (HscEnv(..), hscEPS)
@@ -74,21 +75,34 @@ data ExactBodyLookup
   | UnsupportedBodyCapability Name
 
 recoverExactBody :: HscEnv -> FatIfaceCache -> Id -> IO ExactBodyLookup
-recoverExactBody env cache binder = case nameModule_maybe name of
-  Nothing -> pure (MissingExactBody name NameWithoutModule)
-  Just owner -> case maybeUnfoldingTemplate (realIdUnfolding binder) of
-    Just body ->
-      let group = if binder `elemVarSet` exprSomeFreeVars (const True) body
-            then Rec [(binder, body)] else NonRec binder body
-      in pure (ExactBody owner group InterfaceUnfolding)
-    Nothing -> do
-      result <- lookupFatIfaceExact env cache name
-      pure $ case result of
-        FatIfaceFound group -> ExactBody owner group FatInterfaceGroup
-        FatIfaceMissing reason -> MissingExactBody name reason
-        FatIfaceLoadFailure modul reason -> BodyInterfaceFailure modul reason
+recoverExactBody env cache binder
+  | unsupportedBodyCapability binder = pure (UnsupportedBodyCapability name)
+  | otherwise = case nameModule_maybe name of
+      Nothing -> pure (MissingExactBody name NameWithoutModule)
+      Just owner -> case maybeUnfoldingTemplate (realIdUnfolding binder) of
+        Just body ->
+          let group = if binder `elemVarSet` exprSomeFreeVars (const True) body
+                then Rec [(binder, body)] else NonRec binder body
+          in pure (ExactBody owner group InterfaceUnfolding)
+        Nothing -> do
+          result <- lookupFatIfaceExact env cache name
+          pure $ case result of
+            FatIfaceFound group -> ExactBody owner group FatInterfaceGroup
+            FatIfaceMissing reason -> MissingExactBody name reason
+            FatIfaceLoadFailure modul reason -> BodyInterfaceFailure modul reason
   where
     name = varName binder
+
+-- | Wired-in operations and zero-width values have no recoverable interface
+-- body.  Keep them out of the exact-body worklist rather than asking the fat
+-- interface loader for a definition that cannot exist.
+unsupportedBodyCapability :: Id -> Bool
+unsupportedBodyCapability binder =
+  isJust (isPrimOpId_maybe binder)
+  || isJust (isDataConWorkId_maybe binder)
+  || case typePrimRep_maybe (idType binder) of
+       Just [] -> True
+       _ -> False
 
 -- | Resolve cross-module references by inlining their unfoldings.
 --

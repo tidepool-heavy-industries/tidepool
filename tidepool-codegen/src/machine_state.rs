@@ -208,6 +208,8 @@ pub(crate) struct ExternalSweepPlan {
 /// rely on — see e.g. `set_first_cause`'s `try_borrow_mut` defense below.
 pub struct MachineState {
     cancel_flag: RefCell<Option<Arc<AtomicBool>>>,
+    #[cfg(test)]
+    prepared_test_failure: RefCell<Option<PreparedTestFailure>>,
     text_con_id: Cell<Option<tidepool_repr::DataConId>>,
     json_con_ids: Cell<Option<tidepool_bridge::json_builder::JsonConIds>>,
     time_con_ids: Cell<Option<tidepool_bridge::time::TimeConIds>>,
@@ -288,10 +290,19 @@ pub struct MachineState {
 // dereferenced off that thread.
 unsafe impl Send for MachineState {}
 
+#[cfg(test)]
+struct PreparedTestFailure {
+    point: crate::prepared_control::PreparedSafepoint,
+    remaining: usize,
+    cause: RuntimeError,
+}
+
 impl MachineState {
     pub fn new() -> Self {
         Self {
             cancel_flag: RefCell::new(None),
+            #[cfg(test)]
+            prepared_test_failure: RefCell::new(None),
             text_con_id: Cell::new(None),
             json_con_ids: Cell::new(None),
             time_con_ids: Cell::new(None),
@@ -370,6 +381,48 @@ impl MachineState {
             .borrow()
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
+    }
+
+    /// Every prepared poll records on this invocation. No TLS lookup is
+    /// involved, including when a legacy machine is active on the same thread.
+    pub(crate) fn poll_prepared(
+        &self,
+        _point: crate::prepared_control::PreparedSafepoint,
+    ) -> crate::prepared_control::CallStatus {
+        #[cfg(test)]
+        {
+            let mut pending = self.prepared_test_failure.borrow_mut();
+            let fire = if let Some(failure) = pending.as_mut() {
+                if failure.point == _point {
+                    failure.remaining = failure.remaining.saturating_sub(1);
+                    failure.remaining == 0
+                } else { false }
+            } else { false };
+            if fire {
+                if let Some(failure) = pending.take() {
+                    self.set_first_cause(failure.cause);
+                }
+            }
+        }
+        if self.cancel_requested() {
+            self.set_first_cause(RuntimeError::Cancelled);
+        }
+        self.prepared_call_status()
+    }
+
+    /// Inject a first cause at a specific matching poll, without scheduling
+    /// races or a production callback surface. Settlement uses the same status
+    /// path as real cancellation, stack overflow and language failures.
+    #[cfg(test)]
+    pub(crate) fn fail_prepared_at(
+        &self,
+        point: crate::prepared_control::PreparedSafepoint,
+        occurrence: usize,
+        cause: RuntimeError,
+    ) {
+        *self.prepared_test_failure.borrow_mut() = Some(PreparedTestFailure {
+            point, remaining: occurrence, cause,
+        });
     }
 
     // --- Host-built value constructor ids ----------------------------------
@@ -588,7 +641,7 @@ impl MachineState {
             .live_descriptor(header)
             .ok_or(RuntimeError::BadPointer)?;
         match descriptor.kind() {
-            ObjectKind::Constructor | ObjectKind::Function => Ok(()),
+            ObjectKind::Constructor | ObjectKind::Function | ObjectKind::Thunk => Ok(()),
             _ => Err(RuntimeError::BadThunkState(0)),
         }
     }
