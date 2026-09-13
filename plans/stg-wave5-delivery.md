@@ -30,6 +30,52 @@ request; `800ab0d06` preserves them in Git. Corpus evidence is reproducible via
 `env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER just fixtures-check`.
 Its generated manifests/results remain build artifacts, not new committed logs.
 
+### Delivery rerun
+
+`37d8a8c51` records regenerated producer fixtures and the canonical fingerprint.
+Both producer writers passed; repr's cross-language contract passed 7/7.
+`just fixtures-update` and `just fixtures-check` exited zero. The latter's
+corpus report is **not** all-green acceptance:
+
+| Stage | Passed | Failed | Not reached / missing expectation |
+| --- | ---: | ---: | ---: |
+| Projection | 709 | 103 | 0 |
+| Validation, admission, compilation (each) | 709 | 0 | 103 |
+| Execution | 526 | 183 | 103 |
+| Comparison | 174 | 0 | 104 not reached; 534 missing |
+
+The denominator remains 812 STG tops and 217 expectation keys. The 103
+projection failures now all name `__hsbase_MD5Init`; the old `patError`
+admission failure is gone. The 183 execution outcomes remain 94 managed-host
+argument limitations, 74 Address observations, nine missing arguments, three
+function observations, two budgets, and one non-finite blackhole omission.
+They are not 183 newly discovered engine defects.
+
+Both production structural probes pass all six stages: `Project.Work.candidate`
+observed through `Preparation/Complete -> Left/Right` is `Left 7`; the
+`awaitSettled` dependency projection is `[[(17,True)]]`. A compiled pinned-GHC
+oracle independently produced both values and the exact wired-in pattern-error
+message `Suite.hs:3: Non-exhaustive patterns in f\n`. These monomorphic probes
+use GHC2024 and -O2; they are not general workbench-dialect oracle coverage.
+
+Artifacts: `target/prepared-corpus/run.NVIiwK/provenance.json` identifies the
+frozen executables; `target/prepared-corpus/suite.w1YOfv/results.json` holds
+per-row outcomes. The run began at dirty `1a9246e9f`; frozen producer/probe
+changes were subsequently committed as `1af9be1b9` and `8d55d0d08`.
+
+`nix develop --command cargo test --workspace --no-run --quiet` exited zero
+on the regenerated checkpoint (warnings remain). Formatting and suite
+registration checks passed. `just changed 800ab0d06` stopped at three denied
+validator `expect` calls before nextest; failure evidence is under
+`target/tidepool-test-runs/20260913T173901Z-990022-changed`.
+Those three calls were removed in `eae444084`: repr library tests passed 242/242
+and production repr clippy passed. All-targets repr clippy still rejects
+`items_after_test_module` in `execution_schema/validation.rs`; no lint allowance
+or large test-module relocation was folded into that cleanup. Workspace
+compilation also reports existing unused code/import warnings. Nextest has not
+run through the broad gate, so focused passes are not workspace-test evidence.
+The finite-key acceptance target is still 216, not 174. Wave 5 remains open.
+
 ## Order and owners
 
 1. Repair pending mutable-copy test fixtures; run prepared-program and
@@ -88,9 +134,37 @@ are not observable to this walk. A post-catalog corpus run remains necessary.
 
 The exact stack boundary includes the pinned `collectStackTrace1` worker as
 well as `collectStackTrace`; its body owns the libdw session and address imports.
-Fingerprint MD5 operations also occur in these closures and are not classified
-as unreachable by this inventory. Only source evidence or execution can settle
-their live-path requirements; unknown operations remain named rejections.
+Fingerprint MD5 operations also occur in these closures. Pinned-source review
+finds a live ordinary-error path: exception annotation for Backtraces uses its
+Typeable dictionary, `mkTrCon` computes `fingerprintFingerprints`, and that calls
+`GHC.Internal.Fingerprint.$wfingerprintData`, which owns MD5Init/Update/Final.
+This is not exclusive to the default-off mechanisms. MD5 therefore requires
+real implementation, not a deferred-capability replacement. The corpus rerun
+must establish the concrete remaining stage failures before further work.
+
+### Next implementation boundary: authenticated fingerprinting
+
+The pinned MD5 operations are `MD5Init [Address, Void] -> []`,
+`MD5Update [Address, Address, Int(32), Void] -> []`, and
+`MD5Final [Address, Address, Void] -> []`, all successful `Returns` contracts.
+GHC's configured MD5 context is 88 bytes and its digest buffer is 16 bytes;
+those are pinned ABI facts, not portable Rust-layout assumptions.
+
+The caller also uses pinned byte arrays, contents addresses, keepAlive,
+address offsets, byte reads/writes and width conversions. A correct patch must
+preserve managed ownership while addresses are live and authenticate complete
+read/write spans. The existing owner is MachineState's external-storage ledger
+and its checked byte-range/store operations. The old Core JIT's non-poison raw
+address check is not sufficient authority and must not be copied as the guard.
+
+Before implementing, settle the smallest boundary with these obligations:
+reuse a maintained MD5 implementation without introducing a parallel allocation
+registry; define any pinned-C-context serialization explicitly; preserve
+keepAlive across collection/cancellation; test the result against compiled GHC,
+including empty and multi-block inputs and invalid spans. Inspect all remaining
+operation/signature pairs in this closure rather than assuming MD5Init is its
+only missing operation. No stack-capability stub or exception-context erasure
+may be used to turn this live fingerprint path into an apparent success.
 
 ## Acceptance
 
