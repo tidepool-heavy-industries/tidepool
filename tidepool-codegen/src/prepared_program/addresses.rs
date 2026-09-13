@@ -308,24 +308,20 @@ pub(super) fn emit_read_word8(
     pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_read_word8_address", 5)?;
-    let owner = builder
-        .ins()
-        .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
-    let output = super::arrays::output_slot(builder);
-    let call = builder
-        .ins()
-        .call(host, &[vmctx, owner, arguments[0], arguments[1], output]);
-    let status = builder.inst_results(call)[0];
-    super::arrays::finish_checked_call(builder, status);
-    Ok(vec![builder.ins().load(
+    emit_scaled_read(
+        builder,
+        pipeline,
+        vmctx,
+        pool,
+        arguments,
+        "prepared_read_word8_address",
         types::I8,
-        MemFlags::trusted(),
-        output,
-        0,
-    )])
+    )
 }
 
+/// The host always writes the result as a full machine word regardless of the
+/// primop's result width, so the slot is loaded at `I64` and narrowed here;
+/// loading a narrow type directly from offset 0 would depend on endianness.
 fn emit_scaled_read(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
@@ -345,12 +341,14 @@ fn emit_scaled_read(
         .call(host, &[vmctx, owner, arguments[0], arguments[1], output]);
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
-    Ok(vec![builder.ins().load(
-        result_type,
-        MemFlags::trusted(),
-        output,
-        0,
-    )])
+    let word = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), output, 0);
+    Ok(vec![if result_type == types::I64 {
+        word
+    } else {
+        builder.ins().ireduce(result_type, word)
+    }])
 }
 
 pub(super) fn emit_read_int8(
@@ -414,23 +412,15 @@ pub(super) fn emit_read_wide_char(
     pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host =
-        super::arrays::declare_host(builder, pipeline, "prepared_read_wide_char_address", 5)?;
-    let owner = builder
-        .ins()
-        .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
-    let output = super::arrays::output_slot(builder);
-    let call = builder
-        .ins()
-        .call(host, &[vmctx, owner, arguments[0], arguments[1], output]);
-    let status = builder.inst_results(call)[0];
-    super::arrays::finish_checked_call(builder, status);
-    Ok(vec![builder.ins().load(
+    emit_scaled_read(
+        builder,
+        pipeline,
+        vmctx,
+        pool,
+        arguments,
+        "prepared_read_wide_char_address",
         types::I64,
-        MemFlags::trusted(),
-        output,
-        0,
-    )])
+    )
 }
 
 pub(super) fn emit_write_word8(
