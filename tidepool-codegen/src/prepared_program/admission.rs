@@ -2,7 +2,7 @@ use super::Unsupported;
 use std::collections::BTreeMap;
 use tidepool_repr::execution_schema::{
     Atom, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, OperationDecl,
-    PreparedProgram, ResultContract, RuntimeRep, Signature, SignatureId, ValueId, ValueRef,
+    PreparedProgram, ResultContract, RuntimeRep, Signature, ValueId, ValueRef,
 };
 
 /// Whether one validated operation declaration has an exact native lowering.
@@ -87,10 +87,7 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
     let mut admit_binding = |binding: &HeapBinding, _top: bool| -> Result<(), Unsupported> {
         match &binding.rhs {
             HeapRhs::Thunk { signature, .. } => {
-                let checked = program
-                    .signatures()
-                    .get(signature.0 as usize)
-                    .ok_or(Unsupported::ThunkSignature(binding.id))?;
+                let checked = &program.signatures()[signature.0 as usize];
                 let supported_result = match &checked.results {
                     ResultContract::NoSuccess => true,
                     ResultContract::Returns(reps) => reps.as_slice() == [RuntimeRep::LiftedRef],
@@ -121,29 +118,29 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
     }
 
     let owners = expression_owners(program);
-    let mut pap_fallback_cache: BTreeMap<SignatureId, bool> = BTreeMap::new();
     for (node, frame) in program.expressions().nodes.iter().enumerate() {
+        if let ExprFrame::Operation { operation, .. } = frame {
+            if let Some(declaration) = program.operations().get(operation.0 as usize) {
+                if let Some(signature) = program.signatures().get(declaration.signature.0 as usize)
+                {
+                    if !supports_operation(declaration, signature) {
+                        return Err(Unsupported::Operation {
+                            binding: owners[node].unwrap_or(program.entry()),
+                            node,
+                            identity: declaration.identity.clone(),
+                            signature: signature.clone(),
+                        });
+                    }
+                }
+            }
+        }
         let rejected = match frame {
             ExprFrame::Operation { operation, .. } => {
-                match program
-                    .operations()
-                    .get(operation.0 as usize)
-                    .and_then(|declaration| {
-                        program
-                            .signatures()
-                            .get(declaration.signature.0 as usize)
-                            .map(|signature| (declaration, signature))
-                    }) {
-                    Some((declaration, signature)) => {
-                        if supports_operation(declaration, signature) {
-                            false
-                        } else {
-                            return Err(Unsupported::Operation {
-                                binding: owners[node].unwrap_or(program.entry()),
-                                node,
-                                identity: declaration.identity.clone(),
-                                signature: signature.clone(),
-                            });
+                match program.operations().get(operation.0 as usize) {
+                    Some(declaration) => {
+                        match program.signatures().get(declaration.signature.0 as usize) {
+                            Some(signature) => !supports_operation(declaration, signature),
+                            None => true,
                         }
                     }
                     None => true,
@@ -167,19 +164,10 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
                                     // descriptor remains a generated dispatch
                                     // check, but admission can prove that at least
                                     // one owned callable/pending arity has this ABI.
-                                    // `functions` is fixed once admission begins,
-                                    // so this predicate is stable per demanded
-                                    // signature and worth caching across nodes.
-                                    !*pap_fallback_cache.entry(*signature).or_insert_with(|| {
-                                        functions.values().any(|actual| {
-                                            program.signatures().get(actual.0 as usize).is_some_and(
-                                                |entry| {
-                                                    (0..entry.arguments.len()).any(|pending| {
-                                                        super::apply::classify(entry, pending, demand)
-                                                            .is_some()
-                                                    })
-                                                },
-                                            )
+                                    !functions.values().any(|actual| {
+                                        let entry = &program.signatures()[actual.0 as usize];
+                                        (0..entry.arguments.len()).any(|pending| {
+                                            super::apply::classify(entry, pending, demand).is_some()
                                         })
                                     })
                                 }
