@@ -10,6 +10,7 @@ description = "Intermediate representation for the Tidepool compiler"
 readme = "../README.md"
 
 [dependencies]
+recursion.workspace = true
 ciborium.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true

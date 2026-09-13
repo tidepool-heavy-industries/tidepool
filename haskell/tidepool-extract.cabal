@@ -153,6 +153,7 @@ test-suite execution-schema-encode
   build-depends:
     base >= 4.20 && < 5,
     bytestring,
+    cborg,
     tidepool-extract-internal
   default-language: GHC2024
   default-extensions: OverloadedStrings

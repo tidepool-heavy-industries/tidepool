@@ -1,5 +1,5 @@
 use tidepool_repr::execution_schema::{
-    Architecture, Atom, CheckedLayout, ConstructorDecl, ConstructorId, Endianness, Expr,
+    Architecture, Atom, CheckedLayout, ConstructorDecl, ConstructorId, Endianness, ExprFrame,
     FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, OperationDecl, ProgramEnvelope,
     ProgramRequirements, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
     TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef, WireProgram,
@@ -70,6 +70,12 @@ fn representative_recursive_import_contract_compiles() {
             identity: "sub-int64".into(),
             signature: SignatureId(0),
         }],
+        expressions: tidepool_repr::tree::RecursiveTree {
+            nodes: vec![ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 42_i64.to_be_bytes().to_vec(),
+            })])],
+        },
         bindings: vec![Group::Recursive(vec![TopBinding {
             identity: symbol("Fixture.Vertical", "entry"),
             binding: HeapBinding {
@@ -78,10 +84,7 @@ fn representative_recursive_import_contract_compiles() {
                     signature: SignatureId(0),
                     update: UpdatePolicy::Memoize,
                     captures: vec![ValueRef::Global(GlobalId(0))],
-                    body: Box::new(Expr::Return(vec![Atom::Scalar(ScalarLiteral::Int {
-                        bits: 64,
-                        bytes: 42_i64.to_be_bytes().to_vec(),
-                    })])),
+                    body: 0,
                 },
             },
         }])],

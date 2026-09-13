@@ -14,8 +14,8 @@ use cranelift_module::{FuncId, Linkage, Module};
 use tidepool_heap::execution_descriptor::{ObjectDescriptor, ObjectKind};
 use tidepool_heap::gc::raw::{cheney_copy_descriptors, DescriptorSpace};
 use tidepool_repr::execution_schema::{
-    Architecture, Atom, ConstructorId, Endianness, Expr, Group, HeapRhs, LinkedProgram, RuntimeRep,
-    ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
+    Architecture, Atom, ConstructorId, Endianness, ExprFrame, Group, HeapRhs, LinkedProgram,
+    RuntimeRep, ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
 };
 
 use crate::alloc::emit_prepared_alloc_fast_path;
@@ -131,10 +131,10 @@ impl PreparedNativeProgram {
                 body,
                 ..
             } => {
-                let Expr::Construct {
+                let Some(ExprFrame::Construct {
                     constructor,
                     fields,
-                } = body.as_ref()
+                }) = prepared.expressions().nodes.get(*body)
                 else {
                     return Err(PreparedNativeError::Unsupported(
                         "function body other than direct constructor",

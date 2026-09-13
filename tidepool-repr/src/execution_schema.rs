@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 3;
+pub const SCHEMA_VERSION: u64 = 4;
 pub const EXECUTION_ABI_VERSION: u64 = 2;
 
 macro_rules! dense_id {
@@ -328,26 +328,26 @@ pub enum UpdatePolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HeapBinding {
+pub struct HeapBinding<B = usize> {
     pub id: ValueId,
-    pub rhs: HeapRhs,
+    pub rhs: HeapRhs<B>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HeapRhs {
+pub enum HeapRhs<B = usize> {
     /// Immutable module-owned bytes (GHC StgTopStringLit), not a thunk.
     Bytes(Vec<u8>),
     Function {
         signature: SignatureId,
         parameters: Vec<ValueId>,
         captures: Vec<ValueRef>,
-        body: Box<Expr>,
+        body: B,
     },
     Thunk {
         signature: SignatureId,
         update: UpdatePolicy,
         captures: Vec<ValueRef>,
-        body: Box<Expr>,
+        body: B,
     },
     Constructor {
         constructor: ConstructorId,
@@ -356,11 +356,11 @@ pub enum HeapRhs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct JoinBinding {
+pub struct JoinBinding<B = usize> {
     pub id: JoinId,
     pub signature: SignatureId,
     pub parameters: Vec<ValueId>,
-    pub body: Box<Expr>,
+    pub body: B,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -371,10 +371,10 @@ pub enum AlternativePattern {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Alternative {
+pub struct Alternative<B = usize> {
     pub pattern: AlternativePattern,
     pub binders: Vec<ValueId>,
-    pub body: Expr,
+    pub body: B,
 }
 
 /// GHC's post-unarisation alternative classification, without GHC types.
@@ -393,7 +393,7 @@ pub enum CaseKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Expr {
+pub enum ExprFrame<A> {
     Return(Vec<Atom>),
     Enter {
         callee: Atom,
@@ -413,24 +413,146 @@ pub enum Expr {
         fields: Vec<Atom>,
     },
     Case {
-        scrutinee: Box<Expr>,
+        scrutinee: A,
         binder: ValueId,
         scrutinee_reps: Vec<RuntimeRep>,
         kind: CaseKind,
-        alternatives: Vec<Alternative>,
+        alternatives: Vec<Alternative<A>>,
     },
     Let {
-        bindings: Group<HeapBinding>,
-        body: Box<Expr>,
+        bindings: Group<HeapBinding<A>>,
+        body: A,
     },
     LetJoins {
-        bindings: Group<JoinBinding>,
-        body: Box<Expr>,
+        bindings: Group<JoinBinding<A>>,
+        body: A,
     },
     Jump {
         join: JoinId,
         arguments: Vec<Atom>,
     },
+}
+
+/// The program's flat, postorder expression arena. All syntactic descendants,
+/// including local closure and join bodies, belong to this arena. Language recursion is
+/// expressed through binder references, never through expression-index cycles.
+pub type Expr = crate::tree::RecursiveTree<ExprFrame<usize>>;
+
+impl recursion::MappableFrame for ExprFrame<recursion::PartiallyApplied> {
+    type Frame<X> = ExprFrame<X>;
+
+    fn map_frame<A, B>(input: ExprFrame<A>, mut f: impl FnMut(A) -> B) -> ExprFrame<B> {
+        match input {
+            ExprFrame::Return(atoms) => ExprFrame::Return(atoms),
+            ExprFrame::Enter { callee, signature } => ExprFrame::Enter { callee, signature },
+            ExprFrame::Call {
+                callee,
+                signature,
+                arguments,
+            } => ExprFrame::Call {
+                callee,
+                signature,
+                arguments,
+            },
+            ExprFrame::Operation {
+                operation,
+                arguments,
+            } => ExprFrame::Operation {
+                operation,
+                arguments,
+            },
+            ExprFrame::Construct {
+                constructor,
+                fields,
+            } => ExprFrame::Construct {
+                constructor,
+                fields,
+            },
+            ExprFrame::Jump { join, arguments } => ExprFrame::Jump { join, arguments },
+            ExprFrame::Case {
+                scrutinee,
+                binder,
+                scrutinee_reps,
+                kind,
+                alternatives,
+            } => ExprFrame::Case {
+                scrutinee: f(scrutinee),
+                binder,
+                scrutinee_reps,
+                kind,
+                alternatives: alternatives
+                    .into_iter()
+                    .map(|alt| Alternative {
+                        pattern: alt.pattern,
+                        binders: alt.binders,
+                        body: f(alt.body),
+                    })
+                    .collect(),
+            },
+            ExprFrame::Let { bindings, body } => ExprFrame::Let {
+                bindings: bindings.map(|binding| HeapBinding {
+                    id: binding.id,
+                    rhs: binding.rhs.map_body(&mut f),
+                }),
+                body: f(body),
+            },
+            ExprFrame::LetJoins { bindings, body } => ExprFrame::LetJoins {
+                bindings: bindings.map(|binding| JoinBinding {
+                    id: binding.id,
+                    signature: binding.signature,
+                    parameters: binding.parameters,
+                    body: f(binding.body),
+                }),
+                body: f(body),
+            },
+        }
+    }
+}
+
+impl<T> Group<T> {
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Group<U> {
+        match self {
+            Self::NonRecursive(value) => Group::NonRecursive(f(value)),
+            Self::Recursive(values) => Group::Recursive(values.into_iter().map(f).collect()),
+        }
+    }
+}
+
+impl<A> HeapRhs<A> {
+    pub fn map_body<B>(self, mut f: impl FnMut(A) -> B) -> HeapRhs<B> {
+        match self {
+            Self::Bytes(bytes) => HeapRhs::Bytes(bytes),
+            Self::Constructor {
+                constructor,
+                fields,
+            } => HeapRhs::Constructor {
+                constructor,
+                fields,
+            },
+            Self::Function {
+                signature,
+                parameters,
+                captures,
+                body,
+            } => HeapRhs::Function {
+                signature,
+                parameters,
+                captures,
+                body: f(body),
+            },
+            Self::Thunk {
+                signature,
+                update,
+                captures,
+                body,
+            } => HeapRhs::Thunk {
+                signature,
+                update,
+                captures,
+                body: f(body),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -452,6 +574,7 @@ pub struct WireProgram {
     pub globals: Vec<GlobalDecl>,
     pub constructors: Vec<ConstructorDecl>,
     pub operations: Vec<OperationDecl>,
+    pub expressions: Expr,
     pub bindings: Vec<Group<TopBinding>>,
     pub entry: ValueId,
 }
@@ -472,6 +595,9 @@ impl PreparedProgram {
     }
     pub fn bindings(&self) -> &[Group<TopBinding>] {
         &self.wire.bindings
+    }
+    pub fn expressions(&self) -> &Expr {
+        &self.wire.expressions
     }
     pub fn signatures(&self) -> &[Signature] {
         &self.wire.signatures
@@ -538,7 +664,6 @@ pub struct DecodeLimits {
     pub max_nodes: usize,
     pub max_table_entries: usize,
     pub max_string_bytes: usize,
-    pub max_depth: usize,
     pub max_work: usize,
 }
 
@@ -549,7 +674,6 @@ impl Default for DecodeLimits {
             max_nodes: 1 << 20,
             max_table_entries: 1 << 18,
             max_string_bytes: 1 << 20,
-            max_depth: 4096,
             max_work: 1 << 24,
         }
     }

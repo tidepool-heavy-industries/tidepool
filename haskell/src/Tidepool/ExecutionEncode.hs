@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- | Deterministic CBOR encoding for the internal prepared-execution schema.
 -- The reader owns validation; this module preserves the already-normalized
 -- table order and uses only definite-length arrays and primitive leaves.
@@ -7,6 +9,9 @@ import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
 import Data.ByteString (ByteString)
 import Data.Foldable (fold)
+import Data.List (mapAccumL)
+import Data.Sequence (Seq, (|>))
+import Data.Sequence qualified as Seq
 import Tidepool.ExecutionSchema
 
 encodeWireProgram :: WireProgram -> ByteString
@@ -21,11 +26,13 @@ encodeWireProgram program = toStrictByteString $ array
   , list encodeGlobal (programGlobals program)
   , list encodeConstructor (programConstructors program)
   , list encodeOperation (programOperations program)
-  , list (encodeGroup encodeTopBinding) (programBindings program)
+  , encodeListLen (fromIntegral (Seq.length frames)) <> fold frames
+  , list id bindings
   , encodeValueId (programEntry program)
   ]
  where
   envelope = programEnvelope program
+  ((_, frames), bindings) = mapAccumL encodeTopGroup (0, Seq.empty) (programBindings program)
 
 array :: [Encoding] -> Encoding
 array fields = encodeListLen (fromIntegral (length fields)) <> fold fields
@@ -131,40 +138,36 @@ encodeAtom atom = case atom of
   Void -> tag 2
   Rubbish rep -> tagged 3 [encodeRep rep]
 
-encodeGroup :: (a -> Encoding) -> Group a -> Encoding
-encodeGroup encode group = case group of
-  NonRecursive value -> tagged 0 [encode value]
-  Recursive values -> tagged 1 [list encode values]
+type FlatState = (Int, Seq Encoding)
 
-encodeHeapBinding :: HeapBinding -> Encoding
-encodeHeapBinding binding = array
-  [encodeValueId (heapBindingId binding), encodeHeapRhs (heapBindingRhs binding)]
+encodeTopGroup :: FlatState -> Group TopBinding -> (FlatState, Encoding)
+encodeTopGroup state group = case group of
+  NonRecursive binding ->
+    let (next, encoded) = encodeTopBinding state binding
+    in (next, tagged 0 [encoded])
+  Recursive bindings ->
+    let (next, encoded) = mapAccumL encodeTopBinding state bindings
+    in (next, tagged 1 [list id encoded])
 
-encodeHeapRhs :: HeapRhs -> Encoding
-encodeHeapRhs rhs = case rhs of
-  Bytes bytes -> tagged 3 [encodeBytes bytes]
-  Function signature parameters captures body -> tagged 0
-    [ encodeSignatureId signature
-    , list encodeValueId parameters
-    , list encodeValueRef captures
-    , encodeExpr body
-    ]
-  Thunk signature update captures body -> tagged 1
-    [ encodeSignatureId signature
-    , encodeWord (case update of Memoize -> 0; SingleEntry -> 1)
-    , list encodeValueRef captures
-    , encodeExpr body
-    ]
-  Constructor constructor fields -> tagged 2
-    [encodeConstructorId constructor, list encodeAtom fields]
+encodeTopBinding :: FlatState -> TopBinding -> (FlatState, Encoding)
+encodeTopBinding state (TopBinding identity (HeapBinding value rhs)) =
+  let (next, encodedRhs) = encodeTopRhs state rhs
+  in (next, array [encodeSymbol identity, array [encodeValueId value, encodedRhs]])
 
-encodeJoinBinding :: JoinBinding -> Encoding
-encodeJoinBinding (JoinBinding join signature parameters body) = array
-  [ encodeJoinId join
-  , encodeSignatureId signature
-  , list encodeValueId parameters
-  , encodeExpr body
-  ]
+encodeTopRhs :: FlatState -> HeapRhs -> (FlatState, Encoding)
+encodeTopRhs state rhs = case rhs of
+  Bytes bytes -> (state, tagged 3 [encodeBytes bytes])
+  Function signature parameters captures body ->
+    let (next, root) = flattenExprTree state body
+    in (next, tagged 0 [encodeSignatureId signature, list encodeValueId parameters,
+      list encodeValueRef captures, encodeNodeIndex root])
+  Thunk signature update captures body ->
+    let (next, root) = flattenExprTree state body
+    in (next, tagged 1 [encodeSignatureId signature,
+      encodeWord (case update of Memoize -> 0; SingleEntry -> 1),
+      list encodeValueRef captures, encodeNodeIndex root])
+  Constructor constructor fields ->
+    (state, tagged 2 [encodeConstructorId constructor, list encodeAtom fields])
 
 encodePattern :: AlternativePattern -> Encoding
 encodePattern pattern_ = case pattern_ of
@@ -172,12 +175,52 @@ encodePattern pattern_ = case pattern_ of
   ConstructorPattern constructor -> tagged 1 [encodeConstructorId constructor]
   LiteralPattern literal -> tagged 2 [encodeScalar literal]
 
-encodeAlternative :: Alternative -> Encoding
-encodeAlternative (Alternative pattern_ binders body) = array
-  [encodePattern pattern_, list encodeValueId binders, encodeExpr body]
+-- All bodies share one program-wide postorder arena. A local closure, join,
+-- or alternative contributes a child frame before its owning parent. Keeping
+-- the worklist explicit bounds the Haskell call stack.
+data ExprWork = Visit Expr | Finish Expr Int
 
-encodeExpr :: Expr -> Encoding
-encodeExpr expr = case expr of
+flattenExprTree :: FlatState -> Expr -> (FlatState, Int)
+flattenExprTree (first, frames) root = walk first frames [] [Visit root]
+ where
+  walk :: Int -> Seq Encoding -> [Int] -> [ExprWork] -> (FlatState, Int)
+  walk !next !encoded [rootIndex] [] = ((next, encoded), rootIndex)
+  walk !_ !_ _ [] = error "prepared body has no unique root"
+  walk !next !encoded !results (Visit expr : work) =
+    let children = exprChildren expr
+    in walk next encoded results
+      (map Visit children ++ Finish expr (length children) : work)
+  walk !next !encoded !results (Finish expr arity : work) =
+    let (reversedChildren, remaining) = splitAt arity results
+        frame = encodeExprFrame expr (reverse reversedChildren)
+    in walk (next + 1) (encoded |> frame) (next : remaining) work
+
+exprChildren :: Expr -> [Expr]
+exprChildren expr = case expr of
+  Case scrutinee _ _ _ alternatives ->
+    scrutinee : [body | Alternative _ _ body <- alternatives]
+  Let bindings body -> heapGroupBodies bindings ++ [body]
+  LetJoins bindings body -> joinGroupBodies bindings ++ [body]
+  _ -> []
+
+heapGroupBodies :: Group HeapBinding -> [Expr]
+heapGroupBodies group = case group of
+  NonRecursive binding -> heapBindingBodies binding
+  Recursive bindings -> concatMap heapBindingBodies bindings
+
+heapBindingBodies :: HeapBinding -> [Expr]
+heapBindingBodies (HeapBinding _ rhs) = case rhs of
+  Function _ _ _ body -> [body]
+  Thunk _ _ _ body -> [body]
+  _ -> []
+
+joinGroupBodies :: Group JoinBinding -> [Expr]
+joinGroupBodies group = case group of
+  NonRecursive (JoinBinding _ _ _ body) -> [body]
+  Recursive bindings -> [body | JoinBinding _ _ _ body <- bindings]
+
+encodeExprFrame :: Expr -> [Int] -> Encoding
+encodeExprFrame expr children = case expr of
   Return atoms -> tagged 0 [list encodeAtom atoms]
   Enter atom signature -> tagged 1 [encodeAtom atom, encodeSignatureId signature]
   Call callee signature arguments -> tagged 2
@@ -186,16 +229,87 @@ encodeExpr expr = case expr of
     [encodeOperationId operation, list encodeAtom arguments]
   Construct constructor fields -> tagged 4
     [encodeConstructorId constructor, list encodeAtom fields]
-  Case scrutinee binder results kind alternatives -> tagged 5
-    [ encodeExpr scrutinee
-    , encodeValueId binder
-    , list encodeRep results
-    , encodeCaseKind kind
-    , list encodeAlternative alternatives
-    ]
-  Let bindings body -> tagged 6 [encodeGroup encodeHeapBinding bindings, encodeExpr body]
-  LetJoins bindings body -> tagged 7 [encodeGroup encodeJoinBinding bindings, encodeExpr body]
+  Case _ binder results kind alternatives -> case children of
+    scrutineeIndex : alternativeIndices -> tagged 5
+      [ encodeNodeIndex scrutineeIndex
+      , encodeValueId binder
+      , list encodeRep results
+      , encodeCaseKind kind
+      , list id (zipWith encodeAlternativeFrame alternatives alternativeIndices)
+      ]
+    [] -> error "case frame has no scrutinee"
+  Let bindings _ -> case encodeHeapGroupFrame bindings children of
+    (encodedBindings, [bodyIndex]) ->
+      tagged 6 [encodedBindings, encodeNodeIndex bodyIndex]
+    _ -> error "let frame has no unique body"
+  LetJoins bindings _ -> case encodeJoinGroupFrame bindings children of
+    (encodedBindings, [bodyIndex]) ->
+      tagged 7 [encodedBindings, encodeNodeIndex bodyIndex]
+    _ -> error "let-joins frame has no unique body"
   Jump join arguments -> tagged 8 [encodeJoinId join, list encodeAtom arguments]
+
+encodeNodeIndex :: Int -> Encoding
+encodeNodeIndex = encodeWord . fromIntegral
+
+encodeAlternativeFrame :: Alternative -> Int -> Encoding
+encodeAlternativeFrame (Alternative pattern_ binders _) bodyIndex = array
+  [encodePattern pattern_, list encodeValueId binders, encodeNodeIndex bodyIndex]
+
+encodeHeapGroupFrame :: Group HeapBinding -> [Int] -> (Encoding, [Int])
+encodeHeapGroupFrame group indices = case group of
+  NonRecursive binding ->
+    let (encoded, rest) = encodeHeapBindingFrame binding indices
+    in (tagged 0 [encoded], rest)
+  Recursive bindings ->
+    let (rest, encoded) = mapAccumL encodeOne indices bindings
+    in (tagged 1 [list id encoded], rest)
+ where
+  encodeOne remaining binding =
+    let (encoded, rest) = encodeHeapBindingFrame binding remaining
+    in (rest, encoded)
+
+encodeHeapBindingFrame :: HeapBinding -> [Int] -> (Encoding, [Int])
+encodeHeapBindingFrame (HeapBinding value rhs) indices =
+  let (encodedRhs, rest) = encodeHeapRhsFrame rhs indices
+  in (array [encodeValueId value, encodedRhs], rest)
+
+encodeHeapRhsFrame :: HeapRhs -> [Int] -> (Encoding, [Int])
+encodeHeapRhsFrame rhs indices = case rhs of
+  Bytes bytes -> (tagged 3 [encodeBytes bytes], indices)
+  Function signature parameters captures _ ->
+    let (bodyIndex, rest) = takeIndex indices
+    in (tagged 0 [encodeSignatureId signature, list encodeValueId parameters,
+      list encodeValueRef captures, encodeNodeIndex bodyIndex], rest)
+  Thunk signature update captures _ ->
+    let (bodyIndex, rest) = takeIndex indices
+    in (tagged 1 [encodeSignatureId signature,
+      encodeWord (case update of Memoize -> 0; SingleEntry -> 1),
+      list encodeValueRef captures, encodeNodeIndex bodyIndex], rest)
+  Constructor constructor fields ->
+    (tagged 2 [encodeConstructorId constructor, list encodeAtom fields], indices)
+
+encodeJoinGroupFrame :: Group JoinBinding -> [Int] -> (Encoding, [Int])
+encodeJoinGroupFrame group indices = case group of
+  NonRecursive binding ->
+    let (encoded, rest) = encodeJoinBindingFrame binding indices
+    in (tagged 0 [encoded], rest)
+  Recursive bindings ->
+    let (rest, encoded) = mapAccumL encodeOne indices bindings
+    in (tagged 1 [list id encoded], rest)
+ where
+  encodeOne remaining binding =
+    let (encoded, rest) = encodeJoinBindingFrame binding remaining
+    in (rest, encoded)
+
+encodeJoinBindingFrame :: JoinBinding -> [Int] -> (Encoding, [Int])
+encodeJoinBindingFrame (JoinBinding join signature parameters _) indices =
+  let (bodyIndex, rest) = takeIndex indices
+  in (array [encodeJoinId join, encodeSignatureId signature,
+    list encodeValueId parameters, encodeNodeIndex bodyIndex], rest)
+
+takeIndex :: [Int] -> (Int, [Int])
+takeIndex (index : rest) = (index, rest)
+takeIndex [] = error "prepared frame child index missing"
 
 encodeCaseKind :: CaseKind -> Encoding
 encodeCaseKind kind = case kind of
@@ -203,10 +317,6 @@ encodeCaseKind kind = case kind of
   PrimitiveCase rep -> tagged 1 [encodeRep rep]
   MultiValueCase -> tag 2
   PolymorphicCase -> tag 3
-
-encodeTopBinding :: TopBinding -> Encoding
-encodeTopBinding (TopBinding identity binding) = array
-  [encodeSymbol identity, encodeHeapBinding binding]
 
 tagged :: Word -> [Encoding] -> Encoding
 tagged constructor fields = array (encodeWord constructor : fields)

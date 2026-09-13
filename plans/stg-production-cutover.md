@@ -302,6 +302,40 @@ was not isolated from the intentional fixture additions.
 
 ## Next connected lowering boundary
 
+### Accepted stack-safety and traversal revision
+
+Before extending lowering, schema v4 uses one flat postorder expression arena
+per program, with explicit top-level body root indices. Nested closure, join
+and alternative bodies are indices into that same arena. The envelope now has
+13 fields: expressions at index 10, top bindings at 11, entry at 12. Scalar
+and expression tags are unchanged. Old schema artifacts reject and regenerate;
+ABI v2 remains until the managed-reference tagging change lands.
+
+Decode flat records linearly. A nonrecursive CBOR preflight bounds container
+nesting by the flat grammar before `ciborium::Value` allocation; byte/node/work
+limits remain, while expression-depth limits disappear. Structural validation
+checks earlier-child indices, unique syntactic ownership and reachability.
+Every ValueId binder is unique program-wide; dense scope tables with undo logs
+and closure visibility levels replace environment-map cloning and parent-chain
+lookup. Bound sparse numeric namespaces before allocation. Use `recursion`
+0.5.4 for the two ordered scope/type traversals and tree analyses; reverse child
+scheduling once to retain first-error precedence. Native block emission remains
+an explicit control-flow worklist.
+
+Descriptor observation uses finite demand and node/work budgets, not a second
+relocation-sensitive cycle registry. Budget exhaustion is a typed observation
+failure. Rooted seeds use stable boxed cells and truncate registration before
+cell release. Bridge Value stays boxed with its existing iterative Drop;
+streaming Display/Debug and uncapped walks become stack-safe through ValueFrame.
+
+Reference tag 7 deliberately means evaluated-with-descriptor-inspection for all
+families and function closures; it is not GHC's small-family/arity convention.
+Centralize tag construction so future arity evidence does not alter dynamic
+apply at multiple sites. Updated-chain evacuation uses a second bitmap for
+cycle detection and forwards every traversed thunk to the evacuated result.
+No host call may occur between a recursive group's bump and completion of all
+sibling headers and fields. These changes precede the native lowering below.
+
 Before broad lowering, review the result/root and retained-code boundary as a
 unit. Adding expression cases to the current one-constructor adapter would
 extend a temporary wrapper, not complete the production engine.

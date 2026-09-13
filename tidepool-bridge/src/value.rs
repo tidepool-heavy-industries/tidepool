@@ -10,7 +10,6 @@ use tidepool_repr::{DataConId, Literal};
 
 pub type SharedByteArray = Arc<Mutex<Vec<u8>>>;
 
-#[derive(Debug)]
 pub enum Value {
     Lit(Literal),
     Con(DataConId, Vec<Value>),
@@ -22,43 +21,23 @@ impl Clone for Value {
         match self {
             Self::Lit(literal) => Self::Lit(literal.clone()),
             Self::ByteArray(bytes) => Self::ByteArray(Arc::clone(bytes)),
-            Self::Con(_, fields) if fields.is_empty() => match self {
-                Self::Con(id, _) => Self::Con(*id, Vec::new()),
-                _ => unreachable!(),
-            },
+            Self::Con(id, fields) if fields.is_empty() => Self::Con(*id, Vec::new()),
             Self::Con(_, _) => clone_tree(self),
         }
     }
 }
 
 fn clone_tree(root: &Value) -> Value {
-    enum Work<'a> {
-        Visit(&'a Value),
-        Build(DataConId, usize),
-    }
-    let mut work = vec![Work::Visit(root)];
-    let mut values = Vec::new();
-    while let Some(item) = work.pop() {
-        match item {
-            Work::Visit(Value::Lit(literal)) => values.push(Value::Lit(literal.clone())),
-            Work::Visit(Value::ByteArray(bytes)) => {
-                values.push(Value::ByteArray(Arc::clone(bytes)))
-            }
-            Work::Visit(Value::Con(id, fields)) => {
-                work.push(Work::Build(*id, fields.len()));
-                work.extend(fields.iter().rev().map(Work::Visit));
-            }
-            Work::Build(id, count) => {
-                let split = values.len() - count;
-                let fields = values.split_off(split);
-                values.push(Value::Con(id, fields));
-            }
-        }
-    }
-    match values.pop() {
-        Some(value) => value,
-        None => unreachable!("a cloned value is present"),
-    }
+    recursion::expand_and_collapse::<ValueFrame<'_, recursion::PartiallyApplied>, _, _>(
+        root,
+        Value::as_frame,
+        |frame| match frame {
+            ValueFrame::Leaf(Value::Lit(literal)) => Value::Lit(literal.clone()),
+            ValueFrame::Leaf(Value::ByteArray(bytes)) => Value::ByteArray(Arc::clone(bytes)),
+            ValueFrame::Leaf(Value::Con(..)) => unreachable!("constructors have child frames"),
+            ValueFrame::Con(id, fields) => Value::Con(id, fields),
+        },
+    )
 }
 
 pub enum ValueFrame<'a, X> {
@@ -86,22 +65,53 @@ impl Value {
     }
 
     pub fn node_count(&self) -> usize {
-        let mut count = 0;
-        let mut values = vec![self];
-        while let Some(value) = values.pop() {
-            count += 1;
-            if let Self::Con(_, fields) = value {
-                values.extend(fields);
-            }
-        }
-        count
+        recursion::expand_and_collapse::<ValueFrame<'_, recursion::PartiallyApplied>, _, _>(
+            self,
+            Value::as_frame,
+            |frame| match frame {
+                ValueFrame::Leaf(_) => 1,
+                ValueFrame::Con(_, fields) => 1 + fields.into_iter().sum::<usize>(),
+            },
+        )
     }
 }
 
 impl std::fmt::Display for Value {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Lit(literal) => match literal {
+        format_tree(self, output, FormatMode::Display)
+    }
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        format_tree(self, output, FormatMode::Debug)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FormatMode {
+    Display,
+    Debug,
+}
+
+enum FormatAction<'a> {
+    Value(&'a Value),
+    Text(&'static str),
+}
+
+fn format_tree(
+    root: &Value,
+    output: &mut std::fmt::Formatter<'_>,
+    mode: FormatMode,
+) -> std::fmt::Result {
+    let mut work = vec![FormatAction::Value(root)];
+    while let Some(action) = work.pop() {
+        match action {
+            FormatAction::Text(text) => std::fmt::Write::write_str(output, text)?,
+            FormatAction::Value(Value::Lit(literal)) if matches!(mode, FormatMode::Debug) => {
+                write!(output, "Lit({literal:?})")?;
+            }
+            FormatAction::Value(Value::Lit(literal)) => match literal {
                 Literal::LitInt(n) => write!(output, "{n}"),
                 Literal::LitWord(n) => write!(output, "{n}"),
                 Literal::LitChar(c) => write!(output, "'{}'", c.escape_default()),
@@ -115,20 +125,34 @@ impl std::fmt::Display for Value {
                     Err(_) => write!(output, "<invalid f32 bits=0x{bits:016x}>"),
                 },
                 Literal::LitDouble(bits) => write!(output, "{}", f64::from_bits(*bits)),
-            },
-            Self::Con(id, fields) => {
-                write!(output, "<Con#{}>", id.0)?;
-                for field in fields {
-                    write!(output, " {field}")?;
+            }?,
+            FormatAction::Value(Value::Con(id, fields)) => {
+                match mode {
+                    FormatMode::Display => write!(output, "<Con#{}>", id.0)?,
+                    FormatMode::Debug => {
+                        write!(output, "Con({id:?}, [")?;
+                        work.push(FormatAction::Text("])"));
+                    }
                 }
-                Ok(())
+                for (index, field) in fields.iter().enumerate().rev() {
+                    work.push(FormatAction::Value(field));
+                    match mode {
+                        FormatMode::Display => work.push(FormatAction::Text(" ")),
+                        FormatMode::Debug if index > 0 => work.push(FormatAction::Text(", ")),
+                        FormatMode::Debug => {}
+                    }
+                }
             }
-            Self::ByteArray(bytes) => match bytes.lock() {
+            FormatAction::Value(Value::ByteArray(bytes)) if matches!(mode, FormatMode::Debug) => {
+                write!(output, "ByteArray({bytes:?})")?;
+            }
+            FormatAction::Value(Value::ByteArray(bytes)) => match bytes.lock() {
                 Ok(bytes) => write!(output, "<ByteArray# len={}>", bytes.len()),
                 Err(_) => write!(output, "<ByteArray# poisoned>"),
-            },
+            }?,
         }
     }
+    Ok(())
 }
 
 pub fn render_capped(value: &Value, max_depth: usize) -> String {
@@ -182,5 +206,93 @@ impl Drop for Value {
                 drop(value);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt;
+
+    fn deep_value(depth: usize) -> Value {
+        let mut value = Value::Lit(Literal::LitInt(0));
+        for _ in 0..depth {
+            value = Value::Con(DataConId(7), vec![value]);
+        }
+        value
+    }
+
+    #[test]
+    fn shallow_format_shape_is_preserved() {
+        let value = Value::Con(
+            DataConId(7),
+            vec![
+                Value::Lit(Literal::LitInt(1)),
+                Value::Lit(Literal::LitInt(2)),
+            ],
+        );
+        assert_eq!(format!("{value}"), "<Con#7> 1 2");
+        assert_eq!(
+            format!("{value:?}"),
+            "Con(DataConId(7), [Lit(LitInt(1)), Lit(LitInt(2))])"
+        );
+    }
+
+    #[test]
+    fn deep_clone_count_display_debug_and_drop_fit_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                const DEPTH: usize = 30_000;
+                let value = deep_value(DEPTH);
+                assert_eq!(value.node_count(), DEPTH + 1);
+                let cloned = value.clone();
+                assert_eq!(cloned.node_count(), DEPTH + 1);
+
+                let displayed = format!("{value}");
+                assert_eq!(displayed.matches("<Con#7>").count(), DEPTH);
+                assert!(displayed.ends_with(" 0"));
+
+                let debugged = format!("{cloned:?}");
+                assert_eq!(debugged.matches("Con(DataConId(7), [").count(), DEPTH);
+                assert!(debugged.contains("Lit(LitInt(0))"));
+
+                drop(cloned);
+                drop(value);
+            })
+            .expect("spawn small-stack value test")
+            .join()
+            .expect("small-stack value test");
+    }
+
+    struct FailAfter {
+        remaining: usize,
+    }
+
+    impl fmt::Write for FailAfter {
+        fn write_str(&mut self, text: &str) -> fmt::Result {
+            if text.len() > self.remaining {
+                return Err(fmt::Error);
+            }
+            self.remaining -= text.len();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn early_format_failure_cleans_up_deep_value_on_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let value = deep_value(30_000);
+                let mut display_writer = FailAfter { remaining: 32 };
+                assert!(fmt::write(&mut display_writer, format_args!("{value}")).is_err());
+                let mut debug_writer = FailAfter { remaining: 32 };
+                assert!(fmt::write(&mut debug_writer, format_args!("{value:?}")).is_err());
+                drop(value);
+            })
+            .expect("spawn small-stack formatting test")
+            .join()
+            .expect("small-stack formatting test");
     }
 }

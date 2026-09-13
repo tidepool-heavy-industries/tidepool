@@ -4,13 +4,17 @@ use ciborium::value::Value;
 
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
-    ConstructorId, DecodeLimits, Endianness, Expr, FieldLayout, GlobalDecl, GlobalId, Group,
-    HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId, ParseError,
+    ConstructorId, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl, GlobalId,
+    Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId, ParseError,
     ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
     TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef, WireProgram,
 };
 
-/// Decode only the closed r7 CBOR grammar into an unpublished wire value.
+// Flat schema records have bounded container nesting regardless of program
+// depth. This is a malformed-wire guard, not an expression complexity limit.
+const MAX_CONTAINER_NESTING: usize = 32;
+
+/// Decode only the closed flat CBOR grammar into an unpublished wire value.
 /// Semantic validation and construction publication remain in `decode`.
 pub(super) fn decode_wire(bytes: &[u8], limits: DecodeLimits) -> Result<WireProgram, ParseError> {
     if bytes.len() > limits.max_bytes {
@@ -19,17 +23,21 @@ pub(super) fn decode_wire(bytes: &[u8], limits: DecodeLimits) -> Result<WireProg
             actual: bytes.len(),
         });
     }
-    let consumed = scan_item(bytes, 0, 0, limits.max_depth)?;
+    let consumed = scan_item(bytes, limits.max_work)?;
     if consumed != bytes.len() {
         return Err(ParseError::TrailingBytes);
     }
 
     let mut cursor = Cursor::new(bytes);
-    let value: Value = ciborium::de::from_reader(&mut cursor).map_err(|error| match error {
-        ciborium::de::Error::Io(_) | ciborium::de::Error::Syntax(_) => ParseError::Truncated,
-        ciborium::de::Error::RecursionLimitExceeded => ParseError::LimitExceeded("depth"),
-        ciborium::de::Error::Semantic(_, detail) => ParseError::Malformed(detail),
-    })?;
+    let value: Value =
+        ciborium::de::from_reader_with_recursion_limit(&mut cursor, MAX_CONTAINER_NESTING)
+            .map_err(|error| match error {
+                ciborium::de::Error::Io(_) | ciborium::de::Error::Syntax(_) => {
+                    ParseError::Truncated
+                }
+                ciborium::de::Error::RecursionLimitExceeded => ParseError::LimitExceeded("depth"),
+                ciborium::de::Error::Semantic(_, detail) => ParseError::Malformed(detail),
+            })?;
     if cursor.position() as usize != bytes.len() {
         return Err(ParseError::TrailingBytes);
     }
@@ -38,48 +46,62 @@ pub(super) fn decode_wire(bytes: &[u8], limits: DecodeLimits) -> Result<WireProg
 
 /// Walk one complete CBOR item, rejecting indefinite containers before
 /// `ciborium::Value` erases that distinction.
-fn scan_item(
-    bytes: &[u8],
-    offset: usize,
-    depth: usize,
-    max_depth: usize,
-) -> Result<usize, ParseError> {
-    if depth > max_depth {
-        return Err(ParseError::LimitExceeded("depth"));
-    }
-    let initial = *bytes.get(offset).ok_or(ParseError::Truncated)?;
-    let major = initial >> 5;
-    let additional = initial & 0x1f;
-    if additional == 31 {
-        return Err(ParseError::Malformed(
-            "indefinite-length CBOR is not supported".into(),
-        ));
-    }
-    let (argument, head) = cbor_argument(bytes, offset, additional)?;
-    let mut next = offset
-        .checked_add(head)
-        .ok_or(ParseError::LimitExceeded("work"))?;
-    match major {
-        0 | 1 | 7 => Ok(next),
-        2 | 3 => next
-            .checked_add(usize::try_from(argument).map_err(|_| ParseError::LimitExceeded("work"))?)
-            .filter(|end| *end <= bytes.len())
-            .ok_or(ParseError::Truncated),
-        4 => {
-            for _ in 0..argument {
-                next = scan_item(bytes, next, depth + 1, max_depth)?;
-            }
-            Ok(next)
+fn scan_item(bytes: &[u8], max_work: usize) -> Result<usize, ParseError> {
+    let mut remaining = vec![1_u64];
+    let mut offset = 0_usize;
+    let mut work = 0_usize;
+    while let Some(items) = remaining.last_mut() {
+        if *items == 0 {
+            remaining.pop();
+            continue;
         }
-        5 => {
-            for _ in 0..argument.saturating_mul(2) {
-                next = scan_item(bytes, next, depth + 1, max_depth)?;
-            }
-            Ok(next)
+        *items -= 1;
+        work = work
+            .checked_add(1)
+            .ok_or(ParseError::LimitExceeded("work"))?;
+        if work > max_work {
+            return Err(ParseError::LimitExceeded("work"));
         }
-        6 => scan_item(bytes, next, depth + 1, max_depth),
-        _ => Err(ParseError::Malformed("invalid CBOR major type".into())),
+        let initial = *bytes.get(offset).ok_or(ParseError::Truncated)?;
+        let major = initial >> 5;
+        let additional = initial & 0x1f;
+        if additional == 31 {
+            return Err(ParseError::Malformed(
+                "indefinite-length CBOR is not supported".into(),
+            ));
+        }
+        let (argument, head) = cbor_argument(bytes, offset, additional)?;
+        offset = offset
+            .checked_add(head)
+            .ok_or(ParseError::LimitExceeded("work"))?;
+        let children = match major {
+            0 | 1 | 7 => 0,
+            2 | 3 => {
+                offset = offset
+                    .checked_add(
+                        usize::try_from(argument).map_err(|_| ParseError::LimitExceeded("work"))?,
+                    )
+                    .filter(|end| *end <= bytes.len())
+                    .ok_or(ParseError::Truncated)?;
+                0
+            }
+            4 => argument,
+            5 => argument
+                .checked_mul(2)
+                .ok_or(ParseError::LimitExceeded("work"))?,
+            6 => 1,
+            _ => return Err(ParseError::Malformed("invalid CBOR major type".into())),
+        };
+        if children != 0 {
+            if remaining.len() >= MAX_CONTAINER_NESTING {
+                return Err(ParseError::Malformed(
+                    "flat schema container nesting exceeded".into(),
+                ));
+            }
+            remaining.push(children);
+        }
     }
+    Ok(offset)
 }
 
 fn cbor_argument(bytes: &[u8], offset: usize, additional: u8) -> Result<(u64, usize), ParseError> {
@@ -166,21 +188,26 @@ impl Decoder {
     }
 
     fn program(&mut self, value: &Value) -> Result<WireProgram, ParseError> {
-        let fields = array(value, 12, "program")?;
+        let fields = array(value, 13, "program")?;
         if text_raw(&fields[0], "program magic")? != "TPSTG" {
             return Err(ParseError::Malformed(
                 "invalid prepared program magic".into(),
             ));
+        }
+        let schema_version = unsigned(&fields[1], "schema version")?;
+        if schema_version != super::SCHEMA_VERSION {
+            return Err(ParseError::UnsupportedVersion(schema_version));
         }
         let target = self.target(&fields[5])?;
         let signatures = self.list(&fields[6], true, |this, value| this.signature(value))?;
         let globals = self.list(&fields[7], true, |this, value| this.global(value))?;
         let constructors = self.list(&fields[8], true, |this, value| this.constructor(value))?;
         let operations = self.list(&fields[9], true, |this, value| this.operation(value))?;
-        let bindings = self.list(&fields[10], true, |this, value| this.top_group(value, 0))?;
+        let expressions = self.expr(&fields[10])?;
+        let bindings = self.list(&fields[11], true, |this, value| this.top_group(value))?;
         Ok(WireProgram {
             envelope: ProgramEnvelope {
-                schema_version: unsigned(&fields[1], "schema version")?,
+                schema_version,
                 projection_profile: self.text(&fields[2], "projection profile")?,
                 toolchain: self.text(&fields[3], "toolchain")?,
                 execution_abi_version: unsigned(&fields[4], "execution ABI version")?,
@@ -190,8 +217,9 @@ impl Decoder {
             globals,
             constructors,
             operations,
+            expressions,
             bindings,
-            entry: ValueId(u32_value(&fields[11], "entry value ID")?),
+            entry: ValueId(u32_value(&fields[12], "entry value ID")?),
         })
     }
 
@@ -450,17 +478,24 @@ impl Decoder {
         }
     }
 
-    fn heap_binding(&mut self, value: &Value, depth: usize) -> Result<HeapBinding, ParseError> {
+    fn heap_binding<B>(
+        &mut self,
+        value: &Value,
+        body: impl FnMut(&mut Self, &Value) -> Result<B, ParseError>,
+    ) -> Result<HeapBinding<B>, ParseError> {
         self.node()?;
         let fields = array(value, 2, "heap binding")?;
         Ok(HeapBinding {
             id: ValueId(u32_value(&fields[0], "heap value ID")?),
-            rhs: self.heap_rhs(&fields[1], depth + 1)?,
+            rhs: self.heap_rhs(&fields[1], body)?,
         })
     }
 
-    fn heap_rhs(&mut self, value: &Value, depth: usize) -> Result<HeapRhs, ParseError> {
-        self.depth(depth)?;
+    fn heap_rhs<B>(
+        &mut self,
+        value: &Value,
+        mut body: impl FnMut(&mut Self, &Value) -> Result<B, ParseError>,
+    ) -> Result<HeapRhs<B>, ParseError> {
         let fields = tagged(value, "heap RHS")?;
         let tag = unsigned(&fields[0], "heap RHS tag")?;
         match (tag, fields.len()) {
@@ -470,7 +505,7 @@ impl Decoder {
                     Ok(ValueId(u32_value(value, "parameter ID")?))
                 })?,
                 captures: self.list(&fields[3], false, |this, value| this.value_ref(value))?,
-                body: Box::new(self.expr(&fields[4], depth + 1)?),
+                body: body(self, &fields[4])?,
             }),
             (1, 5) => Ok(HeapRhs::Thunk {
                 signature: SignatureId(u32_value(&fields[1], "thunk signature ID")?),
@@ -480,7 +515,7 @@ impl Decoder {
                     tag => return Err(ParseError::InvalidTag(tag)),
                 },
                 captures: self.list(&fields[3], false, |this, value| this.value_ref(value))?,
-                body: Box::new(self.expr(&fields[4], depth + 1)?),
+                body: body(self, &fields[4])?,
             }),
             (2, 3) => Ok(HeapRhs::Constructor {
                 constructor: ConstructorId(u32_value(&fields[1], "constructor ID")?),
@@ -492,7 +527,7 @@ impl Decoder {
         }
     }
 
-    fn join_binding(&mut self, value: &Value, depth: usize) -> Result<JoinBinding, ParseError> {
+    fn join_binding(&mut self, value: &Value) -> Result<JoinBinding, ParseError> {
         self.node()?;
         let fields = array(value, 4, "join binding")?;
         Ok(JoinBinding {
@@ -501,7 +536,7 @@ impl Decoder {
             parameters: self.list(&fields[2], false, |_this, value| {
                 Ok(ValueId(u32_value(value, "join parameter ID")?))
             })?,
-            body: Box::new(self.expr(&fields[3], depth + 1)?),
+            body: self.expr_index(&fields[3])?,
         })
     }
 
@@ -520,7 +555,7 @@ impl Decoder {
         }
     }
 
-    fn alternative(&mut self, value: &Value, depth: usize) -> Result<Alternative, ParseError> {
+    fn alternative(&mut self, value: &Value) -> Result<Alternative, ParseError> {
         self.node()?;
         let fields = array(value, 3, "alternative")?;
         Ok(Alternative {
@@ -528,7 +563,7 @@ impl Decoder {
             binders: self.list(&fields[1], false, |_this, value| {
                 Ok(ValueId(u32_value(value, "alternative binder ID")?))
             })?,
-            body: self.expr(&fields[2], depth + 1)?,
+            body: self.expr_index(&fields[2])?,
         })
     }
 
@@ -545,52 +580,61 @@ impl Decoder {
         }
     }
 
-    fn expr(&mut self, value: &Value, depth: usize) -> Result<Expr, ParseError> {
-        self.depth(depth)?;
+    fn expr(&mut self, value: &Value) -> Result<Expr, ParseError> {
+        Ok(Expr {
+            nodes: self.list(value, false, Self::expr_frame)?,
+        })
+    }
+
+    fn expr_index(&mut self, value: &Value) -> Result<usize, ParseError> {
+        usize::try_from(unsigned(value, "expression index")?)
+            .map_err(|_| malformed("expression index", "usize"))
+    }
+
+    fn expr_frame(&mut self, value: &Value) -> Result<ExprFrame<usize>, ParseError> {
         self.node()?;
         let fields = tagged(value, "expression")?;
         let tag = unsigned(&fields[0], "expression tag")?;
         match (tag, fields.len()) {
-            (0, 2) => Ok(Expr::Return(self.list(
+            (0, 2) => Ok(ExprFrame::Return(self.list(
                 &fields[1],
                 false,
                 |this, value| this.atom(value),
             )?)),
-            (1, 3) => Ok(Expr::Enter {
+            (1, 3) => Ok(ExprFrame::Enter {
                 callee: self.atom(&fields[1])?,
                 signature: SignatureId(u32_value(&fields[2], "enter signature ID")?),
             }),
-            (2, 4) => Ok(Expr::Call {
+            (2, 4) => Ok(ExprFrame::Call {
                 callee: self.atom(&fields[1])?,
                 signature: SignatureId(u32_value(&fields[2], "call signature ID")?),
                 arguments: self.list(&fields[3], false, |this, value| this.atom(value))?,
             }),
-            (3, 3) => Ok(Expr::Operation {
+            (3, 3) => Ok(ExprFrame::Operation {
                 operation: OperationId(u32_value(&fields[1], "operation ID")?),
                 arguments: self.list(&fields[2], false, |this, value| this.atom(value))?,
             }),
-            (4, 3) => Ok(Expr::Construct {
+            (4, 3) => Ok(ExprFrame::Construct {
                 constructor: ConstructorId(u32_value(&fields[1], "constructor ID")?),
                 fields: self.list(&fields[2], false, |this, value| this.atom(value))?,
             }),
-            (5, 6) => Ok(Expr::Case {
-                scrutinee: Box::new(self.expr(&fields[1], depth + 1)?),
+            (5, 6) => Ok(ExprFrame::Case {
+                scrutinee: self.expr_index(&fields[1])?,
                 binder: ValueId(u32_value(&fields[2], "case binder ID")?),
                 scrutinee_reps: self.list(&fields[3], false, |this, value| this.rep(value))?,
                 kind: self.case_kind(&fields[4])?,
-                alternatives: self.list(&fields[5], false, |this, value| {
-                    this.alternative(value, depth + 1)
-                })?,
+                alternatives: self
+                    .list(&fields[5], false, |this, value| this.alternative(value))?,
             }),
-            (6, 3) => Ok(Expr::Let {
-                bindings: self.heap_group(&fields[1], depth + 1)?,
-                body: Box::new(self.expr(&fields[2], depth + 1)?),
+            (6, 3) => Ok(ExprFrame::Let {
+                bindings: self.heap_group(&fields[1])?,
+                body: self.expr_index(&fields[2])?,
             }),
-            (7, 3) => Ok(Expr::LetJoins {
-                bindings: self.join_group(&fields[1], depth + 1)?,
-                body: Box::new(self.expr(&fields[2], depth + 1)?),
+            (7, 3) => Ok(ExprFrame::LetJoins {
+                bindings: self.join_group(&fields[1])?,
+                body: self.expr_index(&fields[2])?,
             }),
-            (8, 3) => Ok(Expr::Jump {
+            (8, 3) => Ok(ExprFrame::Jump {
                 join: JoinId(u32_value(&fields[1], "jump join ID")?),
                 arguments: self.list(&fields[2], false, |this, value| this.atom(value))?,
             }),
@@ -599,29 +643,23 @@ impl Decoder {
         }
     }
 
-    fn heap_group(
-        &mut self,
-        value: &Value,
-        depth: usize,
-    ) -> Result<Group<HeapBinding>, ParseError> {
-        self.group(value, |this, value| this.heap_binding(value, depth))
+    fn heap_group(&mut self, value: &Value) -> Result<Group<HeapBinding<usize>>, ParseError> {
+        self.group(value, |this, value| {
+            this.heap_binding(value, Self::expr_index)
+        })
     }
 
-    fn join_group(
-        &mut self,
-        value: &Value,
-        depth: usize,
-    ) -> Result<Group<JoinBinding>, ParseError> {
-        self.group(value, |this, value| this.join_binding(value, depth))
+    fn join_group(&mut self, value: &Value) -> Result<Group<JoinBinding>, ParseError> {
+        self.group(value, |this, value| this.join_binding(value))
     }
 
-    fn top_group(&mut self, value: &Value, depth: usize) -> Result<Group<TopBinding>, ParseError> {
+    fn top_group(&mut self, value: &Value) -> Result<Group<TopBinding>, ParseError> {
         self.group(value, |this, value| {
             this.node()?;
             let fields = array(value, 2, "top binding")?;
             Ok(TopBinding {
                 identity: this.symbol(&fields[0])?,
-                binding: this.heap_binding(&fields[1], depth + 1)?,
+                binding: this.heap_binding(&fields[1], Self::expr_index)?,
             })
         })
     }
@@ -644,14 +682,6 @@ impl Decoder {
                 "wrong binding group field count".into(),
             )),
             _ => Err(ParseError::InvalidTag(tag)),
-        }
-    }
-
-    fn depth(&self, depth: usize) -> Result<(), ParseError> {
-        if depth > self.limits.max_depth {
-            Err(ParseError::LimitExceeded("depth"))
-        } else {
-            Ok(())
         }
     }
 }
@@ -715,6 +745,144 @@ fn malformed(what: &str, expected: &str) -> ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deep_program(depth: usize) -> Vec<u8> {
+        let array = Value::Array;
+        let n = |value: usize| Value::Integer((value as u64).into());
+        let text = |value: &str| Value::Text(value.into());
+        let rep = || array(vec![n(4), n(64)]);
+        let leaf = || {
+            array(vec![
+                n(0),
+                array(vec![array(vec![
+                    n(1),
+                    array(vec![
+                        n(0),
+                        n(64),
+                        Value::Bytes(1_i64.to_be_bytes().to_vec()),
+                    ]),
+                ])]),
+            ])
+        };
+        let mut nodes = vec![leaf()];
+        for level in 1..=depth {
+            let body = nodes.len() - 1;
+            let scrutinee = nodes.len();
+            nodes.push(leaf());
+            nodes.push(array(vec![
+                n(5),
+                n(scrutinee),
+                n(level),
+                array(vec![rep()]),
+                array(vec![n(1), rep()]),
+                array(vec![array(vec![array(vec![n(0)]), array(vec![]), n(body)])]),
+            ]));
+        }
+        let root = nodes.len() - 1;
+        let wire = array(vec![
+            text("TPSTG"),
+            n(super::super::SCHEMA_VERSION as usize),
+            text("ghc-9.12-prepared-stg"),
+            text("ghc-9.12.2"),
+            n(super::super::EXECUTION_ABI_VERSION as usize),
+            array(vec![
+                n(0),
+                n(0),
+                n(64),
+                n(64),
+                text("sysv64"),
+                array(vec![]),
+            ]),
+            array(vec![array(vec![array(vec![]), array(vec![rep()])])]),
+            array(vec![]),
+            array(vec![]),
+            array(vec![]),
+            array(nodes),
+            array(vec![array(vec![
+                n(0),
+                array(vec![
+                    array(vec![
+                        text("deep"),
+                        text("Fixture"),
+                        text("value"),
+                        text("entry"),
+                    ]),
+                    array(vec![
+                        n(0),
+                        array(vec![n(0), n(0), array(vec![]), array(vec![]), n(root)]),
+                    ]),
+                ]),
+            ])]),
+            n(0),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&wire, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn deep_flat_program_is_stack_safe_through_decode_validation_and_drop() {
+        const CHILD: &str = "TIDEPOOL_DEEP_FLAT_SCHEMA_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "execution_schema::codec::tests::deep_flat_program_is_stack_safe_through_decode_validation_and_drop", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let bytes = deep_program(20_000);
+                let wire = decode_wire(&bytes, DecodeLimits::default()).unwrap();
+                let requirements = super::super::ProgramRequirements {
+                    schema_version: super::super::SCHEMA_VERSION,
+                    projection_profile: wire.envelope.projection_profile.clone(),
+                    toolchain: wire.envelope.toolchain.clone(),
+                    execution_abi_version: super::super::EXECUTION_ABI_VERSION,
+                    target: wire.envelope.target.clone(),
+                };
+                drop(wire);
+                let prepared =
+                    super::super::parse_program(&bytes, &requirements, DecodeLimits::default())
+                        .unwrap();
+                assert_eq!(prepared.expressions().nodes.len(), 40_001);
+                let cloned = prepared.clone();
+                assert_eq!(prepared, cloned);
+                assert!(!format!("{prepared:?}").is_empty());
+                drop((prepared, cloned));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn malformed_nested_cbor_is_rejected_before_recursive_materialization() {
+        let mut bytes = vec![0x81; 100_000];
+        bytes.push(0);
+        assert!(matches!(
+            decode_wire(&bytes, DecodeLimits::default()),
+            Err(ParseError::Malformed(_))
+        ));
+        assert!(matches!(
+            scan_item(&[0x9f, 0xff], 10),
+            Err(ParseError::Malformed(_))
+        ));
+        assert!(matches!(
+            scan_item(&[0x82, 0], 10),
+            Err(ParseError::Truncated)
+        ));
+        assert!(matches!(
+            scan_item(&[0x82, 0, 0], 2),
+            Err(ParseError::LimitExceeded("work"))
+        ));
+    }
 
     fn number(value: u8) -> Value {
         Value::Integer(value.into())

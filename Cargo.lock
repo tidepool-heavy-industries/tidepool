@@ -4313,6 +4313,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "proptest",
+ "recursion",
  "rustc-hash",
  "serde_json",
  "serial_test",

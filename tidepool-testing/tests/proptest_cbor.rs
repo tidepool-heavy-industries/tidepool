@@ -153,7 +153,7 @@ fn arb_literal() -> impl Strategy<Value = Literal> {
         any::<u64>().prop_map(Literal::LitWord),
         any::<char>().prop_map(Literal::LitChar),
         prop::collection::vec(any::<u8>(), 0..100).prop_map(Literal::LitString),
-        any::<u64>().prop_map(Literal::LitFloat),
+        any::<u32>().prop_map(|bits| Literal::LitFloat(u64::from(bits))),
         any::<u64>().prop_map(Literal::LitDouble),
     ]
 }

@@ -80,6 +80,9 @@ mod tests {
             }],
             constructors: vec![],
             operations: vec![],
+            expressions: crate::execution_schema::Expr {
+                nodes: vec![crate::execution_schema::ExprFrame::Return(vec![])],
+            },
             bindings: vec![Group::NonRecursive(TopBinding {
                 identity: SymbolIdentity {
                     occurrence: "entry".into(),
@@ -91,7 +94,7 @@ mod tests {
                         signature: SignatureId(0),
                         update: UpdatePolicy::Memoize,
                         captures: vec![],
-                        body: Box::new(crate::execution_schema::Expr::Return(vec![])),
+                        body: 0,
                     },
                 },
             })],
