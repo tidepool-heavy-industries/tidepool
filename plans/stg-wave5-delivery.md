@@ -18,6 +18,13 @@ passing; Haskell execution-schema-encode passes. Two old producer fixtures
 remain schema 7 until the final coordinated regeneration. This is not a full
 fixture gate. Workspace formatting is isolated in `93e1b25f5`.
 
+`4dd4f226a` connects MutVar new/read/write, noDuplicate, wired-in failures and
+the exact deferred-capability runtime catalog. `nix develop --command cargo
+test -p tidepool-codegen --lib` passed 384 tests, including reached and untaken
+capability paths and same-CAF retry. Combined Haskell projection and corpus
+projection self-tests pass with the wired-in producer regressions in
+`0c9143feb`. These are focused results, not a workspace or corpus acceptance.
+
 The three historical STG JSON ledgers are removed from the active tree by
 request; `800ab0d06` preserves them in Git. Corpus evidence is reproducible via
 `env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER just fixtures-check`.
@@ -63,6 +70,27 @@ Its generated manifests/results remain build artifacts, not new committed logs.
   NUL scan. Invalid storage is integrity failure, never a partial message.
 - Reusable failures restore thunk state/captures; terminal failures do not
   dereference a potentially damaged heap. Preserve the existing first cause.
+- noDuplicate's no-op requires one evaluator per heap, eager blackholing and
+  no scheduler that starts another evaluator while a thunk is active. Restarting
+  after cancellation can repeat unsafePerformIO allocations; the supported
+  backtrace CAF uses only allocation, not externally committed effects. Wave 6
+  must distinguish a suspended evaluator's blackhole from an actual loop before
+  permitting another evaluator on that heap.
+
+## Inventory boundary
+
+The recovered-closure inventory includes operations with signatures, address
+labels, and recovery residuals. It is diagnostic data, not permissive projection.
+The first complete run is `target/prepared-corpus/suite-inventory.7dlMDZ`:
+812 targets, zero inventory failures, and 146 distinct operation/signature
+pairs across the 103 previously stack-blocked closures. Missing-body interiors
+are not observable to this walk. A post-catalog corpus run remains necessary.
+
+The exact stack boundary includes the pinned `collectStackTrace1` worker as
+well as `collectStackTrace`; its body owns the libdw session and address imports.
+Fingerprint MD5 operations also occur in these closures and are not classified
+as unreachable by this inventory. Only source evidence or execution can settle
+their live-path requirements; unknown operations remain named rejections.
 
 ## Acceptance
 

@@ -416,3 +416,11 @@ are nondeterministic.
   and snapshot the rebuilt runner before releasing the build slot. Record both
   source revisions and executable/artifact hashes: this saves a projection
   cycle without pretending the replay is a new canonical fixtures-check.
+- A first-error projection report hides the size of a recovered dependency
+  closure. The separate STG inventory now records operations with signatures,
+  address literals, and recovery residuals without making projection permissive.
+  Keep catalog decisions separate from evidence collection: finding an operation
+  in a default-off branch is not proof that all its dependencies are deferred.
+- Test handbacks should distinguish an untaken failure branch from the success
+  continuation after a reached failure. Both matter for capability lowering;
+  one test cannot establish both merely because it contains a successful return.

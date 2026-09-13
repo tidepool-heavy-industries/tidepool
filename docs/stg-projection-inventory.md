@@ -5,10 +5,17 @@ unarisation pipeline. The wire format is a finite prepared representation; it
 is not rendered STG, a Core compatibility format, or a production-execution
 parity claim.
 
-## Wire contract (schema 7, execution ABI 5)
+## Wire contract (schema 8, execution ABI 5)
 
-`ProgramEnvelope.schema_version` is 7 and `execution_abi_version` is 5.
-Schema 7 adds explicit `ResultContract` values (`Returns` versus authoritative
+`ProgramEnvelope.schema_version` is 8 and `execution_abi_version` is 5.
+Schema 8 adds `Capability` and `WiredInError` operation identities. Capabilities
+retain GHC's `Returns` contract but fail with a typed reusable error when
+executed; only exact catalogued identity/signature pairs are admitted. Wired-in
+errors carry their kind and an authoritative `NoSuccess` contract. The producer
+recognizes GHC builtin keys, not user spelling, and synthesizes ordinary callable
+tops so bare references and partial applications retain their meaning.
+
+Schema 7 added explicit `ResultContract` values (`Returns` versus authoritative
 `NoSuccess`) and carries that contract on case scrutinees; it also removes the
 obsolete global `dead_end` field. Schema 6's optional external record-parent
 identity and typed operation identity (`PrimOp` versus an intrinsic symbol

@@ -43,7 +43,7 @@ scope boundaries, not grounds to trust module spelling or invent an intrinsic.
 
 ## GHC execution-stack snapshots in prepared programs
 
-The current corpus has 103 target closures whose first projection blocker is
+The `800ab0d06` corpus had 103 target closures whose first projection blocker was
 `__primcall ghc-internal stg_cloneMyStackzh`, with `[VoidRep]` arguments and
 `[UnliftedRefRep]` results. Each also lacks exact recovered bodies for
 `GHC.Internal.ExecutionStack.Internal.stackFrames` and
@@ -59,12 +59,14 @@ produces a GC-managed copy of the active thread's stack. Prepared `raise#`
 retains its exception operand as a machine root and records a terminal cause;
 that is not stack capture or IPE decoding. Neither an empty snapshot nor a
 default-off specialization preserves the mutable backtrace contract. Supporting
-this path requires an explicit stack snapshot, ownership, and decoding design;
-it remains outside the current prepared operation catalog.
+this path requires an explicit stack snapshot, ownership, and decoding design.
+The delivery catalog instead preserves the pinned call signatures and reports
+typed UnsupportedCapability if execution reaches a catalogued stack boundary.
+It does not implement snapshots or claim that every enclosing program succeeds.
 
-## Wired-in error binder recovery
+## Wired-in error boundary
 
-The remaining `patError` global has an exact fat-interface RHS but no serialized
+The `patError` global has an exact fat-interface RHS but no serialized
 authentic defining binder type. GHC 9.12.2 deliberately omits wired-in names
 from ordinary interface declarations; an external extra-declaration binder
 stores its name, not its type or IdInfo. Deserialization resolves that name to
@@ -78,9 +80,9 @@ and [wired-in resolution](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/com
 The prepared `NoSuccess` contract removes result representations at the
 execution boundary; it does not make a mismatched Core binder/RHS well typed.
 
-An explicit future recovery contract could investigate deriving a defining
-binder type from the exact RHS while preserving authoritative wired-in identity
-and no-success evidence separately, with consistent reference rewriting and
-preparation lint. That is reconstruction, not authentic binder retrieval,
-and has not been proved correct here. The current recovery rejection remains;
-no guessed coercion, lookup bypass, or fabricated error body was introduced.
+The delivery path recognizes GHC's wired-in keys and synthesizes ordinary
+callable tops containing a typed WiredInError operation. It does not recover
+the incompatible Core body or guess a replacement binder type. Native lowering
+records the bounded decoded message directly. The remaining integration work is
+session presentation of raised exception operands; the wired-in path already
+retains its message without requiring exception-heap observation.
