@@ -3,9 +3,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::pipeline::CodegenPipeline;
-use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::{Linkage, Module};
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::external_storage::ExternalStorageKind;
 
@@ -229,39 +228,14 @@ pub(super) fn emit_c_string_len(
     pool: &Arc<PinnedBytes>,
     address: Value,
 ) -> Result<Vec<Value>, super::CompileError> {
-    let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
-    signature.params = vec![AbiParam::new(types::I64); 4];
-    signature.returns = vec![AbiParam::new(types::I32)];
-    let host = pipeline
-        .module
-        .declare_function("prepared_c_string_len", Linkage::Import, &signature)
-        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
-    let host = pipeline.module.declare_func_in_func(host, builder.func);
-
-    let output_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-        ir::StackSlotKind::ExplicitSlot,
-        8,
-        3,
-    ));
-    let output = builder.ins().stack_addr(types::I64, output_slot, 0);
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_c_string_len", 4)?;
+    let output = super::arrays::output_slot(builder);
     let owner = builder
         .ins()
         .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
     let call = builder.ins().call(host, &[vmctx, owner, address, output]);
     let status = builder.inst_results(call)[0];
-    let success = builder.ins().icmp_imm(
-        ir::condcodes::IntCC::Equal,
-        status,
-        crate::prepared_control::CallStatus::Success as i64,
-    );
-    let valid = builder.create_block();
-    let invalid = builder.create_block();
-    builder.ins().brif(success, valid, &[], invalid, &[]);
-    builder.switch_to_block(invalid);
-    builder.seal_block(invalid);
-    crate::alloc::emit_prepared_failure_return(builder, status);
-    builder.switch_to_block(valid);
-    builder.seal_block(valid);
+    super::arrays::finish_checked_call(builder, status);
     Ok(vec![builder.ins().load(
         types::I64,
         MemFlags::trusted(),
@@ -317,21 +291,8 @@ pub(super) fn emit_index_char(
     address: Value,
     index: Value,
 ) -> Result<Vec<Value>, super::CompileError> {
-    let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
-    signature.params = vec![AbiParam::new(types::I64); 5];
-    signature.returns = vec![AbiParam::new(types::I32)];
-    let host = pipeline
-        .module
-        .declare_function("prepared_index_char", Linkage::Import, &signature)
-        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
-    let host = pipeline.module.declare_func_in_func(host, builder.func);
-
-    let output_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-        ir::StackSlotKind::ExplicitSlot,
-        8,
-        3,
-    ));
-    let output = builder.ins().stack_addr(types::I64, output_slot, 0);
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_index_char", 5)?;
+    let output = super::arrays::output_slot(builder);
     let owner = builder
         .ins()
         .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
@@ -339,19 +300,7 @@ pub(super) fn emit_index_char(
         .ins()
         .call(host, &[vmctx, owner, address, index, output]);
     let status = builder.inst_results(call)[0];
-    let success = builder.ins().icmp_imm(
-        ir::condcodes::IntCC::Equal,
-        status,
-        crate::prepared_control::CallStatus::Success as i64,
-    );
-    let valid = builder.create_block();
-    let invalid = builder.create_block();
-    builder.ins().brif(success, valid, &[], invalid, &[]);
-    builder.switch_to_block(invalid);
-    builder.seal_block(invalid);
-    crate::alloc::emit_prepared_failure_return(builder, status);
-    builder.switch_to_block(valid);
-    builder.seal_block(valid);
+    super::arrays::finish_checked_call(builder, status);
     Ok(vec![builder.ins().load(
         types::I64,
         MemFlags::trusted(),
