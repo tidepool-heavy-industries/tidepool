@@ -23,6 +23,7 @@ pub mod eval_harness;
 pub mod gen;
 pub mod haskell_suite;
 pub mod jit_run;
+pub mod prepared_corpus;
 pub mod watchdog;
 
 pub use dispatch::NullDispatcher;

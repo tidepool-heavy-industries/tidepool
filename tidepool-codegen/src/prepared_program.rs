@@ -27,7 +27,7 @@ pub use observe::ObservationFailure;
 mod run;
 pub use run::{ExecutionError, RunOptions, RunResult};
 mod plan;
-pub use admission::admit_program;
+pub use admission::{admit_prepared, admit_program};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Unsupported {

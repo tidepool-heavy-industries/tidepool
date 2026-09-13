@@ -1,7 +1,8 @@
 use super::Unsupported;
 use std::collections::BTreeMap;
 use tidepool_repr::execution_schema::{
-    Atom, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, ValueId, ValueRef,
+    Atom, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, PreparedProgram,
+    ValueId, ValueRef,
 };
 
 fn items<T>(group: &Group<T>) -> &[T] {
@@ -11,8 +12,7 @@ fn items<T>(group: &Group<T>) -> &[T] {
     }
 }
 
-fn expression_owners(linked: &LinkedProgram) -> Vec<Option<ValueId>> {
-    let program = linked.prepared();
+fn expression_owners(program: &PreparedProgram) -> Vec<Option<ValueId>> {
     let mut owners = vec![None; program.expressions().nodes.len()];
     let mut pending = Vec::new();
     for group in program.bindings() {
@@ -68,7 +68,12 @@ fn expression_owners(linked: &LinkedProgram) -> Vec<Option<ValueId>> {
 /// Admission is whole-program and precedes declaration/publication. Validation
 /// already proved the flat arena's ownership, bounds, scopes and representations.
 pub fn admit_program(linked: &LinkedProgram) -> Result<(), Unsupported> {
-    let program = linked.prepared();
+    admit_prepared(linked.prepared())
+}
+
+/// Closed admission does not require inventing import handles merely to reject
+/// them. Artifact tooling and compiled owners share this checked boundary.
+pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
     if !program.globals().is_empty() {
         return Err(Unsupported::Global(GlobalId(0)));
     }
@@ -96,7 +101,7 @@ pub fn admit_program(linked: &LinkedProgram) -> Result<(), Unsupported> {
         }
     }
 
-    let owners = expression_owners(linked);
+    let owners = expression_owners(program);
     for (node, frame) in program.expressions().nodes.iter().enumerate() {
         let rejected = match frame {
             ExprFrame::Operation { .. } => true,

@@ -15,6 +15,7 @@ tidepool-heap.workspace = true
 tidepool-codegen.workspace = true
 proptest = "1.10.0"
 serde_json.workspace = true
+serde.workspace = true
 tidepool-runtime.workspace = true
 tidepool-toolchain.workspace = true
 tidepool-mcp.workspace = true
