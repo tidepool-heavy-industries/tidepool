@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tidepool_repr::execution_schema::ValueId;
 
-use crate::execution_descriptor::{DescriptorState, DescriptorTraceError, ObjectDescriptor, ObjectKind};
+use crate::execution_descriptor::{
+    DescriptorState, DescriptorTraceError, ObjectDescriptor, ObjectKind,
+};
 use crate::managed_reference::{tag_of, tag_valid, untag};
 
 #[derive(Clone, Copy, Debug)]
@@ -57,21 +59,33 @@ impl StaticImage {
         entries: BTreeMap<ValueId, usize>,
         descriptors: impl IntoIterator<Item = Arc<ObjectDescriptor>>,
     ) -> Result<Self, StaticImageError> {
-        let descriptors: BTreeMap<_, _> = descriptors.into_iter()
-            .map(|descriptor| (descriptor.initial_header_word(), descriptor)).collect();
-        let bytes = words.len().checked_mul(8).ok_or(StaticImageError::Allocation)?;
+        let descriptors: BTreeMap<_, _> = descriptors
+            .into_iter()
+            .map(|descriptor| (descriptor.initial_header_word(), descriptor))
+            .collect();
+        let bytes = words
+            .len()
+            .checked_mul(8)
+            .ok_or(StaticImageError::Allocation)?;
         let mut starts = Vec::new();
         let bitmap_len = words.len().div_ceil(64);
-        starts.try_reserve_exact(bitmap_len).map_err(|_| StaticImageError::Allocation)?;
+        starts
+            .try_reserve_exact(bitmap_len)
+            .map_err(|_| StaticImageError::Allocation)?;
         starts.resize(bitmap_len, 0_u64);
         let mut slots = BTreeSet::new();
         let mut offset = 0;
         while offset < bytes {
-            let descriptor = descriptors.get(&(words[offset / 8] as usize))
+            let descriptor = descriptors
+                .get(&(words[offset / 8] as usize))
                 .ok_or(StaticImageError::Object(offset))?;
             let extent = descriptor.allocation_extent() as usize;
-            if !matches!(descriptor.kind(), ObjectKind::Constructor | ObjectKind::Function)
-                || extent < 16 || extent % 8 != 0 || extent > bytes - offset
+            if !matches!(
+                descriptor.kind(),
+                ObjectKind::Constructor | ObjectKind::Function
+            ) || extent < 16
+                || extent % 8 != 0
+                || extent > bytes - offset
                 || descriptor.allocation_alignment() != 8
             {
                 return Err(StaticImageError::Object(offset));
@@ -79,8 +93,10 @@ impl StaticImage {
             starts[offset / 8 / 64] |= 1_u64 << (offset / 8 % 64);
             for field in descriptor.trace_offsets() {
                 let slot = offset + *field as usize;
-                if *field as usize % 8 != 0 || *field as usize + 8 > extent
-                    || words[slot / 8] != 0 || !slots.insert(slot)
+                if *field as usize % 8 != 0
+                    || *field as usize + 8 > extent
+                    || words[slot / 8] != 0
+                    || !slots.insert(slot)
                 {
                     return Err(StaticImageError::Relocation(slot));
                 }
@@ -95,7 +111,12 @@ impl StaticImage {
             }
             let header = words[relocation.target_offset / 8] as usize;
             let descriptor = &descriptors[&header];
-            if !tag_valid(relocation.tag, descriptor.kind(), DescriptorState::Live, descriptor.constructor_tag()) {
+            if !tag_valid(
+                relocation.tag,
+                descriptor.kind(),
+                DescriptorState::Live,
+                descriptor.constructor_tag(),
+            ) {
                 return Err(StaticImageError::Relocation(relocation.slot_offset));
             }
         }
@@ -107,23 +128,69 @@ impl StaticImage {
                 return Err(StaticImageError::Entry(id));
             }
         }
-        Ok(Self { words, relocations, entries, descriptors, starts })
+        Ok(Self {
+            words,
+            relocations,
+            entries,
+            descriptors,
+            starts,
+        })
     }
 
     pub fn instantiate(&self) -> Result<StaticRegion, StaticImageError> {
-        // wave4:STATIC_REGION — allocate aligned owned words fallibly, apply
-        // every relocation (base + target | tag), then publish entries as
-        // tagged addresses using each entry descriptor's canonical tag.
-        todo!("wave4:STATIC_REGION")
+        // Allocate before exposing any address. The image has already checked
+        // every relocation, so these writes cannot fail after allocation.
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(self.words.len())
+            .map_err(|_| StaticImageError::Allocation)?;
+        words.extend_from_slice(&self.words);
+        let mut words = words.into_boxed_slice();
+        let base = words.as_mut_ptr() as usize;
+
+        for relocation in &self.relocations {
+            let target = base
+                .checked_add(relocation.target_offset)
+                .ok_or(StaticImageError::Relocation(relocation.slot_offset))?;
+            let encoded = target
+                .checked_add(usize::from(relocation.tag))
+                .ok_or(StaticImageError::Relocation(relocation.slot_offset))?;
+            words[relocation.slot_offset / 8] = encoded as u64;
+        }
+
+        let mut entries = BTreeMap::new();
+        for (&id, &offset) in &self.entries {
+            let address = base
+                .checked_add(offset)
+                .ok_or(StaticImageError::Entry(id))?;
+            let descriptor = &self.descriptors[&(self.words[offset / 8] as usize)];
+            let encoded = address
+                .checked_add(usize::from(descriptor.tag()))
+                .ok_or(StaticImageError::Entry(id))?;
+            entries.insert(id, encoded);
+        }
+
+        Ok(StaticRegion {
+            words,
+            descriptors: self.descriptors.clone(),
+            starts: self.starts.clone(),
+            entries,
+        })
     }
 }
 
 fn is_start(bitmap: &[u64], bytes: usize, offset: usize) -> bool {
-    offset < bytes && offset % 8 == 0
-        && bitmap[offset / 8 / 64] & (1_u64 << (offset / 8 % 64)) != 0
+    offset < bytes && offset % 8 == 0 && bitmap[offset / 8 / 64] & (1_u64 << (offset / 8 % 64)) != 0
 }
 
 impl StaticRegion {
+    /// Immutable allocation bounds, for rejecting collector root slots that
+    /// would otherwise write into this region. Empty regions contain nothing.
+    pub fn address_range(&self) -> std::ops::Range<usize> {
+        let start = self.words.as_ptr() as usize;
+        start..start + std::mem::size_of_val(self.words.as_ref())
+    }
+
     pub fn entry(&self, id: ValueId) -> Option<usize> {
         self.entries.get(&id).copied()
     }
@@ -133,15 +200,24 @@ impl StaticRegion {
     pub fn admit(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
         let base = self.words.as_ptr() as usize;
         let address = untag(encoded);
-        let Some(offset) = address.checked_sub(base) else { return Ok(None); };
+        let Some(offset) = address.checked_sub(base) else {
+            return Ok(None);
+        };
         let bytes = std::mem::size_of_val(self.words.as_ref());
-        if offset >= bytes { return Ok(None); }
+        if offset >= bytes {
+            return Ok(None);
+        }
         if !is_start(&self.starts, bytes, offset) {
             return Err(DescriptorTraceError::InvalidManagedPointer { address });
         }
         let descriptor = &self.descriptors[&(self.words[offset / 8] as usize)];
         let tag = tag_of(encoded);
-        if !tag_valid(tag, descriptor.kind(), DescriptorState::Live, descriptor.constructor_tag()) {
+        if !tag_valid(
+            tag,
+            descriptor.kind(),
+            DescriptorState::Live,
+            descriptor.constructor_tag(),
+        ) {
             return Err(DescriptorTraceError::InvalidManagedTag { address, tag });
         }
         Ok(Some(encoded))
@@ -151,6 +227,43 @@ impl StaticRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tidepool_repr::execution_schema::{
+        Architecture, Endianness, RuntimeRep, StorageLayout, TargetDescriptor,
+    };
+
+    fn target() -> TargetDescriptor {
+        TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "system-v".into(),
+            features: Vec::new(),
+        }
+    }
+
+    fn descriptor(tag: u32, reps: &[RuntimeRep]) -> Arc<ObjectDescriptor> {
+        Arc::new(
+            ObjectDescriptor::constructor(
+                tag,
+                StorageLayout::for_reps(&target(), reps).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn image_with_one_object(
+        descriptor: Arc<ObjectDescriptor>,
+        entries: BTreeMap<ValueId, usize>,
+        relocations: Vec<StaticRelocation>,
+    ) -> StaticImage {
+        let extent = descriptor.allocation_extent() as usize;
+        let mut words = vec![0_u64; extent / 8];
+        words[0] = descriptor.initial_header_word() as u64;
+        StaticImage::new(words, relocations, entries, [descriptor]).unwrap()
+    }
 
     #[test]
     fn empty_image_instantiates_without_publishing_entries() {
@@ -158,5 +271,126 @@ mod tests {
         let region = image.instantiate().unwrap();
         assert_eq!(region.entry(ValueId(0)), None);
         assert_eq!(region.admit(0).unwrap(), None);
+    }
+
+    #[test]
+    fn cyclic_pair_relocations_are_instantiated_with_target_tags() {
+        let first = descriptor(1, &[RuntimeRep::LiftedRef]);
+        let second = descriptor(2, &[RuntimeRep::LiftedRef]);
+        assert_eq!(first.allocation_extent(), 16);
+        assert_eq!(second.allocation_extent(), 16);
+        let mut words = vec![0_u64; 4];
+        words[0] = first.initial_header_word() as u64;
+        words[2] = second.initial_header_word() as u64;
+        let image = StaticImage::new(
+            words,
+            vec![
+                StaticRelocation {
+                    slot_offset: 8,
+                    target_offset: 16,
+                    tag: second.tag(),
+                },
+                StaticRelocation {
+                    slot_offset: 24,
+                    target_offset: 0,
+                    tag: first.tag(),
+                },
+            ],
+            BTreeMap::from([(ValueId(41), 0), (ValueId(9001), 16)]),
+            [first, second],
+        )
+        .unwrap();
+        let region = image.instantiate().unwrap();
+        let base = region.words.as_ptr() as usize;
+        assert_eq!(region.words[1] as usize, (base + 16) | 2);
+        assert_eq!(region.words[3] as usize, base | 1);
+        assert_eq!(
+            region.admit(region.entry(ValueId(41)).unwrap()).unwrap(),
+            Some(region.entry(ValueId(41)).unwrap())
+        );
+        assert_eq!(
+            region.admit(region.entry(ValueId(9001)).unwrap()).unwrap(),
+            Some(region.entry(ValueId(9001)).unwrap())
+        );
+    }
+
+    #[test]
+    fn relocation_validation_rejects_escaping_missing_and_duplicate_edges() {
+        let descriptor = descriptor(1, &[RuntimeRep::LiftedRef]);
+        let extent = descriptor.allocation_extent() as usize;
+        let entries = BTreeMap::new();
+
+        let mut words = vec![0_u64; extent / 8];
+        words[0] = descriptor.initial_header_word() as u64;
+        assert!(matches!(
+            StaticImage::new(
+                words.clone(),
+                vec![StaticRelocation {
+                    slot_offset: 8,
+                    target_offset: extent,
+                    tag: descriptor.tag(),
+                }],
+                entries.clone(),
+                [descriptor.clone()],
+            ),
+            Err(StaticImageError::Relocation(8))
+        ));
+        assert!(matches!(
+            StaticImage::new(words.clone(), vec![], entries.clone(), [descriptor.clone()]),
+            Err(StaticImageError::Relocation(8))
+        ));
+        assert!(matches!(
+            StaticImage::new(
+                words,
+                vec![
+                    StaticRelocation {
+                        slot_offset: 8,
+                        target_offset: 0,
+                        tag: descriptor.tag(),
+                    },
+                    StaticRelocation {
+                        slot_offset: 8,
+                        target_offset: 0,
+                        tag: descriptor.tag(),
+                    },
+                ],
+                entries,
+                [descriptor],
+            ),
+            Err(StaticImageError::Relocation(8))
+        ));
+    }
+
+    #[test]
+    fn entries_are_keyed_by_full_value_id_and_invocations_are_distinct() {
+        let descriptor = descriptor(1, &[]);
+        let image = image_with_one_object(
+            descriptor,
+            BTreeMap::from([(ValueId(17), 0), (ValueId(4_000_000), 0)]),
+            vec![],
+        );
+        let first = image.instantiate().unwrap();
+        let second = image.instantiate().unwrap();
+        assert_eq!(first.entry(ValueId(17)), first.entry(ValueId(4_000_000)));
+        assert_ne!(first.entry(ValueId(17)), second.entry(ValueId(17)));
+    }
+
+    #[test]
+    fn admission_rejects_interiors_and_contradictory_tags() {
+        let image = image_with_one_object(
+            descriptor(1, &[]),
+            BTreeMap::from([(ValueId(73), 0)]),
+            vec![],
+        );
+        let region = image.instantiate().unwrap();
+        let entry = region.entry(ValueId(73)).unwrap();
+        assert!(matches!(
+            region.admit(untag(entry) + 8),
+            Err(DescriptorTraceError::InvalidManagedPointer { .. })
+        ));
+        assert!(matches!(
+            region.admit(entry | 2),
+            Err(DescriptorTraceError::InvalidManagedTag { .. })
+        ));
     }
 }

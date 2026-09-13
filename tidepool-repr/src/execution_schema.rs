@@ -241,6 +241,9 @@ pub struct CheckedLayout {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConstructorDecl {
     pub identity: SymbolIdentity,
+    /// Existing bridge identity minted by Tidepool.Identity.varId on GHC's
+    /// constructor worker. Never substitute the family-relative constructor tag.
+    pub host_id: crate::DataConId,
     pub family: SymbolIdentity,
     pub result_rep: RuntimeRep,
     pub field_reps: Vec<RuntimeRep>,
@@ -286,7 +289,6 @@ pub enum ScalarLiteral {
         bits: u8,
         bytes: Vec<u8>,
     },
-    Char(u32),
     Bytes(Vec<u8>),
     /// The raw `Addr#` null value, never a managed reference.
     NullAddress,
@@ -298,7 +300,6 @@ impl ScalarLiteral {
             Self::Int { bits, .. } => RuntimeRep::Int(*bits),
             Self::Word { bits, .. } => RuntimeRep::Word(*bits),
             Self::Float { bits, .. } => RuntimeRep::Float(*bits),
-            Self::Char(_) => RuntimeRep::Word(32),
             Self::Bytes(_) | Self::NullAddress => RuntimeRep::Address,
         }
     }
