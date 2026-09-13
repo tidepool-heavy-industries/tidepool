@@ -16,6 +16,7 @@ use crate::entry_abi::EntryAbi;
 use crate::pipeline::{CodegenPipeline, PipelineError};
 
 mod admission;
+mod emit;
 mod plan;
 pub use admission::admit_program;
 
