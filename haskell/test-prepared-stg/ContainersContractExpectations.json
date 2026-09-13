@@ -12,7 +12,10 @@
     },
     "insertWithTotal": { "kind": "int", "value": 11 },
     "adjustedLookup": { "kind": "maybe", "value": { "kind": "int", "value": 6 } },
-    "alteredSize": { "kind": "int", "value": 3 },
+    "alteredSize": {
+      "kind": "tuple",
+      "value": [ { "kind": "int", "value": 3 }, { "kind": "maybe", "value": { "kind": "int", "value": 8 } } ]
+    },
     "foldedKeys": { "kind": "text", "value": "apple,banana,pear,quince," },
     "unionTotals": {
       "kind": "list",

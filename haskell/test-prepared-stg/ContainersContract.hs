@@ -24,11 +24,18 @@ insertWithTotal =
 adjustedLookup :: Maybe Int
 adjustedLookup = Map.lookup "pear" (Map.adjust (* 2) "pear" inventory)
 
-alteredSize :: Int
+-- Observes both the surviving size and the updated value at "quince", so a
+-- broken alter update branch (as opposed to its delete branch) fails this
+-- probe.
+alteredSize :: (Int, Maybe Int)
 alteredSize =
-  Map.size
-    (Map.alter (const Nothing) "banana"
-      (Map.alter (fmap (+ 1)) "quince" inventory))
+  ( Map.size altered
+  , Map.lookup "quince" altered
+  )
+  where
+    altered =
+      Map.alter (const Nothing) "banana"
+        (Map.alter (fmap (+ 1)) "quince" inventory)
 
 foldedKeys :: Text
 foldedKeys = Map.foldrWithKey (\key _ folded -> key <> "," <> folded) "" inventory

@@ -11,12 +11,26 @@ pow2ToHundredText = T.pack (show (2 ^ (100 :: Int) :: Integer))
 factorial30Text :: Text
 factorial30Text = T.pack (show (product [1 .. 30 :: Integer]))
 
+-- These seeds must reach the engine as real Integer computation: each is a
+-- large prime literal hidden behind NOINLINE so GHC cannot see through the
+-- product/mod chain at compile time and collapse it to a literal result.
+{-# NOINLINE primeSeedA #-}
+primeSeedA :: Integer
+primeSeedA = 2305843009213693951
+
+{-# NOINLINE primeSeedB #-}
+primeSeedB :: Integer
+primeSeedB = 618970019642690137449562111
+
+{-# NOINLINE primeSeedC #-}
+primeSeedC :: Integer
+primeSeedC = 162259276829213363391578010288127
+
 -- Product of large primes reduced into Int range via mod.
 primeProductMod :: Int
 primeProductMod =
   fromIntegral
-    (product [2305843009213693951, 618970019642690137449562111, 162259276829213363391578010288127 :: Integer]
-      `mod` 1000000007)
+    (product [primeSeedA, primeSeedB, primeSeedC] `mod` 1000000007)
 
 -- gcd on values that exceed 64 bits; the answer itself exceeds 64 bits.
 gcdLargeText :: Text
