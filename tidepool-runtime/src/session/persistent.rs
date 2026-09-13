@@ -1333,7 +1333,7 @@ impl PersistentSession {
         let generation = self
             .lib
             .as_mut()
-            .expect("decl plane present")
+            .ok_or(SessionError::StaleStagedDeclaration)?
             .adopt_staged_batch_with_receipt_and_vals_in(staged, &visible_values)?;
         self.bindings.preserve_observations(&captured_values);
         for name in &replaced_names {
@@ -1491,6 +1491,10 @@ impl PersistentSession {
             name,
             module: entry.module,
         };
+        #[allow(
+            clippy::expect_used,
+            reason = "source liveness and identity are checked by the sole caller, publish_captured_alias_in, and retract_many_in above touches only the decl plane, never source's value-plane entry"
+        )]
         let (_, expired) = self
             .bindings
             .bind_alias_in(scope, entry, source)

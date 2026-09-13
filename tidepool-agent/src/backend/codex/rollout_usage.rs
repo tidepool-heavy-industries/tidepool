@@ -186,7 +186,7 @@ pub fn read_bounded_usage<R: BufRead>(
             };
             if lines == limits.lines {
                 match reader.fill_buf() {
-                    Ok(bytes) if bytes.is_empty() => (),
+                    Ok([]) => (),
                     Ok(_) => {
                         coverage.state = UsageSourceState::LimitedOrInvalid;
                         report.diagnostics.push(UsageDiagnostic {

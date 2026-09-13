@@ -58,7 +58,7 @@ fn bounded_usage_conflicts_across_sources_never_restore_a_winner() {
     let changed = row("child", "a", "1970-01-01T00:00:01Z", 6);
     let result = read_bounded_usage(
         [
-            ("first".into(), Ok(input(&[a.clone()]))),
+            ("first".into(), Ok(input(std::slice::from_ref(&a)))),
             (
                 "second".into(),
                 Ok(input(&[
@@ -165,7 +165,7 @@ fn bounded_usage_limits_report_omissions_instead_of_successful_zero() {
         },
     ] {
         let result = read_bounded_usage(
-            [("fixture".into(), Ok(input(&[row.clone()])))],
+            [("fixture".into(), Ok(input(std::slice::from_ref(&row))))],
             selection(),
             limits,
         )
