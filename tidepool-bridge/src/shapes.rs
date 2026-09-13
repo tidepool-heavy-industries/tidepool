@@ -5,7 +5,7 @@
 //! A "shape fact" is the Value-tree encoding of a Haskell data type as GHC
 //! -O2 Core sees it:
 //!   - `Text` as the worker `Text ByteArray# Int# Int#` (UTF-8 bytes), with
-//!     three accepted backing forms: raw `Value::ByteArray`, `LitString`, and
+//!     raw `Value::ByteArray`, owned `LitString`/`LitByteArray` snapshots, and
 //!     any number of lifted `Con("ByteArray", [..])` wrapper layers (sliced
 //!     Texts from `splitOn` etc. stack them);
 //!   - boxed machine numbers as `I#`/`W#`/`C#`/`D#`/`F#` single-field cons
@@ -196,8 +196,9 @@ pub fn make_text(s: &str, text_id: DataConId) -> Value {
 
 /// Unwrap a Text backing field to its raw bytes, given a recognizer for the
 /// lifted `Con("ByteArray", [..])` wrapper layer. Accepts a raw
-/// `Value::ByteArray` or a `LitString` unconditionally (`LitString` is
-/// copied into a fresh `SharedByteArray`); table-free callers that cannot
+/// `Value::ByteArray` or an owned `LitString`/`LitByteArray` snapshot
+/// unconditionally (literals are copied into a fresh `SharedByteArray`);
+/// table-free callers that cannot
 /// recognize the wrapper con (no `DataConId` for it in hand) pass `|_|
 /// false` and simply won't unwrap that form.
 fn text_backing_with(
@@ -208,7 +209,9 @@ fn text_backing_with(
     loop {
         match cur {
             Value::ByteArray(bs) => return Some(bs.clone()),
-            Value::Lit(Literal::LitString(bytes)) => {
+            // Prepared observation publishes owned byte snapshots; both literal
+            // forms are data, with no live heap or mutator handle to retain.
+            Value::Lit(Literal::LitString(bytes) | Literal::LitByteArray(bytes)) => {
                 return Some(Arc::new(Mutex::new(bytes.clone())));
             }
             Value::Con(id, fields) if fields.len() == 1 && is_bytearray_con(*id) => {
@@ -220,9 +223,9 @@ fn text_backing_with(
 }
 
 /// Unwrap a Text backing field to its raw bytes. Accepts a raw
-/// `Value::ByteArray`, a `LitString`, or any number of lifted
-/// `Con("ByteArray", [..])` wrapper layers around either.
-/// (`LitString` is copied into a fresh `SharedByteArray`.)
+/// `Value::ByteArray`, an owned `LitString`/`LitByteArray` snapshot, or any
+/// number of lifted `Con("ByteArray", [..])` wrapper layers around them.
+/// Literal bytes are copied into a fresh `SharedByteArray`.
 pub fn text_backing(v: &Value, table: &DataConTable) -> Option<SharedByteArray> {
     text_backing_with(v, &|id| is_con_named(id, "ByteArray", table))
 }
@@ -641,6 +644,7 @@ pub fn bignat_bytes_to_decimal(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FromCore;
     use tidepool_repr::DataCon;
 
     fn test_table() -> DataConTable {
@@ -797,6 +801,52 @@ mod tests {
             Value::Lit(Literal::LitInt(2)),
         ];
         assert_eq!(text_bytes_checked(&fields, &t).unwrap(), b"bc");
+    }
+
+    #[test]
+    fn text_lit_byte_array_snapshot_converts_with_and_without_table() {
+        let t = test_table();
+        let fields = vec![
+            Value::Lit(Literal::LitByteArray(b"_hello_".to_vec())),
+            Value::Lit(Literal::LitInt(1)),
+            Value::Lit(Literal::LitInt(5)),
+        ];
+        let text = Value::Con(id(&t, "Text"), fields.clone());
+        assert_eq!(String::from_value(&text, &t).unwrap(), "hello");
+        assert_eq!(
+            String::from_utf8(text_bytes_clamped_with(&fields, |_| false, |_| false).unwrap())
+                .unwrap(),
+            "hello"
+        );
+
+        let invalid_bounds = [
+            Value::Lit(Literal::LitByteArray(b"hello".to_vec())),
+            Value::Lit(Literal::LitInt(4)),
+            Value::Lit(Literal::LitInt(2)),
+        ];
+        assert!(matches!(
+            text_bytes_checked(&invalid_bounds, &t),
+            Err(TextShapeError::BadSlice { .. })
+        ));
+        assert_eq!(
+            text_bytes_clamped_with(&invalid_bounds, |_| false, |_| false).unwrap(),
+            b"o"
+        );
+
+        let invalid_utf8_fields = vec![
+            Value::Lit(Literal::LitByteArray(vec![0xff])),
+            Value::Lit(Literal::LitInt(0)),
+            Value::Lit(Literal::LitInt(1)),
+        ];
+        let invalid_utf8 = Value::Con(id(&t, "Text"), invalid_utf8_fields.clone());
+        assert!(matches!(
+            String::from_value(&invalid_utf8, &t),
+            Err(crate::BridgeError::TypeMismatch { .. })
+        ));
+        assert!(String::from_utf8(
+            text_bytes_clamped_with(&invalid_utf8_fields, |_| false, |_| false).unwrap()
+        )
+        .is_err());
     }
 
     #[test]

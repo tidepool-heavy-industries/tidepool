@@ -33,7 +33,8 @@ import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
   , recoverPreparedClosure )
 import Tidepool.PreparedStg
-  ( PreparedCoverage(..), PreparedModule(..), prepareModule, unelaboratedModule )
+  ( PreparedCoverage(..), PreparedModule(..), RecoveredModuleFailure(..)
+  , prepareModule, unelaboratedModule )
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -44,6 +45,7 @@ main = do
   assertSubsetPreservesFullGroup
   root <- getCurrentDirectory
   let source = root </> "test-prepared-stg" </> "RecoveryCaller.hs"
+      hiddenSource = root </> "test-prepared-stg" </> "RecoveryHiddenText.hs"
       includes = [root </> "test-prepared-stg"]
   libdir <- trim <$> readProcessGhc ["--print-libdir"]
   runGhc (Just libdir) $ do
@@ -54,11 +56,13 @@ main = do
       , ghcLink = NoLink
       }
     target <- guessTarget source Nothing Nothing
-    setTargets [target]
+    hiddenTarget <- guessTarget hiddenSource Nothing Nothing
+    setTargets [target, hiddenTarget]
     _ <- load LoadAllTargets
     hsc <- getSession
     home <- prepareNamed hsc "RecoveryHome"
     caller <- prepareNamed hsc "RecoveryCaller"
+    hidden <- prepareNamed hsc "RecoveryHiddenText"
     let modules = [home, caller]
         entry = callerEntry modules
         context = ProjectionContext
@@ -79,6 +83,7 @@ main = do
       "recovery dropped an original prepared module"
     liftIO $ assertNullaryRecoveryProjection context closure
     liftIO $ incompleteSubsetContract home context
+    liftIO $ hidden_defining_module hsc context hidden
     liftIO $ putStrLn "prepared recovery closure: ok"
   where
     assertOverlapMerge = do
@@ -143,6 +148,31 @@ main = do
       moduleNameString (moduleName (pmModule prepared)) /= "RecoveryHome"
       && moduleNameString (moduleName (pmModule prepared)) /= "RecoveryCaller"
       && any topIsFst (pmBindings prepared)
+
+    hidden_defining_module hsc context hidden = do
+      hiddenEntry <- case
+        [ identity
+        | identity <- either (error . show) id (preparedTopIdentities [hidden])
+        , symbolOccurrence identity == Text.pack "hiddenText"
+        ] of
+        [identity] -> pure identity
+        found -> ioError (userError
+          ("expected one hiddenText entry, got " ++ show found))
+      let hiddenContext = context { projectionEntry = hiddenEntry }
+      closure <- recoverPreparedClosure hsc hiddenContext [hidden]
+      let isTextShow owner = moduleNameString (moduleName owner) == "Data.Text.Show"
+          preparedTextShow = [ prepared
+            | prepared <- closureModules closure, isTextShow (pmModule prepared) ]
+          finderResiduals = [ failure
+            | failure@(DefiningPreparationFailure (RecoveredModuleFinderFailure owner _))
+                <- closureFailures closure
+            , isTextShow owner ]
+      assert (any (not . null . pmBindings) preparedTextShow)
+        ("hidden defining Data.Text.Show body was not prepared: "
+          ++ show (closureFailures closure))
+      assert (null finderResiduals)
+        ("hidden defining module retained a finder residual: "
+          ++ show finderResiduals)
 
     topIsFst (binding, _) = any
       ((== "fst") . occNameString . nameOccName . varName)

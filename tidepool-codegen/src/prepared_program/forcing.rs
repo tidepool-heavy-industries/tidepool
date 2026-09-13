@@ -6,7 +6,7 @@
 //! current range/cursor again before reading fields. Snapshot every child's
 //! logical scalar/reference and register managed slots before the next force.
 //! Constructor identity/field reps come only from the owner's descriptor map.
-//! A single node budget covers roots and descendants; unknown/function/PAP
+//! A shared budget covers value nodes and copied payload bytes; unknown/function/PAP
 //! shapes and exhausted budget are typed observation failures. Cancellation
 //! governs evaluation inside force (a node budget cannot bound a diverging body).
 //!

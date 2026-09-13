@@ -36,8 +36,6 @@ import GHC.Driver.Config.Stg.Pipeline (initStgPipelineOpts)
 import GHC.Driver.Env (HscEnv(..))
 import GHC.Driver.Session
   (GeneralFlag(..), gopt_set, gopt_unset)
-import GHC.Iface.Errors.Types (ReadInterfaceError(..))
-import GHC.Iface.Load (readIface)
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Stg.Pipeline (StgCgInfos, StgPipelineOpts(..), StgToDo(..), stg2stg)
 import GHC.Stg.Syntax (CgStgTopBinding)
@@ -46,18 +44,16 @@ import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Var (Id, isId, varName)
 import GHC.Types.Name (isExternalName, nameModule_maybe)
-import GHC.Unit.Finder (FindResult(..), findImportedModule)
-import GHC.Unit.Module (moduleName)
-import GHC.Unit.Types (Module, moduleUnit, toUnitId)
-import GHC.Unit.Module.Location (ModLocation(ml_hi_file))
-import GHC.Data.Maybe (MaybeErr(..))
+import GHC.Unit.Types (Module)
+import GHC.Unit.Module.Location (ModLocation)
+import GHC.Unit.Module.ModIface (ModIface)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Unit.Module.ModSummary (ModSummary(..))
-import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
+import Tidepool.FatIface (ExactInterfaceFailure(..), readExactInterface)
 import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
 -- | Typed, pre-CorePrep input to the prepared pipeline.
@@ -187,33 +183,26 @@ recoveredSubsetScope owner bindings =
 prepareRecoveredBodies :: HscEnv -> Module -> [CoreBind]
   -> IO (Either RecoveredModuleFailure PreparedModule)
 prepareRecoveredBodies hscEnv owner bindings = do
-  found <- trySynchronous (findImportedModule hscEnv (moduleName owner)
-    (OtherPkg (toUnitId (moduleUnit owner))))
-  case found of
-    Left reason -> pure (Left (RecoveredModuleFinderFailure owner reason))
-    Right (Found location foundOwner)
-      | foundOwner == owner -> do
-          details <- trySynchronous (loadDefiningDetails hscEnv owner location)
-          case details of
-            Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
-            Right tycons -> do
-              prepared <- trySynchronous (prepareRecoveredModule hscEnv
-                (RecoveredModuleInput owner location tycons bindings))
-              pure $ case prepared of
-                Left reason -> Left (RecoveredModulePreparationFailure owner reason)
-                Right value -> Right value
-      | otherwise -> pure (Left (RecoveredModuleFinderFailure owner
-          ("finder returned " ++ renderModule foundOwner)))
-    Right other -> pure (Left (RecoveredModuleFinderFailure owner
-      (renderFindResult other)))
+  exact <- readExactInterface hscEnv owner
+  case exact of
+    Left (ExactInterfaceFinderFailure reason) ->
+      pure (Left (RecoveredModuleFinderFailure owner reason))
+    Left (ExactInterfaceReadFailure reason) ->
+      pure (Left (RecoveredModuleInterfaceFailure owner reason))
+    Right (iface, location) -> do
+      details <- trySynchronous (loadDefiningDetails hscEnv iface)
+      case details of
+        Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
+        Right tycons -> do
+          prepared <- trySynchronous (prepareRecoveredModule hscEnv
+            (RecoveredModuleInput owner location tycons bindings))
+          pure $ case prepared of
+            Left reason -> Left (RecoveredModulePreparationFailure owner reason)
+            Right value -> Right value
   where
-    loadDefiningDetails :: HscEnv -> Module -> ModLocation -> IO [TyCon]
-    loadDefiningDetails env modul location = do
+    loadDefiningDetails :: HscEnv -> ModIface -> IO [TyCon]
+    loadDefiningDetails env iface = do
       let doc = text "Tidepool recovered defining interface"
-      readResult <- readIface (hsc_dflags env) (hsc_NC env) modul (ml_hi_file location)
-      iface <- case readResult of
-        Succeeded value -> pure value
-        Failed failure -> ioError (userError (renderReadInterfaceError failure))
       details <- initIfaceCheck doc env (typecheckIface iface)
       pure (typeEnvTyCons (md_types details))
 
@@ -225,18 +214,6 @@ prepareRecoveredBodies hscEnv owner bindings = do
           Just async -> throwIO async
           Nothing -> pure (Left (displayException (exception :: SomeException)))
         Right value -> pure (Right value)
-
-    renderModule = showSDocUnsafe . ppr
-    renderReadInterfaceError failure = case failure of
-      ExceptionOccurred path exception -> path ++ ": " ++ displayException exception
-      HiModuleNameMismatchWarn path expected actual ->
-        path ++ ": expected " ++ renderModule expected
-          ++ ", found " ++ renderModule actual
-    renderFindResult result = case result of
-      Found _ foundOwner -> "found " ++ renderModule foundOwner
-      NoPackage _ -> "no package"
-      FoundMultiple _ -> "multiple matching modules"
-      NotFound{} -> "module not found"
 
 prepareBindings :: HscEnv -> Module -> ModLocation -> [TyCon] -> [CoreBind]
   -> Map String Id -> [YieldSite] -> IO PreparedModule

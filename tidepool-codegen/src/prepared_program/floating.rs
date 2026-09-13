@@ -19,6 +19,7 @@ pub(super) struct FloatingFamily;
 #[derive(Clone, Copy)]
 pub(super) enum FloatingOperation {
     NearestDouble,
+    Negate,
     Binary(BinaryKind),
     Compare(CompareKind),
     Convert { from_float: bool },
@@ -59,6 +60,7 @@ impl ScalarFamily for FloatingFamily {
                 return None;
             };
             let operation = match name.as_str() {
+                "negateDouble#" | "negateFloat#" => FloatingOperation::Negate,
                 "+##" | "-##" | "*##" | "/##" => FloatingOperation::Binary(match name.as_str() {
                     "+##" => BinaryKind::Add,
                     "-##" => BinaryKind::Sub,
@@ -103,6 +105,10 @@ impl ScalarFamily for FloatingFamily {
                 64
             };
             let valid = match operation {
+                FloatingOperation::Negate => {
+                    signature.arguments == [RuntimeRep::Float(width)]
+                        && returns_exact(signature, &[RuntimeRep::Float(width)])
+                }
                 FloatingOperation::Compare(_) => {
                     signature.arguments == [RuntimeRep::Float(width), RuntimeRep::Float(width)]
                         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -140,6 +146,7 @@ impl ScalarFamily for FloatingFamily {
     ) -> Vec<Value> {
         match operation {
             FloatingOperation::NearestDouble => vec![builder.ins().nearest(arguments[0])],
+            FloatingOperation::Negate => vec![builder.ins().fneg(arguments[0])],
             FloatingOperation::Binary(kind) => {
                 let value = match kind {
                     BinaryKind::Add => builder.ins().fadd(arguments[0], arguments[1]),
@@ -312,6 +319,32 @@ mod tests {
     }
 
     #[test]
+    fn ghc_negate_uses_native_fneg_and_preserves_signed_zero() {
+        for (input, expected) in [(0.0_f64, -0.0_f64), (-0.0, 0.0), (1.5, -1.5)] {
+            let values = run(
+                "negateDouble#",
+                vec![RuntimeRep::Float(64)],
+                vec![RuntimeRep::Float(64)],
+                vec![float(64, input.to_bits())],
+            );
+            assert!(matches!(values.as_slice(),
+                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                    if *bits == expected.to_bits()));
+        }
+        for (input, expected) in [(0.0_f32, -0.0_f32), (-0.0, 0.0), (1.5, -1.5)] {
+            let values = run(
+                "negateFloat#",
+                vec![RuntimeRep::Float(32)],
+                vec![RuntimeRep::Float(32)],
+                vec![float(32, u64::from(input.to_bits()))],
+            );
+            assert!(matches!(values.as_slice(),
+                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+                    if *bits == u64::from(expected.to_bits())));
+        }
+    }
+
+    #[test]
     fn ghc_float_family_rejects_wrong_signatures() {
         assert!(FloatingFamily::recognize(
             &OperationIdentity::PrimOp("plusFloat#".into()),
@@ -329,5 +362,36 @@ mod tests {
             }
         )
         .is_none());
+        for (name, arguments, results) in [
+            (
+                "negateDouble#",
+                vec![RuntimeRep::Float(32)],
+                vec![RuntimeRep::Float(32)],
+            ),
+            (
+                "negateDouble#",
+                vec![RuntimeRep::Float(64); 2],
+                vec![RuntimeRep::Float(64)],
+            ),
+            (
+                "negateFloat#",
+                vec![RuntimeRep::Float(64)],
+                vec![RuntimeRep::Float(64)],
+            ),
+            (
+                "negateFloat#",
+                vec![RuntimeRep::Float(32)],
+                vec![RuntimeRep::Float(64)],
+            ),
+        ] {
+            assert!(FloatingFamily::recognize(
+                &OperationIdentity::PrimOp(name.into()),
+                &Signature {
+                    arguments,
+                    results: ResultContract::Returns(results),
+                }
+            )
+            .is_none());
+        }
     }
 }

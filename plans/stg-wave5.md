@@ -6,8 +6,8 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
-Current local work supersedes the chronological records below. The last pushed
-head remains `18e4e1f70`; later local parcel commits are not yet a full-wave gate.
+Current work supersedes the chronological records below. The last pushed
+head is `9428ca687`; this checkpoint is not yet a full-wave gate.
 The completed `target/prepared-corpus/suite.kteZM6` replay contains all 812 tops:
 708 project and validate, 425 admit and compile, 256 execute, 136 match. Its
 first expression blockers are `plusAddr#` (125), `writeWordArray#` (15), `clz8#`
@@ -33,6 +33,18 @@ is forced only for negative values (including negative zero, excluding NaN).
 Byte observation charges both nodes and copied bytes. Formatting's internal
 Rust `String` allocation still follows Rust's abort-on-OOM behavior; this is a
 known limitation, not a typed-allocation guarantee.
+
+The subsequent real-source formatting probe passes all six stages for all five
+entries: projection, validation, admission, compilation, execution and comparison.
+Tracked source/targets/expectations are `FormattingExecutionContract.hs`,
+`FormattingExecutionTargets`, and `FormattingExecutionExpectations.json` under
+`haskell/test-prepared-stg`; results are
+`target/formatting-corpus.OMMcPp/results.json`. It required genuine bridge support
+for owned `LitByteArray` Text backing and `fneg` lowering for GHC's unary float
+primops. The original error-bearing precedence fixture remains projection-blocked
+by GHC stack-snapshot capability; the successful adjacent fixture uses recursive
+bottom, preserving the laziness obligation without that unrelated dependency.
+This five-case result is not a new full-corpus count.
 
 ### Earlier checkpoint evidence (chronological)
 
@@ -521,6 +533,30 @@ requires the intended mechanisms and interaction tests, not a named remainder
 alone. Review entry/update, remembered slots and recovered-body preparation.
 
 ## Trial record
+
+### Formatting and corpus-gap parcels
+
+These execution forks used Sol Medium under the current contributor guidance,
+not Luna; their results are not additional Luna calibration. All share a tree.
+
+| Parcel | Worker path | Lead assignment/review/correction events | Brief sufficiency / verification |
+| --- | --- | --- | --- |
+| Scalar address/Char/clz8 | Accepted first implementation | 1 / 1 / 0, plus lease messages | Sufficient; 3 focused tests passed. Two harness attempts stopped on another file's syntax and stale extractor preflight. |
+| Machine-word byte arrays | Accepted first implementation after syntax correction | 1 / 1 / 0 | Sufficient; 6 family tests passed. Neighbor compile caught the transient cast syntax error. |
+| Native formatting and bytes | Implemented, fresh review accepted; cross-language repair ongoing | Seed and assignment, 2 reviews, byte-budget contract clarification | 4 focused tests passed. Real-source integration exposed bridge byte-shape support and missing float negation; no expectation was relaxed. |
+| Formatting source authority | Corrected once | 1 / 1 / 1 semantic decision | Full module identity was insufficient for home-source shadowing. Compiled source equality was added and tested, with copied-source acceptance. |
+| Enum projection | Lead helper/fixture, worker tests | 1 seed / 1 assignment / 1 review | Helper compiled unchanged; test corrected its byte-order premise. Colour and Bool family tests passed. |
+| Hidden defining modules | Diagnosed; implementation in progress | 1 investigation / 1 seed+assignment / 1 correction | Exact bodies exist; import visibility is the wrong finder contract. Seed error must preserve finder versus interface failure types. |
+| Corpus executable snapshots | Accepted source change | 1 / 1 / 0 | Shell syntax and diff checks passed; actual full run pending. |
+
+Clean delegation shapes: exact-signature primitive additions and existing-owner
+byte operations. Correction shapes: source/projection test premises and
+integration adapters. Lead-owned decisions: intrinsic source authority, enum
+family evidence, and exact hidden-module lookup. Cross-language execution was
+necessary to find gaps absent from separately green producer/consumer tests.
+Per-worker and planner token totals are not exposed. Lease notifications and
+reactivation remained real lead work; immutable corpus executables remove one
+reason to serialize unrelated builds, not the need to coordinate shared files.
 
 ### Recovery-majority follow-up
 

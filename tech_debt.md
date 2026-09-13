@@ -23,3 +23,20 @@ wire-layout change requires an intentional coordinated migration.
 
 Wave 5 continues with the existing codec; this entry does not authorize a
 serialization redesign during that wave.
+
+## Prepared formatter allocation and source-less authority
+
+The native `Tidepool.Double` formatter calls `haskell_show_double` and may
+build a second `String` for precedence parentheses before it allocates the
+checked external byte payload. Those temporary Rust `String` allocations are
+not fallible, so process OOM can abort instead of yielding the prepared
+runtime's typed `HeapOverflow`. The external payload allocation and store
+already have checked failure paths; this debt is specific to temporary
+formatting storage, not all Text allocation.
+
+Formatter replacement is deliberately limited to loaded source whose bytes
+equal the extractor's compiled-in shipped `Tidepool/Double.hs`. A source-less
+package interface cannot prove that identity and stays on ordinary recovery.
+There is also no GHC stack-snapshot intrinsic in the prepared operation
+catalog; internal root snapshots are not a substitute for one. These are
+scope boundaries, not grounds to trust module spelling or invent an intrinsic.

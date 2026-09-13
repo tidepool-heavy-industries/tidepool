@@ -249,11 +249,11 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
       ++ intercalate ", " (map renderId allReferences))
   sourceHome <- liftIO $ prepareRecoveredBodies hsc (pmModule prepared) []
   case sourceHome of
-    Left RecoveredModuleFinderFailure{} -> pure ()
+    Left RecoveredModuleInterfaceFailure{} -> pure ()
     Left failure -> liftIO $ ioError (userError
-      ("source-home recovery reported wrong failure: " ++ show failure))
+      ("missing source-home interface reported wrong failure: " ++ show failure))
     Right _ -> liftIO $ ioError (userError
-      "source-home module was incorrectly admitted as recovered subset")
+      "missing source-home interface was unexpectedly readable")
   where
     isSemigroupOwner identifier = case nameModule_maybe (varName identifier) of
       Just owner -> moduleNameString (moduleName owner)

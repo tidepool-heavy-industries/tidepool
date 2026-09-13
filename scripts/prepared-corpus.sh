@@ -6,19 +6,45 @@ cd "$repo_root"
 
 output_root="$repo_root/target/prepared-corpus"
 mkdir -p "$output_root"
+run_root="$(mktemp -d "$output_root/run.XXXXXX")"
 priority_root="$(mktemp -d "$output_root/project-work-candidate.XXXXXX")"
 actor_root="$(mktemp -d "$output_root/agent-watch-await-settled.XXXXXX")"
 suite_root="$(mktemp -d "$output_root/suite.XXXXXX")"
+echo "==> prepared corpus executable snapshot: $run_root"
+echo "    provenance: $run_root/provenance.json"
 
 echo "==> building prepared corpus runner"
 cargo build -p tidepool-testing --bin prepared-corpus
-prepared_runner="$(cargo metadata --no-deps --format-version 1 \
+built_runner="$(cargo metadata --no-deps --format-version 1 \
   | jq -r '.target_directory')/debug/prepared-corpus"
-effects_core="$("$prepared_runner" effects-core)"
+prepared_runner="$run_root/prepared-corpus"
+cp --reflink=auto -- "$built_runner" "$prepared_runner"
 
 echo "==> building prepared corpus projection probe"
 ( cd haskell && cabal build execution-corpus-projection )
-projection_probe="$(cd haskell && cabal list-bin execution-corpus-projection)"
+built_probe="$(cd haskell && cabal list-bin execution-corpus-projection)"
+projection_probe="$run_root/execution-corpus-projection"
+cp --reflink=auto -- "$built_probe" "$projection_probe"
+chmod a-w -- "$prepared_runner" "$projection_probe"
+
+runner_hash="$(sha256sum -- "$prepared_runner" | cut -d ' ' -f1)"
+probe_hash="$(sha256sum -- "$projection_probe" | cut -d ' ' -f1)"
+git_head="$(git rev-parse HEAD)"
+git_dirty=false
+if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+  git_dirty=true
+fi
+jq -n \
+  --arg git_head "$git_head" --argjson git_dirty "$git_dirty" \
+  --arg runner_source "$built_runner" --arg runner_path "$prepared_runner" \
+  --arg runner_sha256 "$runner_hash" \
+  --arg probe_source "$built_probe" --arg probe_path "$projection_probe" \
+  --arg probe_sha256 "$probe_hash" \
+  '{git_head: $git_head, git_dirty: $git_dirty,
+    runner: {source: $runner_source, path: $runner_path, sha256: $runner_sha256},
+    projection_probe: {source: $probe_source, path: $probe_path, sha256: $probe_sha256}}' \
+  >"$run_root/provenance.json"
+effects_core="$("$prepared_runner" effects-core)"
 
 metadata="$repo_root/haskell/test/suite_cbor/meta.cbor"
 priority_expectations="$(mktemp)"
@@ -87,6 +113,7 @@ report_totals() {
 }
 
 echo "prepared corpus results:"
+echo "  executables and provenance: $run_root"
 echo "  priority: $priority_root"
 echo "  actor stdlib: $actor_root"
 echo "  suite:    $suite_root"

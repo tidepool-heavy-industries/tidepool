@@ -9,6 +9,7 @@
 module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, lookupFatIface
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact
+  , ExactInterfaceFailure(..), readExactInterface
   ) where
 
 import GHC.Core (CoreBind, Bind(..))
@@ -16,7 +17,7 @@ import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
 import GHC.Types.Name (Name, nameModule_maybe)
 import GHC.Types.Var (varName)
 import GHC.Unit.Types (Module, moduleUnit, moduleName, mkModule, toUnitId)
-import GHC.Unit.Module.ModIface (mi_extra_decls)
+import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls)
 import GHC.Utils.Outputable (showSDocUnsafe, ppr, text)
 
 import GHC.Iface.Load (findAndReadIface, readIface)
@@ -56,6 +57,11 @@ data FatIfaceModule
   = FatIfaceBindings (Map.Map Name CoreBind)
   | FatIfaceNoExtraDeclarations
   | FatIfaceLoadFailureOutcome String
+
+data ExactInterfaceFailure
+  = ExactInterfaceFinderFailure String
+  | ExactInterfaceReadFailure String
+  deriving (Eq, Show)
 
 lookupFatIfaceExact :: HscEnv -> FatIfaceCache -> Name -> IO FatIfaceLookup
 lookupFatIfaceExact hscEnv cache name = case nameModule_maybe name of
@@ -140,35 +146,52 @@ trySynchronous action = do
       Nothing -> pure (Left e)
     Right value -> pure (Right value)
 
+-- | Read an already-resolved defining identity, including hidden package
+-- modules. Import visibility is not a condition for preparing a recovered
+-- implementation. Preserve its exact location for CorePrep; home interfaces
+-- use the finder's recorded location, never a reconstructed source path.
+readExactInterface :: HscEnv -> Module
+  -> IO (Either ExactInterfaceFailure (ModIface, ModLocation))
+readExactInterface env owner = do
+  let installed = mkModule (toUnitId (moduleUnit owner)) (moduleName owner)
+  attempted <- trySynchronous $ findAndReadIface env
+    (text "Tidepool exact defining interface") installed owner NotBoot
+  case attempted of
+    Left exception -> pure (Left
+      (ExactInterfaceFinderFailure (displayException exception)))
+    Right (Succeeded pair) -> pure (Right pair)
+    Right (Failed (HomeModError _ location)) -> do
+      raw <- trySynchronous $ readIface (hsc_dflags env) (hsc_NC env)
+        owner (ml_hi_file location)
+      pure $ case raw of
+        Left exception -> Left (ExactInterfaceReadFailure (displayException exception))
+        Right (Succeeded iface) -> Right (iface, location)
+        Right (Failed failure) -> Left
+          (ExactInterfaceReadFailure (renderReadInterfaceError failure))
+    Right (Failed failure) -> pure $ Left $ case failure of
+      BadIfaceFile{} -> ExactInterfaceReadFailure
+        (renderMissingInterfaceError failure)
+      DynamicHashMismatchError{} -> ExactInterfaceReadFailure
+        (renderMissingInterfaceError failure)
+      FailedToLoadDynamicInterface{} -> ExactInterfaceReadFailure
+        (renderMissingInterfaceError failure)
+      _ -> ExactInterfaceFinderFailure (renderMissingInterfaceError failure)
+
 loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDeclsUnsafe hscEnv modl = do
   ifaceDbg <- lookupEnv "TIDEPOOL_IFACE_DEBUG"
   let doc = text "tidepool fat-iface lookup"
-      -- findAndReadIface wants InstalledModule (GenModule UnitId)
-      installedMod = mkModule (toUnitId (moduleUnit modl)) (moduleName modl)
-  -- Read .hi directly from disk — bypasses PIT, mi_extra_decls intact
-  readResult <- findAndReadIface hscEnv doc installedMod modl NotBoot
-  ifaceResult <- case readResult of
-    -- The finder rejects a @main@ unit as a home interface even when its
-    -- location is known. Retry that exact location through the raw reader;
-    -- this keeps local compiler sessions on the same exact path as installed
-    -- interfaces without consulting the PIT.
-    Failed (HomeModError _ location) -> do
-      rawResult <- readIface (hsc_dflags hscEnv) (hsc_NC hscEnv) modl (ml_hi_file location)
-      pure $ case rawResult of
-        Succeeded iface -> Right iface
-        Failed rawError -> Left (renderReadInterfaceError rawError)
-    Failed err -> pure (Left (renderMissingInterfaceError err))
-    Succeeded (iface, _loc) -> pure (Right iface)
+  -- Read .hi directly from disk — bypasses PIT, mi_extra_decls intact.
+  ifaceResult <- readExactInterface hscEnv modl
   case ifaceResult of
     Left reason -> do
       case ifaceDbg of
         Just _ -> hPutStrLn stderr $
           "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": could not read .hi file: "
-            ++ reason
+            ++ renderExactInterfaceFailure reason
         Nothing -> pure ()
-      return (FatIfaceLoadFailureOutcome reason)
-    Right iface ->
+      return (FatIfaceLoadFailureOutcome (renderExactInterfaceFailure reason))
+    Right (iface, _) ->
       case mi_extra_decls iface of
         Nothing -> do
           case ifaceDbg of
@@ -186,6 +209,11 @@ loadModuleExtraDeclsUnsafe hscEnv modl = do
               "  [fat-iface] " ++ showSDocUnsafe (ppr modl) ++ ": loaded " ++ show (length coreBinds) ++ " bindings"
             Nothing -> pure ()
           return (FatIfaceBindings (bindingsToMap coreBinds))
+
+renderExactInterfaceFailure :: ExactInterfaceFailure -> String
+renderExactInterfaceFailure failure = case failure of
+  ExactInterfaceFinderFailure reason -> reason
+  ExactInterfaceReadFailure reason -> reason
 
 -- | Index CoreBinds into a Name→CoreBind map.
 -- For NonRec bindings, each name maps to its own NonRec.

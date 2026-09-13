@@ -390,3 +390,7 @@ are nondeterministic.
 - Focused scalar compilation hit another worker's half-written byte-array
   expression despite disjoint ownership. A shared tree isolates files, not
   compilation revisions; ephemeral worktrees would remove this interruption.
+- A direct build-lease handoff stalled with both workers waiting for the other,
+  after an intervening verification parcel changed the queue. A typed lease
+  owner plus acknowledged grant/return events would remove this ambiguity; a
+  prose statement that the slot is "free" is not an acknowledged assignment.

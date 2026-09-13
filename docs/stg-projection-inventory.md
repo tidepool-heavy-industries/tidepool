@@ -18,8 +18,8 @@ the physical `NoSuccess` shape status-only. Lowering keeps the semantic result
 contract beside the physical register/area layout: status-only does not mean a
 successful zero-result value. See
 [`entry_abi.rs`](../tidepool-codegen/src/entry_abi.rs).
-The Wave 5 integration fold must regenerate and verify cross-language fixtures;
-these version declarations alone are not freshness evidence.
+Cross-language fixture freshness is a separate check; these version
+declarations alone are not freshness evidence.
 `RuntimeRep` is the physical representation boundary: `Void`, lifted/unlifted
 references, addresses, fixed-width `Int`/`Word`, and 32/64-bit floats. Layouts
 are canonical for the target pointer width, alignment, payload size, and root
@@ -68,6 +68,14 @@ and host identity. Unboxed tuple/multi-value results are represented by
 multiple result components and `MultiValue` cases; no pre-unarisation sum
 layout is reconstructed.
 
+GHC's `tagToEnum#` is not carried as an unimplemented operation. The producer
+requires an enumeration result type and machine-`Int#` argument, then lowers
+the complete GHC constructor family to a primitive `Int` case with zero-based
+literal alternatives and ordinary nullary `Construct` results. It invents no
+default or family member; the existing case-failure path handles an invalid
+tag. The focused fixture checks three-way `Colour` and two-way `Bool` families
+in [`ExecutionProjectionTest.hs`](../haskell/test-prepared-stg/ExecutionProjectionTest.hs).
+
 The validator checks bounds, ownership, scopes, unique wire binders, canonical
 layouts, constructor family/tag evidence, host-ID uniqueness, callable
 saturation, and result-contract evidence before a program can be linked.
@@ -80,9 +88,9 @@ that every validated form is executable by the native connected compiler.
 This is the current Wave 5 executable subset. It includes exact defining-module
 body recovery, generated lazy entry and settlement, generated PAP/application
 dispatch, forcing, invocation-local selective promotion, scoped old-space
-admission, and the admitted scalar families. It is still a subset: this
-inventory does not claim full lazy, imported, primitive, array, external-edge,
-or session-retention execution.
+admission, authenticated external payloads, and admitted scalar and array
+families. It is still a subset: this inventory does not claim full imported,
+primitive, effect, or session-retention execution.
 
 `tidepool-codegen::prepared_program::CompiledProgram` is a closed, pinned
 execution path for the Linux x86-64 little-endian 64-bit SysV profile. Its
@@ -110,8 +118,24 @@ The currently emitted strict subset is:
   no-mutator interval, exact-start old/static admission, and terminal
   `IncompletePromotion` handling;
 - scalar physical arguments/results, including `Int`, `Word`, `Float`,
-  `Double`, and the `rintDouble` intrinsic. Logical `Void` positions remain in
+  `Double`, exact-signature integer/floating families, `double2Int#`,
+  `plusAddr#`, `chr#`, `eqChar#`, `clz8#`, and the `rintDouble` intrinsic.
+  `indexCharOffAddr#` checks a signed offset against retained, NUL-terminated
+  pinned byte storage before returning a `Word(64)` character; it never
+  dereferences an unauthenticated address. Logical `Void` positions remain in
   signatures and layouts even when omitted from physical ABI payloads;
+- exact-signature boxed small/ordinary array new/read/index/write/size/freeze,
+  small-array shrink, and boxed CAS; and byte-array new/freeze/size plus
+  Word8, Word64, and Int64 read/index/write. Array host paths authenticate
+  active descriptor-backed payloads, check bounds, and report typed failures.
+  These operations do not imply parity with every GHC array primop;
+- the shipped `Tidepool.Double` `renderDouble`/`renderDoublePrec` wrappers.
+  Their real Haskell bodies use `show`/`showsPrec` and are not bottoming
+  placeholders. Projection replaces only wrappers whose resolved source bytes
+  match the extractor's compile-time shipped source, whose full GHC module
+  identity and types match, and whose Text constructor has the expected
+  `[UnliftedRef, Int64, Int64]` fields. The generated body preserves lazy
+  precedence demand and calls exact-signature native formatting intrinsics;
 - admitted `raise#` and saturated `NoSuccess` calls. Generated terminal code
   records the raised exception or unexpected return and exits with failure
   status without publishing a result. PAP completion and excess application
@@ -124,6 +148,10 @@ The implementation anchors for these claims are
 [`old_space/prepared.rs`](../tidepool-codegen/src/old_space/prepared.rs),
 [`gc/promotion.rs`](../tidepool-heap/src/gc/promotion.rs),
 [`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs),
+[`arrays.rs`](../tidepool-codegen/src/prepared_program/arrays.rs),
+[`byte_arrays.rs`](../tidepool-codegen/src/prepared_program/byte_arrays.rs),
+[`static_bytes.rs`](../tidepool-codegen/src/prepared_program/static_bytes.rs),
+[`formatting.rs`](../tidepool-codegen/src/prepared_program/formatting.rs),
 [`floating.rs`](../tidepool-codegen/src/prepared_program/floating.rs), and
 [`execution_schema.rs`](../tidepool-repr/src/execution_schema.rs). The terminal
 path is owned by
@@ -136,7 +164,7 @@ behavior are in
 [`no_success_tests.rs`](../tidepool-codegen/src/prepared_program/no_success_tests.rs).
 
 This is an executable connected subset, not a producer cutover. Globals/imports,
-effects, unimplemented foreign/primitive operations, and managed host arguments remain
+effects, other foreign/primitive operations, and managed host arguments remain
 outside this closed path. `Atom::Rubbish`
 is represented by the schema but native `atom_value` demand currently reports
 `Unsupported`; `NullAddress` has only the explicit `Address` lowering and is
@@ -199,13 +227,22 @@ copying and selective promotion traverse those edges in
 [`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs) and
 [`gc/promotion.rs`](../tidepool-heap/src/gc/promotion.rs). The prepared minor
 collector consumes that descriptor path in
-[`host_fns/gc.rs`](../tidepool-codegen/src/host_fns/gc.rs), but prepared
-Young/Retained payload classification and sweeping are not yet connected.
-The existing staged sweep in `MachineState` is consumed by the Core major
-collector in [`jit_machine.rs`](../tidepool-codegen/src/jit_machine.rs), not by
-prepared old arenas. Prepared array primitive emission is also absent, so
-these graph mechanisms do not establish prepared array allocation, mutation,
-or collection semantics.
+[`host_fns/gc.rs`](../tidepool-codegen/src/host_fns/gc.rs). The prepared minor
+collector sweeps Young payloads only after its final successful copy;
+promotion retains selected payloads independently of their young wrappers.
+The machine's checked stores update the external revision, invalidating stale
+sweep plans. These are connected mechanisms for the admitted arrays, not a
+claim that every external-storage operation or retention path is implemented.
+
+There is no GHC stack-snapshot intrinsic in this prepared projection/native
+operation catalog. Runtime root snapshots used by forcing and observation are
+internal mechanisms, not an authored primitive. Source-less package/interface
+copies of `Tidepool.Double` cannot pass the source-byte authority check and
+remain on ordinary recovery; no formatter replacement is inferred from a
+module name alone. Native formatting currently builds a Rust `String` before
+allocating its checked external byte payload; that temporary formatting
+allocation is not fallible and can abort on process OOM rather than returning
+the runtime's typed heap-overflow status.
 
 Imported/global resolution outside the owned executable subset, effects,
 foreign calls, unsupported primitive operations, and full corpus execution
@@ -215,12 +252,12 @@ this inventory.
 
 ## Wave 5 checkpoint — 2026-09-13
 
-At `50beeb099`, the focused checkpoint passed 79 prepared-program tests, 64
+At the historical `50beeb099` checkpoint, focused checks passed 79 prepared-program tests, 64
 heap tests, and the workspace test compilation. The generated fixtures were
 then refreshed with the extractor variables unset and the freshness check
 passed; only `.source-fingerprint` changed and all 695 generated fixture files
-were byte-identical. Freshness is not semantic-green evidence: the latest
-Suite report has 109 comparison matches out of 812 tops, 67 missing
+were byte-identical. Freshness is not semantic-green evidence: that checkpoint's
+Suite report had 109 comparison matches out of 812 tops, 67 missing
 expectations, 11 projection failures, 501 admission failures, 124 execution
 failures, and zero comparison mismatches. The optimized divergent
 `thunk_blackhole` row still hit the 120-second watchdog. Test anchors are
@@ -231,10 +268,9 @@ failures, and zero comparison mismatches. The optimized divergent
 and the heap GC tests under
 [`tidepool-heap/src/gc`](../tidepool-heap/src/gc).
 
-A later focused fold passed 103 prepared-program tests and compiled the
-workspace before the external-graph seed landed. These checks do not validate
-the current graph source; prepared generation/sweeping work and its focused
-checks remain pending.
+A later historical focused fold passed 103 prepared-program tests and compiled
+the workspace before the external-graph seed landed; those counts do not
+validate the current graph source. No new corpus match count is asserted here.
 
 ## Reviewed Wave 4 contracts — 2026-09-12
 
@@ -270,7 +306,7 @@ ambiguous exact external matches reject the producer. All-tops compilation or
 identity-enumeration failure aborts instead of writing a successful empty
 corpus. Consumer validation likewise rejects suffix-alias oracle keys.
 
-The current Suite run contains 812 actual tops: 801 projected and validated,
+That historical Suite run contained 812 actual tops: 801 projected and validated,
 with 11 projection rejections. Historical coverage is a separate denominator:
 255 of 347 legacy names mapped and 92 remained unmapped. The comparator has
 109 matches and 0 failures among reached rows, but 67 rows have missing

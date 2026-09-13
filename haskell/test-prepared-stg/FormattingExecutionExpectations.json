@@ -1,0 +1,10 @@
+{
+  "source_revision": "FormattingExecutionContract.hs",
+  "expectations": {
+    "formatValue": { "kind": "text", "value": "1.5" },
+    "formatContinuation": { "kind": "int", "value": 7 },
+    "positiveLazyPrecedence": { "kind": "text", "value": "1.5" },
+    "negativeZeroPrec": { "kind": "text", "value": "(-0.0)" },
+    "partialValue": { "kind": "text", "value": "(-0.0)" }
+  }
+}
