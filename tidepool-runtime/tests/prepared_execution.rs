@@ -1,6 +1,6 @@
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_repr::execution_schema::{
-    parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, MachineImports,
+    parse_program, Architecture, DecodeLimits, Endianness, Group, ImportedValue, MachineImports,
     ProgramRequirements, TargetDescriptor, ValueId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 use tidepool_runtime::prepared_execution::{
@@ -47,6 +47,30 @@ fn imports() -> MachineImports {
             })
             .collect(),
     }
+}
+
+fn fixture_binding_id(name: &str) -> ValueId {
+    let prepared = parse_program(ARTIFACT, &requirements(), DecodeLimits::default()).unwrap();
+    let mut matches = prepared
+        .bindings()
+        .iter()
+        .flat_map(|group| match group {
+            Group::NonRecursive(binding) => std::slice::from_ref(binding),
+            Group::Recursive(bindings) => bindings.as_slice(),
+        })
+        .filter(|binding| {
+            binding.identity.module == "M3Vertical" && binding.identity.occurrence == name
+        });
+    let id = matches
+        .next()
+        .expect("fixture must define the named binding")
+        .binding
+        .id;
+    assert!(
+        matches.next().is_none(),
+        "fixture binding must be unambiguous"
+    );
+    id
 }
 
 #[test]
@@ -105,6 +129,8 @@ fn one_shot_rejects_missing_import_malformed_and_precancel() {
 
 #[test]
 fn retained_session_reuses_program_and_preserves_disposition() {
+    let box_id = fixture_binding_id("Box");
+    let unsupported_id = fixture_binding_id("entry");
     let mut session = PreparedPersistentSession::from_artifact(
         ARTIFACT,
         &requirements(),
@@ -114,17 +140,17 @@ fn retained_session_reuses_program_and_preserves_disposition() {
     .unwrap();
     let cancel = session.new_cancel_handle();
     let first = session
-        .run_entry(Some(ValueId(17)), &[42], true, &cancel)
+        .run_entry(Some(box_id), &[42], true, &cancel)
         .unwrap();
     let second = session
-        .run_entry(Some(ValueId(17)), &[99], true, &cancel)
+        .run_entry(Some(box_id), &[99], true, &cancel)
         .unwrap();
     assert_eq!(first.value.fields, vec![42]);
     assert_eq!(second.value.fields, vec![99]);
     assert_eq!(session.disposition(), MachineDisposition::Reusable);
 
     let rejected = session
-        .run_entry(Some(ValueId(16)), &[], false, &cancel)
+        .run_entry(Some(unsupported_id), &[], false, &cancel)
         .unwrap_err();
     assert_eq!(rejected.kind(), PreparedFailureKind::Rejected);
     assert_eq!(session.disposition(), MachineDisposition::Reusable);
@@ -132,7 +158,7 @@ fn retained_session_reuses_program_and_preserves_disposition() {
     let cancelled = session.new_cancel_handle();
     cancelled.cancel();
     assert!(matches!(
-        session.run_entry(Some(ValueId(17)), &[1], false, &cancelled),
+        session.run_entry(Some(box_id), &[1], false, &cancelled),
         Err(PreparedRuntimeError::Cancelled)
     ));
     assert_eq!(session.disposition(), MachineDisposition::Reusable);

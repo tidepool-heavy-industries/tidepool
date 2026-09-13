@@ -198,11 +198,18 @@ impl Drop for Value {
             struct Reset<'a>(&'a RefCell<Option<Vec<Value>>>);
             impl Drop for Reset<'_> {
                 fn drop(&mut self) {
-                    *self.0.borrow_mut() = None;
+                    // Release the borrow before any queued values are dropped:
+                    // their Drop implementation re-enters this same queue.
+                    let remaining = self.0.borrow_mut().take();
+                    drop(remaining);
                 }
             }
             let _reset = Reset(slot);
-            while let Some(value) = slot.borrow_mut().as_mut().and_then(Vec::pop) {
+            loop {
+                // A while-let scrutinee keeps this RefMut alive through the
+                // body, where dropping `value` must borrow the queue again.
+                let next = { slot.borrow_mut().as_mut().and_then(Vec::pop) };
+                let Some(value) = next else { break };
                 drop(value);
             }
         });

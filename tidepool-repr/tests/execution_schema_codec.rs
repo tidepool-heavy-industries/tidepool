@@ -28,6 +28,7 @@ fn root(signatures: Cbor) -> Cbor {
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
+        Cbor::Array(vec![]),
         int(0),
     ])
 }
@@ -63,7 +64,8 @@ fn global_with_generation(generation: Cbor) -> Cbor {
             Cbor::Text("value".into()),
             Cbor::Text("retained".into()),
         ]),
-        int(0),
+        Cbor::Array(vec![int(1)]),
+        Cbor::Array(vec![int(0)]),
         Cbor::Bool(true),
         generation,
     ])
@@ -152,7 +154,7 @@ fn codec_rejects_truncated_trailing_and_indefinite_input() {
 }
 
 #[test]
-fn codec_rejects_maps_wrong_lengths_and_excessive_depth() {
+fn codec_rejects_maps_wrong_lengths_and_excessive_container_nesting() {
     let map = bytes(&Cbor::Map(vec![]));
     assert!(matches!(
         parse_program(&map, &requirements(), DecodeLimits::default()),
@@ -165,14 +167,13 @@ fn codec_rejects_maps_wrong_lengths_and_excessive_depth() {
         Err(ParseError::Malformed(_))
     ));
 
-    let encoded = bytes(&root(Cbor::Array(vec![])));
-    let depth_limits = DecodeLimits {
-        max_depth: 0,
-        ..DecodeLimits::default()
-    };
+    let mut nested = Cbor::Null;
+    for _ in 0..33 {
+        nested = Cbor::Array(vec![nested]);
+    }
     assert!(matches!(
-        parse_program(&encoded, &requirements(), depth_limits),
-        Err(ParseError::LimitExceeded("depth"))
+        parse_program(&bytes(&nested), &requirements(), DecodeLimits::default()),
+        Err(ParseError::Malformed(detail)) if detail.contains("container nesting")
     ));
 }
 
@@ -215,7 +216,7 @@ fn public_parse_rejects_wrong_declared_result_representation() {
         ]),
     ]);
     let body = a(vec![int(0), a(vec![scalar])]);
-    let rhs = a(vec![int(0), int(0), a(vec![]), a(vec![]), body]);
+    let rhs = a(vec![int(0), int(0), a(vec![]), a(vec![]), int(0)]);
     let symbol = a(vec![
         Cbor::Text("fixture".into()),
         Cbor::Text("Probe".into()),
@@ -227,7 +228,8 @@ fn public_parse_rejects_wrong_declared_result_representation() {
     let Cbor::Array(fields) = &mut program else {
         unreachable!()
     };
-    fields[10] = a(vec![a(vec![int(0), top])]);
+    fields[10] = a(vec![body]);
+    fields[11] = a(vec![a(vec![int(0), top])]);
     assert!(matches!(
         parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
         Err(ParseError::InvalidSignature(_))

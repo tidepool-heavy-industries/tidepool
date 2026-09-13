@@ -165,3 +165,38 @@ are nondeterministic.
 - Ambient root registries can contain the same slot more than once. The new
   collector reuses sorted/deduplicated root-slot scratch before mutation;
   accepting arbitrary destination pointers would hide invalid initial roots.
+- A full-suite test can expose a missing migration that focused library tests
+  miss. After removing the obsolete expression-depth limit, the repr library
+  passed but `execution_schema_codec` still constructed `DecodeLimits` with
+  `max_depth`. Keep wire-shape integration tests in the schema change's focused
+  compile selection; the corrected 13-field codec suite now passes.
+- A deep-value test exposed a dormant Drop-queue borrow bug. The `while let`
+  condition held a `RefMut` across `drop(value)`, and dropping a constructor
+  re-entered the same queue, panicking and then overflowing during unwind.
+  Extracting the next item in a shorter borrow scope makes the existing
+  iterative Drop work at 30,000 levels on a 64 KiB stack.
+- GHC local `Id` reuse across separate top-level RHS scopes invalidated the
+  projection's program-wide `Id`-to-`ValueId` memoization: parameters of
+  `importedReverse` and `Box` both became `ValueId(41)` in the M3 fixture.
+  The schema-v4 global-binder check caught it before native compilation.
+  Projection now allocates lexical binder IDs with scoped lookup, with a
+  producer regression; a Rust-side duplicate exception would hide the alias.
+  The regenerated fixture also moved numeric IDs, exposing one retained-session
+  test still selecting entries by number. It now resolves Box and entry by
+  their symbolic identities.
+- Exact-symbol closure keys remove a second GHC-unique assumption at the
+  projection's top-level boundary, but do not make target selection complete.
+  An exploratory M3 target check for `polymorphicIdentityResult` retained only
+  that top binding even though the full projection contains a Local call to
+  `polymorphicIdentity`: the prepared `pmBindings` free-variable evidence omits
+  that intra-module dependency. The exploratory assertion was not added to
+  the passing suite. Connected execution must repair the dependency source
+  before treating target-only projection as a complete program.
+- The workspace compile-only warm-up is blocked before the prepared targets by
+  unchanged `tidepool-macro/src/expand.rs:32`: it calls
+  `syn::parse2::<InlineInput>` but this file defines no `InlineInput` type.
+  `nix develop --command cargo build --workspace --tests` reproduces E0425;
+  `git show HEAD:tidepool-macro/src/expand.rs` confirms the missing type is
+  already in committed HEAD. A HEAD-only build was not run. Focused
+  changed-target tests compile and run, but this is not a completed workspace
+  build.

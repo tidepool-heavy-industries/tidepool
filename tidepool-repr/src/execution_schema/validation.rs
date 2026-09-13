@@ -15,9 +15,8 @@ struct ValueType {
     callable: Option<SignatureId>,
 }
 
-// The recursion driver schedules mapped children on a LIFO stack. Keeping
-// children in reverse source order here makes its expansion order match the
-// validator's established diagnostic order.
+// Diagnostics run a node's own checks, then its children in source order.
+// The recursion driver's LIFO stack needs children stored in reverse order.
 struct OrderedFrame<A> {
     children: Vec<A>,
     index: usize,
@@ -38,20 +37,62 @@ impl MappableFrame for OrderedFrame<PartiallyApplied> {
     }
 }
 
-fn child_indices(frame: &ExprFrame<usize>) -> Vec<usize> {
-    let mut children = Vec::new();
-    <ExprFrame<PartiallyApplied> as MappableFrame>::map_frame(frame.clone(), |child| {
-        children.push(child);
-        child
-    });
-    children
+fn for_each_child<E>(
+    frame: &ExprFrame<usize>,
+    mut visit: impl FnMut(usize) -> Result<(), E>,
+) -> Result<(), E> {
+    match frame {
+        ExprFrame::Return(_)
+        | ExprFrame::Enter { .. }
+        | ExprFrame::Call { .. }
+        | ExprFrame::Operation { .. }
+        | ExprFrame::Construct { .. }
+        | ExprFrame::Jump { .. } => {}
+        ExprFrame::Case {
+            scrutinee,
+            alternatives,
+            ..
+        } => {
+            visit(*scrutinee)?;
+            for alternative in alternatives {
+                visit(alternative.body)?;
+            }
+        }
+        ExprFrame::Let { bindings, body } => {
+            let mut visit_binding = |binding: &HeapBinding| match &binding.rhs {
+                HeapRhs::Function { body, .. } | HeapRhs::Thunk { body, .. } => visit(*body),
+                HeapRhs::Bytes(_) | HeapRhs::Constructor { .. } => Ok(()),
+            };
+            match bindings {
+                Group::NonRecursive(binding) => visit_binding(binding)?,
+                Group::Recursive(bindings) => {
+                    for binding in bindings {
+                        visit_binding(binding)?;
+                    }
+                }
+            }
+            visit(*body)?;
+        }
+        ExprFrame::LetJoins { bindings, body } => {
+            match bindings {
+                Group::NonRecursive(binding) => visit(binding.body)?,
+                Group::Recursive(bindings) => {
+                    for binding in bindings {
+                        visit(binding.body)?;
+                    }
+                }
+            }
+            visit(*body)?;
+        }
+    }
+    Ok(())
 }
 
 fn check_flat_tree(tree: &Expr, bindings: &[Group<super::TopBinding>]) -> Result<(), ParseError> {
     let len = tree.nodes.len();
     let mut parents = vec![0u8; len];
     for (index, frame) in tree.nodes.iter().enumerate() {
-        for child in child_indices(frame) {
+        for_each_child(frame, |child| {
             if child >= index {
                 return Err(ParseError::InvalidReference(format!(
                     "expression child {child} must precede parent {index}"
@@ -63,7 +104,8 @@ fn check_flat_tree(tree: &Expr, bindings: &[Group<super::TopBinding>]) -> Result
                     "expression child {child} has multiple parents"
                 )));
             }
-        }
+            Ok(())
+        })?;
     }
     let mut add_root = |binding: &super::TopBinding| -> Result<(), ParseError> {
         let root = match &binding.binding.rhs {
@@ -132,6 +174,7 @@ enum Action {
 #[derive(Clone)]
 struct Seed {
     index: usize,
+    group_actions: Option<Rc<[Action]>>,
     actions: Vec<Action>,
     expected: Option<Rc<Vec<RuntimeRep>>>,
 }
@@ -442,6 +485,7 @@ impl<'w, 'p> Walker<'w, 'p> {
         &mut self,
         rhs: &HeapRhs<B>,
         body: usize,
+        group_actions: Option<Rc<[Action]>>,
         mut actions: Vec<Action>,
     ) -> Result<Option<Seed>, ParseError> {
         if !self.typed {
@@ -505,6 +549,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 });
                 Ok(Some(Seed {
                     index: body,
+                    group_actions,
                     actions,
                     expected: Some(Rc::new(signature.results)),
                 }))
@@ -526,6 +571,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 });
                 Ok(Some(Seed {
                     index: body,
+                    group_actions,
                     actions,
                     expected: Some(Rc::new(signature.results)),
                 }))
@@ -551,14 +597,18 @@ impl<'w, 'p> Walker<'w, 'p> {
             HeapRhs::Function { body, .. } | HeapRhs::Thunk { body, .. } => *body,
             HeapRhs::Bytes(_) | HeapRhs::Constructor { .. } => 0,
         };
-        let seed = self.rhs_seed(&binding.rhs, body, Vec::new())?;
+        let seed = self.rhs_seed(&binding.rhs, body, None, Vec::new())?;
         self.walk(seed)
     }
 
     fn expand(&mut self, seed: Seed) -> Result<OrderedFrame<Seed>, ParseError> {
         let mark = self.undo.len();
+        if let Some(actions) = &seed.group_actions {
+            self.apply(actions)?;
+        }
         self.apply(&seed.actions)?;
         let tree = self.tree;
+        // check_flat_tree has already verified every reachable child index.
         let frame = &tree.nodes[seed.index];
         if !self.typed {
             self.validator.bump_node()?;
@@ -625,6 +675,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             } => {
                 children.push(Seed {
                     index: *scrutinee,
+                    group_actions: None,
                     actions: Vec::new(),
                     expected: Some(Rc::new(scrutinee_reps.clone())),
                 });
@@ -641,7 +692,8 @@ impl<'w, 'p> Walker<'w, 'p> {
                 let actions = self.local_children(bindings, &mut children)?;
                 children.push(Seed {
                     index: *body,
-                    actions,
+                    group_actions: Some(actions),
+                    actions: Vec::new(),
                     expected: seed.expected.clone(),
                 });
             }
@@ -649,7 +701,8 @@ impl<'w, 'p> Walker<'w, 'p> {
                 let actions = self.join_children(bindings, &mut children)?;
                 children.push(Seed {
                     index: *body,
-                    actions,
+                    group_actions: Some(actions),
+                    actions: Vec::new(),
                     expected: seed.expected.clone(),
                 });
             }
@@ -748,7 +801,7 @@ impl<'w, 'p> Walker<'w, 'p> {
         &mut self,
         bindings: &Group<HeapBinding>,
         children: &mut Vec<Seed>,
-    ) -> Result<Vec<Action>, ParseError> {
+    ) -> Result<Rc<[Action]>, ParseError> {
         match bindings {
             Group::NonRecursive(binding) => {
                 if self.value(binding.id)?.is_some() {
@@ -762,13 +815,13 @@ impl<'w, 'p> Walker<'w, 'p> {
                     HeapRhs::Function { body, .. } | HeapRhs::Thunk { body, .. } => *body,
                     _ => 0,
                 };
-                if let Some(seed) = self.rhs_seed(&binding.rhs, body, Vec::new())? {
+                if let Some(seed) = self.rhs_seed(&binding.rhs, body, None, Vec::new())? {
                     children.push(seed);
                 }
-                Ok(vec![Action::Value(
+                Ok(Rc::from(vec![Action::Value(
                     binding.id,
                     self.validator.binding_type(binding),
-                )])
+                )]))
             }
             Group::Recursive(bindings) => {
                 if bindings.is_empty() {
@@ -792,6 +845,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                         self.validator.binding_type(binding),
                     ));
                 }
+                let actions: Rc<[Action]> = Rc::from(actions);
                 let mark = self.undo.len();
                 self.apply(&actions)?;
                 for binding in bindings {
@@ -799,7 +853,9 @@ impl<'w, 'p> Walker<'w, 'p> {
                         HeapRhs::Function { body, .. } | HeapRhs::Thunk { body, .. } => *body,
                         _ => 0,
                     };
-                    if let Some(seed) = self.rhs_seed(&binding.rhs, body, actions.clone())? {
+                    if let Some(seed) =
+                        self.rhs_seed(&binding.rhs, body, Some(actions.clone()), Vec::new())?
+                    {
                         children.push(seed);
                     }
                 }
@@ -813,7 +869,7 @@ impl<'w, 'p> Walker<'w, 'p> {
         &mut self,
         bindings: &Group<JoinBinding>,
         children: &mut Vec<Seed>,
-    ) -> Result<Vec<Action>, ParseError> {
+    ) -> Result<Rc<[Action]>, ParseError> {
         let all: Vec<_> = match bindings {
             Group::NonRecursive(binding) => vec![binding],
             Group::Recursive(bindings) => {
@@ -838,6 +894,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             }
             actions.push(Action::Join(binding.id, binding.signature));
         }
+        let actions: Rc<[Action]> = Rc::from(actions);
         for binding in all {
             let signature = self.validator.signature(binding.signature)?.clone();
             if signature.arguments.len() != binding.parameters.len() {
@@ -853,11 +910,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             for id in &binding.parameters {
                 self.register_value(*id)?;
             }
-            let mut child_actions = if matches!(bindings, Group::Recursive(_)) {
-                actions.clone()
-            } else {
-                Vec::new()
-            };
+            let mut child_actions = Vec::new();
             child_actions.extend(
                 binding
                     .parameters
@@ -876,6 +929,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             );
             children.push(Seed {
                 index: binding.body,
+                group_actions: matches!(bindings, Group::Recursive(_)).then(|| actions.clone()),
                 actions: child_actions,
                 expected: Some(Rc::new(signature.results)),
             });
@@ -1048,6 +1102,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             }
             children.push(Seed {
                 index: alternative.body,
+                group_actions: None,
                 actions,
                 expected: expected.clone(),
             });

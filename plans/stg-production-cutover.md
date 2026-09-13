@@ -340,6 +340,22 @@ Before broad lowering, review the result/root and retained-code boundary as a
 unit. Adding expression cases to the current one-constructor adapter would
 extend a temporary wrapper, not complete the production engine.
 
+Target-only projection needs a dependency-source repair before it can be a
+production completeness boundary. In the M3 probe, targeting
+`polymorphicIdentityResult` retains only that top binding although its full
+projection calls local `polymorphicIdentity`; `pmBindings` free-variable
+evidence omits that edge. Exact-symbol lookup fixes ID aliasing, not missing
+dependency evidence. Keep the full-program projection as the checked input
+until the target closure is proven complete.
+
+Schema-v4 checkpoint verification: the full `tidepool-repr` suite, focused
+bridge deep-value tests, prepared-native, prepared-runtime, toolchain artifact,
+CBOR property, Haskell projection, canonical fixture freshness, and suite
+registration checks passed. Workspace `cargo build --workspace --tests` did
+not complete: unchanged `tidepool-macro/src/expand.rs:32` references undefined
+`InlineInput` (E0425). This is a separate compile blocker, not evidence that
+the workspace is green.
+
 1. `entry_abi.rs`, `descriptor_bridge.rs` and `MachineState`: choose one typed
    status/multi-result transport and root managed result slots across later
    safepoints. Keep lifted/unlifted distinctions in the owning value contract.

@@ -13,6 +13,8 @@ import Data.ByteString qualified as BS
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32, Word64, Word8)
@@ -34,10 +36,9 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Var (Id, varName, varType)
-import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv, mkVarEnv)
+import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
-import GHC.Types.Unique.Set
-  (UniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
 import Tidepool.ExecutionSchema
@@ -63,6 +64,7 @@ data ProjectionError
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv JoinId
+  , topValues :: Map SymbolIdentity ValueId
   , globals :: VarEnv GlobalId, globalDecls :: [GlobalDecl]
   , constructors :: [(DataCon, ConstructorId)], constructorDecls :: [ConstructorDecl]
   , operations :: [(Text, OperationId)], operationDecls :: [OperationDecl]
@@ -76,12 +78,12 @@ type P a = StateT PState (Either ProjectionError) a
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv [] [] [] [] [] [] machine Map.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPrepared context modules = do
-  let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv [] [] [] [] [] []
+  let initial = PState 0 0 emptyVarEnv emptyVarEnv Map.empty emptyVarEnv [] [] [] [] [] []
         (projectionTarget context) (projectionRetainedGenerations context)
   (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
@@ -120,25 +122,28 @@ projectPreparedTarget context modules =
   where
     allBindings = concatMap pmBindings modules
     entry = projectionEntry context
-    seedIds =
-      [ binder
+    seedSymbols =
+      [ symbol
       | (binding, _) <- allBindings
       , binder <- topBinders binding
-      , idSymbol "value" binder == entry
+      , let symbol = idSymbol "value" binder
+      , symbol == entry
       ]
-    dependencies = mkVarEnv
-      [ (binder, nonDetEltsUniqSet freeVars)
+    dependencies = Map.fromListWith (<>)
+      [ (idSymbol "value" binder, map (idSymbol "value") (nonDetEltsUniqSet freeVars))
       | (binding, freeVars) <- allBindings
       , binder <- topBinders binding
       ]
-    reachableIds = close emptyUniqSet seedIds
-    isReachable (binding, _) = any (`elementOfUniqSet` reachableIds) (topBinders binding)
-    close :: UniqSet Id -> [Id] -> UniqSet Id
+    reachableSymbols = close Set.empty seedSymbols
+    isReachable (binding, _) = any
+      (\binder -> idSymbol "value" binder `Set.member` reachableSymbols)
+      (topBinders binding)
+    close :: Set SymbolIdentity -> [SymbolIdentity] -> Set SymbolIdentity
     close visited [] = visited
-    close visited (binder : pending)
-      | binder `elementOfUniqSet` visited = close visited pending
-      | otherwise = close (addOneToUniqSet visited binder)
-          (maybe pending (++ pending) (lookupVarEnv dependencies binder))
+    close visited (symbol : pending)
+      | symbol `Set.member` visited = close visited pending
+      | otherwise = close (Set.insert symbol visited)
+          (maybe pending (++ pending) (Map.lookup symbol dependencies))
 
 topBinders :: CgStgTopBinding -> [Id]
 topBinders (StgTopStringLit binder _) = [binder]
@@ -147,15 +152,15 @@ topBinders (StgTopLifted binding) = bindingBinders binding
 preallocate :: [PreparedModule] -> P ()
 preallocate = mapM_ (mapM_ allocateTop . pmBindings)
   where
-    allocateTop (StgTopStringLit binder _, _) = ensureValue binder >> pure ()
-    allocateTop (StgTopLifted binding, _) = mapM_ ensureValue (bindingBinders binding) >> pure ()
+    allocateTop (StgTopStringLit binder _, _) = allocateTopValue binder >> pure ()
+    allocateTop (StgTopLifted binding, _) = mapM_ allocateTopValue (bindingBinders binding) >> pure ()
 
 projectModule :: PreparedModule -> P [Group TopBinding]
 projectModule = mapM (projectTop . fst) . pmBindings
 
 projectTop :: CgStgTopBinding -> P (Group TopBinding)
 projectTop (StgTopStringLit binder bytes) = do
-  identity <- requireValue binder
+  identity <- requireTopValue binder
   pure (NonRecursive (TopBinding (idSymbol "value" binder)
     (HeapBinding identity (Bytes bytes))))
 projectTop (StgTopLifted (StgNonRec binder rhs)) = NonRecursive <$> projectTopPair binder rhs
@@ -163,12 +168,12 @@ projectTop (StgTopLifted (StgRec pairs)) = Recursive <$> mapM (uncurry projectTo
 
 projectTopPair :: Id -> CgStgRhs -> P TopBinding
 projectTopPair binder rhs = TopBinding (idSymbol "value" binder)
-  <$> (HeapBinding <$> requireValue binder <*> projectRhs binder rhs)
+  <$> (HeapBinding <$> requireTopValue binder <*> projectRhs binder rhs)
 
 projectRhs :: Id -> CgStgRhs -> P HeapRhs
-projectRhs binder (StgRhsClosure captures _ update parameters body resultType) = do
+projectRhs binder (StgRhsClosure captures _ update parameters body resultType) = withScope $ do
   captureRefs <- mapM projectReference (dVarSetElems captures)
-  parameterIds <- mapM ensureParameterValue parameters
+  parameterIds <- mapM bindValue parameters
   resultReps <- repsForType resultType
   projectedBody <- projectExpr resultReps body
   case update of
@@ -213,14 +218,16 @@ projectExpr _ (StgOpApp op args resultType) = do
   Operation <$> internOperation op signature <*> mapM projectArg args
 projectExpr expected (StgCase scrutinee binder altType alts) = do
   binderReps <- repsForType (varType binder)
-  Case <$> projectExpr binderReps scrutinee
-    <*> ensureValue binder <*> pure binderReps
-    <*> projectCaseKind altType <*> mapM (projectAlt expected altType) alts
-projectExpr expected (StgLet _ binding body) = do
-  mapM_ ensureValue (bindingBinders binding)
+  projectedScrutinee <- projectExpr binderReps scrutinee
+  kind <- projectCaseKind altType
+  (identity, alternatives) <- withScope $ do
+    identity <- bindValue binder
+    alternatives <- mapM (projectAlt expected altType) alts
+    pure (identity, alternatives)
+  pure (Case projectedScrutinee identity binderReps kind alternatives)
+projectExpr expected (StgLet _ binding body) = withScope $
   Let <$> projectLocalGroup binding <*> projectExpr expected body
-projectExpr expected (StgLetNoEscape _ binding body) = do
-  mapM_ ensureJoin (bindingBinders binding)
+projectExpr expected (StgLetNoEscape _ binding body) = withScope $
   LetJoins <$> projectJoinGroup binding <*> projectExpr expected body
 projectExpr expected (StgTick _ body) = projectExpr expected body
 
@@ -232,10 +239,10 @@ projectCaseKind PolyAlt = pure PolymorphicCase
 
 projectAlt :: [RuntimeRep] -> AltType -> CgStgAlt -> P Alternative
 projectAlt expected (MultiValAlt _) (GenStgAlt (DataAlt con) binders body)
-  | isUnboxedTupleDataCon con = Alternative DefaultPattern
-      <$> mapM ensureValue binders <*> projectExpr expected body
-projectAlt expected _ (GenStgAlt con binders body) = Alternative <$> projectPattern con
-  <*> mapM ensureValue binders <*> projectExpr expected body
+  | isUnboxedTupleDataCon con = withScope $ Alternative DefaultPattern
+      <$> mapM bindValue binders <*> projectExpr expected body
+projectAlt expected _ (GenStgAlt con binders body) = withScope $ Alternative <$> projectPattern con
+  <*> mapM bindValue binders <*> projectExpr expected body
 
 projectPattern :: AltCon -> P AlternativePattern
 projectPattern DEFAULT = pure DefaultPattern
@@ -243,23 +250,33 @@ projectPattern (DataAlt con) = ConstructorPattern <$> internConstructor con
 projectPattern (LitAlt literal) = LiteralPattern <$> projectLiteral literal
 
 projectLocalGroup :: CgStgBinding -> P (Group HeapBinding)
-projectLocalGroup (StgNonRec binder rhs) = NonRecursive
-  <$> (HeapBinding <$> requireValue binder <*> projectRhs binder rhs)
-projectLocalGroup (StgRec pairs) = Recursive <$> forM pairs (\(binder, rhs) ->
-  HeapBinding <$> requireValue binder <*> projectRhs binder rhs)
+projectLocalGroup (StgNonRec binder rhs) = do
+  projectedRhs <- projectRhs binder rhs
+  identity <- bindValue binder
+  pure (NonRecursive (HeapBinding identity projectedRhs))
+projectLocalGroup (StgRec pairs) = do
+  identities <- mapM (bindValue . fst) pairs
+  Recursive <$> forM (zip identities pairs) (\(identity, (binder, rhs)) ->
+    HeapBinding identity <$> projectRhs binder rhs)
 
 projectJoinGroup :: CgStgBinding -> P (Group JoinBinding)
-projectJoinGroup (StgNonRec binder rhs) = NonRecursive <$> projectJoin binder rhs
-projectJoinGroup (StgRec pairs) = Recursive <$> mapM (uncurry projectJoin) pairs
+projectJoinGroup (StgNonRec binder rhs) = do
+  identity <- freshJoin
+  projected <- projectJoin identity binder rhs
+  modify' (\current -> current { joins = extendVarEnv (joins current) binder identity })
+  pure (NonRecursive projected)
+projectJoinGroup (StgRec pairs) = do
+  identities <- mapM (bindJoin . fst) pairs
+  Recursive <$> forM (zip identities pairs) (\(identity, (binder, rhs)) ->
+    projectJoin identity binder rhs)
 
-projectJoin :: Id -> CgStgRhs -> P JoinBinding
-projectJoin binder (StgRhsClosure _ _ JumpedTo parameters body resultType) = do
+projectJoin :: JoinId -> Id -> CgStgRhs -> P JoinBinding
+projectJoin identity _ (StgRhsClosure _ _ JumpedTo parameters body resultType) = withScope $ do
   resultReps <- repsForType resultType
-  JoinBinding <$> requireJoin binder
-    <*> (internSignature =<< signatureFor parameters resultType)
-    <*> mapM ensureParameterValue parameters
+  JoinBinding identity <$> (internSignature =<< signatureFor parameters resultType)
+    <*> mapM bindValue parameters
     <*> projectExpr resultReps body
-projectJoin binder _ = failShape
+projectJoin _ binder _ = failShape
   ("let-no-escape binding lacks JumpedTo form: " <> symbolText (idSymbol "join" binder))
 
 projectArg :: StgArg -> P Atom
@@ -271,33 +288,39 @@ projectArg (StgLitArg literal) = projectLiteralAtom literal
 projectReference :: Id -> P ValueRef
 projectReference binder = do
   known <- gets values
-  maybe (Global <$> internGlobal binder) (pure . Local) (lookupVarEnv known binder)
+  case lookupVarEnv known binder of
+    Just identity -> pure (Local identity)
+    Nothing -> do
+      tops <- gets topValues
+      maybe (Global <$> internGlobal binder) (pure . Local)
+        (Map.lookup (idSymbol "value" binder) tops)
 
 bindingBinders :: CgStgBinding -> [Id]
 bindingBinders (StgNonRec binder _) = [binder]
 bindingBinders (StgRec pairs) = map fst pairs
 
-ensureValue :: Id -> P ValueId
-ensureValue binder = do
-  known <- gets values
-  case lookupVarEnv known binder of
-    Just identity -> pure identity
+allocateTopValue :: Id -> P ValueId
+allocateTopValue binder = do
+  let symbol = idSymbol "value" binder
+  known <- gets topValues
+  case Map.lookup symbol known of
+    Just _ -> failIdentity ("duplicate top-level value: " <> symbolText symbol)
     Nothing -> do
-      identity <- ValueId <$> gets nextValue
-      modify' (\current -> current { nextValue = nextValue current + 1
-        , values = extendVarEnv (values current) binder identity })
+      identity <- freshValue
+      modify' (\current -> current { topValues = Map.insert symbol identity (topValues current) })
       pure identity
 
--- GHC can reuse a wired-in zero-width binder at several parameter sites.
--- It has no payload and projectArg emits Void for it, so recording it in the
--- ordinary Id-to-ValueId table would incorrectly alias distinct semantic
--- parameters. Allocate an ID for each parameter occurrence instead.
-ensureParameterValue :: Id -> P ValueId
-ensureParameterValue binder = do
-  reps <- repsForType (varType binder)
-  if null reps
-    then freshValue
-    else ensureValue binder
+requireTopValue :: Id -> P ValueId
+requireTopValue binder = gets (Map.lookup (idSymbol "value" binder) . topValues) >>= maybe
+  (failIdentity ("missing top-level value allocation: " <> symbolText (idSymbol "value" binder))) pure
+
+-- GHC uniques can be reused by binders in disjoint RHS scopes. Each lexical
+-- binder gets a fresh wire ID, while the VarEnv tracks only the current scope.
+bindValue :: Id -> P ValueId
+bindValue binder = do
+  identity <- freshValue
+  modify' (\current -> current { values = extendVarEnv (values current) binder identity })
+  pure identity
 
 freshValue :: P ValueId
 freshValue = do
@@ -305,24 +328,25 @@ freshValue = do
   modify' (\current -> current { nextValue = nextValue current + 1 })
   pure identity
 
-requireValue :: Id -> P ValueId
-requireValue binder = gets (\current -> lookupVarEnv (values current) binder) >>= maybe
-  (failIdentity ("missing value allocation: " <> symbolText (idSymbol "value" binder))) pure
+bindJoin :: Id -> P JoinId
+bindJoin binder = do
+  identity <- freshJoin
+  modify' (\current -> current { joins = extendVarEnv (joins current) binder identity })
+  pure identity
 
-ensureJoin :: Id -> P JoinId
-ensureJoin binder = do
-  known <- gets joins
-  case lookupVarEnv known binder of
-    Just identity -> pure identity
-    Nothing -> do
-      identity <- JoinId <$> gets nextJoin
-      modify' (\current -> current { nextJoin = nextJoin current + 1
-        , joins = extendVarEnv (joins current) binder identity })
-      pure identity
+freshJoin :: P JoinId
+freshJoin = do
+  identity <- JoinId <$> gets nextJoin
+  modify' (\current -> current { nextJoin = nextJoin current + 1 })
+  pure identity
 
-requireJoin :: Id -> P JoinId
-requireJoin binder = gets (\current -> lookupVarEnv (joins current) binder) >>= maybe
-  (failIdentity ("missing join allocation: " <> symbolText (idSymbol "join" binder))) pure
+withScope :: P a -> P a
+withScope action = do
+  savedValues <- gets values
+  savedJoins <- gets joins
+  result <- action
+  modify' (\current -> current { values = savedValues, joins = savedJoins })
+  pure result
 
 internGlobal :: Id -> P GlobalId
 internGlobal binder = do

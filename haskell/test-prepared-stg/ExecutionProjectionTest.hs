@@ -46,6 +46,7 @@ projectProjectionContract modules = do
         (ioError (userError "M3 projection omitted recursive control/data"))
       unless (programEntry program == selectedEntry program)
         (ioError (userError "M3 projection did not select the requested exact entry"))
+      verifyProgramWideValueIds program
       verifyTupleArgumentCall program
       verifyDemandedApplicationResults program
       verifySpecificApplicationShapes program
@@ -89,6 +90,33 @@ projectProjectionContract modules = do
     exprIsRecursive (Case scrutinee _ _ _ alternatives) = exprIsRecursive scrutinee
       || any (\(Alternative _ _ body) -> exprIsRecursive body) alternatives
     exprIsRecursive _ = False
+
+-- GHC may reuse an Id unique in unrelated top-level RHSs. Every semantic
+-- binder, including parameters and alternatives, still needs its own wire ID.
+verifyProgramWideValueIds :: WireProgram -> IO ()
+verifyProgramWideValueIds program = unless (length binders == length (nub binders))
+  (ioError (userError "M3 projection reused a ValueId across semantic binders"))
+  where
+    binders = concatMap topGroup (programBindings program)
+    topGroup (NonRecursive top) = topBinding top
+    topGroup (Recursive tops) = concatMap topBinding tops
+    topBinding (TopBinding _ binding) = heapBinding binding
+    heapBinding (HeapBinding identity rhs) = identity : rhsBinders rhs
+    rhsBinders (Function _ parameters _ body) = parameters <> exprBinders body
+    rhsBinders (Thunk _ _ _ body) = exprBinders body
+    rhsBinders Constructor{} = []
+    rhsBinders Bytes{} = []
+    exprBinders (Case scrutinee identity _ _ alternatives) =
+      exprBinders scrutinee <> [identity] <> concatMap alternativeBinders alternatives
+    exprBinders (Let group body) = heapGroup group <> exprBinders body
+    exprBinders (LetJoins group body) = joinGroup group <> exprBinders body
+    exprBinders _ = []
+    alternativeBinders (Alternative _ parameters body) = parameters <> exprBinders body
+    heapGroup (NonRecursive binding) = heapBinding binding
+    heapGroup (Recursive bindings) = concatMap heapBinding bindings
+    joinGroup (NonRecursive binding) = joinBinding binding
+    joinGroup (Recursive bindings) = concatMap joinBinding bindings
+    joinBinding (JoinBinding _ _ parameters body) = parameters <> exprBinders body
 
 literalProjectionContract :: IO ()
 literalProjectionContract = do
