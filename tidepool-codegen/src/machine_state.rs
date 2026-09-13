@@ -124,6 +124,18 @@ impl GcRootSnapshot {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExternalGeneration {
+    Young,
+    Retained,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExternalActivity {
+    Active,
+    Revoked,
+}
+
 struct ExternalStorage {
     base: *mut u8,
     layout: Layout,
@@ -133,6 +145,8 @@ struct ExternalStorage {
     )]
     kind: ExternalStorageKind,
     logical_len: usize,
+    generation: ExternalGeneration,
+    activity: ExternalActivity,
 }
 
 /// Validated pointer-bearing slots in one tracked external payload.
@@ -151,6 +165,7 @@ pub(crate) struct ExternalPayloadView {
     reason = "consumed by the independently integrated major collector"
 )]
 pub(crate) struct ExternalSweepPlan {
+    revision: u64,
     allocated_objects: usize,
     live_objects: usize,
     dead: Vec<*mut u8>,
@@ -240,6 +255,9 @@ pub struct MachineState {
     /// published in a Lit's value word; `base` may differ for byte arrays,
     /// whose ABI pointer follows a hidden allocation-size word.
     external_storage: RefCell<HashMap<*mut u8, ExternalStorage>>,
+    /// None permanently invalidates sweep planning after revision exhaustion;
+    /// an old plan must never become current again through integer wraparound.
+    external_revision: Cell<Option<u64>>,
     external_allocated_bytes: Cell<usize>,
     external_allocated_objects: Cell<usize>,
     external_freed_bytes: Cell<usize>,
@@ -300,6 +318,7 @@ impl MachineState {
             old_space_arenas: RefCell::new(Vec::new()),
             prepared_old_space: RefCell::new(None),
             external_storage: RefCell::new(HashMap::new()),
+            external_revision: Cell::new(Some(0)),
             external_allocated_bytes: Cell::new(0),
             external_allocated_objects: Cell::new(0),
             external_freed_bytes: Cell::new(0),
@@ -1058,6 +1077,85 @@ impl MachineState {
 
     // --- GC-external byte/reference storage -------------------------------
 
+    fn external_changed(&self) {
+        self.external_revision.set(
+            self.external_revision
+                .get()
+                .and_then(|revision| revision.checked_add(1)),
+        );
+    }
+
+    /// Prepared array stores validate before mutation and share this barrier
+    /// owner. Young payload slots are not roots: remembering them would keep
+    /// unreachable Young cycles alive. Retained payload slots use the existing
+    /// remembered set, never a parallel external-root registry.
+    pub(crate) fn store_external_element(
+        &self,
+        published: *mut u8,
+        index: usize,
+        value: *mut u8,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let record = storage
+            .get(&published)
+            .ok_or(ExternalStorageValidationError::Untracked(
+                published as usize,
+            ))?;
+        if record.activity == ExternalActivity::Revoked {
+            return Err(ExternalStorageValidationError::Revoked(published as usize));
+        }
+        if record.kind != ExternalStorageKind::BoxedArray {
+            return Err(ExternalStorageValidationError::KindMismatch {
+                expected: ExternalStorageKind::BoxedArray,
+                actual: record.kind,
+            });
+        }
+        Self::validate_external_record(published, record)?;
+        if index >= record.logical_len {
+            return Err(ExternalStorageValidationError::IndexOutOfBounds {
+                index,
+                len: record.logical_len,
+            });
+        }
+        // SAFETY: owner validation and the logical bound prove this slot.
+        let slot = unsafe { published.add(8).cast::<*mut u8>().add(index) };
+        if record.generation == ExternalGeneration::Retained {
+            let mut remembered = self.remembered_slots.borrow_mut();
+            remembered
+                .try_reserve(1)
+                .map_err(|_| ExternalStorageValidationError::BookkeepingAllocation)?;
+            remembered.insert(slot);
+        }
+        // No failure, callback or safepoint may split the barrier and store.
+        unsafe { slot.write(value) };
+        self.external_changed();
+        Ok(())
+    }
+
+    /// wave5:external-lifetime: validate and reserve all bookkeeping first,
+    /// then mark selected payloads Retained and remember their boxed slots.
+    /// Called after both promotion copies succeed, before execution resumes.
+    /// Failure at that point is incomplete promotion, never reusable.
+    pub(crate) fn retain_external_payloads(
+        &self,
+        _selected: &[(usize, ExternalStorageKind)],
+    ) -> Result<(), ExternalStorageValidationError> {
+        Err(ExternalStorageValidationError::Unsupported(
+            "wave5:external-lifetime",
+        ))
+    }
+
+    /// wave5:external-lifetime: stage only unmarked Young allocations after
+    /// the entire minor operation succeeds, never between growth recopies.
+    pub(crate) fn plan_external_minor_sweep(
+        &self,
+        _marked: &HashSet<*mut u8>,
+    ) -> Result<ExternalSweepPlan, ExternalStorageValidationError> {
+        Err(ExternalStorageValidationError::Unsupported(
+            "wave5:external-lifetime",
+        ))
+    }
+
     /// Take ownership of a fresh allocation before its pointer is initialized
     /// or published to JIT code.
     pub(crate) fn register_external_storage(
@@ -1075,6 +1173,8 @@ impl MachineState {
                 layout,
                 kind,
                 logical_len,
+                generation: ExternalGeneration::Young,
+                activity: ExternalActivity::Active,
             },
         );
         debug_assert!(
@@ -1286,6 +1386,10 @@ impl MachineState {
             .filter(|pointer| !marked.contains(pointer))
             .collect();
         Ok(ExternalSweepPlan {
+            revision: self
+                .external_revision
+                .get()
+                .ok_or(ExternalStorageValidationError::LedgerChanged)?,
             allocated_objects: self.external_allocated_objects.get(),
             live_objects: storage.len(),
             dead,
@@ -1303,7 +1407,8 @@ impl MachineState {
         &self,
         plan: ExternalSweepPlan,
     ) -> Result<ExternalStorageStats, ExternalStorageValidationError> {
-        if self.external_allocated_objects.get() != plan.allocated_objects
+        if self.external_revision.get() != Some(plan.revision)
+            || self.external_allocated_objects.get() != plan.allocated_objects
             || self.external_storage.borrow().len() != plan.live_objects
             || !plan
                 .dead
@@ -1835,6 +1940,23 @@ mod tests {
         }
         ms.register_external_storage(published, base, layout, kind, logical_len);
         published
+    }
+
+    #[test]
+    fn w5_external_lifetime_young_writes_are_not_roots_and_retention_remembers_slots() {
+        let ms = MachineState::new();
+        let payload = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 2) };
+        ms.store_external_element(payload, 0, std::ptr::null_mut())
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 0);
+        ms.retain_external_payloads(&[(payload as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+        assert_eq!(ms.remembered_slots_count(), 2);
+        let dead_young = unsafe { register_test_external(&ms, ExternalStorageKind::Bytes, 3) };
+        ms.commit_external_sweep(ms.plan_external_minor_sweep(&HashSet::new()).unwrap())
+            .unwrap();
+        assert!(ms.external_storage.borrow().contains_key(&payload));
+        assert!(!ms.external_storage.borrow().contains_key(&dead_young));
     }
 
     #[test]

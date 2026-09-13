@@ -64,6 +64,13 @@ pub enum ExternalStorageValidationError {
         stored: usize,
     },
     LedgerChanged,
+    Revoked(usize),
+    IndexOutOfBounds {
+        index: usize,
+        len: usize,
+    },
+    BookkeepingAllocation,
+    Unsupported(&'static str),
 }
 
 /// A bounded span of managed slots, without a per-visit allocation. This is
