@@ -31,6 +31,7 @@ pub(super) enum ByteOperation {
     New,
     Freeze,
     Size,
+    Shrink,
     Read(Element),
     Write(Element),
 }
@@ -67,6 +68,12 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![Int(64)]) =>
         {
             Some(ByteOperation::Size)
+        }
+        "shrinkMutableByteArray#"
+            if signature.arguments == [UnliftedRef, Int(64), Void]
+                && signature.results == ResultContract::Returns(vec![]) =>
+        {
+            Some(ByteOperation::Shrink)
         }
         "readWord8Array#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
@@ -215,6 +222,35 @@ pub(super) unsafe extern "C" fn prepared_sizeof_bytes(
     match result {
         Ok(()) => CallStatus::Success as i32,
         Err(e) => super::arrays::array_error(machine, e),
+    }
+}
+
+pub(super) unsafe extern "C" fn prepared_shrink_bytes(
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+    new_len: i64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        let (published, len) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
+        let new_len = usize::try_from(new_len)
+            .ok()
+            .filter(|&candidate| candidate <= len)
+            .ok_or(RuntimeError::ArrayIndexOutOfBounds {
+                index: new_len,
+                len,
+            })?;
+        machine
+            .shrink_external_payload(published, ExternalStorageKind::Bytes, new_len)
+            .map_err(|error| super::arrays::storage_error(error, new_len as i64))
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
     }
 }
 
@@ -387,6 +423,23 @@ pub(super) fn emit_sizeof_bytes(
         output,
         0,
     )])
+}
+
+pub(super) fn emit_shrink_bytes(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_shrink_bytes", 4)?;
+    let owner = owner_value(builder, descriptor);
+    let call = builder
+        .ins()
+        .call(host, &[vmctx, arguments[0], owner, arguments[1]]);
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    Ok(Vec::new())
 }
 
 pub(super) fn emit_read_bytes(
@@ -712,6 +765,150 @@ mod tests {
     }
 
     #[test]
+    fn shrink_keeps_written_prefix_for_frozen_snapshot_size_and_read_after_gc() {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![
+            RuntimeRep::UnliftedRef,
+            RuntimeRep::Int(64),
+            RuntimeRep::Word(8),
+        ]);
+        wire.signatures.extend([
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Word(8),
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Word(8)]),
+            },
+        ]);
+        wire.operations = [
+            "newByteArray#",
+            "writeWord8Array#",
+            "shrinkMutableByteArray#",
+            "unsafeFreezeByteArray#",
+            "sizeofByteArray#",
+            "indexWord8Array#",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| OperationDecl {
+            identity: OperationIdentity::PrimOp(name.into()),
+            signature: SignatureId(index as u32 + 1),
+        })
+        .collect();
+        let local = |id| Atom::Ref(ValueRef::Local(ValueId(id)));
+        let operation = |id, arguments| ExprFrame::Operation {
+            operation: OperationId(id),
+            arguments,
+        };
+        let case = |scrutinee, binder, results: Vec<RuntimeRep>, binders: Vec<ValueId>, body| {
+            let kind = if results.len() == 1 && binders.is_empty() {
+                CaseKind::Polymorphic
+            } else {
+                CaseKind::MultiValue
+            };
+            ExprFrame::Case {
+                scrutinee,
+                binder: ValueId(binder),
+                kind,
+                scrutinee_results: ResultContract::Returns(results),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders,
+                    body,
+                }],
+            }
+        };
+        wire.expressions.nodes = vec![
+            operation(0, vec![int(4), Atom::Void]),
+            operation(
+                1,
+                vec![
+                    local(100),
+                    int(0),
+                    Atom::Scalar(ScalarLiteral::Word {
+                        bits: 8,
+                        bytes: vec![0xe7],
+                    }),
+                    Atom::Void,
+                ],
+            ),
+            operation(2, vec![local(100), int(1), Atom::Void]),
+            operation(3, vec![local(100), Atom::Void]),
+            operation(4, vec![local(102)]),
+            operation(5, vec![local(102), int(0)]),
+            ExprFrame::Return(vec![local(102), local(103), local(104)]),
+            case(5, 104, vec![RuntimeRep::Word(8)], vec![], 6),
+            case(4, 103, vec![RuntimeRep::Int(64)], vec![], 7),
+            case(3, 109, vec![RuntimeRep::UnliftedRef], vec![ValueId(102)], 8),
+            case(2, 108, vec![], vec![], 9),
+            case(1, 107, vec![], vec![], 10),
+            case(
+                0,
+                106,
+                vec![RuntimeRep::UnliftedRef],
+                vec![ValueId(100)],
+                11,
+            ),
+        ];
+        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+            if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+                *body = 12;
+            }
+        }
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        let program = crate::prepared_program::CompiledProgram::compile(&linked).unwrap();
+        let result = program
+            .run_entry(
+                ValueId(0),
+                &[],
+                &crate::prepared_program::RunOptions {
+                    nursery_bytes: 128,
+                    collect_before_observation: true,
+                    ..Default::default()
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(result.collections >= 1);
+        assert!(matches!(
+            result.values.as_slice(),
+            [
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1)),
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(0xe7)),
+            ] if bytes.as_slice() == [0xe7]
+        ));
+    }
+
+    #[test]
     fn byte_array_index_failures_are_typed_and_terminal() {
         for (element, index, length, diagnostic_len) in [
             (Element::Word8, -1, 8, 8),
@@ -829,6 +1026,25 @@ mod tests {
             ),
             Some(ByteOperation::Size)
         );
+        assert_eq!(
+            recognize(
+                &op("shrinkMutableByteArray#"),
+                &sig(
+                    vec![
+                        RuntimeRep::UnliftedRef,
+                        RuntimeRep::Int(64),
+                        RuntimeRep::Void
+                    ],
+                    vec![]
+                )
+            ),
+            Some(ByteOperation::Shrink)
+        );
+        assert!(recognize(
+            &op("shrinkMutableByteArray#"),
+            &sig(vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64)], vec![])
+        )
+        .is_none());
         assert!(recognize(
             &op("writeIntArray#"),
             &sig(
@@ -893,6 +1109,99 @@ mod tests {
             assert_eq!(status, CallStatus::IntegrityFailure as i32);
             assert_eq!(output, 0x55);
             assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
+        }
+    }
+
+    #[test]
+    fn invalid_byte_shrink_preserves_payload_identity_capacity_and_contents() {
+        use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        for (new_len, revoked) in [(-1, false), (5, false), (1, true)] {
+            let descriptor =
+                Arc::new(ObjectDescriptor::external(ExternalStorageKind::Bytes, &target).unwrap());
+            let machine = crate::machine_state::MachineState::new();
+            let extent = descriptor.allocation_extent() as usize;
+            machine
+                .install_prepared_buffer(vec![0_u64; extent / 8], vec![descriptor.clone()])
+                .unwrap();
+            let (start, size) = machine.gc_active_range().unwrap();
+            let mut vmctx = unsafe {
+                crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+            };
+            vmctx.alloc_ptr = unsafe { start.add(extent) };
+            vmctx.machine_state = &machine as *const _ as *mut _;
+            let reference = (start as usize | usize::from(descriptor.tag())) as *mut u8;
+            let payload = machine
+                .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+                .unwrap();
+            machine
+                .store_external_bytes(payload, 0, &[11, 22, 33, 44])
+                .unwrap();
+            unsafe {
+                descriptor.initialize_header(start);
+                descriptor
+                    .external_payload_slot(start, extent)
+                    .unwrap()
+                    .write(payload);
+            }
+            if revoked {
+                machine
+                    .revoke_external_payload(payload, ExternalStorageKind::Bytes)
+                    .unwrap();
+            }
+            let capacity = unsafe { payload.sub(8).cast::<u64>().read() };
+            let before = unsafe { std::slice::from_raw_parts(payload.add(8), 4) }.to_vec();
+            let status = unsafe {
+                prepared_shrink_bytes(&mut vmctx, reference, Arc::as_ptr(&descriptor), new_len)
+            };
+            assert_eq!(
+                status,
+                if revoked {
+                    CallStatus::IntegrityFailure as i32
+                } else {
+                    CallStatus::LanguageFailure as i32
+                }
+            );
+            assert_eq!(
+                machine.take_runtime_error(),
+                Some(if revoked {
+                    RuntimeError::BadPointer
+                } else {
+                    RuntimeError::ArrayIndexOutOfBounds {
+                        index: new_len,
+                        len: 4,
+                    }
+                })
+            );
+            assert_eq!(unsafe { payload.sub(8).cast::<u64>().read() }, capacity);
+            assert_eq!(unsafe { payload.cast::<u64>().read() }, 4);
+            assert_eq!(
+                unsafe { std::slice::from_raw_parts(payload.add(8), 4) },
+                before.as_slice()
+            );
+            assert_eq!(
+                unsafe {
+                    descriptor
+                        .external_payload_slot(start, extent)
+                        .unwrap()
+                        .read()
+                },
+                payload
+            );
+            assert_eq!(
+                machine
+                    .external_payload_view(payload, ExternalStorageKind::Bytes)
+                    .unwrap()
+                    .logical_len,
+                4
+            );
         }
     }
 

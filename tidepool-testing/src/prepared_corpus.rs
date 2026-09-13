@@ -14,6 +14,9 @@ use tidepool_repr::DataConTable;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Expectation {
+    /// The reference program has no finite observation. Keep compiler-stage
+    /// coverage, but never count omission of native execution as a match.
+    NoFiniteObservation,
     Int(i64),
     Bool(bool),
     Char(char),
@@ -264,6 +267,18 @@ where
         &mut persist,
     );
 
+    if matches!(expected, Some(Expectation::NoFiniteObservation)) {
+        record_stage(
+            &mut record,
+            Stage::Execution,
+            Outcome::Failed {
+                reason: "harness limitation: reference has no finite observation; native execution omitted".into(),
+            },
+            &mut persist,
+        );
+        return record;
+    }
+
     record_stage(
         &mut record,
         Stage::Execution,
@@ -398,6 +413,9 @@ pub fn compare_values(
     expected: &Expectation,
     constructors: &DataConTable,
 ) -> Result<(), String> {
+    if matches!(expected, Expectation::NoFiniteObservation) {
+        return Err("no finite observation is available for value comparison".into());
+    }
     if let Expectation::Error(failure) = expected {
         return Err(format!(
             "expected {:?}, but comparison received no failure evidence",
@@ -520,6 +538,9 @@ pub fn compare_values(
                         "expected {:?}, but comparison received a normal value",
                         failure
                     ));
+                }
+                Expectation::NoFiniteObservation => {
+                    return Err("no finite observation is available for value comparison".into());
                 }
             },
             Task::List(value, expected_elements) => {
@@ -933,5 +954,58 @@ mod tests {
                 .iter()
                 .any(|(stage, running)| *stage == Stage::Validation && *running)
         }));
+    }
+
+    #[test]
+    fn no_finite_observation_preserves_compile_evidence_without_native_execution() {
+        use tidepool_repr::execution_schema::testing;
+
+        let expectations: Expectations = serde_json::from_str(include_str!(
+            "../fixtures/prepared-corpus-expectations.json"
+        ))
+        .unwrap();
+        // Pinned GHC 9.12.2 at -O2 -fno-full-laziness -fcpr-anal lowers
+        // Suite.thunk_blackhole to a self-recursive let-no-escape join. Its
+        // compiled binary times out; it does not produce a blackhole error.
+        let expected = expectations.expectations.get("thunk_blackhole").unwrap();
+        assert!(matches!(expected, Expectation::NoFiniteObservation));
+        assert_eq!(
+            serde_json::to_value(expected).unwrap(),
+            serde_json::json!({"kind": "no_finite_observation"})
+        );
+
+        // GHC-produced Suite.lit_42 (schema 7) is finite: without the typed
+        // guard, this row would execute and reach comparison instead.
+        let bytes = include_bytes!("../fixtures/suite-lit-42.prepared.cbor");
+        let envelope = testing::envelope();
+        let requirements = ProgramRequirements {
+            schema_version: envelope.schema_version,
+            projection_profile: envelope.projection_profile,
+            toolchain: envelope.toolchain,
+            execution_abi_version: envelope.execution_abi_version,
+            target: envelope.target,
+        };
+        let mut saw_execution_running = false;
+        let record = run_prepared_artifact(
+            "finite-test-artifact",
+            bytes,
+            &requirements,
+            Some(expected),
+            &DataConTable::default(),
+            |record| {
+                saw_execution_running |= record.stages.iter().any(|stage| {
+                    stage.stage == Stage::Execution && matches!(stage.outcome, Outcome::Running)
+                });
+            },
+        );
+        assert!(record.stages[..4]
+            .iter()
+            .all(|stage| matches!(stage.outcome, Outcome::Passed)));
+        assert!(matches!(
+            record.stages[4].outcome,
+            Outcome::Failed { ref reason } if reason.contains("harness limitation")
+        ));
+        assert!(matches!(record.stages[5].outcome, Outcome::NotReached));
+        assert!(!saw_execution_running);
     }
 }

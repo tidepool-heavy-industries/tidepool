@@ -244,6 +244,10 @@ impl CompiledProgram {
                 byte_arrays::prepared_sizeof_bytes as *const u8,
             ),
             (
+                "prepared_shrink_bytes",
+                byte_arrays::prepared_shrink_bytes as *const u8,
+            ),
+            (
                 "prepared_read_word8_bytes",
                 byte_arrays::prepared_read_word8_bytes as *const u8,
             ),
@@ -282,6 +286,10 @@ impl CompiledProgram {
             (
                 "prepared_c_string_len",
                 static_bytes::prepared_c_string_len as *const u8,
+            ),
+            (
+                "prepared_copy_addr_to_byte_array",
+                static_bytes::prepared_copy_addr_to_byte_array as *const u8,
             ),
         ])?;
         #[cfg(test)]

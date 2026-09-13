@@ -398,3 +398,12 @@ are nondeterministic.
   still reads source/include trees; keep those fixed during a run or execute
   from an immutable checkout. Isolated worktrees solve both this and the
   half-written-neighbor compilation problem without planner routing.
+- Template Haskell's addDependentFile reached GHC's interface metadata, but
+  Cabal skipped the internal library before GHC could inspect it. Listing the
+  consumed formatter file in extra-source-files fixes the outer dependency
+  gate; an edit-and-restore test proved both incremental rebuilds. Cleaning
+  the build directory would have hidden this missing dependency.
+- A shared wire-program builder is not an encoder. A runner test consuming
+  bytes cannot use that builder without another serialization owner. Keep a
+  labelled producer fixture when the test exercises runner control flow;
+  don't paste a schema-sized hex string or invent a parallel encoder.

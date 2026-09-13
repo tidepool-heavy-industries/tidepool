@@ -111,6 +111,7 @@ impl ScalarFamily for BasicScalarFamily {
 pub(super) enum IntegerKind {
     Add,
     Sub,
+    SubWordC,
     Mul,
     Quot,
     Rem,
@@ -417,6 +418,18 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "uncheckedIShiftRL#" => generic_shift(signature, true, IntegerKind::Shrl),
         "plusWord#" => generic_binary(signature, false, IntegerKind::Add),
         "minusWord#" => generic_binary(signature, false, IntegerKind::Sub),
+        "subWordC#"
+            if signature.arguments == [word_rep(64), word_rep(64)]
+                && returns_exact(signature, &[word_rep(64), int_rep(64)]) =>
+        {
+            Some(IntegerOperation {
+                kind: IntegerKind::SubWordC,
+                signed: false,
+                bits: 64,
+                result_bits: 64,
+                narrow_bits: 0,
+            })
+        }
         "timesWord#" => generic_binary(signature, false, IntegerKind::Mul),
         "quotWord#" => fixed_binary(signature, false, 64, IntegerKind::Quot),
         "remWord#" => fixed_binary(signature, false, 64, IntegerKind::Rem),
@@ -546,6 +559,19 @@ pub(super) fn recognize_operation(
     {
         return Some(PrimitiveOperation::IndexCharOffAddr);
     }
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "copyAddrToByteArray#")
+        && signature.arguments
+            == [
+                RuntimeRep::Address,
+                RuntimeRep::UnliftedRef,
+                RuntimeRep::Int(64),
+                RuntimeRep::Int(64),
+                RuntimeRep::Void,
+            ]
+        && returns_exact(signature, &[])
+    {
+        return Some(PrimitiveOperation::CopyAddrToByteArray);
+    }
     if matches!(&declaration.identity, OperationIdentity::Intrinsic { symbol, convention: ForeignConvention::CCall } if symbol == "strlen")
         && signature.arguments == [RuntimeRep::Address, RuntimeRep::Void]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -589,6 +615,7 @@ pub(super) enum PrimitiveOperation {
     Formatting(super::formatting::FormattingOperation),
     DoubleToInt,
     IndexCharOffAddr,
+    CopyAddrToByteArray,
     CStringLen,
     Raise,
     PrimitiveFailure(super::fallible::PrimitiveFailure),
@@ -651,6 +678,10 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Size) => {
             super::byte_arrays::emit_sizeof_bytes(builder, pipeline, vmctx, bytes_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Shrink) => {
+            super::byte_arrays::emit_shrink_bytes(builder, pipeline, vmctx, bytes_array, arguments)
                 .map(Some)
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Read(element)) => {
@@ -726,6 +757,17 @@ pub(super) fn emit_operation(
             arguments[1],
         )
         .map(Some),
+        PrimitiveOperation::CopyAddrToByteArray => {
+            super::static_bytes::emit_copy_addr_to_byte_array(
+                builder,
+                pipeline,
+                vmctx,
+                bytes,
+                bytes_array,
+                arguments,
+            )
+            .map(Some)
+        }
         PrimitiveOperation::CStringLen => {
             super::static_bytes::emit_c_string_len(builder, pipeline, vmctx, bytes, arguments[0])
                 .map(Some)
@@ -769,6 +811,15 @@ impl ScalarFamily for IntegerFamily {
         let value = match operation.kind {
             IntegerKind::Add => builder.ins().iadd(arguments[0], arguments[1]),
             IntegerKind::Sub => builder.ins().isub(arguments[0], arguments[1]),
+            IntegerKind::SubWordC => {
+                let difference = builder.ins().isub(arguments[0], arguments[1]);
+                let borrowed = builder.ins().icmp(
+                    ir::condcodes::IntCC::UnsignedLessThan,
+                    arguments[0],
+                    arguments[1],
+                );
+                return vec![difference, builder.ins().uextend(ir::types::I64, borrowed)];
+            }
             IntegerKind::Mul => builder.ins().imul(arguments[0], arguments[1]),
             IntegerKind::Quot | IntegerKind::Rem | IntegerKind::QuotRem => {
                 unreachable!("fallible integer operation routed through fallible emitter")
@@ -920,16 +971,16 @@ mod tests {
     fn run_tuple_result(
         name: &str,
         argument_reps: Vec<RuntimeRep>,
-        result_rep: RuntimeRep,
+        result_reps: [RuntimeRep; 2],
         arguments: Vec<Atom>,
     ) -> Result<Vec<tidepool_bridge::Value>, super::super::ExecutionError> {
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();
-        wire.signatures[0].results = ResultContract::Returns(vec![result_rep, result_rep]);
+        wire.signatures[0].results = ResultContract::Returns(result_reps.to_vec());
         wire.signatures.push(Signature {
             arguments: argument_reps,
-            results: ResultContract::Returns(vec![result_rep, result_rep]),
+            results: ResultContract::Returns(result_reps.to_vec()),
         });
         wire.operations.push(OperationDecl {
             identity: OperationIdentity::PrimOp(name.into()),
@@ -1149,6 +1200,90 @@ mod tests {
     }
 
     #[test]
+    fn sub_word_c_requires_exact_mixed_result_signature() {
+        use RuntimeRep::*;
+
+        let identity = OperationIdentity::PrimOp("subWordC#".into());
+        let accepted = sig(vec![Word(64), Word(64)], vec![Word(64), Int(64)]);
+        assert!(matches!(
+            IntegerFamily::recognize(&identity, &accepted),
+            Some(IntegerOperation {
+                kind: IntegerKind::SubWordC,
+                ..
+            })
+        ));
+        for rejected in [
+            sig(vec![Int(64), Word(64)], vec![Word(64), Int(64)]),
+            sig(vec![Word(32), Word(32)], vec![Word(64), Int(64)]),
+            sig(vec![Word(64), Word(64)], vec![Word(64)]),
+            sig(vec![Word(64), Word(64)], vec![Word(64), Word(64)]),
+            sig(vec![Word(64), Word(64)], vec![Int(64), Word(64)]),
+            Signature {
+                arguments: vec![Word(64), Word(64)],
+                results: ResultContract::NoSuccess,
+            },
+        ] {
+            assert!(IntegerFamily::recognize(&identity, &rejected).is_none());
+        }
+    }
+
+    #[test]
+    fn sub_word_c_returns_wrapped_difference_and_unsigned_borrow() {
+        use RuntimeRep::*;
+
+        for (left, right, difference, borrow) in [
+            (0, 1, u64::MAX, 1),
+            (u64::MAX, 1, u64::MAX - 1, 0),
+            (0, 0, 0, 0),
+            (1_u64 << 63, 1, (1_u64 << 63) - 1, 0),
+            (0, 1_u64 << 63, 1_u64 << 63, 1),
+        ] {
+            let values = run_tuple_result(
+                "subWordC#",
+                vec![Word(64), Word(64)],
+                [Word(64), Int(64)],
+                vec![word(64, left), word(64, right)],
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    values.as_slice(),
+                    [
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(actual_difference)),
+                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_borrow)),
+                    ] if *actual_difference == difference && *actual_borrow == borrow
+                ),
+                "subWordC#({left}, {right}) returned {values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_addr_to_byte_array_requires_exact_primop_signature() {
+        use RuntimeRep::*;
+
+        let declaration = OperationDecl {
+            identity: OperationIdentity::PrimOp("copyAddrToByteArray#".into()),
+            signature: tidepool_repr::execution_schema::SignatureId(0),
+        };
+        let accepted = sig(vec![Address, UnliftedRef, Int(64), Int(64), Void], vec![]);
+        assert!(matches!(
+            recognize_operation(&declaration, &accepted),
+            Some(PrimitiveOperation::CopyAddrToByteArray)
+        ));
+        for rejected in [
+            sig(vec![Word(64), UnliftedRef, Int(64), Int(64), Void], vec![]),
+            sig(vec![Address, UnliftedRef, Int(64), Int(64)], vec![]),
+            sig(
+                vec![Address, UnliftedRef, Int(64), Int(64), Void],
+                vec![Void],
+            ),
+        ] {
+            assert!(recognize_operation(&declaration, &rejected).is_none());
+        }
+    }
+
+    #[test]
     fn raise_requires_exact_nonsuccess_contract() {
         let declaration = OperationDecl {
             identity: OperationIdentity::PrimOp("raise#".into()),
@@ -1272,7 +1407,7 @@ mod tests {
         let tuple = run_tuple_result(
             "quotRemInt#",
             vec![RuntimeRep::Int(64); 2],
-            RuntimeRep::Int(64),
+            [RuntimeRep::Int(64); 2],
             vec![int(64, -7), int(64, 3)],
         )
         .unwrap();
@@ -1286,7 +1421,7 @@ mod tests {
         let word_tuple = run_tuple_result(
             "quotRemWord#",
             vec![RuntimeRep::Word(64); 2],
-            RuntimeRep::Word(64),
+            [RuntimeRep::Word(64); 2],
             vec![word(64, 7), word(64, 3)],
         )
         .unwrap();
@@ -1366,7 +1501,7 @@ mod tests {
         let tuple_zero = run_tuple_result(
             "quotRemInt#",
             vec![RuntimeRep::Int(64); 2],
-            RuntimeRep::Int(64),
+            [RuntimeRep::Int(64); 2],
             vec![int(64, 7), int(64, 0)],
         )
         .unwrap_err();
@@ -1381,7 +1516,7 @@ mod tests {
         let tuple_overflow = run_tuple_result(
             "quotRemInt#",
             vec![RuntimeRep::Int(64); 2],
-            RuntimeRep::Int(64),
+            [RuntimeRep::Int(64); 2],
             vec![int(64, i64::MIN), int(64, -1)],
         )
         .unwrap_err();

@@ -964,8 +964,7 @@
       "value": "-2.5"
     },
     "thunk_blackhole": {
-      "kind": "error",
-      "value": "blackhole"
+      "kind": "no_finite_observation"
     },
     "text_takeWhileT_direct": {
       "kind": "text",

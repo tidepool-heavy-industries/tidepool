@@ -38,16 +38,35 @@ Mapping is 809 exact names plus three unique record-parent aliases; none is
 missing or ambiguous. The 347-name legacy ledger remains 255 mapped/92 unmapped,
 separate from the 812-top denominator. Original harness-limit rows remain.
 
-Subsequent work is fixing the shared Char reader and adding checked `strlen`
-over pinned bytes, plus package-qualified imports in the authenticated formatter
-source. Pinning source bytes alone does not pin unqualified dependency semantics.
-Persistent recovered-base and formatting contract cohorts are also being wired
-into the corpus command; their focused snapshot runs passed 1/1 and 5/5.
+Subsequent pushed checkpoint `5a7f342f9` fixes the shared Char reader and adds
+checked `strlen` over pinned bytes, plus package-qualified imports in the
+authenticated formatter source. Pinning source bytes alone does not pin
+unqualified dependency semantics. The three Char rows pass focused replay;
+the full report above remains unchanged. Persistent recovered-base, formatting,
+and dependency-shadow contract cohorts are wired into the corpus command;
+their focused runs passed 1/1, 5/5, and 1/1 respectively. Cabal now tracks the
+TH-consumed formatter source as an extra source file; edit-and-restore tests
+proved both incremental rebuilds without cleaning the build directory.
+
+The next local primitive parcel passed eight byte-array tests, five address-copy
+tests, and two `subWordC#` tests (overlapping selections, not additive coverage).
+Shrink preserves allocation identity and capacity; copy validates both owners
+and complete spans before its ledger-mediated write. Source addresses must
+belong to this compiled program's pinned bytes. A fresh read-only copy review
+accepted the failure/lifetime boundary. Corpus progress remains pending replay.
+
+`thunk_blackhole` now has a typed NoFiniteObservation expectation, not a
+fabricated blackhole or a successful comparison. Pinned GHC 9.12.2 with
+`-O2 -fno-full-laziness -fcpr-anal` lowers it to a self-recursive join, and its
+compiled executable timed out after five seconds. The runner preserves compile
+stages, explicitly omits native execution, and leaves comparison not reached.
+The focused guard test and actual artifact replay passed; original watchdog
+evidence above is retained. Genuine thunk-reentry failure tests are unchanged.
 
 ### Earlier local parcel evidence
 
-Current work supersedes the chronological records below. The last pushed
-head is `9428ca687`; this checkpoint is not yet a full-wave gate.
+Current work supersedes the chronological records below. The then-pushed
+head was `9428ca687`; this was not a full-wave gate.
 The completed `target/prepared-corpus/suite.kteZM6` replay contains all 812 tops:
 708 project and validate, 425 admit and compile, 256 execute, 136 match. Its
 first expression blockers are `plusAddr#` (125), `writeWordArray#` (15), `clz8#`
@@ -588,6 +607,19 @@ not Luna; their results are not additional Luna calibration. All share a tree.
 | Enum projection | Lead helper/fixture, worker tests | 1 seed / 1 assignment / 1 review | Helper compiled unchanged; test corrected its byte-order premise. Colour and Bool family tests passed. |
 | Hidden defining modules | Diagnosed; implementation in progress | 1 investigation / 1 seed+assignment / 1 correction | Exact bodies exist; import visibility is the wrong finder contract. Seed error must preserve finder versus interface failure types. |
 | Corpus executable snapshots | Accepted source change | 1 / 1 / 0 | Shell syntax and diff checks passed; actual full run pending. |
+
+Latest bounded follow-ups: shrink and copy implementations were accepted on
+their first attempt; the copy parcel also received one independent read-only
+review. `subWordC#` needed no semantic correction. NoFiniteObservation needed
+one test-representation correction: inline schema bytes should be a provenance-
+labelled fixture, not a second hand-maintained encoder. The existing shared
+builder has no encoder, so moving to an adjacent Haskell-produced fixture is
+the scoped solution. These follow-ups required assignment, handback review,
+and lease-routing messages; no exact aggregate lead-round total is claimed.
+Hidden-interface recovery subsequently passed its focused suites and review;
+the correction preserved interface-read errors rather than relabelling them
+as finder failures to satisfy an old assertion. Snapshot execution completed
+the full run reported above.
 
 Clean delegation shapes: exact-signature primitive additions and existing-owner
 byte operations. Correction shapes: source/projection test premises and

@@ -6,6 +6,8 @@ use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
+use tidepool_heap::execution_descriptor::ObjectDescriptor;
+use tidepool_heap::external_storage::ExternalStorageKind;
 
 /// Freeze after planning and retain the same Arc in CompiledProgram. Generated
 /// host calls may embed Arc::as_ptr to this owner, never a pointer to a movable
@@ -42,6 +44,18 @@ impl PinnedBytes {
         storage.get(offset..)?.iter().position(|byte| *byte == 0)
     }
 
+    /// A complete span from one pinned allocation. This also admits an empty
+    /// span at its end; unknown addresses never become raw slices.
+    pub(super) fn read_range(&self, address: usize, length: usize) -> Option<&[u8]> {
+        let candidate = self
+            .by_address
+            .partition_point(|storage| storage.as_ptr() as usize <= address)
+            .checked_sub(1)?;
+        let storage = &self.by_address[candidate];
+        let offset = address.checked_sub(storage.as_ptr() as usize)?;
+        storage.get(offset..offset.checked_add(length)?)
+    }
+
     /// Permit an interior/one-past address with a signed offset only when the
     /// accessed byte belongs to that same allocation. Read through its owned
     /// slice, not through the untrusted numeric address. Backing storage includes
@@ -59,6 +73,107 @@ impl PinnedBytes {
         }
         storage.get(target.checked_sub(base)?).copied()
     }
+}
+
+/// Copy a complete span from one pinned source owner to one authenticated
+/// mutable byte-array owner. All bounds and provenance checks precede the
+/// ledger-mediated write, so a failed call cannot partially mutate storage.
+///
+/// # Safety
+/// vmctx belongs to the active generated call, pool and descriptor are retained
+/// by its compiled program, and dest_ref is an untrusted generated reference.
+pub(super) unsafe extern "C" fn prepared_copy_addr_to_byte_array(
+    vmctx: *mut crate::context::VMContext,
+    pool: *const PinnedBytes,
+    descriptor: *const ObjectDescriptor,
+    address: usize,
+    dest_ref: *mut u8,
+    offset: i64,
+    count: i64,
+) -> i32 {
+    use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
+
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        if pool.is_null() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let (published, len) = unsafe {
+            super::arrays::active_payload(
+                machine,
+                vmctx,
+                dest_ref,
+                descriptor,
+                ExternalStorageKind::Bytes,
+            )
+        }?;
+        let offset = usize::try_from(offset)
+            .ok()
+            .filter(|&offset| offset <= len)
+            .ok_or(RuntimeError::ArrayIndexOutOfBounds { index: offset, len })?;
+        let count = usize::try_from(count)
+            .map_err(|_| RuntimeError::ArrayIndexOutOfBounds { index: count, len })?;
+        let end = offset
+            .checked_add(count)
+            .ok_or(RuntimeError::ArrayIndexOutOfBounds {
+                index: i64::MAX,
+                len,
+            })?;
+        if end > len {
+            return Err(RuntimeError::ArrayIndexOutOfBounds {
+                index: i64::try_from(end - 1).unwrap_or(i64::MAX),
+                len,
+            });
+        }
+        let source = unsafe { &*pool }
+            .read_range(address, count)
+            .ok_or(RuntimeError::BadPointer)?;
+        machine
+            .store_external_bytes(published, offset, source)
+            .map_err(|error| super::arrays::storage_error(error, offset as i64))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
+pub(super) fn emit_copy_addr_to_byte_array(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    vmctx: Value,
+    pool: &Arc<PinnedBytes>,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let host =
+        super::arrays::declare_host(builder, pipeline, "prepared_copy_addr_to_byte_array", 7)?;
+    let pool_owner = builder
+        .ins()
+        .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
+    let descriptor_owner = builder.ins().iconst(
+        types::I64,
+        descriptor as *const ObjectDescriptor as usize as i64,
+    );
+    let call = builder.ins().call(
+        host,
+        &[
+            vmctx,
+            pool_owner,
+            descriptor_owner,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            arguments[3],
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    Ok(Vec::new())
 }
 
 /// Noncollecting strlen of a pointer into the compiled program's pinned
@@ -240,6 +355,67 @@ pub(super) fn emit_index_char(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use tidepool_heap::external_storage::ExternalStorageValidationError;
+    use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
+
+    fn with_copy_fixture(
+        test: impl FnOnce(
+            &mut crate::context::VMContext,
+            &crate::machine_state::MachineState,
+            &Arc<ObjectDescriptor>,
+            &PinnedBytes,
+            usize,
+            *mut u8,
+            *mut u8,
+        ),
+    ) {
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let descriptor =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::Bytes, &target).unwrap());
+        let machine = crate::machine_state::MachineState::new();
+        let extent = descriptor.allocation_extent() as usize;
+        machine
+            .install_prepared_buffer(vec![0_u64; extent / 8], vec![descriptor.clone()])
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        machine.store_external_bytes(payload, 0, b"zzzz").unwrap();
+        unsafe {
+            descriptor.initialize_header(start);
+            descriptor
+                .external_payload_slot(start, extent)
+                .unwrap()
+                .write(payload);
+        }
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        vmctx.alloc_ptr = unsafe { start.add(extent) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let storage: Arc<[u8]> = Arc::from(&b"ab\0"[..]);
+        let base = storage.as_ptr() as usize;
+        let pool = PinnedBytes::new(BTreeMap::from([(b"ab".to_vec(), storage)]));
+        let dest_ref = (start as usize | usize::from(descriptor.tag())) as *mut u8;
+        test(
+            &mut vmctx,
+            &machine,
+            &descriptor,
+            &pool,
+            base,
+            dest_ref,
+            payload,
+        );
+    }
 
     #[test]
     fn byte_pool_checks_bounds_without_dereferencing_raw_addresses() {
@@ -274,5 +450,114 @@ mod tests {
         assert_eq!(pool.c_string_len(unterminated_base), None);
         assert_eq!(pool.c_string_len(0), None);
         assert_eq!(pool.c_string_len(usize::MAX), None);
+    }
+
+    #[test]
+    fn read_range_accepts_owned_empty_end_but_never_crosses_allocation() {
+        let storage: Arc<[u8]> = Arc::from(&b"ab\0"[..]);
+        let base = storage.as_ptr() as usize;
+        let pool = PinnedBytes::new(BTreeMap::from([(b"ab".to_vec(), storage)]));
+        assert_eq!(pool.read_range(base, 3), Some(&b"ab\0"[..]));
+        assert_eq!(pool.read_range(base + 1, 2), Some(&b"b\0"[..]));
+        assert_eq!(pool.read_range(base + 3, 0), Some(&b""[..]));
+        assert_eq!(pool.read_range(base + 2, 2), None);
+        assert_eq!(pool.read_range(base + 4, 0), None);
+        assert_eq!(pool.read_range(0, 0), None);
+        assert_eq!(pool.read_range(usize::MAX, 1), None);
+    }
+
+    #[test]
+    fn copy_addr_host_uses_ledger_write_and_invalidates_stale_sweep_plan() {
+        with_copy_fixture(
+            |vmctx, machine, descriptor, pool, base, dest_ref, payload| {
+                let plan = machine
+                    .plan_external_sweep(&HashSet::from([payload]))
+                    .unwrap();
+                let status = unsafe {
+                    prepared_copy_addr_to_byte_array(
+                        vmctx,
+                        pool,
+                        Arc::as_ptr(descriptor),
+                        base,
+                        dest_ref,
+                        1,
+                        3,
+                    )
+                };
+                assert_eq!(status, crate::prepared_control::CallStatus::Success as i32);
+                assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"zab\0");
+                assert!(matches!(
+                    machine.commit_external_sweep(plan),
+                    Err(ExternalStorageValidationError::LedgerChanged)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn copy_addr_host_rejects_bad_spans_before_mutating_destination() {
+        for (source_shift, offset, count, invalid_dest, expected) in [
+            (None, 0, 1, false, crate::host_fns::RuntimeError::BadPointer),
+            (
+                Some(2),
+                0,
+                2,
+                false,
+                crate::host_fns::RuntimeError::BadPointer,
+            ),
+            (
+                Some(0),
+                -1,
+                1,
+                false,
+                crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: -1, len: 4 },
+            ),
+            (
+                Some(0),
+                0,
+                -1,
+                false,
+                crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: -1, len: 4 },
+            ),
+            (
+                Some(0),
+                3,
+                2,
+                false,
+                crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: 4, len: 4 },
+            ),
+            (
+                Some(0),
+                0,
+                1,
+                true,
+                crate::host_fns::RuntimeError::BadPointer,
+            ),
+        ] {
+            with_copy_fixture(
+                |vmctx, machine, descriptor, pool, base, dest_ref, payload| {
+                    let address = source_shift.map_or(0, |shift| base + shift);
+                    let destination = if invalid_dest {
+                        std::ptr::null_mut()
+                    } else {
+                        dest_ref
+                    };
+                    let status = unsafe {
+                        prepared_copy_addr_to_byte_array(
+                            vmctx,
+                            pool,
+                            Arc::as_ptr(descriptor),
+                            address,
+                            destination,
+                            offset,
+                            count,
+                        )
+                    };
+                    assert_ne!(status, crate::prepared_control::CallStatus::Success as i32);
+                    assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"zzzz");
+                    assert_eq!(machine.take_runtime_error(), Some(expected));
+                },
+            );
+        }
     }
 }

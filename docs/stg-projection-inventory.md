@@ -119,16 +119,24 @@ The currently emitted strict subset is:
   `IncompletePromotion` handling;
 - scalar physical arguments/results, including `Int`, `Word`, `Float`,
   `Double`, exact-signature integer/floating families, `double2Int#`,
-  `plusAddr#`, `chr#`, `eqChar#`, `clz8#`, and the `rintDouble` intrinsic.
+  `plusAddr#`, `chr#`, `eqChar#`, `clz8#`, `subWordC#` (wrapped `Word64`
+  difference and `Int64` unsigned borrow), and the `rintDouble` intrinsic.
   `indexCharOffAddr#` checks a signed offset against retained, NUL-terminated
-  pinned byte storage before returning a `Word(64)` character; it never
-  dereferences an unauthenticated address. Logical `Void` positions remain in
-  signatures and layouts even when omitted from physical ABI payloads;
+  pinned byte storage before returning a `Word(64)` character. The exact
+  C-call `strlen` intrinsic likewise scans only within that pinned owner for
+  a NUL. Neither operation dereferences an unauthenticated address. Logical
+  `Void` positions remain in signatures and layouts even when omitted from
+  physical ABI payloads;
 - exact-signature boxed small/ordinary array new/read/index/write/size/freeze,
   small-array shrink, and boxed CAS; and byte-array new/freeze/size plus
-  Word8, Word64, and Int64 read/index/write. Array host paths authenticate
-  active descriptor-backed payloads, check bounds, and report typed failures.
-  These operations do not imply parity with every GHC array primop;
+  Word8, Word64, and Int64 read/index/write, `shrinkMutableByteArray#`, and
+  `copyAddrToByteArray#`. Byte shrink preserves the payload's identity and
+  capacity while shortening its logical length. Address copy admits only a
+  complete span of compiled-program-owned pinned bytes, including an empty
+  span at the owner's end; it does not admit arbitrary host pointers. Array
+  host paths authenticate active descriptor-backed payloads, check bounds,
+  and report typed failures. These operations do not imply parity with every
+  GHC array primop;
 - the shipped `Tidepool.Double` `renderDouble`/`renderDoublePrec` wrappers.
   Their real Haskell bodies use `show`/`showsPrec` and are not bottoming
   placeholders. Projection replaces only wrappers whose resolved source bytes

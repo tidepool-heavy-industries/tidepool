@@ -381,6 +381,164 @@ fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
     }
 }
 
+fn copy_addr_wire(destination_len: i64, offset: i64, count: i64) -> WireProgram {
+    let mut wire = testing::wire_program();
+    wire.signatures = vec![
+        Signature {
+            arguments: vec![RuntimeRep::Address],
+            results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+        },
+        Signature {
+            arguments: vec![RuntimeRep::Int(64), RuntimeRep::Void],
+            results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+        },
+        Signature {
+            arguments: vec![
+                RuntimeRep::Address,
+                RuntimeRep::UnliftedRef,
+                RuntimeRep::Int(64),
+                RuntimeRep::Int(64),
+                RuntimeRep::Void,
+            ],
+            results: ResultContract::Returns(vec![]),
+        },
+        Signature {
+            arguments: vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+            results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+        },
+    ];
+    wire.operations = [
+        "newByteArray#",
+        "copyAddrToByteArray#",
+        "unsafeFreezeByteArray#",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, name)| OperationDecl {
+        identity: OperationIdentity::PrimOp(name.into()),
+        signature: SignatureId(index as u32 + 1),
+    })
+    .collect();
+    let int = |value: i64| {
+        Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })
+    };
+    let local = |id| Atom::Ref(ValueRef::Local(ValueId(id)));
+    let operation = |id, arguments| ExprFrame::Operation {
+        operation: OperationId(id),
+        arguments,
+    };
+    let case = |scrutinee, binder, results, binders, body| ExprFrame::Case {
+        scrutinee,
+        binder: ValueId(binder),
+        kind: CaseKind::MultiValue,
+        scrutinee_results: ResultContract::Returns(results),
+        alternatives: vec![Alternative {
+            pattern: AlternativePattern::Default,
+            binders,
+            body,
+        }],
+    };
+    wire.expressions.nodes = vec![
+        operation(0, vec![int(destination_len), Atom::Void]),
+        operation(
+            1,
+            vec![local(1), local(100), int(offset), int(count), Atom::Void],
+        ),
+        operation(2, vec![local(100), Atom::Void]),
+        ExprFrame::Return(vec![local(101)]),
+        case(2, 102, vec![RuntimeRep::UnliftedRef], vec![ValueId(101)], 3),
+        case(1, 103, vec![], vec![], 4),
+        case(0, 104, vec![RuntimeRep::UnliftedRef], vec![ValueId(100)], 5),
+    ];
+    wire.bindings = vec![
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("CopyAddr", "entry"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(0),
+                    parameters: vec![ValueId(1)],
+                    captures: vec![],
+                    body: 6,
+                },
+            },
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("CopyAddr", "storage"),
+            binding: HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Bytes(b"abcdef".to_vec()),
+            },
+        }),
+    ];
+    wire
+}
+
+#[test]
+fn copy_addr_real_adapter_handles_full_interior_and_empty_spans_after_gc() {
+    for (length, source_shift, offset, count, expected) in [
+        (6, 0, 0, 6, b"abcdef".as_slice()),
+        (5, 1, 1, 3, b"\0bcd\0".as_slice()),
+        (3, 7, 3, 0, b"\0\0\0".as_slice()),
+    ] {
+        let program = compile(copy_addr_wire(length, offset, count));
+        let storage = program.bytes.get(b"abcdef").unwrap();
+        let address = storage.as_ptr() as usize + source_shift;
+        let result = program
+            .run_entry(
+                ValueId(0),
+                &[address as u64],
+                &RunOptions {
+                    nursery_bytes: 128,
+                    collect_before_observation: true,
+                    ..Default::default()
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(result.collections >= 1);
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
+                if bytes == expected
+        ));
+    }
+}
+
+#[test]
+fn copy_addr_real_adapter_rejects_unowned_source_and_destination_overrun() {
+    for (address, offset, count, expected) in [
+        (None, 0, 1, RuntimeError::BadPointer),
+        (Some(6), 0, 2, RuntimeError::BadPointer),
+        (
+            Some(0),
+            3,
+            2,
+            RuntimeError::ArrayIndexOutOfBounds { index: 4, len: 4 },
+        ),
+    ] {
+        let program = compile(copy_addr_wire(4, offset, count));
+        let storage = program.bytes.get(b"abcdef").unwrap();
+        let address = address.map_or(0, |shift| storage.as_ptr() as usize + shift);
+        let error = program
+            .run_entry(
+                ValueId(0),
+                &[address as u64],
+                &RunOptions::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ExecutionError::Runtime(crate::machine_state::MachineFailure { cause, .. })
+                if cause == expected
+        ));
+    }
+}
+
 fn index_char(
     program: &CompiledProgram,
     address: usize,
