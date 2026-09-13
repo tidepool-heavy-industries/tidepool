@@ -122,3 +122,35 @@ observation order with a checked invariant failure. A local lint allowance
 preserves that behavior; resource exhaustion is not a proof that the counter
 cannot overflow, because observations can be reclaimed. If this owner survives
 session cutover, propagate typed exhaustion through observation completion.
+
+## Optimizer-folded corpus probes measure nothing
+
+A corpus probe is compiled at `-O2` before projection, so GHC's simplifier can
+reduce it to a literal or a reference to a pre-built CAF. Such a probe passes
+projection, validation, admission, compilation, execution and comparison while
+exercising none of the machinery its cohort is named for. Stage totals cannot
+distinguish this from genuine coverage, and a rising pass count can therefore
+overstate engine capability.
+
+Tidy Core is the evidence boundary. Dumping it with
+
+```
+ghc -XGHC2024 -O2 -ddump-simpl -dsuppress-all -fforce-recomp -c <Module>.hs
+```
+
+shows exactly what reaches CorePrep and the Core-to-STG handoff. A probe that
+appears there as a bare literal, or as a reference to an already-built CAF, is
+hollow regardless of its stage outcomes. Probes whose inputs are opaque to the
+simplifier retain real calls at that boundary.
+
+The observed folding was literal arithmetic, class-dictionary selection,
+record-field resolution, and the `fmap`/`foldr`/`traverse`/`>>=` chains over
+small structures; recursion over an allocated ADT resisted it. Whether any of
+the 812 Suite tops are hollow for the same reason is unestablished: that corpus
+predates this check and no Tidy Core audit has been run across it. Establish
+that before treating Suite stage totals as coverage evidence.
+
+Keeping a probe honest is a constraint on its inputs, not on its shape. Probes
+must stay nullary monomorphic tops of observable types, because the runner
+cannot pass arguments and functions are not observable, so the operands are the
+only place opacity can be introduced.
