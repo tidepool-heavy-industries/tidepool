@@ -85,6 +85,9 @@ enum CompilationState {
 /// then stack maps are extracted from `ctx.compiled_code()`.
 pub struct CodegenPipeline {
     compilation_state: CompilationState,
+    /// Opt-in pre-compilation IR for structural allocation contract tests.
+    #[cfg(test)]
+    pub(crate) emitted_ir: Option<BTreeMap<FuncId, ir::Function>>,
     /// The JIT module that manages executable memory.
     ///
     /// This field is public as an **escape hatch** for advanced use cases and tests
@@ -196,6 +199,8 @@ impl CodegenPipeline {
 
         Ok(Self {
             compilation_state: CompilationState::Ready,
+            #[cfg(test)]
+            emitted_ir: None,
             module,
             isa,
             stack_maps: StackMapRegistry::new(),
@@ -310,6 +315,10 @@ impl CodegenPipeline {
         ctx: &mut Context,
     ) -> Result<(), PipelineError> {
         self.ensure_usable()?;
+        #[cfg(test)]
+        if let Some(functions) = &mut self.emitted_ir {
+            functions.insert(func_id, ctx.func.clone());
+        }
         // Cranelift has its own substantial native frames. Emission guards
         // cannot protect compilation after returning to their caller's stack.
         self.invalidate();
