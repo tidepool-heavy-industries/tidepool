@@ -348,7 +348,9 @@ runs all four through `run_pure_cohort`.
 | usertypes | 8 | 8 | classes, records, hand-written instances, an expression interpreter |
 | text | 8 | 8 | `Data.Text` splitting, replacement, case folding, non-ASCII length |
 
-Every probe reached comparison and matched its oracle. The measured gaps were
+Every probe reached comparison and matched its oracle. Probe operands are held
+opaque to the simplifier so the cohorts measure execution rather than constant
+folding; see "Coverage is not the same as stage totals" below. The measured gaps were
 four distinct boundaries, each a catalog or metadata omission rather than a
 structural limit:
 
