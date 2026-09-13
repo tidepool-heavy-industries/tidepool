@@ -1,17 +1,19 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 -- | Stable extractor intrinsics for rendering 'Double' values.
 --
--- Translate replaces these exact, qualified bindings with managed-Text
--- primitives. Their bodies are deliberately unreachable.
+-- Backends may replace these exact bindings with managed-Text primitives.
+-- Their reference bodies must have the real returning semantics: OPAQUE keeps
+-- calls intact, but does not hide bottoming demand information from GHC.
 module Tidepool.Double (renderDouble, renderDoublePrec) where
 
 import Data.Text (Text)
-import Prelude (Double, Int, error)
+import Data.Text qualified as Text
+import Prelude (Double, Int, show, showsPrec)
 
 {-# OPAQUE renderDouble #-}
 renderDouble :: Double -> Text
-renderDouble _ = error "Tidepool.Double.renderDouble: extractor intrinsic was not lowered"
+renderDouble value = Text.pack (show value)
 
 {-# OPAQUE renderDoublePrec #-}
 renderDoublePrec :: Int -> Double -> Text
-renderDoublePrec _ _ = error "Tidepool.Double.renderDoublePrec: extractor intrinsic was not lowered"
+renderDoublePrec precedence value = Text.pack (showsPrec precedence value "")

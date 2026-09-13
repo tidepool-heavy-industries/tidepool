@@ -32,6 +32,7 @@ import Tidepool.GhcPipeline
 
 projectProjectionContract :: [PreparedModule] -> IO WireProgram
 projectProjectionContract modules = do
+  verifyPreparedFormatting
   topIdentityAllocationContract
   literalProjectionContract
   case projectPrepared context modules of
@@ -700,6 +701,23 @@ verifySmallArrayOperationContracts = do
           ("GHC small-array operation signature changed: "
             <> show (entryName, operationName, expected, actual,
               programOperations program))))
+
+-- W5_FORMATTING: this must use the registered compiler intrinsic, not recover
+-- an error placeholder or lose the successful continuation as bottoming Core.
+verifyPreparedFormatting :: IO ()
+verifyPreparedFormatting = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/FormattingContract.hs" ["test-prepared-stg", "lib"]
+  let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+        (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+        (SymbolIdentity "main" "FormattingContract" "value" "formatValue" Nothing)
+  program <- either (ioError . userError . show) pure
+    (projectPreparedTarget context (pprModules prepared))
+  unless (any isFormatting (programOperations program))
+    (ioError (userError "W5_FORMATTING: prepared bytes intrinsic missing"))
+  where
+    isFormatting (OperationDecl (IntrinsicIdentity "prepared_render_double_bytes" CCall) _) = True
+    isFormatting _ = False
 
 verifyByteArrayOperationContracts :: IO ()
 verifyByteArrayOperationContracts = do
