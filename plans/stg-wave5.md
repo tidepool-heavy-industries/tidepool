@@ -6,6 +6,46 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Measured source checkpoint `664ced54f`: 127 prepared-program tests passed;
+workspace `cargo test --workspace --no-run --quiet` compiled successfully;
+canonical fixtures-update and fixtures-check completed. Workspace tests were
+not all run. Fixture regeneration changed the fingerprint and 29 CBOR files,
+including larger legacy formatting artifacts after the returning source bodies.
+
+The complete replay is `target/prepared-corpus/suite.8Zkufv/results.json`, SHA-256
+`67b073c0fdb2a866a4e46ef954bc9440fc7dfdb5f3e37e6eddffd951edc4e849`.
+All 812 tops remain: 592 project and validate, 465 admit and compile,
+289 execute, 149 match, and **three comparisons fail**. All prior 136 matches
+remain; the three new failures are showBool/showMaybeNothing/showMaybeInt,
+whose String conversion does not yet accept the prepared Word-represented
+Char# payload. This is a bridge gap, not an expectation change. The 117 newly
+exposed `strlen` and 103 stack-snapshot projection failures are first blockers;
+no formerly matching program was lost. Snapshot identities are retained in
+`target/prepared-corpus/run.1hgMSf/provenance.json`. Corpus exit zero is not
+semantic green. The child blackhole watchdog fired after 120 seconds and the
+parent completed all rows.
+
+| Original first-blocker cohort | Tops | Match | Missing expectation after execution | Comparison red | Execution red | Admission red | Projection red |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Globals | 516 | 36 | 70 | 3 | 66 | 127 | 214 |
+| Thunks | 80 | 53 | 0 | 0 | 27 | 0 | 0 |
+| Expressions | 15 | 0 | 0 | 0 | 15 | 0 | 0 |
+| Other | 201 | 60 | 67 | 0 | 68 | 0 | 6 |
+
+Original baseline: `suite.Kdbf0p/results.json`, SHA-256
+`0d30ad6b5c24ee654c7bf363c29f7099d2c626fd23ec7735885eeeb46e33b449`.
+Mapping is 809 exact names plus three unique record-parent aliases; none is
+missing or ambiguous. The 347-name legacy ledger remains 255 mapped/92 unmapped,
+separate from the 812-top denominator. Original harness-limit rows remain.
+
+Subsequent work is fixing the shared Char reader and adding checked `strlen`
+over pinned bytes, plus package-qualified imports in the authenticated formatter
+source. Pinning source bytes alone does not pin unqualified dependency semantics.
+Persistent recovered-base and formatting contract cohorts are also being wired
+into the corpus command; their focused snapshot runs passed 1/1 and 5/5.
+
+### Earlier local parcel evidence
+
 Current work supersedes the chronological records below. The last pushed
 head is `9428ca687`; this checkpoint is not yet a full-wave gate.
 The completed `target/prepared-corpus/suite.kteZM6` replay contains all 812 tops:

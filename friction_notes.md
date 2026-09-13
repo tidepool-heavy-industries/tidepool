@@ -394,3 +394,7 @@ are nondeterministic.
   after an intervening verification parcel changed the queue. A typed lease
   owner plus acknowledged grant/return events would remove this ambiguity; a
   prose statement that the slot is "free" is not an acknowledged assignment.
+- Executable snapshots do not freeze Haskell source inputs. Corpus projection
+  still reads source/include trees; keep those fixed during a run or execute
+  from an immutable checkout. Isolated worktrees solve both this and the
+  half-written-neighbor compilation problem without planner routing.
