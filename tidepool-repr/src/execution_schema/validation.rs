@@ -300,7 +300,10 @@ impl<'w, 'p> Walker<'w, 'p> {
 
     fn restore(&mut self, mark: usize) {
         while self.undo.len() > mark {
-            match self.undo.pop().expect("undo mark") {
+            let Some(undo) = self.undo.pop() else {
+                break;
+            };
+            match undo {
                 Undo::Value(index, old) => self.values[index] = old,
                 Undo::Join(index, old) => self.joins[index] = old,
                 Undo::Epoch(epoch) => self.epoch = epoch,
@@ -803,7 +806,9 @@ impl<'w, 'p> Walker<'w, 'p> {
                 }
                 ExprFrame::Case { alternatives, .. } => {
                     let mut children = frame.children.into_iter();
-                    let scrutinee = children.next().expect("case scrutinee was queued");
+                    let scrutinee = children.next().ok_or_else(|| {
+                        ParseError::InvalidReference("case scrutinee result is missing".into())
+                    })?;
                     let mut result = ResultContract::NoSuccess;
                     if !alternatives.is_empty() {
                         for child in children {
@@ -821,7 +826,9 @@ impl<'w, 'p> Walker<'w, 'p> {
                     }
                 }
                 ExprFrame::Let { .. } | ExprFrame::LetJoins { .. } => {
-                    frame.children.pop().expect("let body was queued")
+                    frame.children.pop().ok_or_else(|| {
+                        ParseError::InvalidReference("let body result is missing".into())
+                    })?
                 }
             }
         } else {
