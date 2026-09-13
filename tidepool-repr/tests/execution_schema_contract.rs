@@ -49,6 +49,8 @@ fn representative_recursive_import_contract_compiles() {
             required_generation: Some(7),
         }],
         constructors: vec![ConstructorDecl {
+            tag: 1,
+            family_size: 1,
             result_rep: RuntimeRep::LiftedRef,
             identity: symbol("Fixture.Vertical", "Box"),
             family: symbol("Fixture.Vertical", "Box"),

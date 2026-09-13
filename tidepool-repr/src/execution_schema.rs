@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 pub const EXECUTION_ABI_VERSION: u64 = 2;
 
 macro_rules! dense_id {
@@ -204,9 +204,7 @@ fn storage_size(rep: RuntimeRep, pointer_size: u32) -> Result<u32, LayoutError> 
     match rep {
         RuntimeRep::Void => Ok(0),
         RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef | RuntimeRep::Address => Ok(pointer_size),
-        RuntimeRep::Int(bits) | RuntimeRep::Word(bits)
-            if bits > 0 && bits % 8 == 0 && bits <= 128 =>
-        {
+        RuntimeRep::Int(bits) | RuntimeRep::Word(bits) if matches!(bits, 8 | 16 | 32 | 64) => {
             Ok(u32::from(bits / 8))
         }
         RuntimeRep::Float(32) => Ok(4),
@@ -248,6 +246,10 @@ pub struct ConstructorDecl {
     pub field_reps: Vec<RuntimeRep>,
     pub strict_fields: Vec<bool>,
     pub layout: CheckedLayout,
+    /// GHC's one-based tag in the complete algebraic constructor family.
+    pub tag: u32,
+    /// Authoritative family cardinality, not the number of declarations in this artifact.
+    pub family_size: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

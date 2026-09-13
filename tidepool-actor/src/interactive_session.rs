@@ -122,6 +122,8 @@ pub(crate) struct ResidentInteractiveAwait {
 #[derive(Debug, thiserror::Error)]
 pub enum InteractiveSessionCaptureError {
     #[error(transparent)]
+    Resident(#[from] tidepool_runtime::session::ResidentError),
+    #[error(transparent)]
     Decode(#[from] tidepool_bridge::BridgeError),
     #[error(transparent)]
     Site(#[from] crate::RequestSignatureError),
@@ -165,7 +167,7 @@ impl ResidentInteractiveSession {
             .map(crate::RequestId)
             .map_err(|_| InteractiveSessionCaptureError::InvalidRequestId(request_id))?;
         let input = session
-            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
             .ok_or(InteractiveSessionCaptureError::MissingInput)?;
         Ok(Self {
             request: InteractiveSessionRequest {

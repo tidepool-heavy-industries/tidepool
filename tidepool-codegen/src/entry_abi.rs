@@ -207,9 +207,6 @@ fn cranelift_components(reps: &[RuntimeRep], pointer: Type) -> Result<Vec<Type>,
             RuntimeRep::Int(16) | RuntimeRep::Word(16) => components.push(types::I16),
             RuntimeRep::Int(32) | RuntimeRep::Word(32) => components.push(types::I32),
             RuntimeRep::Int(64) | RuntimeRep::Word(64) => components.push(types::I64),
-            RuntimeRep::Int(128) | RuntimeRep::Word(128) => {
-                components.extend([types::I64, types::I64]);
-            }
             RuntimeRep::Float(32) => components.push(types::F32),
             RuntimeRep::Float(64) => components.push(types::F64),
             other => return Err(AbiError::UnsupportedRepresentation(*other)),
@@ -403,17 +400,27 @@ mod tests {
     }
 
     #[test]
-    fn register_transport_expands_i128_and_prefixes_status() {
+    fn register_transport_omits_void_and_prefixes_status() {
         let profile = NativeAbiProfile::new(x86_64(), 4).unwrap();
         let signature = SemanticSignature {
-            arguments: vec![RuntimeRep::Void, RuntimeRep::Word(128)],
-            results: vec![RuntimeRep::Int(128)],
+            arguments: vec![RuntimeRep::Void, RuntimeRep::Word(64)],
+            results: vec![RuntimeRep::Int(64)],
         };
         let abi = EntryAbi::lower(&profile, &signature, EnvironmentMode::Absent).unwrap();
         assert!(matches!(abi.result_transport(), ResultTransport::Registers));
         let clif = abi.cranelift_signature(&profile, CallConv::Tail).unwrap();
-        assert_eq!(clif.params.len(), 3); // vmctx + two i64 components
-        assert_eq!(clif.returns.len(), 3); // status + two i64 components
+        assert_eq!(clif.params.len(), 2); // vmctx + one i64 component
+        assert_eq!(clif.returns.len(), 2); // status + one i64 component
+    }
+
+    #[test]
+    fn scalar_128_has_no_native_abi_components() {
+        for rep in [RuntimeRep::Int(128), RuntimeRep::Word(128)] {
+            assert!(matches!(
+                cranelift_components(&[rep], types::I64),
+                Err(AbiError::UnsupportedRepresentation(rejected)) if rejected == rep
+            ));
+        }
     }
 
     #[test]

@@ -146,7 +146,7 @@ mod tests {
     use tidepool_heap::execution_descriptor::{
         DescriptorState, EntryMetadata, ObjectKind, FORWARDING_POINTER_OFFSET,
     };
-    use tidepool_heap::gc::raw::{cheney_copy_registered, DescriptorRegistry};
+    use tidepool_heap::gc::raw::{cheney_copy_descriptors, DescriptorSpace};
     use tidepool_repr::execution_schema::{
         Architecture, Endianness, Signature, StorageLayout, TargetDescriptor,
     };
@@ -257,16 +257,14 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_honors_sixteen_byte_payload_alignment() {
-        let descriptor = ObjectDescriptor::new(
-            ObjectKind::Constructor,
-            StorageLayout::for_reps(&target(), &[RuntimeRep::Int(128)]).unwrap(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(descriptor.payload_base(), 16);
-        assert_eq!(descriptor.allocation_alignment(), 16);
-        assert_eq!(descriptor.allocation_extent(), 32);
+    fn descriptor_payload_rejects_scalar_128() {
+        for rep in [RuntimeRep::Int(128), RuntimeRep::Word(128)] {
+            assert!(matches!(
+                StorageLayout::for_reps(&target(), &[rep]),
+                Err(tidepool_repr::execution_schema::LayoutError::UnsupportedRepresentation(rejected))
+                    if rejected == rep
+            ));
+        }
     }
 
     #[test]
@@ -308,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_descriptor_object_survives_copy_and_traces_only_managed_slots() {
+    fn descriptor_object_survives_copy_and_traces_only_managed_slots() {
         let descriptor = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
@@ -354,32 +352,16 @@ mod tests {
             marshal_descriptor_object(from_ptr, owner_size, &descriptor, &values).unwrap();
         }
 
-        let mut registry = DescriptorRegistry::new();
-        unsafe {
-            registry
-                .register(from_ptr, owner_size, Arc::clone(&descriptor))
-                .unwrap();
-            registry
-                .register(child, child_size, Arc::clone(&scalar_descriptor))
-                .unwrap();
-        }
+        let layouts = [Arc::clone(&descriptor), Arc::clone(&scalar_descriptor)];
+        let mut space = DescriptorSpace::new(layouts.iter().cloned()).unwrap();
         let mut root = from_ptr;
         let roots = [&mut root as *mut *mut u8];
         let copied = unsafe {
-            cheney_copy_registered(
-                &roots,
-                from_ptr,
-                from_ptr.add(actual_from_len),
-                &mut to,
-                &mut registry,
-            )
-            .unwrap()
+            cheney_copy_descriptors(&roots, from_ptr, actual_from_len, &mut to, &mut space).unwrap()
         };
 
         assert_eq!(copied.bytes_copied, owner_size + child_size);
         assert_eq!(root, to.as_mut_ptr());
-        assert!(registry.descriptor(root).is_some());
-        assert!(registry.descriptor(from_ptr).is_none());
         unsafe {
             let first = root.add(descriptor.trace_offsets()[0] as usize) as *const *mut u8;
             let address = root.add(descriptor.payload_base() as usize + 8) as *const *mut u8;
@@ -388,13 +370,19 @@ mod tests {
             assert_eq!(*first, moved_child);
             assert_eq!(*second, moved_child);
             assert_eq!(*address, child, "Address values are not GC roots");
-            assert!(registry.descriptor(moved_child).is_some());
-            assert!(registry.descriptor(child).is_none());
+            assert_eq!(
+                descriptor.state(from_ptr, actual_from_len).unwrap(),
+                DescriptorState::Forwarded
+            );
+            assert_eq!(
+                scalar_descriptor.state(child, child_size).unwrap(),
+                DescriptorState::Forwarded
+            );
         }
     }
 
     #[test]
-    fn registered_collection_refuses_truncated_range_before_forwarding() {
+    fn descriptor_collection_refuses_truncated_initialized_region_before_forwarding() {
         let descriptor = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
@@ -415,25 +403,15 @@ mod tests {
             )
             .unwrap();
         }
-        let mut registry = DescriptorRegistry::new();
-        unsafe {
-            registry
-                .register(from_ptr, extent, Arc::clone(&descriptor))
-                .unwrap();
-        }
+        let layouts = [Arc::clone(&descriptor)];
+        let mut space = DescriptorSpace::new(layouts.iter().cloned()).unwrap();
         let mut root = from_ptr;
         let roots = [&mut root as *mut *mut u8];
         let mut to = vec![0u8; extent];
         let error = match unsafe {
-            cheney_copy_registered(
-                &roots,
-                from_ptr,
-                from_ptr.add(extent - 1),
-                &mut to,
-                &mut registry,
-            )
+            cheney_copy_descriptors(&roots, from_ptr, extent - 8, &mut to, &mut space)
         } {
-            Ok(_) => panic!("truncated registered collection succeeded"),
+            Ok(_) => panic!("truncated descriptor collection succeeded"),
             Err(error) => error,
         };
 
@@ -446,11 +424,10 @@ mod tests {
             unsafe { descriptor.state(from_ptr, extent) }.unwrap(),
             DescriptorState::Live
         );
-        assert!(registry.descriptor(from_ptr).is_some());
     }
 
     #[test]
-    fn registered_collection_retires_unreachable_descriptors() {
+    fn descriptor_collection_leaves_unreachable_source_objects_unforwarded() {
         let descriptor = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
@@ -467,32 +444,25 @@ mod tests {
             descriptor.initialize_header(from_ptr);
             descriptor.initialize_header(dead);
         }
-        let mut registry = DescriptorRegistry::new();
-        unsafe {
-            registry
-                .register(from_ptr, extent, Arc::clone(&descriptor))
-                .unwrap();
-            registry
-                .register(dead, extent, Arc::clone(&descriptor))
-                .unwrap();
-        }
+        let layouts = [Arc::clone(&descriptor)];
+        let mut space = DescriptorSpace::new(layouts.iter().cloned()).unwrap();
         let mut root = from_ptr;
         let roots = [&mut root as *mut *mut u8];
         let mut to = vec![0u8; extent * 2];
         let result = unsafe {
-            cheney_copy_registered(
-                &roots,
-                from_ptr,
-                from_ptr.add(extent * 2),
-                &mut to,
-                &mut registry,
-            )
-            .unwrap()
+            cheney_copy_descriptors(&roots, from_ptr, extent * 2, &mut to, &mut space).unwrap()
         };
 
         assert_eq!(result.bytes_copied, extent);
-        assert!(registry.descriptor(root).is_some());
-        assert!(registry.descriptor(from_ptr).is_none());
-        assert!(registry.descriptor(dead).is_none());
+        unsafe {
+            assert_eq!(
+                descriptor.state(from_ptr, extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+            assert_eq!(
+                descriptor.state(dead, extent).unwrap(),
+                DescriptorState::Live
+            );
+        }
     }
 }

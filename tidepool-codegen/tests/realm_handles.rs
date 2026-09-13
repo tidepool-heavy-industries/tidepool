@@ -25,6 +25,7 @@
 use crate::support;
 use support::SuspensionTestExt;
 
+use tidepool_bridge::Value;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge::CLOSURE_SENTINEL;
 use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
@@ -32,7 +33,6 @@ use tidepool_codegen::suspension::{ContinuationId, ParkKind, ParkedOutcome, Real
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -388,7 +388,10 @@ fn framed_handle_keeps_closure_live_during_constructor_allocation_gc() {
         };
         let producer =
             park_finalize_fragment(&mut machine, &table, RealmId(2), "framed_producer", 30, 300);
-        let handle = machine.handle_from_live_payload(producer).unwrap();
+        let handle = machine
+            .handle_from_live_payload(producer)
+            .expect("machine reusable")
+            .expect("producer holds a live payload");
         force_gc_on(&mut machine, &table, "before_framed_delivery", 200);
         let mut prefix = Value::Lit(Literal::LitInt(42));
         for _ in 0..40 {
@@ -503,12 +506,16 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
         // Mint the handle. The answerer frame stays parked and rooted.
         let h = machine
             .handle_from_live_payload(answerer_id)
+            .expect("machine reusable")
             .expect("answerer frame holds a finalized payload");
         assert_eq!(machine.handle_realm(h), Some(ANSWERER_REALM));
         assert_receipts(&machine, 2, 1);
         // Minting is once-only: the frame's stash moved into the handle.
         assert!(
-            machine.handle_from_live_payload(answerer_id).is_none(),
+            machine
+                .handle_from_live_payload(answerer_id)
+                .expect("machine reusable")
+                .is_none(),
             "a finalized payload mints exactly one handle"
         );
 

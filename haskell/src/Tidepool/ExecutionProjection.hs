@@ -20,7 +20,7 @@ import GHC.Builtin.PrimOps (primOpOcc)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
   ( DataCon, dataConName, dataConRepArgTys
-  , dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
+  , dataConTag, dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.TyCon qualified as GHC
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
@@ -34,8 +34,10 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Var (Id, varName, varType)
+import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv, mkVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
-import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Types.Unique.Set
+  (UniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, nonDetEltsUniqSet)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
 import Tidepool.ExecutionSchema
@@ -60,8 +62,8 @@ data ProjectionError
 
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
-  , values :: [(Id, ValueId)], joins :: [(Id, JoinId)]
-  , globals :: [(Id, GlobalId)], globalDecls :: [GlobalDecl]
+  , values :: VarEnv ValueId, joins :: VarEnv JoinId
+  , globals :: VarEnv GlobalId, globalDecls :: [GlobalDecl]
   , constructors :: [(DataCon, ConstructorId)], constructorDecls :: [ConstructorDecl]
   , operations :: [(Text, OperationId)], operationDecls :: [OperationDecl]
   , signatures :: [(Signature, SignatureId)]
@@ -74,12 +76,12 @@ type P a = StateT PState (Either ProjectionError) a
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 [] [] [] [] [] [] [] [] [] machine Map.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv [] [] [] [] [] [] machine Map.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPrepared context modules = do
-  let initial = PState 0 0 [] [] [] [] [] [] [] [] []
+  let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv [] [] [] [] [] []
         (projectionTarget context) (projectionRetainedGenerations context)
   (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
@@ -124,18 +126,19 @@ projectPreparedTarget context modules =
       , binder <- topBinders binding
       , idSymbol "value" binder == entry
       ]
-    reachableIds = close seedIds
-    isReachable (binding, _) = any (`elem` reachableIds) (topBinders binding)
-    close needed =
-      let dependencies =
-            [ dependency
-            | (binding, freeVars) <- allBindings
-            , any (`elem` needed) (topBinders binding)
-            , dependency <- nonDetEltsUniqSet freeVars
-            ]
-          expanded = foldr (\binder acc -> if binder `elem` acc then acc else binder : acc)
-            [] (needed ++ dependencies)
-      in if length expanded == length needed then needed else close expanded
+    dependencies = mkVarEnv
+      [ (binder, nonDetEltsUniqSet freeVars)
+      | (binding, freeVars) <- allBindings
+      , binder <- topBinders binding
+      ]
+    reachableIds = close emptyUniqSet seedIds
+    isReachable (binding, _) = any (`elementOfUniqSet` reachableIds) (topBinders binding)
+    close :: UniqSet Id -> [Id] -> UniqSet Id
+    close visited [] = visited
+    close visited (binder : pending)
+      | binder `elementOfUniqSet` visited = close visited pending
+      | otherwise = close (addOneToUniqSet visited binder)
+          (maybe pending (++ pending) (lookupVarEnv dependencies binder))
 
 topBinders :: CgStgTopBinding -> [Id]
 topBinders (StgTopStringLit binder _) = [binder]
@@ -165,47 +168,61 @@ projectTopPair binder rhs = TopBinding (idSymbol "value" binder)
 projectRhs :: Id -> CgStgRhs -> P HeapRhs
 projectRhs binder (StgRhsClosure captures _ update parameters body resultType) = do
   captureRefs <- mapM projectReference (dVarSetElems captures)
-  parameterIds <- mapM ensureValue parameters
-  projectedBody <- projectExpr body
+  parameterIds <- mapM ensureParameterValue parameters
+  resultReps <- repsForType resultType
+  projectedBody <- projectExpr resultReps body
   case update of
     ReEntrant -> Function <$> (internSignature =<< signatureFor parameters resultType)
       <*> pure parameterIds <*> pure captureRefs <*> pure projectedBody
     Updatable -> do
-      signature <- internSignature . Signature [] =<< repsForType resultType
+      signature <- internSignature (Signature [] resultReps)
       pure (Thunk signature Memoize captureRefs projectedBody)
     Stg.SingleEntry -> do
-      signature <- internSignature . Signature [] =<< repsForType resultType
+      signature <- internSignature (Signature [] resultReps)
       pure (Thunk signature Schema.SingleEntry captureRefs projectedBody)
     JumpedTo -> failShape ("heap binding marked JumpedTo: " <> symbolText (idSymbol "value" binder))
 projectRhs _ (StgRhsCon _ con _ _ args _) = Constructor <$> internConstructor con <*> mapM projectArg args
 
-projectExpr :: CgStgExpr -> P Expr
-projectExpr (StgApp function args) = do
-  projectedArgs <- mapM projectArg args
+projectExpr :: [RuntimeRep] -> CgStgExpr -> P Expr
+projectExpr expected (StgApp function args) = do
   knownJoins <- gets joins
-  case lookup function knownJoins of
-    Just join -> pure (Jump join projectedArgs)
-    Nothing -> do
-      callee <- Ref <$> projectReference function
-      signature <- internSignature =<< signatureForApplication function args
-      pure (if null args then Enter callee signature else Call callee signature projectedArgs)
-projectExpr (StgLit literal) = Return . pure <$> projectLiteralAtom literal
-projectExpr (StgConApp con _ args _)
+  case lookupVarEnv knownJoins function of
+    Just join -> Jump join <$> mapM projectArg args
+    Nothing -> case args of
+      [] -> do
+        reps <- repsForType (varType function)
+        case reps of
+          [] -> pure (Return [])
+          [LiftedRefRep] -> do
+            callee <- Ref <$> projectReference function
+            signature <- internSignature =<< signatureForApplication [] expected
+            pure (Enter callee signature)
+          [_] -> Return . pure . Ref <$> projectReference function
+          _ -> failRepresentation "zero-argument STG application retains a multi-component variable"
+      _ -> do
+        projectedArgs <- mapM projectArg args
+        callee <- Ref <$> projectReference function
+        signature <- internSignature =<< signatureForApplication args expected
+        pure (Call callee signature projectedArgs)
+projectExpr _ (StgLit literal) = Return . pure <$> projectLiteralAtom literal
+projectExpr _ (StgConApp con _ args _)
   | isUnboxedTupleDataCon con = Return <$> mapM projectArg args
   | otherwise = Construct <$> internConstructor con <*> mapM projectArg args
-projectExpr (StgOpApp op args resultType) = do
+projectExpr _ (StgOpApp op args resultType) = do
   signature <- internSignature =<< signatureForArgs args resultType
   Operation <$> internOperation op signature <*> mapM projectArg args
-projectExpr (StgCase scrutinee binder altType alts) = Case <$> projectExpr scrutinee
-  <*> ensureValue binder <*> repsForType (varType binder)
-  <*> projectCaseKind altType <*> mapM (projectAlt altType) alts
-projectExpr (StgLet _ binding body) = do
+projectExpr expected (StgCase scrutinee binder altType alts) = do
+  binderReps <- repsForType (varType binder)
+  Case <$> projectExpr binderReps scrutinee
+    <*> ensureValue binder <*> pure binderReps
+    <*> projectCaseKind altType <*> mapM (projectAlt expected altType) alts
+projectExpr expected (StgLet _ binding body) = do
   mapM_ ensureValue (bindingBinders binding)
-  Let <$> projectLocalGroup binding <*> projectExpr body
-projectExpr (StgLetNoEscape _ binding body) = do
+  Let <$> projectLocalGroup binding <*> projectExpr expected body
+projectExpr expected (StgLetNoEscape _ binding body) = do
   mapM_ ensureJoin (bindingBinders binding)
-  LetJoins <$> projectJoinGroup binding <*> projectExpr body
-projectExpr (StgTick _ body) = projectExpr body
+  LetJoins <$> projectJoinGroup binding <*> projectExpr expected body
+projectExpr expected (StgTick _ body) = projectExpr expected body
 
 projectCaseKind :: AltType -> P CaseKind
 projectCaseKind (AlgAlt tycon) = pure (AlgebraicCase (nameSymbol "type" (GHC.tyConName tycon)))
@@ -213,12 +230,12 @@ projectCaseKind (PrimAlt rep) = PrimitiveCase <$> projectRep rep
 projectCaseKind (MultiValAlt _) = pure MultiValueCase
 projectCaseKind PolyAlt = pure PolymorphicCase
 
-projectAlt :: AltType -> CgStgAlt -> P Alternative
-projectAlt (MultiValAlt _) (GenStgAlt (DataAlt con) binders body)
+projectAlt :: [RuntimeRep] -> AltType -> CgStgAlt -> P Alternative
+projectAlt expected (MultiValAlt _) (GenStgAlt (DataAlt con) binders body)
   | isUnboxedTupleDataCon con = Alternative DefaultPattern
-      <$> mapM ensureValue binders <*> projectExpr body
-projectAlt _ (GenStgAlt con binders body) = Alternative <$> projectPattern con
-  <*> mapM ensureValue binders <*> projectExpr body
+      <$> mapM ensureValue binders <*> projectExpr expected body
+projectAlt expected _ (GenStgAlt con binders body) = Alternative <$> projectPattern con
+  <*> mapM ensureValue binders <*> projectExpr expected body
 
 projectPattern :: AltCon -> P AlternativePattern
 projectPattern DEFAULT = pure DefaultPattern
@@ -236,11 +253,12 @@ projectJoinGroup (StgNonRec binder rhs) = NonRecursive <$> projectJoin binder rh
 projectJoinGroup (StgRec pairs) = Recursive <$> mapM (uncurry projectJoin) pairs
 
 projectJoin :: Id -> CgStgRhs -> P JoinBinding
-projectJoin binder (StgRhsClosure _ _ JumpedTo parameters body resultType) = JoinBinding
-  <$> requireJoin binder
-  <*> (internSignature =<< signatureFor parameters resultType)
-  <*> mapM ensureValue parameters
-  <*> projectExpr body
+projectJoin binder (StgRhsClosure _ _ JumpedTo parameters body resultType) = do
+  resultReps <- repsForType resultType
+  JoinBinding <$> requireJoin binder
+    <*> (internSignature =<< signatureFor parameters resultType)
+    <*> mapM ensureParameterValue parameters
+    <*> projectExpr resultReps body
 projectJoin binder _ = failShape
   ("let-no-escape binding lacks JumpedTo form: " <> symbolText (idSymbol "join" binder))
 
@@ -253,7 +271,7 @@ projectArg (StgLitArg literal) = projectLiteralAtom literal
 projectReference :: Id -> P ValueRef
 projectReference binder = do
   known <- gets values
-  maybe (Global <$> internGlobal binder) (pure . Local) (lookup binder known)
+  maybe (Global <$> internGlobal binder) (pure . Local) (lookupVarEnv known binder)
 
 bindingBinders :: CgStgBinding -> [Id]
 bindingBinders (StgNonRec binder _) = [binder]
@@ -262,35 +280,54 @@ bindingBinders (StgRec pairs) = map fst pairs
 ensureValue :: Id -> P ValueId
 ensureValue binder = do
   known <- gets values
-  case lookup binder known of
+  case lookupVarEnv known binder of
     Just identity -> pure identity
     Nothing -> do
       identity <- ValueId <$> gets nextValue
-      modify' (\current -> current { nextValue = nextValue current + 1, values = (binder, identity) : values current })
+      modify' (\current -> current { nextValue = nextValue current + 1
+        , values = extendVarEnv (values current) binder identity })
       pure identity
 
+-- GHC can reuse a wired-in zero-width binder at several parameter sites.
+-- It has no payload and projectArg emits Void for it, so recording it in the
+-- ordinary Id-to-ValueId table would incorrectly alias distinct semantic
+-- parameters. Allocate an ID for each parameter occurrence instead.
+ensureParameterValue :: Id -> P ValueId
+ensureParameterValue binder = do
+  reps <- repsForType (varType binder)
+  if null reps
+    then freshValue
+    else ensureValue binder
+
+freshValue :: P ValueId
+freshValue = do
+  identity <- ValueId <$> gets nextValue
+  modify' (\current -> current { nextValue = nextValue current + 1 })
+  pure identity
+
 requireValue :: Id -> P ValueId
-requireValue binder = gets (lookup binder . values) >>= maybe
+requireValue binder = gets (\current -> lookupVarEnv (values current) binder) >>= maybe
   (failIdentity ("missing value allocation: " <> symbolText (idSymbol "value" binder))) pure
 
 ensureJoin :: Id -> P JoinId
 ensureJoin binder = do
   known <- gets joins
-  case lookup binder known of
+  case lookupVarEnv known binder of
     Just identity -> pure identity
     Nothing -> do
       identity <- JoinId <$> gets nextJoin
-      modify' (\current -> current { nextJoin = nextJoin current + 1, joins = (binder, identity) : joins current })
+      modify' (\current -> current { nextJoin = nextJoin current + 1
+        , joins = extendVarEnv (joins current) binder identity })
       pure identity
 
 requireJoin :: Id -> P JoinId
-requireJoin binder = gets (lookup binder . joins) >>= maybe
+requireJoin binder = gets (\current -> lookupVarEnv (joins current) binder) >>= maybe
   (failIdentity ("missing join allocation: " <> symbolText (idSymbol "join" binder))) pure
 
 internGlobal :: Id -> P GlobalId
 internGlobal binder = do
   known <- gets globals
-  case lookup binder known of
+  case lookupVarEnv known binder of
     Just identity -> pure identity
     Nothing -> do
       reps <- repsForType (varType binder)
@@ -306,7 +343,7 @@ internGlobal binder = do
           symbol = idSymbol "value" binder
           declaration = GlobalDecl symbol rep signature evaluated (Map.lookup symbol generations)
       modify' (\current -> current
-        { globals = globals current <> [(binder, identity)]
+        { globals = extendVarEnv (globals current) binder identity
         , globalDecls = globalDecls current <> [declaration] })
       pure identity
 
@@ -341,12 +378,14 @@ internConstructor con = do
         [rep@UnliftedRefRep] -> pure rep
         _ -> failRepresentation "heap constructor lacks a managed result representation"
       layout <- layoutFor reps
+      tag <- checkedWord32 "constructor tag" (dataConTag con)
+      familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
       prior <- gets constructorDecls
       let identity = ConstructorId (fromIntegral (length prior))
           declaration = ConstructorDecl
             (nameSymbol "constructor" (dataConName con))
             (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
-            resultRep reps fieldStrictness layout
+            resultRep reps fieldStrictness layout tag familySize
       modify' (\current -> current
         { constructors = constructors current <> [(con, identity)]
         , constructorDecls = constructorDecls current <> [declaration] })
@@ -356,6 +395,13 @@ internConstructor con = do
     isUnboxed LiftedRefRep = False
     isUnboxed UnliftedRefRep = False
     isUnboxed _ = True
+
+checkedWord32 :: Text -> Int -> P Word32
+checkedWord32 label value
+  | value < 0 = failRepresentation (label <> " is negative")
+  | toInteger value > toInteger (maxBound :: Word32) =
+      failRepresentation (label <> " exceeds u32")
+  | otherwise = pure (fromIntegral value)
 
 internOperation :: StgOp -> SignatureId -> P OperationId
 internOperation op signature = case op of
@@ -381,6 +427,10 @@ signatureFor args result = Signature <$> (concat <$> mapM (argumentRepsForType .
 -- representation arity as function evidence, but never guesses a thunk from
 -- zero arity. A CAF returning a function has a zero-argument entry, not all the
 -- arrows in the returned function's type.
+--
+-- `importedIdLFInfo` is partial for GHC's wired-in unused-argument descriptor.
+-- Such a zero-width argument is projected directly as Void and never reaches
+-- internGlobal, so this query remains restricted to genuine imported entries.
 importedEntry :: Id -> P (Maybe Signature, Bool)
 importedEntry binder = case importedIdLFInfo binder of
   LFReEntrant _ arity _ _ -> do
@@ -401,17 +451,19 @@ signatureForArgs args result = Signature <$> (concat <$> mapM argReps args) <*> 
     argReps (StgVarArg binder) = argumentRepsForType (varType binder)
     argReps (StgLitArg literal) = argumentRepsForType (literalType literal)
 
--- Call-site saturation is separate from an entry's arity. In particular,
--- demanding a function with no arguments returns the function, and a PAP
--- returns a lifted reference rather than its eventual saturated result.
-signatureForApplication :: Id -> [StgArg] -> P Signature
-signatureForApplication function args = do
-  (_, result) <- splitRepArguments (length args) (varType function)
-  signatureForArgs args result
+-- The STG context, not the callee's source type, says what this application
+-- must produce. Arguments retain their actual unarised representations while
+-- the enclosing RHS, join, or case supplies the demanded result group.
+signatureForApplication :: [StgArg] -> [RuntimeRep] -> P Signature
+signatureForApplication args demandedResult = Signature
+  <$> (concat <$> mapM argReps args) <*> pure demandedResult
+  where
+    argReps (StgVarArg binder) = argumentRepsForType (varType binder)
+    argReps (StgLitArg literal) = argumentRepsForType (literalType literal)
 
--- Follow GHC's countFunRepArgs callable view, including foralls, casts and
--- newtypes, while retaining the residual type. Each source argument expands
--- to a complete representation group, with one position for a void argument.
+-- Imported LF arity is expressed in GHC's callable representation view. Only
+-- imported entries need this source-type traversal; STG application sites use
+-- their actual arguments plus an already-threaded demanded result instead.
 splitRepArguments :: Int -> Type -> P ([RuntimeRep], Type)
 splitRepArguments 0 ty = pure ([], ty)
 splitRepArguments supplied ty = case unwrapType ty of

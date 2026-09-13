@@ -321,7 +321,7 @@ impl Decoder {
     }
 
     fn constructor(&mut self, value: &Value) -> Result<ConstructorDecl, ParseError> {
-        let fields = array(value, 6, "constructor declaration")?;
+        let fields = array(value, 8, "constructor declaration")?;
         Ok(ConstructorDecl {
             identity: self.symbol(&fields[0])?,
             family: self.symbol(&fields[1])?,
@@ -331,6 +331,8 @@ impl Decoder {
             })?,
             layout: self.layout(&fields[4])?,
             result_rep: self.rep(&fields[5])?,
+            tag: u32_value(&fields[6], "constructor tag")?,
+            family_size: u32_value(&fields[7], "constructor family size")?,
         })
     }
 

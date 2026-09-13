@@ -107,8 +107,13 @@ fn tenure(core: &mut PersistentSession, label: &str, n: i64) -> RootSlot {
 /// test cannot reach the machine through `ResidentSession`.
 fn mount(core: &mut PersistentSession, scope: ScopeId, name: &str, raw: u64, slot: RootSlot) {
     let machine = core.machine_mut().expect("bootstrapped");
-    let handle = machine.mint_handle_from_root(slot, RealmId::ROOT);
-    let mounted = machine.take_handle_root(handle).expect("handle is live");
+    let handle = machine
+        .mint_handle_from_root(slot, RealmId::ROOT)
+        .expect("machine reusable");
+    let mounted = machine
+        .take_handle_root(handle)
+        .expect("machine reusable")
+        .expect("handle is live");
     core.bind_in(scope, entry(name, raw, mounted))
         .expect("scope is live");
 }
@@ -121,15 +126,25 @@ fn rehoming_a_handle_moves_its_cleanup_scope() {
     let source = RealmId::fresh();
     let destination = RealmId::fresh();
     let machine = core.machine_mut().expect("bootstrapped");
-    let handle = machine.mint_handle_from_root(slot, source);
+    let handle = machine
+        .mint_handle_from_root(slot, source)
+        .expect("machine reusable");
 
-    assert!(machine.rehome_handle(handle, destination));
+    assert!(machine
+        .rehome_handle(handle, destination)
+        .expect("machine reusable"));
     assert_eq!(machine.handle_realm(handle), Some(destination));
     assert_eq!(machine.close_realm(source), (0, 0));
-    assert!(machine.handle_slot(handle).is_some());
+    assert!(machine
+        .handle_slot(handle)
+        .expect("machine reusable")
+        .is_some());
 
     assert_eq!(machine.close_realm(destination), (0, 1));
-    assert!(machine.handle_slot(handle).is_none());
+    assert!(machine
+        .handle_slot(handle)
+        .expect("machine reusable")
+        .is_none());
     assert_eq!(core.persistent_roots_count(), roots_before - 1);
 }
 
@@ -225,7 +240,8 @@ fn retiring_a_scope_releases_exactly_the_roots_its_receipt_reports() {
     let outstanding = core
         .machine_mut()
         .expect("bootstrapped")
-        .mint_handle_from_root(handle_slot, RealmId::ROOT);
+        .mint_handle_from_root(handle_slot, RealmId::ROOT)
+        .expect("machine reusable");
 
     let baseline_roots = core.persistent_roots_count();
     let baseline_root_frame = core.scope_binding_count(ScopeId::ROOT);

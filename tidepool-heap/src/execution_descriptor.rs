@@ -10,8 +10,16 @@ const HEADER_STATE_MASK: usize = 7;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub enum DescriptorState {
+    /// Word 8 retains the first payload component (or unused minimum padding).
     Live = 0,
+    /// Word 8 is the collector's managed relocation target.
     Forwarded = 1,
+    /// A thunk has an active update obligation. Captures, including word 8,
+    /// retain their original layout until that obligation is settled.
+    Evaluating = 2,
+    /// A thunk's word 8 is its managed WHNF indirection target. Former capture
+    /// slots are dead and must not be traced. The original extent is unchanged.
+    Updated = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,10 +73,17 @@ pub enum DescriptorTraceError {
     HeaderIdentity { expected: usize, actual: usize },
     #[error("invalid prepared object header state {state}")]
     HeaderState { state: usize },
+    #[error("header state {state:?} is invalid for {kind:?}")]
+    StateForKind {
+        state: DescriptorState,
+        kind: ObjectKind,
+    },
     #[error("forwarded object cannot be used as a live tracing snapshot")]
     ForwardedObject,
-    #[error("managed pointer {address:#x} is not a registered object start")]
-    UnregisteredPointer { address: usize },
+    #[error("managed pointer {address:#x} is not an object start in the source space")]
+    InvalidManagedPointer { address: usize },
+    #[error("object header names unknown descriptor {address:#x}")]
+    UnknownDescriptor { address: usize },
     #[error("object at {address:#x} is not aligned to {alignment} bytes")]
     Misaligned { address: usize, alignment: u32 },
     #[error("copy requires {required} bytes but destination contains {available}")]
@@ -77,8 +92,6 @@ pub enum DescriptorTraceError {
     MetadataAllocation,
     #[error("copy source/destination ranges are invalid or overlap")]
     InvalidRange,
-    #[error("registered object extents overlap at {address:#x}")]
-    OverlappingObjects { address: usize },
     #[error("descriptor object extent {declared} exceeds readable bytes {available}")]
     Truncated { declared: u32, available: usize },
     #[error("descriptor trace slot at offset {offset} exceeds object extent {extent}")]
@@ -188,11 +201,24 @@ impl ObjectDescriptor {
         if actual != expected {
             return Err(DescriptorTraceError::HeaderIdentity { expected, actual });
         }
-        match word & HEADER_STATE_MASK {
+        let state = match word & HEADER_STATE_MASK {
             0 => Ok(DescriptorState::Live),
             1 => Ok(DescriptorState::Forwarded),
+            2 => Ok(DescriptorState::Evaluating),
+            3 => Ok(DescriptorState::Updated),
             state => Err(DescriptorTraceError::HeaderState { state }),
+        }?;
+        if matches!(
+            state,
+            DescriptorState::Evaluating | DescriptorState::Updated
+        ) && self.kind != ObjectKind::Thunk
+        {
+            return Err(DescriptorTraceError::StateForKind {
+                state,
+                kind: self.kind,
+            });
         }
+        Ok(state)
     }
 
     /// Install forwarding during the non-fallible commit phase of collection.
@@ -213,7 +239,8 @@ impl ObjectDescriptor {
         );
     }
 
-    /// Visit exactly the managed-reference slots derived by `StorageLayout`.
+    /// Visit the current state's managed slots. Live/evaluating payloads use
+    /// `StorageLayout`; updated thunks trace only their word-8 target.
     /// Address and numeric fields are never reclassified by inspecting their
     /// bits. The caller supplies this descriptor from the compiled entry's
     /// stable metadata; legacy tag/count scanning is not consulted.
@@ -229,8 +256,13 @@ impl ObjectDescriptor {
         available: usize,
         mut visit: impl FnMut(*mut *mut u8),
     ) -> Result<(), DescriptorTraceError> {
-        if self.state(ptr, available)? == DescriptorState::Forwarded {
-            return Err(DescriptorTraceError::ForwardedObject);
+        match self.state(ptr, available)? {
+            DescriptorState::Forwarded => return Err(DescriptorTraceError::ForwardedObject),
+            DescriptorState::Updated => {
+                visit(ptr.add(FORWARDING_POINTER_OFFSET).cast());
+                return Ok(());
+            }
+            DescriptorState::Live | DescriptorState::Evaluating => {}
         }
         for &offset in &self.trace_offsets {
             let slot_size = u32::try_from(std::mem::size_of::<*mut u8>()).map_err(|_| {
@@ -271,7 +303,7 @@ fn descriptor_align_up(value: u32, alignment: u32) -> Result<u32, LayoutError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gc::raw::{cheney_copy_registered, DescriptorRegistry};
+    use crate::gc::raw::{cheney_copy_descriptors, DescriptorSpace};
     use crate::layout;
     use std::sync::Arc;
     use tidepool_repr::execution_schema::{Architecture, Endianness, RuntimeRep, TargetDescriptor};
@@ -284,6 +316,64 @@ mod tests {
             word_width: 64,
             abi: "system-v".into(),
             features: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn thunk_state_changes_trace_shape_without_changing_extent() {
+        let descriptor = ObjectDescriptor::new(
+            ObjectKind::Thunk,
+            StorageLayout::for_reps(&target(), &[RuntimeRep::Address, RuntimeRep::LiftedRef])
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let extent = descriptor.allocation_extent() as usize;
+        let mut words = vec![0_u64; extent / 8];
+        let object = words.as_mut_ptr().cast::<u8>();
+        let mut offsets = Vec::new();
+        unsafe {
+            descriptor.initialize_header(object);
+            std::ptr::write(
+                object.cast::<usize>(),
+                descriptor.initial_header_word() | DescriptorState::Evaluating as usize,
+            );
+            descriptor
+                .for_each_trace_slot(object, extent, |slot| {
+                    offsets.push(slot as usize - object as usize)
+                })
+                .unwrap();
+            assert_eq!(offsets, vec![16]);
+            offsets.clear();
+            std::ptr::write(
+                object.cast::<usize>(),
+                descriptor.initial_header_word() | DescriptorState::Updated as usize,
+            );
+            descriptor
+                .for_each_trace_slot(object, extent, |slot| {
+                    offsets.push(slot as usize - object as usize)
+                })
+                .unwrap();
+            assert_eq!(offsets, vec![8]);
+            assert_eq!(descriptor.allocation_extent() as usize, extent);
+        }
+    }
+
+    #[test]
+    fn only_thunks_may_have_update_states() {
+        let descriptor = ObjectDescriptor::new(
+            ObjectKind::Constructor,
+            StorageLayout::for_reps(&target(), &[]).unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut words = [0_u64; 2];
+        for state in [DescriptorState::Evaluating, DescriptorState::Updated] {
+            words[0] = (descriptor.initial_header_word() | state as usize) as u64;
+            assert!(matches!(
+                unsafe { descriptor.state(words.as_ptr().cast(), 16) },
+                Err(DescriptorTraceError::StateForKind { .. })
+            ));
         }
     }
 
@@ -417,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_copy_rejects_partial_source_and_occupied_destination() {
+    fn descriptor_copy_rejects_partial_initialized_region_before_copying() {
         let descriptor = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
@@ -429,60 +519,34 @@ mod tests {
         let mut source = Arena([0; 256]);
         let mut destination = Arena([0; 256]);
         let pointer = source.0.as_mut_ptr();
-        let mut registry = DescriptorRegistry::new();
+        let layouts = [Arc::clone(&descriptor)];
+        let mut space = DescriptorSpace::new(layouts.iter().cloned()).unwrap();
         unsafe {
             descriptor.initialize_header(pointer);
-            registry
-                .register(pointer, source.0.len(), Arc::clone(&descriptor))
-                .unwrap();
         }
         let before = source.0;
         let error = unsafe {
-            cheney_copy_registered(
+            cheney_copy_descriptors(
                 &[],
-                pointer.add(8),
-                pointer.add(16),
+                pointer,
+                descriptor.allocation_extent() as usize - 8,
                 &mut destination.0,
-                &mut registry,
+                &mut space,
             )
         }
         .err()
         .expect("partially included allocation must fail");
-        assert!(matches!(error, DescriptorTraceError::InvalidRange));
+        assert!(matches!(error, DescriptorTraceError::Truncated { .. }));
         assert_eq!(source.0, before);
-        unsafe {
-            descriptor.initialize_header(destination.0.as_mut_ptr());
-            registry
-                .register(
-                    destination.0.as_mut_ptr(),
-                    destination.0.len(),
-                    Arc::clone(&descriptor),
-                )
-                .unwrap();
-        }
-        let destination_before = destination.0;
-        let error = unsafe {
-            cheney_copy_registered(
-                &[],
-                pointer,
-                pointer.add(16),
-                &mut destination.0,
-                &mut registry,
-            )
-        }
-        .err()
-        .expect("occupied destination must fail");
-        assert!(matches!(error, DescriptorTraceError::InvalidRange));
-        assert_eq!(source.0, before);
-        assert_eq!(destination.0, destination_before);
     }
 
     #[test]
-    fn registered_copy_capacity_failure_preserves_source_roots_and_destination() {
+    fn descriptor_copy_capacity_failure_preserves_source_roots_and_destination() {
         let descriptor = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
-                StorageLayout::for_reps(&target(), &[RuntimeRep::Int(128)]).unwrap(),
+                StorageLayout::for_reps(&target(), &[RuntimeRep::Int(64), RuntimeRep::Int(64)])
+                    .unwrap(),
                 None,
             )
             .unwrap(),
@@ -491,22 +555,20 @@ mod tests {
         let mut destination = Arena([0x5a; 256]);
         let pointer = source.0.as_mut_ptr();
         let extent = descriptor.allocation_extent() as usize;
-        let mut registry = DescriptorRegistry::new();
+        let layouts = [Arc::clone(&descriptor)];
+        let mut space = DescriptorSpace::new(layouts.iter().cloned()).unwrap();
         unsafe {
             descriptor.initialize_header(pointer);
-            registry
-                .register(pointer, extent, Arc::clone(&descriptor))
-                .unwrap();
         }
         let before = source.0;
         let mut root = pointer;
         let error = unsafe {
-            cheney_copy_registered(
+            cheney_copy_descriptors(
                 &[&mut root],
                 pointer,
-                pointer.add(extent),
+                extent,
                 &mut destination.0[..extent - 1],
-                &mut registry,
+                &mut space,
             )
         }
         .err()
@@ -518,11 +580,10 @@ mod tests {
         assert_eq!(root, pointer);
         assert_eq!(source.0, before);
         assert_eq!(destination.0, [0x5a; 256]);
-        assert!(registry.descriptor(pointer).is_some());
     }
 
     #[test]
-    fn registered_copy_rejects_late_interior_child_before_any_mutation() {
+    fn descriptor_copy_rejects_late_interior_child_after_terminal_partial_mutation() {
         let owner = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
@@ -546,7 +607,8 @@ mod tests {
         let owner_extent = owner.allocation_extent() as usize;
         let child_extent = child.allocation_extent() as usize;
         let child_pointer = unsafe { pointer.add(owner_extent) };
-        let mut registry = DescriptorRegistry::new();
+        let layouts = [Arc::clone(&owner), Arc::clone(&child)];
+        let mut space = DescriptorSpace::new(layouts.iter().cloned()).unwrap();
         unsafe {
             owner.initialize_header(pointer);
             child.initialize_header(child_pointer);
@@ -562,39 +624,42 @@ mod tests {
                     .cast::<*mut u8>(),
                 child_pointer.add(8),
             );
-            registry
-                .register(pointer, owner_extent, Arc::clone(&owner))
-                .unwrap();
-            registry
-                .register(child_pointer, child_extent, Arc::clone(&child))
-                .unwrap();
         }
-        let before = source.0;
         let mut root = pointer;
         let error = unsafe {
-            cheney_copy_registered(
+            cheney_copy_descriptors(
                 &[&mut root],
                 pointer,
-                pointer.add(owner_extent + child_extent),
+                owner_extent + child_extent,
                 &mut destination.0,
-                &mut registry,
+                &mut space,
             )
         }
         .err()
         .expect("interior reference must fail");
         assert!(matches!(
             error,
-            DescriptorTraceError::UnregisteredPointer { .. }
+            DescriptorTraceError::InvalidManagedPointer { .. }
         ));
-        assert_eq!(root, pointer);
-        assert_eq!(source.0, before);
-        assert_eq!(destination.0, [0x5a; 256]);
-        assert!(registry.descriptor(pointer).is_some());
-        assert!(registry.descriptor(child_pointer).is_some());
+        assert_ne!(
+            root, pointer,
+            "terminal failure may relocate roots before rejecting an edge"
+        );
+        unsafe {
+            assert_eq!(
+                owner.state(pointer, owner_extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+            assert_eq!(
+                child.state(child_pointer, child_extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+        }
+        assert_ne!(destination.0, [0x5a; 256]);
     }
 
     #[test]
-    fn registered_copy_aligns_each_mixed_layout_destination() {
+    fn descriptor_copy_packs_mixed_layouts_on_eight_byte_boundaries() {
         let narrow = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
@@ -607,7 +672,7 @@ mod tests {
         let wide = Arc::new(
             ObjectDescriptor::new(
                 ObjectKind::Constructor,
-                StorageLayout::for_reps(&target(), &[RuntimeRep::Int(128)]).unwrap(),
+                StorageLayout::for_reps(&target(), &[RuntimeRep::Int(64)]).unwrap(),
                 None,
             )
             .unwrap(),
@@ -615,47 +680,30 @@ mod tests {
         let mut source = Arena([0; 256]);
         let mut destination = Arena([0; 256]);
         let pointer = source.0.as_mut_ptr();
-        let wide_pointer = unsafe { pointer.add(32) };
-        let mut registry = DescriptorRegistry::new();
+        let narrow_extent = narrow.allocation_extent() as usize;
+        let wide_extent = wide.allocation_extent() as usize;
+        let wide_pointer = unsafe { pointer.add(narrow_extent) };
+        let layouts = [Arc::clone(&narrow), Arc::clone(&wide)];
+        let mut space = DescriptorSpace::new(layouts.iter().cloned()).unwrap();
         unsafe {
             narrow.initialize_header(pointer);
             wide.initialize_header(wide_pointer);
-            registry
-                .register(
-                    pointer,
-                    narrow.allocation_extent() as usize,
-                    Arc::clone(&narrow),
-                )
-                .unwrap();
-            registry
-                .register(
-                    wide_pointer,
-                    wide.allocation_extent() as usize,
-                    Arc::clone(&wide),
-                )
-                .unwrap();
         }
         let mut first = pointer;
         let mut second = wide_pointer;
         let copied = unsafe {
-            cheney_copy_registered(
+            cheney_copy_descriptors(
                 &[&mut first, &mut second],
                 pointer,
-                pointer.add(64),
-                &mut destination.0[1..],
-                &mut registry,
+                narrow_extent + wide_extent,
+                &mut destination.0,
+                &mut space,
             )
             .unwrap()
         };
-        assert_eq!(first as usize % narrow.allocation_alignment() as usize, 0);
-        assert_eq!(second as usize % wide.allocation_alignment() as usize, 0);
-        assert!(second as usize >= first as usize + narrow.allocation_extent() as usize);
-        assert_eq!(
-            copied.bytes_copied,
-            second as usize - destination.0[1..].as_ptr() as usize
-                + wide.allocation_extent() as usize
-        );
-        assert!(registry.descriptor(first).is_some());
-        assert!(registry.descriptor(second).is_some());
+        assert_eq!(first as usize % 8, 0);
+        assert_eq!(second as usize % 8, 0);
+        assert_eq!(second, unsafe { first.add(narrow_extent) });
+        assert_eq!(copied.bytes_copied, narrow_extent + wide_extent);
     }
 }

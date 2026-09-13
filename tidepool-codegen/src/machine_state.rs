@@ -561,13 +561,16 @@ impl MachineState {
         if active.is_some() {
             return Err(RuntimeError::BadPointer);
         }
+        let space = tidepool_heap::gc::raw::DescriptorSpace::new(layouts.iter().cloned())
+            .map_err(|_| RuntimeError::HeapOverflow)?;
         *active = Some(GcState {
             active_start: buffer.as_mut_ptr().cast(),
             active_size: std::mem::size_of_val(buffer.as_slice()),
             active_buffer: Some(buffer),
             prepared: Some(crate::host_fns::PreparedHeap {
-                objects: tidepool_heap::gc::raw::DescriptorRegistry::new(),
-                layouts,
+                space,
+                spare: Vec::new(),
+                used: 0,
             }),
         });
         Ok(())

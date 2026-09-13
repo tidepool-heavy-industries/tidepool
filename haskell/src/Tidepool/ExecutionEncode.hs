@@ -87,6 +87,8 @@ encodeConstructor constructor = array
   , list encodeBool (constructorStrictFields constructor)
   , encodeLayout (constructorLayout constructor)
   , encodeRep (constructorResultRep constructor)
+  , encodeWord32 (constructorTag constructor)
+  , encodeWord32 (constructorFamilySize constructor)
   ]
 
 encodeGlobal :: GlobalDecl -> Encoding

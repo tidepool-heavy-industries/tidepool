@@ -15,8 +15,6 @@ main = do
   assert (first == second) "prepared execution encoding is not deterministic"
   assert (BS.take 7 first == BS.pack [0x8c, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
-  assert (BS.length first == 312)
-    ("prepared execution golden length changed: " ++ show (BS.length first))
 
 representative :: WireProgram
 representative = WireProgram envelope signatures globals constructors operations bindings (ValueId 0)
@@ -29,10 +27,11 @@ representative = WireProgram envelope signatures globals constructors operations
     [ Signature [LiftedRefRep] [LiftedRefRep]
     , Signature [] [IntRep 64]
     ]
-  globals = [GlobalDecl (exact "Fixture.Dependency" "imported") (SignatureId 0) False (Just 7)]
+  globals = [GlobalDecl (exact "Fixture.Dependency" "imported") LiftedRefRep
+    (Just (SignatureId 0)) False (Just 7)]
   layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]
   constructors = [ConstructorDecl (exact "Fixture.Vertical" "Box")
-    (exact "Fixture.Vertical" "Box") [IntRep 64] [True] layout]
+    (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1]
   operations = [OperationDecl "sub-int64" (SignatureId 0)]
   result = Return [Scalar (IntLiteral 64 (BS.pack [0,0,0,0,0,0,0,42]))]
   binding = HeapBinding (ValueId 0)

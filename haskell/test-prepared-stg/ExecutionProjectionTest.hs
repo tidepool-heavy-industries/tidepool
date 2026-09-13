@@ -3,6 +3,7 @@
 module ExecutionProjectionTest (projectProjectionContract) where
 
 import Control.Monad (unless)
+import Data.List (nub)
 import Data.Map.Strict qualified as Map
 import GHC.Builtin.Types
   ( doubleRepDataConTy, intRepDataConTy, liftedRepTy, tupleRepDataConTyCon
@@ -26,6 +27,8 @@ projectProjectionContract modules = do
         (ioError (userError "M3 projection emitted no bindings"))
       unless (not (null (programGlobals program)))
         (ioError (userError "M3 projection omitted the imported package value"))
+      unless (any callableReverse (programGlobals program))
+        (ioError (userError "M3 projection omitted reverse's imported entry signature"))
       case programGlobals program of
         imported : _ -> case projectPrepared
           (context { projectionRetainedGenerations = Map.singleton (globalIdentity imported) 7 }) modules of
@@ -36,12 +39,18 @@ projectProjectionContract modules = do
         [] -> pure ()
       unless (any (or . constructorStrictFields) (programConstructors program))
         (ioError (userError "M3 projection omitted the strict constructor field"))
+      unless (all constructorTagsAreUsable (programConstructors program))
+        (ioError (userError "M3 projection emitted invalid constructor tag/family facts"))
       unless (any groupIsRecursive (programBindings program)
         || any (groupAny (rhsIsRecursive . heapBindingRhs . topHeap)) (programBindings program))
         (ioError (userError "M3 projection omitted recursive control/data"))
       unless (programEntry program == selectedEntry program)
         (ioError (userError "M3 projection did not select the requested exact entry"))
       verifyTupleArgumentCall program
+      verifyDemandedApplicationResults program
+      verifySpecificApplicationShapes program
+      verifyVoidParameters program
+      verifyUnboxedReturn program
       case projectPrepared context [] of
         Left (UnsupportedPreparedShape _) -> pure ()
         other -> ioError (userError ("empty program did not produce typed rejection: " <> show other))
@@ -61,11 +70,15 @@ projectProjectionContract modules = do
         entries -> error ("expected one result entry, got " <> show entries)
     groupItems (NonRecursive top) = [top]
     groupItems (Recursive tops) = tops
+    callableReverse global = symbolOccurrence (globalIdentity global) == "reverse"
+      && globalEntrySignature global /= Nothing
 
     topHeap (TopBinding _ binding) = binding
     groupIsRecursive Recursive{} = True
     groupIsRecursive _ = False
     groupAny predicate group = any predicate (groupItems group)
+    constructorTagsAreUsable constructor = constructorTag constructor > 0
+      && constructorTag constructor <= constructorFamilySize constructor
     rhsIsRecursive (Function _ _ _ body) = exprIsRecursive body
     rhsIsRecursive (Thunk _ _ _ body) = exprIsRecursive body
     rhsIsRecursive Constructor{} = False
@@ -125,5 +138,131 @@ verifyTupleArgumentCall program = case
     heapBody (HeapBinding _ (Thunk _ _ _ body)) = body
     heapBody HeapBinding{} = Return []
     joinBody (JoinBinding _ _ _ body) = body
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+-- Calls and enters take their demanded result from the enclosing projection
+-- context: RHS/join signatures, case binders for scrutinees, and that same
+-- enclosing result for alternatives and bodies.
+verifyDemandedApplicationResults :: WireProgram -> IO ()
+verifyDemandedApplicationResults program = do
+  checked <- sum . concat <$> mapM checkTop (programBindings program)
+  unless (checked > 0)
+    (ioError (userError "M3 projection fixture emitted no Call or Enter expression"))
+  where
+    signatureAt (SignatureId index) = programSignatures program !! fromIntegral index
+    checkTop :: Group TopBinding -> IO [Int]
+    checkTop group = mapM (checkHeap . topHeap) (groupItems group)
+    topHeap (TopBinding _ binding) = binding
+    checkHeap :: HeapBinding -> IO Int
+    checkHeap (HeapBinding _ rhs) = case rhs of
+      Function signature _ _ body -> checkExpr (signatureResults (signatureAt signature)) body
+      Thunk signature _ _ body -> checkExpr (signatureResults (signatureAt signature)) body
+      Constructor{} -> pure 0
+      Bytes{} -> pure 0
+    checkJoin :: JoinBinding -> IO Int
+    checkJoin (JoinBinding _ signature _ body) =
+      checkExpr (signatureResults (signatureAt signature)) body
+    checkExpr :: [RuntimeRep] -> Expr -> IO Int
+    checkExpr expected expression = case expression of
+      Enter _ signature -> checkResult expected signature
+      Call _ signature _ -> checkResult expected signature
+      Case scrutinee _ binderReps _ alternatives -> do
+        scrutineeCalls <- checkExpr binderReps scrutinee
+        alternativeCalls <- sum <$> mapM (checkAlternative expected) alternatives
+        pure (scrutineeCalls + alternativeCalls)
+      Let group body -> do
+        localCalls <- sum <$> mapM checkHeap (groupItems group)
+        bodyCalls <- checkExpr expected body
+        pure (localCalls + bodyCalls)
+      LetJoins group body -> do
+        joinCalls <- sum <$> mapM checkJoin (groupItems group)
+        bodyCalls <- checkExpr expected body
+        pure (joinCalls + bodyCalls)
+      _ -> pure 0
+    checkAlternative :: [RuntimeRep] -> Alternative -> IO Int
+    checkAlternative expected (Alternative _ _ body) = checkExpr expected body
+    checkResult :: [RuntimeRep] -> SignatureId -> IO Int
+    checkResult expected signature = do
+      unless (signatureResults (signatureAt signature) == expected)
+        (ioError (userError "M3 projection call result did not match its demanded context"))
+      pure 1
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+verifySpecificApplicationShapes :: WireProgram -> IO ()
+verifySpecificApplicationShapes program = do
+  polymorphicIdentity <- namedBinding "polymorphicIdentity"
+  polymorphicIdentityResult <- namedBinding "polymorphicIdentityResult"
+  unless (hasCall polymorphicIdentity polymorphicIdentityResult)
+    (ioError (userError
+      "M3 projection did not retain the oversaturated polymorphicIdentity call with its demanded Int# result"))
+  where
+    expectedResult = [IntRep 64]
+    namedBinding occurrence = case
+      [ binding
+      | group <- programBindings program
+      , TopBinding symbol binding <- groupItems group
+      , symbolOccurrence symbol == occurrence
+      ] of
+        [binding] -> pure binding
+        bindings -> ioError (userError
+          ("expected one " <> show occurrence <> " binding, got " <> show (length bindings)))
+    hasCall callee binding = any expressionMatches (expressions (heapBody binding))
+      where
+        expressionMatches (Call (Ref (Local target)) signature arguments) =
+          target == heapBindingId callee
+            && length arguments == 2
+            && signatureResults (signatureAt signature) == expectedResult
+        expressionMatches _ = False
+    expressions expression = expression : case expression of
+      Case scrutinee _ _ _ alternatives -> expressions scrutinee
+        <> concatMap (expressions . alternativeBody) alternatives
+      Let group body -> concatMap (expressions . heapBody) (groupItems group) <> expressions body
+      LetJoins group body -> concatMap (expressions . joinBody) (groupItems group) <> expressions body
+      _ -> []
+    signatureAt (SignatureId index) = programSignatures program !! fromIntegral index
+    alternativeBody (Alternative _ _ body) = body
+    heapBody (HeapBinding _ (Function _ _ _ body)) = body
+    heapBody (HeapBinding _ (Thunk _ _ _ body)) = body
+    heapBody HeapBinding{} = Return []
+    joinBody (JoinBinding _ _ _ body) = body
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+verifyVoidParameters :: WireProgram -> IO ()
+verifyVoidParameters program = case
+  [ (signatureAt signature, parameters)
+  | group <- programBindings program
+  , TopBinding symbol (HeapBinding _ (Function signature parameters _ _)) <- groupItems group
+  , symbolOccurrence symbol == "voidParameterPair"
+  ] of
+    [(signature, parameters)] -> do
+      let voidParameters =
+            [ parameter
+            | (VoidRep, parameter) <- zip (signatureArguments signature) parameters
+            ]
+      unless (length voidParameters == 2 && length (nub voidParameters) == 2)
+        (ioError (userError "M3 projection aliased wired-in void parameters"))
+    bindings -> ioError (userError
+      ("expected one voidParameterPair binding, got " <> show (length bindings)))
+  where
+    signatureAt (SignatureId index) = programSignatures program !! fromIntegral index
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+verifyUnboxedReturn :: WireProgram -> IO ()
+verifyUnboxedReturn program = case
+  [ (signatureAt signature, parameters, body)
+  | group <- programBindings program
+  , TopBinding symbol (HeapBinding _ (Function signature parameters _ body)) <- groupItems group
+  , symbolOccurrence symbol == "returnUnboxedArgument"
+  ] of
+    [(signature, [parameter], Return [Ref (Local returned)])]
+      | signatureResults signature == [IntRep 64] && returned == parameter -> pure ()
+    matches -> ioError (userError
+      ("M3 projection did not return the unboxed parameter directly: " <> show matches))
+  where
+    signatureAt (SignatureId index) = programSignatures program !! fromIntegral index
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items

@@ -99,6 +99,8 @@ use lifecycle::OuterSession;
 pub enum DriverError {
     #[error("self-harness driver: {0}")]
     Session(String),
+    #[error("self-harness driver: {0}")]
+    Resident(#[from] tidepool_runtime::session::ResidentError),
     #[error(transparent)]
     Agent(#[from] HarnessError),
     #[error(transparent)]

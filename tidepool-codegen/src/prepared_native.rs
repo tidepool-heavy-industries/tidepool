@@ -12,7 +12,7 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
 use tidepool_heap::execution_descriptor::{ObjectDescriptor, ObjectKind};
-use tidepool_heap::gc::raw::{cheney_copy_registered, DescriptorRegistry};
+use tidepool_heap::gc::raw::{cheney_copy_descriptors, DescriptorSpace};
 use tidepool_repr::execution_schema::{
     Architecture, Atom, ConstructorId, Endianness, Expr, Group, HeapRhs, LinkedProgram, RuntimeRep,
     ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
@@ -199,6 +199,14 @@ impl PreparedNativeProgram {
             ObjectDescriptor::new(ObjectKind::Constructor, layout, None)
                 .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?,
         );
+        if descriptor.allocation_alignment() != 8
+            || descriptor.allocation_extent() < 16
+            || descriptor.allocation_extent() % 8 != 0
+        {
+            return Err(PreparedNativeError::Unsupported(
+                "generated object requires an eight-byte-aligned descriptor layout",
+            ));
+        }
         if descriptor
             .payload()
             .fields()
@@ -215,16 +223,10 @@ impl PreparedNativeProgram {
             .map(|(atom, rep)| field_source(atom, *rep, parameters))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut pipeline = CodegenPipeline::new(&[
-            (
-                "prepared_gc_trigger",
-                crate::host_fns::prepared_gc_trigger as *const u8,
-            ),
-            (
-                "prepared_publish_object",
-                crate::host_fns::prepared_publish_object as *const u8,
-            ),
-        ])?;
+        let mut pipeline = CodegenPipeline::new(&[(
+            "prepared_gc_trigger",
+            crate::host_fns::prepared_gc_trigger as *const u8,
+        )])?;
         let mut prepared_gc_signature = ir::Signature::new(pipeline.isa.default_call_conv());
         prepared_gc_signature.params.push(AbiParam::new(types::I64));
         prepared_gc_signature.params.push(AbiParam::new(types::I64));
@@ -237,19 +239,6 @@ impl PreparedNativeProgram {
                 "prepared_gc_trigger",
                 Linkage::Import,
                 &prepared_gc_signature,
-            )
-            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
-        let mut publish_signature = ir::Signature::new(pipeline.isa.default_call_conv());
-        publish_signature.params.push(AbiParam::new(types::I64));
-        publish_signature.params.push(AbiParam::new(types::I64));
-        publish_signature.params.push(AbiParam::new(types::I64));
-        publish_signature.returns.push(AbiParam::new(types::I32));
-        let publish = pipeline
-            .module
-            .declare_function(
-                "prepared_publish_object",
-                Linkage::Import,
-                &publish_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let tail_signature = abi
@@ -265,7 +254,6 @@ impl PreparedNativeProgram {
             &mut tail_context,
             &mut pipeline,
             prepared_gc,
-            publish,
             &descriptor,
             &declaration.field_reps,
             &sources,
@@ -307,7 +295,7 @@ impl PreparedNativeProgram {
         &self,
         arguments: &[u64],
     ) -> Result<NativeConstructor, PreparedNativeError> {
-        let (object, _) = self.execute_object(arguments)?;
+        let (object, _, _) = self.execute_object(arguments)?;
         decode_object(self.constructor, &self.descriptor, &object)
     }
 
@@ -368,36 +356,26 @@ impl PreparedNativeProgram {
         }
     }
 
-    pub fn execute_after_registered_collection(
+    pub fn execute_after_collection(
         &self,
         arguments: &[u64],
     ) -> Result<CollectionEvidence, PreparedNativeError> {
-        let (mut from, object_offset) = self.execute_object(arguments)?;
+        let (mut from, object_offset, from_used) = self.execute_object(arguments)?;
         let from_ptr = from.as_mut_ptr().cast::<u8>();
         let from_len = from.len() * size_of::<u64>();
         let object = unsafe { from_ptr.add(object_offset) };
-        let mut registry = DescriptorRegistry::new();
-        unsafe {
-            registry
-                .register(
-                    object,
-                    self.descriptor.allocation_extent() as usize,
-                    Arc::clone(&self.descriptor),
-                )
-                .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?;
-        }
+        let mut space = DescriptorSpace::new([Arc::clone(&self.descriptor)])
+            .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?;
         let mut root = object;
         let roots = [&mut root as *mut *mut u8];
-        let mut to = vec![0_u8; from_len];
+        let mut to = vec![0_u64; from.len()];
+        // The collector requires word alignment; every byte of the u64 buffer
+        // is initialized and the byte view stays within its allocation.
+        let tospace =
+            unsafe { std::slice::from_raw_parts_mut(to.as_mut_ptr().cast::<u8>(), from_len) };
         let copied = unsafe {
-            cheney_copy_registered(
-                &roots,
-                from_ptr,
-                from_ptr.add(from_len),
-                &mut to,
-                &mut registry,
-            )
-            .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?
+            cheney_copy_descriptors(&roots, from_ptr, from_used, tospace, &mut space)
+                .map_err(|error| PreparedNativeError::Descriptor(error.to_string()))?
         };
         let result = decode_object_from_ptr(self.constructor, &self.descriptor, root)?;
         Ok(CollectionEvidence {
@@ -413,7 +391,10 @@ impl PreparedNativeProgram {
         self.pipeline.stack_maps.len()
     }
 
-    fn execute_object(&self, arguments: &[u64]) -> Result<(Vec<u64>, usize), PreparedNativeError> {
+    fn execute_object(
+        &self,
+        arguments: &[u64],
+    ) -> Result<(Vec<u64>, usize, usize), PreparedNativeError> {
         if arguments.len() != self.argument_reps.len() {
             return Err(PreparedNativeError::Arguments {
                 expected: self.argument_reps.len(),
@@ -501,12 +482,15 @@ impl PreparedNativeProgram {
                 .ok_or(PreparedNativeError::ResultArea)?;
             Ok(offset)
         })();
-        let (buffer, _) = machine_state.reclaim_session_heap(vmctx.alloc_ptr);
+        let (buffer, used) = machine_state.reclaim_session_heap(vmctx.alloc_ptr);
         machine_state.clear_gc_state();
         machine_state.clear_stack_map_registry();
         let object_offset = result?;
         let buffer = buffer.ok_or(PreparedNativeError::ResultArea)?;
-        Ok((buffer, object_offset))
+        if used > buffer.len() * size_of::<u64>() || object_offset + extent > used {
+            return Err(PreparedNativeError::ResultArea);
+        }
+        Ok((buffer, object_offset, used))
     }
 }
 
@@ -514,7 +498,6 @@ fn emit_tail(
     context: &mut Context,
     pipeline: &mut CodegenPipeline,
     prepared_gc: FuncId,
-    publish: FuncId,
     descriptor: &ObjectDescriptor,
     field_reps: &[RuntimeRep],
     sources: &[FieldSource],
@@ -529,7 +512,6 @@ fn emit_tail(
     let prepared_gc = pipeline
         .module
         .declare_func_in_func(prepared_gc, builder.func);
-    let publish = pipeline.module.declare_func_in_func(publish, builder.func);
     let params = builder.block_params(block).to_vec();
     let vmctx = params[0];
     let result_area = params[1];
@@ -572,25 +554,7 @@ fn emit_tail(
             (descriptor.payload_base() + field.offset()) as i32,
         );
     }
-    let descriptor_index = builder.ins().iconst(types::I64, 0);
-    let publish_call = builder
-        .ins()
-        .call(publish, &[vmctx, object, descriptor_index]);
-    let status = builder.inst_results(publish_call)[0];
     let success = builder.ins().iconst(types::I32, CallStatus::Success as i64);
-    let published = builder
-        .ins()
-        .icmp(ir::condcodes::IntCC::Equal, status, success);
-    let publish_ok = builder.create_block();
-    let publish_failed = builder.create_block();
-    builder
-        .ins()
-        .brif(published, publish_ok, &[], publish_failed, &[]);
-    builder.switch_to_block(publish_failed);
-    builder.seal_block(publish_failed);
-    builder.ins().return_(&[status]);
-    builder.switch_to_block(publish_ok);
-    builder.seal_block(publish_ok);
     builder.ins().store(flags, object, result_area, 0);
     builder.ins().return_(&[success]);
     builder.finalize();
@@ -732,16 +696,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut pipeline = CodegenPipeline::new(&[
-            (
-                "prepared_gc_trigger",
-                crate::host_fns::prepared_gc_trigger as *const u8,
-            ),
-            (
-                "prepared_publish_object",
-                crate::host_fns::prepared_publish_object as *const u8,
-            ),
-        ])
+        let mut pipeline = CodegenPipeline::new(&[(
+            "prepared_gc_trigger",
+            crate::host_fns::prepared_gc_trigger as *const u8,
+        )])
         .unwrap();
         let mut gc_signature = ir::Signature::new(pipeline.isa.default_call_conv());
         gc_signature.params.push(AbiParam::new(types::I64));
@@ -750,19 +708,6 @@ mod tests {
         let gc = pipeline
             .module
             .declare_function("prepared_gc_trigger", Linkage::Import, &gc_signature)
-            .unwrap();
-        let mut publish_signature = ir::Signature::new(pipeline.isa.default_call_conv());
-        publish_signature.params.push(AbiParam::new(types::I64));
-        publish_signature.params.push(AbiParam::new(types::I64));
-        publish_signature.params.push(AbiParam::new(types::I64));
-        publish_signature.returns.push(AbiParam::new(types::I32));
-        let publish = pipeline
-            .module
-            .declare_function(
-                "prepared_publish_object",
-                Linkage::Import,
-                &publish_signature,
-            )
             .unwrap();
         let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
         signature.params.push(AbiParam::new(types::I64));
@@ -786,11 +731,32 @@ mod tests {
             &mut context,
             &mut pipeline,
             gc,
-            publish,
             &parent,
             &[RuntimeRep::LiftedRef, RuntimeRep::Address],
             &[FieldSource::Parameter(0), FieldSource::Parameter(1)],
             &[RuntimeRep::LiftedRef, RuntimeRep::Address],
+        );
+        let entry = context.func.layout.entry_block().unwrap();
+        let branch = context.func.layout.last_inst(entry).unwrap();
+        let ir::InstructionData::Brif { blocks, .. } = &context.func.dfg.insts[branch] else {
+            panic!("prepared allocation entry must branch to slow and fast paths");
+        };
+        let slow = blocks[0].block(&context.func.dfg.value_lists);
+        let func = &context.func;
+        let calls = func
+            .layout
+            .blocks()
+            .flat_map(|block| {
+                func.layout
+                    .block_insts(block)
+                    .filter(move |inst| func.dfg.insts[*inst].opcode().is_call())
+                    .map(move |_| block)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![slow],
+            "only the allocation slow path may call a host function"
         );
         pipeline.define_function(tail, &mut context).unwrap();
         let adapter = pipeline
@@ -822,10 +788,6 @@ mod tests {
         unsafe {
             child.initialize_header(start);
             vmctx.alloc_ptr = start.add(child_extent);
-            assert_eq!(
-                crate::host_fns::prepared_publish_object(&mut vmctx, start, 1),
-                CallStatus::Success as i32
-            );
         }
 
         let mut result_area = [0_u64; 1];

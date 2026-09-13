@@ -106,6 +106,71 @@ mod tests {
         }
     }
 
+    fn empty_constructor(name: &str, tag: u32, family_size: u32) -> ConstructorDecl {
+        ConstructorDecl {
+            identity: symbol(name),
+            family: symbol("Family"),
+            tag,
+            family_size,
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn constructor_tags_preserve_partial_family_evidence() {
+        let mut program = valid_program();
+        program.constructors = vec![empty_constructor("OnlyEncountered", 3, 5)];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        for (tag, family_size) in [(0, 5), (1, 0), (6, 5)] {
+            program.constructors[0].tag = tag;
+            program.constructors[0].family_size = family_size;
+            assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn constructor_family_tags_must_be_unique_and_sizes_agree() {
+        let mut program = valid_program();
+        program.constructors = vec![empty_constructor("A", 1, 3), empty_constructor("B", 2, 3)];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        program.constructors[1].tag = 1;
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::DuplicateDefinition(_))
+        ));
+        program.constructors[1].tag = 2;
+        program.constructors[1].family_size = 4;
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+    }
+
+    #[test]
+    fn unsupported_scalar_widths_never_reach_native_layout() {
+        for rep in [
+            RuntimeRep::Int(128),
+            RuntimeRep::Word(128),
+            RuntimeRep::Int(24),
+        ] {
+            let mut program = valid_program();
+            program.signatures[0].results = vec![rep];
+            assert!(matches!(
+                validate_program(&program, &requirements(), DecodeLimits::default()),
+                Err(ParseError::InvalidSignature(_))
+            ));
+            assert!(crate::execution_schema::StorageLayout::for_reps(&target(), &[rep]).is_err());
+        }
+    }
+
     #[test]
     fn accepts_representative_valid_program() {
         validate_program(&valid_program(), &requirements(), DecodeLimits::default()).unwrap();
@@ -333,6 +398,8 @@ mod tests {
         program.constructors.push(ConstructorDecl {
             identity: symbol("C"),
             family: symbol("Other"),
+            tag: 1,
+            family_size: 1,
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![],
             strict_fields: vec![],
@@ -625,6 +692,8 @@ mod tests {
         program.constructors.push(ConstructorDecl {
             identity: symbol("C"),
             family: symbol("T"),
+            tag: 1,
+            family_size: 1,
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![RuntimeRep::Int(8), RuntimeRep::LiftedRef],
             strict_fields: vec![true, false],
@@ -707,10 +776,30 @@ impl<'a> Validator<'a> {
         }
 
         let mut constructor_symbols = BTreeSet::new();
+        let mut family_sizes = BTreeMap::new();
+        let mut family_tags = BTreeSet::new();
         for constructor in &self.wire.constructors {
             self.bump_work(constructor.field_reps.len() + 1)?;
             self.check_symbol(&constructor.identity)?;
             self.check_symbol(&constructor.family)?;
+            if constructor.tag == 0 || constructor.tag > constructor.family_size {
+                return Err(ParseError::InvalidLayout(
+                    "constructor tag must be within its nonempty GHC family".into(),
+                ));
+            }
+            if family_sizes
+                .insert(&constructor.family, constructor.family_size)
+                .is_some_and(|size| size != constructor.family_size)
+            {
+                return Err(ParseError::InvalidLayout(
+                    "inconsistent constructor family size".into(),
+                ));
+            }
+            if !family_tags.insert((&constructor.family, constructor.tag)) {
+                return Err(ParseError::DuplicateDefinition(
+                    "constructor tag within family".into(),
+                ));
+            }
             if !matches!(
                 constructor.result_rep,
                 RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
@@ -1808,7 +1897,7 @@ impl<'a> Validator<'a> {
     }
 
     fn check_integer_width(&self, bits: u8, bytes: &[u8]) -> Result<(), ParseError> {
-        if !matches!(bits, 8 | 16 | 32 | 64 | 128) || bytes.len() != usize::from(bits) / 8 {
+        if !matches!(bits, 8 | 16 | 32 | 64) || bytes.len() != usize::from(bits) / 8 {
             return Err(ParseError::Malformed(
                 "invalid integer literal width".into(),
             ));
@@ -1892,7 +1981,7 @@ impl<'a> Validator<'a> {
             | RuntimeRep::UnliftedRef
             | RuntimeRep::Address => true,
             RuntimeRep::Int(bits) | RuntimeRep::Word(bits) => {
-                matches!(bits, 8 | 16 | 32 | 64 | 128)
+                matches!(bits, 8 | 16 | 32 | 64)
             }
             RuntimeRep::Float(bits) => matches!(bits, 32 | 64),
         };

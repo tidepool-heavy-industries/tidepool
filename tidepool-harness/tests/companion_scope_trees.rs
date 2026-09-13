@@ -498,6 +498,7 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
     let handle = harness
         .with_session(sid, |s| s.live_payload_handle(&producer_hole))
         .expect("session checkout")
+        .expect("machine reusable")
         .expect(
             "the child's finalize hole must carry a live closure handle — if this is None, \
              `Toolkit`'s mixed function/non-function shape did not classify as a closure \
@@ -798,6 +799,7 @@ async fn multiple_mounts_in_one_window() {
         let handle = harness
             .with_session(sid, |s| s.live_payload_handle(&hole))
             .expect("session checkout")
+            .expect("machine reusable")
             .unwrap_or_else(|| {
                 panic!(
                     "{name}: `{ty}` finalized no live closure handle. For `Toolkit` that \

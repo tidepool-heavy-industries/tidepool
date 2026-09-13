@@ -1561,6 +1561,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         park_cancel_flag: Arc<AtomicBool>,
     ) -> Result<ParkedRaw, JitError> {
+        self.ensure_reusable()?;
         match outcome {
             DriveOutcome::Done(done_ptr) => {
                 // ONE epilogue for both families. `materialize` owns the null/
@@ -1575,6 +1576,7 @@ impl JitEffectMachine {
                         Ok(ParkedRaw::Completed(ParkedOutcome::CompletedValue(value)))
                     }
                     MaterializeResult::Bind(slot) => {
+                        self.ensure_reusable()?;
                         // Bridge the TENURED (rooted, stable) value for the
                         // turn's rendered result — never `done_ptr`, which
                         // tenure has just forwarded. SAFETY: slot.current() is
@@ -2649,10 +2651,12 @@ impl JitEffectMachine {
     pub fn take_parked_live_payload_root(
         &mut self,
         id: ContinuationId,
-    ) -> Option<crate::old_space::RootSlot> {
-        self.resources
+    ) -> Result<Option<crate::old_space::RootSlot>, JitError> {
+        self.ensure_reusable()?;
+        Ok(self
+            .resources
             .continuation_mut(id)
-            .and_then(|frame| frame.live_payload_root.take())
+            .and_then(|frame| frame.live_payload_root.take()))
     }
 
     /// Number of continuations currently parked in the registry. Equal to
@@ -2708,11 +2712,19 @@ impl JitEffectMachine {
     /// session layer (`tidepool_runtime`'s `ResidentSession::live_payload_handle`)
     /// is where a caller-visible consume-once obligation actually begins — see
     /// the runtime session boundary is where the linear wrapper is applied.
-    pub fn handle_from_live_payload(&mut self, id: ContinuationId) -> Option<ValueHandle> {
-        let frame = self.resources.continuation_mut(id)?;
+    pub fn handle_from_live_payload(
+        &mut self,
+        id: ContinuationId,
+    ) -> Result<Option<ValueHandle>, JitError> {
+        self.ensure_reusable()?;
+        let Some(frame) = self.resources.continuation_mut(id) else {
+            return Ok(None);
+        };
         let realm = frame.realm;
-        let slot = frame.live_payload_root.take()?;
-        Some(self.resources.insert_handle(slot, realm))
+        let Some(slot) = frame.live_payload_root.take() else {
+            return Ok(None);
+        };
+        Ok(Some(self.resources.insert_handle(slot, realm)))
     }
 
     /// The runtime resource scope owning `handle`, if it is live (minted and not yet released
@@ -2733,13 +2745,18 @@ impl JitEffectMachine {
         &mut self,
         slot: crate::old_space::RootSlot,
         realm: RealmId,
-    ) -> ValueHandle {
-        self.resources.insert_handle(slot, realm)
+    ) -> Result<ValueHandle, JitError> {
+        self.ensure_reusable()?;
+        Ok(self.resources.insert_handle(slot, realm))
     }
 
     /// Borrow the rooted slot behind a live handle without changing ownership.
-    pub fn handle_slot(&self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
-        self.resources.handle(handle).map(|entry| entry.slot)
+    pub fn handle_slot(
+        &self,
+        handle: ValueHandle,
+    ) -> Result<Option<crate::old_space::RootSlot>, JitError> {
+        self.ensure_reusable()?;
+        Ok(self.resources.handle(handle).map(|entry| entry.slot))
     }
 
     /// Adopt a handle's rooted slot into another ownership discipline.
@@ -2747,14 +2764,19 @@ impl JitEffectMachine {
     /// The handle is removed atomically and the persistent-root registration
     /// remains active; the caller must install the returned slot in a root-owning
     /// structure such as the persistent binding table.
-    pub fn take_handle_root(&mut self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
-        self.resources.take_handle(handle).map(|entry| entry.slot)
+    pub fn take_handle_root(
+        &mut self,
+        handle: ValueHandle,
+    ) -> Result<Option<crate::old_space::RootSlot>, JitError> {
+        self.ensure_reusable()?;
+        Ok(self.resources.take_handle(handle).map(|entry| entry.slot))
     }
 
     /// Move a live handle to another runtime resource scope without changing
     /// the root or numeric handle identity.
-    pub fn rehome_handle(&mut self, handle: ValueHandle, owner: RealmId) -> bool {
-        self.resources.rehome_handle(handle, owner)
+    pub fn rehome_handle(&mut self, handle: ValueHandle, owner: RealmId) -> Result<bool, JitError> {
+        self.ensure_reusable()?;
+        Ok(self.resources.rehome_handle(handle, owner))
     }
 
     /// Drop a live handle and its persistent-root registration immediately.
@@ -2797,6 +2819,7 @@ impl JitEffectMachine {
     /// Panics on a non-session machine (same constraint as every parked
     /// entry — heap retention requires [`Self::compile_session`]).
     pub fn observe_handle(&mut self, handle: ValueHandle) -> Result<Value, JitError> {
+        self.ensure_reusable()?;
         self.pipeline.ensure_usable()?;
         let entry = match self.resources.handle(handle) {
             Some(e) => e,
@@ -2831,7 +2854,8 @@ impl JitEffectMachine {
         unsafe {
             _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
         }
-        let value = bridge_res?.map_err(JitError::HeapBridge)?;
+        self.ensure_reusable()?;
+        let value = crate::host_fns::surface_error(bridge_res?.map_err(JitError::HeapBridge))?;
         Ok(value)
     }
 
@@ -3664,6 +3688,148 @@ mod tests {
             machine.run_pure(),
             Err(JitError::MachineUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn unavailable_machine_fences_heap_access_before_lookup_and_preserves_cause() {
+        use tidepool_repr::types::Literal;
+        use tidepool_repr::{CoreFrame, TreeBuilder};
+        let mut builder = TreeBuilder::new();
+        builder.push(CoreFrame::Lit(Literal::LitInt(1)));
+        let mut machine =
+            JitEffectMachine::compile_session(&builder.build(), &DataConTable::new(), 4096)
+                .unwrap();
+        // The payload is deliberately null: failure admission must precede
+        // any attempt to read, force, or transfer its heap value.
+        let mut cell = Box::new(std::ptr::null_mut());
+        let slot = unsafe { crate::old_space::RootSlot::new(&mut *cell) };
+        machine.machine_state.register_persistent_root(slot.addr());
+        let handle = machine.mint_handle_from_root(slot, RealmId::ROOT).unwrap();
+        machine
+            .machine_state
+            .set_first_cause(crate::host_fns::RuntimeError::Cancelled);
+        machine
+            .machine_state
+            .set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+
+        fn unavailable<T>(result: Result<T, JitError>) {
+            assert!(matches!(
+                result,
+                Err(JitError::MachineUnavailable {
+                    failure: Some(MachineFailure {
+                        cause: crate::host_fns::RuntimeError::Cancelled,
+                        disposition: MachineDisposition::Unavailable,
+                    }),
+                })
+            ));
+        }
+        unavailable(machine.observe_handle(handle));
+        unavailable(machine.handle_slot(handle));
+        unavailable(machine.take_handle_root(handle));
+        unavailable(machine.handle_from_live_payload(ContinuationId(u64::MAX)));
+        unavailable(machine.take_parked_live_payload_root(ContinuationId(u64::MAX)));
+        unavailable(machine.mint_handle_from_root(slot, RealmId::ROOT));
+        unavailable(machine.rehome_handle(handle, RealmId::ROOT));
+        unavailable(machine.run_pure());
+        assert_eq!(machine.value_handle_count(), 1);
+        assert_eq!(machine.persistent_roots_count(), 1);
+        assert!(machine.discard_handle(handle));
+        assert_eq!(machine.value_handle_count(), 0);
+        assert_eq!(machine.persistent_roots_count(), 0);
+        drop(machine);
+    }
+
+    #[test]
+    fn late_prepared_collection_failure_fences_readers_and_retains_both_spaces() {
+        use tidepool_heap::execution_descriptor::{DescriptorState, ObjectDescriptor, ObjectKind};
+        use tidepool_repr::execution_schema::{
+            Architecture, Endianness, RuntimeRep, StorageLayout, TargetDescriptor,
+        };
+        use tidepool_repr::{CoreFrame, TreeBuilder};
+        let mut builder = TreeBuilder::new();
+        builder.push(CoreFrame::Lit(tidepool_repr::types::Literal::LitInt(1)));
+        let mut machine =
+            JitEffectMachine::compile_session(&builder.build(), &DataConTable::new(), 4096)
+                .unwrap();
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: vec![],
+        };
+        let descriptor = Arc::new(
+            ObjectDescriptor::new(
+                ObjectKind::Constructor,
+                StorageLayout::for_reps(&target, &[RuntimeRep::LiftedRef, RuntimeRep::LiftedRef])
+                    .unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let extent = descriptor.allocation_extent() as usize;
+        machine.machine_state.clear_gc_state();
+        machine
+            .machine_state
+            .install_prepared_buffer(vec![0; extent / 8], vec![Arc::clone(&descriptor)])
+            .unwrap();
+        let (start, size) = machine.machine_state.gc_active_range().unwrap();
+        unsafe {
+            descriptor.initialize_header(start);
+            *start.add(8).cast::<*mut u8>() = start;
+            // This edge is discovered only after the root and its self-edge
+            // have moved. An interior payload word is not an object start.
+            *start.add(16).cast::<*mut u8>() = start.add(8);
+        }
+        let mut cell = Box::new(start);
+        let slot = unsafe { crate::old_space::RootSlot::new(&mut *cell) };
+        machine.machine_state.register_persistent_root(slot.addr());
+        let handle = machine.mint_handle_from_root(slot, RealmId::ROOT).unwrap();
+        machine
+            .machine_state
+            .set_stack_map_registry(&machine.pipeline.stack_maps);
+        let mut vmctx =
+            unsafe { VMContext::new(start, start.add(size), crate::host_fns::gc_trigger) };
+        vmctx.machine_state = &machine.machine_state as *const _ as *mut _;
+        vmctx.alloc_ptr = unsafe { start.add(extent) };
+        let status = unsafe { crate::host_fns::prepared_gc_trigger(&mut vmctx, 0) };
+        assert_eq!(
+            status,
+            crate::prepared_control::CallStatus::IntegrityFailure as i32
+        );
+        assert_ne!(
+            *cell, start,
+            "failure must follow relocation, not preflight"
+        );
+        unsafe {
+            assert_eq!(
+                descriptor.state(start, extent).unwrap(),
+                DescriptorState::Forwarded
+            );
+        }
+        let state = machine.machine_state.take_gc_state().unwrap();
+        assert_eq!(state.active_start, start);
+        assert_eq!(state.active_buffer.as_ref().unwrap().len() * 8, extent);
+        assert_eq!(state.prepared.as_ref().unwrap().spare.len() * 8, extent);
+        machine.machine_state.put_gc_state(state);
+        fn unavailable<T>(result: Result<T, JitError>) {
+            assert!(matches!(
+                result,
+                Err(JitError::MachineUnavailable {
+                    failure: Some(MachineFailure {
+                        cause: crate::host_fns::RuntimeError::BadPointer,
+                        disposition: MachineDisposition::Unavailable,
+                    }),
+                })
+            ));
+        }
+        unavailable(machine.observe_handle(handle));
+        unavailable(machine.handle_slot(handle));
+        unavailable(machine.take_handle_root(handle));
+        unavailable(machine.run_pure());
+        assert!(machine.discard_handle(handle));
+        machine.machine_state.clear_stack_map_registry();
     }
 
     #[test]

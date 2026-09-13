@@ -34,8 +34,7 @@ pub use gc::{
     truncate_rust_roots, write_barrier, GcFaultPoint,
 };
 pub(crate) use gc::{
-    prepared_gc_trigger, prepared_publish_object, run_minor_collection_for_tenure_fixup, GcState,
-    PreparedHeap,
+    prepared_gc_trigger, run_minor_collection_for_tenure_fixup, GcState, PreparedHeap,
 };
 
 use errors::unresolved_var_trap;

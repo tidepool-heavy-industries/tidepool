@@ -189,6 +189,8 @@ pub(crate) struct CapturedChildLaunch {
 #[derive(Debug, thiserror::Error)]
 pub enum ActorStartCaptureError {
     #[error(transparent)]
+    Resident(#[from] tidepool_runtime::session::ResidentError),
+    #[error(transparent)]
     Decode(#[from] BridgeError),
     #[error("actor start decoder received a non-start request")]
     UnexpectedRequest,
@@ -320,7 +322,7 @@ impl ResidentActorStart {
         let context_fork = fork_group.is_some() && context == ForkContext::InheritedContext;
         let child_realm = RealmId::fresh();
         let entry = session
-            .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)
+            .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         let facade = materialize_entry_facade(session, &entry)?;
         let lexical_scope = if context_fork {

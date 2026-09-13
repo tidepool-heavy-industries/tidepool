@@ -7,7 +7,8 @@ use crate::layout::*;
 ///
 /// The slow path is a status-returning host call rather than the legacy
 /// poison-pointer path.  This helper is consequently only suitable for an
-/// entry whose ABI returns [`crate::prepared_control::CallStatus`].
+/// entry whose ABI returns [`crate::prepared_control::CallStatus`]. The caller
+/// has checked that the descriptor has eight-byte alignment and extent.
 pub fn emit_prepared_alloc_fast_path(
     builder: &mut FunctionBuilder,
     vmctx_val: Value,
@@ -15,17 +16,10 @@ pub fn emit_prepared_alloc_fast_path(
     gc_trigger: ir::FuncRef,
 ) -> Value {
     let extent = u64::from(descriptor.allocation_extent());
-    let alignment = u64::from(descriptor.allocation_alignment());
-    debug_assert!(alignment.is_power_of_two());
-    let alignment_mask = alignment - 1;
-    // Both descriptor quantities are u32s, so this cannot overflow u64.
-    // Reserve the alignment slack as well: a collection may choose a new
-    // cursor whose low bits differ from the pre-collection cursor.
-    let reserve = extent + alignment_mask;
+    debug_assert_eq!(descriptor.allocation_alignment(), 8);
+    debug_assert!(descriptor.allocation_extent() >= 16 && extent % 8 == 0);
     let flags = MemFlags::trusted();
     let extent_val = builder.ins().iconst(types::I64, extent as i64);
-    let mask_val = builder.ins().iconst(types::I64, alignment_mask as i64);
-    let inverse_mask = builder.ins().iconst(types::I64, !(alignment_mask as i64));
 
     let slow_block = builder.create_block();
     let fast_store_block = builder.create_block();
@@ -38,24 +32,16 @@ pub fn emit_prepared_alloc_fast_path(
     let alloc_limit = builder
         .ins()
         .load(types::I64, flags, vmctx_val, VMCTX_ALLOC_LIMIT_OFFSET);
-    let cursor_plus_mask = builder.ins().iadd(alloc_ptr, mask_val);
-    let cursor_wrapped = builder.ins().icmp(
-        ir::condcodes::IntCC::UnsignedLessThan,
-        cursor_plus_mask,
-        alloc_ptr,
-    );
-    let aligned_ptr = builder.ins().band(cursor_plus_mask, inverse_mask);
-    let new_ptr = builder.ins().iadd(aligned_ptr, extent_val);
+    let new_ptr = builder.ins().iadd(alloc_ptr, extent_val);
     let wrapped = builder
         .ins()
-        .icmp(ir::condcodes::IntCC::UnsignedLessThan, new_ptr, aligned_ptr);
+        .icmp(ir::condcodes::IntCC::UnsignedLessThan, new_ptr, alloc_ptr);
     let exceeds_limit = builder.ins().icmp(
         ir::condcodes::IntCC::UnsignedGreaterThan,
         new_ptr,
         alloc_limit,
     );
-    let needs_gc = builder.ins().bor(cursor_wrapped, wrapped);
-    let needs_gc = builder.ins().bor(needs_gc, exceeds_limit);
+    let needs_gc = builder.ins().bor(wrapped, exceeds_limit);
     builder
         .ins()
         .brif(needs_gc, slow_block, &[], fast_store_block, &[]);
@@ -67,11 +53,11 @@ pub fn emit_prepared_alloc_fast_path(
         .store(flags, new_ptr, vmctx_val, VMCTX_ALLOC_PTR_OFFSET);
     builder
         .ins()
-        .jump(continue_block, &[BlockArg::Value(aligned_ptr)]);
+        .jump(continue_block, &[BlockArg::Value(alloc_ptr)]);
 
     builder.switch_to_block(slow_block);
     builder.seal_block(slow_block);
-    let reserve = builder.ins().iconst(types::I64, reserve as i64);
+    let reserve = builder.ins().iconst(types::I64, extent as i64);
     let call = builder.ins().call(gc_trigger, &[vmctx_val, reserve]);
     let status = builder.inst_results(call)[0];
     let success = builder.ins().iconst(
@@ -99,26 +85,18 @@ pub fn emit_prepared_alloc_fast_path(
     let post_gc_limit = builder
         .ins()
         .load(types::I64, flags, vmctx_val, VMCTX_ALLOC_LIMIT_OFFSET);
-    let post_gc_plus_mask = builder.ins().iadd(post_gc_ptr, mask_val);
-    let post_gc_cursor_wrapped = builder.ins().icmp(
-        ir::condcodes::IntCC::UnsignedLessThan,
-        post_gc_plus_mask,
-        post_gc_ptr,
-    );
-    let post_gc_aligned = builder.ins().band(post_gc_plus_mask, inverse_mask);
-    let post_gc_new = builder.ins().iadd(post_gc_aligned, extent_val);
+    let post_gc_new = builder.ins().iadd(post_gc_ptr, extent_val);
     let post_gc_wrapped = builder.ins().icmp(
         ir::condcodes::IntCC::UnsignedLessThan,
         post_gc_new,
-        post_gc_aligned,
+        post_gc_ptr,
     );
     let post_gc_exceeds_limit = builder.ins().icmp(
         ir::condcodes::IntCC::UnsignedGreaterThan,
         post_gc_new,
         post_gc_limit,
     );
-    let post_gc_failed = builder.ins().bor(post_gc_cursor_wrapped, post_gc_wrapped);
-    let post_gc_failed = builder.ins().bor(post_gc_failed, post_gc_exceeds_limit);
+    let post_gc_failed = builder.ins().bor(post_gc_wrapped, post_gc_exceeds_limit);
     let retry_store_block = builder.create_block();
     let exhausted_block = builder.create_block();
     builder
@@ -140,7 +118,7 @@ pub fn emit_prepared_alloc_fast_path(
         .store(flags, post_gc_new, vmctx_val, VMCTX_ALLOC_PTR_OFFSET);
     builder
         .ins()
-        .jump(continue_block, &[BlockArg::Value(post_gc_aligned)]);
+        .jump(continue_block, &[BlockArg::Value(post_gc_ptr)]);
 
     builder.switch_to_block(continue_block);
     builder.seal_block(continue_block);

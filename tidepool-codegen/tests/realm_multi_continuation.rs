@@ -1409,6 +1409,7 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
         // still a live, correctly-tagged closure object, not poisoned.
         let finalized = machine
             .take_parked_live_payload_root(id)
+            .expect("machine reusable")
             .expect("w3 finalized root");
         let tag = unsafe { heap_layout::read_tag(finalized.current()) };
         assert_eq!(

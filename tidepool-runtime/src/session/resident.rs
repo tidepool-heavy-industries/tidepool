@@ -584,6 +584,10 @@ pub enum ResidentError {
     Session(#[from] SessionError),
 }
 
+fn resident_jit(error: JitError) -> ResidentError {
+    ResidentError::Run(RuntimeError::Jit(error))
+}
+
 /// A resident JIT session: one long-lived [`JitEffectMachine`] whose heap and
 /// effect-plane state persist across turns.
 ///
@@ -1089,14 +1093,22 @@ where
     /// The frame stays parked; the handle is owned by the frame's realm.
     /// `None` when `hole` is not parked or its frame holds no untaken live
     /// payload.
-    pub fn live_payload_handle(&mut self, hole: &str) -> Option<RootCustody> {
+    pub fn live_payload_handle(
+        &mut self,
+        hole: &str,
+    ) -> Result<Option<RootCustody>, ResidentError> {
         self.settle_dropped_custody();
-        let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
+        let Some(&(_, id)) = self.parked.iter().find(|(h, _)| h == hole) else {
+            return Ok(None);
+        };
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
-        self.core
-            .machine_mut()?
+        let Some(machine) = self.core.machine_mut() else {
+            return Ok(None);
+        };
+        Ok(machine
             .handle_from_live_payload(id)
-            .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup), provenance))
+            .map_err(resident_jit)?
+            .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup), provenance)))
     }
 
     /// [`Self::live_payload_handle`]'s sibling for a result that must outlive
@@ -1112,13 +1124,24 @@ where
         &mut self,
         hole: &str,
         realm: RealmId,
-    ) -> Option<RootCustody> {
+    ) -> Result<Option<RootCustody>, ResidentError> {
         self.settle_dropped_custody();
-        let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
+        let Some(&(_, id)) = self.parked.iter().find(|(h, _)| h == hole) else {
+            return Ok(None);
+        };
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
-        let machine = self.core.machine_mut()?;
-        let slot = machine.take_parked_live_payload_root(id)?;
-        let handle = machine.mint_handle_from_root(slot, realm);
+        let Some(machine) = self.core.machine_mut() else {
+            return Ok(None);
+        };
+        let Some(slot) = machine
+            .take_parked_live_payload_root(id)
+            .map_err(resident_jit)?
+        else {
+            return Ok(None);
+        };
+        let handle = machine
+            .mint_handle_from_root(slot, realm)
+            .map_err(resident_jit)?;
         tracing::debug!(
             hole,
             frame = ?id,
@@ -1126,11 +1149,11 @@ where
             ?handle,
             "claimed parked live payload"
         );
-        Some(RootCustody::new(
+        Ok(Some(RootCustody::new(
             handle,
             Arc::clone(&self.custody_cleanup),
             provenance,
-        ))
+        )))
     }
 
     /// Transfer a rooted value to another runtime resource scope.
@@ -1147,10 +1170,10 @@ where
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
-        let moved = self
-            .core
-            .machine_mut()
-            .is_some_and(|machine| machine.rehome_handle(handle, owner));
+        let moved = match self.core.machine_mut() {
+            Some(machine) => machine.rehome_handle(handle, owner).map_err(resident_jit)?,
+            None => false,
+        };
         if !moved {
             return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
                 EffectError::Handler(format!(
@@ -1311,7 +1334,10 @@ where
         let slot = self
             .core
             .machine_mut()
-            .and_then(|machine| machine.take_handle_root(handle))
+            .map(|machine| machine.take_handle_root(handle))
+            .transpose()
+            .map_err(resident_jit)?
+            .flatten()
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     "mount: handle is unknown to the machine (already released or never minted)"
@@ -1386,7 +1412,11 @@ where
         let handle_is_live = self
             .core
             .machine()
-            .is_some_and(|machine| machine.handle_slot(handle).is_some());
+            .map(|machine| machine.handle_slot(handle))
+            .transpose()
+            .map_err(resident_jit)?
+            .flatten()
+            .is_some();
         if !handle_is_live {
             return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
                 EffectError::Handler(
@@ -1398,7 +1428,10 @@ where
         let Some(slot) = self
             .core
             .machine_mut()
-            .and_then(|machine| machine.take_handle_root(handle))
+            .map(|machine| machine.take_handle_root(handle))
+            .transpose()
+            .map_err(resident_jit)?
+            .flatten()
         else {
             return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
                 EffectError::Handler(
@@ -1861,7 +1894,7 @@ where
                     .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
-                .map(|o| project_parked(machine, o, realm))
+                .and_then(|o| project_parked(machine, o, realm))
         })?;
         timing::record_stage(
             timing::NO_NODE,
@@ -2000,7 +2033,7 @@ where
             .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
-                .map(|o| project_parked(machine, o, realm))
+                .and_then(|o| project_parked(machine, o, realm))
         })?;
         timing::record_stage(
             timing::NO_NODE,
@@ -2096,7 +2129,7 @@ where
             .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
-                .map(|outcome| project_parked(machine, outcome, realm))
+                .and_then(|outcome| project_parked(machine, outcome, realm))
         })?;
         let projected = match &outcome {
             ParkedRun::CompletedProject { projected } => projected.clone(),
@@ -2158,7 +2191,7 @@ where
             .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
-                .map(|o| project_parked(machine, o, child_realm))
+                .and_then(|o| project_parked(machine, o, child_realm))
         })?;
         match outcome {
             ParkedRun::CompletedValue { value, .. } => {
@@ -2282,7 +2315,10 @@ where
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| m.take_parked_live_payload_root(frame_id))
+            .map(|m| m.take_parked_live_payload_root(frame_id))
+            .transpose()
+            .map_err(resident_jit)?
+            .flatten()
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     "no finalized closure to apply (session is not suspended on a \
@@ -2385,7 +2421,10 @@ where
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| m.handle_slot(entry))
+            .map(|m| m.handle_slot(entry))
+            .transpose()
+            .map_err(resident_jit)?
+            .flatten()
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     format!(
@@ -2455,6 +2494,7 @@ where
             })?;
             let function_addr = machine
                 .handle_slot(function_handle)
+                .map_err(resident_jit)?
                 .ok_or_else(|| {
                     ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                         format!(
@@ -2465,6 +2505,7 @@ where
                 .addr();
             let argument_addr = machine
                 .handle_slot(argument_handle)
+                .map_err(resident_jit)?
                 .ok_or_else(|| {
                     ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                         format!(
@@ -2535,7 +2576,7 @@ where
                     .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
-                .map(|outcome| project_parked(machine, outcome, owning_realm))
+                .and_then(|outcome| project_parked(machine, outcome, owning_realm))
         })
     }
 
@@ -2620,7 +2661,7 @@ where
         let outcome = self.on_eval_thread(move |machine, _table, handlers, captured| {
             machine
                 .resume_continuation(frame_id, handlers, captured, input)
-                .map(|o| project_parked(machine, o, realm))
+                .and_then(|o| project_parked(machine, o, realm))
         });
         let outcome = match outcome {
             Ok(outcome) => outcome,
@@ -2725,7 +2766,10 @@ where
         let slot = self
             .core
             .machine_mut()
-            .and_then(|machine| machine.take_handle_root(handle))
+            .map(|machine| machine.take_handle_root(handle))
+            .transpose()
+            .map_err(resident_jit)?
+            .flatten()
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     "value-plane bind completed but its handle was unknown to the machine".into(),
@@ -2803,10 +2847,13 @@ where
                 EffectError::Handler("projected bind completed without a resident machine".into()),
             ))));
         };
-        if handles
+        let handles_are_live = handles
             .iter()
-            .any(|handle| machine.handle_slot(*handle).is_none())
-        {
+            .try_fold(true, |all_live, handle| {
+                Ok::<_, JitError>(all_live && machine.handle_slot(*handle)?.is_some())
+            })
+            .map_err(resident_jit)?;
+        if !handles_are_live {
             for handle in handles {
                 machine.discard_handle(handle);
             }
@@ -2819,7 +2866,7 @@ where
         let mut slots = Vec::with_capacity(handles.len());
         let mut remaining_handles = handles.into_iter();
         while let Some(handle) = remaining_handles.next() {
-            let Some(slot) = machine.take_handle_root(handle) else {
+            let Some(slot) = machine.take_handle_root(handle).map_err(resident_jit)? else {
                 // Defensive even though the immutable preflight above and
                 // this loop share one exclusive machine borrow.
                 for slot in slots {
@@ -3082,23 +3129,25 @@ fn project_parked(
     machine: &mut JitEffectMachine,
     outcome: ParkedOutcome,
     realm: RealmId,
-) -> ParkedRun {
+) -> Result<ParkedRun, JitError> {
     match outcome {
-        ParkedOutcome::CompletedValue(value) => ParkedRun::CompletedValue { value, bound: None },
-        ParkedOutcome::CompletedBinding { value, root } => ParkedRun::CompletedValue {
+        ParkedOutcome::CompletedValue(value) => {
+            Ok(ParkedRun::CompletedValue { value, bound: None })
+        }
+        ParkedOutcome::CompletedBinding { value, root } => Ok(ParkedRun::CompletedValue {
             value,
-            bound: Some(machine.mint_handle_from_root(root, realm)),
-        },
-        ParkedOutcome::CompletedProject { roots } => ParkedRun::CompletedProject {
+            bound: Some(machine.mint_handle_from_root(root, realm)?),
+        }),
+        ParkedOutcome::CompletedProject { roots } => Ok(ParkedRun::CompletedProject {
             projected: roots
                 .into_iter()
                 .map(|root| machine.mint_handle_from_root(root, realm))
-                .collect(),
-        },
+                .collect::<Result<_, _>>()?,
+        }),
         ParkedOutcome::CompletedRender { .. } => {
             unreachable!("the resident lane does not park render turns")
         }
-        ParkedOutcome::Suspended { id, request, .. } => ParkedRun::Suspended { id, request },
+        ParkedOutcome::Suspended { id, request, .. } => Ok(ParkedRun::Suspended { id, request }),
     }
 }
 

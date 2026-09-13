@@ -66,6 +66,10 @@ are nondeterministic.
   Follow-up: isolate pure schema tests from execution-harness dependencies;
   keep cross-layer contracts in their own target. This is dependency fan-out,
   not a failing schema test.
+  Implemented follow-up: moved the two tests that actually use the high-level
+  generators into the existing testing crate and removed repr's dependency on
+  that harness. Pure schema checks no longer need that dependency edge; the
+  moved scenarios remain integration tests rather than being deleted.
 - **Shared build admission is manual.** The same focused command first waited
   for Cargo's artifact-directory lock while an agent's build finished. A
   serialized build policy still needs explicit start/finish coordination;
@@ -137,3 +141,27 @@ are nondeterministic.
   lib tests. This was not a workspace battery, but it exceeded the requested
   selection. Handbacks must report the actual command and counts; passing a
   filter as a structured task field would reduce this coordination error.
+
+## STG review follow-through
+
+- Replaced prepared fixture numeric binding/signature selectors with symbol
+  lookup. The two formerly red native cases now pass without changing their
+  behavioral assertions. Added an actual `Data.List.reverse` call to the
+  producer fixture; the callable-import prerequisite and all three focused
+  artifact tests now pass using GHC-derived evidence.
+- Moving the pure CBOR/VarId tests out of `tidepool-repr` removes its harness
+  dependency fanout while retaining the scenarios in `tidepool-testing`.
+  `cargo test -p tidepool-testing --test proptest_cbor` exposed a red
+  `literal_round_trip`: minimal `LitFloat(4294967296)` is rejected as exceeding
+  u32 bits. No baseline was checked and no assertion was weakened. The moved
+  VarId tests pass (6/6); restored bridge-value effect routing passes (3/3).
+- Compile-only integration found a remaining `EffectRoster` caller after MCP
+  endpoint deletion. Shared handler declaration composition now remains in
+  the shared owner, without restoring the removed server.
+- Semispace growth can reuse a former allocation's numeric address. Pointer
+  inequality cannot establish whether collection occurred: the runtime now
+  records completed copying explicitly for cursor publication and generation
+  invalidation, including growth failure after a successful first copy.
+- Ambient root registries can contain the same slot more than once. The new
+  collector reuses sorted/deduplicated root-slot scratch before mutation;
+  accepting arbitrary destination pointers would hide invalid initial roots.

@@ -158,7 +158,7 @@ impl PreparedRuntime {
         }
         let result = if collect {
             let evidence = native
-                .execute_after_registered_collection(arguments)
+                .execute_after_collection(arguments)
                 .map_err(|error| self.classify_execution(error))?;
             PreparedRunResult {
                 value: evidence.result.clone(),

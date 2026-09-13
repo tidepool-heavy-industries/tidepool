@@ -234,8 +234,10 @@ pub(crate) struct GcState {
 
 /// Physical metadata for the active prepared nursery, not a reachability set.
 pub(crate) struct PreparedHeap {
-    pub objects: tidepool_heap::gc::raw::DescriptorRegistry,
-    pub layouts: Vec<std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>>,
+    pub space: tidepool_heap::gc::raw::DescriptorSpace,
+    /// Remains owned even when copying stops after moving only part of the heap.
+    pub spare: Vec<u64>,
+    pub used: usize,
 }
 
 /// A zeroed byte buffer at least `size` bytes, 8-byte aligned by
@@ -913,60 +915,74 @@ unsafe fn verify_heap_post_gc(
     }
 }
 
-/// Shared GC body: walk frames, run Cheney copy, call hooks.
-/// Stage a descriptor collection with enough unoccupied space for the pending
-/// allocation. Capacity retries precede all pointer mutation; a successful copy
-/// is never followed by a fallible growth copy.
+/// Copy once into the reusable semispace, then grow from exact live size if
+/// required. Every completed copy is published before attempting growth.
+/// A corrupt edge may leave both spaces live: the caller must retire the
+/// machine, and both owned buffers stay allocated through native unwinding.
 fn collect_prepared(
     state: &mut GcState,
     roots: &[*mut *mut u8],
+    from_used: usize,
     reserve: usize,
+    completed_copy: &mut bool,
 ) -> Result<usize, crate::host_fns::RuntimeError> {
     use crate::host_fns::RuntimeError;
     use tidepool_heap::execution_descriptor::DescriptorTraceError;
+    let active = state
+        .active_buffer
+        .as_mut()
+        .ok_or(RuntimeError::BadPointer)?;
     let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
     let ceiling = max_heap_bytes() & !7;
     if reserve > ceiling || ceiling < 8 {
         return Err(RuntimeError::HeapOverflow);
     }
-    let mut size = state.active_size.max(reserve).max(8).min(ceiling);
+    prepared.used = from_used;
     loop {
-        let words = size.checked_add(7).ok_or(RuntimeError::HeapOverflow)? / 8;
-        size = words.checked_mul(8).ok_or(RuntimeError::HeapOverflow)?;
-        let mut buffer = Vec::new();
-        buffer
-            .try_reserve_exact(words)
-            .map_err(|_| RuntimeError::HeapOverflow)?;
-        buffer.resize(words, 0_u64);
-        let copy_capacity = size
-            .checked_sub(reserve)
-            .ok_or(RuntimeError::HeapOverflow)?;
+        let words = state.active_size.div_ceil(8);
+        if prepared.spare.len() < words {
+            prepared
+                .spare
+                .try_reserve_exact(words - prepared.spare.len())
+                .map_err(|_| RuntimeError::HeapOverflow)?;
+            prepared.spare.resize(words, 0);
+        }
         // SAFETY: the owning heap and checked snapshot keep source objects and
         // root slots live; the new buffer is disjoint and fully initialized.
         let copied = unsafe {
-            tidepool_heap::gc::raw::cheney_copy_registered(
+            tidepool_heap::gc::raw::cheney_copy_descriptors(
                 roots,
                 state.active_start,
-                state.active_start.add(state.active_size),
-                &mut as_bytes_mut(&mut buffer)[..copy_capacity],
-                &mut prepared.objects,
+                prepared.used,
+                as_bytes_mut(&mut prepared.spare),
+                &mut prepared.space,
             )
         };
         match copied {
             Ok(result) => {
-                state.active_start = buffer.as_mut_ptr().cast();
-                state.active_size = size;
-                state.active_buffer = Some(buffer);
-                return Ok(result.bytes_copied);
-            }
-            Err(DescriptorTraceError::InsufficientSpace { required, .. }) => {
-                let needed = required
+                // No fallible work between copying and publishing ownership.
+                std::mem::swap(active, &mut prepared.spare);
+                *completed_copy = true;
+                state.active_start = active.as_mut_ptr().cast();
+                state.active_size = std::mem::size_of_val(active.as_slice());
+                prepared.used = result.bytes_copied;
+                let needed = prepared
+                    .used
                     .checked_add(reserve)
                     .ok_or(RuntimeError::HeapOverflow)?;
-                if needed > ceiling || size == ceiling {
+                if needed > ceiling {
                     return Err(RuntimeError::HeapOverflow);
                 }
-                size = size.saturating_mul(2).max(needed).min(ceiling);
+                if needed <= state.active_size {
+                    return Ok(prepared.used);
+                }
+                let size = state.active_size.saturating_mul(2).max(needed).min(ceiling);
+                let words = size.div_ceil(8);
+                prepared
+                    .spare
+                    .try_reserve_exact(words - prepared.spare.len())
+                    .map_err(|_| RuntimeError::HeapOverflow)?;
+                prepared.spare.resize(words, 0);
             }
             Err(DescriptorTraceError::MetadataAllocation) => {
                 return Err(RuntimeError::HeapOverflow)
@@ -1006,72 +1022,6 @@ pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reser
         }
         #[cfg(not(target_arch = "x86_64"))]
         ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
-    }
-    ms.prepared_call_status() as i32
-}
-
-/// Noncollecting publication, called only after the generated object is fully
-/// initialized. Descriptor indices refer to pinned owners installed with this
-/// machine's active heap, not arbitrary metadata pointers supplied by code.
-pub(crate) unsafe extern "C" fn prepared_publish_object(
-    vmctx: *mut VMContext,
-    object: *mut u8,
-    descriptor_index: usize,
-) -> i32 {
-    use crate::host_fns::RuntimeError;
-    use tidepool_heap::execution_descriptor::DescriptorState;
-    let ms = unsafe { machine_state(vmctx) };
-    if ms.prepared_call_status() != crate::prepared_control::CallStatus::Success {
-        return ms.prepared_call_status() as i32;
-    }
-    let Some(mut state) = ms.take_gc_state() else {
-        ms.set_first_cause(RuntimeError::BadPointer);
-        return ms.prepared_call_status() as i32;
-    };
-    let result = (|| {
-        let prepared = state.prepared.as_mut().ok_or(RuntimeError::BadPointer)?;
-        let descriptor = prepared
-            .layouts
-            .get(descriptor_index)
-            .ok_or(RuntimeError::BadPointer)?;
-        let offset = (object as usize)
-            .checked_sub(state.active_start as usize)
-            .ok_or(RuntimeError::BadPointer)?;
-        let end = offset
-            .checked_add(descriptor.allocation_extent() as usize)
-            .filter(|end| *end <= state.active_size)
-            .ok_or(RuntimeError::BadPointer)?;
-        let used = unsafe { (*vmctx).alloc_ptr as usize }
-            .checked_sub(state.active_start as usize)
-            .filter(|used| *used <= state.active_size)
-            .ok_or(RuntimeError::BadPointer)?;
-        if end > used || (object as usize) % descriptor.allocation_alignment() as usize != 0 {
-            return Err(RuntimeError::BadPointer);
-        }
-        let available = end - offset;
-        if unsafe { descriptor.state(object, available) }.map_err(|_| RuntimeError::BadPointer)?
-            != DescriptorState::Live
-        {
-            return Err(RuntimeError::BadPointer);
-        }
-        if prepared.objects.descriptor(object).is_some() {
-            return Err(RuntimeError::BadPointer);
-        }
-        unsafe {
-            prepared
-                .objects
-                .register(object, available, std::sync::Arc::clone(descriptor))
-        }
-        .map_err(|error| match error {
-            tidepool_heap::execution_descriptor::DescriptorTraceError::MetadataAllocation => {
-                RuntimeError::HeapOverflow
-            }
-            _ => RuntimeError::BadPointer,
-        })
-    })();
-    ms.put_gc_state(state);
-    if let Err(error) = result {
-        ms.set_first_cause(error);
     }
     ms.prepared_call_status() as i32
 }
@@ -1164,15 +1114,30 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
                     &mut (*vmctx).tail_arg,
                 )
             };
-            let result = collect_prepared(&mut state, &snapshot.into_slots(), reserve);
-            match result {
-                Ok(used) => {
-                    ms.bump_gc_generation();
+            let mut completed_copy = false;
+            let result = collect_prepared(
+                &mut state,
+                &snapshot.into_slots(),
+                from_used,
+                reserve,
+                &mut completed_copy,
+            );
+            // Even a later growth failure leaves the first completed copy
+            // published. Never restore a cursor into the retired semispace.
+            if completed_copy {
+                ms.bump_gc_generation();
+                if let Some(prepared) = state.prepared.as_ref() {
                     unsafe {
-                        (*vmctx).alloc_ptr = state.active_start.add(used);
+                        (*vmctx).alloc_ptr = state.active_start.add(prepared.used);
                         (*vmctx).alloc_limit = state.active_start.add(state.active_size);
                     }
                 }
+            }
+            match result {
+                Ok(used) => unsafe {
+                    (*vmctx).alloc_ptr = state.active_start.add(used);
+                    (*vmctx).alloc_limit = state.active_start.add(state.active_size);
+                },
                 Err(error) => ms.set_first_cause(error),
             }
             ms.put_gc_state(state);
@@ -1533,7 +1498,6 @@ mod tests {
             descriptor.initialize_header(start);
             *start.add(managed_offset).cast::<*mut u8>() = start;
             *start.add(address_offset).cast::<usize>() = start as usize;
-            assert_eq!(prepared_publish_object(&mut vmctx, start, 0), 0);
         }
         let mut root = start;
         ms.register_rust_root(&mut root);
@@ -1544,13 +1508,42 @@ mod tests {
             ms.prepared_call_status(),
             crate::prepared_control::CallStatus::Success
         );
-        assert_ne!(root, start);
+        assert_eq!(root, ms.gc_active_range().unwrap().0);
         assert!(vmctx.alloc_limit as usize - vmctx.alloc_ptr as usize >= extent * 4);
         unsafe {
             assert_eq!(*root.add(managed_offset).cast::<*mut u8>(), root);
             assert_eq!(*root.add(address_offset).cast::<usize>(), start as usize);
         }
         assert_eq!(ms.gc_generation(), 1);
+        // Once both spaces have reached the active size, ordinary collections
+        // reuse them. Only object addresses change; raw Address bits do not.
+        perform_gc_request(0, &mut vmctx, 0);
+        let first_space = root;
+        perform_gc_request(0, &mut vmctx, 0);
+        let second_space = root;
+        assert_ne!(first_space, second_space);
+        perform_gc_request(0, &mut vmctx, 0);
+        assert_eq!(root, first_space);
+
+        // A valid request whose live-plus-reserve exceeds the ceiling is
+        // rejected after copying. The published cursor must describe that
+        // completed copy, not the old source, and the heap stays reusable.
+        perform_gc_request(0, &mut vmctx, max_heap_bytes() & !7);
+        assert_eq!(
+            ms.prepared_call_status(),
+            crate::prepared_control::CallStatus::LanguageFailure
+        );
+        assert_eq!(
+            ms.disposition(),
+            crate::machine_state::MachineDisposition::Reusable
+        );
+        let (active, _) = ms.gc_active_range().unwrap();
+        assert_eq!(root, active);
+        assert_eq!(vmctx.alloc_ptr, unsafe { active.add(extent) });
+        unsafe {
+            assert_eq!(*root.add(managed_offset).cast::<*mut u8>(), root);
+            assert_eq!(*root.add(address_offset).cast::<usize>(), start as usize);
+        }
         ms.clear_gc_state();
         ms.clear_stack_map_registry();
     }

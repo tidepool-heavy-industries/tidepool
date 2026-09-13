@@ -20,7 +20,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 2
+schemaVersion = 3
 executionAbiVersion = 2
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -63,6 +63,7 @@ data ConstructorDecl = ConstructorDecl
   , constructorResultRep :: RuntimeRep
   , constructorFieldReps :: [RuntimeRep], constructorStrictFields :: [Bool]
   , constructorLayout :: CheckedLayout
+  , constructorTag :: Word32, constructorFamilySize :: Word32
   } deriving stock (Eq, Show, Generic)
 data GlobalDecl = GlobalDecl
   { globalIdentity :: SymbolIdentity, globalRep :: RuntimeRep

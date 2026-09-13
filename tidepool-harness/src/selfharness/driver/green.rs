@@ -362,17 +362,23 @@ impl SelfHarnessDriver {
                 // makes ownership transfer atomic with respect to session
                 // admission; a failed checkout never creates custody.
                 let thread_start = self
-                    .with_session_for_host(host, sid, |s| -> Result<ResidentOutcome, String> {
-                        let body = s.live_payload_handle(hole).ok_or_else(|| {
-                            "AsyncSpawnWith: spawner frame carries no untaken body closure"
-                                .to_string()
-                        })?;
+                    .with_session_for_host(host, sid, |s| -> Result<ResidentOutcome, DriverError> {
+                        let body = s
+                            .live_payload_handle(hole)
+                            .map_err(DriverError::Resident)?
+                            .ok_or_else(|| {
+                                DriverError::Session(
+                                    "AsyncSpawnWith: spawner frame carries no untaken body closure"
+                                        .to_string(),
+                                )
+                            })?;
                         s.run_rooted_entry("async_thread", body, 0, realm, Some(table))
-                            .map_err(|e| format!("run_rooted_entry failed: {e}"))
+                            .map_err(|e| {
+                                DriverError::Session(format!("run_rooted_entry failed: {e}"))
+                            })
                     })
                     .await
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(DriverError::Session)?;
+                    .map_err(DriverError::Agent)??;
                 // Spawner-continues-first (the ready queue's own choice) —
                 // resume the spawner immediately
                 // with the fresh id, then start the thread; either push lands

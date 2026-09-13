@@ -1,15 +1,14 @@
-//! Concrete effect handlers for the Tidepool eval server.
+//! Concrete effect handlers for Tidepool sessions.
 //!
 //! Provides the base handlers (Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy),
 //! the debug-only MetaHandler, and the [`build_base_stack`] / [`base_decls`]
-//! convenience functions for assembling a fully-wired eval server.
+//! convenience functions for assembling a handler stack and effect row.
 //!
 //! ## Stack assembly
 //!
 //! ```no_run
 //! # use std::path::PathBuf;
-//! # use tidepool_handlers::{HandlerConfig, build_base_stack};
-//! # use tidepool_mcp::TidepoolMcpServer;
+//! # use tidepool_handlers::{HandlerConfig, base_decls, build_base_stack};
 //! // Must be called inside a tokio runtime (LlmHandler captures Handle::current()).
 //! let cfg = HandlerConfig {
 //!     cwd: PathBuf::from("."),
@@ -17,7 +16,8 @@
 //!     llm_model: "gpt-4o-mini".into(),
 //! };
 //! let stack = build_base_stack(&cfg);
-//! let server = TidepoolMcpServer::new(stack);
+//! let decls = base_decls(&stack);
+//! assert_eq!(decls.last().map(|decl| decl.type_name), Some("RunLLMTurn"));
 //! ```
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
@@ -173,12 +173,10 @@ pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<C
 /// Collect effect declarations from a base stack and append the interposed
 /// effects (`Ask`, then `RunLLMTurn` — WS-B split `runLLMTurn` out of `Ask`).
 /// No `Fork`: the ordinary session engine servicing this stack never accepts
-/// `ForkWith`/`ForkAllWith` (vestigial-subsystems review §4) — see
-/// `tidepool_mcp::EffectRoster::from_handlers`'s doc.
+/// `ForkWith`/`ForkAllWith` (vestigial-subsystems review §4).
 ///
-pub fn base_decls<H: CollectEffectDecls>(stack: &H) -> Vec<EffectDecl> {
-    let roster = tidepool_mcp::EffectRoster::from_handlers(stack);
-    roster.decls().to_vec()
+pub fn base_decls<H: CollectEffectDecls>(_stack: &H) -> Vec<EffectDecl> {
+    tidepool_mcp::with_session_effects(H::collect_decls())
 }
 
 #[cfg(test)]
@@ -187,6 +185,15 @@ pub(crate) mod test_support;
 #[cfg(test)]
 mod tests {
     use crate::test_support::*;
+
+    #[test]
+    fn minimal_stack_decls_keep_interposed_effects_after_handlers() {
+        let names: Vec<&str> = crate::base_decls(&crate::build_minimal_stack())
+            .iter()
+            .map(|decl| decl.type_name)
+            .collect();
+        assert_eq!(names, ["Console", "Ask", "RunLLMTurn"]);
+    }
 
     #[test]
     fn all_effect_constructors_in_table() {

@@ -43,6 +43,15 @@ its `ContinuationId`, request value, and finalized-closure flag.
 - `close_realm(realm)` removes that scope's parked frames, value handles, and
   cancellation entry without affecting siblings. It returns
   `(frames_dropped, handles_released)` and is idempotent.
+- Integrity failure permanently makes the whole machine unavailable, including
+  every realm sharing its heap. Observation, forcing, resumption, handle minting
+  and transfer, and root-slot export return the retained machine failure before
+  reading a value or consuming custody. Missing handles remain distinct from
+  an unavailable machine. Metadata-only release and counting remain available.
+- Retirement diagnostics use the stored first cause and ownership metadata,
+  not values from the failed heap. Storage and executable owners stay alive
+  through native unwinding; teardown releases ownership records without walking
+  potentially damaged object graphs.
 
 ## Consumer obligations
 

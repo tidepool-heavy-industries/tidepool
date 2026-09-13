@@ -18,10 +18,10 @@
 //! passes under a representation that secretly serializes the two threads,
 //! exactly the bug this test exists to catch.
 
+use tidepool_bridge::Value;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -321,6 +321,7 @@ fn capture_operand(
     };
     let custody = session
         .live_payload_handle(hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("{label}: operand suspension has no live payload"));
     let completed = session
         .resume(hole, Value::Lit(Literal::LitInt(0)))
@@ -490,6 +491,7 @@ fn spawn_thread(
     };
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("{label}: wrap frame carries no untaken body closure"));
     let _ = session
         .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
@@ -753,6 +755,7 @@ fn a_green_thread_can_fork_another_green_thread() {
     };
     let outer_body = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .expect("wrap frame carries the outer thread body");
     session
         .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
@@ -773,6 +776,7 @@ fn a_green_thread_can_fork_another_green_thread() {
     // it under its own realm.
     let inner_body = session
         .live_payload_handle(outer_hole.cont_id())
+        .expect("machine reusable")
         .expect("the outer THREAD's frame must carry its nested spawn's closure");
     session
         .resume(outer_hole, Value::Lit(Literal::LitInt(0)))

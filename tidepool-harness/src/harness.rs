@@ -86,6 +86,8 @@ pub enum HarnessError {
     Compile(String),
     #[error("resident session error: {0}")]
     Resident(String),
+    #[error("resident session error: {0}")]
+    ResidentSession(#[from] tidepool_runtime::session::ResidentError),
     #[error("node {0:?} has no live session (not forced, or already terminal)")]
     NoSession(NodeId),
     #[error("node {0:?} is not suspended on a hole")]
@@ -2760,7 +2762,7 @@ impl Harness {
         }
         let hole = pending.hole;
         let mut co = self.checkout_resume_waiting(node, &hole).await?;
-        let handle = co.machine().live_payload_handle(&hole.0);
+        let handle = co.machine().live_payload_handle(&hole.0)?;
         let handle = match handle {
             Some(h) => h,
             None => {

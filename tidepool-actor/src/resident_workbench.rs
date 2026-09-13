@@ -1515,7 +1515,7 @@ pub enum ResidentActorWorkbenchError {
     #[error("resident workbench compiler infrastructure failed:\n{0}")]
     CompileInfrastructure(String),
     #[error("resident workbench execution failed: {0}")]
-    Resident(ResidentError),
+    Resident(#[from] ResidentError),
     #[error("resident workbench task panicked or was cancelled: {0}")]
     Join(tokio::task::JoinError),
     #[error("could not mount the typed completion input: {0}")]
@@ -1748,7 +1748,7 @@ where
                         .live_payload_handle_owned_by(
                             hole.cont_id(),
                             context.placement.resource_scope,
-                        )
+                        )?
                         .ok_or_else(|| {
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "tool installer did not retain its dispatcher".into(),
@@ -3382,6 +3382,7 @@ where
                         }
                         let value = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            ?
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol(
                                 "checkpoint carried no state".into(),
                             ))?;
@@ -3456,6 +3457,7 @@ where
                     )) => {
                         let custody = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            ?
                             .ok_or_else(|| {
                                 ResidentActorWorkbenchError::ActorProtocol(
                                     "request submission suspended without its live payload".into(),
@@ -3480,6 +3482,7 @@ where
                     ResidentRequest::Replies(RepliesReq::AttemptReplyWith(request_id, _)) => {
                         let result = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            ?
                             .ok_or_else(|| {
                                 ResidentActorWorkbenchError::ActorProtocol(
                                     "reply suspended without its live result".into(),
@@ -3495,6 +3498,7 @@ where
                     ResidentRequest::Replies(RepliesReq::ReplyWith(request_id, _)) => {
                         let result = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            ?
                             .ok_or_else(|| {
                                 ResidentActorWorkbenchError::ActorProtocol(
                                     "reply suspended without its live result".into(),
@@ -3517,7 +3521,7 @@ where
                         // Request/watch custody can outlive the publishing actor.
                         // Arc<RootCustody> releases this shared-machine root when
                         // the last registry or watch snapshot stops retaining it.
-                        let value = session.live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)
+                        let value = session.live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("progress publication has no live payload".into()))?;
                         Ok(ResidentActorBoundary::ProgressPublication {
                             continuation: hole, request: crate::request_effect::request_id(request_id)?, value,
@@ -3581,7 +3585,7 @@ where
                     )),
                     ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, dependencies)) => {
                         drop(callback); // Custody is claimed from the suspension, not the decoded value.
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)?
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
                         let dependencies = dependencies.into_iter().map(|dependency| {
                             Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
@@ -3592,7 +3596,7 @@ where
                     }
                     ResidentRequest::Watches(WatchesReq::RegisterRouteGroupsWith(label, callback, groups)) => {
                         drop(callback); // Custody is claimed from the suspension, not the decoded value.
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)?
                             .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
                         let dependencies = groups.into_iter().map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect()).collect::<Result<Vec<Vec<_>>, _>>()?;
                         Ok(ResidentActorBoundary::RouteRegistration {
@@ -3730,7 +3734,7 @@ where
                     if session.parked_realm(&hole) != Some(actor_realm) {
                         return Err(ResidentActorWorkbenchError::ActorProtocol("source installation crossed actor realm".into()));
                     }
-                    let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm).ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("source has no live mapping closure".into()))?;
+                    let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("source has no live mapping closure".into()))?;
                     return Ok(ResidentActorStartupStep::InstallSource {
                         continuation: hole,
                         source: crate::request::sources::SourceBinding { target, entry: Arc::new(entry) },
@@ -3744,6 +3748,7 @@ where
                     ) if session.parked_realm(&hole) == Some(actor_realm) => {
                         let hook = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            ?
                             .ok_or_else(|| {
                                 ResidentActorWorkbenchError::ActorProtocol(
                                     "shutdown registration carried no live hook".into(),
@@ -4035,6 +4040,7 @@ where
                 }
                 let value = session
                     .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                    ?
                     .ok_or_else(|| {
                         ResidentActorWorkbenchError::ActorProtocol(format!(
                             "`{}` suspended without its live value",
@@ -5606,7 +5612,7 @@ where
         incarnation: crate::Incarnation(incarnation),
     };
     let custody = session
-        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
         .ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "actor call or cast suspended without its request".into(),
@@ -5653,7 +5659,7 @@ where
         )));
     }
     let handler = session
-        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
         .ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "actor receive suspended without its handler".into(),
@@ -6470,7 +6476,7 @@ mod request_tests {
         fn bootstrapped(
             expression: tidepool_repr::CoreExpr,
         ) -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
-            let table = tidepool_testing::proptest::build_table_for_expr(&expression);
+            let table = tidepool_testing::gen::standard_datacon_table();
             ResidentSession::bootstrap(
                 &expression,
                 table,

@@ -24,6 +24,7 @@
 use crate::support;
 use support::SuspensionTestExt;
 
+use tidepool_bridge::Value;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::JitEffectMachine;
@@ -35,7 +36,6 @@ use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -588,7 +588,10 @@ fn a2_live_payload_requires_an_explicit_run_policy() {
             other => panic!("finalize-shaped request must suspend, got {other:?}"),
         };
         assert!(
-            machine.take_parked_live_payload_root(id).is_none(),
+            machine
+                .take_parked_live_payload_root(id)
+                .expect("machine reusable")
+                .is_none(),
             "a closure sentinel alone must not authorize rooting a request field"
         );
         assert_eq!(machine.close_realm(RealmId(0)), (1, 0));
@@ -677,10 +680,14 @@ fn a2_live_payload_root_is_per_frame_not_per_machine() {
         // Taking A's finalized root must not disturb B's frame at all.
         let slot_a = machine
             .take_parked_live_payload_root(id_a)
+            .expect("machine reusable")
             .expect("A's finalized root");
         assert_rooting_receipt(&machine, 2);
         assert!(
-            machine.take_parked_live_payload_root(id_a).is_none(),
+            machine
+                .take_parked_live_payload_root(id_a)
+                .expect("machine reusable")
+                .is_none(),
             "a second take on the same id is None — the frame's handle is cleared, \
              not re-derived"
         );
@@ -688,6 +695,7 @@ fn a2_live_payload_root_is_per_frame_not_per_machine() {
 
         let slot_b = machine
             .take_parked_live_payload_root(id_b)
+            .expect("machine reusable")
             .expect("B's finalized root — its OWN, not A's");
         assert_ne!(
             slot_a.addr(),

@@ -55,21 +55,24 @@ macro_rules! base_effects {
     };
 }
 
-/// The ordinary one-shot MCP eval server's and the REPL's effect roster: the
-/// base stack plus the interposed `Ask`/`RunLLMTurn` effects appended last,
-/// in that order. Derived from the single-source [`base_effects!`] list — do
-/// not hand-maintain a parallel order here.
+/// Append the ordinary session's interposed effects after its handler row.
+/// `Ask` and `RunLLMTurn` are suspended by the session router, so neither has
+/// a handler slot. Keep this suffix shared by [`standard_decls`] and stacks
+/// assembled from concrete handlers.
+pub fn with_session_effects(mut handler_decls: Vec<EffectDecl>) -> Vec<EffectDecl> {
+    handler_decls.push(crate::ask_decl());
+    handler_decls.push(crate::runllmturn_decl());
+    handler_decls
+}
+
+/// The ordinary session's effect row: the base stack plus the interposed
+/// `Ask`/`RunLLMTurn` effects. The handler order comes from [`base_effects!`].
 ///
 /// **This is a per-surface roster, not a universal one** (vestigial-subsystems
 /// review §4): it names exactly what the ordinary session engine's request
 /// parser (`tidepool_runtime::session::engine::extract_ask_request`, shared
 /// verbatim by the REPL) actually accepts — `AskWith` and `RunLLMTurnWith`,
-/// nothing else. `EffectRoster::from_handlers` (`tidepool-mcp/src/server.rs`)
-/// is the single production consumer for both surfaces, and appends this same
-/// two-effect suffix independently (it builds from an arbitrary handler
-/// stack, not from this decl-list function) — the two cannot desync because
-/// both append the identical `[Ask, RunLLMTurn]` tail derived from the same
-/// `ask_decl`/`runllmturn_decl` builders.
+/// nothing else. Arbitrary handler stacks use [`with_session_effects`] too.
 ///
 /// A surface that genuinely services more than this — the harness Agent turn
 /// (`tidepool-harness::engine::agent_decls`) dispatches `ForkWith`/
@@ -90,7 +93,7 @@ macro_rules! base_effects {
 pub fn standard_decls() -> Vec<EffectDecl> {
     macro_rules! std_decls_rows {
         ($(($name:ident, $decl:ident)),* $(,)?) => {
-            vec![ $( $crate::$decl() ),*, $crate::ask_decl(), $crate::runllmturn_decl() ]
+            $crate::with_session_effects(vec![ $( $crate::$decl() ),* ])
         };
     }
     crate::base_effects!(std_decls_rows)

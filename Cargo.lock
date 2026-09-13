@@ -4318,7 +4318,6 @@ dependencies = [
  "serial_test",
  "thiserror",
  "tidepool-atomic-write",
- "tidepool-testing",
 ]
 
 [[package]]
@@ -4366,6 +4365,7 @@ dependencies = [
  "libc",
  "proptest",
  "serde_json",
+ "serial_test",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",

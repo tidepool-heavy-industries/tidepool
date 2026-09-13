@@ -51,11 +51,11 @@
 //! why it must not touch `gc_trigger`'s call-count instrumentation), and
 //! this lane's `notify_parent` history for the full diagnosis.
 
+use tidepool_bridge::Value;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
-use tidepool_bridge::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
@@ -429,6 +429,7 @@ fn shared_free_variable_survives_forced_gc_between_tenure_and_resume() {
     // captured `shared` too, and that copy is NOT touched by this tenure.
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // THE EXPERIMENT: force a real collection in the window between the
@@ -496,6 +497,7 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // Multiple forced collections in the window between tenure and resume —
@@ -570,6 +572,7 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
     // own frame, BEFORE the spawner is resumed).
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // REAL ORDER: run the child thread FIRST (mirrors driver.rs's
@@ -833,6 +836,7 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -1053,6 +1057,7 @@ fn handled_dependencies_survive_when_child_completes_synchronously() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // The child dispatches a handled effect and completes SYNCHRONOUSLY here
@@ -1249,6 +1254,7 @@ fn shared_unforced_thunk_survives_forced_gc_between_tenure_and_resume() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     session.force_gc_for_test();
@@ -1517,6 +1523,7 @@ fn event_shaped_capture_survives_tenure_and_resume() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -1600,6 +1607,7 @@ fn event_shaped_capture_survives_real_inflight_gc_with_tiny_nursery() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -1903,6 +1911,7 @@ fn event_capture_survives_via_either_unwrap_binding() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
@@ -2106,6 +2115,7 @@ fn bare_list_capture_survives_tenure_and_resume() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let _inner_hole = match session
@@ -2365,6 +2375,7 @@ fn undceable_list_capture_survives_tenure_and_resume() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // bodyInner ignores watchList but still suspends on body_tag (its own
@@ -2630,6 +2641,7 @@ fn thunked_app_capture_survives_tenure_and_resume() {
 
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // Forcing X (applying bodyInner to watchList) happens HERE, inside
@@ -2706,6 +2718,7 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
     // subsequent collection runs to give it a chance to self-heal.
     let handle = session
         .live_payload_handle(wrap_hole.cont_id())
+        .expect("machine reusable")
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // No force_gc_for_test() here -- this is the point of the test.
