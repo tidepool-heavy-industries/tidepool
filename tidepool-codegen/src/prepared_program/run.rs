@@ -103,7 +103,7 @@ pub(super) fn initialize_heap_tops(
             .checked_add(spec.descriptor.allocation_extent() as usize)
             .ok_or(RuntimeError::HeapOverflow)?;
     }
-    if total > capacity || total % 8 != 0 {
+    if total > capacity || !total.is_multiple_of(8) {
         return Err(RuntimeError::HeapOverflow);
     }
     let base = start as usize;

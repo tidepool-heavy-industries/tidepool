@@ -204,7 +204,7 @@ pub(super) fn declare_dispatchers(
         for function in plan.functions.values() {
             for pending in 0..function.signature.arguments.len() {
                 let Some(Application::Excess { remainder, .. }) =
-                    classify(&function.signature, pending, &demand)
+                    classify(function.signature, pending, &demand)
                 else {
                     continue;
                 };
@@ -317,7 +317,7 @@ pub(super) fn emit_dispatchers(
         let mut next = entered;
         let physical_arguments = logical_arguments(signature, &params[2..]);
         for (&id, function) in &plan.functions {
-            let application = classify(&function.signature, 0, signature);
+            let application = classify(function.signature, 0, signature);
             if application.is_none() {
                 continue;
             }
@@ -417,7 +417,7 @@ pub(super) fn emit_dispatchers(
             let Some(function) = plan.functions.get(&id) else {
                 continue;
             };
-            let Some(application) = classify(&function.signature, pending, signature) else {
+            let Some(application) = classify(function.signature, pending, signature) else {
                 continue;
             };
             let Some(&callee_function) = functions.get(&id) else {
@@ -529,10 +529,7 @@ pub(super) fn emit_dispatchers(
     Ok(())
 }
 
-fn logical_arguments<'a>(
-    signature: &Signature,
-    physical: &'a [ir::Value],
-) -> Vec<Option<ir::Value>> {
+fn logical_arguments(signature: &Signature, physical: &[ir::Value]) -> Vec<Option<ir::Value>> {
     let mut next = 0;
     signature
         .arguments

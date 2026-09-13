@@ -179,7 +179,7 @@ fn emit_function_at(
         bind_parameters(
             &mut builder,
             &mut values,
-            &function.parameters,
+            function.parameters,
             &function.signature.arguments,
             physical_arguments,
             id,
@@ -863,7 +863,7 @@ fn emit_let_group(
             .ok_or_else(|| unsupported(owner, node))?;
         descriptors.push(descriptor);
     }
-    if total < 16 || total % 8 != 0 {
+    if total < 16 || !total.is_multiple_of(8) {
         return Err(unsupported(owner, node));
     }
     let gc = pipeline

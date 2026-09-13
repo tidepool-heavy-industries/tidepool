@@ -395,10 +395,10 @@ impl BindingTable {
         entry: BindingEntry,
         source: SessionVarId,
     ) -> Option<(SessionVarId, Vec<BindingEntry>)> {
-        if !self
+        if self
             .live
             .get(&source)
-            .is_some_and(|source_entry| source_entry.scope == scope)
+            .is_none_or(|source_entry| source_entry.scope != scope)
             || self.live.contains_key(&entry.id)
         {
             return None;

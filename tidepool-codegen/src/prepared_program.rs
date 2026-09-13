@@ -457,7 +457,7 @@ impl CompiledProgram {
         let thunk_native_signature = entry::signature();
         for (&id, thunk) in &plan.thunks {
             let body_abi =
-                EntryAbi::lower_internal(&profile, &thunk.signature, EnvironmentMode::Captured)?;
+                EntryAbi::lower_internal(&profile, thunk.signature, EnvironmentMode::Captured)?;
             let body_signature =
                 body_abi.cranelift_signature(&profile, cranelift_codegen::isa::CallConv::Tail)?;
             let body = pipeline.declare_function_with_signature(
@@ -492,7 +492,7 @@ impl CompiledProgram {
             functions.insert(id, function);
             abis.insert(id, abi);
         }
-        for (&id, _) in &plan.thunks {
+        for &id in plan.thunks.keys() {
             functions.insert(id, prepared_enter);
         }
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;

@@ -224,7 +224,7 @@ impl WorktreeRegistry {
             status: if receipt.status == WorktreeRecordStatus::Provisional {
                 WorktreeRecordStatus::Mounted
             } else {
-                receipt.status.clone()
+                receipt.status
             },
             ..receipt.clone()
         };

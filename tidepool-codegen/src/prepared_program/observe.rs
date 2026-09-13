@@ -130,7 +130,7 @@ pub(super) fn append_exact_starts(
             .into());
         }
         let extent = descriptor.allocation_extent() as usize;
-        if extent < 16 || extent % 8 != 0 {
+        if extent < 16 || !extent.is_multiple_of(8) {
             return Err(DescriptorTraceError::InvalidRange.into());
         }
         starts[offset / 64] |= 1_u64 << (offset % 64);
@@ -237,7 +237,7 @@ impl<'a> ObservationHeap<'a> {
                 .into());
             }
             let extent = descriptor.allocation_extent() as usize;
-            if extent < 16 || extent % 8 != 0 {
+            if extent < 16 || !extent.is_multiple_of(8) {
                 return Err(DescriptorTraceError::InvalidRange.into());
             }
             starts[offset / 64] |= 1_u64 << (offset % 64);

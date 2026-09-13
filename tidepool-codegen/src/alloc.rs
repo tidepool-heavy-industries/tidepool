@@ -55,7 +55,7 @@ pub fn emit_prepared_reserve_fast_path(
     gc_trigger: ir::FuncRef,
     extent: u64,
 ) -> Value {
-    debug_assert!(extent >= 16 && extent % 8 == 0);
+    debug_assert!(extent >= 16 && extent.is_multiple_of(8));
     let flags = MemFlags::trusted();
     let extent_val = builder.ins().iconst(types::I64, extent as i64);
 

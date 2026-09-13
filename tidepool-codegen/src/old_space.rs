@@ -954,7 +954,8 @@ unsafe fn validated_pointer_offsets(pointer: *mut u8, size: usize) -> Result<Vec
             field_offsets(CON_FIELDS_OFFSET, count)
         }
         HeapTag::Thunk => {
-            if size < THUNK_MIN_SIZE || (size - THUNK_CAPTURED_OFFSET) % FIELD_STRIDE != 0 {
+            if size < THUNK_MIN_SIZE || !(size - THUNK_CAPTURED_OFFSET).is_multiple_of(FIELD_STRIDE)
+            {
                 return Err(format!(
                     "old-space Thunk at {pointer:p} has invalid size {size}"
                 ));

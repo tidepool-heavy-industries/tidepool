@@ -145,7 +145,7 @@ pub(super) fn build_static_image(plan: &ProgramPlan<'_>) -> Result<StaticImage, 
         objects.push((id, binding, descriptor, offset));
     }
 
-    if total_bytes % std::mem::size_of::<u64>() != 0 {
+    if !total_bytes.is_multiple_of(std::mem::size_of::<u64>()) {
         return Err(CompileError::Static(StaticImageError::Allocation));
     }
     let word_count = total_bytes / std::mem::size_of::<u64>();
@@ -452,7 +452,7 @@ fn write_pointer(
     if size != bytes.len() {
         return Err(CompileError::Layout(
             tidepool_repr::execution_schema::LayoutError::InvalidPointerWidth(
-                u8::try_from(size.checked_mul(8).unwrap_or(usize::MAX)).unwrap_or(u8::MAX),
+                u8::try_from(size.saturating_mul(8)).unwrap_or(u8::MAX),
             ),
         ));
     }
