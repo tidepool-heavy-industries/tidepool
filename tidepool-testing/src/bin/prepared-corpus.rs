@@ -443,20 +443,8 @@ fn merge_driver_record(record: &mut ProgramRecord, driver_record: &ProgramRecord
                 },
             ),
             (Stage::Projection, _) => {}
-            (stage, outcome) => record.record(*stage, clone_outcome(outcome)),
+            (stage, outcome) => record.record(*stage, outcome.clone()),
         }
-    }
-}
-
-fn clone_outcome(outcome: &Outcome) -> Outcome {
-    match outcome {
-        Outcome::Running => Outcome::Running,
-        Outcome::Passed => Outcome::Passed,
-        Outcome::Failed { reason } => Outcome::Failed {
-            reason: reason.clone(),
-        },
-        Outcome::MissingExpectation => Outcome::MissingExpectation,
-        Outcome::NotReached => Outcome::NotReached,
     }
 }
 
