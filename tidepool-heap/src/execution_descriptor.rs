@@ -1,3 +1,4 @@
+use crate::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
 use crate::managed_reference::{constructor_tag as canonical_constructor_tag, DESCRIPTOR_TAG};
 use std::num::NonZeroU32;
 use tidepool_repr::execution_schema::{LayoutError, Signature, StorageLayout};
@@ -31,6 +32,9 @@ pub enum ObjectKind {
     Thunk,
     Constructor,
     Continuation,
+    /// A fixed-size managed handle for a machine-ledger-owned payload. Its
+    /// Address slot is an explicit external edge, not an inferred managed ref.
+    External(ExternalStorageKind),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +86,8 @@ pub enum DescriptorConstructionError {
     MissingConstructorTag,
     #[error("constructor tag {0} is not a valid authoritative tag")]
     InvalidConstructorTag(u32),
+    #[error("external descriptor requires the fixed external-handle constructor")]
+    ExternalLayout,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -121,6 +127,10 @@ pub enum DescriptorTraceError {
     UpdatedCycle { address: usize },
     #[error("updated thunk does not terminate at an evaluated value")]
     InvalidUpdatedTarget,
+    #[error("external handle has no authenticated payload owner")]
+    MissingExternalOwner,
+    #[error("invalid external payload: {0:?}")]
+    ExternalPayload(ExternalStorageValidationError),
 }
 
 impl ObjectDescriptor {
@@ -135,8 +145,35 @@ impl ObjectDescriptor {
             ObjectKind::Constructor => {
                 return Err(DescriptorConstructionError::MissingConstructorTag)
             }
+            ObjectKind::External(_) => return Err(DescriptorConstructionError::ExternalLayout),
         };
         Self::with_tag(kind, tag, None, payload, entry)
+    }
+
+    /// External handles have one raw payload identity at word 8. The payload
+    /// owner, never the descriptor's managed-root mask, authenticates its slots.
+    pub fn external(
+        kind: ExternalStorageKind,
+        target: &tidepool_repr::execution_schema::TargetDescriptor,
+    ) -> Result<Self, DescriptorConstructionError> {
+        let payload = StorageLayout::for_reps(
+            target,
+            &[tidepool_repr::execution_schema::RuntimeRep::Address],
+        )?;
+        Self::with_tag(
+            ObjectKind::External(kind),
+            DESCRIPTOR_TAG,
+            None,
+            payload,
+            None,
+        )
+    }
+
+    pub fn external_kind(&self) -> Option<ExternalStorageKind> {
+        match self.kind {
+            ObjectKind::External(kind) => Some(kind),
+            _ => None,
+        }
     }
 
     /// Construct an algebraic-constructor descriptor from its authoritative
@@ -346,6 +383,12 @@ impl ObjectDescriptor {
         available: usize,
         mut visit: impl FnMut(*mut *mut u8),
     ) -> Result<(), DescriptorTraceError> {
+        // wave5:external-graph: the owner-aware copier must expand this edge
+        // through ExternalPayloadOwner instead. Managed-only walkers cannot
+        // silently declare an external handle a leaf.
+        if self.external_kind().is_some() {
+            return Err(DescriptorTraceError::MissingExternalOwner);
+        }
         match self.state(ptr, available)? {
             DescriptorState::Forwarded => return Err(DescriptorTraceError::ForwardedObject),
             DescriptorState::Updated => {

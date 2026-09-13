@@ -1,11 +1,72 @@
 //! Owner-authenticated external payload views shared by graph traversals.
 
+/// The two GC-external payload shapes owned by a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalStorageKind {
+    Bytes,
+    BoxedArray,
+}
+
+/// The machine ledger authenticates external edges; descriptor metadata only
+/// states which kind an object requires. Array handles are not provenance.
+///
+/// # Safety
+/// Returned slots remain allocated, initialized and exclusively available to
+/// the collector through the complete copy/fixup interval. No implementation
+/// may collect, force a value, resize, revoke or sweep during this callback.
+pub unsafe trait ExternalPayloadOwner {
+    fn slots(
+        &self,
+        published: *mut u8,
+        expected: ExternalStorageKind,
+    ) -> Result<ExternalPointerSlots, ExternalStorageValidationError>;
+}
+
+/// Validation failures while authenticating an external payload view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalStorageValidationError {
+    Untracked(*mut u8),
+    InvalidBase,
+    LayoutAlignment {
+        actual: usize,
+    },
+    PointerAlignment {
+        kind: ExternalStorageKind,
+    },
+    KindMismatch {
+        expected: ExternalStorageKind,
+        actual: ExternalStorageKind,
+    },
+    PublishedPointerMismatch {
+        kind: ExternalStorageKind,
+    },
+    SpanOverflow {
+        kind: ExternalStorageKind,
+        logical_len: usize,
+    },
+    SpanExceedsAllocation {
+        kind: ExternalStorageKind,
+        required: usize,
+        allocated: usize,
+    },
+    CapacityPrefixMismatch {
+        recorded: usize,
+        stored: usize,
+    },
+    LogicalLengthMismatch {
+        kind: ExternalStorageKind,
+        recorded: usize,
+        stored: usize,
+    },
+    LedgerChanged,
+}
+
 /// A bounded span of managed slots, without a per-visit allocation. This is
 /// not ownership: the machine's allocation ledger must keep the backing
 /// allocation alive and unchanged throughout traversal and relocation.
 ///
-/// wave5:external-view: migrate the machine's validated external payload view
-/// to this span; preserve kind, length, capacity and provenance validation.
+/// The machine validates kind, length, capacity, and provenance before it
+/// constructs this span.
 #[derive(Clone, Copy, Debug)]
 pub struct ExternalPointerSlots {
     base: *mut *mut u8,
@@ -35,7 +96,10 @@ impl IntoIterator for ExternalPointerSlots {
     type IntoIter = ExternalSlotIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        ExternalSlotIter { span: self, next: 0 }
+        ExternalSlotIter {
+            span: self,
+            next: 0,
+        }
     }
 }
 
@@ -66,3 +130,41 @@ impl Iterator for ExternalSlotIter {
 
 impl ExactSizeIterator for ExternalSlotIter {}
 impl std::iter::FusedIterator for ExternalSlotIter {}
+
+#[cfg(test)]
+mod tests {
+    use super::ExternalPointerSlots;
+
+    #[test]
+    fn span_iterator_is_exact_fused_and_in_address_order() {
+        let mut slots: [*mut u8; 3] = [std::ptr::null_mut(); 3];
+        // SAFETY: `slots` remains live and unchanged for the iterator's use.
+        let span = unsafe { ExternalPointerSlots::from_validated(slots.as_mut_ptr(), slots.len()) };
+        let first = slots.as_mut_ptr();
+        let mut iter = span.into_iter();
+
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.next(), Some(first));
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some(unsafe { first.add(1) }));
+        assert_eq!(iter.next(), Some(unsafe { first.add(2) }));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn empty_span_is_exact_and_fused() {
+        // SAFETY: an empty span never dereferences its base.
+        let span = unsafe {
+            ExternalPointerSlots::from_validated(
+                std::ptr::NonNull::<*mut u8>::dangling().as_ptr(),
+                0,
+            )
+        };
+        let mut iter = span.into_iter();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+    }
+}

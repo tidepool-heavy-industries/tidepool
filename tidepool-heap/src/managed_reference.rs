@@ -63,7 +63,7 @@ pub const fn tag_valid(
             matches!(constructor_tag, Some(value) if value.get() == tag as u32)
         }
         (DESCRIPTOR_TAG, ObjectKind::Constructor) => constructor_tag.is_some(),
-        (DESCRIPTOR_TAG, ObjectKind::Function | ObjectKind::Pap) => true,
+        (DESCRIPTOR_TAG, ObjectKind::Function | ObjectKind::Pap | ObjectKind::External(_)) => true,
         _ => false,
     }
 }
