@@ -1,0 +1,21 @@
+{
+  "source_revision": "TextContract.hs native GHC 9.12.2",
+  "expectations": {
+    "splitOnParts": {
+      "kind": "list",
+      "value": [
+        { "kind": "text", "value": "alpha" },
+        { "kind": "text", "value": "beta" },
+        { "kind": "text", "value": "" },
+        { "kind": "text", "value": "gamma" }
+      ]
+    },
+    "intercalated": { "kind": "text", "value": "one | two | three" },
+    "replaced": { "kind": "text", "value": "the dog sat on the dog mat" },
+    "upperWordsRoundTrip": { "kind": "text", "value": "QUICK BROWN FOX" },
+    "nonAsciiLength": { "kind": "int", "value": 12 },
+    "packedShow": { "kind": "text", "value": "(12345,True)" },
+    "charFold": { "kind": "int", "value": 294 },
+    "textKeyedLookup": { "kind": "maybe", "value": { "kind": "int", "value": 2 } }
+  }
+}
