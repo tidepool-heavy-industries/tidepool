@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use cranelift_codegen::ir::{self, types, InstBuilder, Value as SsaValue};
+use cranelift_codegen::ir::{self, InstBuilder, Value as SsaValue};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::FuncId;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
@@ -14,6 +14,9 @@ use tidepool_repr::execution_schema::{GlobalId, LinkedProgram, RuntimeRep, Signa
 use tidepool_repr::DataConId;
 use crate::entry_abi::EntryAbi;
 use crate::pipeline::{CodegenPipeline, PipelineError};
+
+mod admission;
+pub use admission::admit_program;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Unsupported {
@@ -68,15 +71,6 @@ impl CompiledProgram {
         // their addresses; finalize all code/maps together, then publish Self.
         todo!("wave4:PROGRAM_OWNER")
     }
-}
-
-pub fn admit_program(linked: &LinkedProgram) -> Result<(), Unsupported> {
-    if !linked.prepared().globals().is_empty() {
-        return Err(Unsupported::Global(GlobalId(0)));
-    }
-    // wave4:ADMISSION — inspect every nested RHS/frame, not just selected entry.
-    // Host argument admission applies at adapter selection, not internal calls.
-    todo!("wave4:ADMISSION")
 }
 
 /// Lower a saturated, statically resolved call. Payload SSA values become

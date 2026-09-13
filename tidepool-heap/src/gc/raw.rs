@@ -18,6 +18,7 @@ pub struct CopyResult {
 /// Descriptor addresses are the header identities; object addresses are found
 /// afresh from the exact initialized region on every collection.
 pub struct DescriptorSpace {
+    static_region: Option<Arc<crate::static_region::StaticRegion>>,
     descriptors: HashMap<usize, Arc<ObjectDescriptor>>,
     object_starts: Vec<u64>,
     root_slots: Vec<usize>,
@@ -39,12 +40,20 @@ impl DescriptorSpace {
             owners.insert(descriptor.initial_header_word(), descriptor);
         }
         Ok(Self {
+            static_region: None,
             descriptors: owners,
             object_starts: Vec::new(),
             root_slots: Vec::new(),
             updated_visited: Vec::new(),
             updated_path: Vec::new(),
         })
+    }
+
+    /// Pin the closed immutable allocation before installing this space in a
+    /// machine. Its fields cannot acquire nursery edges, so GC never scans it.
+    pub fn with_static_region(mut self, region: Arc<crate::static_region::StaticRegion>) -> Self {
+        self.static_region = Some(region);
+        self
     }
 
     fn prepare_roots(&mut self, root_ptrs: &[*mut *mut u8]) -> Result<(), DescriptorTraceError> {
@@ -302,6 +311,11 @@ unsafe fn evacuate_descriptor(
     let address = untag(encoded);
     if address == 0 {
         return Err(DescriptorTraceError::TaggedNull { value: encoded });
+    }
+    if let Some(region) = &descriptors.static_region {
+        if let Some(reference) = region.admit(encoded)? {
+            return Ok(reference);
+        }
     }
     if address < from_base || address >= from_end || (address - from_base) % 8 != 0 {
         return Err(DescriptorTraceError::InvalidManagedPointer { address });

@@ -651,7 +651,6 @@ fn group_items<T>(group: &Group<T>) -> &[T] {
 
 fn scalar_word(atom: &Atom, expected: RuntimeRep) -> Result<u64, PreparedNativeError> {
     match (atom, expected) {
-        (Atom::Scalar(ScalarLiteral::Char(value)), RuntimeRep::Word(32)) => Ok(u64::from(*value)),
         (Atom::Scalar(ScalarLiteral::Int { bytes, .. }), RuntimeRep::Int(_))
         | (Atom::Scalar(ScalarLiteral::Word { bytes, .. }), RuntimeRep::Word(_))
             if bytes.len() <= 8 =>
