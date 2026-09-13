@@ -16,6 +16,7 @@ use crate::entry_abi::EntryAbi;
 use crate::pipeline::{CodegenPipeline, PipelineError};
 
 mod admission;
+mod adapter;
 mod emit;
 mod image;
 mod plan;
@@ -77,10 +78,61 @@ pub struct CompiledProgram {
 impl CompiledProgram {
     pub fn compile(linked: &LinkedProgram) -> Result<Self, CompileError> {
         admit_program(linked)?;
-        // wave4:PROGRAM_OWNER — declare all top/local function entries before
-        // defining any; pin descriptors and literal bytes before embedding
-        // their addresses; finalize all code/maps together, then publish Self.
-        todo!("wave4:PROGRAM_OWNER")
+        use cranelift_codegen::isa::CallConv;
+        use cranelift_module::Linkage;
+        use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
+        use crate::entry_abi::{EnvironmentMode, NativeAbiProfile};
+        let plan = plan::ProgramPlan::new(linked.prepared())?;
+        let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
+        let statics = image::build_static_image(&plan)?;
+        let mut pipeline = CodegenPipeline::new(&[
+            ("prepared_gc_trigger", crate::host_fns::prepared_gc_trigger as *const u8),
+        ])?;
+        let mut signatures = BTreeMap::new();
+        for (&id, function) in &plan.functions {
+            signatures.insert(id, function.signature.clone());
+        }
+        for (&id, binding) in &plan.top_bindings {
+            signatures.entry(id).or_insert_with(|| Signature {
+                arguments: vec![],
+                results: vec![match &binding.rhs {
+                    HeapRhs::Bytes(_) => RuntimeRep::Address,
+                    HeapRhs::Constructor { constructor, .. } => plan.program.constructors()[constructor.0 as usize].result_rep,
+                    _ => RuntimeRep::LiftedRef,
+                }],
+            });
+        }
+        let mut functions = BTreeMap::new();
+        let mut abis = BTreeMap::new();
+        for (&id, signature) in &signatures {
+            let abi = EntryAbi::lower_internal(&profile, signature, EnvironmentMode::Captured)?;
+            let native = abi.cranelift_signature(&profile, CallConv::Tail)?;
+            let function = pipeline.declare_function_with_signature(&format!("prepared_entry_{}", id.0), Linkage::Local, &native)?;
+            functions.insert(id, function);
+            abis.insert(id, abi);
+        }
+        // Every function address has been declared, including recursive peers.
+        for &id in functions.keys() {
+            emit::emit_function(&plan, id, &functions, &mut pipeline)?;
+        }
+        let mut entries = BTreeMap::new();
+        for (&id, &slot) in &plan.top_slots {
+            let abi = abis[&id].clone();
+            let adapter = adapter::emit_adapter(&mut pipeline, &format!("prepared_adapter_{}", id.0), functions[&id], &abi, slot)?;
+            entries.insert(id, CompiledEntry { function: functions[&id], adapter, signature: signatures[&id].clone(), abi });
+        }
+        pipeline.finalize()?;
+        let mut descriptors = plan.constructors.clone();
+        descriptors.extend(plan.functions.values().map(|function| function.descriptor.clone()));
+        let constructors = plan.program.constructors().iter().zip(&plan.constructors)
+            .map(|(declaration, descriptor)| (descriptor.initial_header_word(), ConstructorObservation {
+                identity: declaration.host_id, fields: declaration.field_reps.clone(),
+            })).collect();
+        let byte_tops = plan.top_bindings.iter().filter_map(|(&id, binding)| match &binding.rhs {
+            HeapRhs::Bytes(bytes) => Some((id, plan.bytes[bytes].clone())), _ => None,
+        }).collect();
+        Ok(Self { pipeline, entries, descriptors, constructors, statics,
+            bytes: plan.bytes, top_slots: plan.top_slots, byte_tops })
     }
 }
 
