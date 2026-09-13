@@ -236,6 +236,10 @@ impl CompiledProgram {
                 byte_arrays::prepared_new_bytes as *const u8,
             ),
             (
+                "prepared_resize_bytes",
+                byte_arrays::prepared_resize_bytes as *const u8,
+            ),
+            (
                 "prepared_freeze_bytes",
                 byte_arrays::prepared_freeze_bytes as *const u8,
             ),

@@ -1296,8 +1296,6 @@ mod tests {
         crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
-    /// W5_ARRAY_BOXED: extend this real-adapter fixture to write/read/GC, not a
-    /// second array evaluator. The result is deliberately not a host array API.
     #[test]
     fn w5_array_boxed_allocation_survives_result_collection() {
         let mut wire = testing::wire_program();

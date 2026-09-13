@@ -9,6 +9,251 @@ fn compile(wire: WireProgram) -> CompiledProgram {
     CompiledProgram::compile(&linked).unwrap()
 }
 
+fn resize_wire(new_len: i64, use_old_alias: bool) -> WireProgram {
+    let mut wire = testing::wire_program();
+    let reference = RuntimeRep::UnliftedRef;
+    let int = RuntimeRep::Int(64);
+    let word = RuntimeRep::Word(8);
+    wire.signatures[0].results = ResultContract::Returns(vec![reference]);
+    wire.signatures.extend([
+        Signature {
+            arguments: vec![int, RuntimeRep::Void],
+            results: ResultContract::Returns(vec![reference]),
+        },
+        Signature {
+            arguments: vec![reference, int, word, RuntimeRep::Void],
+            results: ResultContract::Returns(vec![]),
+        },
+        Signature {
+            arguments: vec![reference, int, RuntimeRep::Void],
+            results: ResultContract::Returns(vec![reference]),
+        },
+        Signature {
+            arguments: vec![reference, RuntimeRep::Void],
+            results: ResultContract::Returns(vec![int]),
+        },
+    ]);
+    wire.operations = [
+        ("newByteArray#", 1),
+        ("writeWord8Array#", 2),
+        ("resizeMutableByteArray#", 3),
+        ("getSizeofMutableByteArray#", 4),
+    ]
+    .into_iter()
+    .map(|(name, signature)| OperationDecl {
+        identity: OperationIdentity::PrimOp(name.into()),
+        signature: SignatureId(signature),
+    })
+    .collect();
+    let local = |id| Atom::Ref(ValueRef::Local(ValueId(id)));
+    let integer = |value: i64| {
+        Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: value.to_be_bytes().to_vec(),
+        })
+    };
+    let byte = |value: u8| {
+        Atom::Scalar(ScalarLiteral::Word {
+            bits: 8,
+            bytes: vec![value],
+        })
+    };
+    let operation = |id, arguments| ExprFrame::Operation {
+        operation: OperationId(id),
+        arguments,
+    };
+    let case = |scrutinee, binder, results: Vec<RuntimeRep>, binders: Vec<ValueId>, body| {
+        ExprFrame::Case {
+            scrutinee,
+            binder: ValueId(binder),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(results),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders,
+                body,
+            }],
+        }
+    };
+    let mut nodes = vec![
+        operation(0, vec![integer(2), Atom::Void]),
+        operation(1, vec![local(100), integer(0), byte(0x7b), Atom::Void]),
+        operation(1, vec![local(100), integer(1), byte(0x58), Atom::Void]),
+        operation(2, vec![local(100), integer(new_len), Atom::Void]),
+    ];
+    let old_size = if use_old_alias {
+        let index = nodes.len();
+        nodes.push(operation(3, vec![local(100), Atom::Void]));
+        Some(index)
+    } else {
+        None
+    };
+    let returned = nodes.len();
+    nodes.push(ExprFrame::Return(vec![local(102)]));
+    let after_resize = if let Some(old_size) = old_size {
+        let index = nodes.len();
+        nodes.push(case(old_size, 105, vec![int], vec![ValueId(104)], returned));
+        index
+    } else {
+        returned
+    };
+    let resize_case = nodes.len();
+    nodes.push(case(
+        3,
+        106,
+        vec![reference],
+        vec![ValueId(102)],
+        after_resize,
+    ));
+    let write_one_case = nodes.len();
+    nodes.push(case(2, 107, vec![], vec![], resize_case));
+    let write_zero_case = nodes.len();
+    nodes.push(case(1, 108, vec![], vec![], write_one_case));
+    let new_case = nodes.len();
+    nodes.push(case(
+        0,
+        109,
+        vec![reference],
+        vec![ValueId(100)],
+        write_zero_case,
+    ));
+    wire.expressions.nodes = nodes;
+    if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+        if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+            *body = new_case;
+        }
+    }
+    wire
+}
+
+#[test]
+fn resize_bytes_real_adapter_copies_prefix_zeroes_growth_and_survives_gc() {
+    for (new_len, expected) in [(4, vec![0x7b, 0x58, 0, 0]), (1, vec![0x7b])] {
+        let program = compile(resize_wire(new_len, false));
+        let result = program
+            .run_entry(
+                ValueId(0),
+                &[],
+                &RunOptions {
+                    nursery_bytes: 16,
+                    collect_before_observation: true,
+                    ..Default::default()
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        // The first wrapper fills the 16-byte nursery, so the resize reserve
+        // must collect before the explicit result-observation collection.
+        assert!(result.collections >= 2);
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
+                if bytes == &expected
+        ));
+    }
+}
+
+#[test]
+fn resize_bytes_old_alias_rejects_after_success() {
+    let program = compile(resize_wire(4, true));
+    let error = program
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions {
+                nursery_bytes: 16,
+                ..Default::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ExecutionError::Runtime(failure) if failure.cause == RuntimeError::BadPointer
+    ));
+}
+
+#[test]
+fn resize_bytes_invalid_lengths_leave_old_active_and_new_wrapper_empty() {
+    use tidepool_heap::{
+        execution_descriptor::ObjectDescriptor, external_storage::ExternalStorageKind,
+    };
+    for (new_len, cause) in [
+        (
+            -1,
+            RuntimeError::ArrayIndexOutOfBounds { index: -1, len: 2 },
+        ),
+        (i64::MAX, RuntimeError::HeapOverflow),
+    ] {
+        let descriptor = Arc::new(
+            ObjectDescriptor::external(ExternalStorageKind::Bytes, &testing::target()).unwrap(),
+        );
+        let extent = descriptor.allocation_extent() as usize;
+        let machine = crate::machine_state::MachineState::new();
+        machine
+            .install_prepared_buffer(vec![0_u64; extent * 2 / 8], vec![descriptor.clone()])
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        vmctx.alloc_ptr = unsafe { start.add(extent * 2) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let replacement_wrapper = unsafe { start.add(extent) };
+        let reference = (start as usize | usize::from(descriptor.tag())) as *mut u8;
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        machine
+            .store_external_bytes(payload, 0, &[0x7b, 0x58])
+            .unwrap();
+        unsafe {
+            descriptor.initialize_header(start);
+            descriptor.initialize_header(replacement_wrapper);
+            descriptor
+                .external_payload_slot(start, extent)
+                .unwrap()
+                .write(payload);
+        }
+        let status = unsafe {
+            super::byte_arrays::prepared_resize_bytes(
+                &mut vmctx,
+                reference,
+                Arc::as_ptr(&descriptor),
+                replacement_wrapper,
+                new_len,
+            )
+        };
+        assert_eq!(
+            status,
+            crate::prepared_control::CallStatus::LanguageFailure as i32
+        );
+        assert_eq!(machine.take_runtime_error(), Some(cause));
+        assert_eq!(
+            machine.disposition(),
+            crate::machine_state::MachineDisposition::Reusable
+        );
+        assert!(unsafe {
+            descriptor
+                .external_payload_slot(replacement_wrapper, extent)
+                .unwrap()
+                .read()
+                .is_null()
+        });
+        assert_eq!(
+            machine
+                .external_active_view(payload, ExternalStorageKind::Bytes)
+                .unwrap()
+                .logical_len,
+            2
+        );
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(payload.add(8), 2) },
+            &[0x7b, 0x58]
+        );
+    }
+}
+
 #[test]
 fn scalar_only_bytes_keep_the_exact_embedded_address_alive() {
     for payload in [Vec::new(), b"a\0b".to_vec()] {

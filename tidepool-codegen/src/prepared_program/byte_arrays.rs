@@ -6,7 +6,8 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 use tidepool_heap::{
-    execution_descriptor::ObjectDescriptor, external_storage::ExternalStorageKind,
+    execution_descriptor::ObjectDescriptor,
+    external_storage::{ExternalStorageKind, ExternalStorageValidationError},
 };
 use tidepool_repr::execution_schema::{OperationIdentity, ResultContract, RuntimeRep, Signature};
 
@@ -29,6 +30,7 @@ impl Element {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ByteOperation {
     New,
+    Resize,
     Freeze,
     Size,
     Shrink,
@@ -50,6 +52,12 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
         {
             Some(ByteOperation::New)
+        }
+        "resizeMutableByteArray#"
+            if signature.arguments == [UnliftedRef, Int(64), Void]
+                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+        {
+            Some(ByteOperation::Resize)
         }
         "unsafeFreezeByteArray#"
             if signature.arguments == [UnliftedRef, Void]
@@ -183,6 +191,48 @@ pub(super) unsafe extern "C" fn prepared_new_bytes(
     };
     unsafe { wrapper.add(8).cast::<*mut u8>().write(payload) };
     CallStatus::Success as i32
+}
+
+/// This host call cannot collect. After authenticating the old handle, the
+/// owner allocates and copies before revoking it; publishing cannot fail.
+///
+/// # Safety
+/// `vmctx` and `descriptor` come from the prepared program. `wrapper` is its
+/// newly reserved object with a valid descriptor header and empty handle slot.
+pub(super) unsafe extern "C" fn prepared_resize_bytes(
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+    wrapper: *mut u8,
+    new_len: i64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        let (published, old_len) = unsafe { active_bytes(machine, vmctx, reference, descriptor) }?;
+        let new_len =
+            usize::try_from(new_len).map_err(|_| RuntimeError::ArrayIndexOutOfBounds {
+                index: new_len,
+                len: old_len,
+            })?;
+        let replacement = machine
+            .resize_external_bytes(published, new_len)
+            .map_err(|error| match error {
+                ExternalStorageValidationError::SpanOverflow { .. }
+                | ExternalStorageValidationError::BookkeepingAllocation => {
+                    RuntimeError::HeapOverflow
+                }
+                other => super::arrays::storage_error(other, new_len as i64),
+            })?;
+        unsafe { wrapper.add(8).cast::<*mut u8>().write(replacement) };
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
 }
 
 pub(super) unsafe extern "C" fn prepared_freeze_bytes(
@@ -381,7 +431,35 @@ pub(super) fn emit_new_bytes(
     let call = builder.ins().call(host, &[vmctx, object, arguments[0]]);
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
-    let result = builder.ins().bor_imm(object, 7);
+    let result = builder.ins().bor_imm(object, i64::from(descriptor.tag()));
+    builder.declare_value_needs_stack_map(result);
+    Ok(vec![result])
+}
+
+pub(super) fn emit_resize_bytes(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    gc: cranelift_module::FuncId,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    // Reserve may collect and rewrite the old managed wrapper before the host
+    // authenticates it. The external replacement is allocated afterward.
+    builder.declare_value_needs_stack_map(arguments[0]);
+    let gc = pipeline.module.declare_func_in_func(gc, builder.func);
+    let object = crate::alloc::emit_prepared_alloc_fast_path(builder, vmctx, descriptor, gc);
+    let header = owner_value(builder, descriptor);
+    builder.ins().store(MemFlags::trusted(), header, object, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().store(MemFlags::trusted(), zero, object, 8);
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_resize_bytes", 5)?;
+    let call = builder
+        .ins()
+        .call(host, &[vmctx, arguments[0], header, object, arguments[1]]);
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    let result = builder.ins().bor_imm(object, i64::from(descriptor.tag()));
     builder.declare_value_needs_stack_map(result);
     Ok(vec![result])
 }
@@ -1043,6 +1121,32 @@ mod tests {
         assert!(recognize(
             &op("shrinkMutableByteArray#"),
             &sig(vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64)], vec![])
+        )
+        .is_none());
+        assert_eq!(
+            recognize(
+                &op("resizeMutableByteArray#"),
+                &sig(
+                    vec![
+                        RuntimeRep::UnliftedRef,
+                        RuntimeRep::Int(64),
+                        RuntimeRep::Void
+                    ],
+                    vec![RuntimeRep::UnliftedRef]
+                )
+            ),
+            Some(ByteOperation::Resize)
+        );
+        assert!(recognize(
+            &op("resizeMutableByteArray#"),
+            &sig(
+                vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Void
+                ],
+                vec![]
+            )
         )
         .is_none());
         assert!(recognize(

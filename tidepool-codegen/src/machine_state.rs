@@ -2514,6 +2514,132 @@ mod tests {
     }
 
     #[test]
+    fn resize_growth_preserves_prefix_and_revokes_old() {
+        let ms = MachineState::new();
+        let old = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 3)
+            .unwrap();
+        ms.store_external_bytes(old, 0, b"abc").unwrap();
+        let replacement = ms.resize_external_bytes(old, 6).unwrap();
+
+        assert_ne!(replacement, old);
+        assert_eq!(unsafe { replacement.sub(8).cast::<u64>().read() }, 22);
+        assert_eq!(unsafe { replacement.cast::<u64>().read() }, 6);
+        assert_eq!(ms.copy_external_bytes(replacement).unwrap(), b"abc\0\0\0");
+        assert!(matches!(
+            ms.external_active_view(old, ExternalStorageKind::Bytes),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert!(matches!(
+            ms.store_external_bytes(old, 0, b"x"),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        assert_eq!(
+            ms.external_payload_view(old, ExternalStorageKind::Bytes)
+                .unwrap()
+                .logical_len,
+            3
+        );
+        assert_eq!(ms.external_storage.borrow().len(), 2);
+    }
+
+    #[test]
+    fn resize_shrink_and_equal_return_fresh_identity() {
+        for new_len in [2, 4] {
+            let ms = MachineState::new();
+            let old = ms
+                .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+                .unwrap();
+            ms.store_external_bytes(old, 0, b"abcd").unwrap();
+            let replacement = ms.resize_external_bytes(old, new_len).unwrap();
+
+            assert_ne!(replacement, old);
+            assert_eq!(
+                ms.copy_external_bytes(replacement).unwrap(),
+                &b"abcd"[..new_len]
+            );
+            assert_eq!(
+                ms.external_active_view(replacement, ExternalStorageKind::Bytes)
+                    .unwrap()
+                    .logical_len,
+                new_len
+            );
+            assert!(matches!(
+                ms.external_active_view(old, ExternalStorageKind::Bytes),
+                Err(ExternalStorageValidationError::Revoked(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn resize_failure_preserves_active_old() {
+        let ms = MachineState::new();
+        let old = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        let boxed = ms
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 1)
+            .unwrap();
+        ms.store_external_bytes(old, 0, b"abcd").unwrap();
+        let before_stats = ms.external_storage_stats();
+        let before_revision = ms.external_revision.get();
+        for (pointer, new_len) in [(old.wrapping_add(1), 2), (boxed, 2), (old, usize::MAX)] {
+            assert!(ms.resize_external_bytes(pointer, new_len).is_err());
+            assert_eq!(ms.external_storage_stats(), before_stats);
+            assert_eq!(ms.external_revision.get(), before_revision);
+            assert_eq!(ms.copy_external_bytes(old).unwrap(), b"abcd");
+            assert_eq!(
+                ms.external_active_view(old, ExternalStorageKind::Bytes)
+                    .unwrap()
+                    .logical_len,
+                4
+            );
+        }
+        unsafe { old.cast::<u64>().write(5) };
+        assert!(matches!(
+            ms.resize_external_bytes(old, 2),
+            Err(ExternalStorageValidationError::LogicalLengthMismatch { .. })
+        ));
+        unsafe { old.cast::<u64>().write(4) };
+        assert_eq!(ms.external_storage_stats(), before_stats);
+        assert_eq!(ms.external_revision.get(), before_revision);
+        assert_eq!(ms.copy_external_bytes(old).unwrap(), b"abcd");
+    }
+
+    #[test]
+    fn resized_old_is_structurally_traceable_until_full_sweep_reclaims_it() {
+        let ms = MachineState::new();
+        let old = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        ms.store_external_bytes(old, 0, b"ab").unwrap();
+        let replacement = ms.resize_external_bytes(old, 3).unwrap();
+
+        ms.retain_external_payloads(&[(old as usize, ExternalStorageKind::Bytes)])
+            .unwrap();
+        assert_eq!(
+            ms.external_payload_view(old, ExternalStorageKind::Bytes)
+                .unwrap()
+                .logical_len,
+            2
+        );
+        ms.commit_external_sweep(
+            ms.plan_external_minor_sweep(&HashSet::from([replacement]))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(ms.external_storage.borrow().contains_key(&old));
+        assert!(ms.external_storage.borrow().contains_key(&replacement));
+        ms.commit_external_sweep(
+            ms.plan_external_sweep(&HashSet::from([replacement]))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!ms.external_storage.borrow().contains_key(&old));
+        assert_eq!(ms.copy_external_bytes(replacement).unwrap(), b"ab\0");
+    }
+
+    #[test]
     fn revoked_external_payload_remains_sweepable_but_rejects_views_and_writes() {
         let ms = MachineState::new();
         let boxed = unsafe { register_test_external(&ms, ExternalStorageKind::BoxedArray, 1) };

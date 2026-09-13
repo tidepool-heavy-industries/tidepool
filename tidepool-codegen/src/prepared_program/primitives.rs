@@ -672,6 +672,17 @@ pub(super) fn emit_operation(
             super::byte_arrays::emit_new_bytes(builder, pipeline, vmctx, gc, bytes_array, arguments)
                 .map(Some)
         }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Resize) => {
+            super::byte_arrays::emit_resize_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                gc,
+                bytes_array,
+                arguments,
+            )
+            .map(Some)
+        }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Freeze) => {
             super::byte_arrays::emit_freeze_bytes(builder, pipeline, vmctx, bytes_array, arguments)
                 .map(Some)

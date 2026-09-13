@@ -407,3 +407,8 @@ are nondeterministic.
   bytes cannot use that builder without another serialization owner. Keep a
   labelled producer fixture when the test exercises runner control flow;
   don't paste a schema-sized hex string or invent a parallel encoder.
+- Running rustfmt on a parent module recursively visits its children. One
+  worker also selected edition 2024 in this edition-2021 workspace, causing
+  unrelated sibling churn. Formatting with the repository edition restored
+  the shared tree without reverting anyone's semantic edits. Formatter scope
+  belongs in the same ownership contract as source-edit scope.

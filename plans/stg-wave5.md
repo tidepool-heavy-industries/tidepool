@@ -6,6 +6,16 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Pushed follow-up `9d3bd3cc0`: 140 prepared-program tests passed, and
+`cargo test --workspace --no-run --quiet` compiled all workspace test targets.
+These are not workspace test execution or a refreshed full-corpus result.
+The bounded `copy-replay.uZtBNV` replay moves `t_swap1` through execution
+(still no expectation); both Text rows next stop at `resizeMutableByteArray#`.
+The owner replacement seed is `03a3ca50b`. Its four owner tests and three
+native resize tests passed, including reserve-time moving GC and oversized
+allocation remaining a reusable resource failure. Exact-signature recognition
+also passed. Final source/corpus integration is in progress.
+
 Measured source checkpoint `664ced54f`: 127 prepared-program tests passed;
 workspace `cargo test --workspace --no-run --quiet` compiled successfully;
 canonical fixtures-update and fixtures-check completed. Workspace tests were
@@ -620,6 +630,15 @@ Hidden-interface recovery subsequently passed its focused suites and review;
 the correction preserved interface-read errors rather than relabelling them
 as finder failures to satisfy an old assertion. Snapshot execution completed
 the full run reported above.
+
+Resize used one owner implementation seed, one owner-test/review parcel, and
+one native integration parcel. Owner tests needed no semantic correction;
+native review clarified reserve-time collection evidence, descriptor-owned
+tags, and resource-overflow classification before acceptance. A wrong-edition
+recursive formatter run was corrected without reverting shared source edits.
+Four owner tests, three native tests and the exact-signature test passed.
+The stack-capability investigation was accepted as evidence, not delegated
+authority to substitute an empty GHC stack snapshot.
 
 Clean delegation shapes: exact-signature primitive additions and existing-owner
 byte operations. Correction shapes: source/projection test premises and

@@ -40,3 +40,24 @@ package interface cannot prove that identity and stays on ordinary recovery.
 There is also no GHC stack-snapshot intrinsic in the prepared operation
 catalog; internal root snapshots are not a substitute for one. These are
 scope boundaries, not grounds to trust module spelling or invent an intrinsic.
+
+## GHC execution-stack snapshots in prepared programs
+
+The current corpus has 103 target closures whose first projection blocker is
+`__primcall ghc-internal stg_cloneMyStackzh`, with `[VoidRep]` arguments and
+`[UnliftedRefRep]` results. Each also lacks exact recovered bodies for
+`GHC.Internal.ExecutionStack.Internal.stackFrames` and
+`GHC.Internal.Stack.CCS.$wgo`. These are shared dependency-closure blockers,
+not evidence that each target executes a snapshot.
+
+In [pinned GHC 9.12.2's backtrace collector](https://downloads.haskell.org/ghc/9.12.2/docs/libraries/ghc-internal-9.1202.0-a87f/src/GHC.Internal.Exception.Backtrace.html),
+the clone-and-decode call is guarded by `IPEBacktrace`; its default is off,
+but `setBacktraceMechanismState` can change it. The separate execution-stack
+and cost-centre paths account for the other missing bodies. The
+[clone primitive](https://downloads.haskell.org/ghc/9.12.2/docs/libraries/ghc-internal-9.1202.0-a87f/src/GHC.Internal.Stack.CloneStack.html)
+produces a GC-managed copy of the active thread's stack. Prepared `raise#`
+retains its exception operand as a machine root and records a terminal cause;
+that is not stack capture or IPE decoding. Neither an empty snapshot nor a
+default-off specialization preserves the mutable backtrace contract. Supporting
+this path requires an explicit stack snapshot, ownership, and decoding design;
+it remains outside the current prepared operation catalog.
