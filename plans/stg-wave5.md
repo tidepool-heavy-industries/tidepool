@@ -6,6 +6,16 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Fixture regeneration/check against pushed `26a2f4341` passed; only the source
+fingerprint changed. The resulting `suite.lasjm6/results.json` has SHA-256
+`e968a32900dc6f1eb254b0fd192676ce69b82a4d7dff5612be657633cccad07f`.
+It records 136 matching results, 120 missing expectations, 140 projection
+failures, 16 validation failures, 260 admission failures and 140 execution
+failures. All 396 admitted programs compiled. The newly reached recovery paths
+expose GHC `mkSeqs shouldn't use the type arg` panics; their diagnosis is in
+progress. No comparison mismatch is reported. This is not semantic-green
+evidence; original-cohort accounting is being recomputed separately.
+
 The next source checkpoint passes `execution-schema-projection`,
 `prepared-recovery-test`, and `recovered-body-test` through the dev shell;
 the scoped recovery regression retains same-owner dependency edges rather
@@ -173,6 +183,21 @@ Divergence remains cancellable, not a fabricated language exception. Raising
 retains the exact exception reference in invocation-owned root storage until
 settlement; any presentation uses bounded descriptor observation, not Core
 error-string decoding.
+
+The wire result encoding will be `[0, reps]` for Returns and `[1]` for
+NoSuccess (schema 7 / execution ABI 5). A fresh source consultation confirmed
+that Wave 5 needs a pointer-free `RaisedException` language cause, not forced
+exception formatting: the current corpus has no message/class-specific oracle.
+The exact operand lives in a stable machine-owned root slot included in the
+complete snapshot independently of temporary observation-root marks. It must
+not be appended inside the raise host call, where observation cleanup would
+truncate it. First raise wins; a prior cause cannot acquire an unrelated
+operand, and later integrity failure preserves the cause while upgrading to
+Unavailable. Clear the slot only on settlement/heap teardown. Do not force a
+diagnostic after first cause is latched. Corpus failure comparison must match
+the exact typed cause and Reusable disposition, never arbitrary runtime errors,
+timeouts or unsupported forms. Add raising expectations only for independently
+verified source cases; the optimized divergent blackhole remains distinct.
 
 Array handles use fixed descriptors and a typed external edge, not variable
 per-allocation descriptors or Core Lit objects. The existing MachineState
