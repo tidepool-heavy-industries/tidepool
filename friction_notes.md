@@ -424,3 +424,10 @@ are nondeterministic.
 - Test handbacks should distinguish an untaken failure branch from the success
   continuation after a reached failure. Both matter for capability lowering;
   one test cannot establish both merely because it contains a successful return.
+- Host-only tests do not check generated ABI transport. The fingerprint adapter
+  needed an explicit Int32-to-I64 extension for its host argument; keep a real
+  generated-call regression alongside kernel vectors and pointer-bound checks.
+- Review native admission independently of producer reachability. The producer
+  emits keepAlive with a Returns contract, but native admission also accepted
+  NoSuccess, which removed the post-call liveness use. A malformed-artifact
+  rejection test now protects that distinction.

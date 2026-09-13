@@ -262,6 +262,27 @@ workspace or producer corpus is green.
 
 ## Explicit boundary gaps
 
+### Fingerprinting and address ownership
+
+The pinned `ghc-internal` CCall leaves `__hsbase_MD5Init`,
+`__hsbase_MD5Update`, and `__hsbase_MD5Final` retain their exact signatures
+through projection and execute in `prepared_program::fingerprint`. They are
+live Typeable/exception machinery, not deferred stack capabilities. The kernel
+is the pinned GHC implementation; context bytes cross into aligned owned Rust
+storage before C runs. `MachineState` authenticates mutable address spans using
+its existing external-storage ledger, while immutable inputs use `PinnedBytes`.
+Neither path accepts an arbitrary non-null address as authority.
+
+`newPinnedByteArray#` uses stable external byte storage. Contents addresses are
+scalars and do not root their wrappers. `keepAlive#` therefore retains its
+managed owner across the generated callback using a post-call opaque SSA use;
+its admitted operation contract is `Returns`, not `NoSuccess`. Signed byte
+offsets remain confined to the base address's original allocation. These
+contracts cover byte reads/writes and the three fingerprint leaves, not general
+foreign pointer access or arbitrary foreign calls.
+
+### Remaining forms
+
 The producer still rejects unsupported literal shapes such as `BigNat` and
 relocatable labels, and rejects primitive/foreign calls without a wire/native
 contract. Validated projection can therefore be broader than connected native

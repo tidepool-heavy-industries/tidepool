@@ -142,7 +142,7 @@ This is not exclusive to the default-off mechanisms. MD5 therefore requires
 real implementation, not a deferred-capability replacement. The corpus rerun
 must establish the concrete remaining stage failures before further work.
 
-### Next implementation boundary: authenticated fingerprinting
+### Authenticated fingerprinting implementation
 
 The pinned MD5 operations are `MD5Init [Address, Void] -> []`,
 `MD5Update [Address, Address, Int(32), Void] -> []`, and
@@ -157,14 +157,46 @@ read/write spans. The existing owner is MachineState's external-storage ledger
 and its checked byte-range/store operations. The old Core JIT's non-poison raw
 address check is not sufficient authority and must not be copied as the guard.
 
-Before implementing, settle the smallest boundary with these obligations:
-reuse a maintained MD5 implementation without introducing a parallel allocation
-registry; define any pinned-C-context serialization explicitly; preserve
-keepAlive across collection/cancellation; test the result against compiled GHC,
-including empty and multi-block inputs and invalid spans. Inspect all remaining
-operation/signature pairs in this closure rather than assuming MD5Init is its
-only missing operation. No stack-capability stub or exception-context erasure
-may be used to turn this live fingerprint path into an apparent success.
+The implementation reuses GHC 9.12.2's public-domain MD5 kernel, with pinned
+source provenance beside the C files. Authenticated bytes are copied into an
+aligned Rust-owned context before calling C; user addresses never reach that
+kernel. MachineState's existing external-storage ledger authenticates complete
+spans, including signed offsets confined to the original allocation. No second
+allocation registry is introduced. Pinned byte arrays use the existing stable
+external byte storage; contents addresses do not carry ownership themselves.
+
+`keepAlive#` calls the generated callback through the shared ABI and retains an
+opaque use of its managed owner after success. A real-adapter regression forces
+collection while the callback holds only the raw byte address and proves that
+the external payload remains alive. MD5 has known empty, short and multi-block
+kernel vectors, checked-span failure tests, and a generated-adapter digest test.
+The full codegen library passed 405 tests; after an inert test-binding cleanup,
+the five focused address tests passed again. Both Haskell projection suites
+passed. These checks do not establish the remaining corpus count or replace
+the pending compiled-GHC fingerprint comparison.
+
+Inspect remaining operation/signature pairs from the corpus rerun rather than
+assuming MD5Init was the only missing operation. No stack-capability stub or
+exception-context erasure may turn this live fingerprint path into an apparent
+success.
+
+The next canonical `just fixtures-check` passed with executable snapshot
+`target/prepared-corpus/run.ewbawl` and Suite report
+`target/prepared-corpus/suite.Fm1mJX/results.json`. All 812 tops projected and
+validated. Native admission accepted 709 and rejected 103; compilation accepted
+those 709. Execution passed 526 and reported 183 failures/limitations. Comparison
+remained 174 matching fixture keys, zero mismatches, out of 217 keys. Moving the
+103 rows from projection to admission is not an execution success. Joining each
+rejected node to its immutable artifact identifies five first-blocker cohorts:
+88 `intToInt32#`, six `decodeDouble_Int64#`, six `leChar#`, two `timesInt2#`,
+and one `addWordC#`. These are native catalog gaps, not MD5 execution failures.
+The priority, actor, recovered-body, formatting and dependency-shadow cohorts
+all passed every stage. The snapshot predates the non-producer-reachable
+keepAlive NoSuccess admission tightening; its three focused tests passed later.
+
+The validator test module was moved byte-for-byte after its production items;
+242 repr library tests and all-target repr Clippy with `-D warnings` passed.
+This removes that crate's prior lint blocker, not a claim about workspace Clippy.
 
 ## Acceptance
 
