@@ -1,0 +1,22 @@
+{
+  "source_revision": "AwaitSettledDependencies.hs native GHC",
+  "expectations": {
+    "awaitSettledDependencies": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "list",
+          "value": [
+            {
+              "kind": "tuple",
+              "value": [
+                { "kind": "int", "value": 17 },
+                { "kind": "bool", "value": true }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

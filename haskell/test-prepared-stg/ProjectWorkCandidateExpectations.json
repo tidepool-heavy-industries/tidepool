@@ -1,0 +1,9 @@
+{
+  "source_revision": "Project.Work.candidate native GHC",
+  "expectations": {
+    "candidate": {
+      "kind": "either_left",
+      "value": { "kind": "int", "value": 7 }
+    }
+  }
+}

@@ -6,7 +6,8 @@
 
 -- | Engine-private typed readiness subscriptions.
 module Tidepool.Agent.Watch.Internal
-  ( Await
+  ( Await (..)
+  , AwaitDependency (..)
   , Watch
   , WatchId (..)
   , WatchLabel (..)

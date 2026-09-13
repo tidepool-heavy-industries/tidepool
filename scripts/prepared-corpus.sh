@@ -50,61 +50,8 @@ jq -n \
 effects_core="$("$prepared_runner" effects-core)"
 
 metadata="$repo_root/haskell/test/suite_cbor/meta.cbor"
-priority_expectations="$(mktemp)"
 suite_targets="$(mktemp)"
-priority_targets="$(mktemp)"
-actor_targets="$(mktemp)"
-trap 'rm -f "$priority_expectations" "$suite_targets" "$priority_targets" "$actor_targets"' EXIT
-
-# Project.Work is a priority production-facing source, but it has no expected
-# value oracle. Keep its expectations explicitly empty so the Rust runner can
-# record missing comparison evidence rather than treating it as a pass.
-printf '%s\n' '{"source_revision":"none","expectations":{}}' >"$priority_expectations"
-printf '%s\n' candidate >"$priority_targets"
-
-priority_source="$priority_root/source/Project.Work.hs"
-priority_include="$priority_root/source"
-mkdir -p "$priority_include/Project"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Work.hs" \
-  "$priority_source"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Types.hs" \
-  "$priority_include/Project/Types.hs"
-echo "==> projecting priority Project.Work.candidate"
-"$projection_probe" \
-  "$priority_source" Project.Work "$priority_targets" "$priority_root" \
-  "$repo_root/haskell/lib" "$priority_include"
-priority_report="$priority_root/results.json"
-"$prepared_runner" run \
-  "$priority_root/manifest.json" "$priority_expectations" "$metadata" \
-  "$priority_report"
-
-printf '%s\n' awaitSettled >"$actor_targets"
-echo "==> projecting actor stdlib Tidepool.Agent.Watch.awaitSettled"
-actor_source="$actor_root/source/Tidepool.Agent.Watch.hs"
-mkdir -p "$(dirname "$actor_source")"
-ln -s "$repo_root/haskell/lib/Tidepool/Agent/Watch.hs" "$actor_source"
-"$projection_probe" \
-  "$actor_source" Tidepool.Agent.Watch \
-  "$actor_targets" "$actor_root" "$repo_root/haskell/lib" "$effects_core"
-actor_report="$actor_root/results.json"
-"$prepared_runner" run \
-  "$actor_root/manifest.json" "$priority_expectations" "$metadata" \
-  "$actor_report"
-
-find "$repo_root/haskell/test/suite_cbor" -maxdepth 1 -type f -name '*.cbor' \
-  ! -name meta.cbor -printf '%f\n' \
-  | sed 's/\.cbor$//' \
-  | LC_ALL=C sort >"$suite_targets"
-suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
-echo "==> projecting Suite.hs prepared corpus ($suite_count targets)"
-"$projection_probe" \
-  --all-tops "$repo_root/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
-  "$repo_root/haskell/lib"
-suite_report="$suite_root/results.json"
-"$prepared_runner" run \
-  "$suite_root/manifest.json" \
-  "$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json" \
-  "$metadata" "$suite_report"
+trap 'rm -f "$suite_targets"' EXIT
 
 assert_contract_report() {
   local cohort="$1"
@@ -125,6 +72,53 @@ assert_contract_report() {
     return 1
   }
 }
+
+priority_source="$repo_root/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
+priority_include="$priority_root/source"
+mkdir -p "$priority_include/Project"
+ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Work.hs" \
+  "$priority_include/Project/Work.hs"
+ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Types.hs" \
+  "$priority_include/Project/Types.hs"
+echo "==> projecting priority Project.Work.candidate structural probe"
+"$projection_probe" \
+  "$priority_source" ProjectWorkCandidate \
+  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateTargets" "$priority_root" \
+  "$repo_root/haskell/lib" "$priority_include"
+priority_report="$priority_root/results.json"
+"$prepared_runner" run \
+  "$priority_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateExpectations.json" "$metadata" \
+  "$priority_report"
+assert_contract_report priority-project-work 1 "$priority_report"
+
+echo "==> projecting actor awaitSettled dependency probe"
+actor_source="$repo_root/haskell/test-prepared-stg/AwaitSettledDependencies.hs"
+"$projection_probe" \
+  "$actor_source" AwaitSettledDependencies \
+  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesTargets" \
+  "$actor_root" "$repo_root/haskell/lib" "$effects_core"
+actor_report="$actor_root/results.json"
+"$prepared_runner" run \
+  "$actor_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesExpectations.json" "$metadata" \
+  "$actor_report"
+assert_contract_report actor-await-settled-dependencies 1 "$actor_report"
+
+find "$repo_root/haskell/test/suite_cbor" -maxdepth 1 -type f -name '*.cbor' \
+  ! -name meta.cbor -printf '%f\n' \
+  | sed 's/\.cbor$//' \
+  | LC_ALL=C sort >"$suite_targets"
+suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
+echo "==> projecting Suite.hs prepared corpus ($suite_count targets)"
+"$projection_probe" \
+  --all-tops "$repo_root/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
+  "$repo_root/haskell/lib"
+suite_report="$suite_root/results.json"
+"$prepared_runner" run \
+  "$suite_root/manifest.json" \
+  "$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json" \
+  "$metadata" "$suite_report"
 
 echo "==> projecting recovered base-call contract (1 target)"
 "$projection_probe" \
@@ -182,6 +176,7 @@ echo "  recovered base contract: $recovered_root"
 echo "  formatting execution contract: $formatting_root"
 echo "  formatting dependency-shadow contract: $formatting_shadow_root"
 echo "  comparison expectations are historical and may be missing; inspect result rows"
+echo "  named limitation: awaitSettled's continuation is not executed by this dependency-only probe"
 report_totals priority "$priority_report"
 report_totals actor-stdlib "$actor_report"
 report_totals suite "$suite_report"
