@@ -74,8 +74,13 @@ encodeRep rep = case rep of
 encodeSignature :: Signature -> Encoding
 encodeSignature signature = array
   [ list encodeRep (signatureArguments signature)
-  , list encodeRep (signatureResults signature)
+  , encodeResultContract (signatureResults signature)
   ]
+
+encodeResultContract :: ResultContract -> Encoding
+encodeResultContract contract = case contract of
+  Returns reps -> tagged 0 [list encodeRep reps]
+  NoSuccess -> tag 1
 
 encodeFieldLayout :: FieldLayout -> Encoding
 encodeFieldLayout field = array
@@ -113,7 +118,6 @@ encodeGlobal global = array
   , case globalRequiredGeneration global of
       Nothing -> tag 0
       Just generation -> tagged 1 [encodeWord64 generation]
-  , encodeBool (globalDeadEnd global)
   ]
 
 encodeOperation :: OperationDecl -> Encoding
@@ -235,11 +239,11 @@ encodeExprFrame expr children = case expr of
     [encodeOperationId operation, list encodeAtom arguments]
   Construct constructor fields -> tagged 4
     [encodeConstructorId constructor, list encodeAtom fields]
-  Case _ binder results kind alternatives -> case children of
+  Case _ binder resultContract kind alternatives -> case children of
     scrutineeIndex : alternativeIndices -> tagged 5
       [ encodeNodeIndex scrutineeIndex
       , encodeValueId binder
-      , list encodeRep results
+      , encodeResultContract resultContract
       , encodeCaseKind kind
       , list id (zipWith encodeAlternativeFrame alternatives alternativeIndices)
       ]

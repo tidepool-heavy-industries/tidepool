@@ -4,9 +4,9 @@
 //! fields and still exercise the normal validation and decoding boundaries.
 
 use super::{
-    Architecture, Atom, Endianness, ExprFrame, Group, HeapBinding, HeapRhs, ProgramEnvelope,
-    RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity, TargetDescriptor,
-    DecodeLimits, ParseError, PreparedProgram, ProgramRequirements, TopBinding, ValueId,
+    Architecture, Atom, DecodeLimits, Endianness, ExprFrame, Group, HeapBinding, HeapRhs,
+    ParseError, PreparedProgram, ProgramEnvelope, ProgramRequirements, ResultContract, RuntimeRep,
+    ScalarLiteral, Signature, SignatureId, SymbolIdentity, TargetDescriptor, TopBinding, ValueId,
     WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 
@@ -50,7 +50,7 @@ pub fn wire_program() -> WireProgram {
         envelope: envelope(),
         signatures: vec![Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         }],
         globals: vec![],
         constructors: vec![],

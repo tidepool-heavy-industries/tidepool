@@ -5,12 +5,19 @@ unarisation pipeline. The wire format is a finite prepared representation; it
 is not rendered STG, a Core compatibility format, or a production-execution
 parity claim.
 
-## Wire contract (schema 6, execution ABI 4)
+## Wire contract (schema 7, execution ABI 5)
 
-`ProgramEnvelope.schema_version` is 6 and `execution_abi_version` is 4.
-Schema 6 adds optional external record-parent identity and typed operation
-identity (`PrimOp` versus an intrinsic symbol with a calling convention).
-ABI 4 includes the invocation's prepared native-stack limit in VMContext.
+`ProgramEnvelope.schema_version` is 7 and `execution_abi_version` is 5.
+Schema 7 adds explicit `ResultContract` values (`Returns` versus authoritative
+`NoSuccess`) and carries that contract on case scrutinees; it also removes the
+obsolete global `dead_end` field. Schema 6's optional external record-parent
+identity and typed operation identity (`PrimOp` versus an intrinsic symbol
+with a calling convention) remain part of the wire contract. ABI 5 carries
+the explicit terminal-result distinction through prepared calls while keeping
+the physical `NoSuccess` shape status-only. Lowering keeps the semantic result
+contract beside the physical register/area layout: status-only does not mean a
+successful zero-result value. See
+[`entry_abi.rs`](../tidepool-codegen/src/entry_abi.rs).
 The Wave 5 integration fold must regenerate and verify cross-language fixtures;
 these version declarations alone are not freshness evidence.
 `RuntimeRep` is the physical representation boundary: `Void`, lifted/unlifted
@@ -18,12 +25,10 @@ references, addresses, fixed-width `Int`/`Word`, and 32/64-bit floats. Layouts
 are canonical for the target pointer width, alignment, payload size, and root
 mask; validation recomputes and compares them.
 
-Global declarations carry six wire fields. The appended `dead_end` bit is
-evidence that a callable has no normal result after saturation, not a language
-error or a synonym for an ordinary zero-result signature. A dead-end global
-must carry an entry signature whose results are empty. Linking requires the
-imported value to agree on entry signature and `dead_end`; ordinary zero-result
-entries remain distinct. See
+Global declarations carry five wire fields. Nonreturning behavior belongs to
+the callable's `ResultContract::NoSuccess`, not to a global-side boolean; it
+is never interchangeable with `ResultContract::Returns([])`, which is a
+successful zero-result call. Linking compares the typed entry contract. See
 [`codec.rs`](../tidepool-repr/src/execution_schema/codec.rs),
 [`validation.rs`](../tidepool-repr/src/execution_schema/validation.rs), and
 [`link.rs`](../tidepool-repr/src/execution_schema/link.rs).
@@ -65,11 +70,10 @@ layout is reconstructed.
 
 The validator checks bounds, ownership, scopes, unique wire binders, canonical
 layouts, constructor family/tag evidence, host-ID uniqueness, callable
-saturation, and dead-end evidence before a program can be linked. Link-time
-imports must match the declared representation, entry signature, and
-evaluatedness/dead-end evidence. These checks establish a valid artifact; they
-do not promise that every validated form is executable by the native connected
-compiler.
+saturation, and result-contract evidence before a program can be linked.
+Link-time imports must match the declared representation, entry signature, and
+evaluatedness. These checks establish a valid artifact; they do not promise
+that every validated form is executable by the native connected compiler.
 
 ## Connected native execution boundary
 
@@ -107,7 +111,11 @@ The currently emitted strict subset is:
   `IncompletePromotion` handling;
 - scalar physical arguments/results, including `Int`, `Word`, `Float`,
   `Double`, and the `rintDouble` intrinsic. Logical `Void` positions remain in
-  signatures and layouts even when omitted from physical ABI payloads.
+  signatures and layouts even when omitted from physical ABI payloads;
+- admitted `raise#` and saturated `NoSuccess` calls. Generated terminal code
+  records the raised exception or unexpected return and exits with failure
+  status without publishing a result. PAP completion and excess application
+  stop at the saturated prefix; a partial application returns a lifted value.
 
 The implementation anchors for these claims are
 [`entry.rs`](../tidepool-codegen/src/prepared_program/entry.rs),
@@ -117,7 +125,15 @@ The implementation anchors for these claims are
 [`gc/promotion.rs`](../tidepool-heap/src/gc/promotion.rs),
 [`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs),
 [`floating.rs`](../tidepool-codegen/src/prepared_program/floating.rs), and
-[`execution_schema.rs`](../tidepool-repr/src/execution_schema.rs).
+[`execution_schema.rs`](../tidepool-repr/src/execution_schema.rs). The terminal
+path is owned by
+[`no_success.rs`](../tidepool-codegen/src/prepared_program/no_success.rs),
+[`primitives.rs`](../tidepool-codegen/src/prepared_program/primitives.rs),
+[`apply.rs`](../tidepool-codegen/src/prepared_program/apply.rs), and
+[`invocation.rs`](../tidepool-codegen/src/prepared_program/invocation.rs).
+Focused native cases for exact, PAP, excess, logical `Void`, and unused-join
+behavior are in
+[`no_success_tests.rs`](../tidepool-codegen/src/prepared_program/no_success_tests.rs).
 
 This is an executable connected subset, not a producer cutover. Globals/imports,
 effects, unimplemented foreign/primitive operations, and managed host arguments remain
@@ -165,15 +181,37 @@ workspace or producer corpus is green.
 The producer still rejects unsupported literal shapes such as `BigNat` and
 relocatable labels, and rejects primitive/foreign calls without a wire/native
 contract. Validated projection can therefore be broader than connected native
-execution. The producer/runtime `NoSuccess` local-bottoming contract is not
-yet represented in the connected native success path. Array primops and GC tracing of external
-boxed-array payload edges are also not implemented; existing array
-representations must not be read as evidence that their collection/update
-semantics are connected. Imported/global resolution outside the owned
-executable subset, effects, foreign calls, unsupported primitive operations,
-and full corpus execution remain separate work. No session-retention or
-effect-support contract is asserted here. No production cutover or
-compatibility promise is implied by this inventory.
+execution. Haskell projects `RaiseOp` as `NoSuccess`, and uses demand evidence
+with the actual prepared entry arity to mark only saturated bottoming calls.
+The focused prepared-STG test checks named bottoming callees with exact
+`[Int64, Float64]` tuple, unary `Int64`, and `Void` entry/call signatures. Its
+partial-call assertion uses a test-local prepared-STG variant because CorePrep
+eta-expands the source PAP; it does not claim a source-retained partial
+`StgApp` or synthetic `LFUnknown` negative coverage. See
+[`ExecutionProjection.hs`](../haskell/src/Tidepool/ExecutionProjection.hs) and
+[`RecoveredBodyTest.hs`](../haskell/test-prepared-stg/RecoveredBodyTest.hs).
+
+External-payload graph support is a separate boundary. The machine ledger
+authenticates pointer-slot views through
+[`external_storage.rs`](../tidepool-heap/src/external_storage.rs) and
+[`machine_state.rs`](../tidepool-codegen/src/machine_state.rs); descriptor
+copying and selective promotion traverse those edges in
+[`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs) and
+[`gc/promotion.rs`](../tidepool-heap/src/gc/promotion.rs). The prepared minor
+collector consumes that descriptor path in
+[`host_fns/gc.rs`](../tidepool-codegen/src/host_fns/gc.rs), but prepared
+Young/Retained payload classification and sweeping are not yet connected.
+The existing staged sweep in `MachineState` is consumed by the Core major
+collector in [`jit_machine.rs`](../tidepool-codegen/src/jit_machine.rs), not by
+prepared old arenas. Prepared array primitive emission is also absent, so
+these graph mechanisms do not establish prepared array allocation, mutation,
+or collection semantics.
+
+Imported/global resolution outside the owned executable subset, effects,
+foreign calls, unsupported primitive operations, and full corpus execution
+remain separate work. No session-retention or effect-support contract is
+asserted here. No production cutover or compatibility promise is implied by
+this inventory.
 
 ## Wave 5 checkpoint — 2026-09-13
 
@@ -192,6 +230,11 @@ failures, and zero comparison mismatches. The optimized divergent
 [`retention_tests.rs`](../tidepool-codegen/src/prepared_program/retention_tests.rs),
 and the heap GC tests under
 [`tidepool-heap/src/gc`](../tidepool-heap/src/gc).
+
+A later focused fold passed 103 prepared-program tests and compiled the
+workspace before the external-graph seed landed. These checks do not validate
+the current graph source; prepared generation/sweeping work and its focused
+checks remain pending.
 
 ## Reviewed Wave 4 contracts — 2026-09-12
 

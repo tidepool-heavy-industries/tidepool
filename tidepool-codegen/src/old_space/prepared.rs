@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tidepool_heap::{
     descriptor_region::{DescriptorArena, DescriptorOldSpace},
     execution_descriptor::{DescriptorTraceError, ObjectDescriptor},
-    gc::promotion::{promote_and_fixup, PromotionFailure},
+    gc::promotion::{promote_and_fixup_with_external, PromotionFailure},
 };
 
 struct Previous<'a>(&'a [DescriptorArena]);
@@ -131,7 +131,7 @@ impl super::OldSpace {
                 prepared.spare.as_mut_ptr().cast::<u8>(),
                 prepared.spare.len() * 8,
             );
-            let copied = promote_and_fixup(
+            let copied = promote_and_fixup_with_external(
                 selected,
                 &roots,
                 state.active_start,
@@ -140,6 +140,7 @@ impl super::OldSpace {
                 &mut destination[0],
                 &mut prepared.space,
                 Some(&Previous(previous)),
+                machine,
             )
             .map_err(|error| match error {
                 PromotionFailure::Preparation(error) => preparation_error(error),

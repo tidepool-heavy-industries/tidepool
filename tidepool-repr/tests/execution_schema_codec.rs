@@ -69,7 +69,6 @@ fn global_with_generation(generation: Cbor) -> Cbor {
         Cbor::Array(vec![int(0)]),
         Cbor::Bool(true),
         generation,
-        Cbor::Bool(false),
     ])
 }
 
@@ -104,7 +103,7 @@ fn codec_rejects_abi_v2_after_tag_abi_bump() {
 fn codec_rejects_unknown_nested_tag() {
     let signatures = Cbor::Array(vec![Cbor::Array(vec![
         Cbor::Array(vec![Cbor::Array(vec![int(99)])]),
-        Cbor::Array(vec![]),
+        Cbor::Array(vec![int(0), Cbor::Array(vec![])]),
     ])]);
     assert!(matches!(
         parse_program(
@@ -117,10 +116,42 @@ fn codec_rejects_unknown_nested_tag() {
 }
 
 #[test]
+fn result_contract_tags_are_distinct_and_have_exact_arity() {
+    for result in [
+        Cbor::Array(vec![int(0), Cbor::Array(vec![])]),
+        Cbor::Array(vec![int(1)]),
+    ] {
+        let signatures = Cbor::Array(vec![Cbor::Array(vec![Cbor::Array(vec![]), result])]);
+        assert!(matches!(
+            parse_program(
+                &bytes(&root(signatures)),
+                &requirements(),
+                DecodeLimits::default()
+            ),
+            Err(ParseError::InvalidReference(_))
+        ));
+    }
+    for result in [
+        Cbor::Array(vec![int(0)]),
+        Cbor::Array(vec![int(1), Cbor::Array(vec![])]),
+    ] {
+        let signatures = Cbor::Array(vec![Cbor::Array(vec![Cbor::Array(vec![]), result])]);
+        assert!(matches!(
+            parse_program(
+                &bytes(&root(signatures)),
+                &requirements(),
+                DecodeLimits::default()
+            ),
+            Err(ParseError::Malformed(_))
+        ));
+    }
+}
+
+#[test]
 fn codec_accepts_optional_generation_shape_and_rejects_unknown_tag() {
     let signatures = Cbor::Array(vec![Cbor::Array(vec![
         Cbor::Array(vec![]),
-        Cbor::Array(vec![]),
+        Cbor::Array(vec![int(0), Cbor::Array(vec![])]),
     ])]);
     let mut valid = root(signatures.clone());
     let Cbor::Array(fields) = &mut valid else {
@@ -150,7 +181,7 @@ fn codec_accepts_optional_generation_shape_and_rejects_unknown_tag() {
 fn codec_rejects_malformed_record_parents_and_intrinsic_identities() {
     let signatures = Cbor::Array(vec![Cbor::Array(vec![
         Cbor::Array(vec![]),
-        Cbor::Array(vec![]),
+        Cbor::Array(vec![int(0), Cbor::Array(vec![])]),
     ])]);
     let mut malformed_parent = root(signatures.clone());
     let Cbor::Array(fields) = &mut malformed_parent else {
@@ -288,7 +319,7 @@ fn codec_enforces_byte_and_table_limits() {
     };
     let one_table_entry = bytes(&root(Cbor::Array(vec![Cbor::Array(vec![
         Cbor::Array(vec![]),
-        Cbor::Array(vec![]),
+        Cbor::Array(vec![int(0), Cbor::Array(vec![])]),
     ])])));
     assert!(matches!(
         parse_program(&one_table_entry, &requirements(), table_limits),
@@ -299,7 +330,7 @@ fn codec_enforces_byte_and_table_limits() {
 #[test]
 fn public_parse_rejects_wrong_declared_result_representation() {
     let a = |values| Cbor::Array(values);
-    let signature = a(vec![a(vec![]), a(vec![a(vec![int(1)])])]);
+    let signature = a(vec![a(vec![]), a(vec![int(0), a(vec![a(vec![int(1)])])])]);
     let scalar = a(vec![
         int(1),
         a(vec![

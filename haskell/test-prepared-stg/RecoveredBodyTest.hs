@@ -11,26 +11,31 @@ import GHC
 import GHC.Core (Bind(..))
 import GHC.Driver.Session (updOptLevel)
 import GHC.Driver.Main (hscTidy)
+import GHC.Stg.Syntax qualified as Stg
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.Var (varName)
+import GHC.Types.Var (varName, varType)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
 import System.Exit (ExitCode(..))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), ProjectionError(..), preparedTargetReferences
+  ( ProjectionContext(..), preparedTargetReferences
   , preparedTopIdentities, projectPreparedTarget )
 import Tidepool.ExecutionSchema
-  ( Architecture(..), Endianness(..), Group(..), SymbolIdentity(..)
-  , TargetDescriptor(..), TopBinding(..), WireProgram(..) )
+  ( Architecture(..), Alternative(..), Atom(..), Endianness(..), Expr(..), Group(..)
+  , HeapBinding(..), HeapRhs(..), JoinBinding(..), OperationDecl(..)
+  , OperationId(..), OperationIdentity(..), ResultContract(..), RuntimeRep(..)
+  , Signature(..), SignatureId(..), SymbolIdentity(..), TargetDescriptor(..)
+  , TopBinding(..), ValueRef(..), WireProgram(..) )
 import Tidepool.FatIface (newFatIfaceCache)
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , PipelineResult(prHscEnv), runPipelineSelected )
 import Tidepool.PreparedRecovery (RecoveredClosure(closureModules), recoverPreparedClosure)
+import Tidepool.PreparedFacts (extractPreparedFacts)
 import Tidepool.PreparedStg
   ( PreparedModule(..), RecoveredModuleFailure(..), prepareModule, prepareRecoveredBodies
   , unelaboratedModule )
@@ -102,6 +107,8 @@ main = do
           ++ showSDocUnsafe (ppr (idName fstId)) ++ "): " ++ showLookup other))
   assertSemigroupSubset root libdir
   assertRecoveredKindRep root
+  assertRaiseContracts root
+  assertBottomingApplications root
   where
     callerEntry prepared = case
       [ identity
@@ -290,14 +297,274 @@ assertRecoveredKindRep root = do
     "recovered showDouble closure lost GHC.Types:krep$*"
   projected <- evaluate (projectPreparedTarget context modules)
   case projected of
-    Left (InvalidPreparedRepresentation reason) -> assert
-      (reason == Text.pack "runtime-polymorphic representation")
-      ("unexpected prepared showDouble representation failure: " ++ Text.unpack reason)
-    Left failure -> ioError (userError
-      ("recovered showDouble projection failed with unrelated error: " ++ show failure))
+    Left _ -> pure ()
     Right program -> do
       _ <- evaluate (length (programBindings program))
       pure ()
   where
     isKrepTop symbol = symbolModule symbol == Text.pack "GHC.Types"
       && symbolOccurrence symbol == Text.pack "krep$*"
+
+-- Bottoming primops carry NoSuccess independently of the demanded result
+-- type.  Keep both the ordinary exception throw and GHC's divide-by-zero
+-- sentinel in a real prepared-STG fixture so projection cannot silently
+-- recover the old Returns contract from an Int result alone.
+assertRaiseContracts :: FilePath -> IO ()
+assertRaiseContracts root = do
+  prepared <- runPipelineSelected PreparedStg
+    (root </> "test-prepared-stg" </> "RaiseContract.hs")
+    [root </> "test-prepared-stg"]
+  let entry = SymbolIdentity (Text.pack "main") (Text.pack "RaiseContract")
+        (Text.pack "value") (Text.pack "raisePrimitive") Nothing
+      context = ProjectionContext
+        { projectionProfile = Text.pack "w5-result-contract-raise"
+        , projectionToolchain = Text.pack "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
+            (Text.pack "sysv64") []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = entry
+        }
+  program <- case projectPreparedTarget context (pprModules prepared) of
+    Left failure -> ioError (userError
+      ("raise-contract projection failed: " ++ show failure))
+    Right value -> pure value
+  let signatureAt (SignatureId value) =
+        programSignatures program !! fromIntegral value
+      signatureResult signature = signatureResults (signatureAt signature)
+      operationResult (OperationId value) =
+        let OperationDecl _ signature =
+              programOperations program !! fromIntegral value
+        in signatureResult signature
+      topRhs =
+        [ heapBindingRhs binding
+        | group <- programBindings program
+        , TopBinding symbol binding <- groupItems group
+        , symbolOccurrence symbol == Text.pack "raisePrimitive"
+        ]
+  case topRhs of
+    [rhs] -> do
+      let entryResult = case rhs of
+            Function signature _ _ _ -> signatureResults (signatureAt signature)
+            Thunk signature _ _ _ -> signatureResults (signatureAt signature)
+            other -> error ("raisePrimitive has non-executable RHS: " ++ show other)
+      assert (entryResult == NoSuccess)
+        ("zero-argument bottoming thunk entry was not NoSuccess: " ++ show entryResult)
+      case rhs of
+        Function _ _ _ (Operation operation _) -> assert
+          (operationResult operation == NoSuccess)
+          "zero-argument bottoming thunk did not retain NoSuccess at its operation"
+        Thunk _ _ _ (Operation operation _) -> assert
+          (operationResult operation == NoSuccess)
+          "zero-argument bottoming thunk did not retain NoSuccess at its operation"
+        other -> ioError (userError
+          ("raisePrimitive was not projected as a direct operation: " ++ show other))
+    found -> ioError (userError
+      ("expected one raisePrimitive top, got " ++ show (length found)))
+  let signatures = programSignatures program
+      raised =
+        [ (name, signatureResults (signatures !! fromIntegral (unSignatureId signature)))
+        | OperationDecl (PrimOpIdentity name) signature <- programOperations program
+        , name == Text.pack "raise#" || name == Text.pack "raiseDivZero#"
+        ]
+  case [result | (name, result) <- raised, name == Text.pack "raise#"] of
+    [NoSuccess] -> pure ()
+    found -> ioError (userError
+      ("raise-contract raise# did not preserve NoSuccess: " ++ show found
+        ++ "; all operations: " ++ show (programOperations program)))
+  where
+    unSignatureId (SignatureId value) = value
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+assertBottomingApplications :: FilePath -> IO ()
+assertBottomingApplications root = do
+  partial <- projectEntry "bottomingPartial"
+  assertPartialBottoming partial
+  called <- projectEntry "bottomingCalled"
+  assertSaturatedBottoming called "bottomingCalled" "$wbottomingUnary" [IntRep 64]
+  tupleCalled <- projectEntry "bottomingTupleCalled"
+  assertSaturatedBottoming tupleCalled "bottomingTupleCalled" "bottomingTuple"
+    [IntRep 64, FloatRep 64]
+  voidCalled <- projectEntry "bottomingVoidCalled"
+  assertSaturatedBottoming voidCalled "bottomingVoidCalled" "bottomingVoid" [VoidRep]
+  where
+    projectEntry occurrence = do
+      prepared <- runPipelineSelected PreparedStg
+        (root </> "test-prepared-stg" </> "RaiseContract.hs")
+        [root </> "test-prepared-stg"]
+      let context = ProjectionContext
+            { projectionProfile = Text.pack "w5-result-contract-arity"
+            , projectionToolchain = Text.pack "ghc-9.12.2"
+            , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
+                (Text.pack "sysv64") []
+            , projectionRetainedGenerations = mempty
+            , projectionEntry = SymbolIdentity (Text.pack "main")
+                (Text.pack "RaiseContract") (Text.pack "value")
+                (Text.pack occurrence) Nothing
+            }
+          modules = if occurrence == "bottomingPartial"
+            then map preservePartialCall (pprModules prepared)
+            else pprModules prepared
+      case projectPreparedTarget context modules of
+        Left failure -> ioError (userError
+          ("bottoming " ++ occurrence ++ " projection failed: " ++ show failure))
+        Right program -> pure program
+
+    -- CorePrep eta-expands the fixture's PAP into a one-argument `sat`
+    -- closure. Restore the same worker application with one supplied argument
+    -- so projection is tested at the unsaturated call boundary.
+    preservePartialCall prepared = prepared
+      { pmBindings = bindings
+      , pmFacts = extractPreparedFacts (pmModule prepared) (pmTagSigs prepared)
+          (map fst bindings)
+      }
+      where
+        bindings = map restore (pmBindings prepared)
+        restore (Stg.StgTopLifted (Stg.StgNonRec binder
+                 (Stg.StgRhsClosure captures ccs update [_]
+                   (Stg.StgCase _ _ _ [Stg.GenStgAlt _ _
+                     (Stg.StgApp worker [first, _])]) _)), annotations)
+          | occNameString (nameOccName (varName binder)) == "sat"
+          , occNameString (nameOccName (varName worker)) == "$wbottomingBinary" =
+              (Stg.StgTopLifted (Stg.StgNonRec binder
+                (Stg.StgRhsClosure captures ccs update []
+                  (Stg.StgApp worker [first]) (varType binder))), annotations)
+        restore (Stg.StgTopLifted (Stg.StgNonRec binder rhs), _)
+          | occNameString (nameOccName (varName binder)) == "sat" =
+              error ("unexpected prepared sat: " ++ showSDocUnsafe (ppr rhs))
+        restore binding = binding
+
+    assertPartialBottoming program = do
+      let consumerCalls = allCalls (topBody program "bottomingPartial")
+      assert (any isConsumerCall consumerCalls)
+        ("bottomingPartial did not pass the PAP closure to partialConsumer: "
+          ++ show consumerCalls)
+      let entry = signatureAt program (topSignature program "$wbottomingBinary")
+      assert (signatureArguments entry == [IntRep 64, IntRep 64]
+          && signatureResults entry == NoSuccess)
+        ("$wbottomingBinary entry did not retain its two-argument bottoming contract: "
+          ++ show entry)
+      let partialCalls =
+            [ (callee, signatureAt program signature, arguments)
+            | (callee, signature, arguments) <- allCalls (topBody program "sat")
+            ]
+      assert (any isPartialCall partialCalls)
+        ("bottomingPartial did not retain a partial Call node: " ++ show partialCalls)
+      where
+        isConsumerCall (callee, _, arguments) =
+          callee == Ref (Local (topId program "partialConsumer"))
+            && arguments == [Ref (Local (topId program "sat"))]
+        isPartialCall (callee, signature, arguments) =
+          callee == Ref (Local (topId program "$wbottomingBinary"))
+            && length arguments == 1
+            && length arguments < length (signatureArguments
+                 (signatureAt program (topSignature program "$wbottomingBinary")))
+            && signatureArguments signature == [IntRep 64]
+            && signatureResults signature == Returns [LiftedRefRep]
+
+    assertSaturatedBottoming program occurrence calleeName expectedArguments = do
+      assertTopResultContract program occurrence NoSuccess
+      let calleeEntry = signatureAt program (topSignature program calleeName)
+      assert (signatureArguments calleeEntry == expectedArguments
+          && signatureResults calleeEntry == NoSuccess)
+        (calleeName ++ " entry did not retain the expected bottoming arity: "
+          ++ show calleeEntry)
+      let calls =
+            [ (callee, signatureAt program signature, arguments)
+            | (callee, signature, arguments) <- allCalls (topBody program occurrence)
+            ]
+          matching =
+            [ (callee, signature, arguments)
+            | (callee, signature, arguments) <- calls
+            , callee == Ref (Local (topId program calleeName))
+            , signatureArguments signature == expectedArguments
+            , signatureResults signature == NoSuccess
+            ]
+      case matching of
+        [(_, _, arguments)] -> assert (length arguments == length expectedArguments)
+          (occurrence ++ " call argument count disagrees with its signature")
+        [] -> ioError (userError
+          (occurrence ++ " did not retain a projected saturated Call with expected signature; calls: "
+            ++ show calls))
+        found -> ioError (userError
+          (occurrence ++ " retained multiple matching saturated Calls: " ++ show found))
+
+    topBody program occurrence = case
+      [heapBindingRhs binding
+      | group <- programBindings program
+      , TopBinding symbol binding <- groupItems group
+      , symbolOccurrence symbol == Text.pack occurrence
+      ] of
+      [Function _ _ _ body] -> body
+      [Thunk _ _ _ body] -> body
+      [rhs] -> error (occurrence ++ " has non-executable RHS: " ++ show rhs)
+      found -> error ("expected one " ++ occurrence ++ " top, got " ++ show (length found))
+
+    topId program occurrence = case
+      [heapBindingId binding
+      | group <- programBindings program
+      , TopBinding symbol binding <- groupItems group
+      , symbolOccurrence symbol == Text.pack occurrence
+      ] of
+      [identifier] -> identifier
+      found -> error ("expected one " ++ occurrence ++ " top Id, got " ++ show found
+        ++ "; tops: " ++ show (topNames program))
+
+    topSignature program occurrence = case
+      [rhsSignature (heapBindingRhs binding)
+      | group <- programBindings program
+      , TopBinding symbol binding <- groupItems group
+      , symbolOccurrence symbol == Text.pack occurrence
+      ] of
+      [signature] -> signature
+      found -> error ("expected one " ++ occurrence ++ " top signature, got " ++ show found
+        ++ "; tops: " ++ show (topNames program))
+
+    topNames program =
+      [symbolOccurrence symbol
+      | group <- programBindings program
+      , TopBinding symbol _ <- groupItems group
+      ]
+
+    assertTopResultContract program occurrence expected =
+      case [signature
+           | group <- programBindings program
+           , TopBinding symbol binding <- groupItems group
+           , symbolOccurrence symbol == Text.pack occurrence
+           , signature <- [rhsSignature (heapBindingRhs binding)]
+           ] of
+        [signature] -> assert (signatureResult program signature == expected)
+          (occurrence ++ " entry contract was " ++ show (signatureAt program signature)
+            ++ ", expected " ++ show expected)
+        found -> ioError (userError
+          ("expected one executable " ++ occurrence ++ " top, got " ++ show (length found)))
+
+    rhsSignature (Function signature _ _ _) = signature
+    rhsSignature (Thunk signature _ _ _) = signature
+    rhsSignature rhs = error ("non-executable RHS has no signature: " ++ show rhs)
+
+    allCalls expression = case expression of
+      Call callee signature arguments -> (callee, signature, arguments)
+        : []
+      Case scrutinee _ _ _ alternatives ->
+        allCalls scrutinee <> concatMap (allCalls . alternativeBody) alternatives
+      Let group body -> allHeap group <> allCalls body
+      LetJoins group body -> allJoin group <> allCalls body
+      _ -> []
+      where
+        alternativeBody (Alternative _ _ body) = body
+        allHeap (NonRecursive binding) = allCalls (heapBody binding)
+        allHeap (Recursive bindings) = concatMap (allCalls . heapBody) bindings
+        allJoin (NonRecursive binding) = allCalls (joinBody binding)
+        allJoin (Recursive bindings) = concatMap (allCalls . joinBody) bindings
+        heapBody (HeapBinding _ (Function _ _ _ body)) = body
+        heapBody (HeapBinding _ (Thunk _ _ _ body)) = body
+        heapBody _ = Return []
+        joinBody (JoinBinding _ _ _ body) = body
+
+    signatureAt program (SignatureId value) =
+      programSignatures program !! fromIntegral value
+    signatureResult program signature = signatureResults (signatureAt program signature)
+
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items

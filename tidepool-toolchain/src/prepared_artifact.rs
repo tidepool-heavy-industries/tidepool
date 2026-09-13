@@ -2,9 +2,9 @@
 //! writer, compile cache, and native consumers.
 
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, Architecture, DecodeLimits, Endianness, LinkError, LinkedProgram,
-    MachineImports, ParseError, PreparedProgram, ProgramRequirements, TargetDescriptor,
-    EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    Architecture, DecodeLimits, EXECUTION_ABI_VERSION, Endianness, LinkError, LinkedProgram,
+    MachineImports, ParseError, PreparedProgram, ProgramRequirements, SCHEMA_VERSION,
+    TargetDescriptor, link_program, parse_program,
 };
 
 pub const PREPARED_SUFFIX: &str = ".prepared.cbor";
@@ -97,7 +97,6 @@ mod tests {
                     entry_signature: global
                         .entry_signature
                         .map(|id| prepared.signatures()[id.0 as usize].clone()),
-                    dead_end: global.dead_end,
                     evaluated: global.required_evaluated,
                     generation: global.required_generation.unwrap_or(0),
                 };
@@ -120,12 +119,14 @@ mod tests {
 
         let mut requirements = production_requirements().unwrap();
         requirements.projection_profile = "stale-profile".into();
-        assert!(PreparedArtifact::parse_for_requirements(
-            fixture(),
-            &requirements,
-            DecodeLimits::default()
-        )
-        .is_err());
+        assert!(
+            PreparedArtifact::parse_for_requirements(
+                fixture(),
+                &requirements,
+                DecodeLimits::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]

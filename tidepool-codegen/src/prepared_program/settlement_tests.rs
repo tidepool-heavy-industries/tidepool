@@ -224,7 +224,7 @@ fn w5_a1_native_recursive_entry_reaches_typed_stack_bound() {
 fn w5_a1_join_backedge_cancellation_settles_thunk() {
     use tidepool_repr::execution_schema::*;
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.expressions.nodes = vec![
         ExprFrame::Jump {
             join: JoinId(0),

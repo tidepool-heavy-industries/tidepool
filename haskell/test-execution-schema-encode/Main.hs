@@ -21,10 +21,10 @@ main = do
   assert (BS.take 7 first == BS.pack [0x8d, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
-    "prepared execution schema is not v6"
+    "prepared execution schema is not v7"
   let globalFields = termList (head (termList (termList (decode first) !! 7)))
-  assert (drop 3 globalFields == [TBool False, TList [TInt 1, TInt 7], TBool False])
-    "global wire fields must end with evaluated, tagged generation, dead-end"
+  assert (drop 3 globalFields == [TBool False, TList [TInt 1, TInt 7]])
+    "global wire fields must end with evaluated, tagged generation"
   let schema6Fields = termList (decode (encodeWireProgram schema6Representative))
       schema6Constructor = termList (schema6Fields !! 8) !! 0
       schema6Parent = termList (termList schema6Constructor !! 0) !! 4
@@ -45,7 +45,7 @@ main = do
   let localBody = Let
         (NonRecursive (HeapBinding (ValueId 8)
           (Thunk (SignatureId 1) Memoize [] (Return []))))
-        (Case (Return []) (ValueId 7) [] PolymorphicCase
+        (Case (Return []) (ValueId 7) (Returns []) PolymorphicCase
           [Alternative DefaultPattern [] (Return [])])
       localFrames = bodyFrames (representativeWith localBody)
   assert (length localFrames == 5) "local expressions were not flattened into one arena"
@@ -144,11 +144,11 @@ representativeWith body = WireProgram envelope signatures globals constructors o
   envelope = ProgramEnvelope schemaVersion "ghc-9.12-prepared-stg" "ghc-9.12.2"
     executionAbiVersion target
   signatures =
-    [ Signature [LiftedRefRep] [LiftedRefRep]
-    , Signature [] [IntRep 64]
+    [ Signature [LiftedRefRep] (Returns [LiftedRefRep])
+    , Signature [] (Returns [IntRep 64])
     ]
   globals = [GlobalDecl (exact "Fixture.Dependency" "imported") LiftedRefRep
-    (Just (SignatureId 0)) False False (Just 7)]
+    (Just (SignatureId 0)) False (Just 7)]
   layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]
   constructors = [ConstructorDecl (exact "Fixture.Vertical" "Box")
     (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1 0]
@@ -164,9 +164,11 @@ schema6Representative = representative
         (SymbolIdentity "m3-fixture" "Fixture" "value" "RecordField" (Just "FixtureRecord"))
         (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1 0]
   , programOperations =
-      [OperationDecl (IntrinsicIdentity "rintDouble" CCall) (SignatureId 2)]
+      [ OperationDecl (IntrinsicIdentity "rintDouble" CCall) (SignatureId 3)
+      , OperationDecl (PrimOpIdentity "raise#") (SignatureId 2) ]
   , programSignatures = programSignatures representative
-      <> [Signature [FloatRep 64] [FloatRep 64]]
+      <> [ Signature [] NoSuccess
+         , Signature [FloatRep 64] (Returns [FloatRep 64]) ]
   }
  where
   layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]

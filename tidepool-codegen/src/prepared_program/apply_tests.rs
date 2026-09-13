@@ -42,15 +42,15 @@ fn partial_wire(exact: bool) -> WireProgram {
     wire.signatures = vec![
         Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::LiftedRef],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
     ];
     wire.constructors = vec![constructor(0), constructor(1)];
@@ -73,7 +73,7 @@ fn partial_wire(exact: bool) -> WireProgram {
         wire.expressions.nodes.push(ExprFrame::Case {
             scrutinee: 1,
             binder: ValueId(12),
-            scrutinee_reps: vec![RuntimeRep::LiftedRef],
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             kind: CaseKind::Polymorphic,
             alternatives: vec![Alternative {
                 pattern: AlternativePattern::Default,
@@ -211,7 +211,7 @@ fn pap_partial_to_partial_flattens_mixed_prefix_across_collection() {
     wire.signatures = vec![
         Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![
@@ -220,19 +220,19 @@ fn pap_partial_to_partial_flattens_mixed_prefix_across_collection() {
                 RuntimeRep::Void,
                 RuntimeRep::LiftedRef,
             ],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::Void],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::LiftedRef],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
     ];
     wire.constructors = vec![constructor(3), constructor(4), constructor(5)];
@@ -257,7 +257,7 @@ fn pap_partial_to_partial_flattens_mixed_prefix_across_collection() {
         ExprFrame::Case {
             scrutinee: 1,
             binder: ValueId(12),
-            scrutinee_reps: vec![RuntimeRep::LiftedRef],
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             kind: CaseKind::Polymorphic,
             alternatives: vec![Alternative {
                 pattern: AlternativePattern::Default,
@@ -273,7 +273,7 @@ fn pap_partial_to_partial_flattens_mixed_prefix_across_collection() {
         ExprFrame::Case {
             scrutinee: 3,
             binder: ValueId(13),
-            scrutinee_reps: vec![RuntimeRep::LiftedRef],
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             kind: CaseKind::Polymorphic,
             alternatives: vec![Alternative {
                 pattern: AlternativePattern::Default,
@@ -370,23 +370,23 @@ fn pap_oversaturation_applies_remainder() {
     wire.signatures = vec![
         Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::Int(64)],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::Word(64), RuntimeRep::LiftedRef],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::LiftedRef],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
     ];
     wire.constructors = vec![constructor(2)];
@@ -418,7 +418,7 @@ fn pap_oversaturation_applies_remainder() {
         ExprFrame::Case {
             scrutinee: 2,
             binder: ValueId(20),
-            scrutinee_reps: vec![RuntimeRep::LiftedRef],
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             kind: CaseKind::Polymorphic,
             alternatives: vec![Alternative {
                 pattern: AlternativePattern::Default,
@@ -496,23 +496,23 @@ fn pap_oversaturation_enters_a_thunk_result_before_suffix_dispatch() {
     wire.signatures = vec![
         Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::Int(64)],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::Word(64), RuntimeRep::LiftedRef],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
         Signature {
             arguments: vec![RuntimeRep::LiftedRef],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         },
     ];
     wire.constructors = vec![constructor(6)];
@@ -545,7 +545,7 @@ fn pap_oversaturation_enters_a_thunk_result_before_suffix_dispatch() {
         ExprFrame::Case {
             scrutinee: 3,
             binder: ValueId(20),
-            scrutinee_reps: vec![RuntimeRep::LiftedRef],
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             kind: CaseKind::Polymorphic,
             alternatives: vec![Alternative {
                 pattern: AlternativePattern::Default,

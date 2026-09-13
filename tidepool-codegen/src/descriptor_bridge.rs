@@ -156,7 +156,7 @@ mod tests {
     };
     use tidepool_heap::gc::raw::{cheney_copy_descriptors, DescriptorSpace};
     use tidepool_repr::execution_schema::{
-        Architecture, Endianness, Signature, StorageLayout, TargetDescriptor,
+        Architecture, Endianness, ResultContract, Signature, StorageLayout, TargetDescriptor,
     };
 
     fn target() -> TargetDescriptor {
@@ -190,7 +190,7 @@ mod tests {
             Some(EntryMetadata::new(
                 Signature {
                     arguments: reps,
-                    results: vec![RuntimeRep::LiftedRef],
+                    results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
                 },
                 11,
             )),
@@ -320,7 +320,7 @@ mod tests {
             Some(EntryMetadata::new(
                 Signature {
                     arguments: Vec::new(),
-                    results: vec![RuntimeRep::LiftedRef],
+                    results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
                 },
                 19,
             ))

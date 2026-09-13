@@ -2,7 +2,7 @@ use super::Unsupported;
 use std::collections::BTreeMap;
 use tidepool_repr::execution_schema::{
     Atom, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, PreparedProgram,
-    ValueId, ValueRef,
+    ResultContract, RuntimeRep, ValueId, ValueRef,
 };
 
 fn items<T>(group: &Group<T>) -> &[T] {
@@ -82,10 +82,11 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
         match &binding.rhs {
             HeapRhs::Thunk { signature, .. } => {
                 let checked = &program.signatures()[signature.0 as usize];
-                if !checked.arguments.is_empty()
-                    || checked.results.as_slice()
-                        != [tidepool_repr::execution_schema::RuntimeRep::LiftedRef]
-                {
+                let supported_result = match &checked.results {
+                    ResultContract::NoSuccess => true,
+                    ResultContract::Returns(reps) => reps.as_slice() == [RuntimeRep::LiftedRef],
+                };
+                if !checked.arguments.is_empty() || !supported_result {
                     return Err(Unsupported::ThunkSignature(binding.id));
                 }
                 functions.insert(binding.id, *signature);
@@ -236,9 +237,14 @@ mod tests {
     fn sig(args: &[RuntimeRep], results: &[RuntimeRep]) -> Vec<u8> {
         array([
             array(args.iter().copied().map(rep)),
-            array(results.iter().copied().map(rep)),
+            array([uint(0), array(results.iter().copied().map(rep))]),
         ])
     }
+
+    fn no_success_sig(args: &[RuntimeRep]) -> Vec<u8> {
+        array([array(args.iter().copied().map(rep)), array([uint(1)])])
+    }
+
     fn symbol(name: &str) -> Vec<u8> {
         array([
             text("fixture"),
@@ -258,7 +264,6 @@ mod tests {
             none(),
             boolean(false),
             none(),
-            boolean(false),
         ])
     }
     fn scalar_int(value: u8) -> Vec<u8> {
@@ -281,6 +286,10 @@ mod tests {
     }
     fn operation(id: u8) -> Vec<u8> {
         array([uint(3), uint(u64::from(id)), array([])])
+    }
+
+    fn operation_with_args(id: u8, arguments: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+        array([uint(3), uint(u64::from(id)), array(arguments)])
     }
     fn let_frame(bindings: Vec<u8>, body: u8) -> Vec<u8> {
         array([uint(6), bindings, uint(u64::from(body))])
@@ -390,7 +399,6 @@ mod tests {
                     entry_signature: global
                         .entry_signature
                         .map(|id| prepared.signatures()[id.0 as usize].clone()),
-                    dead_end: global.dead_end,
                     evaluated: global.required_evaluated,
                     generation: global.required_generation.unwrap_or(0),
                 };
@@ -418,6 +426,25 @@ mod tests {
             admit_program(&linked(bytes)),
             Err(Unsupported::ThunkSignature(ValueId(1)))
         );
+    }
+
+    #[test]
+    fn admission_accepts_nonsuccess_thunks_before_execution() {
+        let bytes = wire(
+            vec![
+                no_success_sig(&[]),
+                no_success_sig(&[RuntimeRep::LiftedRef]),
+            ],
+            vec![],
+            vec![],
+            vec![array([array([uint(0), text("raise#")]), uint(1)])],
+            vec![operation_with_args(
+                0,
+                [atom_rubbish(RuntimeRep::LiftedRef)],
+            )],
+            vec![array([uint(0), top(0, thunk(0, 0))])],
+        );
+        assert_eq!(admit_program(&linked(bytes)), Ok(()));
     }
 
     #[test]

@@ -68,6 +68,10 @@ pub(super) enum Application {
         total_pending: usize,
     },
     Exact,
+    /// Saturate the underlying nonreturning entry; never apply excess args.
+    NoSuccess {
+        consumed: usize,
+    },
     Excess {
         consumed: usize,
         remainder: Signature,
@@ -85,13 +89,29 @@ pub(super) fn classify(
         return None;
     }
     match demand.arguments.len().cmp(&remaining.len()) {
-        std::cmp::Ordering::Less if demand.results == [RuntimeRep::LiftedRef] => {
+        std::cmp::Ordering::Less
+            if demand.results
+                == tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                    RuntimeRep::LiftedRef,
+                ]) =>
+        {
             Some(Application::Partial {
                 total_pending: pending + demand.arguments.len(),
             })
         }
+        std::cmp::Ordering::Equal | std::cmp::Ordering::Greater
+            if entry.results == tidepool_repr::execution_schema::ResultContract::NoSuccess =>
+        {
+            Some(Application::NoSuccess { consumed })
+        }
         std::cmp::Ordering::Equal if demand.results == entry.results => Some(Application::Exact),
-        std::cmp::Ordering::Greater if entry.results == [RuntimeRep::LiftedRef] => {
+        std::cmp::Ordering::Greater
+            if demand.results != tidepool_repr::execution_schema::ResultContract::NoSuccess
+                && entry.results
+                    == tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                        RuntimeRep::LiftedRef,
+                    ]) =>
+        {
             Some(Application::Excess {
                 consumed,
                 remainder: Signature {
@@ -208,7 +228,12 @@ pub(super) fn declare_dispatchers(
     Ok(Dispatchers { by_id, entries })
 }
 
-fn signature_key(signature: &Signature) -> (Vec<RuntimeRep>, Vec<RuntimeRep>) {
+fn signature_key(
+    signature: &Signature,
+) -> (
+    Vec<RuntimeRep>,
+    tidepool_repr::execution_schema::ResultContract,
+) {
     (signature.arguments.clone(), signature.results.clone())
 }
 
@@ -321,6 +346,22 @@ pub(super) fn emit_dispatchers(
                     let returned = builder.inst_results(call).to_vec();
                     builder.ins().return_(&returned);
                 }
+                Application::NoSuccess { consumed } => {
+                    let target = pipeline
+                        .module
+                        .declare_func_in_func(callee_function, builder.func);
+                    let mut call_arguments = vec![vmctx, callee];
+                    call_arguments
+                        .extend(physical_arguments.iter().take(consumed).flatten().copied());
+                    let _ = super::emit_direct_call(
+                        &mut builder,
+                        pipeline,
+                        vmctx,
+                        target,
+                        &call_arguments,
+                        &tidepool_repr::execution_schema::ResultContract::NoSuccess,
+                    )?;
+                }
                 Application::Partial { total_pending } => {
                     if total_pending == 0 {
                         let status = builder.ins().iconst(
@@ -418,6 +459,22 @@ pub(super) fn emit_dispatchers(
                     let call = builder.ins().call(target, &call_arguments);
                     let returned = builder.inst_results(call).to_vec();
                     builder.ins().return_(&returned);
+                }
+                Application::NoSuccess { consumed } => {
+                    let target = pipeline
+                        .module
+                        .declare_func_in_func(callee_function, builder.func);
+                    let mut call_arguments = vec![vmctx, original];
+                    call_arguments
+                        .extend(flattened.iter().take(pending + consumed).flatten().copied());
+                    let _ = super::emit_direct_call(
+                        &mut builder,
+                        pipeline,
+                        vmctx,
+                        target,
+                        &call_arguments,
+                        &tidepool_repr::execution_schema::ResultContract::NoSuccess,
+                    )?;
                 }
                 Application::Partial { total_pending } => {
                     let layout = plan
@@ -664,7 +721,9 @@ mod tests {
     fn w5_a2_arity_split_preserves_void_and_demanded_results() {
         let entry = Signature {
             arguments: vec![RuntimeRep::Void, RuntimeRep::Int(64)],
-            results: vec![RuntimeRep::Int(64)],
+            results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                RuntimeRep::Int(64),
+            ]),
         };
         assert_eq!(
             classify(
@@ -672,7 +731,9 @@ mod tests {
                 0,
                 &Signature {
                     arguments: vec![RuntimeRep::Void],
-                    results: vec![RuntimeRep::LiftedRef]
+                    results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                        RuntimeRep::LiftedRef,
+                    ])
                 }
             ),
             Some(Application::Partial { total_pending: 1 })
@@ -683,7 +744,9 @@ mod tests {
                 1,
                 &Signature {
                     arguments: vec![RuntimeRep::Int(64)],
-                    results: vec![RuntimeRep::Int(64)]
+                    results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                        RuntimeRep::Int(64),
+                    ])
                 }
             ),
             Some(Application::Exact)
@@ -693,7 +756,9 @@ mod tests {
             0,
             &Signature {
                 arguments: vec![RuntimeRep::Int(64)],
-                results: vec![RuntimeRep::LiftedRef]
+                results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                    RuntimeRep::LiftedRef,
+                ])
             }
         )
         .is_none());
@@ -706,6 +771,78 @@ mod tests {
         assert_eq!(
             pap.descriptor.payload().logical_to_stored(),
             &[Some(0), None]
+        );
+    }
+
+    #[test]
+    fn no_success_saturates_prefix_and_never_admits_excess_suffix() {
+        let entry = Signature {
+            arguments: vec![RuntimeRep::Int(64)],
+            results: tidepool_repr::execution_schema::ResultContract::NoSuccess,
+        };
+        let demand = Signature {
+            arguments: vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
+            results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                RuntimeRep::Int(64),
+            ]),
+        };
+        assert_eq!(
+            classify(&entry, 0, &demand),
+            Some(Application::NoSuccess { consumed: 1 })
+        );
+    }
+
+    #[test]
+    fn no_success_partial_application_still_returns_a_pap() {
+        let entry = Signature {
+            arguments: vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
+            results: tidepool_repr::execution_schema::ResultContract::NoSuccess,
+        };
+        let demand = Signature {
+            arguments: vec![RuntimeRep::Int(64)],
+            results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                RuntimeRep::LiftedRef,
+            ]),
+        };
+        assert_eq!(
+            classify(&entry, 0, &demand),
+            Some(Application::Partial { total_pending: 1 })
+        );
+    }
+
+    #[test]
+    fn returning_function_cannot_prove_an_oversaturated_no_success_suffix() {
+        let entry = Signature {
+            arguments: vec![RuntimeRep::Void, RuntimeRep::Int(64)],
+            results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                RuntimeRep::LiftedRef,
+            ]),
+        };
+        let demand = Signature {
+            arguments: vec![RuntimeRep::Void, RuntimeRep::Int(64), RuntimeRep::Word(64)],
+            results: tidepool_repr::execution_schema::ResultContract::NoSuccess,
+        };
+        assert_eq!(classify(&entry, 0, &demand), None);
+        let pap_demand = Signature {
+            arguments: demand.arguments[1..].to_vec(),
+            results: demand.results.clone(),
+        };
+        assert_eq!(classify(&entry, 1, &pap_demand), None);
+    }
+
+    #[test]
+    fn no_success_thunks_are_admitted_only_at_their_exact_prefix() {
+        let entry = Signature {
+            arguments: Vec::new(),
+            results: tidepool_repr::execution_schema::ResultContract::NoSuccess,
+        };
+        let demand = Signature {
+            arguments: Vec::new(),
+            results: tidepool_repr::execution_schema::ResultContract::NoSuccess,
+        };
+        assert_eq!(
+            classify(&entry, 0, &demand),
+            Some(Application::NoSuccess { consumed: 0 })
         );
     }
 }

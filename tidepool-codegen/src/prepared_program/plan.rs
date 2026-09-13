@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
 use tidepool_repr::execution_schema::{
     AlternativePattern, Atom, CaseKind, ExprFrame, Group, HeapBinding, HeapRhs, PreparedProgram,
-    RuntimeRep, ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
+    ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
 };
 
 pub(super) struct FunctionPlan<'a> {
@@ -19,8 +19,8 @@ pub(super) struct FunctionPlan<'a> {
 }
 
 /// A thunk has the same captured environment layout as a function, but its
-/// generated body is entered by the lazy state machine and therefore has a
-/// closed `[] -> [LiftedRef]` semantic signature.
+/// generated body is entered by the lazy state machine. Both ordinary lazy
+/// references and terminal (NoSuccess) thunks retain their checked contract.
 pub(super) struct ThunkPlan<'a> {
     pub signature: &'a Signature,
     pub captures: &'a [ValueRef],
@@ -104,25 +104,28 @@ impl<'a> ProgramPlan<'a> {
                 } => collect_atoms(arguments, &mut bytes),
                 ExprFrame::Case {
                     binder,
-                    scrutinee_reps,
+                    scrutinee_results,
                     kind,
                     alternatives,
                     ..
                 } => {
+                    let scrutinee_reps = scrutinee_results.returned_reps().unwrap_or(&[]);
                     let binder_rep = if *kind == CaseKind::MultiValue {
-                        RuntimeRep::Void
-                    } else if let [rep] = scrutinee_reps.as_slice() {
-                        *rep
+                        Some(RuntimeRep::Void)
+                    } else if let [rep] = scrutinee_reps {
+                        Some(*rep)
                     } else {
-                        RuntimeRep::Void
+                        None
                     };
-                    values.insert(*binder, binder_rep);
+                    if let Some(binder_rep) = binder_rep {
+                        values.insert(*binder, binder_rep);
+                    }
                     for alternative in alternatives {
                         if let AlternativePattern::Literal(literal) = &alternative.pattern {
                             collect_literal(literal, &mut bytes);
                         }
                         let reps: &[RuntimeRep] = match (&alternative.pattern, kind) {
-                            (_, CaseKind::MultiValue) => scrutinee_reps.as_slice(),
+                            (_, CaseKind::MultiValue) => scrutinee_reps,
                             (AlternativePattern::Constructor(id), _) => {
                                 &program.constructors()[id.0 as usize].field_reps
                             }
@@ -218,9 +221,11 @@ impl<'a> ProgramPlan<'a> {
                     body,
                 } => {
                     let signature = signature(program, *signature_id);
-                    if !signature.arguments.is_empty()
-                        || signature.results.as_slice() != [RuntimeRep::LiftedRef]
-                    {
+                    let valid_result = matches!(
+                        &signature.results,
+                        ResultContract::Returns(reps) if reps.as_slice() == [RuntimeRep::LiftedRef]
+                    ) || signature.results == ResultContract::NoSuccess;
+                    if !signature.arguments.is_empty() || !valid_result {
                         return Err(CompileError::Unsupported(
                             super::Unsupported::ThunkSignature(binding.id),
                         ));
@@ -234,10 +239,7 @@ impl<'a> ProgramPlan<'a> {
                         ObjectKind::Thunk,
                         layout,
                         Some(EntryMetadata::new(
-                            Signature {
-                                arguments: Vec::new(),
-                                results: vec![RuntimeRep::LiftedRef],
-                            },
+                            signature.clone(),
                             u64::from(binding.id.0),
                         )),
                     )?);

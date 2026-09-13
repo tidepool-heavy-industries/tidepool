@@ -60,6 +60,18 @@ impl DescriptorSpace {
         })
     }
 
+    /// External payloads authenticated during the most recent copy phase.
+    /// Promotion snapshots this set before sibling fixup starts a fresh phase
+    /// so the runtime can retain only payloads reachable through selected old
+    /// objects.
+    pub fn visited_external_payloads(
+        &self,
+    ) -> impl Iterator<Item = (usize, ExternalStorageKind)> + '_ {
+        self.external_payloads
+            .iter()
+            .map(|(&published, &kind)| (published, kind))
+    }
+
     /// Authenticate and expand a shared payload once per copy phase. This is
     /// traversal scratch, not allocation ownership. The copier must clear it
     /// for growth recopies and for each half of promotion/fixup.
@@ -81,12 +93,17 @@ impl DescriptorSpace {
                 ))
             };
         }
+        // `prepare_descriptor_copy` reserves at least one map entry for every
+        // external descriptor in the authenticated source. An exhausted
+        // capacity here indicates a violated preparation bound; report it as
+        // a typed integrity failure rather than allowing HashMap to allocate
+        // after forwarding has begun.
+        if self.external_payloads.len() >= self.external_payloads.capacity() {
+            return Err(DescriptorTraceError::MetadataIntegrity);
+        }
         let slots = owner
             .slots(published, kind)
             .map_err(DescriptorTraceError::ExternalPayload)?;
-        self.external_payloads
-            .try_reserve(1)
-            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
         self.external_payloads.insert(published as usize, kind);
         Ok(Some(slots))
     }
@@ -258,6 +275,7 @@ pub(crate) unsafe fn prepare_descriptor_copy(
 
     descriptors.prepare_starts(from_used)?;
     let mut offset = 0;
+    let mut external_handles = 0usize;
     while offset < from_used {
         let address = from_base + offset;
         let header = std::ptr::read(address as *const usize);
@@ -287,11 +305,21 @@ pub(crate) unsafe fn prepare_descriptor_copy(
                 DescriptorState::Forwarded => return Err(DescriptorTraceError::ForwardedObject),
                 DescriptorState::Live | DescriptorState::Evaluating | DescriptorState::Updated => {}
             }
+            if descriptor.external_kind().is_some() {
+                external_handles = external_handles
+                    .checked_add(1)
+                    .ok_or(DescriptorTraceError::InvalidRange)?;
+            }
             extent
         };
         descriptors.mark_start(offset);
         offset += extent;
     }
+    descriptors.external_payloads.clear();
+    descriptors
+        .external_payloads
+        .try_reserve(external_handles)
+        .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
     Ok(())
 }
 
@@ -324,6 +352,30 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph(
     descriptors: &mut DescriptorSpace,
     admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
 ) -> Result<CopyResult, DescriptorTraceError> {
+    copy_prevalidated_descriptor_graph_with_external(
+        root_ptrs,
+        from_start,
+        from_used,
+        tospace,
+        descriptors,
+        admitted,
+        None,
+    )
+}
+
+/// Copy a graph after source authentication, optionally expanding external
+/// payload edges through the invocation-owned payload owner. This is the same
+/// Cheney copier as the managed-only path; the owner only supplies additional
+/// bounded edge slots when an external descriptor is scanned.
+pub(crate) unsafe fn copy_prevalidated_descriptor_graph_with_external(
+    root_ptrs: &[*mut *mut u8],
+    from_start: *const u8,
+    from_used: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
+    external: Option<&dyn ExternalPayloadOwner>,
+) -> Result<CopyResult, DescriptorTraceError> {
     let from_base = from_start as usize;
     let from_end = from_base
         .checked_add(from_used)
@@ -345,6 +397,9 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph(
             available: tospace.len(),
         });
     }
+    // External payload expansion is copy-phase scratch. A promotion has two
+    // independent copies, and growth recopies begin a fresh phase as well.
+    descriptors.external_payloads.clear();
     select_prepared_roots(root_ptrs, descriptors)?;
 
     let mut free = 0;
@@ -375,28 +430,59 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph(
                 available: free - scan,
             });
         }
-        let mut edge_error = None;
-        descriptor.for_each_trace_slot(object, extent, |slot| {
-            if edge_error.is_some() {
-                return;
+        if let Some(kind) = descriptor.external_kind() {
+            let owner = external.ok_or(DescriptorTraceError::MissingExternalOwner)?;
+            let payload_slot = descriptor.external_payload_slot(object, extent)?;
+            let published = std::ptr::read(payload_slot);
+            if let Some(slots) = descriptors.expand_external(published, kind, owner)? {
+                for slot in slots {
+                    // A payload slot captured in the initial root snapshot was
+                    // already evacuated above. Do not rewrite it a second time.
+                    if descriptors
+                        .root_slots
+                        .binary_search(&(slot as usize))
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    let value = std::ptr::read(slot).cast::<u8>() as usize;
+                    let relocated = evacuate_descriptor(
+                        value,
+                        from_base,
+                        from_end,
+                        to_base,
+                        tospace.len(),
+                        &mut free,
+                        descriptors,
+                        admitted,
+                    )?;
+                    std::ptr::write(slot, relocated as *mut u8);
+                }
             }
-            let value = std::ptr::read(slot).cast::<u8>() as usize;
-            match evacuate_descriptor(
-                value,
-                from_base,
-                from_end,
-                to_base,
-                tospace.len(),
-                &mut free,
-                descriptors,
-                admitted,
-            ) {
-                Ok(relocated) => std::ptr::write(slot, relocated as *mut u8),
-                Err(error) => edge_error = Some(error),
+        } else {
+            let mut edge_error = None;
+            descriptor.for_each_trace_slot(object, extent, |slot| {
+                if edge_error.is_some() {
+                    return;
+                }
+                let value = std::ptr::read(slot).cast::<u8>() as usize;
+                match evacuate_descriptor(
+                    value,
+                    from_base,
+                    from_end,
+                    to_base,
+                    tospace.len(),
+                    &mut free,
+                    descriptors,
+                    admitted,
+                ) {
+                    Ok(relocated) => std::ptr::write(slot, relocated as *mut u8),
+                    Err(error) => edge_error = Some(error),
+                }
+            })?;
+            if let Some(error) = edge_error {
+                return Err(error);
             }
-        })?;
-        if let Some(error) = edge_error {
-            return Err(error);
         }
         scan += extent;
     }
@@ -479,17 +565,24 @@ pub unsafe fn cheney_copy_descriptors_with_admission(
 /// owner must retain every external allocation through success or native
 /// unwind after failure, with no mutation except this copy's slot rewrites.
 pub unsafe fn cheney_copy_descriptors_with_external(
-    _root_ptrs: &[*mut *mut u8],
-    _from_start: *const u8,
-    _from_used: usize,
-    _tospace: &mut [u8],
-    _descriptors: &mut DescriptorSpace,
-    _admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
-    _external: &dyn ExternalPayloadOwner,
+    root_ptrs: &[*mut *mut u8],
+    from_start: *const u8,
+    from_used: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
+    external: &dyn ExternalPayloadOwner,
 ) -> Result<CopyResult, DescriptorTraceError> {
-    // wave5:external-graph: wire the existing source authentication and Cheney
-    // copier to expand_external; do not add a second copying algorithm.
-    Err(DescriptorTraceError::MissingExternalOwner)
+    prepare_descriptor_copy(root_ptrs, from_start, from_used, tospace, descriptors)?;
+    copy_prevalidated_descriptor_graph_with_external(
+        root_ptrs,
+        from_start,
+        from_used,
+        tospace,
+        descriptors,
+        admitted,
+        Some(external),
+    )
 }
 
 unsafe fn evacuate_descriptor(
@@ -635,7 +728,7 @@ unsafe fn copy_descriptor(
 fn is_evaluated_kind(kind: ObjectKind) -> bool {
     matches!(
         kind,
-        ObjectKind::Constructor | ObjectKind::Function | ObjectKind::Pap
+        ObjectKind::Constructor | ObjectKind::Function | ObjectKind::Pap | ObjectKind::External(_)
     )
 }
 
@@ -1847,6 +1940,7 @@ mod descriptor_copy_tests {
         Arc::new(
             match kind {
                 ObjectKind::Constructor => ObjectDescriptor::constructor(1, layout, None),
+                ObjectKind::External(kind) => ObjectDescriptor::external(kind, &target),
                 _ => ObjectDescriptor::new(kind, layout, None),
             }
             .unwrap(),
@@ -1927,7 +2021,9 @@ mod descriptor_copy_tests {
                 kind: ExternalStorageKind,
             ) -> Result<ExternalPointerSlots, ExternalStorageValidationError> {
                 if published != self.0.get().cast() {
-                    return Err(ExternalStorageValidationError::Untracked(published));
+                    return Err(ExternalStorageValidationError::Untracked(
+                        published as usize,
+                    ));
                 }
                 if kind != ExternalStorageKind::BoxedArray {
                     return Err(ExternalStorageValidationError::KindMismatch {
@@ -1988,6 +2084,184 @@ mod descriptor_copy_tests {
             assert_eq!(tag_of(moved), leaf.tag());
             assert!((to.as_ptr() as usize..to.as_ptr() as usize + 48).contains(&untag(moved)));
             assert_eq!(leaf.state(child, 16).unwrap(), DescriptorState::Forwarded);
+        }
+    }
+
+    #[test]
+    fn external_graph_wrong_kind_is_typed_failure() {
+        use std::cell::UnsafeCell;
+        struct WrongKind(UnsafeCell<*mut u8>);
+        // SAFETY: the test owner is live for the entire single-threaded copy.
+        unsafe impl ExternalPayloadOwner for WrongKind {
+            fn slots(
+                &self,
+                _published: *mut u8,
+                kind: ExternalStorageKind,
+            ) -> Result<ExternalPointerSlots, ExternalStorageValidationError> {
+                Err(ExternalStorageValidationError::KindMismatch {
+                    expected: kind,
+                    actual: ExternalStorageKind::Bytes,
+                })
+            }
+        }
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "system-v".into(),
+            features: vec![],
+        };
+        let external =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        let mut from = [0_u64; 2];
+        let mut to = [0_u64; 2];
+        let mut space = DescriptorSpace::new([Arc::clone(&external)]).unwrap();
+        unsafe {
+            let object = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &external,
+                DescriptorState::Live,
+            );
+            let owner = WrongKind(UnsafeCell::new(std::ptr::null_mut()));
+            std::ptr::write(
+                object
+                    .add(external.payload_base() as usize)
+                    .cast::<*mut u8>(),
+                owner.0.get().cast(),
+            );
+            let mut root = object;
+            let failure = match cheney_copy_descriptors_with_external(
+                &[&mut root as *mut *mut u8],
+                from.as_ptr().cast(),
+                16,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), 16),
+                &mut space,
+                None,
+                &owner,
+            ) {
+                Ok(_) => panic!("wrong external kind unexpectedly copied"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                failure,
+                DescriptorTraceError::ExternalPayload(
+                    ExternalStorageValidationError::KindMismatch {
+                        expected: ExternalStorageKind::BoxedArray,
+                        actual: ExternalStorageKind::Bytes
+                    }
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn external_graph_without_owner_is_rejected() {
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "system-v".into(),
+            features: vec![],
+        };
+        let external =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::Bytes, &target).unwrap());
+        let mut from = [0_u64; 2];
+        let mut to = [0_u64; 2];
+        let mut space = DescriptorSpace::new([Arc::clone(&external)]).unwrap();
+        unsafe {
+            let object = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &external,
+                DescriptorState::Live,
+            );
+            std::ptr::write(
+                object
+                    .add(external.payload_base() as usize)
+                    .cast::<*mut u8>(),
+                std::ptr::NonNull::<u8>::dangling().as_ptr(),
+            );
+            let mut root = object;
+            let failure = match cheney_copy_descriptors(
+                &[&mut root as *mut *mut u8],
+                from.as_ptr().cast(),
+                16,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), 16),
+                &mut space,
+            ) {
+                Ok(_) => panic!("external graph copied without owner"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                failure,
+                DescriptorTraceError::MissingExternalOwner
+            ));
+        }
+    }
+
+    #[test]
+    fn external_bytes_payload_is_authenticated_leaf() {
+        struct BytesOwner;
+        // SAFETY: the empty span has no dereferenceable slots.
+        unsafe impl ExternalPayloadOwner for BytesOwner {
+            fn slots(
+                &self,
+                _published: *mut u8,
+                kind: ExternalStorageKind,
+            ) -> Result<ExternalPointerSlots, ExternalStorageValidationError> {
+                assert_eq!(kind, ExternalStorageKind::Bytes);
+                Ok(unsafe {
+                    ExternalPointerSlots::from_validated(
+                        std::ptr::NonNull::<*mut u8>::dangling().as_ptr(),
+                        0,
+                    )
+                })
+            }
+        }
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "system-v".into(),
+            features: vec![],
+        };
+        let external =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::Bytes, &target).unwrap());
+        let mut from = [0_u64; 2];
+        let mut to = [0_u64; 2];
+        let mut space = DescriptorSpace::new([Arc::clone(&external)]).unwrap();
+        unsafe {
+            let object = write_object(
+                from.as_mut_ptr().cast(),
+                0,
+                &external,
+                DescriptorState::Live,
+            );
+            std::ptr::write(
+                object
+                    .add(external.payload_base() as usize)
+                    .cast::<*mut u8>(),
+                std::ptr::NonNull::<u8>::dangling().as_ptr(),
+            );
+            let mut root = object;
+            let owner = BytesOwner;
+            let copied = cheney_copy_descriptors_with_external(
+                &[&mut root as *mut *mut u8],
+                from.as_ptr().cast(),
+                16,
+                std::slice::from_raw_parts_mut(to.as_mut_ptr().cast(), 16),
+                &mut space,
+                None,
+                &owner,
+            )
+            .unwrap();
+            assert_eq!(copied.bytes_copied, 16);
+            assert_eq!(root, to.as_mut_ptr().cast());
+            assert_eq!(space.visited_external_payloads().count(), 1);
         }
     }
 

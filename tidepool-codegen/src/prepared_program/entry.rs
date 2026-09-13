@@ -204,12 +204,17 @@ pub(super) fn emit_prepared_enter(
         if thunk.results == ResultContract::NoSuccess {
             let unexpected = builder.create_block();
             let failed = builder.create_block();
-            let succeeded = builder.ins().icmp_imm(IntCC::Equal, returned[0], CallStatus::Success as i64);
+            let succeeded =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, returned[0], CallStatus::Success as i64);
             builder.ins().brif(succeeded, unexpected, &[], failed, &[]);
             builder.switch_to_block(unexpected);
             builder.seal_block(unexpected);
             super::no_success::emit_terminal(
-                &mut builder, pipeline, vmctx,
+                &mut builder,
+                pipeline,
+                vmctx,
                 super::no_success::TerminalCause::UnexpectedSuccess,
             )?;
             builder.switch_to_block(failed);
@@ -303,8 +308,8 @@ pub(super) fn emit_prepared_enter(
 /// descriptor identity. The successful result is admitted evaluated evidence.
 /// No safepoint may split payload/header publication. Reusable failures leave
 /// captures intact; integrity failure must not dereference the heap at all.
-/// Old-space update publication must add the owning noncollecting barrier here
-/// before old thunks become admissible, not at individual Enter call sites.
+/// Old-space update publication uses the owning noncollecting barrier here,
+/// so individual Enter sites cannot omit remembered-edge maintenance.
 pub(super) fn emit_thunk_completion(
     builder: &mut FunctionBuilder<'_>,
     vmctx: Value,

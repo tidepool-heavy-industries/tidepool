@@ -334,3 +334,34 @@ are nondeterministic.
   top-level strings. Code-address inventories must include every embedded
   allocation, and primitive strings need GHC's implicit terminal NUL in backing
   storage without changing their logical wire bytes.
+- A GHC panic message named `mkSeqs` even though the fault was our later facts
+  walker forcing an intentionally undefined annotation. Reproducing the panic
+  identified the affected body but did not establish its mechanism; checking
+  the pinned constructor definition and every consumer avoided a workaround
+  that would have disabled a valid GHC pass. Exception text alone is not an
+  ownership boundary.
+- A build lease stayed held while an interactive Cabal repl was idle. Lease
+  handback should report whether a compiler/test process is actually running;
+  a live shell session is not evidence of useful build work.
+- Flat-wire fixture migrations produced four focused failures from stale tags
+  and hand-maintained expression indices. Helpers should allocate child nodes
+  before parents and return their indices; a schema change needs a search for
+  handwritten envelope fragments, not only struct constructors.
+- Similar primitive names do not establish a shared mutation contract:
+  shrink returns State# while resize returns a replacement handle. Inventory
+  exact pinned-GHC signatures before designing alias settlement; otherwise a
+  worker can faithfully implement a contract that invalidates the caller's
+  only usable handle.
+- A completed worker did not process follow-up corrections sent as ordinary
+  messages; it needed an explicit resumed task. Build routing then waited on
+  work that was not running. A coordinator should distinguish queued messages
+  from an active repair task and require an acknowledgement of the assigned
+  revision before marking that dependency in progress.
+- Moving an error vocabulary across the heap/runtime boundary exposed raw
+  diagnostic pointers that made the enclosing runtime error non-Send. Carry
+  numeric addresses in errors, not ownership-shaped pointers; compilation
+  caught this before any unsafe Send workaround was introduced.
+- New GC scratch growth was initially fallible after forwarding began. The
+  existing source-header walk provides an exact upper bound on external
+  handles, so reserve traversal storage there. Allocation timing is part of
+  the failure contract, not merely a performance detail.

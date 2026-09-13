@@ -99,7 +99,7 @@ fn signature(results: &[RuntimeRep]) -> Vec<u8> {
 fn signature_with(arguments: &[RuntimeRep], results: &[RuntimeRep]) -> Vec<u8> {
     array([
         array(arguments.iter().copied().map(rep)),
-        array(results.iter().copied().map(rep)),
+        array([uint(0), array(results.iter().copied().map(rep))]),
     ])
 }
 
@@ -223,7 +223,7 @@ fn case_frame(
         uint(5),
         uint(u64::from(scrutinee)),
         uint(u64::from(binder)),
-        array(reps.iter().copied().map(rep)),
+        array([uint(0), array(reps.iter().copied().map(rep))]),
         case_kind(kind),
         array(alternatives),
     ])
@@ -444,7 +444,7 @@ fn primitive_float_default_first_wire(scrutinee: u64) -> Vec<u8> {
                 uint(5),
                 uint(2),
                 uint(1),
-                array([rep(float)]),
+                array([uint(0), array([rep(float)])]),
                 array([uint(1), rep(float)]),
                 array([
                     alternative(default_pattern(), vec![], 0),

@@ -79,13 +79,21 @@ pub enum RuntimeRep {
 /// cannot return successfully. `Returns([])` is a successful zero-result call;
 /// it is never interchangeable with `NoSuccess`. Partial application does not
 /// discharge the latter contract: it still produces a lifted function value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ResultContract {
     Returns(Vec<RuntimeRep>),
     NoSuccess,
 }
 
 impl ResultContract {
+    /// Successful logical result representations, if the expression may return.
+    pub fn returned_reps(&self) -> Option<&[RuntimeRep]> {
+        match self {
+            Self::Returns(reps) => Some(reps),
+            Self::NoSuccess => None,
+        }
+    }
+
     /// A nonreturning expression satisfies any continuation demand. A demand
     /// alone is not evidence: ordinary returning expressions must match exactly.
     pub fn satisfies(&self, demanded: &Self) -> bool {
@@ -601,7 +609,10 @@ pub struct OperationDecl {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum OperationIdentity {
     PrimOp(String),
-    Intrinsic { symbol: String, convention: ForeignConvention },
+    Intrinsic {
+        symbol: String,
+        convention: ForeignConvention,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

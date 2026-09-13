@@ -22,7 +22,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32, Word64, Word8)
-import GHC.Builtin.PrimOps (primOpOcc)
+import GHC.Builtin.PrimOps (PrimOp(..), primOpOcc)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
   ( DataCon, dataConName, dataConRepArgTys, dataConRepArity, dataConWorkId
@@ -35,8 +35,9 @@ import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
+import GHC.Types.Demand (splitDmdSig)
 import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
-import GHC.Types.Id (isDeadEndId, isDataConWorkId_maybe)
+import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
@@ -78,6 +79,7 @@ data ProjectionError
 data PState = PState
   { nextValue :: Word32, nextJoin :: Word32
   , values :: VarEnv ValueId, joins :: VarEnv JoinId
+  , entryArities :: VarEnv Int
   , topSymbols :: VarEnv SymbolIdentity, topValues :: Map SymbolIdentity ValueId
   , implicitTops :: [TopBinding]
   , implicitValues :: Map SymbolIdentity ValueId
@@ -96,7 +98,7 @@ type P a = StateT PState (Either ProjectionError) a
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -122,7 +124,7 @@ preparedTopIdentities modules = traverse identityOf
 projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
   -> VarEnv SymbolIdentity -> Either ProjectionError WireProgram
 projectPreparedWithTopSymbols context modules topIdentityMap = do
-  let initial = PState 0 0 emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
+  let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
         emptyVarEnv [] [] [] [] [] [] (projectionTarget context)
         (projectionRetainedGenerations context) (Set.fromList
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
@@ -314,13 +316,30 @@ assignTopIdentitySpellings entries = snd (foldl allocateOne
       (symbolUnit symbol, symbolModule symbol, symbolNamespace symbol)
 
 preallocate :: [PreparedModule] -> P ()
-preallocate = mapM_ (mapM_ allocateTop . pmBindings)
+preallocate modules = do
+  mapM_ (mapM_ (registerBindingArities . fst) . pmBindings) modules
+  mapM_ (mapM_ allocateTop . pmBindings) modules
   where
     allocateTop (StgTopStringLit binder _, _) = allocateTopValue binder >> pure ()
     allocateTop (StgTopLifted binding, _) = mapM_ allocateTopValue (bindingBinders binding) >> pure ()
 
 projectModule :: PreparedModule -> P [Group TopBinding]
 projectModule = mapM (projectTop . fst) . pmBindings
+
+registerBindingArities :: CgStgTopBinding -> P ()
+registerBindingArities (StgTopStringLit _ _) = pure ()
+registerBindingArities (StgTopLifted binding) = registerBindingEntryArities binding
+
+registerBindingEntryArities :: CgStgBinding -> P ()
+registerBindingEntryArities (StgNonRec binder rhs) = registerRhsEntryArity binder rhs
+registerBindingEntryArities (StgRec pairs) =
+  mapM_ (uncurry registerRhsEntryArity) pairs
+
+registerRhsEntryArity :: Id -> CgStgRhs -> P ()
+registerRhsEntryArity binder (StgRhsClosure _ _ _ parameters _ _) =
+  modify' (\current -> current
+    { entryArities = extendVarEnv (entryArities current) binder (length parameters) })
+registerRhsEntryArity _ _ = pure ()
 
 projectTop :: CgStgTopBinding -> P (Group TopBinding)
 projectTop (StgTopStringLit binder bytes) = do
@@ -340,57 +359,72 @@ projectRhs :: Id -> CgStgRhs -> P HeapRhs
 projectRhs binder (StgRhsClosure captures _ update parameters body resultType) = withScope $ do
   captureRefs <- mapM projectReference (dVarSetElems captures)
   parameterIds <- mapM bindValue parameters
-  resultReps <- repsForType resultType
-  projectedBody <- projectExpr resultReps body
+  resultContract <- resultContractFor binder (length parameters) resultType
+  projectedBody <- projectExpr resultContract body
   case update of
-    ReEntrant -> Function <$> (internSignature =<< signatureFor parameters resultType)
+    ReEntrant -> Function <$> (internSignature =<< signatureFor parameters resultContract)
       <*> pure parameterIds <*> pure captureRefs <*> pure projectedBody
     Updatable -> do
-      signature <- internSignature (Signature [] resultReps)
+      signature <- internSignature (Signature [] resultContract)
       pure (Thunk signature Memoize captureRefs projectedBody)
     Stg.SingleEntry -> do
-      signature <- internSignature (Signature [] resultReps)
+      signature <- internSignature (Signature [] resultContract)
       pure (Thunk signature Schema.SingleEntry captureRefs projectedBody)
     JumpedTo -> failShape ("heap binding marked JumpedTo: " <> symbolText (idSymbol "value" binder))
 projectRhs _ (StgRhsCon _ con _ _ args _) = Constructor <$> internConstructor con <*> mapM projectArg args
 
-projectExpr :: [RuntimeRep] -> CgStgExpr -> P Expr
+projectExpr :: ResultContract -> CgStgExpr -> P Expr
 projectExpr expected (StgApp function args) = do
   knownJoins <- gets joins
   case lookupVarEnv knownJoins function of
     Just join -> Jump join <$> mapM projectArg args
     Nothing -> case args of
       [] -> do
-        reps <- repsForType (varType function)
-        case reps of
-          [] -> pure (Return [])
-          [LiftedRefRep] -> do
+        deadEnd <- deadEndApplicationSaturated function args
+        if deadEnd
+          then do
             callee <- Ref <$> projectReference function
-            signature <- internSignature =<< signatureForApplication [] expected
+            signature <- internSignature (Signature [] NoSuccess)
             pure (Enter callee signature)
-          [_] -> Return . pure . Ref <$> projectReference function
-          _ -> failRepresentation "zero-argument STG application retains a multi-component variable"
+          else do
+            reps <- repsForType (varType function)
+            case reps of
+              [] -> pure (Return [])
+              [LiftedRefRep] -> do
+                callee <- Ref <$> projectReference function
+                signature <- internSignature =<< signatureForApplication [] expected
+                pure (Enter callee signature)
+              [_] -> Return . pure . Ref <$> projectReference function
+              _ -> failRepresentation "zero-argument STG application retains a multi-component variable"
       _ -> do
         projectedArgs <- mapM projectArg args
         callee <- Ref <$> projectReference function
-        signature <- internSignature =<< signatureForApplication args expected
+        deadEnd <- deadEndApplicationSaturated function args
+        signature <- if deadEnd
+          then internSignature =<< signatureForArgsNoSuccess args
+          else internSignature =<< signatureForApplication args expected
         pure (Call callee signature projectedArgs)
 projectExpr _ (StgLit literal) = Return . pure <$> projectLiteralAtom literal
 projectExpr _ (StgConApp con _ args _)
   | isUnboxedTupleDataCon con = Return <$> mapM projectArg args
   | otherwise = Construct <$> internConstructor con <*> mapM projectArg args
+projectExpr _ (StgOpApp (StgPrimOp RaiseOp) args _) = do
+  signature <- internSignature =<< signatureForArgsNoSuccess args
+  Operation <$> internOperation (StgPrimOp RaiseOp) signature <*> mapM projectArg args
 projectExpr _ (StgOpApp op args resultType) = do
   signature <- internSignature =<< signatureForArgs args resultType
   Operation <$> internOperation op signature <*> mapM projectArg args
 projectExpr expected (StgCase scrutinee binder altType alts) = do
-  binderReps <- repsForType (varType binder)
-  projectedScrutinee <- projectExpr binderReps scrutinee
+  scrutineeResults <- case alts of
+    [] | typePrimRep_maybe (varType binder) == Nothing -> pure NoSuccess
+    _ -> Returns <$> repsForType (varType binder)
+  projectedScrutinee <- projectExpr scrutineeResults scrutinee
   kind <- projectCaseKind altType
   (identity, alternatives) <- withScope $ do
     identity <- bindValue binder
     alternatives <- mapM (projectAlt expected altType) alts
     pure (identity, alternatives)
-  pure (Case projectedScrutinee identity binderReps kind alternatives)
+  pure (Case projectedScrutinee identity scrutineeResults kind alternatives)
 projectExpr expected (StgLet _ binding body) = withScope $
   Let <$> projectLocalGroup binding <*> projectExpr expected body
 projectExpr expected (StgLetNoEscape _ binding body) = withScope $
@@ -403,7 +437,7 @@ projectCaseKind (PrimAlt rep) = PrimitiveCase <$> projectRep rep
 projectCaseKind (MultiValAlt _) = pure MultiValueCase
 projectCaseKind PolyAlt = pure PolymorphicCase
 
-projectAlt :: [RuntimeRep] -> AltType -> CgStgAlt -> P Alternative
+projectAlt :: ResultContract -> AltType -> CgStgAlt -> P Alternative
 projectAlt expected (MultiValAlt _) (GenStgAlt (DataAlt con) binders body)
   | isUnboxedTupleDataCon con = withScope $ Alternative DefaultPattern
       <$> mapM bindValue binders <*> projectExpr expected body
@@ -417,31 +451,35 @@ projectPattern (LitAlt literal) = LiteralPattern <$> projectLiteral literal
 
 projectLocalGroup :: CgStgBinding -> P (Group HeapBinding)
 projectLocalGroup (StgNonRec binder rhs) = do
+  registerRhsEntryArity binder rhs
   projectedRhs <- projectRhs binder rhs
   identity <- bindValue binder
   pure (NonRecursive (HeapBinding identity projectedRhs))
 projectLocalGroup (StgRec pairs) = do
+  mapM_ (uncurry registerRhsEntryArity) pairs
   identities <- mapM (bindValue . fst) pairs
   Recursive <$> forM (zip identities pairs) (\(identity, (binder, rhs)) ->
     HeapBinding identity <$> projectRhs binder rhs)
 
 projectJoinGroup :: CgStgBinding -> P (Group JoinBinding)
 projectJoinGroup (StgNonRec binder rhs) = do
+  registerRhsEntryArity binder rhs
   identity <- freshJoin
   projected <- projectJoin identity binder rhs
   modify' (\current -> current { joins = extendVarEnv (joins current) binder identity })
   pure (NonRecursive projected)
 projectJoinGroup (StgRec pairs) = do
+  mapM_ (uncurry registerRhsEntryArity) pairs
   identities <- mapM (bindJoin . fst) pairs
   Recursive <$> forM (zip identities pairs) (\(identity, (binder, rhs)) ->
     projectJoin identity binder rhs)
 
 projectJoin :: JoinId -> Id -> CgStgRhs -> P JoinBinding
-projectJoin identity _ (StgRhsClosure _ _ JumpedTo parameters body resultType) = withScope $ do
-  resultReps <- repsForType resultType
-  JoinBinding identity <$> (internSignature =<< signatureFor parameters resultType)
+projectJoin identity binder (StgRhsClosure _ _ JumpedTo parameters body resultType) = withScope $ do
+  resultContract <- resultContractFor binder (length parameters) resultType
+  JoinBinding identity <$> (internSignature =<< signatureFor parameters resultContract)
     <*> mapM bindValue parameters
-    <*> projectExpr resultReps body
+    <*> projectExpr resultContract body
 projectJoin _ binder _ = failShape
   ("let-no-escape binding lacks JumpedTo form: " <> symbolText (idSymbol "join" binder))
 
@@ -556,8 +594,11 @@ withScope :: P a -> P a
 withScope action = do
   savedValues <- gets values
   savedJoins <- gets joins
+  savedEntryArities <- gets entryArities
   result <- action
-  modify' (\current -> current { values = savedValues, joins = savedJoins })
+  modify' (\current -> current
+    { values = savedValues, joins = savedJoins
+    , entryArities = savedEntryArities })
   pure result
 
 internGlobal :: Id -> P GlobalId
@@ -583,19 +624,25 @@ internGlobal binder
       case lookupVarEnv known externalBinder of
         Just identity -> pure identity
         Nothing -> do
-          reps <- repsForType (varType externalBinder)
+          reps <- case (typePrimRep_maybe (varType externalBinder), importedIdLFInfo externalBinder) of
+            (Nothing, LFThunk{}) -> do
+              bottomingThunk <- deadEndApplicationSaturated externalBinder []
+              if bottomingThunk
+                then pure [LiftedRefRep]
+                else repsForType (varType externalBinder)
+            _ -> repsForType (varType externalBinder)
           rep <- case reps of
             [] -> pure VoidRep
             [single] -> pure single
             _ -> failRepresentation "global value has more than one representation component"
-          (entry, deadEnd, evaluated) <- importedEntry externalBinder
+          (entry, evaluated) <- importedEntry externalBinder
           signature <- traverse internSignature entry
           existing <- gets globalDecls
           generations <- gets retainedGenerations
           let identity = GlobalId (fromIntegral (length existing))
               symbol = idSymbol "value" externalBinder
               retainedGeneration = Map.lookup symbol generations
-              declaration = GlobalDecl symbol rep signature deadEnd evaluated
+              declaration = GlobalDecl symbol rep signature evaluated
                 retainedGeneration
           modify' (\current -> current
             { globals = extendVarEnv (globals current) externalBinder identity
@@ -671,8 +718,9 @@ internOperation op signature = do
     StgFCallOp (Foreign.CCall (Foreign.CCallSpec
       (Foreign.StaticTarget _ label _ _) Foreign.CCallConv _)) _
       | unpackFS label == "rintDouble"
-      , operationSignature == Signature [FloatRep 64] [FloatRep 64]
-          || operationSignature == Signature [FloatRep 64, VoidRep] [FloatRep 64] ->
+      , operationSignature == Signature [FloatRep 64] (Returns [FloatRep 64])
+          || operationSignature == Signature [FloatRep 64, VoidRep]
+              (Returns [FloatRep 64]) ->
           pure (Schema.IntrinsicIdentity "rintDouble" Schema.CCall)
     _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
   known <- gets operations
@@ -697,8 +745,8 @@ signatureForId identity = do
     Just (signature, _) -> pure signature
     Nothing -> failIdentity "operation refers to an unknown signature"
 
-signatureFor :: [Id] -> Type -> P Signature
-signatureFor args result = Signature <$> (concat <$> mapM (argumentRepsForType . varType) args) <*> repsForType result
+signatureFor :: [Id] -> ResultContract -> P Signature
+signatureFor args result = Signature <$> (concat <$> mapM (argumentRepsForType . varType) args) <*> pure result
 
 -- Imported LF information is authoritative. In its absence GHC uses positive
 -- representation arity as function evidence, but never guesses a thunk from
@@ -708,29 +756,29 @@ signatureFor args result = Signature <$> (concat <$> mapM (argumentRepsForType .
 -- `importedIdLFInfo` is partial for GHC's wired-in unused-argument descriptor.
 -- Such a zero-width argument is projected directly as Void and never reaches
 -- internGlobal, so this query remains restricted to genuine imported entries.
-importedEntry :: Id -> P (Maybe Signature, Bool, Bool)
+importedEntry :: Id -> P (Maybe Signature, Bool)
 importedEntry binder = case importedIdLFInfo binder of
   LFReEntrant _ arity _ _ -> do
     (arguments, result) <- splitRepArguments arity (varType binder)
-    signature <- Signature arguments <$> entryResults result
-    pure (Just signature, isDeadEndId binder, True)
+    signature <- Signature arguments <$> entryResults arity result
+    pure (Just signature, True)
   LFThunk{} -> do
-    signature <- Signature [] <$> entryResults (varType binder)
-    pure (Just signature, isDeadEndId binder, False)
-  LFCon{} -> pure (Nothing, False, True)
-  LFUnlifted -> pure (Nothing, False, True)
-  LFUnknown{} -> pure (Nothing, False, False)
+    signature <- Signature [] <$> entryResults 0 (varType binder)
+    pure (Just signature, False)
+  LFCon{} -> pure (Nothing, True)
+  LFUnlifted -> pure (Nothing, True)
+  LFUnknown{} -> pure (Nothing, False)
   LFLetNoEscape -> failShape "imported join has no heap/global entry"
   where
-    -- wave4:PRELUDE_HASKELL: globalDeadEnd carries the independent evidence.
-    -- An empty vector here is not an assertion that a bottoming call returns
-    -- zero values, nor that it raises instead of diverging.
-    entryResults ty
-      | isDeadEndId binder = pure []
-      | otherwise = repsForType ty
+    entryResults actual ty = do
+      if isDeadEndId binder
+        then do
+          threshold <- demandRepThreshold binder
+          if actual >= threshold then pure NoSuccess else Returns <$> repsForType ty
+        else Returns <$> repsForType ty
 
 signatureForArgs :: [StgArg] -> Type -> P Signature
-signatureForArgs args result = Signature <$> (concat <$> mapM argReps args) <*> repsForType result
+signatureForArgs args result = Signature <$> (concat <$> mapM argReps args) <*> (Returns <$> repsForType result)
   where
     argReps (StgVarArg binder) = argumentRepsForType (varType binder)
     argReps (StgLitArg literal) = argumentRepsForType (literalType literal)
@@ -738,10 +786,13 @@ signatureForArgs args result = Signature <$> (concat <$> mapM argReps args) <*> 
 -- The STG context, not the callee's source type, says what this application
 -- must produce. Arguments retain their actual unarised representations while
 -- the enclosing RHS, join, or case supplies the demanded result group.
-signatureForApplication :: [StgArg] -> [RuntimeRep] -> P Signature
+signatureForApplication :: [StgArg] -> ResultContract -> P Signature
 signatureForApplication args demandedResult = Signature
-  <$> (concat <$> mapM argReps args) <*> pure demandedResult
+  <$> (concat <$> mapM argReps args) <*> demandedResultForApplication
   where
+    demandedResultForApplication = case demandedResult of
+      Returns reps -> pure (Returns reps)
+      NoSuccess -> failShape "demanded NoSuccess lacks callee evidence"
     argReps (StgVarArg binder) = argumentRepsForType (varType binder)
     argReps (StgLitArg literal) = argumentRepsForType (literalType literal)
 
@@ -770,6 +821,65 @@ argumentRepsForType ty = do
 repsForType :: Type -> P [RuntimeRep]
 repsForType ty = maybe (failRepresentation "runtime-polymorphic representation")
   (mapM projectRep) (typePrimRep_maybe ty)
+
+resultContractFor :: Id -> Int -> Type -> P ResultContract
+resultContractFor binder actual ty
+  | isDeadEndId binder = do
+      threshold <- demandRepThreshold binder
+      if actual >= threshold then pure NoSuccess else Returns <$> repsForType ty
+  | otherwise = Returns <$> repsForType ty
+
+signatureForArgsNoSuccess :: [StgArg] -> P Signature
+signatureForArgsNoSuccess args = Signature <$> (concat <$> mapM argReps args) <*> pure NoSuccess
+  where
+    argReps (StgVarArg binder) = argumentRepsForType (varType binder)
+    argReps (StgLitArg literal) = argumentRepsForType (literalType literal)
+
+-- Demand signatures count source arguments. Convert those arguments through
+-- the binder type so an unboxed tuple contributes all payload reps and a
+-- zero-width argument contributes one Void slot.
+demandRepThreshold :: Id -> P Int
+demandRepThreshold binder = sourceArgumentRepSlots sourceArity (varType binder)
+  where
+    sourceArity = length (fst (splitDmdSig (idDmdSig binder)))
+
+sourceArgumentRepSlots :: Int -> Type -> P Int
+sourceArgumentRepSlots 0 _ = pure 0
+sourceArgumentRepSlots remaining ty = case unwrapType ty of
+  FunTy _ _ argument result -> do
+    reps <- argumentRepsForType argument
+    rest <- sourceArgumentRepSlots (remaining - 1) result
+    pure (length reps + rest)
+  _ -> failRepresentation "demand signature exceeds function type"
+
+-- Bottoming evidence belongs to an entered call, not to a partial application
+-- of a bottoming function. Local entries come from the actual prepared-STG
+-- closure parameter list; only external entries use their imported LF arity.
+deadEndApplicationSaturated :: Id -> [StgArg] -> P Bool
+deadEndApplicationSaturated function args
+  | not (isDeadEndId function) = pure False
+  | otherwise = do
+      threshold <- demandRepThreshold function
+      actual <- knownEntryArity function
+      pure (maybe False (\entry -> entry >= threshold && length args >= entry) actual)
+
+knownEntryArity :: Id -> P (Maybe Int)
+knownEntryArity function = do
+  local <- gets (\st -> lookupVarEnv (entryArities st) function)
+  case local of
+    Just arity -> pure (Just arity)
+    Nothing
+      | isExternalName (varName function) -> pure (importedEntryArity function)
+      | otherwise -> pure Nothing
+
+importedEntryArity :: Id -> Maybe Int
+importedEntryArity binder = case importedIdLFInfo binder of
+  LFReEntrant _ arity _ _ -> Just arity
+  LFThunk{} -> Just 0
+  LFCon{} -> Nothing
+  LFUnlifted -> Nothing
+  LFUnknown{} -> Nothing
+  LFLetNoEscape -> Nothing
 
 projectRep :: GHC.PrimRep -> P RuntimeRep
 projectRep (GHC.BoxedRep (Just GHC.Lifted)) = pure LiftedRefRep

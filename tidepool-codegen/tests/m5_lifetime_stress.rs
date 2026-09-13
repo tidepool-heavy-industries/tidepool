@@ -4,7 +4,8 @@ use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::execution_schema::{
-    Architecture, Endianness, RuntimeRep, Signature, StorageLayout, TargetDescriptor,
+    Architecture, Endianness, ResultContract, RuntimeRep, Signature, StorageLayout,
+    TargetDescriptor,
 };
 use tidepool_repr::{DataConTable, VarId};
 
@@ -54,7 +55,7 @@ fn target() -> TargetDescriptor {
 fn pap_void_prefix_and_code_global_survive_collection_then_retire() {
     let pap_signature = Signature {
         arguments: vec![RuntimeRep::Void, RuntimeRep::Word(8), RuntimeRep::LiftedRef],
-        results: vec![RuntimeRep::LiftedRef],
+        results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
     };
     let pap_payload =
         StorageLayout::for_reps(&target(), &pap_signature.arguments).expect("PAP storage layout");

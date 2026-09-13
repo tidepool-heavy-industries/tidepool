@@ -1,11 +1,18 @@
 //! Pure floating operations retain GHC identities and exact representations.
 
 use super::primitives::ScalarFamily;
-use cranelift_codegen::ir::{condcodes::FloatCC, types, InstBuilder, Value};
+use cranelift_codegen::ir::{InstBuilder, Value, condcodes::FloatCC, types};
 use cranelift_frontend::FunctionBuilder;
 use tidepool_repr::execution_schema::{
-    ForeignConvention, OperationIdentity, RuntimeRep, Signature,
+    ForeignConvention, OperationIdentity, ResultContract, RuntimeRep, Signature,
 };
+
+fn returns_exact(signature: &Signature, expected: &[RuntimeRep]) -> bool {
+    match &signature.results {
+        ResultContract::Returns(reps) => reps == expected,
+        ResultContract::NoSuccess => false,
+    }
+}
 
 pub(super) struct FloatingFamily;
 
@@ -98,16 +105,18 @@ impl ScalarFamily for FloatingFamily {
             let valid = match operation {
                 FloatingOperation::Compare(_) => {
                     signature.arguments == [RuntimeRep::Float(width), RuntimeRep::Float(width)]
-                        && signature.results == [RuntimeRep::Int(64)]
+                        && returns_exact(signature, &[RuntimeRep::Int(64)])
                 }
                 FloatingOperation::Convert { from_float } => {
                     signature.arguments == [RuntimeRep::Float(if from_float { 32 } else { 64 })]
-                        && signature.results
-                            == [RuntimeRep::Float(if from_float { 64 } else { 32 })]
+                        && returns_exact(
+                            signature,
+                            &[RuntimeRep::Float(if from_float { 64 } else { 32 })],
+                        )
                 }
                 _ => {
                     signature.arguments == [RuntimeRep::Float(width); 2]
-                        && signature.results == [RuntimeRep::Float(width)]
+                        && returns_exact(signature, &[RuntimeRep::Float(width)])
                 }
             };
             return valid.then_some(operation);
@@ -116,7 +125,7 @@ impl ScalarFamily for FloatingFamily {
             "rintDouble"
                 if (signature.arguments == [RuntimeRep::Float(64)]
                     || signature.arguments == [RuntimeRep::Float(64), RuntimeRep::Void])
-                    && signature.results == [RuntimeRep::Float(64)] =>
+                    && returns_exact(signature, &[RuntimeRep::Float(64)]) =>
             {
                 Some(FloatingOperation::NearestDouble)
             }
@@ -167,7 +176,7 @@ impl ScalarFamily for FloatingFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
     use tidepool_repr::execution_schema::{testing, *};
 
     fn run(
@@ -177,8 +186,11 @@ mod tests {
         atoms: Vec<Atom>,
     ) -> Vec<tidepool_bridge::Value> {
         let mut wire = testing::wire_program();
-        wire.signatures[0].results = results.clone();
-        wire.signatures.push(Signature { arguments, results });
+        wire.signatures[0].results = ResultContract::Returns(results.clone());
+        wire.signatures.push(Signature {
+            arguments,
+            results: ResultContract::Returns(results),
+        });
         wire.operations.push(OperationDecl {
             identity: OperationIdentity::PrimOp(identity.into()),
             signature: SignatureId(1),
@@ -217,10 +229,10 @@ mod tests {
         for state_token in [false, true] {
             for (input, expected) in [(0.5_f64, 0.0_f64), (1.5, 2.0), (-0.5, -0.0), (-1.5, -2.0)] {
                 let mut wire = testing::wire_program();
-                wire.signatures[0].results = vec![RuntimeRep::Float(64)];
+                wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Float(64)]);
                 wire.signatures.push(Signature {
                     arguments: vec![RuntimeRep::Float(64)],
-                    results: vec![RuntimeRep::Float(64)],
+                    results: ResultContract::Returns(vec![RuntimeRep::Float(64)]),
                 });
                 if state_token {
                     wire.signatures[1].arguments.push(RuntimeRep::Void);
@@ -301,21 +313,25 @@ mod tests {
 
     #[test]
     fn ghc_float_family_rejects_wrong_signatures() {
-        assert!(FloatingFamily::recognize(
-            &OperationIdentity::PrimOp("plusFloat#".into()),
-            &Signature {
-                arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
-                results: vec![RuntimeRep::Float(64)]
-            }
-        )
-        .is_none());
-        assert!(FloatingFamily::recognize(
-            &OperationIdentity::PrimOp("eqFloat#".into()),
-            &Signature {
-                arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
-                results: vec![RuntimeRep::Float(32)]
-            }
-        )
-        .is_none());
+        assert!(
+            FloatingFamily::recognize(
+                &OperationIdentity::PrimOp("plusFloat#".into()),
+                &Signature {
+                    arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
+                    results: ResultContract::Returns(vec![RuntimeRep::Float(64)])
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            FloatingFamily::recognize(
+                &OperationIdentity::PrimOp("eqFloat#".into()),
+                &Signature {
+                    arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
+                    results: ResultContract::Returns(vec![RuntimeRep::Float(32)])
+                }
+            )
+            .is_none()
+        );
     }
 }

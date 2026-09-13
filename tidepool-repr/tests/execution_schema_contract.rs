@@ -1,9 +1,9 @@
 use tidepool_repr::execution_schema::parse_program;
-use tidepool_repr::execution_schema::{
-    DecodeLimits, ForeignConvention, GlobalDecl, GlobalId, OperationIdentity,
-    ProgramRequirements, RuntimeRep, SignatureId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
-};
 use tidepool_repr::execution_schema::testing::{envelope, identity, target, wire_program};
+use tidepool_repr::execution_schema::{
+    DecodeLimits, ForeignConvention, GlobalDecl, GlobalId, OperationIdentity, ProgramRequirements,
+    ResultContract, RuntimeRep, SignatureId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+};
 
 const M3_ARTIFACT: &[u8] =
     include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
@@ -19,15 +19,29 @@ fn w5_no_success_is_not_a_successful_empty_return() {
     assert!(tidepool_repr::execution_schema::testing::prepare(wire).is_err());
     assert!(!ResultContract::Returns(vec![]).satisfies(&ResultContract::NoSuccess));
     assert!(ResultContract::NoSuccess.satisfies(&ResultContract::Returns(vec![])));
+    assert_eq!(
+        ResultContract::Returns(vec![]).returned_reps(),
+        Some(&[][..])
+    );
+    assert_eq!(ResultContract::NoSuccess.returned_reps(), None);
 }
 
 #[test]
 fn w5_no_success_case_merge_preserves_successful_representations() {
     use tidepool_repr::execution_schema::ResultContract;
     let result = ResultContract::Returns(vec![RuntimeRep::Int(64)]);
-    assert_eq!(ResultContract::NoSuccess.merge_alternative(&result), Some(result.clone()));
-    assert_eq!(result.merge_alternative(&ResultContract::NoSuccess), Some(result.clone()));
-    assert_eq!(result.merge_alternative(&ResultContract::Returns(vec![])), None);
+    assert_eq!(
+        ResultContract::NoSuccess.merge_alternative(&result),
+        Some(result.clone())
+    );
+    assert_eq!(
+        result.merge_alternative(&ResultContract::NoSuccess),
+        Some(result.clone())
+    );
+    assert_eq!(
+        result.merge_alternative(&ResultContract::Returns(vec![])),
+        None
+    );
 }
 
 #[test]
@@ -48,7 +62,6 @@ fn haskell_m3_fixture_decodes_global_contract() {
         .expect("M3 fixture should retain Data.List.reverse as an imported global");
     assert!(reverse.required_evaluated);
     assert_eq!(reverse.required_generation, None);
-    assert!(!reverse.dead_end);
     assert_eq!(reverse.identity.record_parent, None);
 }
 
@@ -72,7 +85,10 @@ fn haskell_schema6_seed_decodes_record_parent_and_intrinsic() {
         .iter()
         .find(|constructor| constructor.identity.occurrence == "RecordField")
         .expect("schema-6 seed should retain its record-field identity");
-    assert_eq!(constructor.identity.record_parent.as_deref(), Some("FixtureRecord"));
+    assert_eq!(
+        constructor.identity.record_parent.as_deref(),
+        Some("FixtureRecord")
+    );
 
     let operation = program
         .operations()
@@ -85,11 +101,24 @@ fn haskell_schema6_seed_decodes_record_parent_and_intrinsic() {
                 })
         })
         .expect("schema-6 seed should retain its intrinsic operation identity");
-    assert_eq!(operation.signature.0, 2);
-    assert_eq!(program.signatures()[operation.signature.0 as usize].arguments,
-        vec![RuntimeRep::Float(64)]);
-    assert_eq!(program.signatures()[operation.signature.0 as usize].results,
-        vec![RuntimeRep::Float(64)]);
+    assert_eq!(
+        program.signatures()[operation.signature.0 as usize].arguments,
+        vec![RuntimeRep::Float(64)]
+    );
+    assert_eq!(
+        program.signatures()[operation.signature.0 as usize].results,
+        ResultContract::Returns(vec![RuntimeRep::Float(64)])
+    );
+
+    let raise = program
+        .operations()
+        .iter()
+        .find(|operation| operation.identity == OperationIdentity::PrimOp("raise#".into()))
+        .expect("schema seed should retain its nonreturning raise operation");
+    assert_eq!(
+        program.signatures()[raise.signature.0 as usize].results,
+        ResultContract::NoSuccess
+    );
 }
 
 #[test]
@@ -99,12 +128,11 @@ fn representative_recursive_import_contract_compiles() {
     program.envelope = envelope.clone();
     let signature = program.signatures.first_mut().expect("fixture signature");
     signature.arguments = vec![RuntimeRep::LiftedRef];
-    signature.results = vec![RuntimeRep::LiftedRef];
+    signature.results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     program.globals.push(GlobalDecl {
         identity: identity("Fixture.Dependency", "imported"),
         rep: RuntimeRep::LiftedRef,
         entry_signature: Some(SignatureId(0)),
-        dead_end: false,
         required_evaluated: false,
         required_generation: Some(7),
     });
@@ -113,7 +141,9 @@ fn representative_recursive_import_contract_compiles() {
         binding.binding.rhs = tidepool_repr::execution_schema::HeapRhs::Thunk {
             signature: SignatureId(0),
             update: tidepool_repr::execution_schema::UpdatePolicy::Memoize,
-            captures: vec![tidepool_repr::execution_schema::ValueRef::Global(GlobalId(0))],
+            captures: vec![tidepool_repr::execution_schema::ValueRef::Global(GlobalId(
+                0,
+            ))],
             body: 0,
         };
     }

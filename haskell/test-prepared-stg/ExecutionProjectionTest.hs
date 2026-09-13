@@ -370,12 +370,12 @@ verifyDemandedApplicationResults program = do
     checkJoin :: JoinBinding -> IO Int
     checkJoin (JoinBinding _ signature _ body) =
       checkExpr (signatureResults (signatureAt signature)) body
-    checkExpr :: [RuntimeRep] -> Expr -> IO Int
+    checkExpr :: ResultContract -> Expr -> IO Int
     checkExpr expected expression = case expression of
       Enter _ signature -> checkResult expected signature
       Call _ signature _ -> checkResult expected signature
-      Case scrutinee _ binderReps _ alternatives -> do
-        scrutineeCalls <- checkExpr binderReps scrutinee
+      Case scrutinee _ binderResults _ alternatives -> do
+        scrutineeCalls <- checkExpr binderResults scrutinee
         alternativeCalls <- sum <$> mapM (checkAlternative expected) alternatives
         pure (scrutineeCalls + alternativeCalls)
       Let group body -> do
@@ -387,9 +387,9 @@ verifyDemandedApplicationResults program = do
         bodyCalls <- checkExpr expected body
         pure (joinCalls + bodyCalls)
       _ -> pure 0
-    checkAlternative :: [RuntimeRep] -> Alternative -> IO Int
+    checkAlternative :: ResultContract -> Alternative -> IO Int
     checkAlternative expected (Alternative _ _ body) = checkExpr expected body
-    checkResult :: [RuntimeRep] -> SignatureId -> IO Int
+    checkResult :: ResultContract -> SignatureId -> IO Int
     checkResult expected signature = do
       unless (signatureResults (signatureAt signature) == expected)
         (ioError (userError "M3 projection call result did not match its demanded context"))
@@ -405,7 +405,7 @@ verifySpecificApplicationShapes program = do
     (ioError (userError
       "M3 projection did not retain the oversaturated polymorphicIdentity call with its demanded Int# result"))
   where
-    expectedResult = [IntRep 64]
+    expectedResult = Returns [IntRep 64]
     namedBinding occurrence = case
       [ binding
       | group <- programBindings program
@@ -582,7 +582,7 @@ verifyUnboxedReturn program = case
   , symbolOccurrence symbol == "returnUnboxedArgument"
   ] of
     [(signature, [parameter], Return [Ref (Local returned)])]
-      | signatureResults signature == [IntRep 64] && returned == parameter -> pure ()
+      | signatureResults signature == Returns [IntRep 64] && returned == parameter -> pure ()
     matches -> ioError (userError
       ("M3 projection did not return the unboxed parameter directly: " <> show matches))
   where
@@ -607,7 +607,7 @@ verifyRintDoubleStateToken = do
       ] of
       [signatureId] ->
         let signature = programSignatures program !! fromIntegral (unSignatureId signatureId)
-        in unless (signature == Signature [FloatRep 64, VoidRep] [FloatRep 64])
+        in unless (signature == Signature [FloatRep 64, VoidRep] (Returns [FloatRep 64]))
           (ioError (userError
             ("state-bearing rintDouble signature changed: " <> show signature)))
       signatures -> ioError (userError

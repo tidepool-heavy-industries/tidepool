@@ -43,7 +43,7 @@ fn compile_wire(wire: WireProgram) -> CompiledProgram {
 
 fn retained_parent_program(garbage: usize) -> CompiledProgram {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(constructor(0, Vec::new()));
     wire.constructors
         .push(constructor(1, vec![RuntimeRep::LiftedRef]));
@@ -96,7 +96,7 @@ fn retained_parent_program(garbage: usize) -> CompiledProgram {
 
 fn static_constructor_program() -> CompiledProgram {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(constructor(0, Vec::new()));
     wire.expressions.nodes.clear();
     wire.bindings = vec![Group::NonRecursive(TopBinding {

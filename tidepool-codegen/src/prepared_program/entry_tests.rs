@@ -8,7 +8,7 @@ use tidepool_repr::execution_schema::{testing, *};
 #[test]
 fn w5_a4_observation_forces_constructor_child() {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     for (index, fields) in [vec![RuntimeRep::LiftedRef], vec![]]
         .into_iter()
         .enumerate()
@@ -94,7 +94,7 @@ pub(super) fn caf_program(
     update: UpdatePolicy,
 ) -> CompiledProgram {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(ConstructorDecl {
         identity: testing::identity("W5", "Unit"),
         family: testing::identity("W5", "Unit"),
@@ -241,7 +241,7 @@ fn w5_a1_single_entry_success_is_observable_after_heap_scan() {
 #[test]
 fn w5_a1_function_case_enters_captured_local_thunk_across_collection() {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(ConstructorDecl {
         identity: testing::identity("W5", "Unit"),
         family: testing::identity("W5", "Unit"),
@@ -271,7 +271,7 @@ fn w5_a1_function_case_enters_captured_local_thunk_across_collection() {
         ExprFrame::Case {
             scrutinee: 1,
             binder,
-            scrutinee_reps: vec![RuntimeRep::LiftedRef],
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             kind: CaseKind::Polymorphic,
             alternatives: vec![Alternative {
                 pattern: AlternativePattern::Default,
@@ -386,7 +386,7 @@ fn constructor_decl(index: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {
 fn w5_a4_lazy_alias_chain_is_observable() {
     let depth = 96_u64;
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(constructor_decl(0, vec![]));
     wire.expressions.nodes.clear();
     for index in 0..depth {
@@ -440,7 +440,7 @@ fn w5_a4_lazy_alias_chain_is_observable() {
 #[test]
 fn w5_a4_function_result_is_typed_unobservable_failure() {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors
         .push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
     wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
@@ -491,7 +491,7 @@ fn w5_a4_function_result_is_typed_unobservable_failure() {
 #[test]
 fn w5_a4_cycle_uses_one_bounded_observation_budget() {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors
         .push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
     wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(0)))]);
@@ -568,7 +568,7 @@ fn w5_a4_cancelled_run_cleans_observation_roots() {
 #[test]
 fn w5_a4_child_force_moves_heap_without_losing_sibling_root() {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(constructor_decl(0, vec![]));
     wire.constructors.push(constructor_decl(
         1,
@@ -661,7 +661,7 @@ fn w5_a4_child_force_moves_heap_without_losing_sibling_root() {
 
 fn deep_forcing_wire() -> WireProgram {
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(constructor_decl(0, vec![]));
     wire.constructors
         .push(constructor_decl(1, vec![RuntimeRep::LiftedRef]));

@@ -17,11 +17,9 @@ pub fn link_program(
         let wrong_entry = declaration.entry_signature.is_some_and(|signature| {
             imported.entry_signature.as_ref() != Some(&prepared.signatures()[signature.0 as usize])
         });
-        let wrong_dead_end = declaration.dead_end != imported.dead_end;
         if imported.identity != declaration.identity
             || imported.rep != declaration.rep
             || wrong_entry
-            || wrong_dead_end
             || (imported.rep != super::RuntimeRep::LiftedRef && imported.entry_signature.is_some())
             || (declaration.required_evaluated && !imported.evaluated)
             || declaration
@@ -40,8 +38,9 @@ mod tests {
     use super::*;
     use crate::execution_schema::{
         Architecture, Endianness, GlobalDecl, Group, HeapBinding, HeapRhs, ImportedValue,
-        ProgramEnvelope, RuntimeRep, Signature, SignatureId, SymbolIdentity, TargetDescriptor,
-        TopBinding, UpdatePolicy, ValueId, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+        ProgramEnvelope, ResultContract, RuntimeRep, Signature, SignatureId, SymbolIdentity,
+        TargetDescriptor, TopBinding, UpdatePolicy, ValueId, WireProgram, EXECUTION_ABI_VERSION,
+        SCHEMA_VERSION,
     };
 
     fn identity() -> SymbolIdentity {
@@ -72,13 +71,12 @@ mod tests {
             },
             signatures: vec![Signature {
                 arguments: vec![],
-                results: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             }],
             globals: vec![GlobalDecl {
                 identity: identity(),
                 rep: RuntimeRep::LiftedRef,
                 entry_signature: Some(SignatureId(0)),
-                dead_end: false,
                 required_evaluated: true,
                 required_generation,
             }],
@@ -112,9 +110,8 @@ mod tests {
             rep: RuntimeRep::LiftedRef,
             entry_signature: Some(Signature {
                 arguments: vec![],
-                results: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             }),
-            dead_end: false,
             evaluated: true,
             generation,
         };
@@ -167,7 +164,7 @@ mod tests {
             .entry_signature
             .as_mut()
             .unwrap()
-            .results = vec![RuntimeRep::Int(64)];
+            .results = ResultContract::Returns(vec![RuntimeRep::Int(64)]);
         assert!(matches!(
             link_program(prepared(Some(7)), &wrong_signature),
             Err(LinkError::ImportContract(_))
@@ -182,22 +179,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_import_without_matching_dead_end_evidence() {
-        let mut dead_end_declaration = prepared(Some(7));
-        dead_end_declaration.wire.signatures[0].results.clear();
-        dead_end_declaration.wire.globals[0].dead_end = true;
+    fn links_no_success_only_with_matching_entry_contract() {
+        let mut no_success_declaration = prepared(Some(7));
+        no_success_declaration.wire.signatures[0].results = ResultContract::NoSuccess;
         let mut snapshot = imports(7);
         let imported = snapshot.values.get_mut(&identity()).unwrap();
-        imported.dead_end = true;
-        imported.entry_signature.as_mut().unwrap().results.clear();
-        assert!(link_program(dead_end_declaration, &snapshot).is_ok());
+        imported.entry_signature.as_mut().unwrap().results = ResultContract::NoSuccess;
+        assert!(link_program(no_success_declaration, &snapshot).is_ok());
 
-        snapshot.values.get_mut(&identity()).unwrap().dead_end = false;
-        let mut dead_end_declaration = prepared(Some(7));
-        dead_end_declaration.wire.signatures[0].results.clear();
-        dead_end_declaration.wire.globals[0].dead_end = true;
+        snapshot
+            .values
+            .get_mut(&identity())
+            .unwrap()
+            .entry_signature
+            .as_mut()
+            .unwrap()
+            .results = ResultContract::Returns(vec![]);
+        let mut no_success_declaration = prepared(Some(7));
+        no_success_declaration.wire.signatures[0].results = ResultContract::NoSuccess;
         assert!(matches!(
-            link_program(dead_end_declaration, &snapshot),
+            link_program(no_success_declaration, &snapshot),
             Err(LinkError::ImportContract(_))
         ));
     }
@@ -212,7 +213,7 @@ mod tests {
             .entry_signature
             .as_mut()
             .unwrap()
-            .results = vec![RuntimeRep::Int(64)];
+            .results = ResultContract::Returns(vec![RuntimeRep::Int(64)]);
         assert!(matches!(
             link_program(prepared(Some(7)), &equal_id_different_shape),
             Err(LinkError::ImportContract(_))
@@ -221,7 +222,7 @@ mod tests {
         let mut different_id_equal_shape = prepared(Some(7));
         different_id_equal_shape.wire.signatures.push(Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         });
         different_id_equal_shape.wire.globals[0].entry_signature = Some(SignatureId(1));
         assert!(link_program(different_id_equal_shape, &imports(7)).is_ok());

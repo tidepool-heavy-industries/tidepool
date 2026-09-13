@@ -8,11 +8,15 @@
 use super::raw::{self, DescriptorSpace};
 use crate::descriptor_region::{DescriptorArena, DescriptorOldSpace};
 use crate::execution_descriptor::DescriptorTraceError;
+use crate::external_storage::{ExternalPayloadOwner, ExternalStorageKind};
 
 #[derive(Debug)]
 pub struct PromotionResult {
     pub promoted_bytes: usize,
     pub nursery_bytes: usize,
+    /// Payloads expanded while copying the selected graph. Sibling fixup
+    /// deliberately has a fresh scratch set and is not included here.
+    pub promoted_external_payloads: Vec<(usize, ExternalStorageKind)>,
 }
 
 /// Preparation has not changed objects. Incomplete means roots or either heap
@@ -60,6 +64,57 @@ pub unsafe fn promote_and_fixup(
     descriptors: &mut DescriptorSpace,
     previous: Option<&dyn DescriptorOldSpace>,
 ) -> Result<PromotionResult, PromotionFailure> {
+    promote_and_fixup_inner(
+        selected,
+        all_roots,
+        from_start,
+        from_used,
+        nursery_spare,
+        destination,
+        descriptors,
+        previous,
+        None,
+    )
+}
+
+/// Selectively promote with authenticated external payload edges. This keeps
+/// the existing promotion/fixup protocol and only extends each Cheney copy
+/// phase with the owner-provided bounded slots.
+pub unsafe fn promote_and_fixup_with_external(
+    selected: &[*mut *mut u8],
+    all_roots: &[*mut *mut u8],
+    from_start: *const u8,
+    from_used: usize,
+    nursery_spare: &mut [u8],
+    destination: &mut DescriptorArena,
+    descriptors: &mut DescriptorSpace,
+    previous: Option<&dyn DescriptorOldSpace>,
+    external: &dyn ExternalPayloadOwner,
+) -> Result<PromotionResult, PromotionFailure> {
+    promote_and_fixup_inner(
+        selected,
+        all_roots,
+        from_start,
+        from_used,
+        nursery_spare,
+        destination,
+        descriptors,
+        previous,
+        Some(external),
+    )
+}
+
+unsafe fn promote_and_fixup_inner(
+    selected: &[*mut *mut u8],
+    all_roots: &[*mut *mut u8],
+    from_start: *const u8,
+    from_used: usize,
+    nursery_spare: &mut [u8],
+    destination: &mut DescriptorArena,
+    descriptors: &mut DescriptorSpace,
+    previous: Option<&dyn DescriptorOldSpace>,
+    external: Option<&dyn ExternalPayloadOwner>,
+) -> Result<PromotionResult, PromotionFailure> {
     use PromotionFailure::{Incomplete, Preparation};
     if selected.iter().any(|slot| !all_roots.contains(slot)) {
         return Err(Preparation(DescriptorTraceError::InvalidRange));
@@ -78,15 +133,22 @@ pub unsafe fn promote_and_fixup(
     raw::prepare_descriptor_copy(all_roots, from_start, from_used, nursery_spare, descriptors)
         .map_err(Preparation)?;
 
-    let promoted = raw::copy_prevalidated_descriptor_graph(
+    let promoted = raw::copy_prevalidated_descriptor_graph_with_external(
         selected,
         from_start,
         from_used,
         destination.destination(),
         descriptors,
         previous,
+        external,
     )
     .map_err(Incomplete)?;
+    let mut promoted_external_payloads = Vec::new();
+    let payload_count = descriptors.visited_external_payloads().count();
+    promoted_external_payloads
+        .try_reserve(payload_count)
+        .map_err(|_| Incomplete(DescriptorTraceError::MetadataAllocation))?;
+    promoted_external_payloads.extend(descriptors.visited_external_payloads());
     destination
         .seal(promoted.bytes_copied)
         .map_err(Incomplete)?;
@@ -98,18 +160,20 @@ pub unsafe fn promote_and_fixup(
     // promotion. Only this operation has written Forwarded states since then.
     // Updated compression may point at a different descriptor, including an
     // already admitted static/old target; exact-target admission is the proof.
-    let nursery = raw::copy_prevalidated_descriptor_graph(
+    let nursery = raw::copy_prevalidated_descriptor_graph_with_external(
         all_roots,
         from_start,
         from_used,
         nursery_spare,
         descriptors,
         Some(&admitted),
+        external,
     )
     .map_err(Incomplete)?;
     Ok(PromotionResult {
         promoted_bytes: promoted.bytes_copied,
         nursery_bytes: nursery.bytes_copied,
+        promoted_external_payloads,
     })
 }
 
@@ -117,7 +181,11 @@ pub unsafe fn promote_and_fixup(
 mod tests {
     use super::*;
     use crate::execution_descriptor::{DescriptorState, ObjectDescriptor};
-    use crate::managed_reference::untag;
+    use crate::external_storage::{
+        ExternalPointerSlots, ExternalStorageKind, ExternalStorageValidationError,
+    };
+    use crate::managed_reference::{tag_of, untag};
+    use std::rc::Rc;
     use std::sync::Arc;
     use tidepool_repr::execution_schema::{
         Architecture, Endianness, RuntimeRep, StorageLayout, TargetDescriptor,
@@ -154,9 +222,29 @@ mod tests {
             object.cast::<usize>(),
             descriptor.initial_header_word() | DescriptorState::Live as usize,
         );
+        if let Some(&offset) = descriptor.trace_offsets().first() {
+            std::ptr::write(object.add(offset as usize).cast(), child);
+        }
+        object
+    }
+
+    unsafe fn write_external(
+        base: *mut u8,
+        offset: usize,
+        descriptor: &ObjectDescriptor,
+        published: *mut u8,
+    ) -> *mut u8 {
+        let object = base.add(offset);
+        descriptor.initialize_header(object);
         std::ptr::write(
-            object.add(descriptor.trace_offsets()[0] as usize).cast(),
-            child,
+            object.cast::<usize>(),
+            descriptor.initial_header_word() | DescriptorState::Live as usize,
+        );
+        std::ptr::write(
+            object
+                .add(descriptor.payload_base() as usize)
+                .cast::<*mut u8>(),
+            published,
         );
         object
     }
@@ -312,5 +400,104 @@ mod tests {
         let old_value = unsafe { *old_field as usize };
         assert_eq!(untag(old_value), untag(source_root as usize));
         assert_ne!(untag(old_value), source_object as usize);
+    }
+
+    #[test]
+    fn selected_external_alias_promotes_payload_once_and_fixup_reuses_old_leaf() {
+        struct Payload(std::cell::UnsafeCell<*mut u8>);
+        // SAFETY: the test owner remains live and is accessed only by the
+        // single-threaded collector during this copy.
+        unsafe impl crate::external_storage::ExternalPayloadOwner for Payload {
+            fn slots(
+                &self,
+                published: *mut u8,
+                kind: ExternalStorageKind,
+            ) -> Result<ExternalPointerSlots, ExternalStorageValidationError> {
+                if published != self.0.get().cast() {
+                    return Err(ExternalStorageValidationError::Untracked(
+                        published as usize,
+                    ));
+                }
+                if kind != ExternalStorageKind::BoxedArray {
+                    return Err(ExternalStorageValidationError::KindMismatch {
+                        expected: kind,
+                        actual: ExternalStorageKind::BoxedArray,
+                    });
+                }
+                // SAFETY: this span is the owner-authenticated one-slot view.
+                Ok(unsafe { ExternalPointerSlots::from_validated(self.0.get(), 1) })
+            }
+        }
+
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "system-v".into(),
+            features: Vec::new(),
+        };
+        let external =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        let leaf = Arc::new(
+            ObjectDescriptor::constructor(1, StorageLayout::for_reps(&target, &[]).unwrap(), None)
+                .unwrap(),
+        );
+        let extent = external.allocation_extent() as usize;
+        assert_eq!(extent, leaf.allocation_extent() as usize);
+        let source_bytes = extent * 3;
+        let mut source = vec![0_u64; source_bytes / 8];
+        let mut spare = vec![0_u64; source_bytes / 8];
+        let mut descriptors =
+            DescriptorSpace::new([Arc::clone(&external), Arc::clone(&leaf)]).unwrap();
+        let mut destination =
+            DescriptorArena::reserve(source_bytes, [Arc::clone(&external), Arc::clone(&leaf)])
+                .unwrap();
+        let (selected_object, sibling_object, leaf_object, payload) = unsafe {
+            let base = source.as_mut_ptr().cast::<u8>();
+            let leaf_object = write_node(base, extent * 2, &leaf, std::ptr::null_mut());
+            let payload = Rc::new(Payload(std::cell::UnsafeCell::new(
+                (leaf_object as usize | usize::from(leaf.tag())) as *mut u8,
+            )));
+            let published = payload.0.get().cast::<u8>();
+            let selected = write_external(base, 0, &external, published);
+            let sibling = write_external(base, extent, &external, published);
+            (selected, sibling, leaf_object, payload)
+        };
+        let mut selected_root = selected_object;
+        let mut sibling_root = sibling_object;
+        let all_roots = [
+            &mut selected_root as *mut *mut u8,
+            &mut sibling_root as *mut *mut u8,
+        ];
+        let selected = [all_roots[0]];
+        let result = unsafe {
+            promote_and_fixup_with_external(
+                &selected,
+                &all_roots,
+                source.as_ptr().cast(),
+                source_bytes,
+                std::slice::from_raw_parts_mut(spare.as_mut_ptr().cast(), source_bytes),
+                &mut destination,
+                &mut descriptors,
+                None,
+                &*payload,
+            )
+        }
+        .unwrap();
+        assert_eq!(result.promoted_bytes, extent * 2);
+        assert_eq!(result.nursery_bytes, extent);
+        assert_eq!(result.promoted_external_payloads.len(), 1);
+        assert_eq!(
+            result.promoted_external_payloads[0],
+            (payload.0.get() as usize, ExternalStorageKind::BoxedArray)
+        );
+        let payload_value = unsafe { *payload.0.get() as usize };
+        assert_eq!(
+            untag(payload_value),
+            destination.destination().as_ptr() as usize + extent
+        );
+        assert_eq!(tag_of(payload_value), leaf.tag());
+        let _ = leaf_object;
     }
 }

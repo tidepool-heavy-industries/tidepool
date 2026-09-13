@@ -113,6 +113,8 @@ pub enum DescriptorTraceError {
     InsufficientSpace { required: usize, available: usize },
     #[error("descriptor metadata allocation failed")]
     MetadataAllocation,
+    #[error("descriptor external-payload scratch capacity bound was violated")]
+    MetadataIntegrity,
     #[error("copy source/destination ranges are invalid or overlap")]
     InvalidRange,
     #[error("descriptor object extent {declared} exceeds readable bytes {available}")]
@@ -270,6 +272,38 @@ impl ObjectDescriptor {
         &self.trace_offsets
     }
 
+    /// Return the published payload identity carried by an external handle.
+    /// The identity is authenticated by the caller's [`ExternalPayloadOwner`];
+    /// this method only validates the descriptor-owned handle slot.
+    ///
+    /// # Safety
+    /// `ptr` names writable storage for an initialized object described by
+    /// `self`, readable for `available` bytes.
+    pub unsafe fn external_payload_slot(
+        &self,
+        ptr: *mut u8,
+        available: usize,
+    ) -> Result<*mut *mut u8, DescriptorTraceError> {
+        if self.external_kind().is_none() {
+            return Err(DescriptorTraceError::MissingExternalOwner);
+        }
+        self.state(ptr, available)?;
+        let offset = self.payload_base as usize;
+        let end = offset.checked_add(std::mem::size_of::<*mut u8>()).ok_or(
+            DescriptorTraceError::InvalidOffset {
+                offset: self.payload_base,
+                extent: self.allocation_extent,
+            },
+        )?;
+        if end > self.allocation_extent as usize {
+            return Err(DescriptorTraceError::InvalidOffset {
+                offset: self.payload_base,
+                extent: self.allocation_extent,
+            });
+        }
+        Ok(ptr.add(offset).cast())
+    }
+
     /// Word emitted by both the native allocator and host marshalling.
     /// Its address is valid only while this descriptor remains pinned and owned.
     pub fn initial_header_word(&self) -> usize {
@@ -383,9 +417,9 @@ impl ObjectDescriptor {
         available: usize,
         mut visit: impl FnMut(*mut *mut u8),
     ) -> Result<(), DescriptorTraceError> {
-        // wave5:external-graph: the owner-aware copier must expand this edge
-        // through ExternalPayloadOwner instead. Managed-only walkers cannot
-        // silently declare an external handle a leaf.
+        // Managed-only walkers intentionally reject external handles. The
+        // owner-aware collector expands the payload through its authenticated
+        // ExternalPayloadOwner view before visiting managed slots.
         if self.external_kind().is_some() {
             return Err(DescriptorTraceError::MissingExternalOwner);
         }

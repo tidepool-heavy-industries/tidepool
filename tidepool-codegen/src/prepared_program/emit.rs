@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_repr::execution_schema::{
-    AlternativePattern, Atom, CaseKind, ExprFrame, Group, HeapRhs, JoinId, RuntimeRep, Signature,
-    SignatureId, ValueId, ValueRef,
+    AlternativePattern, Atom, CaseKind, ExprFrame, Group, HeapRhs, JoinId, ResultContract,
+    RuntimeRep, Signature, SignatureId, ValueId, ValueRef,
 };
 
 type Values = BTreeMap<ValueId, Value>;
@@ -23,7 +23,7 @@ type Values = BTreeMap<ValueId, Value>;
 #[derive(Clone)]
 struct Destination {
     block: Block,
-    reps: Vec<RuntimeRep>,
+    results: ResultContract,
 }
 
 #[derive(Clone)]
@@ -133,7 +133,7 @@ fn emit_function_at(
                 .top_bindings
                 .get(&id)
                 .ok_or_else(|| unsupported(id, 0))?;
-            (top_signature(plan, binding), None)
+            (top_signature(plan, binding, id)?, None)
         }
     };
     let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
@@ -209,17 +209,28 @@ fn emit_function_at(
     } else {
         // A top constructor or byte literal is already materialized by the
         // invocation-owned top table; its environment is the returned value.
-        return_top(&mut builder, tagged_environment, &signature.results);
+        return_top(
+            &mut builder,
+            tagged_environment,
+            signature
+                .results
+                .returned_reps()
+                .ok_or_else(|| unsupported(id, 0))?,
+        );
         builder.finalize();
         pipeline.define_function(output, &mut context)?;
         return Ok(());
     }
     let root = body.ok_or_else(|| unsupported(id, 0))?;
     let exit = builder.create_block();
-    append_params(&mut builder, exit, &signature.results)?;
+    append_params(
+        &mut builder,
+        exit,
+        signature.results.returned_reps().unwrap_or(&[]),
+    )?;
     let destination = Destination {
         block: exit,
-        reps: signature.results.clone(),
+        results: signature.results.clone(),
     };
     let mut worklist = vec![Work::Emit {
         node: root,
@@ -255,16 +266,17 @@ fn emit_function_at(
                     ExprFrame::Case {
                         scrutinee,
                         binder,
-                        scrutinee_reps,
+                        scrutinee_results,
                         kind,
                         alternatives,
                     } => {
                         let scrutinee_block = builder.create_block();
+                        let scrutinee_reps = scrutinee_results.returned_reps().unwrap_or(&[]);
                         append_params(&mut builder, scrutinee_block, scrutinee_reps)?;
                         worklist.push(Work::Case {
                             node,
                             block: scrutinee_block,
-                            reps: scrutinee_reps.clone(),
+                            reps: scrutinee_reps.to_vec(),
                             values: values.clone(),
                             joins: joins.clone(),
                             destination,
@@ -277,7 +289,7 @@ fn emit_function_at(
                             joins,
                             destination: Destination {
                                 block: scrutinee_block,
-                                reps: scrutinee_reps.clone(),
+                                results: scrutinee_results.clone(),
                             },
                         });
                         let _ = (binder, kind, alternatives);
@@ -414,29 +426,48 @@ fn emit_function_at(
                             pipeline,
                             &plan.bytes,
                         )?;
-                        if output.len()
-                            != signature
-                                .results
-                                .iter()
-                                .filter(|rep| **rep != RuntimeRep::Void)
-                                .count()
-                        {
-                            return Err(unsupported(id, node));
+                        match (output, signature.results.returned_reps()) {
+                            (Some(output), Some(reps)) => {
+                                if output.len()
+                                    != reps.iter().filter(|rep| **rep != RuntimeRep::Void).count()
+                                {
+                                    return Err(unsupported(id, node));
+                                }
+                                finish_returning(
+                                    &mut builder,
+                                    pipeline,
+                                    vmctx,
+                                    &destination,
+                                    output,
+                                    id,
+                                    node,
+                                )?;
+                            }
+                            (None, None) => {}
+                            _ => return Err(unsupported(id, node)),
                         }
-                        jump_to(&mut builder, &destination.block, output);
                     }
                     ExprFrame::Return(atoms) => {
-                        let output = emit_atoms(
+                        let Some(reps) = destination.results.returned_reps() else {
+                            super::no_success::emit_terminal(
+                                &mut builder,
+                                pipeline,
+                                vmctx,
+                                super::no_success::TerminalCause::UnexpectedSuccess,
+                            )?;
+                            continue;
+                        };
+                        let output =
+                            emit_atoms(&mut builder, &values, atoms, reps, vmctx, plan, id, node)?;
+                        finish_returning(
                             &mut builder,
-                            &values,
-                            atoms,
-                            &destination.reps,
+                            pipeline,
                             vmctx,
-                            plan,
+                            &destination,
+                            output,
                             id,
                             node,
                         )?;
-                        jump_to(&mut builder, &destination.block, output);
                     }
                     ExprFrame::Call {
                         callee,
@@ -457,7 +488,17 @@ fn emit_function_at(
                             id,
                             node,
                         )?;
-                        jump_to(&mut builder, &destination.block, output);
+                        if let Some(output) = output {
+                            finish_returning(
+                                &mut builder,
+                                pipeline,
+                                vmctx,
+                                &destination,
+                                output,
+                                id,
+                                node,
+                            )?;
+                        }
                     }
                     ExprFrame::Enter {
                         callee,
@@ -475,7 +516,17 @@ fn emit_function_at(
                             id,
                             node,
                         )?;
-                        jump_to(&mut builder, &destination.block, output);
+                        if let Some(output) = output {
+                            finish_returning(
+                                &mut builder,
+                                pipeline,
+                                vmctx,
+                                &destination,
+                                output,
+                                id,
+                                node,
+                            )?;
+                        }
                     }
                     ExprFrame::Construct {
                         constructor,
@@ -493,7 +544,15 @@ fn emit_function_at(
                             id,
                             node,
                         )?;
-                        jump_to(&mut builder, &destination.block, output);
+                        finish_returning(
+                            &mut builder,
+                            pipeline,
+                            vmctx,
+                            &destination,
+                            output,
+                            id,
+                            node,
+                        )?;
                     }
                 }
             }
@@ -528,18 +587,27 @@ fn emit_function_at(
     }
     builder.seal_all_blocks();
     builder.switch_to_block(exit);
-    let result_values = block_values(&builder, exit, &signature.results)?;
-    for (&value, rep) in result_values.iter().zip(
-        signature
-            .results
-            .iter()
-            .filter(|rep| **rep != RuntimeRep::Void),
-    ) {
+    let Some(result_reps) = signature.results.returned_reps() else {
+        super::no_success::emit_terminal(
+            &mut builder,
+            pipeline,
+            vmctx,
+            super::no_success::TerminalCause::UnexpectedSuccess,
+        )?;
+        builder.finalize();
+        pipeline.define_function(output, &mut context)?;
+        return Ok(());
+    };
+    let result_values = block_values(&builder, exit, result_reps)?;
+    for (&value, rep) in result_values
+        .iter()
+        .zip(result_reps.iter().filter(|rep| **rep != RuntimeRep::Void))
+    {
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             builder.declare_value_needs_stack_map(value);
         }
     }
-    return_values(&mut builder, result_values, &signature.results);
+    return_values(&mut builder, result_values, result_reps);
     builder.finalize();
     pipeline.define_function(output, &mut context)?;
     Ok(())
@@ -696,6 +764,32 @@ fn bind_block_values(
 fn jump_to(builder: &mut FunctionBuilder<'_>, block: &Block, values: Vec<Value>) {
     let args: Vec<_> = values.into_iter().map(BlockArg::Value).collect();
     builder.ins().jump(*block, &args);
+}
+
+fn finish_returning(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    vmctx: Value,
+    destination: &Destination,
+    values: Vec<Value>,
+    owner: ValueId,
+    node: usize,
+) -> Result<(), CompileError> {
+    let Some(reps) = destination.results.returned_reps() else {
+        // A normal result from an otherwise unreachable join cannot be
+        // published through a nonreturning continuation.
+        return super::no_success::emit_terminal(
+            builder,
+            pipeline,
+            vmctx,
+            super::no_success::TerminalCause::UnexpectedSuccess,
+        );
+    };
+    if values.len() != reps.iter().filter(|rep| **rep != RuntimeRep::Void).count() {
+        return Err(unsupported(owner, node));
+    }
+    jump_to(builder, &destination.block, values);
+    Ok(())
 }
 
 fn emit_let_group(
@@ -914,27 +1008,33 @@ fn emit_case_dispatch(
         });
     }
     let invalid = builder.create_block();
-    match kind {
-        CaseKind::MultiValue => jump_to(builder, &alternative_blocks[0].0, scrutinee),
-        CaseKind::Polymorphic => jump_to(builder, &alternative_blocks[0].0, Vec::new()),
-        CaseKind::Primitive(rep) => {
-            let mut next = None;
-            let mut default = None;
-            for (index, alternative) in alternatives.iter().enumerate() {
-                if matches!(alternative.pattern, AlternativePattern::Default) {
-                    default = Some(alternative_blocks[index].0);
-                    continue;
-                }
-                let here = next.take();
-                if let Some(here) = here {
-                    builder.switch_to_block(here);
-                }
-                match &alternative.pattern {
-                    AlternativePattern::Default => unreachable!("handled before literal dispatch"),
-                    AlternativePattern::Literal(literal) => {
-                        let expected = scalar_value(builder, literal, *rep, plan, owner, node)?;
-                        let equal =
-                            match rep {
+    if alternatives.is_empty() {
+        // A successful scrutinee in an empty case is an impossible normal
+        // continuation, whether its representation was known or unresolved.
+        builder.ins().jump(invalid, &[]);
+    } else {
+        match kind {
+            CaseKind::MultiValue => jump_to(builder, &alternative_blocks[0].0, scrutinee),
+            CaseKind::Polymorphic => jump_to(builder, &alternative_blocks[0].0, Vec::new()),
+            CaseKind::Primitive(rep) => {
+                let mut next = None;
+                let mut default = None;
+                for (index, alternative) in alternatives.iter().enumerate() {
+                    if matches!(alternative.pattern, AlternativePattern::Default) {
+                        default = Some(alternative_blocks[index].0);
+                        continue;
+                    }
+                    let here = next.take();
+                    if let Some(here) = here {
+                        builder.switch_to_block(here);
+                    }
+                    match &alternative.pattern {
+                        AlternativePattern::Default => {
+                            unreachable!("handled before literal dispatch")
+                        }
+                        AlternativePattern::Literal(literal) => {
+                            let expected = scalar_value(builder, literal, *rep, plan, owner, node)?;
+                            let equal = match rep {
                                 RuntimeRep::Float(32) | RuntimeRep::Float(64) => builder
                                     .ins()
                                     .fcmp(ir::condcodes::FloatCC::Equal, scrutinee[0], expected),
@@ -944,75 +1044,80 @@ fn emit_case_dispatch(
                                     expected,
                                 ),
                             };
-                        let otherwise = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(equal, alternative_blocks[index].0, &[], otherwise, &[]);
-                        next = Some(otherwise);
+                            let otherwise = builder.create_block();
+                            builder.ins().brif(
+                                equal,
+                                alternative_blocks[index].0,
+                                &[],
+                                otherwise,
+                                &[],
+                            );
+                            next = Some(otherwise);
+                        }
+                        AlternativePattern::Constructor(_) => return Err(unsupported(owner, node)),
                     }
-                    AlternativePattern::Constructor(_) => return Err(unsupported(owner, node)),
+                }
+                if let Some(next) = next {
+                    builder.switch_to_block(next);
+                    builder.ins().jump(default.unwrap_or(invalid), &[]);
+                } else {
+                    builder.ins().jump(default.unwrap_or(invalid), &[]);
                 }
             }
-            if let Some(next) = next {
-                builder.switch_to_block(next);
-                builder.ins().jump(default.unwrap_or(invalid), &[]);
-            } else {
-                builder.ins().jump(default.unwrap_or(invalid), &[]);
-            }
-        }
-        CaseKind::Algebraic(family) => {
-            let mut routes = Vec::new();
-            let mut alternatives_by_descriptor = Vec::new();
-            let mut default = None;
-            for (index, alternative) in alternatives.iter().enumerate() {
-                match alternative.pattern {
-                    AlternativePattern::Constructor(constructor) => {
-                        let route = builder.create_block();
-                        routes.push((route, constructor, index));
-                        alternatives_by_descriptor
-                            .push((plan.constructors[constructor.0 as usize].clone(), route));
+            CaseKind::Algebraic(family) => {
+                let mut routes = Vec::new();
+                let mut alternatives_by_descriptor = Vec::new();
+                let mut default = None;
+                for (index, alternative) in alternatives.iter().enumerate() {
+                    match alternative.pattern {
+                        AlternativePattern::Constructor(constructor) => {
+                            let route = builder.create_block();
+                            routes.push((route, constructor, index));
+                            alternatives_by_descriptor
+                                .push((plan.constructors[constructor.0 as usize].clone(), route));
+                        }
+                        AlternativePattern::Default => default = Some(alternative_blocks[index].0),
+                        AlternativePattern::Literal(_) => return Err(unsupported(owner, node)),
                     }
-                    AlternativePattern::Default => default = Some(alternative_blocks[index].0),
-                    AlternativePattern::Literal(_) => return Err(unsupported(owner, node)),
                 }
-            }
-            let descriptors: Vec<_> = plan
-                .program
-                .constructors()
-                .iter()
-                .enumerate()
-                .filter(|(_, declaration)| declaration.family == *family)
-                .map(|(index, _)| plan.constructors[index].clone())
-                .collect();
-            emit_algebraic_dispatch(
-                builder,
-                scrutinee[0],
-                &descriptors,
-                &alternatives_by_descriptor,
-                default,
-                invalid,
-            );
-            for (route, constructor, index) in routes {
-                builder.switch_to_block(route);
-                let object = builder.ins().band_imm(scrutinee[0], !7_i64);
-                let descriptor = &plan.constructors[constructor.0 as usize];
-                let fields = descriptor
-                    .payload()
-                    .logical_to_stored()
+                let descriptors: Vec<_> = plan
+                    .program
+                    .constructors()
                     .iter()
                     .enumerate()
-                    .filter_map(|(logical, stored)| stored.map(|stored| (logical, stored)))
-                    .map(|(_, stored)| {
-                        let field = &descriptor.payload().fields()[stored as usize];
-                        builder.ins().load(
-                            physical_type(field.rep()).expect("validated representation"),
-                            MemFlags::trusted(),
-                            object,
-                            (descriptor.payload_base() + field.offset()) as i32,
-                        )
-                    })
+                    .filter(|(_, declaration)| declaration.family == *family)
+                    .map(|(index, _)| plan.constructors[index].clone())
                     .collect();
-                jump_to(builder, &alternative_blocks[index].0, fields);
+                emit_algebraic_dispatch(
+                    builder,
+                    scrutinee[0],
+                    &descriptors,
+                    &alternatives_by_descriptor,
+                    default,
+                    invalid,
+                );
+                for (route, constructor, index) in routes {
+                    builder.switch_to_block(route);
+                    let object = builder.ins().band_imm(scrutinee[0], !7_i64);
+                    let descriptor = &plan.constructors[constructor.0 as usize];
+                    let fields = descriptor
+                        .payload()
+                        .logical_to_stored()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(logical, stored)| stored.map(|stored| (logical, stored)))
+                        .map(|(_, stored)| {
+                            let field = &descriptor.payload().fields()[stored as usize];
+                            builder.ins().load(
+                                physical_type(field.rep()).expect("validated representation"),
+                                MemFlags::trusted(),
+                                object,
+                                (descriptor.payload_base() + field.offset()) as i32,
+                            )
+                        })
+                        .collect();
+                    jump_to(builder, &alternative_blocks[index].0, fields);
+                }
             }
         }
     }
@@ -1032,24 +1137,21 @@ fn emit_case_dispatch(
 fn top_signature(
     plan: &ProgramPlan<'_>,
     binding: &tidepool_repr::execution_schema::HeapBinding,
-) -> Signature {
+    owner: ValueId,
+) -> Result<Signature, CompileError> {
     let result = match &binding.rhs {
         HeapRhs::Bytes(_) => RuntimeRep::Address,
         HeapRhs::Constructor { constructor, .. } => {
             plan.program.constructors()[constructor.0 as usize].result_rep
         }
-        HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
-            plan.program.signatures()[signature.0 as usize]
-                .results
-                .first()
-                .copied()
-                .unwrap_or(RuntimeRep::Void)
+        HeapRhs::Function { .. } | HeapRhs::Thunk { .. } => {
+            return Err(unsupported(owner, 0));
         }
     };
-    Signature {
+    Ok(Signature {
         arguments: Vec::new(),
-        results: vec![result],
-    }
+        results: ResultContract::Returns(vec![result]),
+    })
 }
 
 fn bind_parameters(
@@ -1130,19 +1232,25 @@ fn emit_enter(
     plan: &ProgramPlan<'_>,
     owner: ValueId,
     node: usize,
-) -> Result<Vec<Value>, CompileError> {
+) -> Result<Option<Vec<Value>>, CompileError> {
     let signature = plan
         .program
         .signatures()
         .get(signature_id.0 as usize)
         .ok_or_else(|| unsupported(owner, node))?;
-    if !signature.arguments.is_empty()
-        || signature.results.len() != 1
-        || !matches!(
-            signature.results[0],
-            RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
-        )
-    {
+    let result_rep = match &signature.results {
+        ResultContract::Returns(reps)
+            if matches!(
+                reps.as_slice(),
+                [RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef]
+            ) =>
+        {
+            Some(reps[0])
+        }
+        ResultContract::NoSuccess => None,
+        _ => return Err(unsupported(owner, node)),
+    };
+    if !signature.arguments.is_empty() {
         return Err(unsupported(owner, node));
     }
     // The program-level state machine owns evaluatedness, descriptor
@@ -1158,8 +1266,6 @@ fn emit_enter(
         owner,
         node,
     )?;
-    let complete = builder.create_block();
-    builder.append_block_param(complete, physical_type(signature.results[0])?);
     let enter = pipeline
         .module
         .declare_func_in_func(prepared_enter, builder.func);
@@ -1177,22 +1283,32 @@ fn emit_enter(
 
     builder.switch_to_block(valid);
     builder.seal_block(valid);
-    builder.ins().jump(complete, &[returned[1].into()]);
+    if let Some(rep) = result_rep {
+        let complete = builder.create_block();
+        builder.append_block_param(complete, physical_type(rep)?);
+        builder.ins().jump(complete, &[returned[1].into()]);
+
+        builder.switch_to_block(invalid);
+        builder.seal_block(invalid);
+        crate::alloc::emit_prepared_failure_return(builder, status);
+
+        builder.switch_to_block(complete);
+        builder.seal_block(complete);
+        let result = builder.block_params(complete)[0];
+        builder.declare_value_needs_stack_map(result);
+        return Ok(Some(vec![result]));
+    }
+    super::no_success::emit_terminal(
+        builder,
+        pipeline,
+        vmctx,
+        super::no_success::TerminalCause::UnexpectedSuccess,
+    )?;
 
     builder.switch_to_block(invalid);
     builder.seal_block(invalid);
     crate::alloc::emit_prepared_failure_return(builder, status);
-
-    builder.switch_to_block(complete);
-    builder.seal_block(complete);
-    let result = builder.block_params(complete)[0];
-    if matches!(
-        signature.results[0],
-        RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
-    ) {
-        builder.declare_value_needs_stack_map(result);
-    }
-    Ok(vec![result])
+    Ok(None)
 }
 
 fn emit_construct(
@@ -1268,7 +1384,7 @@ fn emit_exact_call(
     plan: &ProgramPlan<'_>,
     owner: ValueId,
     node: usize,
-) -> Result<Vec<Value>, CompileError> {
+) -> Result<Option<Vec<Value>>, CompileError> {
     let ValueRef::Local(_) = atom_ref(callee, owner, node)? else {
         return Err(unsupported(owner, node));
     };
@@ -1308,12 +1424,14 @@ fn emit_exact_call(
         owner,
         node,
     )?);
-    Ok(super::emit_direct_call(
+    super::emit_direct_call(
         builder,
+        pipeline,
+        vmctx,
         callee_ref,
         &call_arguments,
         &signature.results,
-    ))
+    )
 }
 
 fn atom_ref(atom: &Atom, owner: ValueId, node: usize) -> Result<&ValueRef, CompileError> {

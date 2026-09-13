@@ -111,17 +111,26 @@ pub(super) fn emit_adapter(
         arguments.push(value);
     }
     let callee = pipeline.module.declare_func_in_func(function, builder.func);
-    let values = super::emit_direct_call(&mut builder, callee, &arguments, abi.semantic_results());
-    for (value, field) in values.into_iter().zip(abi.result_layout().fields()) {
-        builder.ins().store(
-            MemFlags::trusted(),
-            value,
-            result_area,
-            field.offset() as i32,
-        );
+    let values = super::emit_direct_call(
+        &mut builder,
+        pipeline,
+        vmctx,
+        callee,
+        &arguments,
+        abi.semantic_results(),
+    )?;
+    if let Some(values) = values {
+        for (value, field) in values.into_iter().zip(abi.result_layout().fields()) {
+            builder.ins().store(
+                MemFlags::trusted(),
+                value,
+                result_area,
+                field.offset() as i32,
+            );
+        }
+        let success = builder.ins().iconst(types::I32, 0);
+        builder.ins().return_(&[success]);
     }
-    let success = builder.ins().iconst(types::I32, 0);
-    builder.ins().return_(&[success]);
     builder.finalize();
     pipeline.define_function(adapter, &mut context)?;
     Ok(adapter)

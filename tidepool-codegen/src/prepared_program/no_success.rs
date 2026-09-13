@@ -11,9 +11,7 @@ pub(super) enum TerminalCause {
 
 /// The generated caller supplied a valid VMContext. This call cannot collect,
 /// force a diagnostic, or replace the invocation's first cause.
-pub(super) unsafe extern "C" fn unexpected_success(
-    vmctx: *mut crate::context::VMContext,
-) -> i32 {
+pub(super) unsafe extern "C" fn unexpected_success(vmctx: *mut crate::context::VMContext) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
     machine.set_first_cause(crate::host_fns::RuntimeError::NoSuccessReturned);
     machine.prepared_call_status() as i32
@@ -51,7 +49,9 @@ pub(super) fn emit_terminal(
         TerminalCause::UnexpectedSuccess => "prepared_no_success_returned",
     };
     signature.returns.push(AbiParam::new(types::I32));
-    let function = pipeline.module.declare_function(name, Linkage::Import, &signature)
+    let function = pipeline
+        .module
+        .declare_function(name, Linkage::Import, &signature)
         .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
     let function = pipeline.module.declare_func_in_func(function, builder.func);
     let call = builder.ins().call(function, &arguments);

@@ -333,8 +333,24 @@ impl Decoder {
         let fields = array(value, 2, "signature")?;
         Ok(Signature {
             arguments: self.list(&fields[0], false, |this, value| this.rep(value))?,
-            results: self.list(&fields[1], false, |this, value| this.rep(value))?,
+            results: self.result_contract(&fields[1])?,
         })
+    }
+
+    fn result_contract(&mut self, value: &Value) -> Result<super::ResultContract, ParseError> {
+        let fields = tagged(value, "result contract")?;
+        match (unsigned(&fields[0], "result contract tag")?, fields.len()) {
+            (0, 2) => Ok(super::ResultContract::Returns(self.list(
+                &fields[1],
+                false,
+                |this, value| this.rep(value),
+            )?)),
+            (1, 1) => Ok(super::ResultContract::NoSuccess),
+            (0..=1, _) => Err(ParseError::Malformed(
+                "wrong result contract field count".into(),
+            )),
+            (tag, _) => Err(ParseError::InvalidTag(tag)),
+        }
     }
 
     fn field_layout(&mut self, value: &Value) -> Result<FieldLayout, ParseError> {
@@ -375,14 +391,13 @@ impl Decoder {
     }
 
     fn global(&mut self, value: &Value) -> Result<GlobalDecl, ParseError> {
-        let fields = array(value, 6, "global declaration")?;
+        let fields = array(value, 5, "global declaration")?;
         Ok(GlobalDecl {
             identity: self.symbol(&fields[0])?,
             rep: self.rep(&fields[1])?,
             entry_signature: self.optional_signature(&fields[2])?,
             required_evaluated: bool_value(&fields[3], "required evaluated")?,
             required_generation: self.optional_generation(&fields[4])?,
-            dead_end: bool_value(&fields[5], "dead-end evidence")?,
         })
     }
 
@@ -650,7 +665,7 @@ impl Decoder {
             (5, 6) => Ok(ExprFrame::Case {
                 scrutinee: self.expr_index(&fields[1])?,
                 binder: ValueId(u32_value(&fields[2], "case binder ID")?),
-                scrutinee_reps: self.list(&fields[3], false, |this, value| this.rep(value))?,
+                scrutinee_results: self.result_contract(&fields[3])?,
                 kind: self.case_kind(&fields[4])?,
                 alternatives: self
                     .list(&fields[5], false, |this, value| this.alternative(value))?,
@@ -802,7 +817,7 @@ mod tests {
                 n(5),
                 n(scrutinee),
                 n(level),
-                array(vec![rep()]),
+                array(vec![n(0), array(vec![rep()])]),
                 array(vec![n(1), rep()]),
                 array(vec![array(vec![array(vec![n(0)]), array(vec![]), n(body)])]),
             ]));
@@ -822,7 +837,10 @@ mod tests {
                 text("sysv64"),
                 array(vec![]),
             ]),
-            array(vec![array(vec![array(vec![]), array(vec![rep()])])]),
+            array(vec![array(vec![
+                array(vec![]),
+                array(vec![n(0), array(vec![rep()])]),
+            ])]),
             array(vec![]),
             array(vec![]),
             array(vec![]),

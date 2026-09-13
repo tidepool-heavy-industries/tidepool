@@ -1208,7 +1208,9 @@ impl MachineState {
         let storage = self.external_storage.borrow();
         let record = storage
             .get(&published)
-            .ok_or(ExternalStorageValidationError::Untracked(published))?;
+            .ok_or(ExternalStorageValidationError::Untracked(
+                published as usize,
+            ))?;
         if record.kind != expected {
             return Err(ExternalStorageValidationError::KindMismatch {
                 expected,
@@ -1270,7 +1272,9 @@ impl MachineState {
         let storage = self.external_storage.borrow();
         for &published in marked {
             if !storage.contains_key(&published) {
-                return Err(ExternalStorageValidationError::Untracked(published));
+                return Err(ExternalStorageValidationError::Untracked(
+                    published as usize,
+                ));
             }
         }
         for (&published, record) in storage.iter() {

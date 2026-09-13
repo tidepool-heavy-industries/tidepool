@@ -21,7 +21,7 @@
 
 use crate::context::VMContext;
 use crate::gc::frame_walker;
-use crate::machine_state::{machine_state, machine_state_opt};
+use crate::machine_state::{machine_state, machine_state_opt, MachineState};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
@@ -920,6 +920,7 @@ unsafe fn verify_heap_post_gc(
 /// A corrupt edge may leave both spaces live: the caller must retire the
 /// machine, and both owned buffers stay allocated through native unwinding.
 fn collect_prepared(
+    machine: &MachineState,
     state: &mut GcState,
     roots: &[*mut *mut u8],
     from_used: usize,
@@ -951,23 +952,15 @@ fn collect_prepared(
         // SAFETY: the owning heap and checked snapshot keep source objects and
         // root slots live; the new buffer is disjoint and fully initialized.
         let copied = unsafe {
-            match admitted {
-                Some(owner) => tidepool_heap::gc::raw::cheney_copy_descriptors_with_admission(
-                    roots,
-                    state.active_start,
-                    prepared.used,
-                    as_bytes_mut(&mut prepared.spare),
-                    &mut prepared.space,
-                    owner,
-                ),
-                None => tidepool_heap::gc::raw::cheney_copy_descriptors(
-                    roots,
-                    state.active_start,
-                    prepared.used,
-                    as_bytes_mut(&mut prepared.spare),
-                    &mut prepared.space,
-                ),
-            }
+            tidepool_heap::gc::raw::cheney_copy_descriptors_with_external(
+                roots,
+                state.active_start,
+                prepared.used,
+                as_bytes_mut(&mut prepared.spare),
+                &mut prepared.space,
+                admitted,
+                machine,
+            )
         };
         match copied {
             Ok(result) => {
@@ -1134,6 +1127,7 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
                     .map(|owner| owner as &dyn tidepool_heap::descriptor_region::DescriptorOldSpace)
             };
             let result = collect_prepared(
+                ms,
                 &mut state,
                 &snapshot.into_slots(),
                 from_used,
@@ -1563,6 +1557,105 @@ mod tests {
             assert_eq!(*root.add(managed_offset).cast::<*mut u8>(), root);
             assert_eq!(*root.add(address_offset).cast::<usize>(), start as usize);
         }
+        ms.clear_gc_state();
+        ms.clear_stack_map_registry();
+    }
+
+    #[test]
+    fn prepared_collection_traces_owned_boxed_payload_through_growth() {
+        use std::alloc::{alloc_zeroed, Layout};
+        use std::sync::Arc;
+        use tidepool_heap::execution_descriptor::{DescriptorState, ObjectDescriptor};
+        use tidepool_heap::external_storage::ExternalStorageKind;
+        use tidepool_heap::managed_reference::untag;
+        use tidepool_repr::execution_schema::{
+            Architecture, Endianness, StorageLayout, TargetDescriptor,
+        };
+
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let wrapper =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        let leaf = Arc::new(
+            ObjectDescriptor::constructor(1, StorageLayout::for_reps(&target, &[]).unwrap(), None)
+                .unwrap(),
+        );
+        let used = wrapper.allocation_extent() as usize + leaf.allocation_extent() as usize;
+        let ms = crate::machine_state::MachineState::new();
+        ms.install_prepared_buffer(vec![0_u64; used / 8], vec![wrapper.clone(), leaf.clone()])
+            .unwrap();
+        let (start, size) = ms.gc_active_range().unwrap();
+        let child = unsafe { start.add(wrapper.allocation_extent() as usize) };
+        unsafe {
+            wrapper.initialize_header(start);
+            leaf.initialize_header(child);
+        }
+
+        let layout = Layout::from_size_align(16, 8).unwrap();
+        let payload = unsafe { alloc_zeroed(layout) };
+        assert!(!payload.is_null());
+        unsafe {
+            payload.cast::<u64>().write(1);
+            payload
+                .add(8)
+                .cast::<*mut u8>()
+                .write((child as usize | usize::from(leaf.tag())) as *mut u8);
+            wrapper
+                .external_payload_slot(start, wrapper.allocation_extent() as usize)
+                .unwrap()
+                .write(payload);
+        }
+        ms.register_external_storage(payload, payload, layout, ExternalStorageKind::BoxedArray, 1);
+
+        let mut root = start;
+        ms.register_rust_root(&mut root);
+        let maps = crate::stack_map::StackMapRegistry::new();
+        ms.set_stack_map_registry(&maps);
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
+        vmctx.machine_state = &ms as *const _ as *mut _;
+        vmctx.alloc_ptr = unsafe { start.add(used) };
+        perform_gc_request(0, &mut vmctx, used * 4);
+
+        assert_eq!(
+            ms.prepared_call_status(),
+            crate::prepared_control::CallStatus::Success
+        );
+        let (active, active_size) = ms.gc_active_range().unwrap();
+        assert_eq!(root, active);
+        assert!(
+            active_size >= used * 5,
+            "the copy must include growth reserve"
+        );
+        let moved_child = unsafe { payload.add(8).cast::<*mut u8>().read() } as usize;
+        assert_eq!(
+            untag(moved_child),
+            active as usize + wrapper.allocation_extent() as usize
+        );
+        assert_eq!(
+            unsafe {
+                leaf.state(
+                    untag(moved_child) as *const u8,
+                    leaf.allocation_extent() as usize,
+                )
+            }
+            .unwrap(),
+            DescriptorState::Live
+        );
+        assert_eq!(
+            unsafe {
+                wrapper
+                    .external_payload_slot(root, wrapper.allocation_extent() as usize)
+                    .unwrap()
+                    .read()
+            },
+            payload
+        );
         ms.clear_gc_state();
         ms.clear_stack_map_registry();
     }

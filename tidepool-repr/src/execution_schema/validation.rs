@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorId, DecodeLimits,
     Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationId,
-    ParseError, ProgramRequirements, RuntimeRep, ScalarLiteral, SignatureId, SymbolIdentity,
-    ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral, SignatureId,
+    SymbolIdentity, ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -21,7 +21,7 @@ struct OrderedFrame<A> {
     children: Vec<A>,
     index: usize,
     mark: usize,
-    expected: Option<Rc<Vec<RuntimeRep>>>,
+    expected: Option<Rc<ResultContract>>,
 }
 
 impl MappableFrame for OrderedFrame<PartiallyApplied> {
@@ -176,7 +176,7 @@ struct Seed {
     index: usize,
     group_actions: Option<Rc<[Action]>>,
     actions: Vec<Action>,
-    expected: Option<Rc<Vec<RuntimeRep>>>,
+    expected: Option<Rc<ResultContract>>,
 }
 
 struct Walker<'w, 'p> {
@@ -464,7 +464,8 @@ impl<'w, 'p> Walker<'w, 'p> {
             match signature.arguments.len().cmp(&actual.arguments.len()) {
                 std::cmp::Ordering::Less
                     if signature.results
-                        != super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]) => {
+                        != super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]) =>
+                {
                     return Err(ParseError::InvalidSignature(
                         "partial application must return a function reference".into(),
                     ))
@@ -484,6 +485,14 @@ impl<'w, 'p> Walker<'w, 'p> {
                     ))
                 }
                 _ => {}
+            }
+            if signature.arguments.len() > actual.arguments.len()
+                && signature.results == ResultContract::NoSuccess
+                && actual.results != ResultContract::NoSuccess
+            {
+                return Err(ParseError::InvalidSignature(
+                    "oversaturated call cannot infer a nonreturning suffix".into(),
+                ));
             }
             // Preserve independently established nonreturning evidence in the
             // expression result, even if its continuation demanded normal reps.
@@ -698,7 +707,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             ExprFrame::Case {
                 scrutinee,
                 binder,
-                scrutinee_reps,
+                scrutinee_results,
                 kind,
                 alternatives,
             } => {
@@ -706,14 +715,13 @@ impl<'w, 'p> Walker<'w, 'p> {
                     index: *scrutinee,
                     group_actions: None,
                     actions: Vec::new(),
-                    expected: Some(Rc::new(scrutinee_reps.clone())),
+                    expected: Some(Rc::new(scrutinee_results.clone())),
                 });
                 self.case_children(
                     *binder,
-                    scrutinee_reps,
+                    scrutinee_results,
                     kind,
                     alternatives,
-                    &seed.expected,
                     &mut children,
                 )?;
             }
@@ -747,13 +755,13 @@ impl<'w, 'p> Walker<'w, 'p> {
 
     fn collapse(
         &mut self,
-        mut frame: OrderedFrame<Vec<RuntimeRep>>,
-    ) -> Result<Vec<RuntimeRep>, ParseError> {
+        mut frame: OrderedFrame<ResultContract>,
+    ) -> Result<ResultContract, ParseError> {
         frame.children.reverse();
         let tree = self.tree;
         let actual = if self.typed {
             match &tree.nodes[frame.index] {
-                ExprFrame::Return(atoms) => self.atom_reps(atoms)?,
+                ExprFrame::Return(atoms) => ResultContract::Returns(self.atom_reps(atoms)?),
                 ExprFrame::Enter { callee, signature } => {
                     self.check_callable(callee, *signature, true)?.results
                 }
@@ -783,7 +791,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 } => {
                     let declaration = self.validator.constructor(*constructor)?;
                     self.check_atom_reps(fields, &declaration.field_reps, "constructor fields")?;
-                    vec![declaration.result_rep]
+                    ResultContract::Returns(vec![declaration.result_rep])
                 }
                 ExprFrame::Jump { join, arguments } => {
                     let signature_id = self.join(*join)?.ok_or_else(|| {
@@ -793,29 +801,35 @@ impl<'w, 'p> Walker<'w, 'p> {
                     self.check_atom_reps(arguments, &signature.arguments, "join arguments")?;
                     signature.results
                 }
-                ExprFrame::Case { .. } => {
+                ExprFrame::Case { alternatives, .. } => {
                     let mut children = frame.children.into_iter();
-                    children.next();
-                    let first = children.next().unwrap_or_default();
-                    for child in children {
-                        if child != first {
-                            return Err(ParseError::InvalidSignature(
-                                "case alternatives return different representations".into(),
-                            ));
+                    let scrutinee = children.next().expect("case scrutinee was queued");
+                    let mut result = ResultContract::NoSuccess;
+                    if !alternatives.is_empty() {
+                        for child in children {
+                            result = result.merge_alternative(&child).ok_or_else(|| {
+                                ParseError::InvalidSignature(
+                                    "case alternatives return different representations".into(),
+                                )
+                            })?;
                         }
                     }
-                    first
+                    if scrutinee == ResultContract::NoSuccess {
+                        ResultContract::NoSuccess
+                    } else {
+                        result
+                    }
                 }
                 ExprFrame::Let { .. } | ExprFrame::LetJoins { .. } => {
-                    frame.children.pop().unwrap_or_default()
+                    frame.children.pop().expect("let body was queued")
                 }
             }
         } else {
-            Vec::new()
+            ResultContract::Returns(Vec::new())
         };
         if self.typed {
             if let Some(expected) = frame.expected {
-                if actual != *expected {
+                if !actual.satisfies(&expected) {
                     return Err(ParseError::InvalidSignature(format!(
                         "expression representations {actual:?} do not match expected {expected:?}"
                     )));
@@ -969,25 +983,31 @@ impl<'w, 'p> Walker<'w, 'p> {
     fn case_children(
         &mut self,
         binder: ValueId,
-        scrutinee_reps: &[RuntimeRep],
+        scrutinee_results: &ResultContract,
         kind: &CaseKind,
         alternatives: &[Alternative],
-        expected: &Option<Rc<Vec<RuntimeRep>>>,
         children: &mut Vec<Seed>,
     ) -> Result<(), ParseError> {
-        for rep in scrutinee_reps {
-            self.validator.check_rep(*rep)?;
-        }
-        if alternatives.is_empty() {
-            return Err(ParseError::Malformed("case has no alternatives".into()));
-        }
+        let scrutinee_reps = match scrutinee_results {
+            ResultContract::Returns(reps) => {
+                for rep in reps {
+                    self.validator.check_rep(*rep)?;
+                }
+                Some(reps.as_slice())
+            }
+            ResultContract::NoSuccess if alternatives.is_empty() => None,
+            ResultContract::NoSuccess => {
+                return Err(ParseError::InvalidSignature(
+                    "case with alternatives requires returning scrutinee representations".into(),
+                ));
+            }
+        };
         match kind {
             CaseKind::Algebraic(family) => {
                 self.validator.check_symbol(family)?;
-                if !matches!(
-                    scrutinee_reps,
-                    [RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef]
-                ) {
+                if scrutinee_reps.is_some_and(|reps| {
+                    !matches!(reps, [RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef])
+                }) {
                     return Err(ParseError::InvalidSignature(
                         "algebraic case requires a managed reference".into(),
                     ));
@@ -998,7 +1018,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 if matches!(
                     rep,
                     RuntimeRep::Void | RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
-                ) || scrutinee_reps != [*rep]
+                ) || scrutinee_reps.is_some_and(|reps| reps != [*rep])
                 {
                     return Err(ParseError::InvalidSignature(
                         "primitive case scrutinee representation mismatch".into(),
@@ -1006,13 +1026,17 @@ impl<'w, 'p> Walker<'w, 'p> {
                 }
             }
             CaseKind::MultiValue | CaseKind::Polymorphic => {
-                if alternatives.len() != 1 || alternatives[0].pattern != AlternativePattern::Default
+                if !alternatives.is_empty()
+                    && (alternatives.len() != 1
+                        || alternatives[0].pattern != AlternativePattern::Default)
                 {
                     return Err(ParseError::Malformed(
                         "multi-value and polymorphic cases require one DEFAULT alternative".into(),
                     ));
                 }
-                if *kind == CaseKind::MultiValue && scrutinee_reps.contains(&RuntimeRep::Void) {
+                if *kind == CaseKind::MultiValue
+                    && scrutinee_reps.is_some_and(|reps| reps.contains(&RuntimeRep::Void))
+                {
                     return Err(ParseError::InvalidSignature(
                         "multi-value case contains a nonphysical Void component".into(),
                     ));
@@ -1020,18 +1044,18 @@ impl<'w, 'p> Walker<'w, 'p> {
             }
         }
         let mut case_actions = Vec::new();
-        if *kind == CaseKind::MultiValue {
-            self.register_value(binder)?;
+        if self.value(binder)?.is_some() {
+            return Err(ParseError::DuplicateDefinition(format!(
+                "case binder {:?}",
+                binder
+            )));
+        }
+        self.register_value(binder)?;
+        if alternatives.is_empty() {
+            return Ok(());
         }
         if *kind != CaseKind::MultiValue {
-            if self.value(binder)?.is_some() {
-                return Err(ParseError::DuplicateDefinition(format!(
-                    "case binder {:?}",
-                    binder
-                )));
-            }
-            self.register_value(binder)?;
-            if let [rep] = scrutinee_reps {
+            if let Some([rep]) = scrutinee_reps {
                 case_actions.push(Action::Value(
                     binder,
                     ValueType {
@@ -1094,7 +1118,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 ));
             }
             let reps: Vec<_> = match (&alternative.pattern, kind) {
-                (_, CaseKind::MultiValue) => scrutinee_reps.to_vec(),
+                (_, CaseKind::MultiValue) => scrutinee_reps.unwrap_or_default().to_vec(),
                 (AlternativePattern::Constructor(id), _) => {
                     self.validator.constructor(*id)?.field_reps.clone()
                 }
@@ -1132,7 +1156,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 index: alternative.body,
                 group_actions: None,
                 actions,
-                expected: expected.clone(),
+                expected: None,
             });
         }
         Ok(())
@@ -1205,7 +1229,7 @@ mod tests {
             },
             signatures: vec![Signature {
                 arguments: vec![],
-                results: vec![RuntimeRep::Int(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
             }],
             globals: vec![],
             constructors: vec![],
@@ -1237,29 +1261,21 @@ mod tests {
     }
 
     #[test]
-    fn dead_end_global_requires_canonical_entry_evidence() {
+    fn no_success_is_established_by_callable_entry_signature() {
         let mut program = valid_program();
         program.globals.push(super::super::GlobalDecl {
             identity: symbol("bottom"),
             rep: RuntimeRep::LiftedRef,
             entry_signature: None,
-            dead_end: true,
             required_evaluated: true,
             required_generation: None,
         });
-        // wave4:PRELUDE_RUST — malformed evidence must reject even when unused.
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidSignature(_))
-        ));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
         program.globals[0].entry_signature = Some(SignatureId(0));
-        assert!(matches!(
-            validate_program(&program, &requirements(), DecodeLimits::default()),
-            Err(ParseError::InvalidSignature(_))
-        ));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
         program.signatures.push(Signature {
             arguments: vec![RuntimeRep::Void],
-            results: vec![],
+            results: ResultContract::NoSuccess,
         });
         program.globals[0].entry_signature = Some(SignatureId(1));
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
@@ -1345,7 +1361,7 @@ mod tests {
             RuntimeRep::Int(24),
         ] {
             let mut program = valid_program();
-            program.signatures[0].results = vec![rep];
+            program.signatures[0].results = ResultContract::Returns(vec![rep]);
             assert!(matches!(
                 validate_program(&program, &requirements(), DecodeLimits::default()),
                 Err(ParseError::InvalidSignature(_))
@@ -1369,7 +1385,7 @@ mod tests {
             RuntimeRep::Float(64),
         ] {
             let mut program = valid_program();
-            program.signatures[0].results = vec![rep];
+            program.signatures[0].results = ResultContract::Returns(vec![rep]);
             replace_root(&mut program, ExprFrame::Return(vec![Atom::Rubbish(rep)]));
             validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
         }
@@ -1391,9 +1407,9 @@ mod tests {
             &mut program,
             ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::NullAddress)]),
         );
-        program.signatures[0].results = vec![RuntimeRep::Address];
+        program.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
-        program.signatures[0].results = vec![RuntimeRep::LiftedRef];
+        program.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
     }
 
@@ -1409,17 +1425,16 @@ mod tests {
                 identity: symbol("imported_value"),
                 rep,
                 entry_signature: None,
-                dead_end: false,
                 required_evaluated: true,
                 required_generation: None,
             });
-            program.signatures[0].results = vec![rep];
+            program.signatures[0].results = ResultContract::Returns(vec![rep]);
             replace_root(
                 &mut program,
                 ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]),
             );
             validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
-            program.signatures[0].results = vec![RuntimeRep::LiftedRef];
+            program.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
             assert!(validate_program(&program, &requirements(), DecodeLimits::default()).is_err());
         }
     }
@@ -1431,7 +1446,6 @@ mod tests {
             identity: symbol("address"),
             rep: RuntimeRep::Address,
             entry_signature: Some(SignatureId(0)),
-            dead_end: false,
             required_evaluated: true,
             required_generation: None,
         });
@@ -1442,7 +1456,6 @@ mod tests {
         actual: Signature,
         application: Signature,
         arguments: Vec<Atom>,
-        dead_end: bool,
     ) -> WireProgram {
         let mut program = valid_program();
         let argument_count = arguments.len();
@@ -1451,7 +1464,6 @@ mod tests {
             identity: symbol("callee"),
             rep: RuntimeRep::LiftedRef,
             entry_signature: Some(SignatureId(0)),
-            dead_end,
             required_evaluated: true,
             required_generation: None,
         });
@@ -1492,7 +1504,7 @@ mod tests {
     fn callable_application_checks_saturation_and_argument_prefixes() {
         let actual = Signature {
             arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         };
         let saturated = callable_program(
             actual.clone(),
@@ -1501,7 +1513,6 @@ mod tests {
                 results: actual.results.clone(),
             },
             vec![int_atom(1), word_atom(2)],
-            false,
         );
         validate_program(&saturated, &requirements(), DecodeLimits::default()).unwrap();
 
@@ -1509,24 +1520,22 @@ mod tests {
             actual.clone(),
             Signature {
                 arguments: vec![RuntimeRep::Int(64)],
-                results: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             },
             vec![int_atom(1)],
-            false,
         );
         validate_program(&undersaturated, &requirements(), DecodeLimits::default()).unwrap();
 
         let oversaturated = callable_program(
             Signature {
                 arguments: vec![RuntimeRep::Int(64)],
-                results: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             },
             Signature {
                 arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
-                results: vec![RuntimeRep::Int(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
             },
             vec![int_atom(1), word_atom(2)],
-            false,
         );
         validate_program(&oversaturated, &requirements(), DecodeLimits::default()).unwrap();
 
@@ -1534,10 +1543,9 @@ mod tests {
             actual.clone(),
             Signature {
                 arguments: vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
-                results: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             },
             vec![int_atom(1), int_atom(2)],
-            false,
         );
         assert_invalid_signature(prefix_mismatch);
 
@@ -1545,29 +1553,116 @@ mod tests {
             actual,
             Signature {
                 arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
-                results: vec![RuntimeRep::Word(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Word(64)]),
             },
             vec![int_atom(1), word_atom(2)],
-            false,
         );
         assert_invalid_signature(saturated_result_mismatch);
     }
 
     #[test]
-    fn dead_end_saturation_does_not_require_a_normal_result() {
+    fn no_success_saturation_does_not_require_a_normal_result() {
         let program = callable_program(
             Signature {
                 arguments: vec![RuntimeRep::Int(64)],
-                results: vec![],
+                results: ResultContract::NoSuccess,
             },
             Signature {
                 arguments: vec![RuntimeRep::Int(64)],
-                results: vec![RuntimeRep::Word(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Word(64)]),
             },
             vec![int_atom(1)],
-            true,
         );
         validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn local_bottoming_entry_satisfies_a_normal_call_demand() {
+        let mut program = valid_program();
+        program.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::NoSuccess,
+        });
+        program.operations.push(OperationDecl {
+            identity: crate::execution_schema::OperationIdentity::PrimOp("raise#".into()),
+            signature: SignatureId(1),
+        });
+        program.expressions.nodes = vec![
+            ExprFrame::Call {
+                callee: Atom::Ref(ValueRef::Local(ValueId(1))),
+                signature: SignatureId(0),
+                arguments: vec![],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![],
+            },
+        ];
+        program.bindings.push(Group::NonRecursive(TopBinding {
+            identity: symbol("bottom"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(1),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn no_success_demand_requires_evidence_and_partial_application_returns_a_function() {
+        let mut normal = callable_program(
+            Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+            },
+            Signature {
+                arguments: vec![],
+                results: ResultContract::NoSuccess,
+            },
+            vec![],
+        );
+        assert_invalid_signature(normal.clone());
+        normal.globals[0].entry_signature = None;
+        assert_invalid_signature(normal);
+
+        let actual = Signature {
+            arguments: vec![RuntimeRep::Int(64)],
+            results: ResultContract::NoSuccess,
+        };
+        assert_invalid_signature(callable_program(
+            actual.clone(),
+            Signature {
+                arguments: vec![],
+                results: ResultContract::NoSuccess,
+            },
+            vec![],
+        ));
+        let partial = callable_program(
+            actual,
+            Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            },
+            vec![],
+        );
+        validate_program(&partial, &requirements(), DecodeLimits::default()).unwrap();
+
+        assert_invalid_signature(callable_program(
+            Signature {
+                arguments: vec![RuntimeRep::Int(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
+                results: ResultContract::NoSuccess,
+            },
+            vec![int_atom(1), word_atom(2)],
+        ));
     }
 
     fn integer(value: i64) -> Atom {
@@ -1596,7 +1691,7 @@ mod tests {
         nodes.push(ExprFrame::Case {
             scrutinee: 0,
             binder: ValueId(1),
-            scrutinee_reps: reps,
+            scrutinee_results: ResultContract::Returns(reps),
             kind,
             alternatives,
         });
@@ -1617,6 +1712,124 @@ mod tests {
             binders: vec![],
             body: 0,
         }
+    }
+
+    #[test]
+    fn empty_case_retains_known_reps_or_proves_bottom_without_a_binder_value() {
+        let mut program = valid_program();
+        program.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::NoSuccess,
+        });
+        program.operations.push(OperationDecl {
+            identity: crate::execution_schema::OperationIdentity::PrimOp("raise#".into()),
+            signature: SignatureId(1),
+        });
+        program.expressions.nodes = vec![
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![],
+            },
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(1),
+                scrutinee_results: ResultContract::NoSuccess,
+                kind: CaseKind::Primitive(RuntimeRep::Int(64)),
+                alternatives: vec![],
+            },
+        ];
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        *body = 1;
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        if let ExprFrame::Case { binder, .. } = &mut program.expressions.nodes[1] {
+            *binder = ValueId(0);
+        }
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::DuplicateDefinition(_))
+        ));
+        if let ExprFrame::Case {
+            binder,
+            scrutinee_results,
+            ..
+        } = &mut program.expressions.nodes[1]
+        {
+            *binder = ValueId(1);
+            *scrutinee_results = ResultContract::Returns(vec![RuntimeRep::Int(64)]);
+        }
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        program.expressions.nodes[0] = ExprFrame::Return(vec![integer(1)]);
+        if let ExprFrame::Case {
+            scrutinee_results, ..
+        } = &mut program.expressions.nodes[1]
+        {
+            *scrutinee_results = ResultContract::NoSuccess;
+        }
+        assert_invalid_signature(program);
+    }
+
+    #[test]
+    fn mixed_case_alternatives_merge_bottom_with_successful_representations() {
+        let mut program = valid_program();
+        program.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::NoSuccess,
+        });
+        program.operations.push(OperationDecl {
+            identity: crate::execution_schema::OperationIdentity::PrimOp("raise#".into()),
+            signature: SignatureId(1),
+        });
+        program.expressions.nodes = vec![
+            ExprFrame::Return(vec![integer(1)]),
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![],
+            },
+            ExprFrame::Return(vec![integer(42)]),
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(1),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+                kind: CaseKind::Primitive(RuntimeRep::Int(64)),
+                alternatives: vec![
+                    Alternative {
+                        pattern: AlternativePattern::Literal(ScalarLiteral::Int {
+                            bits: 64,
+                            bytes: 1_i64.to_be_bytes().to_vec(),
+                        }),
+                        binders: vec![],
+                        body: 1,
+                    },
+                    Alternative {
+                        pattern: AlternativePattern::Default,
+                        binders: vec![],
+                        body: 2,
+                    },
+                ],
+            },
+        ];
+        let Group::NonRecursive(binding) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut binding.binding.rhs else {
+            unreachable!()
+        };
+        *body = 3;
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        program.signatures[0].results = ResultContract::NoSuccess;
+        assert_invalid_signature(program.clone());
+        program.expressions.nodes[0] = ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments: vec![],
+        };
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
     }
 
     #[test]
@@ -1924,7 +2137,7 @@ mod tests {
         program.signatures[0].arguments = vec![RuntimeRep::Int(64)];
         program.signatures.push(Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
         program.expressions.nodes = vec![
             ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]),
@@ -1991,7 +2204,7 @@ mod tests {
     #[test]
     fn rejects_function_body_with_wrong_result_representation() {
         let mut program = valid_program();
-        program.signatures[0].results = vec![RuntimeRep::LiftedRef];
+        program.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         set_top_rhs(
             &mut program,
             HeapRhs::Function {
@@ -2010,7 +2223,7 @@ mod tests {
         program.signatures[0].arguments = vec![RuntimeRep::Int(64)];
         program.signatures.push(Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
         program.expressions.nodes = vec![
             ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]),
@@ -2053,11 +2266,11 @@ mod tests {
         program.signatures = vec![
             Signature {
                 arguments: vec![RuntimeRep::Int(64)],
-                results: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             },
             Signature {
                 arguments: vec![],
-                results: vec![RuntimeRep::LiftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
             },
         ];
         program.expressions.nodes = vec![
@@ -2102,7 +2315,7 @@ mod tests {
         operation.signatures[0].arguments = vec![RuntimeRep::Int(64)];
         operation.signatures.push(Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
         let Group::NonRecursive(binding) = &mut operation.bindings[0] else {
             unreachable!()
@@ -2124,7 +2337,7 @@ mod tests {
         jump.signatures[0].arguments = vec![RuntimeRep::Int(64)];
         jump.signatures.push(Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
         jump.expressions.nodes = vec![
             ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]),
@@ -2178,7 +2391,7 @@ mod tests {
         let mut distinct_signature = valid_program();
         distinct_signature.signatures.push(Signature {
             arguments: vec![RuntimeRep::Int(64)],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
         distinct_signature.operations = vec![
             OperationDecl {
@@ -2292,7 +2505,7 @@ mod tests {
                     nodes.push(ExprFrame::Case {
                         scrutinee: root,
                         binder: ValueId(id),
-                        scrutinee_reps: vec![RuntimeRep::Int(64)],
+                        scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
                         kind: CaseKind::Primitive(RuntimeRep::Int(64)),
                         alternatives: vec![Alternative {
                             pattern: AlternativePattern::Default,
@@ -2324,7 +2537,7 @@ mod tests {
             ExprFrame::Case {
                 scrutinee: 1,
                 binder: ValueId(1),
-                scrutinee_reps: vec![RuntimeRep::Int(64)],
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
                 kind: CaseKind::Primitive(RuntimeRep::Int(64)),
                 alternatives: vec![default_alternative()],
             },
@@ -2340,7 +2553,7 @@ mod tests {
             ExprFrame::Case {
                 scrutinee: 0,
                 binder: ValueId(1),
-                scrutinee_reps: vec![RuntimeRep::Int(64)],
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
                 kind: CaseKind::Primitive(RuntimeRep::Int(64)),
                 alternatives: vec![Alternative {
                     body: 0,
@@ -2388,7 +2601,7 @@ mod tests {
         let mut program = valid_program();
         program.signatures.push(Signature {
             arguments: vec![],
-            results: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         });
         program.expressions.nodes = vec![
             ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]),
@@ -2550,8 +2763,19 @@ impl<'a> Validator<'a> {
         self.check_table_len(self.wire.bindings.len())?;
 
         for signature in &self.wire.signatures {
-            self.bump_work(signature.arguments.len() + signature.results.len() + 1)?;
-            for rep in signature.arguments.iter().chain(&signature.results) {
+            self.bump_work(
+                signature.arguments.len()
+                    + signature
+                        .results
+                        .returned_reps()
+                        .map_or(0, <[RuntimeRep]>::len)
+                    + 1,
+            )?;
+            for rep in signature
+                .arguments
+                .iter()
+                .chain(signature.results.returned_reps().unwrap_or(&[]))
+            {
                 self.check_rep(*rep)?;
             }
         }
@@ -2574,15 +2798,6 @@ impl<'a> Validator<'a> {
                         "only a lifted global can have a callable entry".into(),
                     ));
                 }
-                if global.dead_end && !self.signature(signature)?.results.is_empty() {
-                    return Err(ParseError::InvalidSignature(
-                        "dead-end callable entry must have empty results".into(),
-                    ));
-                }
-            } else if global.dead_end {
-                return Err(ParseError::InvalidSignature(
-                    "dead-end global requires callable entry evidence".into(),
-                ));
             }
         }
 

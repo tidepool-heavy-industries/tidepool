@@ -7,8 +7,8 @@
 //! and retained-program reuse cross this boundary in that order. The legacy
 //! `CoreExpr` machine is not a fallback for any operation in this module.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::MachineDisposition;
@@ -17,8 +17,8 @@ use tidepool_codegen::prepared_program::{
     CompileError, CompiledProgram, ExecutionError, RunOptions,
 };
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, DecodeLimits, LinkError, LinkedProgram, MachineImports,
-    ParseError, ProgramRequirements, ValueId,
+    DecodeLimits, LinkError, LinkedProgram, MachineImports, ParseError, ProgramRequirements,
+    ValueId, link_program, parse_program,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -217,8 +217,8 @@ mod tests {
     use tidepool_codegen::host_fns::RuntimeError;
     use tidepool_codegen::machine_state::MachineFailure;
     use tidepool_repr::execution_schema::{
-        Architecture, Endianness, ImportedValue, TargetDescriptor, EXECUTION_ABI_VERSION,
-        SCHEMA_VERSION,
+        Architecture, EXECUTION_ABI_VERSION, Endianness, ImportedValue, SCHEMA_VERSION,
+        TargetDescriptor,
     };
 
     fn head(major: u8, length: usize) -> Vec<u8> {
@@ -357,7 +357,6 @@ mod tests {
                         entry_signature: global
                             .entry_signature
                             .map(|id| prepared.signatures()[id.0 as usize].clone()),
-                        dead_end: global.dead_end,
                         evaluated: global.required_evaluated,
                         generation: global.required_generation.unwrap_or(0),
                     };

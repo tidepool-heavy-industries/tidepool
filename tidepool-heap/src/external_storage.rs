@@ -14,6 +14,9 @@ pub enum ExternalStorageKind {
 /// Returned slots remain allocated, initialized and exclusively available to
 /// the collector through the complete copy/fixup interval. No implementation
 /// may collect, force a value, resize, revoke or sweep during this callback.
+/// One published identity must always yield the same span in that interval;
+/// distinct identities must have disjoint spans. The copier deduplicates by
+/// identity, so overlapping aliases must use the same published identity.
 pub unsafe trait ExternalPayloadOwner {
     fn slots(
         &self,
@@ -25,7 +28,9 @@ pub unsafe trait ExternalPayloadOwner {
 /// Validation failures while authenticating an external payload view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalStorageValidationError {
-    Untracked(*mut u8),
+    /// Published handle identity, retained as an integer so runtime errors
+    /// remain transferable across resident worker boundaries.
+    Untracked(usize),
     InvalidBase,
     LayoutAlignment {
         actual: usize,

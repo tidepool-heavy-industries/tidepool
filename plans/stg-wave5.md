@@ -6,15 +6,58 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Pushed source head: `ba13cf1d3`. Primitive byte access passed six adapter
+tests; the machine-state selection passed 16 tests and the byte-pool bounds
+unit test passed. Real recovered `showDouble` walking and the recovery suites
+pass after fixing our consumer of GHC's deliberately undefined constructor
+annotation. This repair has not yet been followed by a full corpus replay.
+Schema-7/ABI-5 nonreturning-result migration now passes the Rust focused fold:
+242 repr unit tests, ten codec tests, five cross-language/schema contracts,
+102 prepared-program tests, six entry-ABI tests and 16 testing-crate unit tests.
+The local seeds `47153c3d6` and `392cbabc5` were deliberately partial; those
+results apply to the integrated working tree, not to either seed by itself.
+The strengthened Haskell `recovered-body-test` now passes: exact tuple, unary
+and Void entry/call signatures are asserted. Its partial-call case uses a
+test-local prepared-STG variant because CorePrep eta-expands the source PAP;
+it is not evidence that the original source retained a PAP node. Same-invocation
+raised-CAF retry passes after relocation, including Live header/capture checks.
+
+The external-graph fold passes eight heap external tests, four promotion tests,
+one production host-GC growth test and all 103 prepared-program tests.
+`bash scripts/dev-shell.sh cargo test --workspace --no-run --quiet` completed
+successfully with warnings. Fresh source review accepted the nonreturning path;
+external-graph review requested an explicit stable/disjoint-span unsafe owner
+contract, which was added before acceptance. The graph worker's new promotion
+fixture needed a zero-field helper correction and Rc ownership before publishing
+its payload address. Source-walk preallocation removes a late allocation-failure
+path after forwarding; it is not a reachable-graph preflight.
+
+Prepared array primitive emission, Young/Retained ledger policy and prepared
+payload reclamation remain unimplemented. The existing Core major collector
+does not supply those mechanisms to the prepared path. Corpus replay is next;
+the numbers below still describe the earlier checkpoint.
+
+Trial conclusion for this fold: bounded view migration and exact verification
+delegated cleanly; fixture writing needed correction when GHC optimized away
+the intended premise; unsafe graph implementation needed lead corrections for
+preallocation and a pointer-free error boundary. Fresh review also tightened
+the unsafe alias contract. Those global invariants remained lead-owned.
+Haskell fixture repair escalated from Luna to Sol, not another assertion
+relaxation. Worker/planner token totals are unavailable. Lead events included
+seed writing, two graph-contract corrections, fixture-premise review and
+several lease/reactivation messages; orchestration was not free.
+
+Last complete corpus evidence (before those source repairs):
+
 Fixture regeneration/check against pushed `26a2f4341` passed; only the source
 fingerprint changed. The resulting `suite.lasjm6/results.json` has SHA-256
 `e968a32900dc6f1eb254b0fd192676ce69b82a4d7dff5612be657633cccad07f`.
 It records 136 matching results, 120 missing expectations, 140 projection
 failures, 16 validation failures, 260 admission failures and 140 execution
 failures. All 396 admitted programs compiled. The newly reached recovery paths
-expose GHC `mkSeqs shouldn't use the type arg` panics; their diagnosis is in
-progress. No comparison mismatch is reported. This is not semantic-green
-evidence; original-cohort accounting is being recomputed separately.
+exposed `mkSeqs shouldn't use the type arg` panics, now traced to our facts
+walker forcing an unused GHC annotation. No comparison mismatch is reported.
+This is not semantic-green evidence. Original-cohort accounting follows.
 
 Completed accounting: all 812 originals are present (665 structured identity
 matches, three unique record-parent fallbacks, 144 exact unique canonical-name
@@ -177,6 +220,23 @@ the existing owner; descriptor arenas stay out of Core-layout compaction.
 
 ### Recovered bottoming bodies and external arrays
 
+Current implementation checkpoint: `ba13cf1d3` is pushed. Checked primitive
+byte access and exception-root ownership passed their focused contracts; the
+generated raising path is not yet connected. The recovered `showDouble`
+regression and recovery suites pass after the facts walker stopped forcing
+GHC's deliberately undefined boxed-constructor annotation. The 140-row cohort
+has not been remeasured after that repair. Local seeds `47153c3d6` and
+`392cbabc5` start the coordinated schema-7/ABI-5 migration and intentionally
+do not constitute a compiling checkpoint.
+
+The current delegation review has already found two contract corrections:
+the producer initially applied dead-end evidence before saturation, and the
+validator initially rejected empty cases with known returning scrutinee reps.
+Both were sent back with the precise accepted rule. These are semantic review
+disagreements, not failures to fix by changing expectations. The first native
+wiring brief was too broad; ownership was split into ABI/apply/adapter/plan
+and emitter/invocation parcels before implementation continued.
+
 The recovered `GHC.Internal.Err.error` body is present and ends in GHC's
 `raise#`; its representation-polymorphic result is not a missing-body failure.
 Eight external failing targets reproduce that exact path; three internal sat
@@ -220,6 +280,68 @@ for a full sweep. No sweep follows incomplete tracing. Resize cannot free a
 payload still named by an alias; settle the prepared handle/resize contract
 before reusing the legacy helper. These are required array-enabling contracts,
 not permission to admit arrays ahead of their collector integration.
+
+The external-storage extension keeps generation and revocation in that same
+ledger: fresh payloads are Young/Active, promotion marks shared payloads
+Retained, and successful minors reclaim only unreachable Young payloads.
+Retained payload sweeping requires a full strong-root trace, never the
+remembered-slot set. This avoids making every nursery collection scan the
+retained graph while still reclaiming ordinary array-loop garbage. Wave 5's
+production invocation does not yet retire retained roots; the existing major
+retirement policy must be connected at the Wave 6 session boundary rather
+than inventing an unreviewed pressure trigger in an array primitive.
+
+The descriptor owns an explicit external edge kind. Its owner-authenticated
+view exposes a bounded slot span, not a newly allocated Vec on every visit.
+Minor copy and both promotion phases deduplicate shared external expansions
+and skip slots already rewritten as snapshot roots; otherwise a second
+rewrite mistakes a to-space pointer for an invalid source reference. Each
+copying phase gets fresh traversal scratch. Full major tracing follows
+validated nursery, retained and external graph views; Core's object decoder
+must never inspect descriptor arenas.
+
+`resizeMutableByteArray#` publishes a fresh payload identity, even when its
+requested size is smaller: initialize
+the new allocation/handle before revoking the old identity. Revoked aliases
+remain structurally traceable and keep that allocation's address reserved,
+but operations and observation reject them before accessing their contents.
+Only a successful applicable liveness trace may release the allocation.
+This avoids use-after-free/address-reuse ambiguity without adding a second
+handle generation registry. Any incomplete copy/fixup cancels sweeping and
+retains all buffers/payloads through native unwind.
+
+The distinct `shrinkMutableByteArray#` and `shrinkSmallMutableArray#` primops
+return only State#, not a replacement handle. They preserve payload identity
+and allocation capacity, update the authenticated logical length in place,
+and make all aliases see that length. Boxed shrink removes remembered slots
+outside the new logical span. It must not revoke the only handle the caller has.
+
+Array allocation reserves its fixed-size managed wrapper before allocating
+the external payload. The wrapper receives a valid descriptor header, and
+the noncollecting ledger allocation initializes its external slot before
+publication. Allocating an unrooted Young payload before a collecting wrapper
+reserve would let that very collection reclaim it. Allocation failure must
+unwind without publishing the incomplete wrapper. This is a separate payload
+allocation operation, not a host call added to the ordinary Construct fast path.
+
+Array parcels after the result-contract fold:
+
+- External view: move the shared kind/error vocabulary below codegen and
+  replace per-visit slot Vec allocation with a bounded iterator. Preserve all
+  existing ledger authentication. This parcel is implemented and focused checks pass.
+- Descriptor graph: explicit external-edge metadata, one authenticated owner
+  view, shared-payload/remembered-slot deduplication in minor and promotion
+  copies. Tests must include aliasing through both roots and copied handles,
+  promotion followed by unselected-root fixup, and late failure without sweep.
+- Payload lifetime: Young/Retained classification in the existing ledger,
+  successful-minor Young sweep, strong-root major tracing for retained payloads,
+  and revoked-resize aliases. No per-object descriptor registration.
+- Small/boxed arrays: new/read/write/index/size/freeze first, then copy/clone,
+  CAS and shrink; exact logical State# and unlifted signatures. Seed one real
+  adapter allocation/store/collection/read test before family delegation.
+- Byte arrays: bounds-checked sized reads/writes/indexing, allocation/copy,
+  size/freeze and explicit resize versus shrink alias contracts. No raw-address
+  inference from an arbitrary Address field.
 
 Lead commits semantic types/signatures, hardest path and a red contract before
 implementation delegation. Searchable wave5 task markers identify scaffolds;
@@ -348,6 +470,47 @@ that exact variant, not arbitrary Void insertion. Rust coverage exercises both
 forms; producer correction and corpus rerun remain separate evidence.
 
 Subsequent parcel log (recorded while running):
+
+Current result-contract migration log (still open; these are local parcel
+events, not reconstructed totals for earlier context):
+
+- Repr: one lead type/callable/test seed, one assignment, two semantic
+  corrections (unknown oversaturation and known-rep empty cases), four small
+  interface/coordination follow-ups. First brief was insufficient; worker
+  implementation is awaiting the shared fixture/build boundary.
+- Haskell: one assignment and one semantic correction on saturation evidence;
+  one build-lease follow-up. First implementation was not accepted on source
+  review. Cross-language tests remain the acceptance, not matching type names.
+- Native recognition: one assignment, one helper-interface follow-up, one
+  handback review. Implementation reported source-complete; no build claim.
+- Native ABI/apply: one root native seed, an initially oversized wiring brief,
+  two scope-narrowing messages, and one handback review. An unrelated
+  CallerArea extension was sent back for removal. Emission/invocation moved
+  to a separate owner; the scaffolding brief needed that correction.
+- Constructor-panic diagnosis: the reproduction was useful, but the proposed
+  GHC-pass workaround was rejected. A separate pinned-source read plus lead
+  consumer inspection identified the actual fault. The corrected regression
+  passed two Haskell suites. This is a review disagreement, not a clean
+  one-round diagnostic success.
+
+No harness worker/planner token totals are available. The current experiment
+shows routine signature migration delegating cleanly, but continuation
+semantics still requiring lead review; build-lease routing remains lead
+overhead rather than implementation work.
+
+Latest parcel events: integrated Rust verification needed one assignment and
+one consolidated authorization for mechanical fixture repair; four failures
+were stale wire tags or flat-tree ownership/order, not four backend defects.
+The partial-PAP test required a lead contract correction: the Case-bound
+callee has unknown callable metadata, so its demand is ordinary LiftedRef;
+the underlying bottoming entry remains NoSuccess and still raises at runtime.
+Haskell assertion review required one tests-only follow-up because the initial
+tests checked raise# presence without proving entry/call result contracts.
+The raised-CAF retry required one seed-shape assignment: retrying a new
+invocation was insufficient evidence of same-machine restoration. External
+view work has one lead type/iterator seed and one implementation assignment;
+its build is pending. The array inventory was accepted after one read-only
+round; it corrected the lead's conflation of shrink and resize signatures.
 
 | Parcel | Worker rounds | Lead events / brief sufficiency | Outcome |
 |---|---:|---|---|

@@ -13,7 +13,7 @@ fn compile(wire: WireProgram) -> CompiledProgram {
 fn scalar_only_bytes_keep_the_exact_embedded_address_alive() {
     for payload in [Vec::new(), b"a\0b".to_vec()] {
         let mut wire = testing::wire_program();
-        wire.signatures[0].results = vec![RuntimeRep::Address];
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
         wire.expressions.nodes[0] =
             ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Bytes(payload.clone()))]);
         let program = compile(wire);
@@ -43,7 +43,7 @@ fn scalar_only_bytes_keep_the_exact_embedded_address_alive() {
 fn bytes_top_and_scalar_literal_share_terminated_storage() {
     let payload = b"a\0b".to_vec();
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::Address];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
     wire.expressions.nodes[0] =
         ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Bytes(payload.clone()))]);
     wire.bindings.push(Group::NonRecursive(TopBinding {
@@ -65,10 +65,10 @@ fn bytes_top_and_scalar_literal_share_terminated_storage() {
 fn heap_top_scalar_bytes_resolve_without_a_bytes_top() {
     let payload = b"heap\0field".to_vec();
     let mut wire = testing::wire_program();
-    wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.signatures.push(Signature {
         arguments: vec![],
-        results: vec![RuntimeRep::LiftedRef],
+        results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
     });
     wire.expressions.nodes[0] = ExprFrame::Construct {
         constructor: ConstructorId(0),
@@ -197,11 +197,11 @@ fn index_char_wire(result_rep: RuntimeRep) -> WireProgram {
     wire.signatures = vec![
         Signature {
             arguments: vec![RuntimeRep::Address, RuntimeRep::Int(64)],
-            results: vec![result_rep],
+            results: ResultContract::Returns(vec![result_rep]),
         },
         Signature {
             arguments: vec![RuntimeRep::Address, RuntimeRep::Int(64)],
-            results: vec![result_rep],
+            results: ResultContract::Returns(vec![result_rep]),
         },
     ];
     wire.operations = vec![OperationDecl {

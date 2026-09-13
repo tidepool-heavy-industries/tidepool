@@ -1,8 +1,8 @@
 use cranelift_codegen::ir::{self, types, AbiParam, Type};
 use cranelift_codegen::isa::CallConv;
 use tidepool_repr::execution_schema::{
-    Architecture, Endianness, LayoutError, RuntimeRep, Signature as SemanticSignature,
-    StorageLayout, TargetDescriptor,
+    Architecture, Endianness, LayoutError, ResultContract, RuntimeRep,
+    Signature as SemanticSignature, StorageLayout, TargetDescriptor,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,7 +56,7 @@ pub enum ResultTransport {
 pub struct EntryAbi {
     semantic_arguments: Vec<RuntimeRep>,
     physical_arguments: Vec<RuntimeRep>,
-    semantic_results: Vec<RuntimeRep>,
+    semantic_results: ResultContract,
     physical_results: Vec<RuntimeRep>,
     environment: EnvironmentMode,
     result_layout: StorageLayout,
@@ -87,13 +87,15 @@ impl EntryAbi {
             .copied()
             .filter(|rep| *rep != RuntimeRep::Void)
             .collect();
-        let physical_results: Vec<_> = signature
-            .results
+        // NoSuccess has a status-only native ABI. Keep its semantic contract
+        // separately: an empty physical payload does not mean successful Void.
+        let returned_reps = signature.results.returned_reps().unwrap_or(&[]);
+        let physical_results: Vec<_> = returned_reps
             .iter()
             .copied()
             .filter(|rep| *rep != RuntimeRep::Void)
             .collect();
-        let result_layout = StorageLayout::for_reps(profile.target(), &signature.results)?;
+        let result_layout = StorageLayout::for_reps(profile.target(), returned_reps)?;
         let result_components = cranelift_components(&physical_results, profile.pointer_type())?;
         // The status discriminant consumes one component of the verified result
         // budget. A caller area transports the entire result vector when it does
@@ -127,7 +129,7 @@ impl EntryAbi {
         &self.physical_arguments
     }
 
-    pub fn semantic_results(&self) -> &[RuntimeRep] {
+    pub fn semantic_results(&self) -> &ResultContract {
         &self.semantic_results
     }
 
@@ -299,7 +301,7 @@ mod tests {
             Some(EntryMetadata::new(
                 SemanticSignature {
                     arguments: vec![RuntimeRep::LiftedRef],
-                    results: vec![RuntimeRep::LiftedRef],
+                    results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
                 },
                 7,
             )),
@@ -311,7 +313,7 @@ mod tests {
 
         let signature = SemanticSignature {
             arguments: reps,
-            results: vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)]),
         };
         let profile = NativeAbiProfile::new(x86_64(), 2).unwrap();
         let abi = EntryAbi::lower(&profile, &signature, EnvironmentMode::Captured).unwrap();
@@ -331,7 +333,7 @@ mod tests {
     fn platform_adapter_executes_tail_entry_and_materializes_mixed_results() {
         let signature = SemanticSignature {
             arguments: vec![RuntimeRep::Int(64), RuntimeRep::Float(64)],
-            results: vec![RuntimeRep::Int(64), RuntimeRep::Float(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64), RuntimeRep::Float(64)]),
         };
         let profile = NativeAbiProfile::new(x86_64(), 5).unwrap();
         let abi = EntryAbi::lower(&profile, &signature, EnvironmentMode::Absent).unwrap();
@@ -416,13 +418,52 @@ mod tests {
         let profile = NativeAbiProfile::new(x86_64(), 4).unwrap();
         let signature = SemanticSignature {
             arguments: vec![RuntimeRep::Void, RuntimeRep::Word(64)],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         };
         let abi = EntryAbi::lower(&profile, &signature, EnvironmentMode::Absent).unwrap();
         assert!(matches!(abi.result_transport(), ResultTransport::Registers));
         let clif = abi.cranelift_signature(&profile, CallConv::Tail).unwrap();
         assert_eq!(clif.params.len(), 2); // vmctx + one i64 component
         assert_eq!(clif.returns.len(), 2); // status + one i64 component
+    }
+
+    #[test]
+    fn no_success_is_status_only_without_becoming_empty_returns() {
+        let profile = NativeAbiProfile::new(x86_64(), 4).unwrap();
+        let returns_nothing = SemanticSignature {
+            arguments: Vec::new(),
+            results: ResultContract::Returns(Vec::new()),
+        };
+        let never_returns = SemanticSignature {
+            arguments: Vec::new(),
+            results: ResultContract::NoSuccess,
+        };
+        let ordinary =
+            EntryAbi::lower(&profile, &returns_nothing, EnvironmentMode::Absent).unwrap();
+        let terminal = EntryAbi::lower(&profile, &never_returns, EnvironmentMode::Absent).unwrap();
+        assert_eq!(
+            ordinary.semantic_results(),
+            &ResultContract::Returns(Vec::new())
+        );
+        assert_eq!(terminal.semantic_results(), &ResultContract::NoSuccess);
+        assert!(ordinary.result_layout().fields().is_empty());
+        assert!(terminal.result_layout().fields().is_empty());
+        assert_eq!(
+            ordinary
+                .cranelift_signature(&profile, CallConv::Tail)
+                .unwrap()
+                .returns
+                .len(),
+            1
+        );
+        assert_eq!(
+            terminal
+                .cranelift_signature(&profile, CallConv::Tail)
+                .unwrap()
+                .returns
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -439,11 +480,11 @@ mod tests {
     fn aarch64_profile_lowers_without_claiming_native_execution() {
         let signature = SemanticSignature {
             arguments: vec![RuntimeRep::Void, RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
-            results: vec![
+            results: ResultContract::Returns(vec![
                 RuntimeRep::LiftedRef,
                 RuntimeRep::Word(64),
                 RuntimeRep::Float(64),
-            ],
+            ]),
         };
         let profile = NativeAbiProfile::new(aarch64(), 2).unwrap();
         let abi = EntryAbi::lower(&profile, &signature, EnvironmentMode::Captured).unwrap();

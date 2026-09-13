@@ -8,7 +8,20 @@ use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::{ir, ir::InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use std::sync::Arc;
-use tidepool_repr::execution_schema::{OperationDecl, OperationIdentity, RuntimeRep, Signature};
+use tidepool_repr::execution_schema::{
+    OperationDecl, OperationIdentity, ResultContract, RuntimeRep, Signature,
+};
+
+fn result_reps(signature: &Signature) -> Option<&[RuntimeRep]> {
+    match &signature.results {
+        ResultContract::Returns(reps) => Some(reps),
+        ResultContract::NoSuccess => None,
+    }
+}
+
+fn returns_exact(signature: &Signature, expected: &[RuntimeRep]) -> bool {
+    result_reps(signature) == Some(expected)
+}
 
 /// Pure scalar families cannot allocate, call hosts, or inspect managed data.
 pub(super) trait ScalarFamily {
@@ -76,7 +89,7 @@ fn binary_same(
         RuntimeRep::Int(bits) | RuntimeRep::Word(bits) if valid_bits(bits) => bits,
         _ => return None,
     };
-    if signature.arguments.as_slice() == [lhs, rhs] && signature.results.as_slice() == [result] {
+    if signature.arguments.as_slice() == [lhs, rhs] && returns_exact(signature, &[result]) {
         Some(bits)
     } else {
         None
@@ -88,7 +101,7 @@ fn unary_same(signature: &Signature, arg: RuntimeRep, result: RuntimeRep) -> Opt
         RuntimeRep::Int(bits) | RuntimeRep::Word(bits) if valid_bits(bits) => bits,
         _ => return None,
     };
-    if signature.arguments.as_slice() == [arg] && signature.results.as_slice() == [result] {
+    if signature.arguments.as_slice() == [arg] && returns_exact(signature, &[result]) {
         Some(bits)
     } else {
         None
@@ -122,7 +135,7 @@ fn compare(
     } else {
         word_rep(bits)
     };
-    let result_bits = match signature.results.as_slice() {
+    let result_bits = match result_reps(signature)? {
         [RuntimeRep::Int(64)] => 64,
         _ => return None,
     };
@@ -152,7 +165,7 @@ fn generic_shift(
     kind: IntegerKind,
 ) -> Option<IntegerOperation> {
     let lhs = if signed { int_rep(64) } else { word_rep(64) };
-    (signature.arguments.as_slice() == [lhs, int_rep(64)] && signature.results.as_slice() == [lhs])
+    (signature.arguments.as_slice() == [lhs, int_rep(64)] && returns_exact(signature, &[lhs]))
         .then_some(IntegerOperation {
             kind,
             signed,
@@ -188,7 +201,7 @@ fn fixed_quot_rem(signature: &Signature, signed: bool, bits: u8) -> Option<Integ
     } else {
         word_rep(bits)
     };
-    (signature.arguments.as_slice() == [rep, rep] && signature.results.as_slice() == [rep, rep])
+    (signature.arguments.as_slice() == [rep, rep] && returns_exact(signature, &[rep, rep]))
         .then_some(IntegerOperation {
             kind: IntegerKind::QuotRem,
             signed,
@@ -229,15 +242,14 @@ fn fixed_shift(
     } else {
         word_rep(bits)
     };
-    (signature.arguments.as_slice() == [value, int_rep(64)]
-        && signature.results.as_slice() == [value])
-    .then_some(IntegerOperation {
-        kind,
-        signed,
-        bits,
-        result_bits: bits,
-        narrow_bits: 0,
-    })
+    (signature.arguments.as_slice() == [value, int_rep(64)] && returns_exact(signature, &[value]))
+        .then_some(IntegerOperation {
+            kind,
+            signed,
+            bits,
+            result_bits: bits,
+            narrow_bits: 0,
+        })
 }
 
 fn convert(signature: &Signature, from_signed: bool, to_signed: bool) -> Option<IntegerOperation> {
@@ -246,7 +258,7 @@ fn convert(signature: &Signature, from_signed: bool, to_signed: bool) -> Option<
         (false, [RuntimeRep::Word(64)]) => 64,
         _ => return None,
     };
-    let result = match (to_signed, signature.results.as_slice()) {
+    let result = match (to_signed, result_reps(signature)?) {
         (true, [RuntimeRep::Int(64)]) => 64,
         (false, [RuntimeRep::Word(64)]) => 64,
         _ => return None,
@@ -277,14 +289,15 @@ fn convert_between(
     } else {
         word_rep(to_bits)
     };
-    (signature.arguments.as_slice() == [source] && signature.results.as_slice() == [result])
-        .then_some(IntegerOperation {
+    (signature.arguments.as_slice() == [source] && returns_exact(signature, &[result])).then_some(
+        IntegerOperation {
             kind: IntegerKind::Convert,
             signed: from_signed,
             bits: from_bits,
             result_bits: to_bits,
             narrow_bits: 0,
-        })
+        },
+    )
 }
 
 fn narrow(signature: &Signature, signed: bool, result_bits: u8) -> Option<IntegerOperation> {
@@ -294,7 +307,7 @@ fn narrow(signature: &Signature, signed: bool, result_bits: u8) -> Option<Intege
         _ => return None,
     };
     let result = if signed { int_rep(64) } else { word_rep(64) };
-    (signature.results.as_slice() == [result]).then_some(IntegerOperation {
+    returns_exact(signature, &[result]).then_some(IntegerOperation {
         kind: IntegerKind::Narrow,
         signed,
         bits: source,
@@ -442,15 +455,21 @@ pub(super) fn recognize_operation(
 ) -> Option<ScalarOperation> {
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
         && signature.arguments == [RuntimeRep::Float(64)]
-        && signature.results == [RuntimeRep::Int(64)]
+        && returns_exact(signature, &[RuntimeRep::Int(64)])
     {
         return Some(ScalarOperation::DoubleToInt);
     }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "indexCharOffAddr#")
         && signature.arguments == [RuntimeRep::Address, RuntimeRep::Int(64)]
-        && signature.results == [RuntimeRep::Word(64)]
+        && returns_exact(signature, &[RuntimeRep::Word(64)])
     {
         return Some(ScalarOperation::IndexCharOffAddr);
+    }
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "raise#")
+        && signature.arguments == [RuntimeRep::LiftedRef]
+        && matches!(&signature.results, ResultContract::NoSuccess)
+    {
+        return Some(ScalarOperation::Raise);
     }
     IntegerFamily::recognize(&declaration.identity, signature)
         .map(ScalarOperation::Integer)
@@ -464,6 +483,7 @@ pub(super) fn recognize_operation(
 pub(super) enum ScalarOperation {
     DoubleToInt,
     IndexCharOffAddr,
+    Raise,
     Integer(IntegerOperation),
     Floating(super::floating::FloatingOperation),
 }
@@ -475,10 +495,19 @@ pub(super) fn emit_operation(
     vmctx: ir::Value,
     pipeline: &mut CodegenPipeline,
     bytes: &Arc<super::static_bytes::PinnedBytes>,
-) -> Result<Vec<ir::Value>, super::CompileError> {
+) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
+        ScalarOperation::Raise => {
+            super::no_success::emit_terminal(
+                builder,
+                pipeline,
+                vmctx,
+                super::no_success::TerminalCause::Raised(arguments[0]),
+            )?;
+            Ok(None)
+        }
         ScalarOperation::DoubleToInt => {
-            super::fallible::emit_double_to_int(builder, vmctx, pipeline, arguments[0])
+            super::fallible::emit_double_to_int(builder, vmctx, pipeline, arguments[0]).map(Some)
         }
         ScalarOperation::IndexCharOffAddr => super::static_bytes::emit_index_char(
             builder,
@@ -487,21 +516,22 @@ pub(super) fn emit_operation(
             bytes,
             arguments[0],
             arguments[1],
-        ),
+        )
+        .map(Some),
         ScalarOperation::Integer(operation)
             if matches!(
                 operation.kind,
                 IntegerKind::Quot | IntegerKind::Rem | IntegerKind::QuotRem
             ) =>
         {
-            super::fallible::emit(operation, builder, vmctx, pipeline, arguments)
+            super::fallible::emit(operation, builder, vmctx, pipeline, arguments).map(Some)
         }
         ScalarOperation::Integer(operation) => {
-            Ok(IntegerFamily::emit(operation, builder, arguments))
+            Ok(Some(IntegerFamily::emit(operation, builder, arguments)))
         }
-        ScalarOperation::Floating(operation) => Ok(super::floating::FloatingFamily::emit(
+        ScalarOperation::Floating(operation) => Ok(Some(super::floating::FloatingFamily::emit(
             operation, builder, arguments,
-        )),
+        ))),
     }
 }
 
@@ -591,10 +621,13 @@ mod tests {
     use crate::host_fns::RuntimeError;
     use tidepool_repr::execution_schema::{Atom, ScalarLiteral};
 
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
 
     fn sig(arguments: Vec<RuntimeRep>, results: Vec<RuntimeRep>) -> Signature {
-        Signature { arguments, results }
+        Signature {
+            arguments,
+            results: ResultContract::Returns(results),
+        }
     }
 
     fn run_scalar(
@@ -606,10 +639,10 @@ mod tests {
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();
-        wire.signatures[0].results = vec![result_rep];
+        wire.signatures[0].results = ResultContract::Returns(vec![result_rep]);
         wire.signatures.push(Signature {
             arguments: argument_reps,
-            results: vec![result_rep],
+            results: ResultContract::Returns(vec![result_rep]),
         });
         wire.operations.push(OperationDecl {
             identity: OperationIdentity::PrimOp(name.into()),
@@ -645,10 +678,10 @@ mod tests {
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();
-        wire.signatures[0].results = vec![result_rep];
+        wire.signatures[0].results = ResultContract::Returns(vec![result_rep]);
         wire.signatures.push(Signature {
             arguments: argument_reps,
-            results: vec![result_rep],
+            results: ResultContract::Returns(vec![result_rep]),
         });
         wire.operations.push(OperationDecl {
             identity: OperationIdentity::PrimOp(name.into()),
@@ -678,10 +711,10 @@ mod tests {
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();
-        wire.signatures[0].results = vec![result_rep, result_rep];
+        wire.signatures[0].results = ResultContract::Returns(vec![result_rep, result_rep]);
         wire.signatures.push(Signature {
             arguments: argument_reps,
-            results: vec![result_rep, result_rep],
+            results: ResultContract::Returns(vec![result_rep, result_rep]),
         });
         wire.operations.push(OperationDecl {
             identity: OperationIdentity::PrimOp(name.into()),
@@ -733,6 +766,34 @@ mod tests {
 
         let fabricated_width = sig(vec![RuntimeRep::Int(8); 2], vec![RuntimeRep::Int(8)]);
         assert!(IntegerFamily::recognize(&identity, &fabricated_width).is_none());
+    }
+
+    #[test]
+    fn raise_requires_exact_nonsuccess_contract() {
+        let declaration = OperationDecl {
+            identity: OperationIdentity::PrimOp("raise#".into()),
+            signature: tidepool_repr::execution_schema::SignatureId(0),
+        };
+        let signature = Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::NoSuccess,
+        };
+        assert!(matches!(
+            recognize_operation(&declaration, &signature),
+            Some(ScalarOperation::Raise)
+        ));
+
+        let returning = Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        assert!(recognize_operation(&declaration, &returning).is_none());
+
+        let wrong_argument = Signature {
+            arguments: vec![RuntimeRep::Int(64)],
+            results: ResultContract::NoSuccess,
+        };
+        assert!(recognize_operation(&declaration, &wrong_argument).is_none());
     }
 
     #[test]
@@ -992,16 +1053,17 @@ mod tests {
     #[test]
     fn fixed_width_word64_primops_use_ghc_names_and_int_counts() {
         let word64_binary = sig(vec![RuntimeRep::Word(64); 2], vec![RuntimeRep::Word(64)]);
-        assert!(IntegerFamily::recognize(
-            &OperationIdentity::PrimOp("and64#".into()),
-            &word64_binary,
-        )
-        .is_some());
-        assert!(IntegerFamily::recognize(
-            &OperationIdentity::PrimOp("andWord64#".into()),
-            &word64_binary,
-        )
-        .is_none());
+        assert!(
+            IntegerFamily::recognize(&OperationIdentity::PrimOp("and64#".into()), &word64_binary,)
+                .is_some()
+        );
+        assert!(
+            IntegerFamily::recognize(
+                &OperationIdentity::PrimOp("andWord64#".into()),
+                &word64_binary,
+            )
+            .is_none()
+        );
 
         let signed_shift = sig(
             vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
@@ -1035,16 +1097,20 @@ mod tests {
     #[test]
     fn narrow_primops_are_target_width_in_and_out() {
         let identity = OperationIdentity::PrimOp("narrow8Int#".into());
-        assert!(IntegerFamily::recognize(
-            &identity,
-            &sig(vec![RuntimeRep::Int(64)], vec![RuntimeRep::Int(64)])
-        )
-        .is_some());
-        assert!(IntegerFamily::recognize(
-            &identity,
-            &sig(vec![RuntimeRep::Int(8)], vec![RuntimeRep::Int(8)])
-        )
-        .is_none());
+        assert!(
+            IntegerFamily::recognize(
+                &identity,
+                &sig(vec![RuntimeRep::Int(64)], vec![RuntimeRep::Int(64)])
+            )
+            .is_some()
+        );
+        assert!(
+            IntegerFamily::recognize(
+                &identity,
+                &sig(vec![RuntimeRep::Int(8)], vec![RuntimeRep::Int(8)])
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1157,13 +1223,13 @@ mod tests {
 
     #[test]
     fn w5_a3_integer_add_runs_through_real_adapter() {
-        use std::sync::{atomic::AtomicBool, Arc};
+        use std::sync::{Arc, atomic::AtomicBool};
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();
         wire.signatures.push(Signature {
             arguments: vec![RuntimeRep::Int(64); 2],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
         wire.operations.push(OperationDecl {
             identity: OperationIdentity::PrimOp("+#".into()),

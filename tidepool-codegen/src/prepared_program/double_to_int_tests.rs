@@ -8,11 +8,11 @@ fn double2int_wire(entry_rep: RuntimeRep, operation_rep: RuntimeRep) -> WireProg
     wire.signatures = vec![
         Signature {
             arguments: vec![entry_rep],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         },
         Signature {
             arguments: vec![operation_rep],
-            results: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         },
     ];
     wire.operations = vec![OperationDecl {

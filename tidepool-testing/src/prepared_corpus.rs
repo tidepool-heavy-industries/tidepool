@@ -50,14 +50,19 @@ pub fn matches_expected_failure(
     use tidepool_codegen::prepared_program::ExecutionError;
     matches!(
         (error, expected),
-        (ExecutionError::Runtime(MachineFailure {
-            cause: RuntimeError::BlackHole,
-            disposition: MachineDisposition::Reusable,
-        }), ExpectedFailure::Blackhole)
-        | (ExecutionError::Runtime(MachineFailure {
-            cause: RuntimeError::RaisedException,
-            disposition: MachineDisposition::Reusable,
-        }), ExpectedFailure::RaisedException)
+        (
+            ExecutionError::Runtime(MachineFailure {
+                cause: RuntimeError::BlackHole,
+                disposition: MachineDisposition::Reusable,
+            }),
+            ExpectedFailure::Blackhole
+        ) | (
+            ExecutionError::Runtime(MachineFailure {
+                cause: RuntimeError::RaisedException,
+                disposition: MachineDisposition::Reusable,
+            }),
+            ExpectedFailure::RaisedException
+        )
     )
 }
 
@@ -286,6 +291,18 @@ where
                 },
                 &mut persist,
             );
+            // An error oracle is compared only after native execution reached
+            // its terminal result. Validation, admission, compilation, and
+            // watchdog failures remain stage failures, never language evidence.
+            if let Some(outcome) = comparison_for_execution_error(&error, expected) {
+                record_stage(
+                    &mut record,
+                    Stage::Comparison,
+                    Outcome::Running,
+                    &mut persist,
+                );
+                record_stage(&mut record, Stage::Comparison, outcome, &mut persist);
+            }
             return record;
         }
     };
@@ -314,6 +331,32 @@ where
 {
     record.record(stage, outcome);
     persist(record);
+}
+
+fn comparison_for_expected_failure(
+    error: &tidepool_codegen::prepared_program::ExecutionError,
+    expected: &ExpectedFailure,
+) -> Outcome {
+    if matches_expected_failure(error, expected) {
+        Outcome::Passed
+    } else {
+        Outcome::Failed {
+            reason: format!("expected {expected:?}, received execution failure: {error}"),
+        }
+    }
+}
+
+fn comparison_for_execution_error(
+    error: &tidepool_codegen::prepared_program::ExecutionError,
+    expected: Option<&Expectation>,
+) -> Option<Outcome> {
+    match expected {
+        Some(Expectation::Error(expected)) => {
+            Some(comparison_for_expected_failure(error, expected))
+        }
+        None => Some(Outcome::MissingExpectation),
+        Some(_) => None,
+    }
 }
 
 impl ProgramRecord {
@@ -623,6 +666,85 @@ mod tests {
         );
         assert!(matches!(report.stages[0].outcome, Outcome::NotReached));
         assert!(matches!(report.stages[4].outcome, Outcome::NotReached));
+    }
+
+    fn runtime_failure(
+        cause: tidepool_codegen::host_fns::RuntimeError,
+        disposition: tidepool_codegen::machine_state::MachineDisposition,
+    ) -> tidepool_codegen::prepared_program::ExecutionError {
+        tidepool_codegen::prepared_program::ExecutionError::Runtime(
+            tidepool_codegen::machine_state::MachineFailure { cause, disposition },
+        )
+    }
+
+    #[test]
+    fn expected_failure_matching_requires_the_exact_reusable_cause() {
+        use tidepool_codegen::host_fns::RuntimeError;
+        use tidepool_codegen::machine_state::MachineDisposition;
+
+        assert!(matches_expected_failure(
+            &runtime_failure(RuntimeError::RaisedException, MachineDisposition::Reusable),
+            &ExpectedFailure::RaisedException,
+        ));
+        assert!(matches_expected_failure(
+            &runtime_failure(RuntimeError::BlackHole, MachineDisposition::Reusable),
+            &ExpectedFailure::Blackhole,
+        ));
+        assert!(!matches_expected_failure(
+            &runtime_failure(RuntimeError::RaisedException, MachineDisposition::Reusable),
+            &ExpectedFailure::Blackhole,
+        ));
+        assert!(!matches_expected_failure(
+            &runtime_failure(RuntimeError::BlackHole, MachineDisposition::Reusable),
+            &ExpectedFailure::RaisedException,
+        ));
+        assert!(!matches_expected_failure(
+            &runtime_failure(RuntimeError::Cancelled, MachineDisposition::Reusable),
+            &ExpectedFailure::RaisedException,
+        ));
+        assert!(!matches_expected_failure(
+            &runtime_failure(
+                RuntimeError::RaisedException,
+                MachineDisposition::Unavailable
+            ),
+            &ExpectedFailure::RaisedException,
+        ));
+    }
+
+    #[test]
+    fn expected_execution_failure_preserves_execution_reason_and_records_comparison() {
+        use tidepool_codegen::host_fns::RuntimeError;
+        use tidepool_codegen::machine_state::MachineDisposition;
+
+        let error = runtime_failure(RuntimeError::RaisedException, MachineDisposition::Reusable);
+        let mut report = ProgramRecord::new("raised".into());
+        report.record(
+            Stage::Execution,
+            Outcome::Failed {
+                reason: error.to_string(),
+            },
+        );
+        report.record(
+            Stage::Comparison,
+            comparison_for_expected_failure(&error, &ExpectedFailure::RaisedException),
+        );
+        assert!(matches!(
+            report.stages[4].outcome,
+            Outcome::Failed { ref reason } if reason == "Haskell exception raised"
+        ));
+        assert!(matches!(report.stages[5].outcome, Outcome::Passed));
+
+        report.record(
+            Stage::Comparison,
+            comparison_for_expected_failure(&error, &ExpectedFailure::Blackhole),
+        );
+        assert!(matches!(report.stages[5].outcome, Outcome::Failed { .. }));
+
+        assert!(matches!(
+            comparison_for_execution_error(&error, None),
+            Some(Outcome::MissingExpectation)
+        ));
+        assert!(comparison_for_execution_error(&error, Some(&Expectation::Int(1))).is_none());
     }
 
     #[test]

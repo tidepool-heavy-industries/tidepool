@@ -1,12 +1,12 @@
 use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::MachineDisposition;
-use tidepool_repr::execution_schema::{
-    parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, MachineImports,
-    ProgramRequirements, TargetDescriptor, ValueId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
-};
 use tidepool_repr::DataConId;
+use tidepool_repr::execution_schema::{
+    Architecture, DecodeLimits, EXECUTION_ABI_VERSION, Endianness, ImportedValue, MachineImports,
+    ProgramRequirements, SCHEMA_VERSION, TargetDescriptor, ValueId, parse_program,
+};
 use tidepool_runtime::prepared_execution::{
-    run_prepared_once, PreparedCancelHandle, PreparedFailureKind, PreparedRuntimeError,
+    PreparedCancelHandle, PreparedFailureKind, PreparedRuntimeError, run_prepared_once,
 };
 use tidepool_runtime::session::persistent::PreparedPersistentSession;
 
@@ -62,6 +62,7 @@ fn symbol(namespace: &str, module: &str, occurrence: &str) -> Vec<u8> {
         text(module),
         text(namespace),
         text(occurrence),
+        array([uint(0)]),
     ])
 }
 
@@ -98,7 +99,7 @@ fn strict_artifact() -> Vec<u8> {
             text("sysv64"),
             array([]),
         ]),
-        array([array([array([]), array([rep_lifted()])])]),
+        array([array([array([]), array([uint(0), array([rep_lifted()])])])]),
         array([]),
         array([constructor]),
         array([]),
@@ -138,7 +139,6 @@ fn imports() -> MachineImports {
                     entry_signature: global
                         .entry_signature
                         .map(|id| prepared.signatures()[id.0 as usize].clone()),
-                    dead_end: global.dead_end,
                     evaluated: global.required_evaluated,
                     generation: global.required_generation.unwrap_or(0),
                 };

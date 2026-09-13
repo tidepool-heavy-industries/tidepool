@@ -5,7 +5,7 @@
 -- introspection API and contains no rendered GHC syntax.
 module Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), TargetDescriptor(..)
-  , ProgramEnvelope(..), SymbolIdentity(..), RuntimeRep(..), Signature(..)
+  , ProgramEnvelope(..), SymbolIdentity(..), RuntimeRep(..), ResultContract(..), Signature(..)
   , ValueId(..), JoinId(..), GlobalId(..), ConstructorId(..), OperationId(..)
   , SignatureId(..), ValueRef(..), ScalarLiteral(..), Atom(..), Group(..)
   , UpdatePolicy(..), HeapBinding(..), HeapRhs(..), JoinBinding(..)
@@ -21,8 +21,8 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 6
-executionAbiVersion = 4
+schemaVersion = 7
+executionAbiVersion = 5
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype JoinId = JoinId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -52,7 +52,14 @@ data SymbolIdentity = SymbolIdentity
 data RuntimeRep = VoidRep | LiftedRefRep | UnliftedRefRep | AddressRep
   | IntRep Word8 | WordRep Word8 | FloatRep Word8
   deriving stock (Eq, Ord, Show, Generic)
-data Signature = Signature { signatureArguments :: [RuntimeRep], signatureResults :: [RuntimeRep] }
+
+data ResultContract = Returns [RuntimeRep] | NoSuccess
+  deriving stock (Eq, Ord, Show, Generic)
+
+data Signature = Signature
+  { signatureArguments :: [RuntimeRep]
+  , signatureResults :: ResultContract
+  }
   deriving stock (Eq, Show, Generic)
 data FieldLayout = FieldLayout { fieldRep :: RuntimeRep, fieldOffset :: Word32 }
   deriving stock (Eq, Show, Generic)
@@ -71,8 +78,6 @@ data ConstructorDecl = ConstructorDecl
 data GlobalDecl = GlobalDecl
   { globalIdentity :: SymbolIdentity, globalRep :: RuntimeRep
   , globalEntrySignature :: Maybe SignatureId
-  -- No normal result after saturation; entry result reps are empty.
-  , globalDeadEnd :: Bool
   , globalRequiredEvaluated :: Bool, globalRequiredGeneration :: Maybe Word64
   } deriving stock (Eq, Show, Generic)
 -- | Operation signatures distinguish instantiated uses of one identity.
@@ -109,7 +114,7 @@ data CaseKind = AlgebraicCase SymbolIdentity | PrimitiveCase RuntimeRep
   | MultiValueCase | PolymorphicCase deriving stock (Eq, Show, Generic)
 data Expr = Return [Atom] | Enter Atom SignatureId | Call Atom SignatureId [Atom] | Operation OperationId [Atom]
   | Construct ConstructorId [Atom]
-  | Case Expr ValueId [RuntimeRep] CaseKind [Alternative]
+  | Case Expr ValueId ResultContract CaseKind [Alternative]
   | Let (Group HeapBinding) Expr | LetJoins (Group JoinBinding) Expr
   | Jump JoinId [Atom]
   deriving stock (Eq, Show, Generic)

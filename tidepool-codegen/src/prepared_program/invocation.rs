@@ -27,7 +27,7 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tidepool_heap::static_region::StaticRegion;
-use tidepool_repr::execution_schema::{RuntimeRep, StorageLayout, ValueId};
+use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, StorageLayout, ValueId};
 
 pub(super) struct PreparedInvocation<'code> {
     pub(super) program: &'code CompiledProgram,
@@ -38,7 +38,7 @@ pub(super) struct PreparedInvocation<'code> {
     pub(super) statics: Arc<StaticRegion>,
     pub(super) top_table: RootWords,
     pub(super) results: RootWords,
-    pub(super) result_reps: Vec<RuntimeRep>,
+    pub(super) result_contract: ResultContract,
     pub(super) result_layout: StorageLayout,
     pub(super) collections_before: u64,
     /// Boxed so the machine's borrowed admission pointer remains stable even
@@ -254,7 +254,7 @@ impl<'code> PreparedInvocation<'code> {
             statics,
             top_table,
             results,
-            result_reps: compiled.abi.semantic_results().to_vec(),
+            result_contract: compiled.abi.semantic_results().clone(),
             result_layout: compiled.abi.result_layout().clone(),
             collections_before: 0,
             old_space: Box::new(OldSpace::new()),
@@ -312,6 +312,12 @@ impl<'code> PreparedInvocation<'code> {
         {
             return Err(runtime_error_for_status(&invocation.machine, status));
         }
+        if invocation.result_contract == ResultContract::NoSuccess {
+            return Err(runtime_error(
+                &invocation.machine,
+                RuntimeError::NoSuccessReturned,
+            ));
+        }
 
         super::run::register_result_roots(
             &invocation.machine,
@@ -331,23 +337,25 @@ impl<'code> PreparedInvocation<'code> {
         if self.machine.prepared_call_status() != CallStatus::Success {
             return Err(runtime_error_from_machine(&self.machine));
         }
+        let result_reps = self
+            .result_contract
+            .returned_reps()
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::NoSuccessReturned))?;
         let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
         let result_words = self.results.snapshot();
-        let result_seeds = match super::observe::snapshot_results(
-            &result_words,
-            &self.result_reps,
-            &self.result_layout,
-        ) {
-            Ok(seeds) => seeds,
-            Err(error @ super::ObservationFailure::Integrity(_)) => {
-                self.machine.set_first_cause(RuntimeError::BadPointer);
-                return Err(runtime_error_from_machine_or_observation(
-                    &self.machine,
-                    error,
-                ));
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let result_seeds =
+            match super::observe::snapshot_results(&result_words, result_reps, &self.result_layout)
+            {
+                Ok(seeds) => seeds,
+                Err(error @ super::ObservationFailure::Integrity(_)) => {
+                    self.machine.set_first_cause(RuntimeError::BadPointer);
+                    return Err(runtime_error_from_machine_or_observation(
+                        &self.machine,
+                        error,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
         let values = match super::forcing::observe_results(
             &self.machine,
             self.program,
@@ -401,7 +409,12 @@ impl<'code> PreparedInvocation<'code> {
         if self.machine.prepared_call_status() != CallStatus::Success {
             return Err(runtime_error_from_machine(&self.machine));
         }
-        let Some(rep) = self.result_reps.get(logical_index).copied() else {
+        let Some(rep) = self
+            .result_contract
+            .returned_reps()
+            .and_then(|reps| reps.get(logical_index))
+            .copied()
+        else {
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         };
         if !matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
