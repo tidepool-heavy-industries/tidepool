@@ -130,13 +130,23 @@ The currently emitted strict subset is:
 - exact-signature boxed small/ordinary array new/read/index/write/size/freeze,
   small-array shrink, and boxed CAS; and byte-array new/freeze/size plus
   Word8, Word64, and Int64 read/index/write, `shrinkMutableByteArray#`, and
-  `copyAddrToByteArray#`. Byte shrink preserves the payload's identity and
-  capacity while shortening its logical length. Address copy admits only a
-  complete span of compiled-program-owned pinned bytes, including an empty
-  span at the owner's end; it does not admit arbitrary host pointers. Array
-  host paths authenticate active descriptor-backed payloads, check bounds,
-  and report typed failures. These operations do not imply parity with every
-  GHC array primop;
+  `resizeMutableByteArray#` and `copyAddrToByteArray#`. Resize admits exactly
+  `[UnliftedRef, Int64, Void] -> [UnliftedRef]`: it reserves a new managed
+  wrapper, allocates a fresh external byte payload, copies the common prefix,
+  zeroes growth, and revokes the old payload only after successful allocation
+  and copy. Old aliases remain structurally traceable until a successful sweep
+  but reject mutator access and observation. Invalid sizes leave the old
+  payload active. Byte shrink instead preserves payload identity and capacity
+  while shortening its logical length. Address copy admits only a complete
+  span of compiled-program-owned pinned bytes, including an empty span at the
+  owner's end; it does not admit arbitrary host pointers. Array host paths
+  authenticate active descriptor-backed payloads, check bounds, and report
+  typed failures. Focused resize tests in
+  [`bytes_tests.rs`](../tidepool-codegen/src/prepared_program/bytes_tests.rs)
+  and [`machine_state.rs`](../tidepool-codegen/src/machine_state.rs) cover
+  reserve-time collection, prefix/growth, revoked aliases, failed sizes, and
+  deferred reclamation; they are not corpus-progress evidence. These operations
+  do not imply parity with every GHC array primop;
 - the shipped `Tidepool.Double` `renderDouble`/`renderDoublePrec` wrappers.
   Their real Haskell bodies use `show`/`showsPrec` and are not bottoming
   placeholders. Projection replaces only wrappers whose resolved source bytes

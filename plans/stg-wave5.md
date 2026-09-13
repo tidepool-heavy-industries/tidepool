@@ -6,6 +6,30 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
+Frozen source `fbf74b81a` has a new complete corpus replay at
+`target/prepared-corpus/suite.Ej6U9S/results.json`: 812 tops, 709 project and
+validate, 548 admit and compile, 371 execute, 157 match, zero comparison
+mismatches. Missing expectations and unobserved results are not matches.
+The recovered-base (1), formatting (5), and dependency-shadow (1) contract
+cohorts all passed all six stages. Canonical fixture update/check completed;
+only the source fingerprint changed, not generated CBOR bytes. The prepared
+fold passed 143 tests and workspace test-target compilation passed.
+`just changed 9d3bd3cc0` failed at workspace formatting before clippy or
+nextest; its preserved log is
+`target/tidepool-test-runs/20260913T152315Z-675750-changed/nextest.log`.
+This is not a green broad gate. Full row/cohort evidence is in
+`plans/stg-wave5-corpus-checkpoint.json`; all prior 149 matches survived.
+The original foreign-call cohort has four matches and six still blocked,
+not ten established successes.
+
+The next bounded batch follows decoded operation tables, not guessed test
+expectations: character ord/ge, full-word clz, wide-word add/multiply/divide,
+and ledger-owned byte copy/comparison. Current expression first blockers are
+ord (138), wide quotient/remainder (16), geChar (3), and byte comparison (3).
+The sole remaining global is an exact `patError` binder/RHS type mismatch;
+103 producer rows still require GHC stack/backtrace capabilities. Neither
+capability nor type mismatch is repaired by inventing a body or default value.
+
 Pushed follow-up `9d3bd3cc0`: 140 prepared-program tests passed, and
 `cargo test --workspace --no-run --quiet` compiled all workspace test targets.
 These are not workspace test execution or a refreshed full-corpus result.
