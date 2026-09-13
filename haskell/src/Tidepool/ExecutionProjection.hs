@@ -23,7 +23,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32, Word64, Word8)
-import GHC.Builtin.PrimOps (PrimOp(..), primOpOcc)
+import GHC.Builtin.PrimOps (PrimOp(..), PrimCall(..), primOpOcc)
 import GHC.Builtin.Types (doubleDataCon, intDataCon)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
@@ -905,6 +905,9 @@ internOperation :: StgOp -> SignatureId -> P OperationId
 internOperation op signature = do
   operationSignature <- signatureForId signature
   operationIdentity <- case op of
+    StgPrimOp GetCurrentCCSOp
+      | operationSignature == Signature [LiftedRefRep, VoidRep] (Returns [AddressRep]) ->
+          pure (Schema.CapabilityIdentity "ghc:getCurrentCCS")
     StgPrimOp primop -> pure (Schema.PrimOpIdentity
       (Text.pack (occNameString (primOpOcc primop))))
     -- ghc-internal's rounding helper is an external C implementation, not an
@@ -924,6 +927,21 @@ internOperation op signature = do
       , unitString unit == "ghc-prim"
       , operationSignature == Signature [AddressRep, VoidRep] (Returns [IntRep 64]) ->
           pure (Schema.IntrinsicIdentity "strlen" Schema.CCall)
+    StgPrimCallOp (PrimCall label unit)
+      | unitString unit == "ghc-internal"
+      , unpackFS label == "stg_cloneMyStackzh"
+      , operationSignature == Signature [VoidRep] (Returns [UnliftedRefRep]) ->
+          pure (Schema.CapabilityIdentity "ghc:cloneMyStack")
+      | unitString unit == "ghc-internal"
+      , unpackFS label == "stg_decodeStackzh"
+      , operationSignature == Signature [UnliftedRefRep, VoidRep] (Returns [UnliftedRefRep]) ->
+          pure (Schema.CapabilityIdentity "ghc:decodeStack")
+    StgFCallOp (Foreign.CCall (Foreign.CCallSpec
+      (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlaySafe)) _
+      | unitString unit == "ghc-internal"
+      , unpackFS label == "lookupIPE"
+      , operationSignature == Signature [AddressRep, AddressRep, VoidRep] (Returns [WordRep 8]) ->
+          pure (Schema.CapabilityIdentity "ghc:lookupIPE")
     StgPrimCallOp call -> lift . Left $
       UnsupportedPrimitiveCall (Text.pack (showSDocUnsafe (ppr call))) operationSignature
     StgFCallOp call _ -> lift . Left $
