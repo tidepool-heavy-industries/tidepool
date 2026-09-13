@@ -1,0 +1,40 @@
+{
+  "source_revision": "ContainersContract.hs native GHC 9.12.2",
+  "expectations": {
+    "mapToAscList": {
+      "kind": "list",
+      "value": [
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "apple" }, { "kind": "int", "value": 1 } ] },
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "banana" }, { "kind": "int", "value": 2 } ] },
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "pear" }, { "kind": "int", "value": 3 } ] },
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "quince" }, { "kind": "int", "value": 7 } ] }
+      ]
+    },
+    "insertWithTotal": { "kind": "int", "value": 11 },
+    "adjustedLookup": { "kind": "maybe", "value": { "kind": "int", "value": 6 } },
+    "alteredSize": { "kind": "int", "value": 3 },
+    "foldedKeys": { "kind": "text", "value": "apple,banana,pear,quince," },
+    "unionTotals": {
+      "kind": "list",
+      "value": [
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "apple" }, { "kind": "int", "value": 6 } ] },
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "banana" }, { "kind": "int", "value": 2 } ] },
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "cherry" }, { "kind": "int", "value": 4 } ] },
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "pear" }, { "kind": "int", "value": 3 } ] },
+        { "kind": "tuple", "value": [ { "kind": "text", "value": "quince" }, { "kind": "int", "value": 7 } ] }
+      ]
+    },
+    "setMembership": {
+      "kind": "tuple",
+      "value": [ { "kind": "bool", "value": true }, { "kind": "bool", "value": false } ]
+    },
+    "setDifferenceList": {
+      "kind": "list",
+      "value": [
+        { "kind": "text", "value": "apple" },
+        { "kind": "text", "value": "banana" },
+        { "kind": "text", "value": "quince" }
+      ]
+    }
+  }
+}
