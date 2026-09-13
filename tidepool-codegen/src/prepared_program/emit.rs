@@ -984,7 +984,9 @@ fn emit_let_group(
                     );
                 }
             }
-            HeapRhs::Bytes(_) => unreachable!(),
+            HeapRhs::Bytes(_) => {
+                unreachable!("the descriptor loop above already rejects a byte right-hand side")
+            }
         }
     }
     Ok(values)

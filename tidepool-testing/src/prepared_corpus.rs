@@ -131,7 +131,7 @@ pub enum Stage {
     Comparison,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
     Running,
