@@ -1,0 +1,42 @@
+{
+  "source_revision": "UserTypesContract.hs native GHC 9.12.2",
+  "expectations": {
+    "defaultMethodPair": {
+      "kind": "tuple",
+      "value": [
+        { "kind": "text", "value": "summary:widget" },
+        { "kind": "text", "value": "custom-gadget" }
+      ]
+    },
+    "updatedOrderView": {
+      "kind": "tuple",
+      "value": [
+        { "kind": "int", "value": 41 },
+        { "kind": "text", "value": "ada" },
+        { "kind": "int", "value": 1250 },
+        { "kind": "bool", "value": true },
+        { "kind": "text", "value": "rush" }
+      ]
+    },
+    "functorFoldSum": { "kind": "int", "value": 78 },
+    "maybeChain": { "kind": "maybe", "value": { "kind": "int", "value": 42 } },
+    "eitherTraversed": {
+      "kind": "either_right",
+      "value": {
+        "kind": "list",
+        "value": [
+          { "kind": "int", "value": 4 },
+          { "kind": "int", "value": 16 },
+          { "kind": "int", "value": 36 },
+          { "kind": "int", "value": 64 }
+        ]
+      }
+    },
+    "eitherTraverseFailure": {
+      "kind": "either_left",
+      "value": { "kind": "text", "value": "odd:5" }
+    },
+    "evalExpr": { "kind": "int", "value": 9 },
+    "prettyExpr": { "kind": "text", "value": "((3 * (1 + 4)) + -6)" }
+  }
+}
