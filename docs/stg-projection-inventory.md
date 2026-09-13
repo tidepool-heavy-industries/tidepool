@@ -171,7 +171,14 @@ The currently emitted strict subset is:
   `[UnliftedRef, Int64, UnliftedRef, Int64, Int64] -> [Int64]`; it accepts
   aliases and compares unsigned bytes, returning -1, 0, or 1 only after both
   spans validate. Both paths return status failures without a partial copy or
-  comparison result. Focused resize tests in
+  comparison result. The exact C-call `_hs_text_memchr` intrinsic admits
+  `[UnliftedRef, Word64, Word64, Word8, Void] -> [Int64]` over one
+  descriptor-backed byte array: the host authenticates the active payload
+  through the external-storage ledger, requires the offset/length span to lie
+  entirely within the array's logical extent, and returns the first needle
+  index relative to the span start, or -1 when absent. It is read-only and
+  noncollecting; a span or authentication failure is typed and publishes no
+  result. Focused resize tests in
   [`bytes_tests.rs`](../tidepool-codegen/src/prepared_program/bytes_tests.rs)
   and [`machine_state.rs`](../tidepool-codegen/src/machine_state.rs) cover
   reserve-time collection, prefix/growth, revoked aliases, failed sizes, and
@@ -272,6 +279,15 @@ is the pinned GHC implementation; context bytes cross into aligned owned Rust
 storage before C runs. `MachineState` authenticates mutable address spans using
 its existing external-storage ledger, while immutable inputs use `PinnedBytes`.
 Neither path accepts an arbitrary non-null address as authority.
+
+The pinned text package's `_hs_text_memchr` C call takes the managed
+byte-array route, not an address route: the operand is a `ByteArray#`
+descriptor whose payload the ledger must prove active before any byte is read.
+Projection admits it by exact label and exact signature; the text unit id
+carries a version and package hash, so only its `text-` package-name prefix is
+a stable guard, and the emitted intrinsic identity is the bare symbol with the
+CCall convention. Unit identity is a projection-time guard only and is not
+part of the schema identity.
 
 `newPinnedByteArray#` uses stable external byte storage. Contents addresses are
 scalars and do not root their wrappers. `keepAlive#` therefore retains its

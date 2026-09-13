@@ -1573,6 +1573,27 @@ impl MachineState {
         })
     }
 
+    /// Find the first needle byte in one complete active byte span. This is a
+    /// noncollecting, read-only ledger operation; the returned index is
+    /// relative to the span's start, or -1 when the needle is absent.
+    pub(crate) fn find_external_byte(
+        &self,
+        published: *mut u8,
+        offset: usize,
+        count: usize,
+        needle: u8,
+    ) -> Result<i64, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let span = Self::checked_external_byte_range(&storage, published, offset, count)?;
+        // The ledger borrow and checked span authenticate every scanned byte;
+        // nothing is read outside them and no payload borrow escapes.
+        let span = unsafe { std::slice::from_raw_parts(span, count) };
+        Ok(span
+            .iter()
+            .position(|byte| *byte == needle)
+            .map_or(-1, |index| index as i64))
+    }
+
     /// Snapshot an active byte payload while its ledger owner is borrowed.
     /// This call is noncollecting and returns owned storage; no payload borrow
     /// survives into later observation or forcing steps.

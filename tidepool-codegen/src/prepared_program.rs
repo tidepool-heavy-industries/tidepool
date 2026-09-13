@@ -61,6 +61,7 @@ mod safepoint;
 #[cfg(test)]
 mod settlement_tests;
 mod static_bytes;
+mod text_search;
 mod wide_words;
 pub use admission::{admit_prepared, admit_program, supports_operation};
 
@@ -356,6 +357,7 @@ impl CompiledProgram {
             .into_iter()
             .chain(addresses::host_functions())
             .chain(fingerprint::host_functions())
+            .chain(text_search::host_functions())
             .collect::<Vec<_>>(),
         )?;
         #[cfg(test)]

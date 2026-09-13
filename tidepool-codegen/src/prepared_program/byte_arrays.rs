@@ -405,7 +405,7 @@ fn checked_byte_span_arg(value: i64, len: usize) -> Result<usize, RuntimeError> 
     usize::try_from(value).map_err(|_| RuntimeError::ArrayIndexOutOfBounds { index: value, len })
 }
 
-fn byte_range_error(error: ExternalStorageValidationError) -> RuntimeError {
+pub(super) fn byte_range_error(error: ExternalStorageValidationError) -> RuntimeError {
     match error {
         ExternalStorageValidationError::AliasedByteCopy => RuntimeError::AliasedByteCopy,
         ExternalStorageValidationError::IndexOutOfBounds { index, len } => {

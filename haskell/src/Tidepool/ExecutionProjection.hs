@@ -13,7 +13,7 @@ import Control.Monad (foldM, forM, unless)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
-import Data.List (find)
+import Data.List (find, isPrefixOf)
 import Data.Maybe (isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
@@ -1015,6 +1015,19 @@ internOperation op signature = do
       , unitString unit == "ghc-prim"
       , operationSignature == Signature [AddressRep, VoidRep] (Returns [IntRep 64]) ->
           pure (Schema.IntrinsicIdentity "strlen" Schema.CCall)
+    -- text's byte-search kernel is a C implementation with no Haskell body.
+    -- Its unit id carries a version and package hash ("text-2.1.2-<hash>"),
+    -- so only the package-name prefix is stable across toolchains; the exact
+    -- label and signature carry the rest of the guard. The unit is a
+    -- projection-time guard only: the emitted identity is the bare symbol.
+    StgFCallOp (Foreign.CCall (Foreign.CCallSpec
+      (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlayRisky)) _
+      | unpackFS label == "_hs_text_memchr"
+      , "text-" `isPrefixOf` unitString unit
+      , operationSignature == Signature
+          [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 8, VoidRep]
+          (Returns [IntRep 64]) ->
+          pure (Schema.IntrinsicIdentity "_hs_text_memchr" Schema.CCall)
     -- Fingerprinting is on the ordinary exception/Typeable path. These C
     -- leaves retain their pinned ABI and execute against authenticated byte
     -- storage; they are not deferred stack capabilities.
