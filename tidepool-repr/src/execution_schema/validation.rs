@@ -455,12 +455,6 @@ impl<'w, 'p> Walker<'w, 'p> {
         }
         if let Some(actual_id) = ty.callable {
             let actual = self.validator.signature(actual_id)?;
-            // Only the global declaration can discharge a call's normal-result
-            // obligation. Prefix/partial-application checks still apply.
-            let dead_end = match atom {
-                Atom::Ref(ValueRef::Global(id)) => self.validator.global(*id)?.dead_end,
-                _ => false,
-            };
             let common = actual.arguments.len().min(signature.arguments.len());
             if actual.arguments[..common] != signature.arguments[..common] {
                 return Err(ParseError::InvalidSignature(
@@ -468,18 +462,22 @@ impl<'w, 'p> Walker<'w, 'p> {
                 ));
             }
             match signature.arguments.len().cmp(&actual.arguments.len()) {
-                std::cmp::Ordering::Less if signature.results != [RuntimeRep::LiftedRef] => {
+                std::cmp::Ordering::Less
+                    if signature.results
+                        != super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]) => {
                     return Err(ParseError::InvalidSignature(
                         "partial application must return a function reference".into(),
                     ))
                 }
-                std::cmp::Ordering::Equal if !dead_end && signature.results != actual.results => {
+                std::cmp::Ordering::Equal if !actual.results.satisfies(&signature.results) => {
                     return Err(ParseError::InvalidSignature(
                         "saturated application result disagrees with entry signature".into(),
                     ))
                 }
                 std::cmp::Ordering::Greater
-                    if !dead_end && actual.results != [RuntimeRep::LiftedRef] =>
+                    if actual.results != super::ResultContract::NoSuccess
+                        && actual.results
+                            != super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]) =>
                 {
                     return Err(ParseError::InvalidSignature(
                         "oversaturation requires a returned function reference".into(),
@@ -487,8 +485,23 @@ impl<'w, 'p> Walker<'w, 'p> {
                 }
                 _ => {}
             }
+            // Preserve independently established nonreturning evidence in the
+            // expression result, even if its continuation demanded normal reps.
+            if signature.arguments.len() >= actual.arguments.len()
+                && actual.results == super::ResultContract::NoSuccess
+            {
+                return Ok(super::Signature {
+                    arguments: signature.arguments,
+                    results: super::ResultContract::NoSuccess,
+                });
+            }
+        } else if signature.results == super::ResultContract::NoSuccess {
+            return Err(ParseError::InvalidSignature(
+                "unknown callee cannot establish a nonreturning result".into(),
+            ));
         } else if ty.rep != RuntimeRep::LiftedRef
-            && (!signature.arguments.is_empty() || signature.results.as_slice() != [ty.rep])
+            && (!signature.arguments.is_empty()
+                || signature.results != super::ResultContract::Returns(vec![ty.rep]))
         {
             return Err(ParseError::InvalidSignature(
                 "callee is not a callable reference".into(),

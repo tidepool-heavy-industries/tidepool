@@ -11,6 +11,26 @@ const SCHEMA6_SEED_ARTIFACT: &[u8] =
     include_bytes!("../../haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor");
 
 #[test]
+fn w5_no_success_is_not_a_successful_empty_return() {
+    use tidepool_repr::execution_schema::{ExprFrame, ResultContract};
+    let mut wire = wire_program();
+    wire.signatures[0].results = ResultContract::NoSuccess;
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![]);
+    assert!(tidepool_repr::execution_schema::testing::prepare(wire).is_err());
+    assert!(!ResultContract::Returns(vec![]).satisfies(&ResultContract::NoSuccess));
+    assert!(ResultContract::NoSuccess.satisfies(&ResultContract::Returns(vec![])));
+}
+
+#[test]
+fn w5_no_success_case_merge_preserves_successful_representations() {
+    use tidepool_repr::execution_schema::ResultContract;
+    let result = ResultContract::Returns(vec![RuntimeRep::Int(64)]);
+    assert_eq!(ResultContract::NoSuccess.merge_alternative(&result), Some(result.clone()));
+    assert_eq!(result.merge_alternative(&ResultContract::NoSuccess), Some(result.clone()));
+    assert_eq!(result.merge_alternative(&ResultContract::Returns(vec![])), None);
+}
+
+#[test]
 fn haskell_m3_fixture_decodes_global_contract() {
     let requirements = ProgramRequirements {
         schema_version: SCHEMA_VERSION,

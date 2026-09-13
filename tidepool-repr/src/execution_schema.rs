@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 6;
-pub const EXECUTION_ABI_VERSION: u64 = 4;
+pub const SCHEMA_VERSION: u64 = 7;
+pub const EXECUTION_ABI_VERSION: u64 = 5;
 
 macro_rules! dense_id {
     ($name:ident) => {
@@ -75,10 +75,38 @@ pub enum RuntimeRep {
     Float(u8),
 }
 
+/// Successful result representations, or authoritative evidence that saturation
+/// cannot return successfully. `Returns([])` is a successful zero-result call;
+/// it is never interchangeable with `NoSuccess`. Partial application does not
+/// discharge the latter contract: it still produces a lifted function value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResultContract {
+    Returns(Vec<RuntimeRep>),
+    NoSuccess,
+}
+
+impl ResultContract {
+    /// A nonreturning expression satisfies any continuation demand. A demand
+    /// alone is not evidence: ordinary returning expressions must match exactly.
+    pub fn satisfies(&self, demanded: &Self) -> bool {
+        matches!(self, Self::NoSuccess) || self == demanded
+    }
+
+    /// Meet branches at a case continuation without inventing results for a
+    /// nonreturning branch. Different successful representations are incompatible.
+    pub fn merge_alternative(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::NoSuccess, result) | (result, Self::NoSuccess) => Some(result.clone()),
+            _ if self == other => Some(self.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature {
     pub arguments: Vec<RuntimeRep>,
-    pub results: Vec<RuntimeRep>,
+    pub results: ResultContract,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -264,9 +292,6 @@ pub struct GlobalDecl {
     /// Required entry evidence when GHC knows the closure's entry arity.
     /// Unknown lifted values must not acquire an entry from their full type.
     pub entry_signature: Option<SignatureId>,
-    /// No normal result after saturation. The entry signature then has empty
-    /// results; this does not imply raising rather than divergence.
-    pub dead_end: bool,
     pub required_evaluated: bool,
     pub required_generation: Option<u64>,
 }
@@ -421,7 +446,10 @@ pub enum ExprFrame<A> {
     Case {
         scrutinee: A,
         binder: ValueId,
-        scrutinee_reps: Vec<RuntimeRep>,
+        /// Empty alternatives may demand NoSuccess when GHC cannot resolve the
+        /// binder's representation. Validation must prove that demand from the
+        /// scrutinee, not infer it merely from the absence of alternatives.
+        scrutinee_results: ResultContract,
         kind: CaseKind,
         alternatives: Vec<Alternative<A>>,
     },
@@ -478,13 +506,13 @@ impl recursion::MappableFrame for ExprFrame<recursion::PartiallyApplied> {
             ExprFrame::Case {
                 scrutinee,
                 binder,
-                scrutinee_reps,
+                scrutinee_results,
                 kind,
                 alternatives,
             } => ExprFrame::Case {
                 scrutinee: f(scrutinee),
                 binder,
-                scrutinee_reps,
+                scrutinee_results,
                 kind,
                 alternatives: alternatives
                     .into_iter()
@@ -640,7 +668,6 @@ pub struct ImportedValue {
     /// Semantic signature supplied by the binding owner. Signature IDs are
     /// module-local table indices and therefore cannot cross the link boundary.
     pub entry_signature: Option<Signature>,
-    pub dead_end: bool,
     pub evaluated: bool,
     pub generation: u64,
 }
