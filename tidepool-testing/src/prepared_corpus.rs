@@ -47,12 +47,22 @@ pub struct Expectations {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ProjectionManifest {
     pub version: u32,
+    pub legacy_targets: Vec<LegacyTargetMapping>,
     pub programs: Vec<ProjectionRecord>,
+}
+
+/// Old artifact names are coverage provenance, not STG entry identities.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct LegacyTargetMapping {
+    pub legacy_name: String,
+    pub identity: Option<SourceIdentity>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ProjectionRecord {
     pub name: String,
+    /// Only an exact external top may carry a historical expectation key.
+    pub expectation_key: Option<String>,
     #[serde(flatten)]
     pub projection: ProjectionOutcome,
 }

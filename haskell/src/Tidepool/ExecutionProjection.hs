@@ -39,7 +39,8 @@ import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
-import GHC.Types.Unique.Set (mkUniqSet)
+import GHC.Types.Unique.Set (mkUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.FM (lookupUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
@@ -65,6 +66,8 @@ data ProjectionError
   | InvalidPreparedRepresentation Text
   | InvalidPreparedLayout Text
   | MissingPreparedEntry SymbolIdentity
+  | MissingPreparedTop SymbolIdentity
+  | UnboundPreparedInternal Text
   deriving stock (Eq, Show)
 
 data PState = PState
@@ -161,11 +164,6 @@ projectPreparedTarget context modules =
       | (_, binding) <- allBindings
       , binder <- topBinders binding
       ]
-    topIdentities = Map.fromList
-      [ (exactNameOf modul binder, mappedTopIdentity binder)
-      | (modul, binding) <- allBindings
-      , binder <- topBinders binding
-      ]
     entry = projectionEntry context
     seedSymbols =
       [ symbol
@@ -177,8 +175,8 @@ projectPreparedTarget context modules =
     dependencies = Map.fromListWith (<>)
       [ (mappedTopIdentity binder, Set.fromList
           [ symbol
-          | name <- Set.toList (topBindingReferences modul topLevel binding)
-          , Just symbol <- [Map.lookup name topIdentities]
+          | unique <- nonDetEltsUniqSet (topBindingReferences modul topLevel binding)
+          , Just symbol <- [lookupUFM topIdentityMap unique]
           ])
       | (modul, binding) <- allBindings
       , binder <- topBinders binding
@@ -429,8 +427,10 @@ projectReference binder = do
       topNames <- gets topSymbols
       tops <- gets topValues
       let symbol = lookupVarEnv topNames binder
-      case symbol >>= (`Map.lookup` tops) of
-        Just identity -> pure (Local identity)
+      case symbol of
+        Just home -> case Map.lookup home tops of
+          Just identity -> pure (Local identity)
+          Nothing -> lift (Left (MissingPreparedTop home))
         Nothing -> Global <$> internGlobal binder
 
 bindingBinders :: CgStgBinding -> [Id]
@@ -493,6 +493,9 @@ withScope action = do
   pure result
 
 internGlobal :: Id -> P GlobalId
+internGlobal binder | not (isExternalName (varName binder)) =
+  lift (Left (UnboundPreparedInternal
+    (Text.pack (occNameString (nameOccName (varName binder))))))
 internGlobal binder = do
   known <- gets globals
   case lookupVarEnv known binder of

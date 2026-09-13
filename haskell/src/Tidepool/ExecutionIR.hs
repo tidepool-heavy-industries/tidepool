@@ -161,12 +161,12 @@ inventoryPreparedModule prepared =
 -- walk as the inventory.  The supplied universe is the complete set of
 -- candidate top binders across all projected modules; references outside it
 -- remain package/import globals and are deliberately omitted.
-topBindingReferences :: Module -> UniqSet Unique -> CgStgTopBinding -> Set ExactName
+topBindingReferences :: Module -> UniqSet Unique -> CgStgTopBinding -> UniqSet Unique
 topBindingReferences modul topLevel binding =
   let Acc _dependencies _ _ _ references = walkTop scope binding
-  in Set.fromList
-    [ name
-    | (unique, name) <- references
+  in mkUniqSet
+    [ unique
+    | (unique, _) <- references
     , elementOfUniqSet unique topLevel
     ]
  where
