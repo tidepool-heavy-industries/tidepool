@@ -8,11 +8,13 @@ import Control.Exception (evaluate)
 import Data.List (intercalate)
 import Data.Text qualified as Text
 import GHC
-import GHC.Core (Bind(..))
+import GHC.Core (Bind(..), maybeUnfoldingTemplate)
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.Utils qualified as CoreUtils
 import GHC.Driver.Session (updOptLevel)
 import GHC.Driver.Main (hscTidy)
 import GHC.Stg.Syntax qualified as Stg
-import GHC.Types.Id (idName)
+import GHC.Types.Id (idName, realIdUnfolding)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName, varType)
@@ -30,7 +32,8 @@ import Tidepool.ExecutionSchema
   , OperationId(..), OperationIdentity(..), ResultContract(..), RuntimeRep(..)
   , Signature(..), SignatureId(..), SymbolIdentity(..), TargetDescriptor(..)
   , TopBinding(..), ValueRef(..), WireProgram(..) )
-import Tidepool.FatIface (newFatIfaceCache)
+import Tidepool.FatIface
+  ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact )
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , PipelineResult(prHscEnv), runPipelineSelected )
@@ -107,6 +110,7 @@ main = do
           ++ showSDocUnsafe (ppr (idName fstId)) ++ "): " ++ showLookup other))
   assertSemigroupSubset root libdir
   assertRecoveredKindRep root
+  assertPatErrorBody root
   assertRaiseContracts root
   assertBottomingApplications root
   where
@@ -152,6 +156,10 @@ main = do
     showLookup (ExactBody owner _ origin) = "exact body in " ++ renderModule owner ++ " via " ++ show origin
     showLookup (MissingExactBody name reason) = "missing " ++ renderName name ++ ": " ++ show reason
     showLookup (BodyInterfaceFailure owner reason) = "interface failure in " ++ renderModule owner ++ ": " ++ reason
+    showLookup (BodyTypeMismatch owner name requested candidate fallback) =
+      "type mismatch in " ++ renderModule owner ++ " for " ++ renderName name
+        ++ ": " ++ requested ++ " vs " ++ candidate
+        ++ maybe "" ("; " ++) fallback
     showLookup (UnsupportedBodyCapability name) = "unsupported body " ++ renderName name
 
     renderModule = showSDocUnsafe . ppr
@@ -261,6 +269,10 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
     showLookup' (ExactBody owner _ origin) = "exact body in " ++ renderModule' owner ++ " via " ++ show origin
     showLookup' (MissingExactBody name reason) = "missing " ++ renderName' name ++ ": " ++ show reason
     showLookup' (BodyInterfaceFailure owner reason) = "interface failure in " ++ renderModule' owner ++ ": " ++ reason
+    showLookup' (BodyTypeMismatch owner name requested candidate fallback) =
+      "type mismatch in " ++ renderModule' owner ++ " for " ++ renderName' name
+        ++ ": " ++ requested ++ " vs " ++ candidate
+        ++ maybe "" ("; " ++) fallback
     showLookup' (UnsupportedBodyCapability name) = "unsupported body " ++ renderName' name
     renderModule' = showSDocUnsafe . ppr
     renderName' = showSDocUnsafe . ppr
@@ -304,6 +316,95 @@ assertRecoveredKindRep root = do
   where
     isKrepTop symbol = symbolModule symbol == Text.pack "GHC.Types"
       && symbolOccurrence symbol == Text.pack "krep$*"
+
+-- Representation-polymorphic error workers must never let an incompatible
+-- fat-interface body reach pre-CorePrep. This fixture records that patError has
+-- no real unfolding, proves the raw fat candidate is incompatible, and then
+-- requires typed recovery rejection under the defining owner.
+assertPatErrorBody :: FilePath -> IO ()
+assertPatErrorBody root = do
+  prepared <- runPipelineSelected PreparedStg
+    (root </> "test" </> "Suite.hs") [root </> "lib"]
+  let pipeline = pprPipelineResult prepared
+      home = pprModules prepared
+      entry = SymbolIdentity (Text.pack "main") (Text.pack "Suite")
+        (Text.pack "value") (Text.pack "qq_patch_invert_involution") Nothing
+      context = ProjectionContext
+        { projectionProfile = Text.pack "w5-pat-error-body"
+        , projectionToolchain = Text.pack "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64
+            (Text.pack "sysv64") []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = entry
+        }
+      patErrors = filter isPatError (preparedTargetReferences context home)
+  patError <- case patErrors of
+    [value] -> pure value
+    found -> ioError (userError
+      ("expected one recovered patError reference, got "
+        ++ show (length found) ++ ": "
+        ++ intercalate ", " (map renderId found)))
+  cache <- newFatIfaceCache
+  case maybeUnfoldingTemplate (realIdUnfolding patError) of
+    Just _ -> ioError (userError
+      "patError unexpectedly has a real unfolding; expected fat-interface recovery")
+    Nothing -> pure ()
+  fatLookup <- lookupFatIfaceExact (prHscEnv pipeline) cache (varName patError)
+  fatGroup <- case fatLookup of
+    FatIfaceFound group -> pure group
+    FatIfaceMissing reason -> ioError (userError
+      ("patError fat interface has no candidate: " ++ show reason))
+    FatIfaceLoadFailure owner reason -> ioError (userError
+      ("patError fat interface failed to load " ++ renderModule owner
+        ++ ": " ++ reason))
+  let fatPairs = bindPairs fatGroup
+      selected = [ (binder, body)
+                 | (binder, body) <- fatPairs
+                 , varName binder == varName patError ]
+  (fatBinder, fatBody) <- case selected of
+    [pair] -> pure pair
+    found -> ioError (userError
+      ("patError fat group selected-binder count was " ++ show (length found)))
+  let binderMismatch = not (eqType (idType patError) (idType fatBinder))
+      rhsMismatch = not (eqType (idType fatBinder) (CoreUtils.exprType fatBody))
+  assert (not binderMismatch)
+    "patError fat-interface loader did not reuse the requested wired-in binder"
+  assert rhsMismatch
+    "patError fat-interface binder/RHS mismatch regression was not exercised"
+  result <- recoverExactBody (prHscEnv pipeline) cache patError
+  case result of
+    BodyTypeMismatch owner name requested candidate _ -> do
+      assert (isControlExceptionBase owner && name == varName patError)
+        "typed patError mismatch named the wrong defining Id"
+      assert (not (null requested) && not (null candidate))
+        "typed patError mismatch omitted requested/candidate types"
+    ExactBody owner _ origin -> ioError (userError
+      ("patError fat candidate mismatch was accepted as exact body via "
+        ++ show origin ++ " in " ++ renderModule owner))
+    other -> ioError (userError
+      ("patError recovery returned an untyped outcome: " ++ showLookup' other))
+  where
+    isPatError identifier =
+      occNameString (nameOccName (varName identifier)) == "patError"
+        && maybe False isControlExceptionBase (nameModule_maybe (varName identifier))
+    isControlExceptionBase owner =
+      moduleNameString (moduleName owner) == "GHC.Internal.Control.Exception.Base"
+    bindPairs (NonRec binder body) = [(binder, body)]
+    bindPairs (Rec pairs) = pairs
+    renderId identifier = showSDocUnsafe (ppr (idName identifier))
+    renderModule = showSDocUnsafe . ppr
+    showLookup' (ExactBody owner _ origin) =
+      "exact body in " ++ renderModule owner ++ " via " ++ show origin
+    showLookup' (MissingExactBody name reason) =
+      "missing " ++ showSDocUnsafe (ppr name) ++ ": " ++ show reason
+    showLookup' (BodyInterfaceFailure owner reason) =
+      "interface failure in " ++ renderModule owner ++ ": " ++ reason
+    showLookup' (BodyTypeMismatch owner name requested candidate fallback) =
+      "type mismatch in " ++ renderModule owner ++ " for "
+        ++ showSDocUnsafe (ppr name) ++ ": " ++ requested ++ " vs "
+        ++ candidate ++ maybe "" ("; " ++) fallback
+    showLookup' (UnsupportedBodyCapability name) =
+      "unsupported body " ++ showSDocUnsafe (ppr name)
 
 -- Bottoming primops carry NoSuccess independently of the demanded result
 -- type.  Keep both the ordinary exception throw and GHC's divide-by-zero

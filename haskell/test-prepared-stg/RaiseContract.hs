@@ -3,16 +3,17 @@
 
 module RaiseContract where
 
-import GHC.Exts (Double#, Int#, raise#, raiseDivZero#)
+import GHC.Exts (Double#, Int#, raise#, raiseDivZero#, raiseUnderflow#)
 import GHC.Types (Double(D#), Int(I#))
 
 raisePrimitive :: Int
 raisePrimitive = raise# ()
 
--- GHC 9.12 lowers this wired-in sentinel to the same RaiseOp as raise#;
--- retaining the source spelling guards the recovered divide-by-zero path.
 raiseDivZeroPrimitive :: Int
 raiseDivZeroPrimitive = raiseDivZero# (# #)
+
+raiseUnderflowPrimitive :: Int
+raiseUnderflowPrimitive = raiseUnderflow# (# #)
 
 bottomingUnary :: Int -> Int
 bottomingUnary value = raise# value

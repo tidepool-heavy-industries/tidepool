@@ -29,6 +29,7 @@ import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 data RecoveryFailure
   = MissingImplementation Name FatIfaceMissing
   | InterfaceLoadingFailure Module String
+  | IncompatibleImplementation Name String
   | UnsupportedExternalCapability Name
   | MissingHomeImplementation Name
   | DefiningPreparationFailure RecoveredModuleFailure
@@ -40,6 +41,8 @@ instance Show RecoveryFailure where
       "missing implementation " ++ renderName name ++ ": " ++ show reason
     InterfaceLoadingFailure owner reason ->
       "interface loading failure " ++ renderModule owner ++ ": " ++ reason
+    IncompatibleImplementation name reason ->
+      "incompatible implementation " ++ renderName name ++ ": " ++ reason
     UnsupportedExternalCapability name ->
       "unsupported external capability " ++ renderName name
     MissingHomeImplementation name ->
@@ -95,6 +98,12 @@ recoverPreparedClosure env context home = do
                 (groups, dirty, failures ++ [MissingImplementation name reason])
               BodyInterfaceFailure owner reason ->
                 (groups, dirty, failures ++ [InterfaceLoadingFailure owner reason])
+              BodyTypeMismatch _ name requested candidate fallback ->
+                let fallbackText = maybe "" ("; fallback: " ++) fallback
+                    reason = "requested type " ++ requested
+                      ++ "; candidate type " ++ candidate ++ fallbackText
+                in (groups, dirty
+                  , failures ++ [IncompatibleImplementation name reason])
               UnsupportedBodyCapability name ->
                 (groups, dirty, failures ++ [UnsupportedExternalCapability name])
       prepareOne groups (prepared, failures) owner = do

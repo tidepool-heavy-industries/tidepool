@@ -51,6 +51,7 @@ import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (Module, unitString)
+import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferences)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
@@ -74,6 +75,8 @@ data ProjectionError
   | MissingPreparedEntry SymbolIdentity
   | MissingPreparedTop SymbolIdentity
   | UnboundPreparedInternal Text
+  | UnsupportedPrimitiveCall Text Signature
+  | UnsupportedForeignCall Text Signature
   deriving stock (Eq, Show)
 
 data PState = PState
@@ -408,9 +411,10 @@ projectExpr _ (StgLit literal) = Return . pure <$> projectLiteralAtom literal
 projectExpr _ (StgConApp con _ args _)
   | isUnboxedTupleDataCon con = Return <$> mapM projectArg args
   | otherwise = Construct <$> internConstructor con <*> mapM projectArg args
-projectExpr _ (StgOpApp (StgPrimOp RaiseOp) args _) = do
-  signature <- internSignature =<< signatureForArgsNoSuccess args
-  Operation <$> internOperation (StgPrimOp RaiseOp) signature <*> mapM projectArg args
+projectExpr _ (StgOpApp (StgPrimOp primop) args _)
+  | primop `elem` [RaiseOp, RaiseDivZeroOp, RaiseUnderflowOp] = do
+    signature <- internSignature =<< signatureForArgsNoSuccess args
+    Operation <$> internOperation (StgPrimOp primop) signature <*> mapM projectArg args
 projectExpr _ (StgOpApp op args resultType) = do
   signature <- internSignature =<< signatureForArgs args resultType
   Operation <$> internOperation op signature <*> mapM projectArg args
@@ -722,7 +726,10 @@ internOperation op signature = do
           || operationSignature == Signature [FloatRep 64, VoidRep]
               (Returns [FloatRep 64]) ->
           pure (Schema.IntrinsicIdentity "rintDouble" Schema.CCall)
-    _ -> failShape "foreign/prim-call operation lacks a structured operation contract"
+    StgPrimCallOp call -> lift . Left $
+      UnsupportedPrimitiveCall (Text.pack (showSDocUnsafe (ppr call))) operationSignature
+    StgFCallOp call _ -> lift . Left $
+      UnsupportedForeignCall (Text.pack (showSDocUnsafe (ppr call))) operationSignature
   known <- gets operations
   case find (matches operationIdentity operationSignature) known of
     Just (_, _, identity) -> pure identity

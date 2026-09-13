@@ -76,6 +76,9 @@ projectProjectionContract modules = do
       verifyVoidParameters program
       verifyUnboxedReturn program
       verifyRintDoubleStateToken
+      verifyBottomingSentinelContracts
+      verifySmallArrayOperationContracts
+      verifyByteArrayOperationContracts
       case projectPrepared context [] of
         Left (UnsupportedPreparedShape _) -> pure ()
         other -> ioError (userError ("empty program did not produce typed rejection: " <> show other))
@@ -614,6 +617,136 @@ verifyRintDoubleStateToken = do
         ("expected one state-bearing rintDouble operation, got " <> show signatures))
   where
     unSignatureId (SignatureId value) = value
+
+verifyBottomingSentinelContracts :: IO ()
+verifyBottomingSentinelContracts = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/RaiseContract.hs" ["test-prepared-stg"]
+  mapM_ (verify prepared)
+    [ ("raiseDivZeroPrimitive", "raiseDivZero#")
+    , ("raiseUnderflowPrimitive", "raiseUnderflow#")
+    ]
+  where
+    verify prepared (entryName, operationName) = do
+      let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+            (SymbolIdentity "main" "RaiseContract" "value" entryName Nothing)
+      program <- case projectPreparedTarget context (pprModules prepared) of
+        Left failure -> ioError (userError
+          ("bottoming sentinel projection failed: " <> show (entryName, failure)))
+        Right value -> pure value
+      let signatureAt (SignatureId index) =
+            programSignatures program !! fromIntegral index
+          operationAt (OperationId index) =
+            programOperations program !! fromIntegral index
+          topRhs =
+            [ heapBindingRhs binding
+            | group <- programBindings program
+            , TopBinding symbol binding <- groupItems group
+            , symbolOccurrence symbol == entryName
+            ]
+      case topRhs of
+        [Thunk entrySignature _ _ (Operation operation [Void])] ->
+          verifyContracts program signatureAt operationAt entrySignature operation
+        [Function entrySignature [] _ (Operation operation [Void])] ->
+          verifyContracts program signatureAt operationAt entrySignature operation
+        found -> ioError (userError
+          ("bottoming sentinel did not project to one direct Void operation: "
+            <> show (entryName, found)))
+      where
+        verifyContracts program signatureAt operationAt entrySignature operation = do
+          unless (signatureResults (signatureAt entrySignature) == NoSuccess)
+            (ioError (userError
+              ("bottoming sentinel entry returned normally: " <> show entryName)))
+          let OperationDecl identity operationSignature = operationAt operation
+          unless (identity == PrimOpIdentity operationName
+            && signatureAt operationSignature == Signature [VoidRep] NoSuccess)
+            (ioError (userError
+              ("bottoming sentinel operation contract changed: "
+                <> show (entryName, identity, signatureAt operationSignature,
+                  programOperations program))))
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items
+
+verifySmallArrayOperationContracts :: IO ()
+verifySmallArrayOperationContracts = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/ArrayContract.hs" ["test-prepared-stg"]
+  mapM_ (verify prepared)
+    [ ("newArrayContract", "newSmallArray#",
+        Signature [IntRep 64, LiftedRefRep, VoidRep] (Returns [UnliftedRefRep]))
+    , ("readArrayContract", "readSmallArray#",
+        Signature [UnliftedRefRep, IntRep 64, VoidRep] (Returns [LiftedRefRep]))
+    , ("writeArrayContract", "writeSmallArray#",
+        Signature [UnliftedRefRep, IntRep 64, LiftedRefRep, VoidRep] (Returns []))
+    ]
+  where
+    verify prepared (entryName, operationName, expected) = do
+      let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+            (SymbolIdentity "main" "ArrayContract" "value" entryName Nothing)
+      program <- case projectPreparedTarget context (pprModules prepared) of
+        Left failure -> ioError (userError
+          ("small-array projection failed: " <> show (entryName, failure)))
+        Right value -> pure value
+      let actual =
+            [ programSignatures program !! fromIntegral index
+            | OperationDecl (PrimOpIdentity name) (SignatureId index)
+                <- programOperations program
+            , name == operationName
+            ]
+      unless (actual == [expected])
+        (ioError (userError
+          ("GHC small-array operation signature changed: "
+            <> show (entryName, operationName, expected, actual,
+              programOperations program))))
+
+verifyByteArrayOperationContracts :: IO ()
+verifyByteArrayOperationContracts = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/ByteArrayContract.hs" ["test-prepared-stg"]
+  mapM_ (verify prepared)
+    [ ("newByteContract", "newByteArray#",
+        Signature [IntRep 64, VoidRep] (Returns [UnliftedRefRep]))
+    , ("freezeByteContract", "unsafeFreezeByteArray#",
+        Signature [UnliftedRefRep, VoidRep] (Returns [UnliftedRefRep]))
+    , ("sizeofByteContract", "sizeofByteArray#",
+        Signature [UnliftedRefRep] (Returns [IntRep 64]))
+    , ("getSizeofMutableByteContract", "getSizeofMutableByteArray#",
+        Signature [UnliftedRefRep, VoidRep] (Returns [IntRep 64]))
+    , ("readWord8Contract", "readWord8Array#",
+        Signature [UnliftedRefRep, IntRep 64, VoidRep] (Returns [WordRep 8]))
+    , ("writeWord8Contract", "writeWord8Array#",
+        Signature [UnliftedRefRep, IntRep 64, WordRep 8, VoidRep] (Returns []))
+    , ("indexWord8Contract", "indexWord8Array#",
+        Signature [UnliftedRefRep, IntRep 64] (Returns [WordRep 8]))
+    , ("readIntContract", "readIntArray#",
+        Signature [UnliftedRefRep, IntRep 64, VoidRep] (Returns [IntRep 64]))
+    , ("writeIntContract", "writeIntArray#",
+        Signature [UnliftedRefRep, IntRep 64, IntRep 64, VoidRep] (Returns []))
+    , ("indexIntContract", "indexIntArray#",
+        Signature [UnliftedRefRep, IntRep 64] (Returns [IntRep 64]))
+    ]
+  where
+    verify prepared (entryName, operationName, expected) = do
+      let context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
+            (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty
+            (SymbolIdentity "main" "ByteArrayContract" "value" entryName Nothing)
+      program <- case projectPreparedTarget context (pprModules prepared) of
+        Left failure -> ioError (userError
+          ("byte-array projection failed: " <> show (entryName, failure)))
+        Right value -> pure value
+      let actual =
+            [ programSignatures program !! fromIntegral index
+            | OperationDecl (PrimOpIdentity name) (SignatureId index)
+                <- programOperations program
+            , name == operationName
+            ]
+      unless (actual == [expected])
+        (ioError (userError
+          ("GHC byte-array operation signature changed: "
+            <> show (entryName, operationName, expected, actual,
+              programOperations program))))
 
 topBindersForTest :: CgStgTopBinding -> [Id]
 topBindersForTest (StgTopStringLit binder _) = [binder]
