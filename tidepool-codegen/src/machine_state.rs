@@ -641,18 +641,21 @@ impl MachineState {
         self.install_prepared_buffer_with_static_region(buffer, layouts, None)
     }
 
-    /// Inspect an untagged generated reference without allocating or collecting.
+    /// Read the authoritative, zero-based family tag after generated Enter.
+    /// Pointer low bits are evidence, not the constructor's identity.
     ///
     /// # Safety
-    /// A non-null reference must point to a readable initialized object header
+    /// A non-null untagged address must point to a readable initialized object header
     /// whose storage remains owned by this invocation. This is not admission of
     /// arbitrary host pointers; generated code establishes reference provenance.
-    pub(crate) unsafe fn inspect_prepared_entry(
+    pub(crate) unsafe fn prepared_constructor_tag(
         &self,
-        reference: *const usize,
-    ) -> Result<(), RuntimeError> {
-        use tidepool_heap::execution_descriptor::ObjectKind;
-        if reference.is_null() || reference as usize % 8 != 0 {
+        encoded: usize,
+    ) -> Result<i64, RuntimeError> {
+        use tidepool_heap::execution_descriptor::{ObjectKind, DescriptorState};
+        use tidepool_heap::managed_reference::{tag_valid, untag};
+        let reference = untag(encoded) as *const usize;
+        if reference.is_null() {
             return Err(RuntimeError::BadPointer);
         }
         let active = self
@@ -671,10 +674,14 @@ impl MachineState {
             .space
             .live_descriptor(header)
             .ok_or(RuntimeError::BadPointer)?;
-        match descriptor.kind() {
-            ObjectKind::Constructor | ObjectKind::Function | ObjectKind::Thunk => Ok(()),
-            _ => Err(RuntimeError::BadThunkState(0)),
+        if descriptor.kind() != ObjectKind::Constructor {
+            return Err(RuntimeError::ExpectedConstructor);
         }
+        let tag = descriptor.constructor_tag().ok_or(RuntimeError::ExpectedConstructor)?;
+        if !tag_valid((encoded & 7) as u8, descriptor.kind(), DescriptorState::Live, Some(tag)) {
+            return Err(RuntimeError::BadPointer);
+        }
+        Ok(i64::from(tag.get() - 1))
     }
 
     /// Install a prepared nursery whose descriptor space admits one immutable

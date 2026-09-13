@@ -62,6 +62,8 @@ pub enum RuntimeError {
     ArrayIndexOutOfBounds { index: i64, len: usize },
     #[error("copyByteArray# source and destination name the same array")]
     AliasedByteCopy,
+    #[error("data-to-tag expected an evaluated constructor")]
+    ExpectedConstructor,
     #[error("external {kind:?} allocation failed ({bytes} bytes)")]
     ExternalAllocationFailed {
         kind: ExternalStorageKind,
@@ -96,6 +98,7 @@ impl RuntimeError {
     pub fn machine_disposition(&self) -> MachineDisposition {
         match self {
             Self::CaseTrap
+            | Self::ExpectedConstructor
             | Self::NoSuccessReturned
             | Self::BadPointer
             | Self::TypeMetadata
