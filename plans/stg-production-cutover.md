@@ -341,13 +341,12 @@ Before broad lowering, review the result/root and retained-code boundary as a
 unit. Adding expression cases to the current one-constructor adapter would
 extend a temporary wrapper, not complete the production engine.
 
-Target-only projection needs a dependency-source repair before it can be a
-production completeness boundary. In the M3 probe, targeting
-`polymorphicIdentityResult` retains only that top binding although its full
-projection calls local `polymorphicIdentity`; `pmBindings` free-variable
-evidence omits that edge. Exact-symbol lookup fixes ID aliasing, not missing
-dependency evidence. Keep the full-program projection as the checked input
-until the target closure is proven complete.
+Wave 3 resolved the M3 target-only projection gap with structured binding
+traversal and exact top identity selection. Targeting
+`polymorphicIdentityResult` now retains its local `polymorphicIdentity`
+dependency while excluding unrelated tops; the producer regression passes.
+The full-program projection remains a useful checked input, but target closure
+is no longer an open dependency-source blocker.
 
 Schema-v4 checkpoint verification: the full `tidepool-repr` suite, focused
 bridge deep-value tests, prepared-native, prepared-runtime, toolchain artifact,

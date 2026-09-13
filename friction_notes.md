@@ -187,13 +187,12 @@ are nondeterministic.
   test still selecting entries by number. It now resolves Box and entry by
   their symbolic identities.
 - Exact-symbol closure keys remove a second GHC-unique assumption at the
-  projection's top-level boundary, but do not make target selection complete.
-  An exploratory M3 target check for `polymorphicIdentityResult` retained only
-  that top binding even though the full projection contains a Local call to
-  `polymorphicIdentity`: the prepared `pmBindings` free-variable evidence omits
-  that intra-module dependency. The exploratory assertion was not added to
-  the passing suite. Connected execution must repair the dependency source
-  before treating target-only projection as a complete program.
+  projection's top-level boundary. Wave 3's structured binding traversal now
+  makes target selection complete for the M3 case: targeting
+  `polymorphicIdentityResult` retains its local `polymorphicIdentity`
+  dependency while excluding unrelated tops, and the producer regression
+  passes. The earlier exploratory omission is retained as history, not a
+  current execution blocker.
 - The historical workspace warm-up report blamed unchanged
   `tidepool-macro/src/expand.rs:32`; source inspection instead attributes that
   missing `InlineInput` code to `e1a4b9145`, not unchanged `main`. In the final
