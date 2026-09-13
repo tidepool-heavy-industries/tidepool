@@ -111,3 +111,30 @@ The Project.Work priority target projects, validates, admits, compiles, and
 runs; it has no comparison expectation. The actor stdlib target still fails
 source compilation because the production generated Effects.Core module is
 not present in this corpus setup. No tiny prepared-probe stub is substituted.
+
+## Fold result on `a1e2f5299`
+
+The strengthened `ho_myany` regression passed the Haskell
+`execution-schema-projection` suite. It exercises a previously failing Suite
+target with multiple distinct internal `sat` tops and asserts no fake internal
+globals. The Rust prepared-program tests passed 27/27; the corpus runner passed
+12/12 and comparator tests passed 7/7. The Haskell corpus mapping self-test
+passed. Repr's cross-language schema contract passed 2/2.
+
+`just fixtures-check` passed and replayed the 812-top corpus with the counts
+above: 802 validated, 56 compared successfully, 67 without expectations.
+`bash scripts/dev-shell.sh cargo build --workspace --tests` exited 0; this
+compiled all test targets without executing them. `just fixtures-update`
+changed only `haskell/test/suite_cbor/.source-fingerprint`, not semantic CBOR.
+Its first invocation failed because preset `TIDEPOOL_EXTRACT_WORKER` was stale;
+retrying with both `TIDEPOOL_EXTRACT` and `TIDEPOOL_EXTRACT_WORKER` unset rebuilt
+the matched worker and succeeded. No Core interpreter tests were run.
+
+Luna outcomes: B's mapping producer and C's typed consumer handled the bounded
+contracts after one review correction each. A needed a lead correction to test
+the actual two-internal-top failure, then passed against the real Suite case.
+The initial scaffold's `Unique` lookup was invalid because a `VarEnv` is keyed
+by `Var`; A derived a Unique-keyed view from the single identity owner. The
+cross-language semantic seam and precise test oracle were the parts that
+needed lead review. Exact worker token and full lead-round totals are not
+available; none are inferred here.

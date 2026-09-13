@@ -273,3 +273,8 @@ are nondeterministic.
   by consumer validation. Ambiguous exact external legacy matches fail the
   producer, and an all-tops source or identity-enumeration failure aborts
   rather than emitting a falsely successful empty manifest.
+- A preset stale `TIDEPOOL_EXTRACT_WORKER` caused the first
+  `just fixtures-update` attempt to fail. Unsetting both extractor paths let
+  the recipe resolve and rebuild a matched worker; update and check then
+  succeeded. This should be automated at the recipe boundary so routine
+  source changes do not require callers to diagnose stale shell state.
