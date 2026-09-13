@@ -402,6 +402,7 @@ impl<'a> ObservationHeap<'a> {
                                     }
                                     DescriptorMeaning::Callable { .. } => None,
                                     DescriptorMeaning::Pap { .. } => None,
+                                    DescriptorMeaning::External => None,
                                 })
                                 .or_else(|| {
                                     self.constructors.and_then(|constructors| {

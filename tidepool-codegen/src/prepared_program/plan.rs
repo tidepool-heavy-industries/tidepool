@@ -48,6 +48,7 @@ pub(super) struct ProgramPlan<'a> {
     /// after validation, so no lexical search or scope cloning is necessary.
     pub values: BTreeMap<ValueId, RuntimeRep>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
+    pub boxed_array: Arc<ObjectDescriptor>,
     /// Compact slots, not ValueId-indexed allocation controlled by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
@@ -307,6 +308,10 @@ impl<'a> ProgramPlan<'a> {
             top_bindings,
             values,
             constructors,
+            boxed_array: Arc::new(ObjectDescriptor::external(
+                tidepool_heap::external_storage::ExternalStorageKind::BoxedArray,
+                target,
+            )?),
             top_slots,
             bytes: Arc::new(PinnedBytes::new(bytes)),
             heap_tops,

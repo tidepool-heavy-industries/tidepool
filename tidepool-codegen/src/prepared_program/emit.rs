@@ -425,6 +425,8 @@ fn emit_function_at(
                             vmctx,
                             pipeline,
                             &plan.bytes,
+                            prepared_gc,
+                            &plan.boxed_array,
                         )?;
                         match (output, signature.results.returned_reps()) {
                             (Some(output), Some(reps)) => {

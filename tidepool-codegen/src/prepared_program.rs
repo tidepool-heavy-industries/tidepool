@@ -43,6 +43,7 @@ mod floating;
 mod forcing;
 mod plan;
 mod primitives;
+mod arrays;
 #[cfg(test)]
 mod retention_tests;
 mod safepoint;
@@ -109,6 +110,7 @@ pub(crate) struct DescriptorMetadata {
 }
 
 pub(crate) enum DescriptorMeaning {
+    External,
     Constructor(ConstructorObservation),
     Callable {
         binding: ValueId,
@@ -199,6 +201,7 @@ impl CompiledProgram {
             ("prepared_bad_state", prepared_bad_state as *const u8),
             ("prepared_blackhole", prepared_blackhole as *const u8),
             ("prepared_raise", no_success::raise as *const u8),
+            ("prepared_new_boxed", arrays::prepared_new_boxed as *const u8),
             ("prepared_no_success_returned", no_success::unexpected_success as *const u8),
             (
                 "prepared_primitive_failure",
@@ -448,6 +451,7 @@ impl CompiledProgram {
         }
         pipeline.finalize()?;
         let mut descriptors = plan.constructors.clone();
+        descriptors.push(Arc::clone(&plan.boxed_array));
         descriptors.extend(
             plan.functions
                 .values()
@@ -464,6 +468,10 @@ impl CompiledProgram {
                 .map(|pap| Arc::clone(&pap.descriptor)),
         );
         let mut descriptor_registry = BTreeMap::new();
+        descriptor_registry.insert(plan.boxed_array.initial_header_word(), DescriptorMetadata {
+            descriptor: Arc::clone(&plan.boxed_array),
+            meaning: DescriptorMeaning::External,
+        });
         for (declaration, descriptor) in plan.program.constructors().iter().zip(&plan.constructors)
         {
             descriptor_registry.insert(

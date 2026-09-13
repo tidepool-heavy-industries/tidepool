@@ -453,6 +453,9 @@ pub(super) fn recognize_operation(
     declaration: &OperationDecl,
     signature: &Signature,
 ) -> Option<ScalarOperation> {
+    if let Some(operation) = super::arrays::recognize(&declaration.identity, signature) {
+        return Some(ScalarOperation::Array(operation));
+    }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
         && signature.arguments == [RuntimeRep::Float(64)]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -481,6 +484,7 @@ pub(super) fn recognize_operation(
 
 #[derive(Clone, Copy)]
 pub(super) enum ScalarOperation {
+    Array(super::arrays::ArrayOperation),
     DoubleToInt,
     IndexCharOffAddr,
     Raise,
@@ -495,8 +499,12 @@ pub(super) fn emit_operation(
     vmctx: ir::Value,
     pipeline: &mut CodegenPipeline,
     bytes: &Arc<super::static_bytes::PinnedBytes>,
+    gc: cranelift_module::FuncId,
+    boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
+        ScalarOperation::Array(super::arrays::ArrayOperation::NewBoxed) =>
+            super::arrays::emit_new_boxed(builder, pipeline, vmctx, gc, boxed_array, arguments).map(Some),
         ScalarOperation::Raise => {
             super::no_success::emit_terminal(
                 builder,
