@@ -3,6 +3,25 @@ use cranelift_frontend::FunctionBuilder;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 
 use crate::layout::*;
+
+/// Failure does not publish payload components. Cranelift nevertheless needs
+/// ABI-shaped returns; callers branch on status before observing any payload.
+pub(crate) fn emit_prepared_failure_return(builder: &mut FunctionBuilder<'_>, status: Value) {
+    let payload_types: Vec<_> = builder.func.signature.returns.iter().skip(1)
+        .map(|parameter| parameter.value_type).collect();
+    let mut values = vec![status];
+    for ty in payload_types {
+        let value = if ty == types::F32 {
+            builder.ins().f32const(0.0)
+        } else if ty == types::F64 {
+            builder.ins().f64const(0.0)
+        } else {
+            builder.ins().iconst(ty, 0)
+        };
+        values.push(value);
+    }
+    builder.ins().return_(&values);
+}
 /// Emit a prepared-object allocation against the installed nursery.
 ///
 /// The slow path is a status-returning host call rather than the legacy
@@ -75,7 +94,7 @@ pub fn emit_prepared_alloc_fast_path(
 
     builder.switch_to_block(failed_block);
     builder.seal_block(failed_block);
-    builder.ins().return_(&[status]);
+    emit_prepared_failure_return(builder, status);
 
     builder.switch_to_block(retry_block);
     builder.seal_block(retry_block);
@@ -109,7 +128,7 @@ pub fn emit_prepared_alloc_fast_path(
         types::I32,
         crate::prepared_control::CallStatus::IntegrityFailure as i64,
     );
-    builder.ins().return_(&[exhausted]);
+    emit_prepared_failure_return(builder, exhausted);
 
     builder.switch_to_block(retry_store_block);
     builder.seal_block(retry_store_block);

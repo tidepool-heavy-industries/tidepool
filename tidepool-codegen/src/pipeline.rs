@@ -158,6 +158,9 @@ impl CodegenPipeline {
     /// that JIT code can call (e.g., gc_trigger).
     pub fn new(symbols: &[(&str, *const u8)]) -> Result<Self, PipelineError> {
         let mut flag_builder = settings::builder();
+        flag_builder
+            .set("enable_multi_ret_implicit_sret", "true")
+            .map_err(|e| PipelineError::Init(format!("set implicit result transport: {e}")))?;
         // REQUIRED: enables RBP frame chain for GC stack walking
         flag_builder
             .set("preserve_frame_pointers", "true")

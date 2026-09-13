@@ -26,6 +26,7 @@ pub mod pipeline;
 pub mod prepared_calls;
 pub mod prepared_control;
 pub mod prepared_native;
+pub mod prepared_program;
 pub mod prepared_thunks;
 mod resource_ledger;
 pub mod scope;

@@ -64,6 +64,18 @@ pub struct EntryAbi {
 }
 
 impl EntryAbi {
+    /// Connected entries let Cranelift assign register and implicit-sret
+    /// components. There is no explicit payload-area argument between entries.
+    pub fn lower_internal(
+        profile: &NativeAbiProfile,
+        signature: &SemanticSignature,
+        environment: EnvironmentMode,
+    ) -> Result<Self, AbiError> {
+        let mut abi = Self::lower(profile, signature, environment)?;
+        abi.result_transport = ResultTransport::Registers;
+        Ok(abi)
+    }
+
     pub fn lower(
         profile: &NativeAbiProfile,
         signature: &SemanticSignature,
