@@ -198,6 +198,46 @@ The validator test module was moved byte-for-byte after its production items;
 242 repr library tests and all-target repr Clippy with `-D warnings` passed.
 This removes that crate's prior lint blocker, not a claim about workspace Clippy.
 
+### Audited native breadth and IPE boundary
+
+`bb8c4703c` adds an all-operation audit over projected artifacts using native
+admission's exact identity/signature classifier. The prior Suite snapshot
+contained 145 distinct pairs, 16 unsupported; these are all-pair findings, not
+another first-blocker count. Bounded scalar/address operations were implemented,
+and `decodeDouble_Int64#` was checked against compiled pinned GHC, including
+subnormal, infinity and NaN behavior. Three fingerprint programs also match
+compiled-GHC structural expectations. No catch/masking no-op was introduced.
+
+`d90ca7551` defers the pinned IPE decoder worker by exact module, identity and
+signature. Its interface test also proves a source-module `$wgo` remains
+ordinary code. Canonical `just fixtures-check` completed with snapshot
+`target/prepared-corpus/run.vnfgUy` and Suite report `suite.mmH9Ox/results.json`.
+All 812 tops project and validate, but only 709 admit and compile: 526 execute,
+183 report execution failures/limitations, and 103 still stop at admission.
+Comparison remains 174 of 217 fixture keys matching, zero mismatches. The
+priority, actor dependency, recovered-body, formatting, shadow and fingerprint
+probe cohorts pass. This is not the 216-key acceptance gate.
+
+The same-snapshot all-operation audit reports 128 identity/signature pairs,
+126 supported and two unsupported, with no projection or decoding omissions.
+The remaining pairs are `newAlignedPinnedByteArray#` and `raiseIO#`, present
+in all 103 rejected tops. Operation pairs and fixture keys are different
+denominators. These remaining operations require disposition against their
+actual recovered paths; absence from the catalog is not evidence of dead code.
+
+Verification at this boundary: 427 codegen library tests, 10 bignum tests and
+15 corpus-runner tests passed. The Haskell execution-schema-projection suite
+passed and `just fixtures-update` completed. Workspace test-target compilation
+(`nix develop --command cargo test --workspace --no-run --quiet`) passed;
+it ran no tests. `just changed 800ab0d06` passed formatting and stopped at
+25 heap Clippy errors before nextest. Its log is under
+`target/tidepool-test-runs/20260913T185514Z-1252207-changed/`.
+Heap cleanup subsequently passed all-target Clippy and 71 library tests.
+The broad rerun advanced past heap but stopped on one worktree and 55 codegen
+Clippy diagnostics; nextest still did not run. Its retained log is under
+`target/tidepool-test-runs/20260913T190141Z-1270764-changed/`.
+Focused green checks are not workspace green.
+
 ## Acceptance
 
 216 finite Suite fixture keys match with no comparison mismatch; the optimized
