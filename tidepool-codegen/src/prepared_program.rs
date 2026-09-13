@@ -19,6 +19,8 @@ mod admission;
 mod adapter;
 mod emit;
 mod image;
+mod observe;
+pub use observe::ObservationFailure;
 mod plan;
 pub use admission::admit_program;
 
