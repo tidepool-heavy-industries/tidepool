@@ -330,3 +330,54 @@ implementation, inventory and checks where they reduce total work. No worker
 headcount target. Shared-tree builds have one acknowledged lease; production
 schema edits wait until the pending test batch completes. Use fresh review for
 failure semantics and pointer ownership, not another general audit wave.
+
+## Pure-eval coverage
+
+Four oracle-backed cohorts measure how far prepared execution is from ordinary
+pure Haskell: complex types and pure functions, no effects and no FFI beyond
+what the standard library itself calls. Each probe is a nullary monomorphic top
+whose expected value is transcribed from a module compiled and run by the
+pinned GHC 9.12.2; no value is hand-derived. Sources, targets, oracles and
+expectations are in `haskell/test-prepared-stg/`, and `scripts/prepared-corpus.sh`
+runs all four through `run_pure_cohort`.
+
+| Cohort | Probes | Six stages passing | Exercises |
+| --- | ---: | ---: | --- |
+| containers | 8 | 8 | `Data.Map.Strict` and `Data.Set` over `Text` keys |
+| bignum | 6 | 6 | `Integer` arithmetic beyond `Int64` |
+| usertypes | 8 | 8 | classes, records, hand-written instances, an expression interpreter |
+| text | 8 | 8 | `Data.Text` splitting, replacement, case folding, non-ASCII length |
+
+Every probe reached comparison and matched its oracle. The measured gaps were
+four distinct boundaries, each a catalog or metadata omission rather than a
+structural limit:
+
+| Gap | Found by | Disposition |
+| --- | --- | --- |
+| `reallyUnsafePtrEquality#` `[LiftedRef, LiftedRef] -> [Int64]` | containers (`Data.Set`) | admitted in `11272efd3` |
+| `indexWord8OffAddr#` `[Address, Int64] -> [Word8]` | text (`toUpper`) | admitted in `7d2eef4c8` |
+| `_hs_text_memchr` `[UnliftedRef, Word64, Word64, Word8, Void] -> [Int64]` | text (`splitOn`, `replace`) | admitted in `b608cd8a1` |
+| boxed tuple constructors of arity four and five absent from generated metadata | usertypes (five-field record view) | wired in at `f2832ffb1`, metadata regenerated in `fad4871bc` |
+
+The first three are exact identity/signature pairs; every other shape of each
+operation remains rejected with its identity and signature. The memchr operand
+is a managed `ByteArray#`, so its host authenticates the span through the
+external-storage ledger before reading, and authentication failures and span
+failures keep distinct typed causes.
+
+### Denominators
+
+The Suite corpus is unchanged by this work: 347 targets, 812 prepared tops,
+812 through projection, validation, admission and compilation, 628 executing,
+184 recorded execution limitations, and **216 matching fixture keys with zero
+mismatches** against a 217-key denominator. Cohort coverage is additive; it
+does not move the Suite denominator.
+
+### Coverage is not the same as stage totals
+
+A probe compiled at `-O2` can reach projection already folded into a literal,
+in which case it passes every stage while exercising nothing. Tidy Core is the
+boundary where that is visible, and probe operands are the only place opacity
+can be introduced given the nullary-top constraint. `tech_debt.md` records the
+hazard and the open question of whether any existing Suite top is hollow for
+the same reason.
