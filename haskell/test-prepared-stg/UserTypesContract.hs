@@ -127,11 +127,20 @@ instance Foldable Pair where
   foldr f base (Single left) = f left base
   foldr f base (Both left right) = f left (f right base)
 
+-- Hiding only the field values leaves the Pair constructor manifest at the
+-- use site, and case-of-known-constructor then resolves the Functor/Foldable
+-- dispatch away without ever consulting a dictionary. The structure itself
+-- has to pass through a NOINLINE function for the same reason the scalar
+-- seeds do.
+{-# NOINLINE opaquePair #-}
+opaquePair :: Pair Int -> Pair Int
+opaquePair value = value
+
 functorFoldSum :: Int
 functorFoldSum =
-  sum (fmap (* 10) (Both pairLeftSeed pairRightSeed))
-    + sum (fmap (+ 1) (Single singleSeed))
-    + length (Leaf :: Pair Int)
+  sum (fmap (* 10) (opaquePair (Both pairLeftSeed pairRightSeed)))
+    + sum (fmap (+ 1) (opaquePair (Single singleSeed)))
+    + length (opaquePair (Leaf :: Pair Int))
 
 -- Maybe/Either chains via >>= and traverse.
 maybeChain :: Maybe Int
