@@ -1,8 +1,6 @@
 use super::plan::HeapTopSpec;
-use super::safepoint::NativeStackBounds;
 use super::{CompiledProgram, ObservationFailure, Unsupported};
-use crate::context::VMContext;
-use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
+use crate::host_fns::RuntimeError;
 use crate::machine_state::MachineFailure;
 use crate::machine_state::{MachineDisposition, MachineState};
 use crate::prepared_control::CallStatus;
@@ -60,210 +58,13 @@ impl CompiledProgram {
         options: &RunOptions,
         cancel: Arc<AtomicBool>,
     ) -> Result<RunResult, ExecutionError> {
-        // wave4:INVOCATION — scalar-only host admission, private static
-        // instantiation/top table, fresh MachineState with code/maps/descriptors
-        // pinned through unwind, ordinary prepared nursery, vector C adapter.
-        // Check status/first cause BEFORE registering or reading result slots.
-        // Register managed result layout slots before optional collection;
-        // restore root mark on every exit. Observe while storage remains owned.
-        // Integrity in observation retires machine with first cause retained.
-        // No compiled address or returned Value may retain an invocation pointer.
-        let compiled = self
-            .entries
-            .get(&entry)
-            .ok_or(ExecutionError::MissingEntry(entry))?;
-        if compiled.abi.semantic_arguments().iter().any(|rep| {
-            matches!(
-                rep,
-                tidepool_repr::execution_schema::RuntimeRep::LiftedRef
-                    | tidepool_repr::execution_schema::RuntimeRep::UnliftedRef
-            )
-        }) {
-            return Err(ExecutionError::Unsupported(Unsupported::HostArguments(
-                entry,
-            )));
-        }
-        if arguments.len() != compiled.abi.physical_arguments().len() {
-            return Err(ExecutionError::Arguments {
-                expected: compiled.abi.physical_arguments().len(),
-                actual: arguments.len(),
-            });
-        }
-
-        // The adapter and its first generated callee can both consume a
-        // finalized native frame before another generated entry preflight.
-        // The OS helper already places the guard/unwind reserve below `low`;
-        // reserve two complete compiled frames above it for this initial hop.
-        let max_native_frame = self.pipeline.native_frame_maximum();
-        let native_frame_reserve = max_native_frame
-            .checked_mul(2)
-            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
-        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
-        bounds
-            .ensure_current_frame_reserve(native_frame_reserve)
-            .map_err(runtime_error_without_machine)?;
-        let prepared_stack_limit = bounds
-            .limit_with_frame_reserve(max_native_frame)
-            .map_err(runtime_error_without_machine)?;
-
-        let statics = Arc::new(self.statics.instantiate()?);
-        let mut top_table = try_slots(self.top_slots.len())?;
-        for (&id, &slot) in &self.top_slots {
-            if self.heap_top_specs.iter().any(|spec| spec.id == id) {
-                continue;
-            }
-            let value = statics
-                .entry(id)
-                .or_else(|| self.byte_tops.get(&id).map(|bytes| bytes.as_ptr() as usize))
-                .ok_or(ExecutionError::MissingEntry(id))?;
-            let slot = top_table
-                .get_mut(slot)
-                .ok_or(ExecutionError::MissingEntry(id))?;
-            *slot = value;
-        }
-
-        let heap_reserve = heap_top_extent(&self.heap_top_specs)?;
-        let nursery_bytes = options.nursery_bytes.max(heap_reserve);
-        let nursery = try_words(nursery_bytes.div_ceil(std::mem::size_of::<u64>()))?;
-        let mut argument_area = try_words(arguments.len())?;
-        argument_area.copy_from_slice(arguments);
-        let result_words = (compiled.abi.result_layout().payload_size() as usize)
-            .div_ceil(std::mem::size_of::<u64>());
-        let mut result_area = try_words(result_words.max(1))?;
-
-        let machine = MachineState::new();
-        machine.set_cancel_flag(Arc::clone(&cancel));
-        machine.set_stack_map_registry(&self.pipeline.stack_maps);
-        if let Err(error) = machine.install_prepared_buffer_with_static_region(
-            nursery,
-            self.descriptors.clone(),
-            Some(Arc::clone(&statics)),
-        ) {
-            machine.clear_stack_map_registry();
-            machine.clear_cancel_flag();
-            return Err(runtime_error(&machine, error));
-        }
-        let (start, size) = match machine.gc_active_range() {
-            Some(range) => range,
-            None => {
-                machine.clear_gc_state();
-                machine.clear_stack_map_registry();
-                machine.clear_cancel_flag();
-                return Err(runtime_error(&machine, RuntimeError::BadPointer));
-            }
-        };
-        let heap_used = initialize_heap_tops(
-            start,
-            size,
-            &self.heap_top_specs,
-            &self.top_slots,
-            &mut top_table,
-            &statics,
-            &self.byte_tops,
-        )
-        .map_err(|cause| runtime_error(&machine, cause))?;
-        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
-        vmctx.alloc_ptr = unsafe { start.add(heap_used) };
-        vmctx.machine_state = (&machine as *const MachineState).cast_mut();
-        vmctx.prepared_tops = top_table.as_ptr();
-        vmctx.prepared_stack_limit = prepared_stack_limit;
-        for spec in &self.heap_top_specs {
-            if let Some(&slot) = self.top_slots.get(&spec.id) {
-                let root = unsafe { top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
-                machine.register_rust_root(root);
-            }
-        }
-        let root_mark = machine.rust_roots_len();
-        let mut cleanup = RunCleanup::new(&machine, &mut vmctx, root_mark);
-        let collections_before = machine.gc_generation();
-
-        let result = (|| {
-            let pointer = self.pipeline.get_function_ptr(compiled.adapter);
-            let raw_status = unsafe {
-                let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
-                    std::mem::transmute(pointer);
-                adapter(&mut vmctx, result_area.as_mut_ptr(), argument_area.as_ptr())
-            };
-            let status = match CallStatus::from_raw(i64::from(raw_status)) {
-                Ok(status) => status,
-                Err(_) => {
-                    machine.set_first_cause(RuntimeError::BadPointer);
-                    return Err(runtime_error_from_machine(&machine));
-                }
-            };
-            if status == CallStatus::IntegrityFailure {
-                machine.set_first_cause(RuntimeError::BadPointer);
-            }
-            if status != CallStatus::Success
-                || machine.prepared_call_status() != CallStatus::Success
-            {
-                return Err(runtime_error_for_status(&machine, status));
-            }
-
-            register_result_roots(&machine, &mut result_area, compiled.abi.result_layout());
-            if options.collect_before_observation {
-                let raw_status = unsafe { prepared_gc_trigger(&mut vmctx, 0) };
-                let status = match CallStatus::from_raw(i64::from(raw_status)) {
-                    Ok(status) => status,
-                    Err(_) => {
-                        machine.set_first_cause(RuntimeError::BadPointer);
-                        CallStatus::IntegrityFailure
-                    }
-                };
-                if status != CallStatus::Success
-                    || machine.prepared_call_status() != CallStatus::Success
-                {
-                    return Err(runtime_error_for_status(&machine, status));
-                }
-            }
-
-            // Forcing observation must run before reclaiming the invocation
-            // buffer: a child thunk may allocate and collect, and every
-            // borrowed nursery view is dropped before that force begins.
-            // Copy physical result words before any generated force. The
-            // forcing observer may collect and rewrite registered result
-            // slots; no shared Rust slice may remain live across that call.
-            let result_seeds = match super::observe::snapshot_results(
-                &result_area,
-                compiled.abi.semantic_results(),
-                compiled.abi.result_layout(),
-            ) {
-                Ok(seeds) => seeds,
-                Err(error @ ObservationFailure::Integrity(_)) => {
-                    machine.set_first_cause(RuntimeError::BadPointer);
-                    return Err(runtime_error_from_machine_or_observation(&machine, error));
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let values = match super::forcing::observe_results(
-                &machine,
-                self,
-                &mut vmctx,
-                &statics,
-                &self.descriptor_registry,
-                &result_seeds,
-                options.observation_budget,
-            ) {
-                Ok(values) => values,
-                Err(ExecutionError::Observation(error @ ObservationFailure::Integrity(_))) => {
-                    machine.set_first_cause(RuntimeError::BadPointer);
-                    return Err(runtime_error_from_machine_or_observation(&machine, error));
-                }
-                Err(error) => return Err(error),
-            };
-            cleanup.finish();
-            Ok(RunResult {
-                values,
-                collections: machine.gc_generation().saturating_sub(collections_before),
-            })
-        })();
-        cleanup.drop_now();
-        machine.clear_cancel_flag();
-        result
+        let mut invocation =
+            super::invocation::PreparedInvocation::enter(self, entry, arguments, options, cancel)?;
+        invocation.observe(options.observation_budget)
     }
 }
 
-fn try_words(words: usize) -> Result<Vec<u64>, ExecutionError> {
+pub(super) fn try_words(words: usize) -> Result<Vec<u64>, ExecutionError> {
     let mut result = Vec::new();
     result
         .try_reserve_exact(words)
@@ -272,7 +73,11 @@ fn try_words(words: usize) -> Result<Vec<u64>, ExecutionError> {
     Ok(result)
 }
 
-fn heap_top_extent(specs: &[HeapTopSpec]) -> Result<usize, ExecutionError> {
+pub(super) fn try_root_words(words: usize) -> Result<super::invocation::RootWords, ExecutionError> {
+    super::invocation::RootWords::new(words)
+}
+
+pub(super) fn heap_top_extent(specs: &[HeapTopSpec]) -> Result<usize, ExecutionError> {
     specs.iter().try_fold(0usize, |total, spec| {
         total
             .checked_add(spec.descriptor.allocation_extent() as usize)
@@ -280,12 +85,12 @@ fn heap_top_extent(specs: &[HeapTopSpec]) -> Result<usize, ExecutionError> {
     })
 }
 
-fn initialize_heap_tops(
+pub(super) fn initialize_heap_tops(
     start: *mut u8,
     capacity: usize,
     specs: &[HeapTopSpec],
     top_slots: &std::collections::BTreeMap<ValueId, usize>,
-    top_table: &mut [usize],
+    top_table: &super::invocation::RootWords,
     statics: &tidepool_heap::static_region::StaticRegion,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
 ) -> Result<usize, RuntimeError> {
@@ -344,7 +149,9 @@ fn initialize_heap_tops(
             HeapRhs::Bytes(_) => return Err(RuntimeError::BadPointer),
         }
         if let Some(&slot) = top_slots.get(&spec.id) {
-            top_table[slot] = pointer(spec.id)?;
+            top_table
+                .write(slot, pointer(spec.id)? as u64)
+                .map_err(|_| RuntimeError::BadPointer)?;
         }
     }
     Ok(total)
@@ -426,18 +233,9 @@ fn write_atoms(
     Ok(())
 }
 
-fn try_slots(slots: usize) -> Result<Vec<usize>, ExecutionError> {
-    let mut result = Vec::new();
-    result
-        .try_reserve_exact(slots)
-        .map_err(|_| runtime_error_without_machine(RuntimeError::HeapOverflow))?;
-    result.resize(slots, 0);
-    Ok(result)
-}
-
-fn register_result_roots(
+pub(super) fn register_result_roots(
     machine: &MachineState,
-    result_area: &mut [u64],
+    result_area: &super::invocation::RootWords,
     layout: &tidepool_repr::execution_schema::StorageLayout,
 ) {
     for field in layout.fields() {
@@ -455,48 +253,6 @@ fn register_result_roots(
             };
             machine.register_rust_root(slot);
         }
-    }
-}
-
-struct RunCleanup<'a> {
-    machine: &'a MachineState,
-    vmctx: *mut VMContext,
-    root_mark: usize,
-    armed: bool,
-}
-
-impl<'a> RunCleanup<'a> {
-    fn new(machine: &'a MachineState, vmctx: &mut VMContext, root_mark: usize) -> Self {
-        Self {
-            machine,
-            vmctx,
-            root_mark,
-            armed: true,
-        }
-    }
-
-    fn finish(&mut self) {
-        if !self.armed {
-            return;
-        }
-        self.machine.truncate_rust_roots(self.root_mark);
-        let _ = self
-            .machine
-            .reclaim_session_heap(unsafe { (*self.vmctx).alloc_ptr });
-        self.machine.clear_gc_state();
-        self.machine.clear_stack_map_registry();
-        self.machine.clear_cancel_flag();
-        self.armed = false;
-    }
-
-    fn drop_now(&mut self) {
-        self.finish();
-    }
-}
-
-impl Drop for RunCleanup<'_> {
-    fn drop(&mut self) {
-        self.finish();
     }
 }
 
@@ -526,7 +282,7 @@ pub(super) fn runtime_error_for_status(
     runtime_error_from_machine(machine)
 }
 
-fn runtime_error_from_machine_or_observation(
+pub(super) fn runtime_error_from_machine_or_observation(
     machine: &MachineState,
     observation: ObservationFailure,
 ) -> ExecutionError {
@@ -537,7 +293,7 @@ fn runtime_error_from_machine_or_observation(
     }
 }
 
-fn runtime_error_without_machine(error: RuntimeError) -> ExecutionError {
+pub(super) fn runtime_error_without_machine(error: RuntimeError) -> ExecutionError {
     ExecutionError::Runtime(MachineFailure {
         disposition: error.machine_disposition(),
         cause: error,

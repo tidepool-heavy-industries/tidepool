@@ -1,9 +1,6 @@
 //! Explicit-worklist native emission over the checked flat arena.
 
-use super::{
-    plan::ProgramPlan,
-    CompileError, Unsupported,
-};
+use super::{plan::ProgramPlan, CompileError, Unsupported};
 use crate::entry_abi::{EntryAbi, EnvironmentMode, NativeAbiProfile};
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::isa::CallConv;
@@ -60,6 +57,7 @@ pub(super) fn emit_function(
     plan: &ProgramPlan<'_>,
     id: ValueId,
     functions: &BTreeMap<ValueId, FuncId>,
+    dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
     prepared_stack_overflow: FuncId,
@@ -73,6 +71,7 @@ pub(super) fn emit_function(
         id,
         output,
         functions,
+        dispatchers,
         prepared_gc,
         prepared_poll,
         prepared_stack_overflow,
@@ -87,6 +86,7 @@ pub(super) fn emit_thunk_body(
     id: ValueId,
     output: FuncId,
     functions: &BTreeMap<ValueId, FuncId>,
+    dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
     prepared_stack_overflow: FuncId,
@@ -99,6 +99,7 @@ pub(super) fn emit_thunk_body(
         id,
         output,
         functions,
+        dispatchers,
         prepared_gc,
         prepared_poll,
         prepared_stack_overflow,
@@ -113,6 +114,7 @@ fn emit_function_at(
     id: ValueId,
     output: FuncId,
     functions: &BTreeMap<ValueId, FuncId>,
+    dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
     prepared_stack_overflow: FuncId,
@@ -165,8 +167,10 @@ fn emit_function_at(
     let poll = pipeline
         .module
         .declare_func_in_func(prepared_poll, builder.func);
-    let point = builder.ins().iconst(types::I32,
-        crate::prepared_control::PreparedSafepoint::FunctionEntry as i64);
+    let point = builder.ins().iconst(
+        types::I32,
+        crate::prepared_control::PreparedSafepoint::FunctionEntry as i64,
+    );
     let entry_status = builder.ins().call(poll, &[vmctx, point]);
     let entry_status = builder.inst_results(entry_status)[0];
     let entry = emit_status_guard(&mut builder, entry_status);
@@ -330,8 +334,10 @@ fn emit_function_at(
                     }
                     ExprFrame::Jump { join, arguments } => {
                         let target = joins.get(join).ok_or_else(|| unsupported(id, node))?;
-                        let point = builder.ins().iconst(types::I32,
-                            crate::prepared_control::PreparedSafepoint::Backedge as i64);
+                        let point = builder.ins().iconst(
+                            types::I32,
+                            crate::prepared_control::PreparedSafepoint::Backedge as i64,
+                        );
                         let status = builder.ins().call(poll, &[vmctx, point]);
                         let status = builder.inst_results(status)[0];
                         emit_status_guard(&mut builder, status);
@@ -400,8 +406,13 @@ fn emit_function_at(
                             id,
                             node,
                         )?;
-                        let output =
-                            super::primitives::emit_operation(operation, &mut builder, &physical_arguments);
+                        let output = super::primitives::emit_operation(
+                            operation,
+                            &mut builder,
+                            &physical_arguments,
+                            vmctx,
+                            pipeline,
+                        )?;
                         if output.len()
                             != signature
                                 .results
@@ -436,6 +447,7 @@ fn emit_function_at(
                             vmctx,
                             pipeline,
                             functions,
+                            dispatchers,
                             &values,
                             callee,
                             *call_signature,
@@ -1247,6 +1259,7 @@ fn emit_exact_call(
     vmctx: Value,
     pipeline: &mut CodegenPipeline,
     functions: &BTreeMap<ValueId, FuncId>,
+    dispatchers: &super::apply::Dispatchers,
     values: &BTreeMap<ValueId, Value>,
     callee: &Atom,
     signature: SignatureId,
@@ -1255,7 +1268,7 @@ fn emit_exact_call(
     owner: ValueId,
     node: usize,
 ) -> Result<Vec<Value>, CompileError> {
-    let ValueRef::Local(target) = atom_ref(callee, owner, node)? else {
+    let ValueRef::Local(_) = atom_ref(callee, owner, node)? else {
         return Err(unsupported(owner, node));
     };
     let environment = atom_value(
@@ -1268,12 +1281,13 @@ fn emit_exact_call(
         owner,
         node,
     )?;
-    let callee_id = *functions
-        .get(&target)
+    let _ = functions;
+    let callee_ref = *dispatchers
+        .get(&signature)
         .ok_or_else(|| unsupported(owner, node))?;
     let callee_ref = pipeline
         .module
-        .declare_func_in_func(callee_id, builder.func);
+        .declare_func_in_func(callee_ref, builder.func);
     let signature = plan
         .program
         .signatures()
@@ -1283,13 +1297,16 @@ fn emit_exact_call(
         return Err(unsupported(owner, node));
     }
     let mut call_arguments = vec![vmctx, environment];
-    for (argument, rep) in arguments.iter().zip(signature.arguments.iter()) {
-        if *rep != RuntimeRep::Void {
-            call_arguments.push(atom_value(
-                builder, vmctx, values, plan, argument, *rep, owner, node,
-            )?);
-        }
-    }
+    call_arguments.extend(emit_atoms(
+        builder,
+        values,
+        arguments,
+        &signature.arguments,
+        vmctx,
+        plan,
+        owner,
+        node,
+    )?);
     Ok(super::emit_direct_call(
         builder,
         callee_ref,

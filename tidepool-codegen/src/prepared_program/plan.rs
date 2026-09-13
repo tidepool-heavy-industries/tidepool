@@ -53,6 +53,10 @@ pub(super) struct ProgramPlan<'a> {
     pub bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
     pub heap_tops: BTreeSet<ValueId>,
     pub heap_top_specs: Vec<HeapTopSpec>,
+    /// Flattened pending argument layouts owned by the application emitter.
+    /// Keys use the original function and logical (Void-inclusive) prefix
+    /// length, so dispatch never infers storage slots from physical arity.
+    pub pap_layouts: BTreeMap<(ValueId, usize), super::apply::PapLayout>,
 }
 
 impl<'a> ProgramPlan<'a> {
@@ -252,6 +256,12 @@ impl<'a> ProgramPlan<'a> {
         }
 
         let heap_tops = super::image::heap_top_partition(&top_bindings);
+        let pap_layouts = super::apply::layouts(
+            target,
+            functions
+                .iter()
+                .map(|(&id, function)| (id, function.signature)),
+        )?;
         let mut heap_top_specs = Vec::new();
         for (&id, binding) in &top_bindings {
             if !heap_tops.contains(&id) {
@@ -298,6 +308,7 @@ impl<'a> ProgramPlan<'a> {
             bytes,
             heap_tops,
             heap_top_specs,
+            pap_layouts,
         })
     }
 }

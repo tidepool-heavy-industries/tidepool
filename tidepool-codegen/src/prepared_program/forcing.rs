@@ -226,7 +226,9 @@ pub(super) fn observe_results(
                         for seed in fields {
                             slots.push(roots.push(seed.word, seed.rep)?);
                         }
-                        Ok(super::observe::ObservationFrame::Constructor(identity, slots))
+                        Ok(super::observe::ObservationFrame::Constructor(
+                            identity, slots,
+                        ))
                     }
                 };
                 mapped
@@ -275,12 +277,9 @@ fn current_heap<'a>(
     super::observe::append_exact_starts(nursery, registry, starts, scanned_words)
         .map_err(ExecutionError::from)?;
     super::observe::ObservationHeap::new_with_registry_and_starts(
-        nursery,
-        statics,
-        registry,
-        starts,
+        nursery, statics, registry, starts,
     )
-        .map_err(ExecutionError::from)
+    .map_err(ExecutionError::from)
 }
 
 impl Drop for ObservationRoots<'_> {

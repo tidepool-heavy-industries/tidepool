@@ -298,3 +298,22 @@ are nondeterministic.
 - Parent review caught host-side scalar initialization writing a machine word
   for narrow packed fields. Shared typed artifact builders prevent wire drift
   but do not replace mixed-width layout interaction tests.
+- IR contract tests selected calls by argument count; adding a two-argument
+  cancellation poll silently changed what they measured. Resolve the callee's
+  declared identity instead. Both repaired allocation/entry contracts pass.
+- Pure primop ports repeatedly confused GHC constructor labels with emitted
+  occurrence names. Worker briefs must point at an executable table query or
+  the authoritative occurrence mapping, not merely the old emitter enum.
+- A deep observation fixture compiled one function per data node, making an
+  iterative traversal test impractically expensive. Build a validated static
+  image of the large data behind a tiny compiled program instead. The real
+  20,000-node forcing observer then passes on a 256 KiB thread stack.
+- A shared-tree test failure was reported as "pre-existing" without revision
+  evidence. It was a sibling's concurrent edit. Reports should distinguish
+  baseline failures, concurrent parcel failures and unknown provenance.
+- Serializing builds does not freeze their inputs: a worker can edit a shared
+  dependency halfway through another worker's compilation. Verification needs
+  a revision/input snapshot as well as a build lease. Ephemeral worktrees solve
+  the source race; a fold still needs explicit dependency-ready handshakes.
+  Typed coordinator messages should carry producer parcel/revision and required
+  consumer edits, rather than asking the lead to relay import/signature fixes.

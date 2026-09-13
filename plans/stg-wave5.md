@@ -35,9 +35,13 @@ top slots. The closed immutable remainder stays static; image construction
 independently rejects static-to-heap edges.
 
 PAP arity includes Void; storage excludes Void. Static PAP descriptors identify
-the original callable and pending count. Dynamic apply uses rooted host
-storage and generated signature-specific ABI bridges for exact, partial and
-oversaturated calls. Primitive families share representation, failure and
+the original callable and pending count. Dynamic apply uses generated
+signature-specific Tail dispatchers for exact, partial and oversaturated calls.
+This refines the earlier host-buffer/bridge sketch: keeping pending and supplied
+arguments in declared managed SSA roots removes a second rooting protocol and
+never calls Tail code through a Rust function pointer. Dispatchers share the
+same arity classifier; PAPs flatten to the original function plus prefix.
+Primitive families share representation, failure and
 rooting contracts, without importing Core layouts. Typed intrinsic identities
 and external record-parent identity require coordinated wire migration.
 
@@ -47,6 +51,33 @@ bounds evaluation, and cleanup is stack-safe. OldSpace owns descriptor-backed
 regions, exact starts, retention promotion, and remembered slots. All old
 managed mutations, including bulk array operations, use the barrier owner.
 Retained closures pin code/descriptors. Terminal teardown uses ownership data.
+
+### Retention implementation boundary
+
+The prepared invocation must own its machine, top table and instantiated static
+region while borrowing the compiled program. Keep this boundary non-Send:
+putting an Rc<CompiledProgram> inside the existing unsafe-Send OldSpace would
+hide the pipeline's Rc debug-registry aliases from the type checker. The
+invocation privately owns OldSpace; use this owner in run_entry rather than
+building a second test-only invocation path. Cross-thread/multi-generation
+prepared sessions remain Wave 6, not an inferred unsafe Send implementation.
+
+Selective retention promotion validates the complete initialized nursery before
+its first forwarding write and rejects preexisting Forwarded headers. Through
+immediate sibling fixup there is no mutator reentry. A scoped fixup capability
+authenticates the exact source generation and newly promoted region starts;
+Updated compression may also end in already admitted static/old objects. The
+source descriptor/extent remain authoritative, but the target descriptor need
+not be identical after indirection compression. Do not make arbitrary Forwarded
+headers acceptable in ordinary nursery collection.
+
+After the first promotion write, complete-root sibling fixup is mandatory and
+non-cancellable: calling prepared_gc_trigger would be wrong because its poll
+can skip collection. Preallocate destination and scratch before mutation. Any
+failure that prevents fixup is terminal, retaining both heaps, descriptor/code
+owners and roots through unwind. No native call or observation may see the
+intermediate partially forwarded nursery. The old-space mutation barrier stays
+the existing owner; descriptor arenas stay out of Core-layout compaction.
 
 ## Sequence and delegation
 
@@ -116,6 +147,56 @@ alone. Review entry/update, remembered slots and recovered-body preparation.
 ## Trial record
 
 ### Integrated recovery/lazy checkpoint
+
+Connected PAP/primitive checkpoint: Terra's final prepared-program run passed
+73/73 tests (`bash scripts/dev-shell.sh cargo test -p tidepool-codegen --lib
+prepared_program -- --nocapture`). Six real-adapter PAP tests cover partial,
+exact, excess, a suffix signature absent from the wire, mixed lifted/scalar/Void
+prefix flattening under moving GC, a thunk returned before excess application,
+and allocation cancellation without result publication followed by retry.
+Demanded dispatcher signatures now close through an ordered cursor worklist.
+The deterministic join-backedge settlement test also passed in that run.
+The pure float and checked quotient/remainder families are connected; this does
+not establish every primitive family or old-space retention.
+
+The foreign-call diagnosis is now concrete: GHC projects rintDouble with
+logical arguments `[Float64, Void]` and result `[Float64]`. The original
+intrinsic seed recognized only its physical C signature. Preserve the final
+State# argument on the wire and erase it only in native ABI lowering; accept
+that exact variant, not arbitrary Void insertion. Rust coverage exercises both
+forms; producer correction and corpus rerun remain separate evidence.
+
+Subsequent parcel log (recorded while running):
+
+| Parcel | Worker rounds | Lead events / brief sufficiency | Outcome |
+|---|---:|---|---|
+| Float pure family | 2 Luna | Seed + assignment + semantic correction: constructor labels are not primOpOcc names; conversion branch was unreachable | Three focused tests passed after correction; no host-libm claim |
+| A4 deep observation | 2 follow-ups | Rejected ignored expensive fixture and !Send owner transfer; required large validated image behind tiny compiled module | 20,000-node test passes on 256 KiB stack |
+| A2 dynamic apply/PAP | 2 Luna | Arity/layout seed + assignment + correction on suffix closure, PAP-of-PAP, rooting, Enter and absent adapter tests | Escalated to Terra; not accepted from compilation alone |
+| Retention custody | Sol read + fresh Astra consultation | Two bounded ownership questions and one forwarding-authentication follow-up | Non-Send borrowing invocation accepted; no unsafe Send widening |
+| Invocation owner | 1 Luna | Type/Drop seed + assignment; report corrected to identify concurrent A2 reds rather than inherited failures | Production run_entry uses owner; promotion not implemented yet |
+
+Actual native recursive-entry stack-bound and reusable language/stack failure
+settlement tests passed with the relocation and cancellation tests (four
+settlement cases). The newly added deterministic join-backedge cancellation
+case has not yet run at this entry. Token totals remain unavailable.
+
+First recovery corpus replay (`target/prepared-corpus/suite.SyCuEW`) retained
+812 tops: 791 projected/validated, 262 admitted/compiled, 173 executed, 106
+matched, zero comparison mismatches and 67 missing expectations. Baseline was
+802 projected, 191 admitted, 123 executed and 56 matched. Recovery exposed
+11 runtime-polymorphic projection rejections; the ten foreign-call rows still
+reject. These are not a green full-wave result. Results SHA256:
+`b416596e72201e92f28bd15382e402d336251407fba08b02ffc4304750843e31`.
+
+The named `thunk_blackhole` timeout needs a semantic distinction: its 135-byte
+prepared artifact (`132.prepared.cbor` in that replay) contains recursive
+LetJoins with two zero-argument Jump nodes, not self-entry of an Evaluating
+heap thunk. GHC has made the body an infinite join loop. The historical oracle
+expects "blackhole", but the corpus runner's watchdog aborts without requesting
+engine cancellation. Preserve this original outcome; do not change lowering
+to fabricate a blackhole from a valid divergent join. A deterministic backedge
+cancellation contract is the engine-side acceptance for this shape.
 
 The current focused fold passed `bash scripts/dev-shell.sh cargo test -p
 tidepool-codegen --lib prepared_program`: 58 passed, none failed. The repr

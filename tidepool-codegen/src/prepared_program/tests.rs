@@ -5,7 +5,9 @@ use super::{
     CompileError, CompiledProgram, ExecutionError, ObservationFailure, RunOptions, Unsupported,
 };
 use crate::host_fns::RuntimeError;
-use cranelift_codegen::ir::{self, instructions::CallInfo, ExternalName, InstructionData, Opcode, ValueDef};
+use cranelift_codegen::ir::{
+    self, instructions::CallInfo, ExternalName, InstructionData, Opcode, ValueDef,
+};
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, FuncOrDataId, Module};
 use tidepool_bridge::Value;

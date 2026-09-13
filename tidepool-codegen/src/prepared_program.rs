@@ -20,20 +20,25 @@ use tidepool_repr::DataConId;
 
 mod adapter;
 mod admission;
+mod apply;
 mod emit;
 mod image;
+mod invocation;
 mod observe;
 pub use observe::ObservationFailure;
 mod run;
 pub use run::{ExecutionError, RunOptions, RunResult};
-mod entry;
-mod forcing;
-mod floating;
 #[cfg(test)]
-mod settlement_tests;
+mod apply_tests;
+mod entry;
+mod fallible;
+mod floating;
+mod forcing;
 mod plan;
 mod primitives;
 mod safepoint;
+#[cfg(test)]
+mod settlement_tests;
 pub use admission::{admit_prepared, admit_program};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -100,6 +105,11 @@ pub(crate) enum DescriptorMeaning {
         address: *const u8,
         signature: Signature,
         update: Option<tidepool_repr::execution_schema::UpdatePolicy>,
+    },
+    Pap {
+        function: ValueId,
+        pending: usize,
+        signature: Signature,
     },
 }
 
@@ -173,6 +183,10 @@ impl CompiledProgram {
             ("prepared_case_trap", prepared_case_trap as *const u8),
             ("prepared_bad_state", prepared_bad_state as *const u8),
             ("prepared_blackhole", prepared_blackhole as *const u8),
+            (
+                "prepared_primitive_failure",
+                fallible::prepared_primitive_failure as *const u8,
+            ),
         ])?;
         #[cfg(test)]
         {
@@ -200,7 +214,9 @@ impl CompiledProgram {
             .returns
             .push(AbiParam::new(types::I32));
         let mut prepared_poll_signature = prepared_status_signature.clone();
-        prepared_poll_signature.params.push(AbiParam::new(types::I32));
+        prepared_poll_signature
+            .params
+            .push(AbiParam::new(types::I32));
         let prepared_poll = pipeline
             .module
             .declare_function("prepared_poll", Linkage::Import, &prepared_poll_signature)
@@ -289,6 +305,19 @@ impl CompiledProgram {
         for (&id, _) in &plan.thunks {
             functions.insert(id, prepared_enter);
         }
+        let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
+        apply::emit_dispatchers(
+            &plan,
+            &dispatchers,
+            &functions,
+            &profile,
+            prepared_gc,
+            prepared_poll,
+            prepared_stack_overflow,
+            prepared_enter,
+            prepared_bad_state,
+            &mut pipeline,
+        )?;
         // Every function address has been declared, including recursive peers.
         for &id in functions.keys() {
             if plan.thunks.contains_key(&id) {
@@ -298,6 +327,7 @@ impl CompiledProgram {
                 &plan,
                 id,
                 &functions,
+                &dispatchers,
                 prepared_gc,
                 prepared_poll,
                 prepared_stack_overflow,
@@ -312,6 +342,7 @@ impl CompiledProgram {
                 id,
                 body,
                 &functions,
+                &dispatchers,
                 prepared_gc,
                 prepared_poll,
                 prepared_stack_overflow,
@@ -329,11 +360,22 @@ impl CompiledProgram {
                 policy: thunk.policy,
             })
             .collect::<Vec<_>>();
+        let mut enter_evaluated = plan.constructors.clone();
+        enter_evaluated.extend(
+            plan.functions
+                .values()
+                .map(|function| Arc::clone(&function.descriptor)),
+        );
+        enter_evaluated.extend(
+            plan.pap_layouts
+                .values()
+                .map(|pap| Arc::clone(&pap.descriptor)),
+        );
         entry::emit_prepared_enter(
             &mut pipeline,
             prepared_enter,
             &thunk_entries,
-            &plan.constructors,
+            &enter_evaluated,
             prepared_poll,
             prepared_stack_overflow,
             prepared_bad_state,
@@ -377,6 +419,11 @@ impl CompiledProgram {
                 .values()
                 .map(|thunk| Arc::clone(&thunk.descriptor)),
         );
+        descriptors.extend(
+            plan.pap_layouts
+                .values()
+                .map(|pap| Arc::clone(&pap.descriptor)),
+        );
         let mut descriptor_registry = BTreeMap::new();
         for (declaration, descriptor) in plan.program.constructors().iter().zip(&plan.constructors)
         {
@@ -415,6 +462,27 @@ impl CompiledProgram {
                         address: pipeline.get_function_ptr(prepared_enter),
                         signature: thunk.signature.clone(),
                         update: Some(thunk.policy),
+                    },
+                },
+            );
+        }
+        for (&(function, pending), pap) in &plan.pap_layouts {
+            let signature = plan
+                .functions
+                .get(&function)
+                .map(|entry| Signature {
+                    arguments: entry.signature.arguments[pending..].to_vec(),
+                    results: entry.signature.results.clone(),
+                })
+                .ok_or(CompileError::MissingRepresentation(function))?;
+            descriptor_registry.insert(
+                pap.descriptor.initial_header_word(),
+                DescriptorMetadata {
+                    descriptor: Arc::clone(&pap.descriptor),
+                    meaning: DescriptorMeaning::Pap {
+                        function,
+                        pending,
+                        signature,
                     },
                 },
             );

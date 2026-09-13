@@ -74,17 +74,23 @@ pub(super) fn append_exact_starts(
 ) -> Result<(), ObservationFailure> {
     let descriptors: BTreeMap<_, _> = registry
         .values()
-        .map(|metadata| (metadata.descriptor.initial_header_word(), &metadata.descriptor))
+        .map(|metadata| {
+            (
+                metadata.descriptor.initial_header_word(),
+                &metadata.descriptor,
+            )
+        })
         .collect();
     starts.resize(nursery.len().div_ceil(64), 0);
     let mut offset = *scanned_words;
     while offset < nursery.len() {
         let header = nursery[offset] as usize;
-        let descriptor = descriptors
-            .get(&(header & !7))
-            .ok_or(DescriptorTraceError::UnknownDescriptor {
-                address: header & !7,
-            })?;
+        let descriptor =
+            descriptors
+                .get(&(header & !7))
+                .ok_or(DescriptorTraceError::UnknownDescriptor {
+                    address: header & !7,
+                })?;
         let available = (nursery.len() - offset) * 8;
         let state = unsafe { descriptor.state(nursery.as_ptr().add(offset).cast(), available)? };
         if !matches!(
@@ -373,6 +379,7 @@ impl<'a> ObservationHeap<'a> {
                                         Some(observation)
                                     }
                                     DescriptorMeaning::Callable { .. } => None,
+                                    DescriptorMeaning::Pap { .. } => None,
                                 })
                                 .or_else(|| {
                                     self.constructors.and_then(|constructors| {

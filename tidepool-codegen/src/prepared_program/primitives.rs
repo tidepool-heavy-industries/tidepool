@@ -4,6 +4,7 @@
 //! GHC's `PrimOp` table. An operation is admitted only after its complete wire
 //! signature has been checked; emitters never infer a heap layout from bits.
 
+use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::{ir, ir::InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use tidepool_repr::execution_schema::{OperationDecl, OperationIdentity, RuntimeRep, Signature};
@@ -21,10 +22,13 @@ pub(super) trait ScalarFamily {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IntegerKind {
+pub(super) enum IntegerKind {
     Add,
     Sub,
     Mul,
+    Quot,
+    Rem,
+    QuotRem,
     Negate,
     And,
     Or,
@@ -40,11 +44,11 @@ enum IntegerKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct IntegerOperation {
-    kind: IntegerKind,
-    signed: bool,
-    bits: u8,
-    result_bits: u8,
-    narrow_bits: u8,
+    pub(super) kind: IntegerKind,
+    pub(super) signed: bool,
+    pub(super) bits: u8,
+    pub(super) result_bits: u8,
+    pub(super) narrow_bits: u8,
 }
 
 pub(super) struct IntegerFamily;
@@ -177,6 +181,22 @@ fn fixed_binary(
     })
 }
 
+fn fixed_quot_rem(signature: &Signature, signed: bool, bits: u8) -> Option<IntegerOperation> {
+    let rep = if signed {
+        int_rep(bits)
+    } else {
+        word_rep(bits)
+    };
+    (signature.arguments.as_slice() == [rep, rep] && signature.results.as_slice() == [rep, rep])
+        .then_some(IntegerOperation {
+            kind: IntegerKind::QuotRem,
+            signed,
+            bits,
+            result_bits: bits,
+            narrow_bits: 0,
+        })
+}
+
 fn fixed_unary(
     signature: &Signature,
     signed: bool,
@@ -289,6 +309,18 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "+#" => generic_binary(signature, true, IntegerKind::Add),
         "-#" => generic_binary(signature, true, IntegerKind::Sub),
         "*#" => generic_binary(signature, true, IntegerKind::Mul),
+        "quotInt#" => fixed_binary(signature, true, 64, IntegerKind::Quot),
+        "remInt#" => fixed_binary(signature, true, 64, IntegerKind::Rem),
+        "quotRemInt#" => fixed_quot_rem(signature, true, 64),
+        "quotInt8#" => fixed_binary(signature, true, 8, IntegerKind::Quot),
+        "remInt8#" => fixed_binary(signature, true, 8, IntegerKind::Rem),
+        "quotRemInt8#" => fixed_quot_rem(signature, true, 8),
+        "quotInt16#" => fixed_binary(signature, true, 16, IntegerKind::Quot),
+        "remInt16#" => fixed_binary(signature, true, 16, IntegerKind::Rem),
+        "quotRemInt16#" => fixed_quot_rem(signature, true, 16),
+        "quotInt32#" => fixed_binary(signature, true, 32, IntegerKind::Quot),
+        "remInt32#" => fixed_binary(signature, true, 32, IntegerKind::Rem),
+        "quotRemInt32#" => fixed_quot_rem(signature, true, 32),
         "negateInt#" => generic_unary(signature, true, IntegerKind::Negate),
         "andI#" => generic_binary(signature, true, IntegerKind::And),
         "orI#" => generic_binary(signature, true, IntegerKind::Or),
@@ -300,6 +332,9 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "plusWord#" => generic_binary(signature, false, IntegerKind::Add),
         "minusWord#" => generic_binary(signature, false, IntegerKind::Sub),
         "timesWord#" => generic_binary(signature, false, IntegerKind::Mul),
+        "quotWord#" => fixed_binary(signature, false, 64, IntegerKind::Quot),
+        "remWord#" => fixed_binary(signature, false, 64, IntegerKind::Rem),
+        "quotRemWord#" => fixed_quot_rem(signature, false, 64),
         "and#" => generic_binary(signature, false, IntegerKind::And),
         "or#" => generic_binary(signature, false, IntegerKind::Or),
         "xor#" => generic_binary(signature, false, IntegerKind::Xor),
@@ -346,6 +381,15 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "plusWord8#" => fixed_binary(signature, false, 8, IntegerKind::Add),
         "subWord8#" => fixed_binary(signature, false, 8, IntegerKind::Sub),
         "timesWord8#" => fixed_binary(signature, false, 8, IntegerKind::Mul),
+        "quotWord8#" => fixed_binary(signature, false, 8, IntegerKind::Quot),
+        "remWord8#" => fixed_binary(signature, false, 8, IntegerKind::Rem),
+        "quotRemWord8#" => fixed_quot_rem(signature, false, 8),
+        "quotWord16#" => fixed_binary(signature, false, 16, IntegerKind::Quot),
+        "remWord16#" => fixed_binary(signature, false, 16, IntegerKind::Rem),
+        "quotRemWord16#" => fixed_quot_rem(signature, false, 16),
+        "quotWord32#" => fixed_binary(signature, false, 32, IntegerKind::Quot),
+        "remWord32#" => fixed_binary(signature, false, 32, IntegerKind::Rem),
+        "quotRemWord32#" => fixed_quot_rem(signature, false, 32),
         "ltWord8#" => compare(signature, false, 8, IntCC::UnsignedLessThan),
         "leWord8#" => compare(signature, false, 8, IntCC::UnsignedLessThanOrEqual),
         "gtWord8#" => compare(signature, false, 8, IntCC::UnsignedGreaterThan),
@@ -353,6 +397,9 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "plusWord64#" => fixed_binary(signature, false, 64, IntegerKind::Add),
         "subWord64#" => fixed_binary(signature, false, 64, IntegerKind::Sub),
         "timesWord64#" => fixed_binary(signature, false, 64, IntegerKind::Mul),
+        "quotWord64#" => fixed_binary(signature, false, 64, IntegerKind::Quot),
+        "remWord64#" => fixed_binary(signature, false, 64, IntegerKind::Rem),
+        "quotRemWord64#" => fixed_quot_rem(signature, false, 64),
         "and64#" => fixed_binary(signature, false, 64, IntegerKind::And),
         "or64#" => fixed_binary(signature, false, 64, IntegerKind::Or),
         "xor64#" => fixed_binary(signature, false, 64, IntegerKind::Xor),
@@ -362,6 +409,9 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "plusInt64#" => fixed_binary(signature, true, 64, IntegerKind::Add),
         "subInt64#" => fixed_binary(signature, true, 64, IntegerKind::Sub),
         "timesInt64#" => fixed_binary(signature, true, 64, IntegerKind::Mul),
+        "quotInt64#" => fixed_binary(signature, true, 64, IntegerKind::Quot),
+        "remInt64#" => fixed_binary(signature, true, 64, IntegerKind::Rem),
+        "quotRemInt64#" => fixed_quot_rem(signature, true, 64),
         "negateInt64#" => fixed_unary(signature, true, 64, IntegerKind::Negate),
         "uncheckedIShiftL64#" => fixed_shift(signature, true, 64, IntegerKind::Shl),
         "uncheckedIShiftRA64#" => fixed_shift(signature, true, 64, IntegerKind::Shra),
@@ -382,15 +432,19 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
     }
 }
 
-/// Recognize only primop identities. Foreign intrinsics need a distinct
-/// authority and ABI path even if their spelling resembles a primop.
+/// Recognize admitted scalar identities. Primops and typed C-call intrinsics
+/// use separate recognition authorities even when their spellings resemble
+/// one another.
 pub(super) fn recognize_operation(
     declaration: &OperationDecl,
     signature: &Signature,
 ) -> Option<ScalarOperation> {
-    IntegerFamily::recognize(&declaration.identity, signature).map(ScalarOperation::Integer)
-        .or_else(|| super::floating::FloatingFamily::recognize(&declaration.identity, signature)
-            .map(ScalarOperation::Floating))
+    IntegerFamily::recognize(&declaration.identity, signature)
+        .map(ScalarOperation::Integer)
+        .or_else(|| {
+            super::floating::FloatingFamily::recognize(&declaration.identity, signature)
+                .map(ScalarOperation::Floating)
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -399,10 +453,28 @@ pub(super) enum ScalarOperation {
     Floating(super::floating::FloatingOperation),
 }
 
-pub(super) fn emit_operation(operation: ScalarOperation, builder: &mut FunctionBuilder<'_>, arguments: &[ir::Value]) -> Vec<ir::Value> {
+pub(super) fn emit_operation(
+    operation: ScalarOperation,
+    builder: &mut FunctionBuilder<'_>,
+    arguments: &[ir::Value],
+    vmctx: ir::Value,
+    pipeline: &mut CodegenPipeline,
+) -> Result<Vec<ir::Value>, super::CompileError> {
     match operation {
-        ScalarOperation::Integer(operation) => IntegerFamily::emit(operation, builder, arguments),
-        ScalarOperation::Floating(operation) => super::floating::FloatingFamily::emit(operation, builder, arguments),
+        ScalarOperation::Integer(operation)
+            if matches!(
+                operation.kind,
+                IntegerKind::Quot | IntegerKind::Rem | IntegerKind::QuotRem
+            ) =>
+        {
+            super::fallible::emit(operation, builder, vmctx, pipeline, arguments)
+        }
+        ScalarOperation::Integer(operation) => {
+            Ok(IntegerFamily::emit(operation, builder, arguments))
+        }
+        ScalarOperation::Floating(operation) => Ok(super::floating::FloatingFamily::emit(
+            operation, builder, arguments,
+        )),
     }
 }
 
@@ -426,6 +498,9 @@ impl ScalarFamily for IntegerFamily {
             IntegerKind::Add => builder.ins().iadd(arguments[0], arguments[1]),
             IntegerKind::Sub => builder.ins().isub(arguments[0], arguments[1]),
             IntegerKind::Mul => builder.ins().imul(arguments[0], arguments[1]),
+            IntegerKind::Quot | IntegerKind::Rem | IntegerKind::QuotRem => {
+                unreachable!("fallible integer operation routed through fallible emitter")
+            }
             IntegerKind::Negate => builder.ins().ineg(arguments[0]),
             IntegerKind::And => builder.ins().band(arguments[0], arguments[1]),
             IntegerKind::Or => builder.ins().bor(arguments[0], arguments[1]),
@@ -486,6 +561,7 @@ fn integer_type(bits: u8) -> ir::Type {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_fns::RuntimeError;
     use tidepool_repr::execution_schema::{Atom, ScalarLiteral};
 
     use std::sync::{atomic::AtomicBool, Arc};
@@ -533,6 +609,74 @@ mod tests {
             .unwrap()
     }
 
+    fn run_scalar_result(
+        name: &str,
+        argument_reps: Vec<RuntimeRep>,
+        result_rep: RuntimeRep,
+        arguments: Vec<Atom>,
+    ) -> Result<super::super::RunResult, super::super::ExecutionError> {
+        use tidepool_repr::execution_schema::{testing, *};
+
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = vec![result_rep];
+        wire.signatures.push(Signature {
+            arguments: argument_reps,
+            results: vec![result_rep],
+        });
+        wire.operations.push(OperationDecl {
+            identity: OperationIdentity::PrimOp(name.into()),
+            signature: SignatureId(1),
+        });
+        wire.expressions.nodes[0] = ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments,
+        };
+        let prepared = testing::prepare(wire).unwrap();
+        let linked = link_program(prepared, &MachineImports::default()).unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
+        compiled.run_entry(
+            ValueId(0),
+            &[],
+            &super::super::RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn run_tuple_result(
+        name: &str,
+        argument_reps: Vec<RuntimeRep>,
+        result_rep: RuntimeRep,
+        arguments: Vec<Atom>,
+    ) -> Result<Vec<tidepool_bridge::Value>, super::super::ExecutionError> {
+        use tidepool_repr::execution_schema::{testing, *};
+
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = vec![result_rep, result_rep];
+        wire.signatures.push(Signature {
+            arguments: argument_reps,
+            results: vec![result_rep, result_rep],
+        });
+        wire.operations.push(OperationDecl {
+            identity: OperationIdentity::PrimOp(name.into()),
+            signature: SignatureId(1),
+        });
+        wire.expressions.nodes[0] = ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments,
+        };
+        let prepared = testing::prepare(wire).unwrap();
+        let linked = link_program(prepared, &MachineImports::default()).unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
+        compiled
+            .run_entry(
+                ValueId(0),
+                &[],
+                &super::super::RunOptions::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .map(|result| result.values)
+    }
+
     fn int(bits: u8, value: i64) -> Atom {
         let bytes = value.to_be_bytes();
         Atom::Scalar(ScalarLiteral::Int {
@@ -565,10 +709,221 @@ mod tests {
     }
 
     #[test]
-    fn division_is_not_admitted_as_a_scalar_operation() {
+    fn division_is_admitted_only_for_exact_scalar_signature() {
         let identity = OperationIdentity::PrimOp("quotInt#".into());
         let signature = sig(vec![RuntimeRep::Int(64); 2], vec![RuntimeRep::Int(64)]);
-        assert!(IntegerFamily::recognize(&identity, &signature).is_none());
+        assert!(IntegerFamily::recognize(&identity, &signature).is_some());
+        let wrong = sig(
+            vec![RuntimeRep::Int(64), RuntimeRep::Word(64)],
+            vec![RuntimeRep::Int(64)],
+        );
+        assert!(IntegerFamily::recognize(&identity, &wrong).is_none());
+
+        for (quot, rem, rep) in [
+            ("quotInt8#", "remInt8#", RuntimeRep::Int(8)),
+            ("quotInt16#", "remInt16#", RuntimeRep::Int(16)),
+            ("quotInt32#", "remInt32#", RuntimeRep::Int(32)),
+            ("quotInt64#", "remInt64#", RuntimeRep::Int(64)),
+            ("quotWord8#", "remWord8#", RuntimeRep::Word(8)),
+            ("quotWord16#", "remWord16#", RuntimeRep::Word(16)),
+            ("quotWord32#", "remWord32#", RuntimeRep::Word(32)),
+            ("quotWord64#", "remWord64#", RuntimeRep::Word(64)),
+        ] {
+            let signature = sig(vec![rep, rep], vec![rep]);
+            assert!(
+                IntegerFamily::recognize(&OperationIdentity::PrimOp(quot.into()), &signature,)
+                    .is_some()
+            );
+            assert!(
+                IntegerFamily::recognize(&OperationIdentity::PrimOp(rem.into()), &signature,)
+                    .is_some()
+            );
+        }
+        for (name, rep) in [
+            ("quotRemInt8#", RuntimeRep::Int(8)),
+            ("quotRemInt16#", RuntimeRep::Int(16)),
+            ("quotRemInt32#", RuntimeRep::Int(32)),
+            ("quotRemInt64#", RuntimeRep::Int(64)),
+            ("quotRemWord8#", RuntimeRep::Word(8)),
+            ("quotRemWord16#", RuntimeRep::Word(16)),
+            ("quotRemWord32#", RuntimeRep::Word(32)),
+            ("quotRemWord64#", RuntimeRep::Word(64)),
+        ] {
+            let signature = sig(vec![rep, rep], vec![rep, rep]);
+            assert!(
+                IntegerFamily::recognize(&OperationIdentity::PrimOp(name.into()), &signature,)
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn quotient_and_remainder_use_real_ghc_names_and_truncate() {
+        let quotient = run_scalar(
+            "quotInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, -7), int(64, 3)],
+        );
+        assert!(matches!(
+            quotient,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-2))
+        ));
+        let remainder = run_scalar(
+            "remInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, -7), int(64, 3)],
+        );
+        assert!(matches!(
+            remainder,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-1))
+        ));
+
+        let word_quotient = run_scalar(
+            "quotWord#",
+            vec![RuntimeRep::Word(64); 2],
+            RuntimeRep::Word(64),
+            vec![word(64, 7), word(64, 3)],
+        );
+        assert!(matches!(
+            word_quotient,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(2))
+        ));
+        let word_remainder = run_scalar(
+            "remWord#",
+            vec![RuntimeRep::Word(64); 2],
+            RuntimeRep::Word(64),
+            vec![word(64, 7), word(64, 3)],
+        );
+        assert!(matches!(
+            word_remainder,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(1))
+        ));
+
+        let tuple = run_tuple_result(
+            "quotRemInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, -7), int(64, 3)],
+        )
+        .unwrap();
+        assert!(matches!(
+            tuple.as_slice(),
+            [
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-2)),
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-1)),
+            ]
+        ));
+        let word_tuple = run_tuple_result(
+            "quotRemWord#",
+            vec![RuntimeRep::Word(64); 2],
+            RuntimeRep::Word(64),
+            vec![word(64, 7), word(64, 3)],
+        )
+        .unwrap();
+        assert!(matches!(
+            word_tuple.as_slice(),
+            [
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(2)),
+                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(1)),
+            ]
+        ));
+
+        let narrow_signed = run_scalar(
+            "quotInt8#",
+            vec![RuntimeRep::Int(8); 2],
+            RuntimeRep::Int(8),
+            vec![int(8, -7), int(8, 3)],
+        );
+        assert!(matches!(
+            narrow_signed,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-2))
+        ));
+        let narrow_word = run_scalar(
+            "remWord16#",
+            vec![RuntimeRep::Word(16); 2],
+            RuntimeRep::Word(16),
+            vec![word(16, 7), word(16, 3)],
+        );
+        assert!(matches!(
+            narrow_word,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(1))
+        ));
+    }
+
+    #[test]
+    fn quotient_failures_are_typed_and_rem_min_overflow_is_zero() {
+        let zero = run_scalar_result(
+            "quotInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, 7), int(64, 0)],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            zero,
+            super::super::ExecutionError::Runtime(crate::machine_state::MachineFailure {
+                cause: RuntimeError::DivisionByZero,
+                ..
+            })
+        ));
+
+        let overflow = run_scalar_result(
+            "quotInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, i64::MIN), int(64, -1)],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            overflow,
+            super::super::ExecutionError::Runtime(crate::machine_state::MachineFailure {
+                cause: RuntimeError::Overflow,
+                ..
+            })
+        ));
+
+        let remainder = run_scalar(
+            "remInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, i64::MIN), int(64, -1)],
+        );
+        assert!(matches!(
+            remainder,
+            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(0))
+        ));
+
+        let tuple_zero = run_tuple_result(
+            "quotRemInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, 7), int(64, 0)],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            tuple_zero,
+            super::super::ExecutionError::Runtime(crate::machine_state::MachineFailure {
+                cause: RuntimeError::DivisionByZero,
+                ..
+            })
+        ));
+
+        let tuple_overflow = run_tuple_result(
+            "quotRemInt#",
+            vec![RuntimeRep::Int(64); 2],
+            RuntimeRep::Int(64),
+            vec![int(64, i64::MIN), int(64, -1)],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            tuple_overflow,
+            super::super::ExecutionError::Runtime(crate::machine_state::MachineFailure {
+                cause: RuntimeError::Overflow,
+                ..
+            })
+        ));
     }
 
     #[test]

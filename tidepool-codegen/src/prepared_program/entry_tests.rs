@@ -1,6 +1,8 @@
 use super::{CompiledProgram, RunOptions};
 use crate::host_fns::RuntimeError;
+use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
+use tidepool_heap::static_region::{StaticImage, StaticRelocation};
 use tidepool_repr::execution_schema::{testing, *};
 
 #[test]
@@ -374,9 +376,7 @@ fn constructor_decl(index: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {
             root_mask: layout
                 .fields()
                 .iter()
-                .map(|field| {
-                    matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
-                })
+                .map(|field| matches!(field.rep(), RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef))
                 .collect(),
         },
     }
@@ -390,9 +390,11 @@ fn w5_a4_lazy_alias_chain_is_observable() {
     wire.constructors.push(constructor_decl(0, vec![]));
     wire.expressions.nodes.clear();
     for index in 0..depth {
-        wire.expressions.nodes.push(ExprFrame::Return(vec![Atom::Ref(
-            ValueRef::Local(ValueId((index + 1) as u32)),
-        )]));
+        wire.expressions
+            .nodes
+            .push(ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(
+                ValueId((index + 1) as u32),
+            ))]));
     }
     wire.bindings.clear();
     wire.bindings.extend((0..=depth).map(|index| {
@@ -439,13 +441,12 @@ fn w5_a4_lazy_alias_chain_is_observable() {
 fn w5_a4_function_result_is_typed_unobservable_failure() {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
-    wire.constructors.push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
-    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(
-        ScalarLiteral::Int {
-            bits: 64,
-            bytes: 0_i64.to_be_bytes().to_vec(),
-        },
-    )]);
+    wire.constructors
+        .push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+        bits: 64,
+        bytes: 0_i64.to_be_bytes().to_vec(),
+    })]);
     wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(0)))]);
     wire.bindings = vec![Group::Recursive(vec![
         TopBinding {
@@ -481,11 +482,9 @@ fn w5_a4_function_result_is_typed_unobservable_failure() {
         .unwrap_err();
     assert!(matches!(
         error,
-        super::ExecutionError::Observation(
-            super::ObservationFailure::Unobservable(
-                tidepool_heap::execution_descriptor::ObjectKind::Function
-            )
-        )
+        super::ExecutionError::Observation(super::ObservationFailure::Unobservable(
+            tidepool_heap::execution_descriptor::ObjectKind::Function
+        ))
     ));
 }
 
@@ -493,7 +492,8 @@ fn w5_a4_function_result_is_typed_unobservable_failure() {
 fn w5_a4_cycle_uses_one_bounded_observation_budget() {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
-    wire.constructors.push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
+    wire.constructors
+        .push(constructor_decl(0, vec![RuntimeRep::LiftedRef]));
     wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(0)))]);
     wire.bindings = vec![Group::Recursive(vec![
         TopBinding {
@@ -639,7 +639,10 @@ fn w5_a4_child_force_moves_heap_without_losing_sibling_root() {
             Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
-    assert!(result.collections > 0, "child force must move nursery objects");
+    assert!(
+        result.collections > 0,
+        "child force must move nursery objects"
+    );
     assert!(matches!(
         result.values.as_slice(),
         [tidepool_bridge::Value::Con(parent, fields)]
@@ -656,59 +659,94 @@ fn w5_a4_child_force_moves_heap_without_losing_sibling_root() {
     ));
 }
 
-fn deep_forcing_wire(depth: u32) -> WireProgram {
+fn deep_forcing_wire() -> WireProgram {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = vec![RuntimeRep::LiftedRef];
     wire.constructors.push(constructor_decl(0, vec![]));
-    wire.constructors.push(constructor_decl(1, vec![RuntimeRep::LiftedRef]));
-    wire.expressions.nodes = vec![ExprFrame::Return(vec![Atom::Ref(
-        ValueRef::Local(ValueId(depth)),
-    )])];
-    wire.bindings.clear();
-    wire.bindings.reserve_exact(depth as usize + 2);
-    wire.bindings.push(Group::NonRecursive(TopBinding {
-        identity: testing::identity("W5", "deep-leaf"),
-        binding: HeapBinding {
-            id: ValueId(0),
-            rhs: HeapRhs::Constructor {
-                constructor: ConstructorId(0),
-                fields: vec![],
-            },
-        },
-    }));
-    for index in 1..=depth {
-        wire.bindings.push(Group::NonRecursive(TopBinding {
-            identity: testing::identity("W5", &format!("deep-node{index}")),
+    wire.constructors
+        .push(constructor_decl(1, vec![RuntimeRep::LiftedRef]));
+    wire.expressions.nodes = vec![ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(
+        ValueId(1),
+    ))])];
+    wire.bindings = vec![
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "deep-lazy-root"),
             binding: HeapBinding {
-                id: ValueId(index),
-                rhs: HeapRhs::Constructor {
-                    constructor: ConstructorId(1),
-                    fields: vec![Atom::Ref(ValueRef::Local(ValueId(index - 1)))],
+                id: ValueId(0),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(0),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![],
+                    body: 0,
                 },
             },
-        }));
-    }
-    wire.bindings.push(Group::NonRecursive(TopBinding {
-        identity: testing::identity("W5", "deep-lazy-root"),
-        binding: HeapBinding {
-            id: ValueId(depth + 1),
-            rhs: HeapRhs::Thunk {
-                signature: SignatureId(0),
-                update: UpdatePolicy::Memoize,
-                captures: vec![],
-                body: 0,
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "deep-static-root"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(1),
+                    fields: vec![Atom::Ref(ValueRef::Local(ValueId(2)))],
+                },
             },
-        },
-    }));
-    wire.entry = ValueId(depth + 1);
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("W5", "deep-static-leaf"),
+            binding: HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        }),
+    ];
+    wire.entry = ValueId(0);
     wire
 }
 
+fn install_deep_static_chain(program: &mut CompiledProgram, depth: usize) {
+    let leaf = Arc::clone(&program.descriptors[0]);
+    let node = Arc::clone(&program.descriptors[1]);
+    let node_extent = node.allocation_extent() as usize;
+    let leaf_offset = depth
+        .checked_mul(node_extent)
+        .expect("deep static chain extent must fit");
+    let total_bytes = leaf_offset
+        .checked_add(leaf.allocation_extent() as usize)
+        .expect("deep static chain size must fit");
+    let mut words = vec![0_u64; total_bytes / std::mem::size_of::<u64>()];
+    let mut relocations = Vec::with_capacity(depth);
+    for index in 0..depth {
+        let offset = index * node_extent;
+        unsafe { node.initialize_header(words.as_mut_ptr().cast::<u8>().add(offset)) };
+        let field = node.payload().fields().first().expect("node has one field");
+        let slot_offset = offset + node.payload_base() as usize + field.offset() as usize;
+        let target_offset = if index + 1 == depth {
+            leaf_offset
+        } else {
+            (index + 1) * node_extent
+        };
+        relocations.push(StaticRelocation {
+            slot_offset,
+            target_offset,
+            tag: if index + 1 == depth {
+                leaf.tag()
+            } else {
+                node.tag()
+            },
+        });
+    }
+    unsafe { leaf.initialize_header(words.as_mut_ptr().cast::<u8>().add(leaf_offset)) };
+    let entries = BTreeMap::from([(ValueId(1), 0), (ValueId(2), leaf_offset)]);
+    program.statics = StaticImage::new(words, relocations, entries, [leaf, node])
+        .expect("iteratively built deep static chain must validate");
+}
+
 /// The root is lazy, and observation forces it before iteratively expanding
-/// 20,000 constructor nodes. Compilation stays outside the restricted-stack
-/// worker; only generated entry plus forcing/materialization run there.
+/// 20,000 constructor nodes from a test-private validated static image.
 #[test]
-#[ignore = "expensive prepared compilation; run explicitly for A4 evidence"]
 fn w5_a4_forcing_observation_20k_constructors_small_stack() {
     if std::env::var_os("TIDEPOOL_A4_DEEP_CHILD").is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -727,14 +765,16 @@ fn w5_a4_forcing_observation_20k_constructors_small_stack() {
         return;
     }
 
-    let program = compile_wire(deep_forcing_wire(20_000));
+    let wire = deep_forcing_wire();
     let join = std::thread::Builder::new()
         .name("prepared-a4-deep-observe".into())
         .stack_size(256 * 1024)
         .spawn(move || {
+            let mut program = compile_wire(wire);
+            install_deep_static_chain(&mut program, 20_000);
             let result = program
                 .run_entry(
-                    ValueId(20_001),
+                    ValueId(0),
                     &[],
                     &RunOptions {
                         observation_budget: 20_002,

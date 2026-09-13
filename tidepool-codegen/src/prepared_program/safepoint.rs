@@ -176,8 +176,12 @@ mod tests {
         machine.set_cancel_flag(Arc::new(AtomicBool::new(true)));
         let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
-        let status = unsafe { prepared_poll_at(&mut vmctx,
-            crate::prepared_control::PreparedSafepoint::FunctionEntry as u32) };
+        let status = unsafe {
+            prepared_poll_at(
+                &mut vmctx,
+                crate::prepared_control::PreparedSafepoint::FunctionEntry as u32,
+            )
+        };
         assert_ne!(status, CallStatus::Success as i32);
         assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
     }
@@ -190,8 +194,12 @@ mod tests {
         let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         assert_eq!(
-            unsafe { prepared_poll_at(&mut vmctx,
-                crate::prepared_control::PreparedSafepoint::FunctionEntry as u32) },
+            unsafe {
+                prepared_poll_at(
+                    &mut vmctx,
+                    crate::prepared_control::PreparedSafepoint::FunctionEntry as u32,
+                )
+            },
             CallStatus::IntegrityFailure as i32
         );
         assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));

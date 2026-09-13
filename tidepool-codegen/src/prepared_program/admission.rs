@@ -130,14 +130,33 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
             ExprFrame::Call {
                 callee, signature, ..
             } => {
-                let actual = match callee {
-                    Atom::Ref(ValueRef::Local(id)) => functions.get(id),
-                    _ => None,
-                };
-                actual.is_none_or(|actual| {
-                    program.signatures()[actual.0 as usize]
-                        != program.signatures()[signature.0 as usize]
-                })
+                match callee {
+                    Atom::Ref(ValueRef::Local(id)) => {
+                        match program.signatures().get(signature.0 as usize) {
+                            None => true,
+                            Some(demand) => {
+                                if let Some(entry) = functions
+                                    .get(id)
+                                    .and_then(|actual| program.signatures().get(actual.0 as usize))
+                                {
+                                    super::apply::classify(entry, 0, demand).is_none()
+                                } else {
+                                    // Case/let values may be PAPs. Their actual
+                                    // descriptor remains a generated dispatch
+                                    // check, but admission can prove that at least
+                                    // one owned callable/pending arity has this ABI.
+                                    !functions.values().any(|actual| {
+                                        let entry = &program.signatures()[actual.0 as usize];
+                                        (0..entry.arguments.len()).any(|pending| {
+                                            super::apply::classify(entry, pending, demand).is_some()
+                                        })
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    _ => true,
+                }
             }
             _ => false,
         };
@@ -418,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_indirect_and_partial_calls() {
+    fn admission_rejects_indirect_calls_and_accepts_partial_calls() {
         let indirect = wire(
             vec![
                 sig(&[RuntimeRep::LiftedRef], &[RuntimeRep::Int(64)]),
@@ -453,13 +472,7 @@ mod tests {
             ],
             vec![array([uint(0), top(0, function(1, &[], 2))])],
         );
-        assert_eq!(
-            admit_program(&linked(partial)),
-            Err(Unsupported::Expression {
-                binding: ValueId(0),
-                node: 1
-            })
-        );
+        assert_eq!(admit_program(&linked(partial)), Ok(()));
     }
 
     #[test]
