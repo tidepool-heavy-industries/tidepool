@@ -20,6 +20,9 @@ main = do
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
     "prepared execution schema is not v5"
+  let globalFields = termList (head (termList (termList (decode first) !! 7)))
+  assert (drop 3 globalFields == [TBool False, TList [TInt 1, TInt 7], TBool False])
+    "global wire fields must end with evaluated, tagged generation, dead-end"
 
   let localBody = Let
         (NonRecursive (HeapBinding (ValueId 8)

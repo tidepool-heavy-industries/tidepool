@@ -106,11 +106,11 @@ encodeGlobal global = array
   , case globalEntrySignature global of
       Nothing -> tag 0
       Just signature -> tagged 1 [encodeSignatureId signature]
-  , encodeBool (globalDeadEnd global)
   , encodeBool (globalRequiredEvaluated global)
   , case globalRequiredGeneration global of
       Nothing -> tag 0
       Just generation -> tagged 1 [encodeWord64 generation]
+  , encodeBool (globalDeadEnd global)
   ]
 
 encodeOperation :: OperationDecl -> Encoding
