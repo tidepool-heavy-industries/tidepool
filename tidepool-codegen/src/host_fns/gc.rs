@@ -978,6 +978,10 @@ fn collect_prepared(
                     return Err(RuntimeError::HeapOverflow);
                 }
                 if needed <= state.active_size {
+                    // Only the final successful copy's marks decide Young
+                    // payload liveness. Growth recopies reuse root-slot
+                    // addresses, so sweeping between copies is forbidden.
+                    sweep_prepared_young(machine, &prepared.space)?;
                     return Ok(prepared.used);
                 }
                 let size = state.active_size.saturating_mul(2).max(needed).min(ceiling);
@@ -994,6 +998,29 @@ fn collect_prepared(
             Err(_) => return Err(RuntimeError::BadPointer),
         }
     }
+}
+
+fn sweep_prepared_young(
+    machine: &crate::machine_state::MachineState,
+    space: &tidepool_heap::gc::raw::DescriptorSpace,
+) -> Result<(), crate::host_fns::RuntimeError> {
+    use crate::host_fns::RuntimeError;
+    use tidepool_heap::external_storage::ExternalStorageValidationError;
+    let mut marked = HashSet::new();
+    let payloads = space.visited_external_payloads();
+    marked
+        .try_reserve(payloads.len())
+        .map_err(|_| RuntimeError::HeapOverflow)?;
+    marked.extend(payloads.map(|(address, _)| address as *mut u8));
+    let classify = |error| match error {
+        ExternalStorageValidationError::BookkeepingAllocation => RuntimeError::HeapOverflow,
+        _ => RuntimeError::BadPointer,
+    };
+    let plan = machine
+        .plan_external_minor_sweep(&marked)
+        .map_err(classify)?;
+    machine.commit_external_sweep(plan).map_err(classify)?;
+    Ok(())
 }
 
 /// Prepared allocation safepoint. Failure is an explicit ABI status, never an
@@ -1613,6 +1640,13 @@ mod tests {
         }
         ms.register_external_storage(payload, payload, layout, ExternalStorageKind::BoxedArray, 1);
 
+        // An unreachable Young allocation must survive neither the final
+        // successful copy nor any accidental intermediate growth sweep.
+        let dead = unsafe { alloc_zeroed(layout) };
+        assert!(!dead.is_null());
+        let dead_published = unsafe { dead.add(8) };
+        ms.register_external_storage(dead_published, dead, layout, ExternalStorageKind::Bytes, 0);
+
         let mut root = start;
         ms.register_rust_root(&mut root);
         let maps = crate::stack_map::StackMapRegistry::new();
@@ -1656,6 +1690,8 @@ mod tests {
             },
             payload
         );
+        assert_eq!(ms.external_storage_stats().live_objects, 1);
+        assert_eq!(ms.external_storage_stats().freed_objects, 1);
         ms.clear_gc_state();
         ms.clear_stack_map_registry();
     }

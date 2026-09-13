@@ -66,7 +66,7 @@ impl DescriptorSpace {
     /// objects.
     pub fn visited_external_payloads(
         &self,
-    ) -> impl Iterator<Item = (usize, ExternalStorageKind)> + '_ {
+    ) -> impl ExactSizeIterator<Item = (usize, ExternalStorageKind)> + '_ {
         self.external_payloads
             .iter()
             .map(|(&published, &kind)| (published, kind))

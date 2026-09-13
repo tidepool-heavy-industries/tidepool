@@ -146,8 +146,9 @@ impl super::OldSpace {
                 PromotionFailure::Preparation(error) => preparation_error(error),
                 PromotionFailure::Incomplete(error) => RuntimeError::IncompletePromotion(error),
             })?;
-            // Mandatory fixup succeeded. No allocation/callback/failure between
-            // this publication and returning control to the invocation.
+            // Publish the consistent nursery before retention bookkeeping.
+            // Any subsequent bookkeeping failure is terminal and preserves
+            // every heap/payload owner through unwind.
             std::mem::swap(active, &mut prepared.spare);
             state.active_start = active.as_mut_ptr().cast();
             state.active_size = active.len() * 8;
@@ -155,6 +156,11 @@ impl super::OldSpace {
             vmctx.alloc_ptr = state.active_start.add(copied.nursery_bytes);
             vmctx.alloc_limit = state.active_start.add(state.active_size);
             machine.bump_gc_generation();
+            machine
+                .retain_external_payloads(&copied.promoted_external_payloads)
+                .map_err(|error| {
+                    RuntimeError::IncompletePromotion(DescriptorTraceError::ExternalPayload(error))
+                })?;
             Ok(())
         })();
         machine.put_gc_state(state);
