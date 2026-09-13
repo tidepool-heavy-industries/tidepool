@@ -1705,6 +1705,12 @@ mod tests {
         // itself becomes unreachable in the next minor collection.
         ms.retain_external_payloads(&[(payload as usize, ExternalStorageKind::BoxedArray)])
             .unwrap();
+        let retained_child = unsafe { payload.add(8).cast::<*mut u8>().read() };
+        assert_eq!(
+            ms.compare_exchange_external_element(payload, 0, retained_child, retained_child)
+                .unwrap(),
+            retained_child
+        );
         ms.allocate_external_storage(ExternalStorageKind::Bytes, 0)
             .unwrap();
         root = std::ptr::null_mut();

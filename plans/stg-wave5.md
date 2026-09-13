@@ -6,7 +6,7 @@ Broad Core deletion is Wave 7. No Core fallback is added.
 
 ## Latest verification checkpoint
 
-Pushed source head: `ba13cf1d3`. Primitive byte access passed six adapter
+Pushed source head: `18e4e1f70`. Primitive byte access passed six adapter
 tests; the machine-state selection passed 16 tests and the byte-pool bounds
 unit test passed. Real recovered `showDouble` walking and the recovery suites
 pass after fixing our consumer of GHC's deliberately undefined constructor
@@ -32,10 +32,94 @@ fixture needed a zero-field helper correction and Rc ownership before publishing
 its payload address. Source-walk preallocation removes a late allocation-failure
 path after forwarding; it is not a reachable-graph preflight.
 
-Prepared array primitive emission, Young/Retained ledger policy and prepared
-payload reclamation remain unimplemented. The existing Core major collector
-does not supply those mechanisms to the prepared path. Corpus replay is next;
-the numbers below still describe the earlier checkpoint.
+Prepared array primitive emission remains unimplemented. Young/Retained ledger
+policy and final-copy minor reclamation are now implemented locally; production
+integration verification passed GC 2/2, promotion 1/1 and machine-state 27/27.
+Fresh source review accepted the scoped lifetime integration. These results
+cover the owner and GC parcel committed in `0e35c2654`, not the array emitter
+seed interleaved in history. Seeds `533a97130` and `e7e24c772`
+are not verified checkpoints. The existing Core major collector does not supply
+these mechanisms to the prepared path.
+
+The complete replay pinned to `18e4e1f70` is
+`target/prepared-corpus/suite.aq7NWK/results.json`, SHA-256
+`f623bedb62400776eb1144685f851b98262f4cf79882491b9d2f525f4215ce8d`.
+All 812 rows remain: 708 project, 684 validate, 424 admit, 256 execute and
+136 match. All previous 136 matches remain. The 287 missing-comparison rows
+include 120 successful observations lacking expectations and 167 failed
+executions lacking expectations; they are not 287 successful programs.
+There are 104 unsupported foreign/prim-call projection failures, 24 validation
+failures, 116 global and 144 expression admission failures. Execution failures
+include 74 Address results, 79 managed host arguments, nine missing scalar
+arguments, three function observations, two observation budgets and one
+`thunk_blackhole` child watchdog termination. The parent completed all rows.
+`just fixtures-check` passed at this checkpoint; this is not semantic green.
+
+Source/artifact diagnosis attributes all 24 validation failures to
+`raiseDivZero#` and `raiseUnderflow#`: their enclosing thunks correctly declare
+NoSuccess, while the producer emits returning operation signatures. The fix
+belongs in operation projection, not validator relaxation. Separately, exact
+recovery accepts a `patError` interface body whose type differs from its binder.
+The first investigation incorrectly attributed this to `realIdUnfolding`;
+the live-Id test found no unfolding, so the fat-interface path must be checked
+directly. Investigate typed candidate rejection and exact fallback, never invent
+representation-polymorphic binders or revive Core error-sentinel lowering.
+
+The arithmetic-raise producer repair passed `execution-schema-projection` and
+`recovered-body-test`; native terminal emission now has a separate focused
+test awaiting its run. Array allocation is seeded through the real adapter,
+with checked access/store implementation delegated. The first array seed
+incorrectly retained source State# positions in results: actual projection
+uses physical result reps but retains zero-width argument slots. The worker
+reported the validator contradiction and the lead corrected the contract;
+no validator relaxation was authorized.
+
+This parcel record: lifetime implementation needed one consolidated semantic
+correction (revoked structural retention and fallible sweep staging), then
+production tests and a fresh Accept; raising projection needed one worker
+round with both focused tests passing; array seed needed a lead contract
+correction before its implementation round could complete. Source review and
+test results are separate evidence. The generic foreign-call diagnostic did
+not contain enough information to choose intrinsics, so capability work waits
+for a bounded probe with call kind, identity and instantiated signature.
+
+The rebuilt bounded probe identifies `stg_cloneMyStackzh` for `showDouble`
+and `qq_fmt_double`: `[Void] -> Returns [UnliftedRef]`. Fresh GHC-source
+consultation confirms this requires a real RTS stack snapshot, tracing and
+decoding contract; an empty substitute would be wrong. These two roots reach
+it through the `OPAQUE` placeholder bodies of `Tidepool.Double.renderDouble`
+and `renderDoublePrec`, whose intended prepared intrinsic lowering is missing.
+The next bounded intrinsic work is therefore managed Text formatting via
+the existing pure `tidepool_bignum::haskell_show_double`, not pretending that
+Cranelift frames are GHC stack objects. The other 102 rejected roots have not
+yet been classified by actual operation identity.
+
+The recovered-body test now separately proves that the requested and fat
+`patError` binders agree, while that binder and its RHS disagree. It passes.
+GHC's fat format serializes external tops by Name and reconstructs this one
+as a wired-in Id, losing the defining lifted type. Typed rejection remains;
+changing the binder to the RHS type is not an exact-body lookup. Relaxing
+caller/defining Core-type equality for other internally well-typed bottoming
+bodies is a separate future boundary question, not this failure's repair.
+
+Array progress: the first boxed-family fold and native arithmetic-raise check
+passed seven focused tests. Freeze/shrink/CAS then passed nine boxed-family
+tests after one review correction added real-adapter coverage (the initial
+handback tested their host functions only). Initial byte Word8/Int roundtrips
+and bounds passed three native tests; additional byte alias/kind/revocation
+checks await the serialized build slot. A GHC-produced fixture confirms all
+ten selected byte-array signatures, including Word8 rather than Word64.
+Canonical fixture regeneration changed only `.source-fingerprint`; byte
+comparison passed and the new full corpus replay is running. No new corpus
+match total or workspace-green claim is made yet.
+
+The formatting investigation also found that OPAQUE preserves bottoming demand
+information: an error placeholder can inform caller optimization before STG
+projection. A late intrinsic wrapper alone cannot restore deleted successful
+continuations. The source baseline must express the real returning semantics
+before optimization. Formatting precedence must preserve negative zero and
+must not force precedence for positive/NaN values merely because the outgoing
+Core helper did so. These are correctness requirements for the intrinsic seed.
 
 Trial conclusion for this fold: bounded view migration and exact verification
 delegated cleanly; fixture writing needed correction when GHC optimized away

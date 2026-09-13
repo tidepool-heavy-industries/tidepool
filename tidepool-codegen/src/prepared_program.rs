@@ -34,6 +34,7 @@ pub use run::{ExecutionError, RunOptions, RunResult};
 #[cfg(test)]
 mod apply_tests;
 mod arrays;
+mod byte_arrays;
 #[cfg(test)]
 mod bytes_tests;
 #[cfg(test)]
@@ -216,6 +217,46 @@ impl CompiledProgram {
             (
                 "prepared_sizeof_boxed",
                 arrays::prepared_sizeof_boxed as *const u8,
+            ),
+            (
+                "prepared_freeze_boxed",
+                arrays::prepared_freeze_boxed as *const u8,
+            ),
+            (
+                "prepared_shrink_boxed",
+                arrays::prepared_shrink_boxed as *const u8,
+            ),
+            (
+                "prepared_cas_boxed",
+                arrays::prepared_cas_boxed as *const u8,
+            ),
+            (
+                "prepared_new_bytes",
+                byte_arrays::prepared_new_bytes as *const u8,
+            ),
+            (
+                "prepared_freeze_bytes",
+                byte_arrays::prepared_freeze_bytes as *const u8,
+            ),
+            (
+                "prepared_sizeof_bytes",
+                byte_arrays::prepared_sizeof_bytes as *const u8,
+            ),
+            (
+                "prepared_read_word8_bytes",
+                byte_arrays::prepared_read_word8_bytes as *const u8,
+            ),
+            (
+                "prepared_read_int_bytes",
+                byte_arrays::prepared_read_int_bytes as *const u8,
+            ),
+            (
+                "prepared_write_word8_bytes",
+                byte_arrays::prepared_write_word8_bytes as *const u8,
+            ),
+            (
+                "prepared_write_int_bytes",
+                byte_arrays::prepared_write_int_bytes as *const u8,
             ),
             (
                 "prepared_no_success_returned",
@@ -472,6 +513,7 @@ impl CompiledProgram {
         pipeline.finalize()?;
         let mut descriptors = plan.constructors.clone();
         descriptors.push(Arc::clone(&plan.boxed_array));
+        descriptors.push(Arc::clone(&plan.bytes_array));
         descriptors.extend(
             plan.functions
                 .values()
@@ -492,6 +534,13 @@ impl CompiledProgram {
             plan.boxed_array.initial_header_word(),
             DescriptorMetadata {
                 descriptor: Arc::clone(&plan.boxed_array),
+                meaning: DescriptorMeaning::External,
+            },
+        );
+        descriptor_registry.insert(
+            plan.bytes_array.initial_header_word(),
+            DescriptorMetadata {
+                descriptor: Arc::clone(&plan.bytes_array),
                 meaning: DescriptorMeaning::External,
             },
         );

@@ -49,6 +49,7 @@ pub(super) struct ProgramPlan<'a> {
     pub values: BTreeMap<ValueId, RuntimeRep>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
     pub boxed_array: Arc<ObjectDescriptor>,
+    pub bytes_array: Arc<ObjectDescriptor>,
     /// Compact slots, not ValueId-indexed allocation controlled by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
@@ -310,6 +311,10 @@ impl<'a> ProgramPlan<'a> {
             constructors,
             boxed_array: Arc::new(ObjectDescriptor::external(
                 tidepool_heap::external_storage::ExternalStorageKind::BoxedArray,
+                target,
+            )?),
+            bytes_array: Arc::new(ObjectDescriptor::external(
+                tidepool_heap::external_storage::ExternalStorageKind::Bytes,
                 target,
             )?),
             top_slots,

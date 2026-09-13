@@ -127,7 +127,7 @@ pub(super) unsafe extern "C" fn prepared_new_boxed(
     CallStatus::Success as i32
 }
 
-fn array_error(
+pub(super) fn array_error(
     machine: &crate::machine_state::MachineState,
     error: crate::host_fns::RuntimeError,
 ) -> i32 {
@@ -162,7 +162,15 @@ unsafe fn active_boxed_payload(
     reference: *mut u8,
     descriptor: *const ObjectDescriptor,
 ) -> Result<(*mut u8, usize), crate::host_fns::RuntimeError> {
-    unsafe { active_payload(machine, vmctx, reference, descriptor, ExternalStorageKind::BoxedArray) }
+    unsafe {
+        active_payload(
+            machine,
+            vmctx,
+            reference,
+            descriptor,
+            ExternalStorageKind::BoxedArray,
+        )
+    }
 }
 
 /// Shared noncollecting wrapper admission for boxed and byte-array primitives.
@@ -351,7 +359,10 @@ pub(super) unsafe extern "C" fn prepared_shrink_boxed(
         let new_len = usize::try_from(new_len)
             .ok()
             .filter(|&candidate| candidate <= len)
-            .ok_or(RuntimeError::ArrayIndexOutOfBounds { index: new_len, len })?;
+            .ok_or(RuntimeError::ArrayIndexOutOfBounds {
+                index: new_len,
+                len,
+            })?;
         machine
             .shrink_external_payload(published, ExternalStorageKind::BoxedArray, new_len)
             .map_err(|error| storage_error(error, new_len as i64))
@@ -390,7 +401,11 @@ pub(super) unsafe extern "C" fn prepared_cas_boxed(
         let old = machine
             .compare_exchange_external_element(published, checked_index, expected, value)
             .map_err(|error| storage_error(error, index))?;
-        let (flag, observed) = if old == expected { (0, value) } else { (1, old) };
+        let (flag, observed) = if old == expected {
+            (0, value)
+        } else {
+            (1, old)
+        };
         unsafe {
             flag_output.write(flag);
             value_output.write(observed);
@@ -450,7 +465,7 @@ pub(super) fn emit_new_boxed(
     Ok(vec![result])
 }
 
-fn declare_host(
+pub(super) fn declare_host(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     name: &str,
@@ -466,7 +481,7 @@ fn declare_host(
     Ok(pipeline.module.declare_func_in_func(host, builder.func))
 }
 
-fn finish_checked_call(builder: &mut FunctionBuilder<'_>, status: Value) {
+pub(super) fn finish_checked_call(builder: &mut FunctionBuilder<'_>, status: Value) {
     let success = builder
         .ins()
         .icmp_imm(ir::condcodes::IntCC::Equal, status, 0);
@@ -480,7 +495,7 @@ fn finish_checked_call(builder: &mut FunctionBuilder<'_>, status: Value) {
     builder.seal_block(valid);
 }
 
-fn output_slot(builder: &mut FunctionBuilder<'_>) -> Value {
+pub(super) fn output_slot(builder: &mut FunctionBuilder<'_>) -> Value {
     let slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
         ir::StackSlotKind::ExplicitSlot,
         8,
@@ -683,7 +698,11 @@ mod tests {
             recognize(
                 &primop("shrinkSmallMutableArray#"),
                 &signature(
-                    vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64), RuntimeRep::Void],
+                    vec![
+                        RuntimeRep::UnliftedRef,
+                        RuntimeRep::Int(64),
+                        RuntimeRep::Void
+                    ],
                     vec![]
                 )
             ),
@@ -1007,6 +1026,276 @@ mod tests {
         crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
+    fn frozen_shrink_program(index_tail: bool) -> crate::prepared_program::CompiledProgram {
+        let mut wire = testing::wire_program();
+        let final_rep = if index_tail {
+            RuntimeRep::LiftedRef
+        } else {
+            RuntimeRep::Int(64)
+        };
+        wire.signatures[0].results = ResultContract::Returns(vec![final_rep.clone()]);
+        wire.signatures.extend([
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: if index_tail {
+                    vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64)]
+                } else {
+                    vec![RuntimeRep::UnliftedRef]
+                },
+                results: ResultContract::Returns(vec![final_rep.clone()]),
+            },
+        ]);
+        wire.constructors = vec![empty_constructor(0)];
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Arrays", "initial"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        }));
+        wire.operations = [
+            "newSmallArray#",
+            "unsafeFreezeSmallArray#",
+            "shrinkSmallMutableArray#",
+            if index_tail {
+                "indexSmallArray#"
+            } else {
+                "sizeofSmallArray#"
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| OperationDecl {
+            identity: OperationIdentity::PrimOp(name.into()),
+            signature: SignatureId(index as u32 + 1),
+        })
+        .collect();
+        let int = |value: i64| {
+            Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: value.to_be_bytes().to_vec(),
+            })
+        };
+        wire.expressions.nodes = vec![
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![int(3), Atom::Ref(ValueRef::Local(ValueId(1))), Atom::Void],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(1),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(100))), Atom::Void],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(2),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(100))), int(1), Atom::Void],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(3),
+                arguments: if index_tail {
+                    vec![Atom::Ref(ValueRef::Local(ValueId(101))), int(2)]
+                } else {
+                    vec![Atom::Ref(ValueRef::Local(ValueId(101)))]
+                },
+            },
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(102)))]),
+            ExprFrame::Case {
+                scrutinee: 3,
+                binder: ValueId(102),
+                kind: CaseKind::Polymorphic,
+                scrutinee_results: ResultContract::Returns(vec![final_rep]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: 4,
+                }],
+            },
+            ExprFrame::Case {
+                scrutinee: 2,
+                binder: ValueId(103),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: 5,
+                }],
+            },
+            ExprFrame::Case {
+                scrutinee: 1,
+                binder: ValueId(104),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(101)],
+                    body: 6,
+                }],
+            },
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(105),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(100)],
+                    body: 7,
+                }],
+            },
+        ];
+        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+            if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+                *body = 8;
+            }
+        }
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
+    }
+
+    fn cas_program(name: &str, success: bool) -> crate::prepared_program::CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results =
+            ResultContract::Returns(vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef]);
+        wire.signatures.extend([
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef]),
+            },
+        ]);
+        wire.constructors = vec![empty_constructor(0), empty_constructor(1)];
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Arrays", "initial"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Constructor {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+            },
+        }));
+        wire.operations = ["newSmallArray#", name]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| OperationDecl {
+                identity: OperationIdentity::PrimOp(name.into()),
+                signature: SignatureId(index as u32 + 1),
+            })
+            .collect();
+        let initial = Atom::Ref(ValueRef::Local(ValueId(1)));
+        let replacement = Atom::Ref(ValueRef::Local(ValueId(101)));
+        wire.expressions.nodes = vec![
+            ExprFrame::Operation {
+                operation: OperationId(0),
+                arguments: vec![
+                    Atom::Scalar(ScalarLiteral::Int {
+                        bits: 64,
+                        bytes: 1_i64.to_be_bytes().to_vec(),
+                    }),
+                    initial.clone(),
+                    Atom::Void,
+                ],
+            },
+            ExprFrame::Construct {
+                constructor: ConstructorId(1),
+                fields: vec![],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(1),
+                arguments: vec![
+                    Atom::Ref(ValueRef::Local(ValueId(100))),
+                    Atom::Scalar(ScalarLiteral::Int {
+                        bits: 64,
+                        bytes: 0_i64.to_be_bytes().to_vec(),
+                    }),
+                    if success {
+                        initial
+                    } else {
+                        replacement.clone()
+                    },
+                    replacement,
+                    Atom::Void,
+                ],
+            },
+            ExprFrame::Return(vec![
+                Atom::Ref(ValueRef::Local(ValueId(102))),
+                Atom::Ref(ValueRef::Local(ValueId(103))),
+            ]),
+            ExprFrame::Case {
+                scrutinee: 2,
+                binder: ValueId(104),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![
+                    RuntimeRep::Int(64),
+                    RuntimeRep::LiftedRef,
+                ]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(102), ValueId(103)],
+                    body: 3,
+                }],
+            },
+            ExprFrame::Case {
+                scrutinee: 1,
+                binder: ValueId(101),
+                kind: CaseKind::Polymorphic,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: 4,
+                }],
+            },
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(105),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(100)],
+                    body: 5,
+                }],
+            },
+        ];
+        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+            if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+                *body = 6;
+            }
+        }
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
+    }
+
     /// W5_ARRAY_BOXED: extend this real-adapter fixture to write/read/GC, not a
     /// second array evaluator. The result is deliberately not a host array API.
     #[test]
@@ -1181,6 +1470,59 @@ mod tests {
     }
 
     #[test]
+    fn prepared_freeze_alias_observes_shrink_and_rejects_old_tail() {
+        let result = frozen_shrink_program(false)
+            .run_entry(
+                ValueId(0),
+                &[],
+                &Default::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                1
+            ))]
+        ));
+        let error = frozen_shrink_program(true)
+            .run_entry(
+                ValueId(0),
+                &[],
+                &Default::default(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap_err();
+        assert!(matches!(error,
+            crate::prepared_program::ExecutionError::Runtime(failure)
+                if failure.cause == crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: 2, len: 1 }
+                    && failure.disposition == crate::machine_state::MachineDisposition::Reusable));
+    }
+
+    #[test]
+    fn prepared_cas_returns_flag_then_post_operation_value() {
+        for (name, success) in [("casSmallArray#", true), ("casArray#", false)] {
+            let result = cas_program(name, success)
+                .run_entry(
+                    ValueId(0),
+                    &[],
+                    &crate::prepared_program::RunOptions {
+                        collect_before_observation: true,
+                        ..Default::default()
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+            let expected_flag = i64::from(!success);
+            let expected_constructor = tidepool_repr::DataConId(if success { 1001 } else { 1000 });
+            assert!(matches!(result.values.as_slice(),
+                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(flag)),
+                 tidepool_bridge::Value::Con(id, fields)]
+                    if *flag == expected_flag && *id == expected_constructor && fields.is_empty()));
+        }
+    }
+
+    #[test]
     fn revoked_array_payload_rejects_host_reads_without_publishing_output() {
         use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
         let target = TargetDescriptor {
@@ -1237,5 +1579,132 @@ mod tests {
             Some(crate::host_fns::RuntimeError::BadPointer)
         );
         assert_eq!(machine.external_storage_stats().live_objects, 1);
+    }
+
+    #[test]
+    fn boxed_freeze_shrink_and_cas_keep_alias_identity_and_exact_results() {
+        use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let descriptor =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        let machine = crate::machine_state::MachineState::new();
+        let extent = descriptor.allocation_extent() as usize;
+        machine
+            .install_prepared_buffer(vec![0_u64; extent / 8], vec![descriptor.clone()])
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 3)
+            .unwrap();
+        unsafe {
+            descriptor.initialize_header(start);
+            descriptor
+                .external_payload_slot(start, extent)
+                .unwrap()
+                .write(payload);
+        }
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        vmctx.alloc_ptr = unsafe { start.add(extent) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let alias = (start as usize | usize::from(descriptor.tag())) as *mut u8;
+        let original = 0x10usize as *mut u8;
+        let replacement = 0x20usize as *mut u8;
+        let absent = 0x30usize as *mut u8;
+        machine
+            .store_external_element(payload, 0, original)
+            .unwrap();
+        machine
+            .retain_external_payloads(&[(payload as usize, ExternalStorageKind::BoxedArray)])
+            .unwrap();
+
+        assert_eq!(
+            unsafe { prepared_freeze_boxed(&mut vmctx, alias, Arc::as_ptr(&descriptor)) },
+            crate::prepared_control::CallStatus::Success as i32
+        );
+        assert_eq!(
+            unsafe {
+                descriptor
+                    .external_payload_slot(start, extent)
+                    .unwrap()
+                    .read()
+            },
+            payload
+        );
+
+        let mut flag = -1;
+        let mut observed = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                prepared_cas_boxed(
+                    &mut vmctx,
+                    alias,
+                    Arc::as_ptr(&descriptor),
+                    0,
+                    original,
+                    replacement,
+                    &mut flag,
+                    &mut observed,
+                )
+            },
+            crate::prepared_control::CallStatus::Success as i32
+        );
+        assert_eq!((flag, observed), (0, replacement));
+        assert_eq!(
+            unsafe {
+                prepared_cas_boxed(
+                    &mut vmctx,
+                    alias,
+                    Arc::as_ptr(&descriptor),
+                    0,
+                    absent,
+                    original,
+                    &mut flag,
+                    &mut observed,
+                )
+            },
+            crate::prepared_control::CallStatus::Success as i32
+        );
+        assert_eq!((flag, observed), (1, replacement));
+
+        assert_eq!(
+            unsafe { prepared_shrink_boxed(&mut vmctx, alias, Arc::as_ptr(&descriptor), 1) },
+            crate::prepared_control::CallStatus::Success as i32
+        );
+        let mut length = -1;
+        assert_eq!(
+            unsafe {
+                prepared_sizeof_boxed(&mut vmctx, alias, Arc::as_ptr(&descriptor), &mut length)
+            },
+            crate::prepared_control::CallStatus::Success as i32
+        );
+        assert_eq!(length, 1);
+        assert_eq!(
+            machine
+                .external_active_view(payload, ExternalStorageKind::BoxedArray)
+                .unwrap()
+                .logical_len,
+            1
+        );
+        let mut tail = absent;
+        assert_eq!(
+            unsafe {
+                prepared_read_boxed(&mut vmctx, alias, Arc::as_ptr(&descriptor), 1, &mut tail)
+            },
+            crate::prepared_control::CallStatus::LanguageFailure as i32
+        );
+        assert_eq!(tail, absent);
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(crate::host_fns::RuntimeError::ArrayIndexOutOfBounds { index: 1, len: 1 })
+        );
     }
 }

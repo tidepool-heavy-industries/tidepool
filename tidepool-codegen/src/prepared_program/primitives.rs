@@ -457,6 +457,9 @@ pub(super) fn recognize_operation(
     if let Some(operation) = super::arrays::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Array(operation));
     }
+    if let Some(operation) = super::byte_arrays::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::ByteArray(operation));
+    }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "double2Int#")
         && signature.arguments == [RuntimeRep::Float(64)]
         && returns_exact(signature, &[RuntimeRep::Int(64)])
@@ -498,6 +501,7 @@ pub(super) fn recognize_operation(
 #[derive(Clone, Copy)]
 pub(super) enum PrimitiveOperation {
     Array(super::arrays::ArrayOperation),
+    ByteArray(super::byte_arrays::ByteOperation),
     DoubleToInt,
     IndexCharOffAddr,
     Raise,
@@ -515,6 +519,7 @@ pub(super) fn emit_operation(
     bytes: &Arc<super::static_bytes::PinnedBytes>,
     gc: cranelift_module::FuncId,
     boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
+    bytes_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
         PrimitiveOperation::PrimitiveFailure(cause) => {
@@ -536,6 +541,52 @@ pub(super) fn emit_operation(
         PrimitiveOperation::Array(super::arrays::ArrayOperation::SizeofBoxed) => {
             super::arrays::emit_sizeof_boxed(builder, pipeline, vmctx, boxed_array, arguments)
                 .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::UnsafeFreezeBoxed) => {
+            super::arrays::emit_freeze_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::ShrinkSmallBoxed) => {
+            super::arrays::emit_shrink_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::CasBoxed) => {
+            super::arrays::emit_cas_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::New) => {
+            super::byte_arrays::emit_new_bytes(builder, pipeline, vmctx, gc, bytes_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Freeze) => {
+            super::byte_arrays::emit_freeze_bytes(builder, pipeline, vmctx, bytes_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Size) => {
+            super::byte_arrays::emit_sizeof_bytes(builder, pipeline, vmctx, bytes_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Read(element)) => {
+            super::byte_arrays::emit_read_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                bytes_array,
+                arguments,
+                element,
+            )
+            .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Write(element)) => {
+            super::byte_arrays::emit_write_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                bytes_array,
+                arguments,
+                element,
+            )
+            .map(Some)
         }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(

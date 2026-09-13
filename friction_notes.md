@@ -365,3 +365,15 @@ are nondeterministic.
   existing source-header walk provides an exact upper bound on external
   handles, so reserve traversal storage there. Allocation timing is part of
   the failure contract, not merely a performance detail.
+- The array inventory and lead seed copied source State# result positions into
+  wire results. The validator caught the resulting Void Case before execution.
+  The producer uses GHC's physical `typePrimRep_maybe` for results (no Void
+  constructor), but deliberately injects Void for zero-width arguments. Check
+  both producer conversion functions before transcribing source signatures.
+  This was a lead contract defect, not a worker implementation defect; neither
+  the schema nor the validator needed loosening.
+- Rust-only verification through `just` can be blocked by a concurrently edited
+  Haskell worker's freshness check. The focused Nix Cargo run still used the
+  pinned toolchain and checked the owning Rust target, but did not establish
+  extractor freshness. Report those as separate checks rather than rebuilding
+  the worker for every independent Rust edit.

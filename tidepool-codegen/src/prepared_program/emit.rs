@@ -427,6 +427,7 @@ fn emit_function_at(
                             &plan.bytes,
                             prepared_gc,
                             &plan.boxed_array,
+                            &plan.bytes_array,
                         )?;
                         match (output, signature.results.returned_reps()) {
                             (Some(output), Some(reps)) => {
