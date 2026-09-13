@@ -32,6 +32,7 @@ library tidepool-extract-internal
     Tidepool.PrimOps
     Tidepool.PreparedStg
     Tidepool.PreparedRecovery
+    Tidepool.PreparedBuiltins
     Tidepool.PreparedFacts
     Tidepool.PreparedFormatting
     Tidepool.PreparedSites
@@ -185,9 +186,11 @@ test-suite execution-corpus-projection
   type:             exitcode-stdio-1.0
   main-is:          ExecutionCorpusProbe.hs
   hs-source-dirs:   test-execution-corpus
+  other-modules:    ExecutionCorpusInventory
   build-depends:
     base >= 4.20 && < 5,
     bytestring,
+    containers,
     directory,
     filepath,
     ghc >= 9.12 && < 9.13,

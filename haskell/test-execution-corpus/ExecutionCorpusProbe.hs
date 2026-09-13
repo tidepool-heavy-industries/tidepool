@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Main (main) where
 
@@ -6,14 +7,32 @@ import Control.Monad (forM, unless)
 import Control.Exception
   ( AsyncException, SomeException, evaluate, fromException, throwIO, try )
 import Data.ByteString qualified as BS
-import Data.List (intercalate)
+import Data.List (intercalate, isInfixOf)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import GHC.Builtin.PrimOps (PrimCall(..))
+import GHC.Builtin.Types.Prim (intPrimTy)
+import GHC.Core (AltCon(DEFAULT))
+import GHC.Core.Multiplicity (pattern ManyTy)
+import GHC.Data.FastString (fsLit)
+import GHC.Stg.Syntax
+import GHC.Types.Basic (FunctionOrData(IsFunction))
+import GHC.Types.CostCentre (dontCareCCS)
+import GHC.Types.Id (mkSysLocal)
+import GHC.Types.Literal (Literal(LitLabel))
+import GHC.Types.Name.Env (emptyNameEnv)
+import GHC.Types.Unique (mkUniqueGrimily)
+import GHC.Types.Var.Set (emptyDVarSet)
+import GHC.Unit.Module (mkModuleName)
+import GHC.Unit.Types (mainUnit, mkModule)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs)
 import System.FilePath ((</>))
 import qualified System.Info as SystemInfo
 
+import ExecutionCorpusInventory
+  ( TargetInventory, inventoryRecoveredTarget, renderTargetInventories
+  , unavailableTargetInventory, renderPreparedFactsForTest )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), preparedTopIdentities, projectPreparedTarget )
@@ -26,6 +45,7 @@ import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
 import Tidepool.PreparedFormatting
   ( FormattingAuthority, resolveFormattingAuthority )
+import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Json (jsonString)
 
 data Record = Record String (Maybe String) [RecoveryFailure] Outcome
@@ -52,15 +72,17 @@ runProbe arguments = do
   targets <- lines <$> readFile targetsFile
   createDirectoryIfMissing True outputDir
   compiled <- trySync (runPipelineSelected PreparedStg source includes)
-  (records, legacyTargets) <- case compiled of
+  (records, legacyTargets, inventories) <- case compiled of
     Left failure -> if allTops
       then ioError (userError
         ("all-tops source compilation rejected: " <> show failure))
-      else pure
-        ( map (rejectedRecord moduleNameArg
-            ("source compilation rejected: " <> show failure)) targets
-        , map (\target -> LegacyTarget target Nothing) targets
-        )
+      else let reason = "source compilation rejected: " <> show failure
+        in pure
+          ( map (rejectedRecord moduleNameArg reason) targets
+          , map (\target -> LegacyTarget target Nothing) targets
+          , map (\target -> unavailableTargetInventory
+              (missingName moduleNameArg target) [] reason) targets
+          )
     Right prepared -> do
       formattingAuthority <- resolveFormattingAuthority
         (prHscEnv (pprPipelineResult prepared))
@@ -70,31 +92,38 @@ runProbe arguments = do
         Left failure -> if allTops
           then ioError (userError
             ("all-tops prepared identity enumeration rejected: " <> show failure))
-          else pure
-            ( map (rejectedRecord moduleNameArg
-                ("prepared identity enumeration rejected: " <> show failure)) targets
-            , map (\target -> LegacyTarget target Nothing) targets
-            )
+          else let reason = "prepared identity enumeration rejected: " <> show failure
+            in pure
+              ( map (rejectedRecord moduleNameArg reason) targets
+              , map (\target -> LegacyTarget target Nothing) targets
+              , map (\target -> unavailableTargetInventory
+                  (missingName moduleNameArg target) [] reason) targets
+              )
         Right (Left failure) -> if allTops
           then ioError (userError
             ("all-tops prepared identity enumeration rejected: " <> show failure))
-          else pure
-            ( map (rejectedRecord moduleNameArg
-                ("prepared identity enumeration rejected: " <> show failure)) targets
-            , map (\target -> LegacyTarget target Nothing) targets
-            )
+          else let reason = "prepared identity enumeration rejected: " <> show failure
+            in pure
+              ( map (rejectedRecord moduleNameArg reason) targets
+              , map (\target -> LegacyTarget target Nothing) targets
+              , map (\target -> unavailableTargetInventory
+                  (missingName moduleNameArg target) [] reason) targets
+              )
         Right (Right identities) -> do
           let selected = filter (inModule moduleNameArg) identities
           legacy <- mapLegacyTargets moduleNameArg identities targets
-          rows <- if allTops
+          rowsWithInventory <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
               projectOneIdentity prepared formattingAuthority outputDir index identity
             else forM (zip [0 :: Int ..] (zip targets legacy)) $ \(index, (occurrence, legacyTarget)) ->
               projectOneTarget prepared formattingAuthority moduleNameArg outputDir index occurrence
                 (legacyTargetIdentity legacyTarget)
-          pure (rows, legacy)
+          let (rows, targetInventories) = unzip rowsWithInventory
+          pure (rows, legacy, targetInventories)
   BS.writeFile (outputDir </> "manifest.json")
     (toBytes (renderManifest records legacyTargets))
+  BS.writeFile (outputDir </> "diagnostic-inventory.json")
+    (toBytes (renderTargetInventories inventories))
 
 forceIdentities :: Either a [b] -> Either a [b]
 forceIdentities result = case result of
@@ -161,10 +190,13 @@ projectOneTarget
   -> Int
   -> String
   -> Maybe SymbolIdentity
-  -> IO Record
+  -> IO (Record, TargetInventory)
 projectOneTarget prepared formattingAuthority moduleNameArg outputDir index occurrence mapped = do
-  let reject reason = pure (Record (missingName moduleNameArg occurrence)
-        Nothing [] (Rejected reason))
+  let name = missingName moduleNameArg occurrence
+      reject reason = pure
+        ( Record name Nothing [] (Rejected reason)
+        , unavailableTargetInventory name [] reason
+        )
   case mapped of
     Nothing -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
     Just selected -> projectOneIdentity prepared formattingAuthority outputDir index selected
@@ -175,36 +207,41 @@ projectOneIdentity
   -> FilePath
   -> Int
   -> SymbolIdentity
-  -> IO Record
+  -> IO (Record, TargetInventory)
 projectOneIdentity prepared formattingAuthority outputDir index selected = do
   let context = projectionContext formattingAuthority selected
       artifactName = numericArtifactName index
       name = identityName selected
       expectationKey = externalExpectationKey selected
-      reject residuals reason = pure (Record name Nothing residuals (Rejected reason))
+      unavailable residuals reason = unavailableTargetInventory name residuals reason
+      reject residuals inventory reason = pure
+        (Record name Nothing residuals (Rejected reason), inventory)
   recovered <- trySync (recoverPreparedClosure
     (prHscEnv (pprPipelineResult prepared)) context (pprModules prepared))
   case recovered of
-    Left failure -> reject [] ("target " <> show (symbolOccurrence selected)
-      <> " recovery failed: " <> show failure)
+    Left failure -> let reason = "target " <> show (symbolOccurrence selected) <> " recovery failed: " <> show failure
+      in reject [] (unavailable [] reason) reason
     Right closure -> do
       let residuals = closureFailures closure
+          inventory = inventoryRecoveredTarget context selected closure
       projected <- trySync (evaluate
         (projectPreparedTarget context (closureModules closure)))
       case projected of
-        Left failure -> reject residuals ("target " <> show (symbolOccurrence selected)
+        Left failure -> reject residuals inventory ("target " <> show (symbolOccurrence selected)
           <> " projection rejected: " <> show failure)
-        Right (Left failure) -> reject residuals ("target " <> show (symbolOccurrence selected)
+        Right (Left failure) -> reject residuals inventory ("target " <> show (symbolOccurrence selected)
           <> " rejected: " <> show failure)
         Right (Right program) -> do
           encoded <- trySync (evaluate (BS.copy (encodeWireProgram program)))
           case encoded of
-            Left failure -> reject residuals ("target " <> show (symbolOccurrence selected)
+            Left failure -> reject residuals inventory ("target " <> show (symbolOccurrence selected)
               <> " encoding rejected: " <> show failure)
             Right bytes -> do
               BS.writeFile (outputDir </> artifactName) bytes
-              pure (Record name expectationKey residuals
-                (Projected artifactName selected))
+              pure
+                ( Record name expectationKey residuals (Projected artifactName selected)
+                , inventory
+                )
 
 identityName :: SymbolIdentity -> String
 identityName identity = intercalate ":" $ case symbolRecordParent identity of
@@ -263,7 +300,34 @@ mappingSelfTest = do
     exactExternalMapping "Suite" [] "answer" == Right Nothing
   assert "duplicate legacy inputs are preserved" $
     length (mapLegacyTargetsPure "Suite" identities ["answer", "answer"]) == 2
+  inventorySelfTest assert
   putStrLn "execution-corpus-projection mapping self-test: ok"
+
+inventorySelfTest :: (String -> Bool -> IO ()) -> IO ()
+inventorySelfTest assert = do
+  let modul = mkModule mainUnit (mkModuleName "InventorySelfTest")
+      topBinder = mkSysLocal (fsLit "inventory_top") (mkUniqueGrimily 7001)
+        ManyTy intPrimTy
+      caseBinder = mkSysLocal (fsLit "inventory_case") (mkUniqueGrimily 7002)
+        ManyTy intPrimTy
+      first = StgPrimCallOp (PrimCall (fsLit "stg_inventory_first") mainUnit)
+      second = StgPrimCallOp (PrimCall (fsLit "stg_inventory_second") mainUnit)
+      label = LitLabel (fsLit "inventory_label") IsFunction
+      body = StgCase (StgOpApp first [] intPrimTy) caseBinder PolyAlt
+        [GenStgAlt DEFAULT [] (StgOpApp second [StgLitArg label] intPrimTy)]
+      rhs = StgRhsClosure emptyDVarSet dontCareCCS ReEntrant [] body intPrimTy
+      facts = extractPreparedFacts modul emptyNameEnv
+        [StgTopLifted (StgNonRec topBinder rhs)]
+      rendered = renderPreparedFactsForTest modul facts
+  assert "inventory retains both nested unsupported operations"
+    (length (preparedOperations facts) == 2
+      && "stg_inventory_first" `isInfixOf` rendered
+      && "stg_inventory_second" `isInfixOf` rendered)
+  assert "inventory retains label literals after unsupported operations"
+    (case preparedLiterals facts of
+      [LitLabel found IsFunction] -> found == fsLit "inventory_label"
+        && "inventory_label" `isInfixOf` rendered
+      _ -> False)
 
 mapLegacyTargetsPure
   :: String -> [SymbolIdentity] -> [String] -> [Either String LegacyTarget]
