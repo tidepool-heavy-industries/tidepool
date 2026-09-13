@@ -3,6 +3,7 @@ module Tidepool.ExecutionProjection
   , ProjectionError(..)
   , projectPrepared
   , projectPreparedTarget
+  , preparedTopIdentities
   , projectLiteralAtomForTest
   , assignTopIdentitySpellingForTest
   ) where
@@ -89,6 +90,22 @@ projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionErr
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPrepared context modules = projectPreparedWithTopSymbols context modules
   (buildTopIdentityMap modules)
+
+-- | Corpus tooling enumerates the same identities that projection resolves,
+-- before any target filtering. Preserve module/binding emission order and never
+-- infer STG names from filenames emitted by the retired Core translator.
+preparedTopIdentities :: [PreparedModule] -> Either ProjectionError [SymbolIdentity]
+preparedTopIdentities modules = traverse identityOf
+  [ binder
+  | prepared <- modules
+  , (binding, _) <- pmBindings prepared
+  , binder <- topBinders binding
+  ]
+  where
+    identities = buildTopIdentityMap modules
+    identityOf binder = maybe
+      (Left (UnsupportedPreparedShape "top binder missing from complete identity map"))
+      Right (lookupVarEnv identities binder)
 
 projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
   -> VarEnv SymbolIdentity -> Either ProjectionError WireProgram
