@@ -5,6 +5,24 @@ integration. Delivery takes precedence over delegation experiments and unused
 primitive-family completeness. The prior verified checkpoint is `800ab0d06`;
 its 173 matching fixture keys are evidence, not completion.
 
+## Current evidence
+
+`59945d6e6` closes the pending mutable-array-copy batch: 163 prepared-program
+tests and 42 machine-state tests passed through `scripts/dev-shell.sh cargo test
+-p tidepool-codegen --lib <filter> -- --nocapture` with filters
+`prepared_program::` and `machine_state::`. Logs remain in
+`target/w5-delivery-{prepared,machine}.log`.
+
+Schema migration `6c86ca470` has 242 repr library tests and 12 codec tests
+passing; Haskell execution-schema-encode passes. Two old producer fixtures
+remain schema 7 until the final coordinated regeneration. This is not a full
+fixture gate. Workspace formatting is isolated in `93e1b25f5`.
+
+The three historical STG JSON ledgers are removed from the active tree by
+request; `800ab0d06` preserves them in Git. Corpus evidence is reproducible via
+`env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER just fixtures-check`.
+Its generated manifests/results remain build artifacts, not new committed logs.
+
 ## Order and owners
 
 1. Repair pending mutable-copy test fixtures; run prepared-program and
