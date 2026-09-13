@@ -16,8 +16,10 @@ use super::{ConstructorObservation, DescriptorMeaning, DescriptorMetadata};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ObservationFailure {
-    #[error("observation node budget {limit} exhausted")]
+    #[error("observation budget {limit} exhausted")]
     BudgetExceeded { limit: usize },
+    #[error("observation snapshot allocation failed")]
+    AllocationFailed,
     #[error("cannot observe {0:?} without forcing or applying it")]
     Unobservable(ObjectKind),
     #[error("representation {0:?} is not a materialized host value")]
@@ -35,6 +37,16 @@ pub(super) struct ObservationSeed {
 pub(super) struct ObservationBudget {
     pub(super) remaining: usize,
     pub(super) limit: usize,
+}
+
+impl ObservationBudget {
+    /// Materialization costs one unit per value node and per copied payload
+    /// byte. An atomic byte-array leaf cannot bypass the observation bound.
+    pub(super) fn charge_bytes(&mut self, bytes: usize) -> Result<(), ObservationFailure> {
+        self.remaining = self.remaining.checked_sub(bytes)
+            .ok_or(ObservationFailure::BudgetExceeded { limit: self.limit })?;
+        Ok(())
+    }
 }
 
 pub(super) enum ObservationFrame<X> {
