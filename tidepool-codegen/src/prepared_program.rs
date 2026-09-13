@@ -275,6 +275,10 @@ impl CompiledProgram {
                     byte_arrays::prepared_new_bytes as *const u8,
                 ),
                 (
+                    "prepared_new_aligned_bytes",
+                    byte_arrays::prepared_new_aligned_bytes as *const u8,
+                ),
+                (
                     "prepared_resize_bytes",
                     byte_arrays::prepared_resize_bytes as *const u8,
                 ),

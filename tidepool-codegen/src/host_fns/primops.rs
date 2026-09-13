@@ -71,7 +71,7 @@ fn allocate_external(
     // the byte layout, both within their nonempty allocations.
     let published = unsafe { base.add(published_offset) };
     if let Some(ms) = unsafe { current_machine() } {
-        ms.register_external_storage(published, base, layout, kind, logical_len);
+        ms.register_external_storage(published, base, layout, published_offset, kind, logical_len);
     }
     Ok(published)
 }

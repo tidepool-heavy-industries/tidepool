@@ -802,6 +802,10 @@ impl PrimitiveOperation {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the emitter receives the checked ABI, descriptor, and root owners explicitly"
+)]
 pub(super) fn emit_operation(
     operation: PrimitiveOperation,
     builder: &mut FunctionBuilder<'_>,
@@ -925,6 +929,17 @@ pub(super) fn emit_operation(
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::New) => {
             super::byte_arrays::emit_new_bytes(builder, pipeline, vmctx, gc, bytes_array, arguments)
                 .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::NewAligned) => {
+            super::byte_arrays::emit_new_aligned_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                gc,
+                bytes_array,
+                arguments,
+            )
+            .map(Some)
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Resize) => {
             super::byte_arrays::emit_resize_bytes(

@@ -1647,7 +1647,14 @@ mod tests {
                 .unwrap()
                 .write(payload);
         }
-        ms.register_external_storage(payload, payload, layout, ExternalStorageKind::BoxedArray, 1);
+        ms.register_external_storage(
+            payload,
+            payload,
+            layout,
+            0,
+            ExternalStorageKind::BoxedArray,
+            1,
+        );
 
         // An unreachable Young allocation is reclaimed after the complete
         // successful operation, including its growth recopy.

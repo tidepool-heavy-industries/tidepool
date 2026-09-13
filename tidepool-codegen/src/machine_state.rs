@@ -136,9 +136,37 @@ enum ExternalActivity {
     Revoked,
 }
 
+/// Allocation geometry for byte payloads. The published ABI stays
+/// `[capacity][length][bytes]`; alignment padding precedes the capacity word.
+/// The ledger must retain the true allocation base and this published offset.
+fn aligned_byte_layout(
+    logical_len: usize,
+    alignment: usize,
+) -> Result<(Layout, usize), ExternalStorageValidationError> {
+    if !alignment.is_power_of_two() {
+        return Err(ExternalStorageValidationError::LayoutAlignment { actual: alignment });
+    }
+    let alignment = alignment.max(8);
+    let data_offset = alignment.max(16);
+    let size = data_offset.checked_add(logical_len).ok_or(
+        ExternalStorageValidationError::SpanOverflow {
+            kind: ExternalStorageKind::Bytes,
+            logical_len,
+        },
+    )?;
+    let layout = Layout::from_size_align(size, alignment).map_err(|_| {
+        ExternalStorageValidationError::SpanOverflow {
+            kind: ExternalStorageKind::Bytes,
+            logical_len,
+        }
+    })?;
+    Ok((layout, data_offset - 8))
+}
+
 struct ExternalStorage {
     base: *mut u8,
     layout: Layout,
+    published_offset: usize,
     #[allow(
         dead_code,
         reason = "consumed by the independently integrated major collector"
@@ -1661,15 +1689,39 @@ impl MachineState {
         kind: ExternalStorageKind,
         logical_len: usize,
     ) -> Result<*mut u8, ExternalStorageValidationError> {
-        let size = match kind {
-            ExternalStorageKind::Bytes => 16usize.checked_add(logical_len),
-            ExternalStorageKind::BoxedArray => logical_len
-                .checked_mul(std::mem::size_of::<*mut u8>())
-                .and_then(|bytes| 8usize.checked_add(bytes)),
+        if kind == ExternalStorageKind::Bytes {
+            return self.allocate_external_bytes(logical_len, 8);
         }
-        .ok_or(ExternalStorageValidationError::SpanOverflow { kind, logical_len })?;
+        let size = logical_len
+            .checked_mul(std::mem::size_of::<*mut u8>())
+            .and_then(|bytes| 8usize.checked_add(bytes))
+            .ok_or(ExternalStorageValidationError::SpanOverflow { kind, logical_len })?;
         let layout = Layout::from_size_align(size, 8)
             .map_err(|_| ExternalStorageValidationError::SpanOverflow { kind, logical_len })?;
+        self.allocate_external_with_layout(kind, logical_len, layout, 0)
+    }
+
+    pub(crate) fn allocate_external_bytes(
+        &self,
+        logical_len: usize,
+        alignment: usize,
+    ) -> Result<*mut u8, ExternalStorageValidationError> {
+        let (layout, published_offset) = aligned_byte_layout(logical_len, alignment)?;
+        self.allocate_external_with_layout(
+            ExternalStorageKind::Bytes,
+            logical_len,
+            layout,
+            published_offset,
+        )
+    }
+
+    fn allocate_external_with_layout(
+        &self,
+        kind: ExternalStorageKind,
+        logical_len: usize,
+        layout: Layout,
+        published_offset: usize,
+    ) -> Result<*mut u8, ExternalStorageValidationError> {
         self.external_storage
             .borrow_mut()
             .try_reserve(1)
@@ -1680,16 +1732,24 @@ impl MachineState {
         if base.is_null() {
             return Err(ExternalStorageValidationError::BookkeepingAllocation);
         }
-        let published = match kind {
-            ExternalStorageKind::Bytes => unsafe { base.add(8) },
-            ExternalStorageKind::BoxedArray => base,
-        };
-        self.register_external_storage(published, base, layout, kind, logical_len);
+        let published = unsafe { base.add(published_offset) };
+        self.register_external_storage(
+            published,
+            base,
+            layout,
+            published_offset,
+            kind,
+            logical_len,
+        );
         // SAFETY: both representations reserve their length prefix; byte
-        // arrays additionally reserve the capacity prefix at allocation base.
+        // arrays additionally reserve the capacity prefix immediately before
+        // the published handle. Alignment padding may precede that prefix.
         unsafe {
             if kind == ExternalStorageKind::Bytes {
-                base.cast::<u64>().write(size as u64);
+                published
+                    .sub(8)
+                    .cast::<u64>()
+                    .write((layout.size() - (published_offset - 8)) as u64);
             }
             published.cast::<u64>().write(logical_len as u64);
         }
@@ -1703,6 +1763,7 @@ impl MachineState {
         published: *mut u8,
         base: *mut u8,
         layout: Layout,
+        published_offset: usize,
         kind: ExternalStorageKind,
         logical_len: usize,
     ) {
@@ -1711,6 +1772,7 @@ impl MachineState {
             ExternalStorage {
                 base,
                 layout,
+                published_offset,
                 kind,
                 logical_len,
                 generation: ExternalGeneration::Young,
@@ -1757,11 +1819,13 @@ impl MachineState {
         published: *mut u8,
         new_len: usize,
     ) -> Result<*mut u8, ExternalStorageValidationError> {
-        {
+        let alignment = {
             let storage = self.external_storage.borrow();
-            Self::checked_external_record(&storage, published, ExternalStorageKind::Bytes)?;
-        }
-        let replacement = self.allocate_external_storage(ExternalStorageKind::Bytes, new_len)?;
+            Self::checked_external_record(&storage, published, ExternalStorageKind::Bytes)?
+                .layout
+                .align()
+        };
+        let replacement = self.allocate_external_bytes(new_len, alignment)?;
         let mut storage = self.external_storage.borrow_mut();
         let old = storage
             .get_mut(&published)
@@ -1859,27 +1923,36 @@ impl MachineState {
                 actual: record.layout.align(),
             });
         }
-        if (record.base as usize) % prefix_alignment != 0
-            || (published as usize) % prefix_alignment != 0
+        if !(record.base as usize).is_multiple_of(record.layout.align())
+            || !(published as usize).is_multiple_of(prefix_alignment)
         {
             return Err(ExternalStorageValidationError::PointerAlignment { kind: record.kind });
         }
         let stored_len = match record.kind {
             ExternalStorageKind::Bytes => {
-                // Byte arrays publish eight bytes after their allocation base:
-                // [capacity][logical length][bytes...].
-                let expected_published = (record.base as usize).checked_add(8).ok_or(
-                    ExternalStorageValidationError::SpanOverflow {
+                if record.published_offset < 8 {
+                    return Err(ExternalStorageValidationError::PublishedPointerMismatch {
+                        kind: record.kind,
+                    });
+                }
+                let expected_published = (record.base as usize)
+                    .checked_add(record.published_offset)
+                    .ok_or(ExternalStorageValidationError::SpanOverflow {
                         kind: record.kind,
                         logical_len: record.logical_len,
-                    },
-                )?;
+                    })?;
                 if published as usize != expected_published {
                     return Err(ExternalStorageValidationError::PublishedPointerMismatch {
                         kind: record.kind,
                     });
                 }
-                let required = 16usize.checked_add(record.logical_len).ok_or(
+                let data_offset = record.published_offset.checked_add(8).ok_or(
+                    ExternalStorageValidationError::SpanOverflow {
+                        kind: record.kind,
+                        logical_len: record.logical_len,
+                    },
+                )?;
+                let required = data_offset.checked_add(record.logical_len).ok_or(
                     ExternalStorageValidationError::SpanOverflow {
                         kind: record.kind,
                         logical_len: record.logical_len,
@@ -1892,12 +1965,23 @@ impl MachineState {
                         allocated: record.layout.size(),
                     });
                 }
+                if expected_published
+                    .checked_add(8)
+                    .is_none_or(|data| !data.is_multiple_of(record.layout.align()))
+                {
+                    return Err(ExternalStorageValidationError::PointerAlignment {
+                        kind: record.kind,
+                    });
+                }
                 // SAFETY: pointer relationship and required allocation span
                 // were checked above before either prefix is read.
-                let stored_capacity = unsafe { *(record.base as *const u64) } as usize;
-                if stored_capacity != record.layout.size() {
+                let capacity_offset = record.published_offset - 8;
+                let available = record.layout.size() - capacity_offset;
+                let stored_capacity =
+                    unsafe { *record.base.add(capacity_offset).cast::<u64>() } as usize;
+                if stored_capacity != available {
                     return Err(ExternalStorageValidationError::CapacityPrefixMismatch {
-                        recorded: record.layout.size(),
+                        recorded: available,
                         stored: stored_capacity,
                     });
                 }
@@ -1906,7 +1990,7 @@ impl MachineState {
                 (unsafe { *(published as *const u64) }) as usize
             }
             ExternalStorageKind::BoxedArray => {
-                if published != record.base {
+                if record.published_offset != 0 || published != record.base {
                     return Err(ExternalStorageValidationError::PublishedPointerMismatch {
                         kind: record.kind,
                     });
@@ -2730,7 +2814,7 @@ mod tests {
                 unsafe { *(published as *mut u64) = logical_len as u64 };
             }
         }
-        ms.register_external_storage(published, base, layout, kind, logical_len);
+        ms.register_external_storage(published, base, layout, published_offset, kind, logical_len);
         published
     }
 
@@ -2766,6 +2850,81 @@ mod tests {
             Err(ExternalStorageValidationError::SpanOverflow { .. })
         ));
         assert_eq!(ms.external_storage_stats(), before);
+    }
+
+    #[test]
+    fn aligned_byte_allocations_authenticate_prefix_geometry_and_requested_power() {
+        let ms = MachineState::new();
+        for alignment in [1, 8, 16, 32, 4096] {
+            let published = ms.allocate_external_bytes(5, alignment).unwrap();
+            let address = ms.external_byte_address(published).unwrap();
+            assert_eq!(address % alignment, 0);
+            let storage = ms.external_storage.borrow();
+            let record = &storage[&published];
+            assert_eq!(
+                published as usize,
+                record.base as usize + record.published_offset
+            );
+            assert_eq!(record.layout.align(), alignment.max(8));
+            assert_eq!(unsafe { published.sub(8).cast::<u64>().read() }, 21);
+            assert_eq!(unsafe { published.cast::<u64>().read() }, 5);
+        }
+        for alignment in [0, 3, 6] {
+            assert!(matches!(
+                ms.allocate_external_bytes(1, alignment),
+                Err(ExternalStorageValidationError::LayoutAlignment { actual })
+                    if actual == alignment
+            ));
+        }
+    }
+
+    #[test]
+    fn aligned_byte_validation_rejects_corrupt_prefix_and_recorded_offset() {
+        let ms = MachineState::new();
+        let published = ms.allocate_external_bytes(4, 64).unwrap();
+        let capacity = unsafe { published.sub(8).cast::<u64>().read() };
+        unsafe { published.sub(8).cast::<u64>().write(capacity + 1) };
+        assert!(matches!(
+            ms.external_active_view(published, ExternalStorageKind::Bytes),
+            Err(ExternalStorageValidationError::CapacityPrefixMismatch { .. })
+        ));
+        unsafe { published.sub(8).cast::<u64>().write(capacity) };
+
+        let offset = ms.external_storage.borrow()[&published].published_offset;
+        ms.external_storage
+            .borrow_mut()
+            .get_mut(&published)
+            .unwrap()
+            .published_offset = offset + 8;
+        assert!(matches!(
+            ms.external_active_view(published, ExternalStorageKind::Bytes),
+            Err(ExternalStorageValidationError::PublishedPointerMismatch { .. })
+        ));
+        ms.external_storage
+            .borrow_mut()
+            .get_mut(&published)
+            .unwrap()
+            .published_offset = offset;
+    }
+
+    #[test]
+    fn aligned_byte_resize_preserves_alignment_and_shrink_preserves_capacity() {
+        let ms = MachineState::new();
+        let old = ms.allocate_external_bytes(4, 256).unwrap();
+        ms.store_external_bytes(old, 0, b"abcd").unwrap();
+        let replacement = ms.resize_external_bytes(old, 7).unwrap();
+        assert_eq!(ms.external_byte_address(replacement).unwrap() % 256, 0);
+        assert_eq!(ms.copy_external_bytes(replacement).unwrap(), b"abcd\0\0\0");
+        assert!(matches!(
+            ms.external_active_view(old, ExternalStorageKind::Bytes),
+            Err(ExternalStorageValidationError::Revoked(_))
+        ));
+        let capacity = unsafe { replacement.sub(8).cast::<u64>().read() };
+        ms.shrink_external_payload(replacement, ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        assert_eq!(unsafe { replacement.sub(8).cast::<u64>().read() }, capacity);
+        assert_eq!(unsafe { replacement.cast::<u64>().read() }, 2);
+        assert_eq!(ms.external_byte_address(replacement).unwrap() % 256, 0);
     }
 
     #[test]

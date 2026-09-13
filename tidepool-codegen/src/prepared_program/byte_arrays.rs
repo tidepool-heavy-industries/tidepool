@@ -32,6 +32,7 @@ impl Element {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ByteOperation {
     New,
+    NewAligned,
     Contents,
     Resize,
     Freeze,
@@ -63,6 +64,12 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
         {
             Some(ByteOperation::New)
+        }
+        "newAlignedPinnedByteArray#"
+            if signature.arguments == [Int(64), Int(64), Void]
+                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+        {
+            Some(ByteOperation::NewAligned)
         }
         "byteArrayContents#" | "mutableByteArrayContents#"
             if signature.arguments == [UnliftedRef]
@@ -222,6 +229,30 @@ pub(super) unsafe extern "C" fn prepared_new_bytes(
             .allocate_external_storage(ExternalStorageKind::Bytes, length)
             .ok()
     });
+    let Some(payload) = payload else {
+        return super::arrays::array_error(machine, RuntimeError::HeapOverflow);
+    };
+    unsafe { wrapper.add(8).cast::<*mut u8>().write(payload) };
+    CallStatus::Success as i32
+}
+
+/// # Safety
+/// Generated code has reserved the wrapper and initialized its descriptor
+/// header and handle slot. No collection or re-entry occurs in this call.
+pub(super) unsafe extern "C" fn prepared_new_aligned_bytes(
+    vmctx: *mut crate::context::VMContext,
+    wrapper: *mut u8,
+    length: i64,
+    alignment: i64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let payload = usize::try_from(length)
+        .ok()
+        .zip(usize::try_from(alignment).ok())
+        .and_then(|(length, alignment)| machine.allocate_external_bytes(length, alignment).ok());
     let Some(payload) = payload else {
         return super::arrays::array_error(machine, RuntimeError::HeapOverflow);
     };
@@ -591,6 +622,31 @@ pub(super) fn emit_new_bytes(
     builder.ins().store(MemFlags::trusted(), zero, object, 8);
     let host = super::arrays::declare_host(builder, pipeline, "prepared_new_bytes", 3)?;
     let call = builder.ins().call(host, &[vmctx, object, arguments[0]]);
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    let result = builder.ins().bor_imm(object, i64::from(descriptor.tag()));
+    builder.declare_value_needs_stack_map(result);
+    Ok(vec![result])
+}
+
+pub(super) fn emit_new_aligned_bytes(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    gc: cranelift_module::FuncId,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let gc = pipeline.module.declare_func_in_func(gc, builder.func);
+    let object = crate::alloc::emit_prepared_alloc_fast_path(builder, vmctx, descriptor, gc);
+    let header = owner_value(builder, descriptor);
+    builder.ins().store(MemFlags::trusted(), header, object, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().store(MemFlags::trusted(), zero, object, 8);
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_new_aligned_bytes", 4)?;
+    let call = builder
+        .ins()
+        .call(host, &[vmctx, object, arguments[0], arguments[1]]);
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
     let result = builder.ins().bor_imm(object, i64::from(descriptor.tag()));
@@ -1169,6 +1225,184 @@ mod tests {
         crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
+    fn aligned_contents_program(alignment: i64) -> crate::prepared_program::CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures = vec![
+            Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::Word(8)]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Int(64), RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![
+                    RuntimeRep::UnliftedRef,
+                    RuntimeRep::Int(64),
+                    RuntimeRep::Word(8),
+                    RuntimeRep::Void,
+                ],
+                results: ResultContract::Returns(vec![]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef],
+                results: ResultContract::Returns(vec![RuntimeRep::Address]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Int(64), RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Address, RuntimeRep::Int(64), RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::Word(8)]),
+            },
+            Signature {
+                arguments: vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+            },
+        ];
+        wire.operations = [
+            ("newAlignedPinnedByteArray#", 1),
+            ("writeWord8Array#", 2),
+            ("mutableByteArrayContents#", 3),
+            ("newByteArray#", 4),
+            ("readWord8OffAddr#", 5),
+            ("getSizeofMutableByteArray#", 6),
+        ]
+        .into_iter()
+        .map(|(name, signature)| OperationDecl {
+            identity: OperationIdentity::PrimOp(name.into()),
+            signature: SignatureId(signature),
+        })
+        .collect();
+
+        let mut nodes = vec![
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(40)))]),
+            ExprFrame::Operation {
+                operation: OperationId(5),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(10))), Atom::Void],
+            },
+            ExprFrame::Case {
+                scrutinee: 1,
+                binder: ValueId(41),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(42)],
+                    body: 0,
+                }],
+            },
+            ExprFrame::Operation {
+                operation: OperationId(4),
+                arguments: vec![Atom::Ref(ValueRef::Local(ValueId(20))), int(0), Atom::Void],
+            },
+            ExprFrame::Case {
+                scrutinee: 3,
+                binder: ValueId(43),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Word(8)]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(40)],
+                    body: 2,
+                }],
+            },
+        ];
+        let mut after_garbage = 4;
+        for offset in 0..16 {
+            let allocation = nodes.len();
+            nodes.push(ExprFrame::Operation {
+                operation: OperationId(3),
+                arguments: vec![int(8), Atom::Void],
+            });
+            let case = nodes.len();
+            nodes.push(ExprFrame::Case {
+                scrutinee: allocation,
+                binder: ValueId(100 + offset),
+                kind: CaseKind::MultiValue,
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![ValueId(200 + offset)],
+                    body: after_garbage,
+                }],
+            });
+            after_garbage = case;
+        }
+        let aligned = nodes.len();
+        nodes.push(ExprFrame::Operation {
+            operation: OperationId(0),
+            arguments: vec![int(1), int(alignment), Atom::Void],
+        });
+        let write = nodes.len();
+        nodes.push(ExprFrame::Operation {
+            operation: OperationId(1),
+            arguments: vec![
+                Atom::Ref(ValueRef::Local(ValueId(10))),
+                int(0),
+                Atom::Scalar(ScalarLiteral::Word {
+                    bits: 8,
+                    bytes: vec![0x7b],
+                }),
+                Atom::Void,
+            ],
+        });
+        let contents = nodes.len();
+        nodes.push(ExprFrame::Operation {
+            operation: OperationId(2),
+            arguments: vec![Atom::Ref(ValueRef::Local(ValueId(10)))],
+        });
+        let contents_case = nodes.len();
+        nodes.push(ExprFrame::Case {
+            scrutinee: contents,
+            binder: ValueId(44),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::Address]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![ValueId(20)],
+                body: after_garbage,
+            }],
+        });
+        let write_case = nodes.len();
+        nodes.push(ExprFrame::Case {
+            scrutinee: write,
+            binder: ValueId(45),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(vec![]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![],
+                body: contents_case,
+            }],
+        });
+        let aligned_case = nodes.len();
+        nodes.push(ExprFrame::Case {
+            scrutinee: aligned,
+            binder: ValueId(46),
+            kind: CaseKind::MultiValue,
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![ValueId(10)],
+                body: write_case,
+            }],
+        });
+        wire.expressions.nodes = nodes;
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!("fixture entry is nonrecursive")
+        };
+        let HeapRhs::Function { body, .. } = &mut entry.binding.rhs else {
+            unreachable!("fixture entry is a function")
+        };
+        *body = aligned_case;
+        let linked =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
+    }
+
     #[test]
     fn byte_and_int_roundtrip_through_real_adapter_and_collection() {
         for (element, expected) in [
@@ -1263,6 +1497,28 @@ mod tests {
                         }
             ));
         }
+    }
+
+    #[test]
+    fn aligned_contents_survive_moving_collection_in_real_adapter() {
+        let result = aligned_contents_program(256)
+            .run_entry(
+                ValueId(0),
+                &[],
+                &crate::prepared_program::RunOptions {
+                    nursery_bytes: 64,
+                    ..Default::default()
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(result.collections > 0);
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(
+                tidepool_repr::Literal::LitWord(0x7b)
+            )]
+        ));
     }
 
     #[test]
@@ -1454,6 +1710,24 @@ mod tests {
             ),
             Some(ByteOperation::New)
         );
+        assert_eq!(
+            recognize(
+                &op("newAlignedPinnedByteArray#"),
+                &sig(
+                    vec![RuntimeRep::Int(64), RuntimeRep::Int(64), RuntimeRep::Void],
+                    vec![RuntimeRep::UnliftedRef]
+                )
+            ),
+            Some(ByteOperation::NewAligned)
+        );
+        assert!(recognize(
+            &op("newAlignedPinnedByteArray#"),
+            &sig(
+                vec![RuntimeRep::Int(64), RuntimeRep::Void],
+                vec![RuntimeRep::UnliftedRef]
+            )
+        )
+        .is_none());
         for name in ["byteArrayContents#", "mutableByteArrayContents#"] {
             assert_eq!(
                 recognize(
@@ -1713,6 +1987,62 @@ mod tests {
             assert_eq!(output, 0x55);
             assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
         }
+    }
+
+    #[test]
+    fn aligned_allocation_rejects_bad_requests_without_publication_and_preserves_first_cause() {
+        for (length, alignment) in [(-1, 64), (8, 0), (8, 3)] {
+            let machine = crate::machine_state::MachineState::new();
+            let mut heap = [0_u64; 4];
+            let start = heap.as_mut_ptr().cast::<u8>();
+            let mut vmctx = unsafe {
+                crate::context::VMContext::new(
+                    start,
+                    start.add(std::mem::size_of_val(&heap)),
+                    crate::host_fns::gc_trigger,
+                )
+            };
+            vmctx.machine_state = &machine as *const _ as *mut _;
+            let mut wrapper = [0_u64; 2];
+            assert_eq!(
+                unsafe {
+                    prepared_new_aligned_bytes(
+                        &mut vmctx,
+                        wrapper.as_mut_ptr().cast(),
+                        length,
+                        alignment,
+                    )
+                },
+                CallStatus::LanguageFailure as i32
+            );
+            assert_eq!(wrapper[1], 0);
+            assert_eq!(machine.external_storage_stats().live_objects, 0);
+            assert_eq!(
+                machine.take_runtime_error(),
+                Some(RuntimeError::HeapOverflow)
+            );
+        }
+
+        let machine = crate::machine_state::MachineState::new();
+        machine.set_first_cause(RuntimeError::Cancelled);
+        let mut heap = [0_u64; 4];
+        let start = heap.as_mut_ptr().cast::<u8>();
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(
+                start,
+                start.add(std::mem::size_of_val(&heap)),
+                crate::host_fns::gc_trigger,
+            )
+        };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let mut wrapper = [0_u64; 2];
+        assert_eq!(
+            unsafe { prepared_new_aligned_bytes(&mut vmctx, wrapper.as_mut_ptr().cast(), 8, 3,) },
+            CallStatus::Cancelled as i32
+        );
+        assert_eq!(wrapper[1], 0);
+        assert_eq!(machine.external_storage_stats().live_objects, 0);
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
     }
 
     #[test]
