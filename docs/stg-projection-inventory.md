@@ -335,6 +335,27 @@ The machine's checked stores update the external revision, invalidating stale
 sweep plans. These are connected mechanisms for the admitted arrays, not a
 claim that every external-storage operation or retention path is implemented.
 
+### `noDuplicate#` execution invariant
+
+Prepared execution lowers `noDuplicate#` to a no-op only while one invocation
+is the sole evaluator of its private heap, turns are serialized, thunk entry
+installs a blackhole before evaluation, and no scheduler can begin another
+evaluation on that heap while the first is active. Cancellation restores a
+thunk to `Live` and retries it from the beginning; it is not GHC's suspended
+stack resumption. This can repeat allocation-only `unsafePerformIO` work, which
+is currently the only admitted use requiring `noDuplicate#`.
+
+Session integration must not preserve this lowering if an effect-suspended
+evaluation can coexist with another cell turn or sibling realm on the same
+heap. In that model, entering the suspended evaluation's blackhole means wait,
+not `<<loop>>`, and evaluator identity plus wakeup/settlement must become an
+explicit runtime contract before concurrency is admitted.
+
+`MutVar#` has its own object descriptor but reuses the external boxed-storage
+owner. Any future external-value observation must classify by descriptor
+identity; `ExternalStorageKind::BoxedArray` is storage layout, not language
+meaning.
+
 There is no GHC stack-snapshot intrinsic in this prepared projection/native
 operation catalog. Runtime root snapshots used by forcing and observation are
 internal mechanisms, not an authored primitive. Source-less package/interface

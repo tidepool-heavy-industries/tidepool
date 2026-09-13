@@ -298,6 +298,11 @@ engine/toolchain cleanup:
   in `target/tidepool-test-runs/20260913T192232Z-1348080-changed/`.
   This command did not execute nextest; the separate focused invocation above did.
 
+The three `tidepool-agent` diagnostics are also present on `origin/main`; that
+crate is byte-identical to main in this range. They block the workspace command,
+but are not Wave 5 regressions. The runtime diagnostics belong to the Wave 6
+session owners named above.
+
 The vendored MD5 C signedness warning and unrelated test warnings remain
 nonfatal. No performance claim or full-workspace test pass is inferred.
 The next planning boundary is Wave 6: retained session integration and effect
