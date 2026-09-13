@@ -93,7 +93,7 @@ pub(super) fn initialize_heap_tops(
     top_table: &super::invocation::RootWords,
     statics: &tidepool_heap::static_region::StaticRegion,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
-    bytes: &std::collections::BTreeMap<Vec<u8>, Arc<[u8]>>,
+    bytes: &super::static_bytes::PinnedBytes,
 ) -> Result<usize, RuntimeError> {
     let mut offsets = std::collections::BTreeMap::new();
     let mut total = 0usize;
@@ -167,7 +167,7 @@ fn write_atoms(
     reps: &[RuntimeRep],
     pointer: &impl Fn(ValueId) -> Result<usize, RuntimeError>,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
-    bytes: &std::collections::BTreeMap<Vec<u8>, Arc<[u8]>>,
+    bytes: &super::static_bytes::PinnedBytes,
 ) -> Result<(), RuntimeError> {
     for (logical, (atom, rep)) in atoms.iter().zip(reps).enumerate() {
         let Some(stored) = descriptor

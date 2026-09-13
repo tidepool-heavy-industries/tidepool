@@ -16,6 +16,16 @@ expose GHC `mkSeqs shouldn't use the type arg` panics; their diagnosis is in
 progress. No comparison mismatch is reported. This is not semantic-green
 evidence; original-cohort accounting is being recomputed separately.
 
+Completed accounting: all 812 originals are present (665 structured identity
+matches, three unique record-parent fallbacks, 144 exact unique canonical-name
+matches where failure rows omitted structured identity). None is ambiguous.
+All previous 109 matches remain matches; the original 516-global cohort now
+has 23 matches, 53 missing expectations and 440 not reaching comparison.
+The 16 validation failures independently confirm the NoSuccess gap: local
+`GHC.Prim.Exception.raiseDivZero`/`raiseUnderflow` entries advertise a lifted
+result while BigNat/Integer callers demand their actual unlifted or multi-value
+bottoming result. Do not relax the validator to hide this distinction.
+
 The next source checkpoint passes `execution-schema-projection`,
 `prepared-recovery-test`, and `recovered-body-test` through the dev shell;
 the scoped recovery regression retains same-owner dependency edges rather

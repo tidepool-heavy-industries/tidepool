@@ -1,5 +1,7 @@
-use super::CompiledProgram;
+use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, Unsupported};
+use crate::host_fns::RuntimeError;
 use cranelift_codegen::ir::{InstructionData, Opcode};
+use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_repr::execution_schema::{testing, *};
 
 fn compile(wire: WireProgram) -> CompiledProgram {
@@ -56,7 +58,7 @@ fn bytes_top_and_scalar_literal_share_terminated_storage() {
         program.byte_tops.get(&ValueId(1)).unwrap(),
         program.bytes.get(&payload).unwrap(),
     ));
-    assert_eq!(program.bytes[&payload].as_ref(), b"a\0b\0");
+    assert_eq!(program.bytes.get(&payload).unwrap().as_ref(), b"a\0b\0");
 }
 
 #[test]
@@ -180,6 +182,126 @@ fn heap_top_scalar_bytes_resolve_without_a_bytes_top() {
             .cast::<usize>()
             .read_unaligned()
     };
-    assert_eq!(embedded, program.bytes[&payload].as_ptr() as usize);
-    assert_eq!(program.bytes[&payload].as_ref(), b"heap\0field\0");
+    assert_eq!(
+        embedded,
+        program.bytes.get(&payload).unwrap().as_ptr() as usize
+    );
+    assert_eq!(
+        program.bytes.get(&payload).unwrap().as_ref(),
+        b"heap\0field\0"
+    );
+}
+
+fn index_char_wire(result_rep: RuntimeRep) -> WireProgram {
+    let mut wire = testing::wire_program();
+    wire.signatures = vec![
+        Signature {
+            arguments: vec![RuntimeRep::Address, RuntimeRep::Int(64)],
+            results: vec![result_rep],
+        },
+        Signature {
+            arguments: vec![RuntimeRep::Address, RuntimeRep::Int(64)],
+            results: vec![result_rep],
+        },
+    ];
+    wire.operations = vec![OperationDecl {
+        identity: OperationIdentity::PrimOp("indexCharOffAddr#".into()),
+        signature: SignatureId(1),
+    }];
+    wire.expressions.nodes[0] = ExprFrame::Operation {
+        operation: OperationId(0),
+        arguments: vec![
+            Atom::Ref(ValueRef::Local(ValueId(1))),
+            Atom::Ref(ValueRef::Local(ValueId(2))),
+        ],
+    };
+    wire.bindings = vec![
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("IndexChar", "entry"),
+            binding: HeapBinding {
+                id: ValueId(0),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(0),
+                    parameters: vec![ValueId(1), ValueId(2)],
+                    captures: vec![],
+                    body: 0,
+                },
+            },
+        }),
+        Group::NonRecursive(TopBinding {
+            identity: testing::identity("IndexChar", "storage"),
+            binding: HeapBinding {
+                id: ValueId(3),
+                rhs: HeapRhs::Bytes(b"\x80A".to_vec()),
+            },
+        }),
+    ];
+    wire
+}
+
+fn index_char(
+    program: &CompiledProgram,
+    address: usize,
+    offset: i64,
+) -> Result<u64, ExecutionError> {
+    let result = program.run_entry(
+        ValueId(0),
+        &[address as u64, offset as u64],
+        &RunOptions::default(),
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    match result.values.as_slice() {
+        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(value))] => Ok(*value),
+        other => panic!("unexpected indexCharOffAddr# result: {other:?}"),
+    }
+}
+
+fn assert_bad_pointer(result: Result<u64, ExecutionError>) {
+    assert!(matches!(
+        result,
+        Err(ExecutionError::Runtime(
+            crate::machine_state::MachineFailure {
+                cause: RuntimeError::BadPointer,
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn index_char_real_adapter_reads_owned_bytes_and_terminal_nul() {
+    let program = compile(index_char_wire(RuntimeRep::Word(64)));
+    let storage = program.bytes.get(b"\x80A").unwrap();
+    let base = storage.as_ptr() as usize;
+    assert_eq!(index_char(&program, base, 0).unwrap(), 0x80);
+    assert_eq!(index_char(&program, base, 1).unwrap(), b'A' as u64);
+    assert_eq!(index_char(&program, base, 2).unwrap(), 0);
+    assert_eq!(index_char(&program, base + 1, -1).unwrap(), 0x80);
+    assert_eq!(index_char(&program, base + storage.len(), -1).unwrap(), 0);
+}
+
+#[test]
+fn index_char_real_adapter_rejects_out_of_range_and_unowned_addresses() {
+    let program = compile(index_char_wire(RuntimeRep::Word(64)));
+    let storage = program.bytes.get(b"\x80A").unwrap();
+    let base = storage.as_ptr() as usize;
+    assert_bad_pointer(index_char(&program, base, -1));
+    assert_bad_pointer(index_char(&program, base, storage.len() as i64));
+    assert_bad_pointer(index_char(&program, base + storage.len(), 0));
+    assert_bad_pointer(index_char(&program, 0, 0));
+    assert_bad_pointer(index_char(&program, usize::MAX, 1));
+    assert_eq!(index_char(&program, base, 1).unwrap(), b'A' as u64);
+}
+
+#[test]
+fn index_char_rejects_wrong_char_rep_before_native_emission() {
+    let linked = link_program(
+        testing::prepare(index_char_wire(RuntimeRep::Word(32))).unwrap(),
+        &MachineImports::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        CompiledProgram::compile(&linked),
+        Err(CompileError::Unsupported(Unsupported::Expression { .. }))
+    ));
 }

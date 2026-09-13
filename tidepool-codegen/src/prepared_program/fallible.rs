@@ -180,10 +180,18 @@ pub(super) fn emit_double_to_int(
 
     let lower = builder.ins().f64const(-9_223_372_036_854_775_808.0);
     let upper = builder.ins().f64const(9_223_372_036_854_775_808.0);
-    let above_lower = builder.ins().fcmp(FloatCC::GreaterThanOrEqual, value, lower);
+    let above_lower = builder
+        .ins()
+        .fcmp(FloatCC::GreaterThanOrEqual, value, lower);
     let below_upper = builder.ins().fcmp(FloatCC::LessThan, value, upper);
     let in_range = builder.ins().band(above_lower, below_upper);
     let invalid = builder.ins().icmp_imm(IntCC::Equal, in_range, 0);
-    guard(builder, pipeline, vmctx, invalid, PrimitiveFailure::Overflow)?;
+    guard(
+        builder,
+        pipeline,
+        vmctx,
+        invalid,
+        PrimitiveFailure::Overflow,
+    )?;
     Ok(vec![builder.ins().fcvt_to_sint(types::I64, value)])
 }

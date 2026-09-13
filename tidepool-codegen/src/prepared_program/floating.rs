@@ -215,47 +215,53 @@ mod tests {
         // GHC's foreign call carries a final State# token even for this pure
         // intrinsic. Preserve its logical position; only physical ABI erases it.
         for state_token in [false, true] {
-        for (input, expected) in [(0.5_f64, 0.0_f64), (1.5, 2.0), (-0.5, -0.0), (-1.5, -2.0)] {
-            let mut wire = testing::wire_program();
-            wire.signatures[0].results = vec![RuntimeRep::Float(64)];
-            wire.signatures.push(Signature {
-                arguments: vec![RuntimeRep::Float(64)],
-                results: vec![RuntimeRep::Float(64)],
-            });
-            if state_token { wire.signatures[1].arguments.push(RuntimeRep::Void); }
-            wire.operations.push(OperationDecl {
-                identity: OperationIdentity::Intrinsic {
-                    symbol: "rintDouble".into(),
-                    convention: ForeignConvention::CCall,
-                },
-                signature: SignatureId(1),
-            });
-            wire.expressions.nodes[0] = ExprFrame::Operation {
-                operation: OperationId(0),
-                arguments: vec![Atom::Scalar(ScalarLiteral::Float {
-                    bits: 64,
-                    bytes: input.to_bits().to_be_bytes().to_vec(),
-                })],
-            };
-            if state_token {
-                let ExprFrame::Operation { arguments, .. } = &mut wire.expressions.nodes[0] else { unreachable!() };
-                arguments.push(Atom::Void);
-            }
-            let linked =
-                link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-            let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
-            let result = compiled
-                .run_entry(
-                    ValueId(0),
-                    &[],
-                    &super::super::RunOptions::default(),
-                    Arc::new(AtomicBool::new(false)),
-                )
-                .unwrap();
-            assert!(matches!(result.values.as_slice(),
+            for (input, expected) in [(0.5_f64, 0.0_f64), (1.5, 2.0), (-0.5, -0.0), (-1.5, -2.0)] {
+                let mut wire = testing::wire_program();
+                wire.signatures[0].results = vec![RuntimeRep::Float(64)];
+                wire.signatures.push(Signature {
+                    arguments: vec![RuntimeRep::Float(64)],
+                    results: vec![RuntimeRep::Float(64)],
+                });
+                if state_token {
+                    wire.signatures[1].arguments.push(RuntimeRep::Void);
+                }
+                wire.operations.push(OperationDecl {
+                    identity: OperationIdentity::Intrinsic {
+                        symbol: "rintDouble".into(),
+                        convention: ForeignConvention::CCall,
+                    },
+                    signature: SignatureId(1),
+                });
+                wire.expressions.nodes[0] = ExprFrame::Operation {
+                    operation: OperationId(0),
+                    arguments: vec![Atom::Scalar(ScalarLiteral::Float {
+                        bits: 64,
+                        bytes: input.to_bits().to_be_bytes().to_vec(),
+                    })],
+                };
+                if state_token {
+                    let ExprFrame::Operation { arguments, .. } = &mut wire.expressions.nodes[0]
+                    else {
+                        unreachable!()
+                    };
+                    arguments.push(Atom::Void);
+                }
+                let linked =
+                    link_program(testing::prepare(wire).unwrap(), &MachineImports::default())
+                        .unwrap();
+                let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
+                let result = compiled
+                    .run_entry(
+                        ValueId(0),
+                        &[],
+                        &super::super::RunOptions::default(),
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                    .unwrap();
+                assert!(matches!(result.values.as_slice(),
                 [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
                 if *bits == expected.to_bits()));
-        }
+            }
         }
     }
 

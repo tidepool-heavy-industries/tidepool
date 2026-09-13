@@ -1,4 +1,4 @@
-//! Representation-checked, non-allocating integer primitive operations.
+//! Representation-checked, non-allocating primitive operations.
 //!
 //! Names are the authoritative spellings emitted by `Tidepool.PrimOps` from
 //! GHC's `PrimOp` table. An operation is admitted only after its complete wire
@@ -7,6 +7,7 @@
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::{ir, ir::InstBuilder};
 use cranelift_frontend::FunctionBuilder;
+use std::sync::Arc;
 use tidepool_repr::execution_schema::{OperationDecl, OperationIdentity, RuntimeRep, Signature};
 
 /// Pure scalar families cannot allocate, call hosts, or inspect managed data.
@@ -445,6 +446,12 @@ pub(super) fn recognize_operation(
     {
         return Some(ScalarOperation::DoubleToInt);
     }
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "indexCharOffAddr#")
+        && signature.arguments == [RuntimeRep::Address, RuntimeRep::Int(64)]
+        && signature.results == [RuntimeRep::Word(64)]
+    {
+        return Some(ScalarOperation::IndexCharOffAddr);
+    }
     IntegerFamily::recognize(&declaration.identity, signature)
         .map(ScalarOperation::Integer)
         .or_else(|| {
@@ -456,6 +463,7 @@ pub(super) fn recognize_operation(
 #[derive(Clone, Copy)]
 pub(super) enum ScalarOperation {
     DoubleToInt,
+    IndexCharOffAddr,
     Integer(IntegerOperation),
     Floating(super::floating::FloatingOperation),
 }
@@ -466,11 +474,20 @@ pub(super) fn emit_operation(
     arguments: &[ir::Value],
     vmctx: ir::Value,
     pipeline: &mut CodegenPipeline,
+    bytes: &Arc<super::static_bytes::PinnedBytes>,
 ) -> Result<Vec<ir::Value>, super::CompileError> {
     match operation {
         ScalarOperation::DoubleToInt => {
             super::fallible::emit_double_to_int(builder, vmctx, pipeline, arguments[0])
         }
+        ScalarOperation::IndexCharOffAddr => super::static_bytes::emit_index_char(
+            builder,
+            pipeline,
+            vmctx,
+            bytes,
+            arguments[0],
+            arguments[1],
+        ),
         ScalarOperation::Integer(operation)
             if matches!(
                 operation.kind,

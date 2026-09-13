@@ -25,6 +25,10 @@ pub enum RuntimeError {
     Overflow,
     #[error("Haskell error called")]
     UserError,
+    #[error("Haskell exception raised")]
+    RaisedException,
+    #[error("non-returning prepared entry returned successfully")]
+    NoSuccessReturned,
     /// GHC's generated failure path for a refutable binding, incomplete case,
     /// or incomplete guarded equation.
     #[error("pattern match failure: {0}")]
@@ -86,6 +90,7 @@ impl RuntimeError {
     pub fn machine_disposition(&self) -> MachineDisposition {
         match self {
             Self::CaseTrap
+            | Self::NoSuccessReturned
             | Self::BadPointer
             | Self::TypeMetadata
             | Self::UnresolvedExternal(_)
@@ -98,6 +103,7 @@ impl RuntimeError {
             Self::DivisionByZero
             | Self::Overflow
             | Self::UserError
+            | Self::RaisedException
             | Self::PatternMatchFailure(_)
             | Self::Undefined
             | Self::HeapOverflow

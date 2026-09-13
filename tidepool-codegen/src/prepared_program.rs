@@ -32,19 +32,20 @@ pub use run::{ExecutionError, RunOptions, RunResult};
 mod apply_tests;
 #[cfg(test)]
 mod bytes_tests;
+#[cfg(test)]
+mod double_to_int_tests;
 mod entry;
 mod fallible;
 mod floating;
 mod forcing;
 mod plan;
 mod primitives;
+#[cfg(test)]
+mod retention_tests;
 mod safepoint;
 #[cfg(test)]
 mod settlement_tests;
-#[cfg(test)]
-mod retention_tests;
-#[cfg(test)]
-mod double_to_int_tests;
+mod static_bytes;
 pub use admission::{admit_prepared, admit_program};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -152,7 +153,7 @@ pub struct CompiledProgram {
     /// Own every address embedded in generated code, including scalar literals
     /// with no top-level Bytes binding. Keys are logical bytes; values are the
     /// exact allocations whose addresses the emitter used.
-    pub(crate) bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
+    pub(crate) bytes: Arc<static_bytes::PinnedBytes>,
     pub(crate) heap_top_specs: Vec<plan::HeapTopSpec>,
     /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.
     /// The target is generated code which calls Tail `prepared_enter`.
@@ -197,6 +198,10 @@ impl CompiledProgram {
             (
                 "prepared_primitive_failure",
                 fallible::prepared_primitive_failure as *const u8,
+            ),
+            (
+                "prepared_index_char",
+                static_bytes::prepared_index_char as *const u8,
             ),
         ])?;
         #[cfg(test)]
@@ -514,10 +519,17 @@ impl CompiledProgram {
             .top_bindings
             .iter()
             .filter_map(|(&id, binding)| match &binding.rhs {
-                HeapRhs::Bytes(bytes) => Some((id, plan.bytes[bytes].clone())),
+                HeapRhs::Bytes(bytes) => Some((id, bytes)),
                 _ => None,
             })
-            .collect();
+            .map(|(id, bytes)| {
+                plan.bytes
+                    .get(bytes)
+                    .cloned()
+                    .map(|storage| (id, storage))
+                    .ok_or(CompileError::MissingRepresentation(id))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         Ok(Self {
             pipeline,
             entries,

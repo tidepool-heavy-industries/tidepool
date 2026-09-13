@@ -1,5 +1,6 @@
 //! Checked binder and closure layout facts used by every emitter consumer.
 
+use super::static_bytes::PinnedBytes;
 use super::CompileError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -50,7 +51,7 @@ pub(super) struct ProgramPlan<'a> {
     /// Compact slots, not ValueId-indexed allocation controlled by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
-    pub bytes: BTreeMap<Vec<u8>, Arc<[u8]>>,
+    pub bytes: Arc<PinnedBytes>,
     pub heap_tops: BTreeSet<ValueId>,
     pub heap_top_specs: Vec<HeapTopSpec>,
     /// Flattened pending argument layouts owned by the application emitter.
@@ -305,7 +306,7 @@ impl<'a> ProgramPlan<'a> {
             values,
             constructors,
             top_slots,
-            bytes,
+            bytes: Arc::new(PinnedBytes::new(bytes)),
             heap_tops,
             heap_top_specs,
             pap_layouts,

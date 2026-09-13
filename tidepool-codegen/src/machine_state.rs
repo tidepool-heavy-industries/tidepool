@@ -58,8 +58,8 @@
 use std::alloc::Layout;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::context::VMContext;
 use crate::host_fns::{GcState, RuntimeError};
@@ -216,6 +216,10 @@ pub struct MachineState {
     stack_map_registry: RefCell<Option<*const StackMapRegistry>>,
     call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
+    /// Prepared exception operand; independent of temporary observation marks.
+    /// Prepared invocations keep this machine in Rc storage while snapshots use
+    /// the slot's address. No heap-backed operand escapes in RuntimeError.
+    prepared_exception: Cell<*mut u8>,
     disposition: Cell<MachineDisposition>,
     last_failure: RefCell<Option<MachineFailure>>,
     diagnostics: RefCell<Vec<String>>,
@@ -319,6 +323,7 @@ impl MachineState {
             gc_generation: Cell::new(0),
             gc_state: RefCell::new(None),
             rust_roots: RefCell::new(Vec::new()),
+            prepared_exception: Cell::new(std::ptr::null_mut()),
             persistent_roots: RefCell::new(Vec::new()),
             stowed_roots: RefCell::new(Vec::new()),
             code_roots: RefCell::new(HashSet::new()),
@@ -477,12 +482,32 @@ impl MachineState {
     /// cause; silently dropping it (rather than panicking) is the same
     /// tradeoff `take_runtime_error` already makes.
     pub(crate) fn set_first_cause(&self, cause: RuntimeError) {
+        self.record_first_cause(cause, None);
+    }
+
+    /// # Safety
+    /// A non-null operand is an admitted managed reference in this invocation.
+    /// The machine must remain in its stable owner while collection uses roots.
+    pub(crate) unsafe fn record_prepared_raise(&self, reference: *mut u8) {
+        if self.disposition() == MachineDisposition::Unavailable {
+            return;
+        }
+        if reference.is_null() {
+            self.set_first_cause(RuntimeError::BadPointer);
+        } else {
+            self.record_first_cause(RuntimeError::RaisedException, Some(reference));
+        }
+    }
+
+    fn record_first_cause(&self, cause: RuntimeError, exception: Option<*mut u8>) {
         let disposition = cause.machine_disposition();
         if disposition == MachineDisposition::Unavailable {
             self.disposition.set(MachineDisposition::Unavailable);
         }
         if let Ok(mut slot) = self.runtime_error.try_borrow_mut() {
             if slot.is_none() {
+                self.prepared_exception
+                    .set(exception.unwrap_or(std::ptr::null_mut()));
                 *slot = Some(cause.clone());
                 if let Ok(mut failure) = self.last_failure.try_borrow_mut() {
                     *failure = Some(MachineFailure {
@@ -517,11 +542,18 @@ impl MachineState {
     /// code still holds a `borrow_mut` on the cell — a plain `borrow_mut`
     /// would then panic (and panicking inside `Drop`/unwind double-panics →
     /// `abort()`).
+    /// Consuming a prepared cause settles/releases its exception operand.
+    /// Any future operand presentation must precede this operation.
     pub(crate) fn take_runtime_error(&self) -> Option<RuntimeError> {
-        self.runtime_error
+        let cause = self
+            .runtime_error
             .try_borrow_mut()
             .ok()
-            .and_then(|mut e| e.take())
+            .and_then(|mut e| e.take());
+        if cause.is_some() {
+            self.prepared_exception.set(std::ptr::null_mut());
+        }
+        cause
     }
 
     /// Same `try_borrow` defense as [`Self::take_runtime_error`]. Falls
@@ -719,6 +751,7 @@ impl MachineState {
     /// Clear this machine's GC state and run-scoped rust roots. One-shot
     /// teardown path.
     pub fn clear_gc_state(&self) {
+        self.prepared_exception.set(std::ptr::null_mut());
         self.gc_state.borrow_mut().take();
         self.clear_rust_roots();
     }
@@ -728,6 +761,7 @@ impl MachineState {
     /// per-run rust roots. Does NOT touch `persistent_roots` — those are
     /// session-scoped and survive until `free_session_heap`.
     pub(crate) fn clear_run_scratch(&self) {
+        self.prepared_exception.set(std::ptr::null_mut());
         self.gc_state.borrow_mut().take();
         self.clear_rust_roots();
     }
@@ -737,6 +771,7 @@ impl MachineState {
     /// `self` (not through any ambient reach) so it always clears exactly
     /// the dying machine's own registries.
     pub(crate) fn free_session_heap(&self) {
+        self.prepared_exception.set(std::ptr::null_mut());
         self.clear_persistent_roots();
         // Defensive: a machine dropped mid-nested-child (a child panicked and
         // its guard unwound) must not leave a dangling stowed slot registered.
@@ -772,6 +807,7 @@ impl MachineState {
         self.rust_roots.borrow_mut().push(slot);
     }
 
+    /// Temporary root-vector mark; excludes the independently owned exception.
     pub(crate) fn rust_roots_len(&self) -> usize {
         self.rust_roots.borrow().len()
     }
@@ -780,6 +816,7 @@ impl MachineState {
         self.rust_roots.borrow_mut().truncate(mark);
     }
 
+    /// Clear temporary registrations, not the exception settlement slot.
     pub(crate) fn clear_rust_roots(&self) {
         self.rust_roots.borrow_mut().clear();
     }
@@ -788,6 +825,9 @@ impl MachineState {
     /// `perform_gc` to build its root slot list.
     pub(crate) fn extend_rust_roots(&self, out: &mut Vec<*mut *mut u8>) {
         out.extend(self.rust_roots.borrow().iter().copied());
+        if !self.prepared_exception.get().is_null() {
+            out.push(self.prepared_exception.as_ptr());
+        }
     }
 
     // --- persistent roots (session-scoped GC roots, leaf 3) ---------------
@@ -935,7 +975,8 @@ impl MachineState {
                 + self.stowed_roots.borrow().len()
                 + self.code_roots.borrow().len()
                 + self.remembered_slots.borrow().len()
-                + 2,
+                + 2
+                + usize::from(!self.prepared_exception.get().is_null()),
         );
         slots.extend_from_slice(stack_roots);
         self.extend_rust_roots(&mut slots);
@@ -1430,18 +1471,14 @@ pub fn restore_current_machine(prev: *mut MachineState) {
 /// clear `CURRENT_MACHINE`) at any safepoint.
 pub(crate) unsafe fn current_machine<'a>() -> Option<&'a MachineState> {
     let p = CURRENT_MACHINE.with(|c| c.get());
-    if p.is_null() {
-        None
-    } else {
-        Some(&*p)
-    }
+    if p.is_null() { None } else { Some(&*p) }
 }
 
 /// Test-only support for exercising the ambient shims / vmctx-less host fns
 /// outside a full `JitEffectMachine` run.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::{install_current_machine, restore_current_machine, MachineState};
+    use super::{MachineState, install_current_machine, restore_current_machine};
 
     /// Install a fresh throwaway `MachineState` as this thread's current
     /// machine for the duration of `f`, restoring whatever was previously
@@ -1518,6 +1555,209 @@ mod tests {
         assert_eq!(
             ms.take_runtime_error(),
             Some(RuntimeError::UserErrorMsg("boom".into()))
+        );
+    }
+
+    #[test]
+    fn prepared_raise_root_survives_observation_mark_cleanup() {
+        use tidepool_heap::execution_descriptor::ObjectDescriptor;
+        use tidepool_repr::execution_schema::{StorageLayout, testing};
+
+        let machine = std::rc::Rc::new(MachineState::new());
+        let descriptor = Arc::new(
+            ObjectDescriptor::constructor(
+                1,
+                StorageLayout::for_reps(&testing::target(), &[]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        machine
+            .install_prepared_buffer(
+                vec![descriptor.initial_header_word() as u64, 0],
+                vec![descriptor],
+            )
+            .unwrap();
+        let reference = machine.gc_active_range().unwrap().0;
+        let mark = machine.rust_roots_len();
+        let mut temporary = reference;
+        machine.register_rust_root(&mut temporary);
+        // The descriptor-backed object and stable Rc machine remain owned.
+        unsafe { machine.record_prepared_raise(reference) };
+        machine.truncate_rust_roots(mark);
+        let mut roots = Vec::new();
+        machine.extend_rust_roots(&mut roots);
+        assert_eq!(roots, vec![machine.prepared_exception.as_ptr()]);
+        assert_eq!(machine.prepared_exception.get(), reference);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::RaisedException)
+        );
+        assert!(machine.prepared_exception.get().is_null());
+    }
+
+    fn prepared_exception_fixture(
+        object_count: usize,
+    ) -> (
+        std::rc::Rc<MachineState>,
+        Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>,
+    ) {
+        use tidepool_heap::execution_descriptor::ObjectDescriptor;
+        use tidepool_repr::execution_schema::{StorageLayout, testing};
+
+        let machine = std::rc::Rc::new(MachineState::new());
+        let descriptor = Arc::new(
+            ObjectDescriptor::constructor(
+                1,
+                StorageLayout::for_reps(&testing::target(), &[]).unwrap(),
+                None,
+            )
+            .unwrap(),
+        );
+        let extent = descriptor.allocation_extent() as usize;
+        let mut buffer = vec![0_u64; (extent * object_count).div_ceil(8)];
+        for index in 0..object_count {
+            // SAFETY: every offset names one complete allocation in `buffer`.
+            unsafe {
+                descriptor.initialize_header(buffer.as_mut_ptr().cast::<u8>().add(index * extent));
+            }
+        }
+        machine
+            .install_prepared_buffer(buffer, vec![Arc::clone(&descriptor)])
+            .unwrap();
+        machine
+            .gc_state
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .prepared
+            .as_mut()
+            .unwrap()
+            .used = extent * object_count;
+        (machine, descriptor)
+    }
+
+    fn prepared_exception_reference(
+        machine: &MachineState,
+        descriptor: &tidepool_heap::execution_descriptor::ObjectDescriptor,
+        index: usize,
+    ) -> *mut u8 {
+        let start = machine.gc_active_range().unwrap().0;
+        // SAFETY: the fixture initialized an object at every descriptor-sized offset.
+        unsafe { start.add(index * descriptor.allocation_extent() as usize) }
+    }
+
+    #[test]
+    fn first_prepared_raise_wins_and_keeps_its_operand() {
+        let (machine, descriptor) = prepared_exception_fixture(2);
+        let first = prepared_exception_reference(&machine, &descriptor, 0);
+        let second = prepared_exception_reference(&machine, &descriptor, 1);
+
+        // SAFETY: both references are exact starts in the fixture's admitted nursery.
+        unsafe { machine.record_prepared_raise(first) };
+        // SAFETY: the second reference is also an admitted exact start.
+        unsafe { machine.record_prepared_raise(second) };
+
+        assert_eq!(machine.prepared_exception.get(), first);
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::RaisedException)
+        );
+        assert!(machine.prepared_exception.get().is_null());
+    }
+
+    #[test]
+    fn earlier_cancellation_prevents_prepared_exception_capture() {
+        let (machine, descriptor) = prepared_exception_fixture(1);
+        let reference = prepared_exception_reference(&machine, &descriptor, 0);
+        machine.set_first_cause(RuntimeError::Cancelled);
+
+        // SAFETY: `reference` is an admitted exact start in the fixture nursery.
+        unsafe { machine.record_prepared_raise(reference) };
+
+        assert!(machine.prepared_exception.get().is_null());
+        assert_eq!(machine.take_runtime_error(), Some(RuntimeError::Cancelled));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn later_bad_pointer_preserves_exception_cause_and_upgrades_disposition() {
+        let (machine, descriptor) = prepared_exception_fixture(1);
+        let reference = prepared_exception_reference(&machine, &descriptor, 0);
+
+        // SAFETY: `reference` is an admitted exact start in the fixture nursery.
+        unsafe { machine.record_prepared_raise(reference) };
+        machine.set_first_cause(RuntimeError::BadPointer);
+
+        assert_eq!(machine.prepared_exception.get(), reference);
+        assert_eq!(machine.disposition(), MachineDisposition::Unavailable);
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::RaisedException)
+        );
+        assert!(machine.prepared_exception.get().is_null());
+    }
+
+    #[test]
+    fn collector_rewrites_independent_prepared_exception_root() {
+        let (machine, descriptor) = prepared_exception_fixture(1);
+        let before = prepared_exception_reference(&machine, &descriptor, 0);
+        // SAFETY: `before` is an admitted exact start in the fixture nursery.
+        unsafe { machine.record_prepared_raise(before) };
+
+        let mut state = machine.take_gc_state().unwrap();
+        let old_buffer = state.active_buffer.take().unwrap();
+        let from_start = state.active_start;
+        let from_used = state.prepared.as_ref().unwrap().used;
+        let mut to_buffer = vec![0_u64; old_buffer.len()];
+        let to_len = std::mem::size_of_val(to_buffer.as_slice());
+        let roots = vec![machine.prepared_exception.as_ptr()];
+        let copied = unsafe {
+            let to_bytes =
+                std::slice::from_raw_parts_mut(to_buffer.as_mut_ptr().cast::<u8>(), to_len);
+            tidepool_heap::gc::raw::cheney_copy_descriptors(
+                &roots,
+                from_start,
+                from_used,
+                to_bytes,
+                &mut state.prepared.as_mut().unwrap().space,
+            )
+        }
+        .unwrap();
+        assert_eq!(copied.bytes_copied, descriptor.allocation_extent() as usize);
+        let after = machine.prepared_exception.get();
+        assert_ne!(after, before);
+        assert!(after as usize >= to_buffer.as_ptr() as usize);
+        assert!((after as usize) < to_buffer.as_ptr() as usize + to_len);
+        state.active_start = to_buffer.as_mut_ptr().cast();
+        state.active_size = to_len;
+        state.active_buffer = Some(to_buffer);
+        machine.put_gc_state(state);
+
+        assert_eq!(
+            machine.prepared_call_status(),
+            crate::prepared_control::CallStatus::LanguageFailure
+        );
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::RaisedException)
+        );
+    }
+
+    #[test]
+    fn heap_teardown_clears_exception_slot_without_consuming_cause() {
+        let (machine, descriptor) = prepared_exception_fixture(1);
+        let reference = prepared_exception_reference(&machine, &descriptor, 0);
+        // SAFETY: `reference` is an admitted exact start in the fixture nursery.
+        unsafe { machine.record_prepared_raise(reference) };
+
+        machine.clear_run_scratch();
+
+        assert!(machine.prepared_exception.get().is_null());
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::RaisedException)
         );
     }
 
